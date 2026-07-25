@@ -636,21 +636,22 @@ fn realtime_uses_the_synchronous_lane_and_never_creates_a_batch_row() {
     );
 }
 
-/// I12: a realtime send covering SEVERAL ledger rows settles them on the
-/// measured total, not on the sum of their reservations.
+/// A realtime pass over several groups sends one call per group, so EVERY row
+/// settles on a token count the provider reported for that row.
 ///
-/// `:batchEmbedContents` reports one token count per CALL, and
-/// `EMBEDDING_BATCH_SIZE` puts up to 32 groups in a call — so on the realtime
-/// lane the multi-row case IS the case. Measuring only single-row sends covered
-/// 1 of 30 sync settlements in the dogfood run; every realtime chunk embed fell
-/// through to its reservation, which I10 measured at -32%..+52%.
+/// `:batchEmbedContents` reports one count per CALL. Batching groups into one
+/// call — which `EMBEDDING_BATCH_SIZE` used to do, up to 32 at a time — leaves
+/// nothing that can honestly settle a single row, and the dogfood run showed
+/// what that cost: 1 of 30 sync settlements carried a measured figure, and
+/// every realtime chunk embed fell back to a reservation that I10 measured at
+/// -32%..+52%. One call per row removes the question instead of answering it.
 ///
-/// The inputs here are pure ASCII, where `estimate_embedding_tokens` counts one
-/// token per 4 scalars and the mock reports one per scalar — so the measured
-/// total is exactly 4x the reserved total, and "did it settle on the
-/// measurement" has an arithmetic answer rather than an approximate one.
+/// The inputs are pure ASCII, where `estimate_embedding_tokens` counts one
+/// token per 4 scalars and the mock reports one per scalar — so a settled row
+/// is exactly 4x its own reservation, and "did it settle on the measurement"
+/// has an arithmetic answer rather than an approximate one.
 #[test]
-fn a_multi_group_realtime_send_settles_on_the_measured_total() {
+fn every_row_of_a_realtime_pass_settles_on_its_own_reported_tokens() {
     let dir = tempfile::tempdir().unwrap();
     for (name, body) in [
         ("alpha.md", "# Rollback drill\n\nThe checkout gateway retries twice.\n"),
@@ -669,41 +670,35 @@ fn a_multi_group_realtime_send_settles_on_the_measured_total() {
     let executed = indexed["embedding_tasks_executed"].as_u64().unwrap();
     assert!(
         executed > 1,
-        "this contract needs a send covering several rows: {indexed}"
+        "this contract needs a pass covering several rows: {indexed}"
     );
 
-    // Every row of the send is a sync row, and none of them is the whole call,
-    // so each carries a derived share — `estimated` is per row and no row here
-    // was measured on its own.
+    // Every row is its own call, so every row is measured — `estimated=0`
+    // across the board, with no apportioned share left anywhere.
     assert_eq!(
         ledger_query(
             &dir,
             "SELECT COUNT(*) || '|' || SUM(estimated)
              FROM cost_ledger WHERE adapter_kind = 'embedding' AND scope_id <> 'device'"
         ),
-        format!("{executed}|{executed}"),
-        "each row of a multi-group send is an apportioned share"
+        format!("{executed}|0"),
+        "a per-call row is measured, not estimated"
     );
 
-    // The SUM is the part that has to be exact: it is what the budget cap reads.
-    let settled: f64 = ledger_query(
+    // Row by row, not just in aggregate: an apportioned split could match the
+    // total while getting every individual row wrong.
+    // `ledger_query` reads column 0 as TEXT, so a bare COUNT(*) comes back
+    // empty and would pass every comparison it is given.
+    let mismatched = ledger_query(
         &dir,
-        "SELECT printf('%.12f', SUM(usd))
-         FROM cost_ledger WHERE adapter_kind = 'embedding' AND scope_id <> 'device'",
-    )
-    .parse()
-    .unwrap();
-    let reserved: f64 = ledger_query(
-        &dir,
-        "SELECT printf('%.12f', SUM(estimated_usd))
-         FROM batch_requests WHERE adapter_kind = 'embedding'",
-    )
-    .parse()
-    .unwrap();
-    assert!(
-        (settled - reserved * 4.0).abs() < 1e-12,
-        "settled {settled} must be the measured total (4x the reserved {reserved}), \
-         not the reservation itself"
+        "SELECT printf('%d', COUNT(*)) FROM cost_ledger l
+         JOIN batch_requests b USING (scope_id, adapter_kind, input_hash, tool_profile_hash)
+         WHERE l.adapter_kind = 'embedding'
+           AND abs(l.usd - b.estimated_usd * 4.0) > 1e-12",
+    );
+    assert_eq!(
+        mismatched, "0",
+        "every row must settle at 4x its OWN reservation"
     );
 }
 

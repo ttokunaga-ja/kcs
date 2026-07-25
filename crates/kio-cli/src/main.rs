@@ -13414,8 +13414,11 @@ fn task_failure_from_adapter(error: kio_adapter::AdapterError) -> TaskExecutionF
 // ===========================================================================
 
 const EMBEDDING_ADAPTER_KIND: &str = "embedding";
-/// Chunks embedded per adapter batch. Task granularity is per-chunk; adapter
-/// call granularity is this.
+/// Chunks planned, reserved, and sent per pass of the sync send loop.
+///
+/// NOT the adapter-call granularity: `send_embed_group` makes one call per
+/// group, so that a row settles on a token count the provider reported for
+/// that row. This only bounds how much work one plan/reserve cycle takes on.
 const EMBEDDING_BATCH_SIZE: usize = 32;
 
 fn embedding_execution() -> Option<AdoptedEmbeddingExecution> {
@@ -13647,9 +13650,9 @@ fn compute_query_embedding_page1(
         mime: None,
     }];
     // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): a single-item
-    // sync query embed with its own single ledger reservation — the cleanest
-    // 1-token-to-1-HTTP-call site (contrast `send_embed_batch`'s multi-group
-    // batch, main.rs's embedding charge/send region).
+    // sync query embed with its own single ledger reservation. Both sync sites
+    // are now 1 token to 1 HTTP call — `send_embed_group` reaches it by
+    // sending one group per call rather than by being inherently single.
     match run_embedding_adapter(
         execution,
         items,
@@ -14011,13 +14014,13 @@ fn run_embedding_enrichment_for_instances(
     // multi-minute hang.
     //
     // R17-7: the reuse-based crash safety here is precise about WHICH crash window it
-    // covers. A crash AFTER `send_embed_batch` COMPLETES but before this deferred
-    // write-back is fully absorbed: `send_embed_batch` already wrote the embeddings
+    // covers. A crash AFTER `send_embed_group` COMPLETES but before this deferred
+    // write-back is fully absorbed: `send_embed_group` already wrote the embeddings
     // row + chunk_vec and F8 already reserved the charge, so re-driving the chunk hits
     // the free content-addressed reuse path (§5.5: text_hash hit → no API call, no
     // re-charge), no unrecorded completion is double-billed, and the per-chunk map
     // keeps a reuse "done" from being contaminated by a sibling send "failed" (L6).
-    // This does NOT extend to a crash INTERNAL to `send_embed_batch`, in the narrow
+    // This does NOT extend to a crash INTERNAL to `send_embed_group`, in the narrow
     // window AFTER the API bills but BEFORE the embeddings row / chunk_vec commit:
     // there the embeddings are unwritten, so §5.5 reuse misses and the chunk re-enters
     // `to_send`, yet its stale RateLimit/Quota `fallback_reason` makes
@@ -14232,115 +14235,81 @@ fn run_embedding_enrichment_for_instances(
         if charged_indices.is_empty() {
             continue;
         }
-        let to_send: Vec<EmbeddingSendGroup<'_>> = charged_indices
-            .iter()
-            .map(|&index| plan.to_send[index].clone())
-            .collect();
-        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this ONE
-        // adapter call carries every charged group's item in a single
-        // `EmbeddingRequest` (Gemini's `:batchEmbedContents` batches
-        // client-side, 07 §5.3), but each group holds its OWN independently
-        // reserved `intent_token`. A provider idempotency key is a per-HTTP-
-        // call identifier, so there is no single token that represents every
-        // group in a multi-group batch — thread the FIRST charged group's
-        // token as this call's representative (the common case is exactly
-        // one group per batch, where this is simply that group's own token).
-        // Dormant in production either way: the real Gemini profile always
-        // declares `ProviderIdempotency::NotProvided` (04 §5.5), so this
-        // value is never actually attached to a header outside the
-        // `require_idempotency_token` test seam.
-        let batch_idempotency_token = charged_indices
-            .first()
-            .and_then(|&index| charge_by_group[index].as_ref())
-            .map(|charge| charge.intent_token.clone());
-        match send_embed_batch(
-            &conn,
-            execution,
-            &profile,
-            &to_send,
-            batch_idempotency_token,
-        ) {
-            Ok(report) => {
-                // I12: this ONE call covers every charged group, and the
-                // provider reports ONE token count for it. Price the call, then
-                // attribute it — `apportion` guarantees the shares add back to
-                // the priced total, which is what the budget cap sums.
-                //
-                // `estimated` is per ROW, and only a single-group send has a
-                // row the provider actually measured; a share of a total is
-                // derived however exact the total is, so it stays `true`. The
-                // fallback when no usage came back is each row's OWN
-                // reservation, not a share of their sum — reading a missing
-                // count as anything else is how a real send settles at the
-                // wrong number (I10: that estimator runs -32%..+52%).
-                let reserved_total: f64 = charged_indices
-                    .iter()
-                    .map(|&index| {
-                        charge_by_group[index]
-                            .as_ref()
-                            .expect("charged_indices only contains Some entries")
-                            .reserved_usd
-                    })
-                    .sum();
-                let call_billed = embedding_billed_from_usage(
-                    report.usage.as_ref(),
-                    active_embedding_send_lane(),
-                    reserved_total,
-                );
-                // Weights are parallel to `to_send`, which was built from
-                // `charged_indices` in order.
-                let shares = (!call_billed.estimated)
-                    .then(|| apportion(call_billed.usd, &report.token_weights));
-                for (position, &index) in charged_indices.iter().enumerate() {
-                    let charge = charge_by_group[index]
-                        .as_ref()
-                        .expect("charged_indices only contains Some entries");
-                    let billed = match shares.as_ref() {
-                        Some(shares) if charged_indices.len() == 1 => BilledAmount {
-                            usd: shares[position],
-                            estimated: false,
-                        },
-                        Some(shares) => BilledAmount {
-                            usd: shares[position],
-                            estimated: true,
-                        },
-                        None => BilledAmount {
-                            usd: charge.reserved_usd,
-                            estimated: true,
-                        },
-                    };
+        // One HTTP call per group, so this row's charge is the token count the
+        // provider reported for THIS row. `:batchEmbedContents` bills and
+        // reports per CALL, so any call spanning several rows can only be split
+        // by guesswork; the Batch lane avoids that by making the job the task
+        // (07 §5.7), and the sync lane avoids it by making the call the row.
+        // The realtime lane is opt-in and never the default (2026-07-25
+        // ruling), so its extra round trips buy exact per-row billing at a cost
+        // no default path pays.
+        let mut sent = 0usize;
+        let mut send_failure = None;
+        for &index in &charged_indices {
+            let charge = charge_by_group[index]
+                .as_ref()
+                .expect("charged_indices only contains Some entries");
+            let group = &plan.to_send[index];
+            // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): a provider
+            // idempotency key identifies one HTTP call, and now every call is
+            // one group, so each send carries its OWN reservation's token
+            // rather than a representative standing in for the batch.
+            match send_embed_group(
+                &conn,
+                execution,
+                &profile,
+                group,
+                Some(charge.intent_token.clone()),
+            ) {
+                Ok(usage) => {
                     settle_task_charge_success(
                         &ledger,
                         &charge.key,
                         &charge.intent_token,
-                        billed,
+                        embedding_billed_from_usage(
+                            usage.as_ref(),
+                            active_embedding_send_lane(),
+                            charge.reserved_usd,
+                        ),
                     )?;
                     // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
                     // et al. can find this group's ledger selector via
                     // `task.reservation_id` without reconstructing the key from
                     // possibly-since-changed config.
                     reserved_by_ref.insert(
-                        embedding_task_output_ref(&plan.to_send[index].representative.chunk_id),
+                        embedding_task_output_ref(&group.representative.chunk_id),
                         (
                             charge.reserved_usd,
                             month.clone(),
                             charge.intent_token.clone(),
                         ),
                     );
+                    record_embedding_transitions(
+                        &mut transitions,
+                        group.members.iter().copied(),
+                        embedding_done_transition(),
+                    );
+                    outcome.executed += group.members.len();
+                    sent += 1;
                 }
-                record_embedding_transitions(
-                    &mut transitions,
-                    to_send
-                        .iter()
-                        .flat_map(|group| group.members.iter().copied()),
-                    embedding_done_transition(),
-                );
-                outcome.executed += to_send
-                    .iter()
-                    .map(|group| group.members.len())
-                    .sum::<usize>();
+                Err(failure) => {
+                    send_failure = Some(failure);
+                    break;
+                }
             }
-            Err(failure) => {
+        }
+        match send_failure {
+            None => {}
+            // A group that already went out stays sent, settled, and done — it
+            // really was billed. Only the groups this pass never reached are
+            // marked failed, which per-call sending makes knowable; the old
+            // one-call-per-batch shape had to fail all of them together.
+            Some(failure) => {
+                let unsent: Vec<&EmbeddingSendGroup<'_>> = charged_indices[sent..]
+                    .iter()
+                    .map(|&index| &plan.to_send[index])
+                    .collect();
+                let to_send = unsent;
                 // CL42/CL44: leave every charged group's reservation OPEN on
                 // failure, exactly like markdownize — a retry (of this same task
                 // key, whichever member drives it) REUSES it via
@@ -14644,118 +14613,61 @@ fn link_reused_chunks(
     Ok(())
 }
 
-/// Call the adapter for the to-send chunks and write `embeddings` + `chunk_vec`.
-/// What one sync embed send reported, plus what the caller needs to attribute
-/// it.
+/// Send ONE group on the sync lane, write its `embeddings` + `chunk_vec`, and
+/// return the usage the provider reported for that call.
 ///
-/// I12: `:batchEmbedContents` reports ONE `promptTokenCount` for the whole
-/// CALL, while the caller holds one ledger row per group (up to
-/// `EMBEDDING_BATCH_SIZE`). The Batch lane does not have this problem — 07
-/// §5.7 makes the JOB the task, so its billing unit and its accounting unit are
-/// the same object. The sync lane is the one that broke that invariant, so it
-/// is the one that has to split the total back out.
-struct SyncEmbedReport {
-    usage: Option<kio_adapter::types::AdapterUsage>,
-    /// Per-group token estimates over the strings actually sent, parallel to
-    /// the `to_send` slice. Weights only — their absolute accuracy does not
-    /// matter, because [`apportion`] scales them to the measured total.
-    token_weights: Vec<f64>,
-}
-
-/// Split `total` across `weights` so the parts add back to `total` exactly.
-///
-/// I12: the parts are an attribution, not a measurement — the provider bills
-/// per call, and no per-row truth exists to be recovered. What does have to
-/// hold is the SUM, because that is the only thing production reads from this
-/// table (`ops::month_to_date_usd`'s `SUM(usd)`, which the budget cap gates
-/// on). So the last share takes the rounding remainder rather than letting a
-/// crumb fall out of the ledger, and a degenerate weight vector splits evenly
-/// rather than dropping the charge — the provider billed it either way.
-fn apportion(total: f64, weights: &[f64]) -> Vec<f64> {
-    if weights.is_empty() {
-        return Vec::new();
-    }
-    let sum: f64 = weights.iter().sum();
-    let mut shares: Vec<f64> = if sum > 0.0 && sum.is_finite() {
-        weights.iter().map(|weight| total * weight / sum).collect()
-    } else {
-        vec![total / weights.len() as f64; weights.len()]
-    };
-    let head: f64 = shares[..shares.len() - 1].iter().sum();
-    let last = shares.len() - 1;
-    shares[last] = total - head;
-    shares
-}
-
-fn send_embed_batch(
+/// One group per call is what makes the returned usage settleable as-is:
+/// `:batchEmbedContents` reports a single `promptTokenCount` per CALL, so a
+/// call spanning several ledger rows can only be divided among them by
+/// guesswork. Both lanes now keep the billing unit and the accounting unit the
+/// same object — the Batch lane by making the job the task (07 §5.7), this one
+/// by making the call the row. The realtime lane is opt-in and never the
+/// default (2026-07-25 ruling), so the round trips it costs are never on a
+/// default path.
+fn send_embed_group(
     conn: &Connection,
     execution: AdoptedEmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
-    to_send: &[EmbeddingSendGroup<'_>],
-    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): see the call
-    // site's doc for why this is a single representative token, not one per
-    // group.
+    group: &EmbeddingSendGroup<'_>,
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this group's own
+    // reservation token. A provider idempotency key identifies one HTTP call,
+    // and one call is now one group, so there is nothing to pick a
+    // representative from.
     idempotency_token: Option<String>,
-) -> std::result::Result<SyncEmbedReport, TaskExecutionFailure> {
+) -> std::result::Result<Option<kio_adapter::types::AdapterUsage>, TaskExecutionFailure> {
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): the adapter input is
     // the humanized filename context prepended to the chunk body. Every member
     // of a group shares one `embedding_hash` = one `(text_hash, context,
     // profile)`, so the representative's context is the whole group's context.
-    let inputs = to_send
-        .iter()
-        .map(|group| {
-            let context = embedding_store::chunk_embedding_context(&group.representative.raw_path);
-            embedding_store::contextualized_embedding_input(
-                context.as_deref(),
-                &group.representative.text,
-            )
-        })
-        .collect::<Vec<_>>();
-    // I12: each group's share of this CALL's token count, measured over the
-    // exact string this call sends. Derived here rather than in the caller for
-    // the same reason the reservation estimate is: estimating one string while
-    // sending another is how the two drift apart.
-    let token_weights = inputs
-        .iter()
-        .map(|input| estimate_embedding_tokens(input))
-        .collect::<Vec<_>>();
-    let items = to_send
-        .iter()
-        .zip(inputs)
-        .map(|(group, input)| EmbeddingItem {
-            id: group.representative.chunk_id.clone(),
-            text: Some(input),
-            path: None,
-            mime: None,
-        })
-        .collect::<Vec<_>>();
+    let context = embedding_store::chunk_embedding_context(&group.representative.raw_path);
+    let items = vec![EmbeddingItem {
+        id: group.representative.chunk_id.clone(),
+        text: Some(embedding_store::contextualized_embedding_input(
+            context.as_deref(),
+            &group.representative.text,
+        )),
+        path: None,
+        mime: None,
+    }];
     let outcome = run_embedding_adapter(
         execution,
         items,
         EmbeddingInputType::MarkdownChunk,
         idempotency_token,
     )?;
-    let usage = outcome.usage;
-    let by_id = outcome
+    let chunk = group.representative;
+    let Some(vector) = outcome
         .vectors
-        .into_iter()
-        .map(|vector| (vector.id, vector.vector))
-        .collect::<BTreeMap<_, _>>();
-    let held = BTreeSet::new();
-    for group in to_send {
-        let chunk = group.representative;
-        let Some(vector) = by_id.get(&chunk.chunk_id) else {
-            return Err(TaskExecutionFailure {
-                retry_kind: RetryErrorKind::ContractViolation,
-                retry_after_ms: None,
-            });
-        };
-        persist_group_vector(conn, profile, group, vector, &held)?;
-    }
-    Ok(SyncEmbedReport {
-        usage,
-        token_weights,
-    })
+        .iter()
+        .find(|vector| vector.id == chunk.chunk_id)
+    else {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
+        });
+    };
+    persist_group_vector(conn, profile, group, &vector.vector, &BTreeSet::new())?;
+    Ok(outcome.usage)
 }
 
 /// Write one group's content vector and fan it out to every member chunk.
@@ -15484,7 +15396,7 @@ fn chunk_embedding_hash(
 ) -> Result<String> {
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): fold the chunk's
     // humanized filename context into the content-addressed identity, matching
-    // the context prepended to the adapter input in `send_embed_batch`. Two
+    // the context prepended to the adapter input in `send_embed_group`. Two
     // chunks with identical bodies but different filenames therefore get
     // distinct `embedding_hash`es (and distinct vectors), never a shared one.
     let context = embedding_store::chunk_embedding_context(&chunk.raw_path);
@@ -21773,7 +21685,7 @@ mod tests {
     use kio_adapter::catalog::deterministic_embedding_vector;
 
     use super::{
-        apportion, effective_invocation_lane, embedding_usd_per_token, lane_rate,
+        effective_invocation_lane, embedding_usd_per_token, lane_rate,
         estimate_embedding_cost, estimate_embedding_tokens, markdownize_send_lane, parsed_repair,
         parsed_search, query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
@@ -23334,46 +23246,6 @@ mod tests {
         // Mixed text adds the two ratios rather than picking one.
         assert!((estimate_embedding_tokens("abcd日本語だ") - 5.0).abs() < 1e-9);
         assert!(estimate_embedding_tokens("").abs() < 1e-9);
-    }
-
-    #[test]
-    fn apportioned_shares_add_back_to_the_measured_total() {
-        // I12: the split is an attribution, but the SUM is what the budget cap
-        // reads (`month_to_date_usd`), so it has to be exact — not
-        // exact-to-a-tolerance. These weights do not divide the total cleanly
-        // in binary, which is the case a naive `total * w / sum` loses a crumb
-        // on.
-        for weights in [
-            vec![1.0, 1.0, 1.0],
-            vec![7.0, 11.0, 13.0, 17.0],
-            vec![0.25, 1_000_000.0],
-            vec![3.0],
-        ] {
-            let total = 0.000_123_456_789_f64;
-            let shares = apportion(total, &weights);
-            assert_eq!(shares.len(), weights.len());
-            let sum: f64 = shares.iter().sum();
-            assert_eq!(sum, total, "weights {weights:?} lost {}", total - sum);
-        }
-    }
-
-    #[test]
-    fn apportioned_shares_follow_the_weights() {
-        let shares = apportion(9.0, &[1.0, 2.0]);
-        assert!((shares[0] - 3.0).abs() < 1e-12, "{shares:?}");
-        assert!((shares[1] - 6.0).abs() < 1e-12, "{shares:?}");
-    }
-
-    #[test]
-    fn apportioning_with_no_usable_weights_still_books_the_whole_charge() {
-        // A zero (or non-finite) weight vector must not drop the charge: the
-        // provider billed the call whatever this code can say about its parts.
-        for weights in [vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 1.0]] {
-            let shares = apportion(1.0, &weights);
-            let sum: f64 = shares.iter().sum();
-            assert_eq!(sum, 1.0, "weights {weights:?} dropped the charge");
-        }
-        assert!(apportion(1.0, &[]).is_empty());
     }
 
     #[test]
