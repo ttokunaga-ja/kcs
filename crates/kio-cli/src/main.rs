@@ -14260,39 +14260,60 @@ fn run_embedding_enrichment_for_instances(
             &to_send,
             batch_idempotency_token,
         ) {
-            Ok(usage) => {
-                // I12: `:batchEmbedContents` reports one token count for the
-                // whole CALL, but this send covers `charged_indices` ledger
-                // rows. A per-call total settles a row exactly only when it IS
-                // the row; splitting it across several would be an attribution
-                // this code has no ground truth for, and dividing a measured
-                // number by a guess does not make the parts measured. So the
-                // measured figure is used for the one-row case and the
-                // reservation stands for the rest — see I10 on why that
-                // remainder is not a safe place to leave things.
-                let measured = (charged_indices.len() == 1)
-                    .then(|| {
-                        let charge = charge_by_group[charged_indices[0]]
+            Ok(report) => {
+                // I12: this ONE call covers every charged group, and the
+                // provider reports ONE token count for it. Price the call, then
+                // attribute it — `apportion` guarantees the shares add back to
+                // the priced total, which is what the budget cap sums.
+                //
+                // `estimated` is per ROW, and only a single-group send has a
+                // row the provider actually measured; a share of a total is
+                // derived however exact the total is, so it stays `true`. The
+                // fallback when no usage came back is each row's OWN
+                // reservation, not a share of their sum — reading a missing
+                // count as anything else is how a real send settles at the
+                // wrong number (I10: that estimator runs -32%..+52%).
+                let reserved_total: f64 = charged_indices
+                    .iter()
+                    .map(|&index| {
+                        charge_by_group[index]
                             .as_ref()
-                            .expect("charged_indices only contains Some entries");
-                        embedding_billed_from_usage(
-                            usage.as_ref(),
-                            active_embedding_send_lane(),
-                            charge.reserved_usd,
-                        )
-                    });
-                for &index in &charged_indices {
+                            .expect("charged_indices only contains Some entries")
+                            .reserved_usd
+                    })
+                    .sum();
+                let call_billed = embedding_billed_from_usage(
+                    report.usage.as_ref(),
+                    active_embedding_send_lane(),
+                    reserved_total,
+                );
+                // Weights are parallel to `to_send`, which was built from
+                // `charged_indices` in order.
+                let shares = (!call_billed.estimated)
+                    .then(|| apportion(call_billed.usd, &report.token_weights));
+                for (position, &index) in charged_indices.iter().enumerate() {
                     let charge = charge_by_group[index]
                         .as_ref()
                         .expect("charged_indices only contains Some entries");
+                    let billed = match shares.as_ref() {
+                        Some(shares) if charged_indices.len() == 1 => BilledAmount {
+                            usd: shares[position],
+                            estimated: false,
+                        },
+                        Some(shares) => BilledAmount {
+                            usd: shares[position],
+                            estimated: true,
+                        },
+                        None => BilledAmount {
+                            usd: charge.reserved_usd,
+                            estimated: true,
+                        },
+                    };
                     settle_task_charge_success(
                         &ledger,
                         &charge.key,
                         &charge.intent_token,
-                        measured.unwrap_or(BilledAmount {
-                            usd: charge.reserved_usd,
-                            estimated: true,
-                        }),
+                        billed,
                     )?;
                     // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
                     // et al. can find this group's ledger selector via
@@ -14624,6 +14645,48 @@ fn link_reused_chunks(
 }
 
 /// Call the adapter for the to-send chunks and write `embeddings` + `chunk_vec`.
+/// What one sync embed send reported, plus what the caller needs to attribute
+/// it.
+///
+/// I12: `:batchEmbedContents` reports ONE `promptTokenCount` for the whole
+/// CALL, while the caller holds one ledger row per group (up to
+/// `EMBEDDING_BATCH_SIZE`). The Batch lane does not have this problem — 07
+/// §5.7 makes the JOB the task, so its billing unit and its accounting unit are
+/// the same object. The sync lane is the one that broke that invariant, so it
+/// is the one that has to split the total back out.
+struct SyncEmbedReport {
+    usage: Option<kio_adapter::types::AdapterUsage>,
+    /// Per-group token estimates over the strings actually sent, parallel to
+    /// the `to_send` slice. Weights only — their absolute accuracy does not
+    /// matter, because [`apportion`] scales them to the measured total.
+    token_weights: Vec<f64>,
+}
+
+/// Split `total` across `weights` so the parts add back to `total` exactly.
+///
+/// I12: the parts are an attribution, not a measurement — the provider bills
+/// per call, and no per-row truth exists to be recovered. What does have to
+/// hold is the SUM, because that is the only thing production reads from this
+/// table (`ops::month_to_date_usd`'s `SUM(usd)`, which the budget cap gates
+/// on). So the last share takes the rounding remainder rather than letting a
+/// crumb fall out of the ledger, and a degenerate weight vector splits evenly
+/// rather than dropping the charge — the provider billed it either way.
+fn apportion(total: f64, weights: &[f64]) -> Vec<f64> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let sum: f64 = weights.iter().sum();
+    let mut shares: Vec<f64> = if sum > 0.0 && sum.is_finite() {
+        weights.iter().map(|weight| total * weight / sum).collect()
+    } else {
+        vec![total / weights.len() as f64; weights.len()]
+    };
+    let head: f64 = shares[..shares.len() - 1].iter().sum();
+    let last = shares.len() - 1;
+    shares[last] = total - head;
+    shares
+}
+
 fn send_embed_batch(
     conn: &Connection,
     execution: AdoptedEmbeddingExecution,
@@ -14633,26 +14696,37 @@ fn send_embed_batch(
     // site's doc for why this is a single representative token, not one per
     // group.
     idempotency_token: Option<String>,
-    // I12: the usage the adapter reported for this send, returned so the caller
-    // settles on measured tokens instead of its reservation.
-) -> std::result::Result<Option<kio_adapter::types::AdapterUsage>, TaskExecutionFailure> {
+) -> std::result::Result<SyncEmbedReport, TaskExecutionFailure> {
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): the adapter input is
     // the humanized filename context prepended to the chunk body. Every member
     // of a group shares one `embedding_hash` = one `(text_hash, context,
     // profile)`, so the representative's context is the whole group's context.
-    let items = to_send
+    let inputs = to_send
         .iter()
         .map(|group| {
             let context = embedding_store::chunk_embedding_context(&group.representative.raw_path);
-            EmbeddingItem {
-                id: group.representative.chunk_id.clone(),
-                text: Some(embedding_store::contextualized_embedding_input(
-                    context.as_deref(),
-                    &group.representative.text,
-                )),
-                path: None,
-                mime: None,
-            }
+            embedding_store::contextualized_embedding_input(
+                context.as_deref(),
+                &group.representative.text,
+            )
+        })
+        .collect::<Vec<_>>();
+    // I12: each group's share of this CALL's token count, measured over the
+    // exact string this call sends. Derived here rather than in the caller for
+    // the same reason the reservation estimate is: estimating one string while
+    // sending another is how the two drift apart.
+    let token_weights = inputs
+        .iter()
+        .map(|input| estimate_embedding_tokens(input))
+        .collect::<Vec<_>>();
+    let items = to_send
+        .iter()
+        .zip(inputs)
+        .map(|(group, input)| EmbeddingItem {
+            id: group.representative.chunk_id.clone(),
+            text: Some(input),
+            path: None,
+            mime: None,
         })
         .collect::<Vec<_>>();
     let outcome = run_embedding_adapter(
@@ -14678,7 +14752,10 @@ fn send_embed_batch(
         };
         persist_group_vector(conn, profile, group, vector, &held)?;
     }
-    Ok(usage)
+    Ok(SyncEmbedReport {
+        usage,
+        token_weights,
+    })
 }
 
 /// Write one group's content vector and fan it out to every member chunk.
@@ -21696,7 +21773,7 @@ mod tests {
     use kio_adapter::catalog::deterministic_embedding_vector;
 
     use super::{
-        effective_invocation_lane, embedding_usd_per_token, lane_rate,
+        apportion, effective_invocation_lane, embedding_usd_per_token, lane_rate,
         estimate_embedding_cost, estimate_embedding_tokens, markdownize_send_lane, parsed_repair,
         parsed_search, query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
@@ -23257,6 +23334,46 @@ mod tests {
         // Mixed text adds the two ratios rather than picking one.
         assert!((estimate_embedding_tokens("abcd日本語だ") - 5.0).abs() < 1e-9);
         assert!(estimate_embedding_tokens("").abs() < 1e-9);
+    }
+
+    #[test]
+    fn apportioned_shares_add_back_to_the_measured_total() {
+        // I12: the split is an attribution, but the SUM is what the budget cap
+        // reads (`month_to_date_usd`), so it has to be exact — not
+        // exact-to-a-tolerance. These weights do not divide the total cleanly
+        // in binary, which is the case a naive `total * w / sum` loses a crumb
+        // on.
+        for weights in [
+            vec![1.0, 1.0, 1.0],
+            vec![7.0, 11.0, 13.0, 17.0],
+            vec![0.25, 1_000_000.0],
+            vec![3.0],
+        ] {
+            let total = 0.000_123_456_789_f64;
+            let shares = apportion(total, &weights);
+            assert_eq!(shares.len(), weights.len());
+            let sum: f64 = shares.iter().sum();
+            assert_eq!(sum, total, "weights {weights:?} lost {}", total - sum);
+        }
+    }
+
+    #[test]
+    fn apportioned_shares_follow_the_weights() {
+        let shares = apportion(9.0, &[1.0, 2.0]);
+        assert!((shares[0] - 3.0).abs() < 1e-12, "{shares:?}");
+        assert!((shares[1] - 6.0).abs() < 1e-12, "{shares:?}");
+    }
+
+    #[test]
+    fn apportioning_with_no_usable_weights_still_books_the_whole_charge() {
+        // A zero (or non-finite) weight vector must not drop the charge: the
+        // provider billed the call whatever this code can say about its parts.
+        for weights in [vec![0.0, 0.0, 0.0], vec![f64::INFINITY, 1.0]] {
+            let shares = apportion(1.0, &weights);
+            let sum: f64 = shares.iter().sum();
+            assert_eq!(sum, 1.0, "weights {weights:?} dropped the charge");
+        }
+        assert!(apportion(1.0, &[]).is_empty());
     }
 
     #[test]

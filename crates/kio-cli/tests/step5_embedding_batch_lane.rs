@@ -636,6 +636,77 @@ fn realtime_uses_the_synchronous_lane_and_never_creates_a_batch_row() {
     );
 }
 
+/// I12: a realtime send covering SEVERAL ledger rows settles them on the
+/// measured total, not on the sum of their reservations.
+///
+/// `:batchEmbedContents` reports one token count per CALL, and
+/// `EMBEDDING_BATCH_SIZE` puts up to 32 groups in a call — so on the realtime
+/// lane the multi-row case IS the case. Measuring only single-row sends covered
+/// 1 of 30 sync settlements in the dogfood run; every realtime chunk embed fell
+/// through to its reservation, which I10 measured at -32%..+52%.
+///
+/// The inputs here are pure ASCII, where `estimate_embedding_tokens` counts one
+/// token per 4 scalars and the mock reports one per scalar — so the measured
+/// total is exactly 4x the reserved total, and "did it settle on the
+/// measurement" has an arithmetic answer rather than an approximate one.
+#[test]
+fn a_multi_group_realtime_send_settles_on_the_measured_total() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        ("alpha.md", "# Rollback drill\n\nThe checkout gateway retries twice.\n"),
+        ("beta.md", "# Capacity plan\n\nQueue depth stays under four hundred.\n"),
+        ("gamma.md", "# Handoff notes\n\nThe operator owns the bridge decision.\n"),
+    ] {
+        std::fs::write(dir.path().join(name), body).unwrap();
+    }
+    kio(&dir).arg("init").assert().success();
+
+    let indexed = json(
+        &dir,
+        "{}",
+        &["index", "--approve", "--online", "--realtime"],
+    );
+    let executed = indexed["embedding_tasks_executed"].as_u64().unwrap();
+    assert!(
+        executed > 1,
+        "this contract needs a send covering several rows: {indexed}"
+    );
+
+    // Every row of the send is a sync row, and none of them is the whole call,
+    // so each carries a derived share — `estimated` is per row and no row here
+    // was measured on its own.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT COUNT(*) || '|' || SUM(estimated)
+             FROM cost_ledger WHERE adapter_kind = 'embedding' AND scope_id <> 'device'"
+        ),
+        format!("{executed}|{executed}"),
+        "each row of a multi-group send is an apportioned share"
+    );
+
+    // The SUM is the part that has to be exact: it is what the budget cap reads.
+    let settled: f64 = ledger_query(
+        &dir,
+        "SELECT printf('%.12f', SUM(usd))
+         FROM cost_ledger WHERE adapter_kind = 'embedding' AND scope_id <> 'device'",
+    )
+    .parse()
+    .unwrap();
+    let reserved: f64 = ledger_query(
+        &dir,
+        "SELECT printf('%.12f', SUM(estimated_usd))
+         FROM batch_requests WHERE adapter_kind = 'embedding'",
+    )
+    .parse()
+    .unwrap();
+    assert!(
+        (settled - reserved * 4.0).abs() < 1e-12,
+        "settled {settled} must be the measured total (4x the reserved {reserved}), \
+         not the reservation itself"
+    );
+}
+
 /// A second submission pass over the SAME member set lands on the same task key
 /// and must not create a second provider job — "1 job = 1 task" holds across
 /// re-runs, which is what keeps the §5.8 recovery walk unambiguous.
