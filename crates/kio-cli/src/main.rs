@@ -13452,7 +13452,7 @@ fn run_embedding_adapter(
     // ledger `intent_token` for this send — see
     // `kio_adapter::types::EmbeddingRequest::idempotency_token`'s doc.
     idempotency_token: Option<String>,
-) -> std::result::Result<Vec<kio_adapter::types::EmbeddingVector>, TaskExecutionFailure> {
+) -> std::result::Result<kio_adapter::catalog::AdoptedEmbeddingOutcome, TaskExecutionFailure> {
     run_adopted_embedding(execution, items, input_type, idempotency_token).map_err(|error| {
         // R13-2(e): a `keychain:` (not-implemented) auth must be LOUD — the query
         // path degrades to text fallback and the index path only counts a failed
@@ -13656,28 +13656,25 @@ fn compute_query_embedding_page1(
         EmbeddingInputType::Query,
         Some(intent_token.clone()),
     ) {
-        Ok(vectors) => {
+        Ok(outcome) => {
             // CL43: durably record the (fallback) provider id immediately on
             // response receipt, strictly before the terminal Tx below — a crash
             // in between still leaves a queryable `batch_job_id` for the next
             // write-command's crash recovery.
             sync_record_provider_request_id(conn, &key, &intent_token, &intent_token)
                 .map_err(pipeline_to_kio)?;
-            let billed_usd = estimate_embedding_cost(query, query_embedding_send_lane());
-            // QA17: this Gemini `batchEmbedContents` integration has no real
-            // per-call usage to report (see `EmbeddingResponse.usage`'s doc
-            // comment) — the reservation estimate stands, `estimated=1`,
-            // same as before this field existed.
-            settle_task_charge_success(
-                &ledger,
-                &key,
-                &intent_token,
-                BilledAmount {
-                    usd: billed_usd,
-                    estimated: true,
-                },
-            )?;
-            Ok(vectors
+            // I12: `:batchEmbedContents` reports `usageMetadata.promptTokenCount`
+            // as a per-CALL total, which is the granularity it bills at, so this
+            // settles on the measured number. The reservation estimate remains
+            // the fallback for a response that carried no usable report.
+            let billed = embedding_billed_from_usage(
+                outcome.usage.as_ref(),
+                query_embedding_send_lane(),
+                estimate_embedding_cost(query, query_embedding_send_lane()),
+            );
+            settle_task_charge_success(&ledger, &key, &intent_token, billed)?;
+            Ok(outcome
+                .vectors
                 .into_iter()
                 .next()
                 .map(|vector| QueryEmbeddingOutcome::Vector(vector.vector)))
@@ -14263,22 +14260,39 @@ fn run_embedding_enrichment_for_instances(
             &to_send,
             batch_idempotency_token,
         ) {
-            Ok(()) => {
+            Ok(usage) => {
+                // I12: `:batchEmbedContents` reports one token count for the
+                // whole CALL, but this send covers `charged_indices` ledger
+                // rows. A per-call total settles a row exactly only when it IS
+                // the row; splitting it across several would be an attribution
+                // this code has no ground truth for, and dividing a measured
+                // number by a guess does not make the parts measured. So the
+                // measured figure is used for the one-row case and the
+                // reservation stands for the rest — see I10 on why that
+                // remainder is not a safe place to leave things.
+                let measured = (charged_indices.len() == 1)
+                    .then(|| {
+                        let charge = charge_by_group[charged_indices[0]]
+                            .as_ref()
+                            .expect("charged_indices only contains Some entries");
+                        embedding_billed_from_usage(
+                            usage.as_ref(),
+                            active_embedding_send_lane(),
+                            charge.reserved_usd,
+                        )
+                    });
                 for &index in &charged_indices {
                     let charge = charge_by_group[index]
                         .as_ref()
                         .expect("charged_indices only contains Some entries");
-                    // QA17: same posture as the query-embedding settle site
-                    // above — no real per-call usage available from this
-                    // Gemini integration, so the reservation estimate stands.
                     settle_task_charge_success(
                         &ledger,
                         &charge.key,
                         &charge.intent_token,
-                        BilledAmount {
+                        measured.unwrap_or(BilledAmount {
                             usd: charge.reserved_usd,
                             estimated: true,
-                        },
+                        }),
                     )?;
                     // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
                     // et al. can find this group's ledger selector via
@@ -14619,7 +14633,9 @@ fn send_embed_batch(
     // site's doc for why this is a single representative token, not one per
     // group.
     idempotency_token: Option<String>,
-) -> std::result::Result<(), TaskExecutionFailure> {
+    // I12: the usage the adapter reported for this send, returned so the caller
+    // settles on measured tokens instead of its reservation.
+) -> std::result::Result<Option<kio_adapter::types::AdapterUsage>, TaskExecutionFailure> {
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): the adapter input is
     // the humanized filename context prepended to the chunk body. Every member
     // of a group shares one `embedding_hash` = one `(text_hash, context,
@@ -14639,13 +14655,15 @@ fn send_embed_batch(
             }
         })
         .collect::<Vec<_>>();
-    let vectors = run_embedding_adapter(
+    let outcome = run_embedding_adapter(
         execution,
         items,
         EmbeddingInputType::MarkdownChunk,
         idempotency_token,
     )?;
-    let by_id = vectors
+    let usage = outcome.usage;
+    let by_id = outcome
+        .vectors
         .into_iter()
         .map(|vector| (vector.id, vector.vector))
         .collect::<BTreeMap<_, _>>();
@@ -14660,7 +14678,7 @@ fn send_embed_batch(
         };
         persist_group_vector(conn, profile, group, vector, &held)?;
     }
-    Ok(())
+    Ok(usage)
 }
 
 /// Write one group's content vector and fan it out to every member chunk.
@@ -14737,9 +14755,10 @@ const EMBEDDING_BATCH_JOB_MAX_MEMBERS: usize = 512;
 /// R24: a job that keeps ending in a non-success terminal state used to be
 /// re-submitted without bound — every `batch resume` settled the failure,
 /// cleared the row, and immediately created a new job with a fresh reservation.
-/// Because the endpoint reports no usage the reservation IS the settled charge,
-/// so a permanently-failing member set recorded its full estimate once per pass
-/// until the budget cap hard-stopped the scope.
+/// A failed send reports no usage — measured settlement (I4/I12) covers the
+/// success path only — so on this path the reservation IS the settled charge,
+/// and a permanently-failing member set recorded its full estimate once per
+/// pass until the budget cap hard-stopped the scope.
 ///
 /// Counted on `contract_violation_count`, NOT on `attempts`, specifically
 /// because **`kio batch reset-violations` already exists as the operator escape
@@ -14952,9 +14971,10 @@ fn submit_embedding_batch_jobs(
         // estimate prices the string actually sent. Estimating
         // `representative.text` while sending
         // `contextualized_embedding_input(context, text)` undercounts by the
-        // whole context prefix — and since the endpoint reports no usage, that
-        // shortfall is never corrected at settle time (QA17), so it is a
-        // permanent under-record of real spend.
+        // whole context prefix. Settlement now corrects that from the reported
+        // tokens (I4/I12), but the RESERVATION is what the budget cap gates on
+        // and what a failed send settles at, so an undercount here still lets
+        // spending through the cap that the cap was set to stop (I10).
         let inputs = job_groups
             .iter()
             .map(|group| {
@@ -15281,27 +15301,11 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
                         }],
                     }
                 });
-                let (billed, uncovered) = resolve_billing_from_reported_usage(
+                embedding_billed_from_usage(
                     reported.as_ref(),
-                    // The embedding adapter declares exactly one billable kind
-                    // (`gemini_embedding`'s profile: `TokensIn`). Its module is
-                    // private, so the set is restated rather than fabricated
-                    // from an `AdapterProfile` this call site does not have.
-                    &std::collections::BTreeSet::from(["tokens_in".to_owned()]),
-                    // The SAME rate resolution the reservation used, fallback
-                    // included. Pricing the two sides from different sources is
-                    // how a reservation and its settlement drift apart, and
-                    // `registered_declared_pricing` alone returns an empty map
-                    // when nothing is declared — which would silently pin every
-                    // charge to the estimate.
-                    &std::collections::BTreeMap::from([(
-                        "tokens_in".to_owned(),
-                        embedding_usd_per_token(PreferredRequestKind::Batch),
-                    )]),
+                    PreferredRequestKind::Batch,
                     row.estimated_usd,
-                );
-                warn_uncovered_pricing_kinds_once(EMBEDDING_ADAPTER_KIND, &uncovered);
-                billed
+                )
             } else {
                 BilledAmount {
                     usd: row.estimated_usd,
@@ -15545,8 +15549,10 @@ fn realtime_lane_requested() -> bool {
 /// So the callers of this function are, by construction, the ones already on the
 /// synchronous lane — either because the invocation asked for `--realtime` or
 /// because the batch lane was unavailable and the send fell back. Pricing them
-/// at the sync rate is therefore correct, not a placeholder: the adapter reports
-/// no usage, so this estimate IS the settled charge (QA17).
+/// at the sync rate is therefore correct, not a placeholder — and since I12 it
+/// prices the SETTLEMENT too, not just the reservation, because
+/// `embedding_billed_from_usage` resolves the measured tokens through this same
+/// lane.
 fn active_embedding_send_lane() -> PreferredRequestKind {
     PreferredRequestKind::Sync
 }
@@ -15563,10 +15569,12 @@ fn query_embedding_send_lane() -> PreferredRequestKind {
 /// R24 (5 系統一致): this used to `return declared` BEFORE looking at `lane`,
 /// so declaring `tokens_in` in `tools.toml` — which the spec calls the
 /// normative source, and which the dogfood config does declare — silently
-/// collapsed the two lanes to one price. Because the endpoint reports no usage,
-/// the reservation estimate IS the settled charge (QA17), so that recorded
-/// every Batch job at the sync rate: a 2x over-record that consumes the budget
-/// cap twice as fast as the provider actually bills.
+/// collapsed the two lanes to one price. At the time the reservation estimate
+/// was also the settled charge, so that recorded every Batch job at the sync
+/// rate: a 2x over-record that consumes the budget cap twice as fast as the
+/// provider actually bills. Settlement now prices measured tokens (I4/I12) —
+/// through this same function — so a wrong lane here corrupts BOTH sides at
+/// once rather than only the reservation.
 fn embedding_usd_per_token(lane: PreferredRequestKind) -> f64 {
     let standard = kio_adapter::tool_lock::registered_declared_pricing("embedding")
         .get("tokens_in")
@@ -15621,12 +15629,52 @@ fn is_cjk_scalar(ch: char) -> bool {
     )
 }
 
-/// Cost estimate for embedding `text` on `lane`. Because the adapter reports
-/// no usage (`EmbeddingResponse.usage` is `None` — the endpoint returns no
-/// token count), this estimate is what the ledger records as the settled
-/// charge, so both the token count and the per-token rate have to be right.
+/// Cost estimate for embedding `text` on `lane`.
+///
+/// This is the RESERVATION, and — per I12's fix — only the settlement fallback
+/// for a send whose response carried no usable usage report. It used to be the
+/// settled charge outright, on the since-falsified reasoning that the endpoint
+/// returns no token count. It still has to be right: I10 measured this
+/// estimator against 33 real jobs and found -32%..+52% error with 24% of jobs
+/// UNDER-estimated, and the budget cap gates on the reservation, not on the
+/// settlement.
 fn estimate_embedding_cost(text: &str, lane: PreferredRequestKind) -> f64 {
     estimate_embedding_tokens(text) * embedding_usd_per_token(lane)
+}
+
+/// Price one embedding send from the usage the adapter reported, degrading to
+/// `fallback_estimated_usd` (the reservation) whenever that report is absent or
+/// fails to cover every kind the adapter declares it bills for.
+///
+/// I12: one function for all three send sites — Batch collect, sync query, sync
+/// chunk — because pricing one adapter in three places is exactly how the bug
+/// happened. The Batch site learned to read `usage` while the two sync sites
+/// went on asserting the endpoint had none to give, and nothing in the type
+/// system objected. A new send site now has to pick a lane and a fallback, not
+/// invent a pricing rule.
+fn embedding_billed_from_usage(
+    reported: Option<&kio_adapter::types::AdapterUsage>,
+    lane: PreferredRequestKind,
+    fallback_estimated_usd: f64,
+) -> BilledAmount {
+    let (billed, uncovered) = resolve_billing_from_reported_usage(
+        reported,
+        // The embedding adapter declares exactly one billable kind
+        // (`gemini_embedding`'s profile: `TokensIn`). Its module is private, so
+        // the set is restated rather than fabricated from an `AdapterProfile`
+        // these call sites do not have.
+        &std::collections::BTreeSet::from(["tokens_in".to_owned()]),
+        // The SAME rate resolution the reservation used, fallback included.
+        // Pricing the two sides from different sources is how a reservation and
+        // its settlement drift apart.
+        &std::collections::BTreeMap::from([(
+            "tokens_in".to_owned(),
+            embedding_usd_per_token(lane),
+        )]),
+        fallback_estimated_usd,
+    );
+    warn_uncovered_pricing_kinds_once(EMBEDDING_ADAPTER_KIND, &uncovered);
+    billed
 }
 
 /// Retained current-config chunks that have no usable current-profile vector.

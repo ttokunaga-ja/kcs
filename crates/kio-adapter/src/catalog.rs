@@ -18,9 +18,9 @@ use crate::mistral_ocr::{
 use crate::office_convert::{is_office_media, resolve_office_converter};
 use crate::traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 use crate::types::{
-    AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest, EmbeddingVector,
-    IncrementalHints, MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse, PreparedUnitHint,
-    PreviousMarkdownizeContext, ProviderIdempotency, RawInput,
+    AdapterProfile, AdapterUsage, EmbeddingInputType, EmbeddingItem, EmbeddingRequest,
+    EmbeddingVector, IncrementalHints, MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse,
+    PreparedUnitHint, PreviousMarkdownizeContext, ProviderIdempotency, RawInput,
 };
 use crate::{AdapterError, Result};
 
@@ -654,6 +654,12 @@ pub enum AdoptedEmbeddingExecution {
     /// end-to-end (a missing token surfaces as `ContractViolation`). Never
     /// true for the real, shipped Gemini profile.
     RequireIdempotencyToken,
+    /// I12: behaves like `Mock`, but the response carries no
+    /// `usageMetadata` — the one case where a settle site must fall back to
+    /// the reservation estimate. Kept as its own variant because `Mock` now
+    /// reports a token count like the live endpoint does, so without this the
+    /// degrade path would have no coverage at all.
+    NoUsageReport,
     Real,
 }
 
@@ -669,6 +675,7 @@ pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution>
         Some("require_idempotency_token") => {
             Some(AdoptedEmbeddingExecution::RequireIdempotencyToken)
         }
+        Some("no_usage_report") => Some(AdoptedEmbeddingExecution::NoUsageReport),
         Some(_) => None,
         // R13-2: activate the Real path when EITHER a `tools.toml` `[embedding]`
         // adapter is declared (its auth is resolved at execution — keychain there
@@ -734,6 +741,22 @@ pub fn declared_adopted_embedding_profile(
     }
 }
 
+/// What one adopted-embedding send produced: the vectors, plus the usage the
+/// adapter self-reported for THIS call.
+///
+/// I12: this used to be a bare `Vec<EmbeddingVector>`, so `response.usage` was
+/// discarded at the crate boundary. The Batch lane grew its own token-count
+/// path and left both sync settle sites pricing themselves from the
+/// reservation estimate — while four doc comments went on asserting the
+/// endpoint reports no token count, which stopped being true the moment the
+/// adapter started populating `usage`. Carrying it here means a caller can no
+/// longer settle a sync send without at least deciding what to do with the
+/// real number.
+pub struct AdoptedEmbeddingOutcome {
+    pub vectors: Vec<EmbeddingVector>,
+    pub usage: Option<AdapterUsage>,
+}
+
 pub fn run_adopted_embedding(
     execution: AdoptedEmbeddingExecution,
     items: Vec<EmbeddingItem>,
@@ -743,7 +766,7 @@ pub fn run_adopted_embedding(
     // `EmbeddingRequest::idempotency_token`'s doc. `None` for a call with no
     // ledger charge.
     idempotency_token: Option<String>,
-) -> Result<Vec<EmbeddingVector>> {
+) -> Result<AdoptedEmbeddingOutcome> {
     let request = EmbeddingRequest {
         input_type,
         items,
@@ -785,7 +808,10 @@ pub fn run_adopted_embedding(
         )
         .embed(request),
     }?;
-    Ok(response.vectors)
+    Ok(AdoptedEmbeddingOutcome {
+        vectors: response.vectors,
+        usage: response.usage,
+    })
 }
 
 #[must_use]
@@ -858,9 +884,22 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
                     ),
                 })
                 .collect(),
-            // A mock cannot invent a provider's token count; `None` keeps this
-            // seam on the honest degrade-to-estimate path.
-            prompt_tokens: None,
+            // I12: this used to be `None` on the reasoning that "a mock cannot
+            // invent a provider's token count". The live endpoint always
+            // returns `usageMetadata.promptTokenCount`, so a seam that reports
+            // nothing is not the honest case — it is a shape the provider never
+            // sends, and it silently pins every mock-driven settlement to the
+            // degrade-to-estimate branch. That is the I3 failure again: a mock
+            // that disagrees with the wire makes its own tests vacuous. The
+            // count is derived from the input so it is deterministic and moves
+            // when the input does; `AdoptedEmbeddingExecution::NoUsageReport`
+            // still exercises the degrade path deliberately.
+            prompt_tokens: (self.execution != AdoptedEmbeddingExecution::NoUsageReport).then(|| {
+                items
+                    .iter()
+                    .map(|item| item.text.as_deref().unwrap_or("").chars().count() as u64)
+                    .sum()
+            }),
         })
     }
 }
@@ -928,7 +967,7 @@ mod tests {
 
     #[test]
     fn run_adopted_embedding_mock_returns_one_vector_per_item() {
-        let vectors = run_adopted_embedding(
+        let outcome = run_adopted_embedding(
             AdoptedEmbeddingExecution::Mock,
             vec![
                 EmbeddingItem {
@@ -948,9 +987,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(vectors.len(), 2);
-        assert_eq!(vectors[0].id, "a");
-        assert_eq!(vectors[1].id, "b");
+        assert_eq!(outcome.vectors.len(), 2);
+        assert_eq!(outcome.vectors[0].id, "a");
+        assert_eq!(outcome.vectors[1].id, "b");
     }
 
     #[test]

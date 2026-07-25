@@ -317,6 +317,97 @@ fn batch_resume_collects_the_vectors_and_clears_the_intent_token() {
     );
 }
 
+/// I12: the SYNC query embed settles on the tokens the endpoint reported, not
+/// on its reservation.
+///
+/// The Batch lane learned to read `usage` while this path went on booking the
+/// estimate, guarded by four doc comments asserting the endpoint reports no
+/// token count — an assertion the live wire had already contradicted. Nothing
+/// caught it because `run_adopted_embedding` dropped `response.usage` at the
+/// crate boundary, so no call site could have used it even had it wanted to.
+/// `kio search` is the highest-frequency send in the product; it should be the
+/// last one billing on a guess.
+#[test]
+fn a_sync_query_embed_settles_on_the_reported_tokens() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let submit = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/query-usage",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    json(&dir, &submit, &["index", "--approve", "--online"]);
+    let key = submitted_key(&capture);
+    json(
+        &dir,
+        &success_script("batches/query-usage", &key),
+        &["batch", "resume"],
+    );
+
+    // 8 ASCII scalars in, and the mock reports one token per scalar the way the
+    // live endpoint reports `usageMetadata.promptTokenCount` for the call.
+    json(
+        &dir,
+        &success_script("batches/query-usage", &key),
+        &["search", "rollback", "--mode", "vector"],
+    );
+
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT outcome || '|' || estimated || '|' || printf('%.10f', usd)
+             FROM cost_ledger WHERE scope_id = 'device' AND adapter_kind = 'embedding'"
+        ),
+        // 8 tokens at the SYNC rate ($0.20 / 1M) — a query cannot wait out a
+        // batch turnaround, so it is never eligible for the half rate.
+        "succeeded|0|0.0000016000",
+        "the query embed must settle on reported tokens at the sync rate"
+    );
+}
+
+/// I12's fallback: a response with no usage report keeps the reservation and
+/// stays `estimated=1`. Reading a missing count as zero would settle a real
+/// send at $0.00 — the one direction a budget cap cannot defend against.
+#[test]
+fn a_sync_query_embed_without_a_usage_report_keeps_the_reservation() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let submit = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/query-no-usage",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    json(&dir, &submit, &["index", "--approve", "--online"]);
+    let key = submitted_key(&capture);
+    json(
+        &dir,
+        &success_script("batches/query-no-usage", &key),
+        &["batch", "resume"],
+    );
+
+    let _ = kio(&dir)
+        .env("KIO_TEST_GEMINI_EMBED", "no_usage_report")
+        .env(
+            "KIO_TEST_GEMINI_BATCH",
+            success_script("batches/query-no-usage", &key),
+        )
+        .args(["--json", "search", "rollback", "--mode", "vector"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT outcome || '|' || estimated
+             FROM cost_ledger WHERE scope_id = 'device' AND adapter_kind = 'embedding'"
+        ),
+        "succeeded|1",
+        "no usage report must degrade to the reservation, not to zero"
+    );
+}
+
 /// A job that ends in a non-success terminal state settles the row rather than
 /// leaving it in flight forever, and records the reservation (the provider may
 /// still have billed part of the work).
@@ -364,9 +455,10 @@ fn a_failed_batch_job_terminates_the_row_instead_of_hanging() {
 /// R24 (6 系統全会一致) closed what this test previously pinned as a KNOWN GAP:
 /// a job that fails settles the row and NULLs its `intent_token`, and
 /// `phase1_intent`'s ON CONFLICT clears `batch_job_id`, so the same pass
-/// re-reserved the same task key and created another job — forever. Because the
-/// endpoint reports no usage, each pass recorded a full estimate for work that
-/// produced nothing, until the budget cap hard-stopped the scope.
+/// re-reserved the same task key and created another job — forever. A failed
+/// send carries no usage to settle on (measured settlement covers the success
+/// path only), so each pass recorded a full estimate for work that produced
+/// nothing, until the budget cap hard-stopped the scope.
 ///
 /// The bound rides on `batch_requests.attempts`, which that ON CONFLICT clause
 /// does NOT reset. Here one failure is retried (attempts 1 < 3), which is the

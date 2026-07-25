@@ -413,11 +413,16 @@ pub struct EmbeddingResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_profile_hash: Option<String>,
     /// QA17: this request's self-reported billing usage (07 §4 L291-307).
-    /// `None` when the concrete Adapter has no real per-call signal to report
-    /// (e.g. this codebase's Gemini `batchEmbedContents` integration — the
-    /// endpoint's response carries no per-request token count) — the caller
-    /// degrades to the reservation estimate, same as before this field
-    /// existed.
+    /// `None` when the concrete Adapter has no real per-call signal to report —
+    /// the caller degrades to the reservation estimate.
+    ///
+    /// I12: this doc used to name Gemini `batchEmbedContents` as the example of
+    /// an endpoint carrying no token count. It carries one — measured against
+    /// the live endpoint, `usageMetadata.promptTokenCount`, as a per-CALL total.
+    /// The absent per-REQUEST count is true and beside the point, since per-call
+    /// is the granularity the provider bills at. `gemini_embedding` populates
+    /// this field accordingly; a caller that settles on the reservation while
+    /// this is `Some` is discarding the provider's own number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AdapterUsage>,
 }
