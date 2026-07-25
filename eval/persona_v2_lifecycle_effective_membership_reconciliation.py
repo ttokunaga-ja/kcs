@@ -341,6 +341,81 @@ def _fail(message):
     raise PersonaV2LifecycleEffectiveMembershipReconciliationError(message)
 
 
+def _freeze_cached_value(value):
+    """Convert cache state to a recursively immutable tuple representation."""
+
+    if value is None or type(value) in {bool, int, float, str, bytes}:
+        return ("atom", value)
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple(
+                (_freeze_cached_value(key), _freeze_cached_value(item))
+                for key, item in value.items()
+            ),
+        )
+    if type(value) is list:
+        return ("list", tuple(_freeze_cached_value(item) for item in value))
+    if type(value) is tuple:
+        return ("tuple", tuple(_freeze_cached_value(item) for item in value))
+    if type(value) in {set, frozenset}:
+        frozen_items = tuple(
+            sorted(
+                (_freeze_cached_value(item) for item in value),
+                key=repr,
+            )
+        )
+        return (
+            "set" if type(value) is set else "frozenset",
+            frozen_items,
+        )
+    _fail(f"cache state contains an unsupported value: {type(value).__name__}")
+
+
+def _thaw_cached_value(value):
+    """Return a fully detached value from an immutable cache representation."""
+
+    tag = value[0]
+    if tag == "atom":
+        return value[1]
+    if tag == "dict":
+        return {
+            _thaw_cached_value(key): _thaw_cached_value(item)
+            for key, item in value[1]
+        }
+    if tag == "list":
+        return [_thaw_cached_value(item) for item in value[1]]
+    if tag == "tuple":
+        return tuple(_thaw_cached_value(item) for item in value[1])
+    if tag == "set":
+        return {_thaw_cached_value(item) for item in value[1]}
+    if tag == "frozenset":
+        return frozenset(_thaw_cached_value(item) for item in value[1])
+    _fail("immutable cache state has an unknown tag")
+
+
+def _detached_lru_cache(*, maxsize):
+    """Cache immutable tuples while exposing a fresh detached value per call."""
+
+    def decorate(builder):
+        @functools.lru_cache(maxsize=maxsize)
+        def immutable_cache(*args, **kwargs):
+            return _freeze_cached_value(builder(*args, **kwargs))
+
+        @functools.wraps(builder)
+        def detached(*args, **kwargs):
+            return _thaw_cached_value(immutable_cache(*args, **kwargs))
+
+        detached.cache_clear = immutable_cache.cache_clear
+        detached.cache_info = immutable_cache.cache_info
+        detached.immutable_cache_only = True
+        if hasattr(immutable_cache, "cache_parameters"):
+            detached.cache_parameters = immutable_cache.cache_parameters
+        return detached
+
+    return decorate
+
+
 def _require_persona_id(persona_id):
     if type(persona_id) is not str or persona_id not in envelope.PERSONA_IDS:
         _fail(f"unknown persona ID: {persona_id!r}")
@@ -487,7 +562,7 @@ def _witness_visibility():
     ]
 
 
-@functools.lru_cache(maxsize=1)
+@_detached_lru_cache(maxsize=1)
 def _shared_catalogs():
     semantic = source_semantic.build_source_semantic_membership_catalog()
     source_semantic.validate_source_semantic_membership_catalog(semantic)
@@ -639,7 +714,7 @@ def _companion_mirror_row(match, primary):
     return row
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _persona_plan(persona_id):
     _require_persona_id(persona_id)
     catalogs = _shared_catalogs()
@@ -907,7 +982,7 @@ def _shard_receipt(persona_id, origin, descriptor):
     return row
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _origin_dependencies(persona_id, origin):
     semantic_manifest = source_semantic.build_source_semantic_membership_origin_manifest(
         persona_id, origin
@@ -930,7 +1005,7 @@ def _origin_dependencies(persona_id, origin):
     return semantic_manifest, source_manifest
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _canonical_origin_rows(persona_id, origin):
     _require_persona_id(persona_id)
     _require_origin(origin)
@@ -975,7 +1050,7 @@ def _origin_binding(name, role, value, *, canonical, coordinates):
     )
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _canonical_origin_manifest(persona_id, origin):
     _require_persona_id(persona_id)
     _require_origin(origin)
@@ -1217,7 +1292,7 @@ event_created_witness_lineage_body_bytes = (
 )
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _persona_w0_audit(persona_id):
     plan = _persona_plan(persona_id)
     known_by_fact_id = {
@@ -1307,7 +1382,7 @@ def _persona_w0_audit(persona_id):
     }
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _persona_inverted_rows(persona_id):
     plan = _persona_plan(persona_id)
     primary_by_capability = {
@@ -1410,7 +1485,7 @@ def _profile_origins(profile):
     return ("pilot",) if profile == "pilot" else ORIGIN_ORDER
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _canonical_profile_manifest(persona_id, profile):
     _require_persona_id(persona_id)
     _require_profile(profile)
@@ -1524,7 +1599,7 @@ def _view_receipt(persona_id):
     }
 
 
-@functools.lru_cache(maxsize=1)
+@_detached_lru_cache(maxsize=1)
 def _canonical_suite_descriptor():
     origins = [
         _canonical_origin_manifest(persona_id, origin)
@@ -1819,7 +1894,7 @@ def build_lifecycle_effective_membership_suite_descriptor():
     return copy.deepcopy(_canonical_suite_descriptor())
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _canonical_content_projection(persona_id):
     _require_persona_id(persona_id)
     plan = _persona_plan(persona_id)

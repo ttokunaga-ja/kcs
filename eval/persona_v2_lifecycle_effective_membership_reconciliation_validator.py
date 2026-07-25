@@ -365,6 +365,81 @@ def _fail(message):
     )
 
 
+def _freeze_cached_value(value):
+    """Convert cache state to a recursively immutable tuple representation."""
+
+    if value is None or type(value) in {bool, int, float, str, bytes}:
+        return ("atom", value)
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple(
+                (_freeze_cached_value(key), _freeze_cached_value(item))
+                for key, item in value.items()
+            ),
+        )
+    if type(value) is list:
+        return ("list", tuple(_freeze_cached_value(item) for item in value))
+    if type(value) is tuple:
+        return ("tuple", tuple(_freeze_cached_value(item) for item in value))
+    if type(value) in {set, frozenset}:
+        frozen_items = tuple(
+            sorted(
+                (_freeze_cached_value(item) for item in value),
+                key=repr,
+            )
+        )
+        return (
+            "set" if type(value) is set else "frozenset",
+            frozen_items,
+        )
+    _fail(f"cache state contains an unsupported value: {type(value).__name__}")
+
+
+def _thaw_cached_value(value):
+    """Return a fully detached value from an immutable cache representation."""
+
+    tag = value[0]
+    if tag == "atom":
+        return value[1]
+    if tag == "dict":
+        return {
+            _thaw_cached_value(key): _thaw_cached_value(item)
+            for key, item in value[1]
+        }
+    if tag == "list":
+        return [_thaw_cached_value(item) for item in value[1]]
+    if tag == "tuple":
+        return tuple(_thaw_cached_value(item) for item in value[1])
+    if tag == "set":
+        return {_thaw_cached_value(item) for item in value[1]}
+    if tag == "frozenset":
+        return frozenset(_thaw_cached_value(item) for item in value[1])
+    _fail("immutable cache state has an unknown tag")
+
+
+def _detached_lru_cache(*, maxsize):
+    """Cache immutable tuples while exposing a fresh detached value per call."""
+
+    def decorate(builder):
+        @functools.lru_cache(maxsize=maxsize)
+        def immutable_cache(*args, **kwargs):
+            return _freeze_cached_value(builder(*args, **kwargs))
+
+        @functools.wraps(builder)
+        def detached(*args, **kwargs):
+            return _thaw_cached_value(immutable_cache(*args, **kwargs))
+
+        detached.cache_clear = immutable_cache.cache_clear
+        detached.cache_info = immutable_cache.cache_info
+        detached.immutable_cache_only = True
+        if hasattr(immutable_cache, "cache_parameters"):
+            detached.cache_parameters = immutable_cache.cache_parameters
+        return detached
+
+    return decorate
+
+
 def _ascii(value):
     return value.encode("ascii")
 
@@ -419,6 +494,282 @@ def _require_all_false_authority(value, *, label):
         for flag in (authority or {}).values()
     ):
         _fail(f"{label} authority must be the exact all-false schema")
+
+
+def _require_sha256_pin(value, *, label):
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        _fail(f"{label} must be an exact lowercase SHA-256 pin")
+
+
+def _require_artifact_identity(
+    value,
+    *,
+    artifact_kind,
+    artifact_schema,
+    label,
+    expected_persona_id=None,
+    expected_origin=None,
+    expected_profile=None,
+):
+    if (
+        type(value) is not dict
+        or value.get("artifact_kind") != artifact_kind
+        or value.get("artifact_schema") != artifact_schema
+        or type(value.get("artifact_schema_version")) is not int
+        or value.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+        or value.get("fixture_id") != envelope.FIXTURE_ID
+        or type(value.get("fixture_schema_version")) is not int
+        or value.get("fixture_schema_version")
+        != envelope.FIXTURE_SCHEMA_VERSION
+    ):
+        _fail(f"{label} artifact identity drifted")
+    if (
+        expected_persona_id is not None
+        and value.get("persona_id") != expected_persona_id
+    ):
+        _fail(f"{label} persona coordinate differs from validator argument")
+    if expected_origin is not None and value.get("origin") != expected_origin:
+        _fail(f"{label} origin coordinate differs from validator argument")
+    if expected_profile is not None and value.get("profile") != expected_profile:
+        _fail(f"{label} profile coordinate differs from validator argument")
+
+
+def _require_binding_pin_shapes(
+    value, field, coordinate_fields, *, label
+):
+    bindings = value.get(field) if type(value) is dict else None
+    if type(bindings) is not list or len(bindings) != len(coordinate_fields):
+        _fail(f"{label} binding cardinality drifted")
+    base_fields = {
+        "artifact_kind",
+        "artifact_schema",
+        "artifact_schema_version",
+        "canonical_bytes",
+        "dependency_role",
+        "fixture_id",
+        "fixture_schema_version",
+        "name",
+        "sha256",
+    }
+    for index, (binding, coordinates) in enumerate(
+        zip(bindings, coordinate_fields, strict=True)
+    ):
+        expected_fields = base_fields | set(coordinates)
+        if type(binding) is not dict or set(binding) != expected_fields:
+            _fail(f"{label} binding {index} schema drifted")
+        if (
+            type(binding["canonical_bytes"]) is not int
+            or binding["canonical_bytes"] <= 0
+            or type(binding["artifact_schema_version"]) is not int
+            or binding["artifact_schema_version"] <= 0
+            or binding["fixture_id"] != envelope.FIXTURE_ID
+            or binding["fixture_schema_version"]
+            != envelope.FIXTURE_SCHEMA_VERSION
+            or any(
+                type(binding[field_name]) is not str
+                or not binding[field_name]
+                for field_name in (
+                    "artifact_kind",
+                    "artifact_schema",
+                    "dependency_role",
+                    "name",
+                )
+            )
+            or any(
+                type(binding[coordinate]) is not str
+                or not binding[coordinate]
+                for coordinate in coordinates
+            )
+        ):
+            _fail(f"{label} binding {index} pin metadata drifted")
+        _require_sha256_pin(
+            binding["sha256"], label=f"{label} binding {index}"
+        )
+
+
+def _require_actual_origin_security_invariants(
+    value, *, expected_persona_id, expected_origin
+):
+    _require_artifact_identity(
+        value,
+        artifact_kind=ORIGIN_KIND,
+        artifact_schema=ORIGIN_SCHEMA,
+        label="effective origin manifest",
+        expected_persona_id=expected_persona_id,
+        expected_origin=expected_origin,
+    )
+    _require_all_false_authority(value, label="effective origin manifest")
+    descriptor = value.get("body_descriptor")
+    descriptor_fields = {
+        "body_bytes",
+        "body_persisted",
+        "body_sha256",
+        "file_name",
+        "maximum_row_bytes_including_lf",
+        "row_count",
+    }
+    if type(descriptor) is not dict or set(descriptor) != descriptor_fields:
+        _fail("effective origin body descriptor schema drifted")
+    if (
+        descriptor["body_persisted"] is not True
+        or type(descriptor["body_bytes"]) is not int
+        or not 1 <= descriptor["body_bytes"] <= MAX_ORIGIN_BODY_BYTES
+        or type(descriptor["row_count"]) is not int
+        or not 1 <= descriptor["row_count"] <= MAX_ORIGIN_ROWS
+        or type(descriptor["maximum_row_bytes_including_lf"]) is not int
+        or not 1
+        <= descriptor["maximum_row_bytes_including_lf"]
+        <= MAX_COMPACT_ROW_BYTES_INCLUDING_LF
+        or type(descriptor["file_name"]) is not str
+        or not descriptor["file_name"]
+    ):
+        _fail("effective origin body descriptor pin metadata drifted")
+    _require_sha256_pin(
+        descriptor["body_sha256"], label="effective origin body"
+    )
+    representative_pin = {
+        ("p01", "pilot"): (
+            EXPECTED_P01_PILOT_COMPACT_BODY_BYTES,
+            EXPECTED_P01_PILOT_COMPACT_BODY_SHA256,
+        ),
+        ("p12", "full-residual"): (
+            EXPECTED_P12_FULL_RESIDUAL_COMPACT_BODY_BYTES,
+            EXPECTED_P12_FULL_RESIDUAL_COMPACT_BODY_SHA256,
+        ),
+    }.get((expected_persona_id, expected_origin))
+    if representative_pin is not None and (
+        descriptor["body_bytes"] != representative_pin[0]
+        or descriptor["body_sha256"] != representative_pin[1]
+    ):
+        _fail("effective origin representative frozen body pin drifted")
+    _require_binding_pin_shapes(
+        value,
+        "input_bindings",
+        ((), (), ("persona_id", "origin"), ("persona_id",), ("persona_id",)),
+        label="effective origin input",
+    )
+    bindings = value["input_bindings"]
+    if (
+        bindings[2]["persona_id"] != expected_persona_id
+        or bindings[2]["origin"] != expected_origin
+        or any(
+            binding["persona_id"] != expected_persona_id
+            for binding in bindings[3:]
+        )
+    ):
+        _fail("effective origin input binding coordinates drifted")
+
+
+def _require_actual_profile_security_invariants(
+    value, *, expected_persona_id, expected_profile
+):
+    _require_artifact_identity(
+        value,
+        artifact_kind=PROFILE_KIND,
+        artifact_schema=PROFILE_SCHEMA,
+        label="effective profile manifest",
+        expected_persona_id=expected_persona_id,
+        expected_profile=expected_profile,
+    )
+    _require_all_false_authority(value, label="effective profile manifest")
+    bindings = value.get("origin_manifest_bindings")
+    expected_origins = _profile_origins(expected_profile)
+    _require_binding_pin_shapes(
+        value,
+        "origin_manifest_bindings",
+        tuple(("persona_id", "origin") for _ in expected_origins),
+        label="effective profile origin",
+    )
+    if any(
+        binding["persona_id"] != expected_persona_id
+        or binding["origin"] != expected_origin
+        for binding, expected_origin in zip(
+            bindings, expected_origins, strict=True
+        )
+    ):
+        _fail("effective profile origin binding coordinates drifted")
+
+
+def _require_actual_projection_pin_shapes(
+    value, *, expected_persona_id, opening_raw
+):
+    _require_artifact_identity(
+        value,
+        artifact_kind=PROJECTION_KIND,
+        artifact_schema=PROJECTION_SCHEMA,
+        label="effective content projection",
+        expected_persona_id=expected_persona_id,
+    )
+    sections = value.get("content_sections") if type(value) is dict else None
+    commitments = (
+        sections.get("effective_membership_shard_commitments")
+        if type(sections) is dict
+        else None
+    )
+    if type(commitments) is not list or not commitments:
+        _fail("effective content projection commitments are missing")
+    for index, commitment in enumerate(commitments):
+        if type(commitment) is not dict or set(commitment) != CONTENT_SHARD_COMMITMENT_FIELDS:
+            _fail(f"effective content projection commitment {index} schema drifted")
+        if (
+            type(commitment["body_bytes"]) is not int
+            or not 1 <= commitment["body_bytes"] <= MAX_EXPANDED_SHARD_BODY_BYTES
+            or type(commitment["row_count"]) is not int
+            or not 1 <= commitment["row_count"] <= MAX_EXPANDED_ROWS_PER_SHARD
+        ):
+            _fail(f"effective content projection commitment {index} metadata drifted")
+        _require_sha256_pin(
+            commitment["body_sha256"],
+            label=f"effective content projection commitment {index}",
+        )
+    if expected_persona_id == "p01" and (
+        len(opening_raw) != EXPECTED_P01_CONTENT_PROJECTION_BYTES
+        or _sha256(opening_raw) != EXPECTED_P01_CONTENT_PROJECTION_SHA256
+    ):
+        _fail("p01 effective content projection frozen pin drifted")
+
+
+def _require_actual_suite_security_invariants(value, *, opening_raw):
+    _require_artifact_identity(
+        value,
+        artifact_kind=SUITE_KIND,
+        artifact_schema=SUITE_SCHEMA,
+        label="effective suite descriptor",
+    )
+    _require_all_false_authority(value, label="effective suite descriptor")
+    if (
+        len(opening_raw) != EXPECTED_SUITE_CANONICAL_BYTES
+        or _sha256(opening_raw) != EXPECTED_SUITE_SHA256
+    ):
+        _fail("effective-membership suite frozen production pin drifted")
+    _require_binding_pin_shapes(
+        value,
+        "input_bindings",
+        ((), (), (), ()),
+        label="effective suite input",
+    )
+    _require_binding_pin_shapes(
+        value,
+        "origin_manifest_bindings",
+        tuple(("persona_id", "origin") for _ in range(40)),
+        label="effective suite origin",
+    )
+    _require_binding_pin_shapes(
+        value,
+        "profile_manifest_bindings",
+        tuple(("persona_id", "profile") for _ in range(40)),
+        label="effective suite profile",
+    )
+    _require_binding_pin_shapes(
+        value,
+        "content_projection_bindings",
+        tuple(("persona_id",) for _ in range(20)),
+        label="effective suite content projection",
+    )
 
 
 def _reject_prohibited_keys(value, *, path="$"):
@@ -583,7 +934,7 @@ def _normal_profile_id(persona_id, topic_slot):
     return f"{persona_id}-source-fact-profile-{topic_slot}-normal-v2"
 
 
-@functools.lru_cache(maxsize=1)
+@_detached_lru_cache(maxsize=1)
 def _independent_catalog_state():
     semantic = source_semantic.build_source_semantic_membership_catalog()
     source_semantic.validate_source_semantic_membership_catalog(semantic)
@@ -799,7 +1150,7 @@ def _companion_mirror_row(match, primary, primary_match):
     return row
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _independent_persona_plan(persona_id):
     _require_persona_id(persona_id)
     catalog_state = _independent_catalog_state()
@@ -1341,7 +1692,7 @@ def _expected_origin_body(persona_id, origin):
     return body, maximum, count
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _expected_origin_manifest(persona_id, origin):
     _require_persona_id(persona_id)
     _require_origin(origin)
@@ -1565,6 +1916,11 @@ def validate_lifecycle_effective_membership_origin_manifest(
         maximum=MAX_ORIGIN_MANIFEST_BYTES,
     )
     try:
+        _require_actual_origin_security_invariants(
+            snapshot,
+            expected_persona_id=persona_id,
+            expected_origin=origin,
+        )
         expected = copy.deepcopy(_expected_origin_manifest(persona_id, origin))
         if not _strict_equal(snapshot, expected):
             _fail("effective-membership origin differs from reconstruction")
@@ -1658,7 +2014,7 @@ def _profile_origins(profile):
     return ("pilot",) if profile == "pilot" else ORIGIN_ORDER
 
 
-@functools.lru_cache(maxsize=40)
+@_detached_lru_cache(maxsize=40)
 def _expected_profile_manifest(persona_id, profile):
     _require_persona_id(persona_id)
     _require_profile(profile)
@@ -1770,6 +2126,11 @@ def validate_lifecycle_effective_membership_profile_manifest(
         maximum=MAX_PROFILE_MANIFEST_BYTES,
     )
     try:
+        _require_actual_profile_security_invariants(
+            snapshot,
+            expected_persona_id=persona_id,
+            expected_profile=profile,
+        )
         expected = copy.deepcopy(
             _expected_profile_manifest(persona_id, profile)
         )
@@ -1785,7 +2146,7 @@ def validate_lifecycle_effective_membership_profile_manifest(
         )
 
 
-@functools.lru_cache(maxsize=20)
+@_detached_lru_cache(maxsize=20)
 def _expected_content_projection(persona_id):
     _require_persona_id(persona_id)
     plan = _independent_persona_plan(persona_id)
@@ -1897,6 +2258,11 @@ def validate_lifecycle_effective_membership_content_projection(
     )
     try:
         _reject_prohibited_keys(snapshot)
+        _require_actual_projection_pin_shapes(
+            snapshot,
+            expected_persona_id=persona_id,
+            opening_raw=opening_raw,
+        )
         expected = copy.deepcopy(_expected_content_projection(persona_id))
         if not _strict_equal(snapshot, expected):
             _fail("effective content projection differs from reconstruction")
@@ -1910,7 +2276,7 @@ def validate_lifecycle_effective_membership_content_projection(
         )
 
 
-@functools.lru_cache(maxsize=1)
+@_detached_lru_cache(maxsize=1)
 def _witness_registry():
     registry = {}
     incidental = set()
@@ -2258,7 +2624,7 @@ def _require_frozen_suite_pins(value, origins, profiles, projections):
         _fail("effective-membership frozen production pins drifted")
 
 
-@functools.lru_cache(maxsize=1)
+@_detached_lru_cache(maxsize=1)
 def _expected_suite_descriptor():
     origins = [
         copy.deepcopy(_expected_origin_manifest(persona_id, origin))
@@ -2531,6 +2897,9 @@ def validate_lifecycle_effective_membership_suite_descriptor(
         maximum=MAX_SUITE_DESCRIPTOR_BYTES,
     )
     try:
+        _require_actual_suite_security_invariants(
+            snapshot, opening_raw=opening_raw
+        )
         expected = copy.deepcopy(_expected_suite_descriptor())
         if not _strict_equal(snapshot, expected):
             _fail("effective-membership suite differs from reconstruction")

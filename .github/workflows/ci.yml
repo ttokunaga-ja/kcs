@@ -219,6 +219,100 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryLongColdHashSeedTest
 
+  persona-v2-closure-contract-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_corpus_semantic_namespace_v3.CorpusSemanticNamespaceV3FastContractTest
+          eval.test_persona_v2_corpus_semantic_namespace_v3.CorpusSemanticNamespaceV3FastBoundaryTest
+          eval.test_persona_v2_review_request_catalog.PersonaV2ReviewRequestCatalogContractTests
+          eval.test_persona_v2_g0_blocker_resolution_ledger.PersonaV2G0BlockerResolutionLedgerTests
+          eval.test_persona_v2_query_history_target_resolution.PersonaV2QueryHistoryTargetResolutionTests
+          eval.test_persona_v2_device_lane_compositor.PersonaV2DeviceLaneCompositorTests
+          eval.test_persona_v2_query_history_semantic_resolution_feasibility.SemanticResolutionFeasibilityFastTests
+          eval.test_persona_v2_corpus_input_closure_v3.CorpusInputClosureV3FastTests
+          eval.test_persona_v2_evaluation_target_resolution_closure_slice.PersonaV2EvaluationTargetResolutionClosureSliceTests
+          eval.test_persona_v2_history_presolve_input_closure_slice.PersonaV2HistoryPresolveInputClosureSliceTests
+          eval.test_persona_v2_history_readiness_contract.PersonaV2HistoryReadinessContractTests
+          eval.test_persona_v2_source_semantic_capacity_axis_catalog.PersonaV2SourceSemanticCapacityAxisCatalogTests
+          eval.test_persona_v2_capacity_fact_truth_occurrence_policy.PersonaV2CapacityFactTruthOccurrencePolicyTests
+
+  persona-v2-source-semantic-capacity-axis-full:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1
+          python3 -m unittest -v
+          eval.test_persona_v2_source_semantic_capacity_axis_catalog.PersonaV2SourceSemanticCapacityAxisCatalogFullTest
+
+  persona-v2-source-semantic-capacity-axis-cold:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1
+          python3 -m unittest -v
+          eval.test_persona_v2_source_semantic_capacity_axis_catalog.PersonaV2SourceSemanticCapacityAxisCatalogColdTest
+
+  persona-v2-capacity-fact-truth-occurrence-policy-full:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1
+          python3 -m unittest -v
+          eval.test_persona_v2_capacity_fact_truth_occurrence_policy.PersonaV2CapacityFactTruthOccurrencePolicyFullTest
+
+  persona-v2-capacity-fact-truth-occurrence-policy-cold:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1
+          python3 -m unittest -v
+          eval.test_persona_v2_capacity_fact_truth_occurrence_policy.PersonaV2CapacityFactTruthOccurrencePolicyColdTest
+
+  persona-v2-history-presolve-input-closure-full:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1
+          python3 -m unittest -v
+          eval.test_persona_v2_history_presolve_input_closure_slice.PersonaV2HistoryPresolveInputClosureSliceFullTest
+
+  persona-v2-history-presolve-input-closure-cold:
+    needs: persona-v2-closure-contract-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1
+          python3 -m unittest -v
+          eval.test_persona_v2_history_presolve_input_closure_slice.PersonaV2HistoryPresolveInputClosureSliceColdTest
+
   rust:
     runs-on: ubuntu-latest
 

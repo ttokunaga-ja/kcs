@@ -360,6 +360,277 @@ class LifecycleEffectiveMembershipReconciliationTest(unittest.TestCase):
         self.assertEqual(snapshot, opening)
         self.assertNotEqual(snapshot, live_value)
 
+    def test_projection_candidate_identity_cannot_bypass_p01_pin(self):
+        candidate = {
+            "artifact_kind": independent.PROJECTION_KIND,
+            "artifact_schema": independent.PROJECTION_SCHEMA,
+            "artifact_schema_version": independent.ARTIFACT_SCHEMA_VERSION,
+            "content_sections": {
+                "effective_membership_shard_commitments": [
+                    {
+                        "body_bytes": 1,
+                        "body_sha256": "0" * 64,
+                        "first_intent_key": "first",
+                        "last_intent_key": "last",
+                        "origin": "pilot",
+                        "row_count": 1,
+                        "row_kind": (
+                            "effective-membership-shard-content-commitment"
+                        ),
+                        "source_shard_id": "shard-1",
+                    }
+                ]
+            },
+            "fixture_id": envelope.FIXTURE_ID,
+            "fixture_schema_version": envelope.FIXTURE_SCHEMA_VERSION,
+            "persona_id": "p02",
+        }
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_content_projection",
+                return_value=copy.deepcopy(candidate),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "persona coordinate differs from validator argument",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_content_projection(
+                "p01", candidate
+            )
+        p01_candidate = copy.deepcopy(candidate)
+        p01_candidate["persona_id"] = "p01"
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_content_projection",
+                return_value=copy.deepcopy(p01_candidate),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "p01 effective content projection frozen pin drifted",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_content_projection(
+                "p01", p01_candidate
+            )
+        for field in (
+            "artifact_schema_version",
+            "fixture_schema_version",
+        ):
+            with self.subTest(boolean_version_field=field):
+                boolean_version = copy.deepcopy(p01_candidate)
+                boolean_version[field] = True
+                with (
+                    mock.patch.object(
+                        independent,
+                        "_expected_content_projection",
+                        return_value=copy.deepcopy(boolean_version),
+                    ),
+                    self.assertRaisesRegex(
+                        independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                        "artifact identity drifted",
+                    ),
+                ):
+                    independent.validate_lifecycle_effective_membership_content_projection(
+                        "p01", boolean_version
+                    )
+
+    def test_cached_expected_objects_are_immutable_and_actual_authority_is_checked(self):
+        validator_cached_helpers = (
+            "_independent_catalog_state",
+            "_independent_persona_plan",
+            "_expected_origin_manifest",
+            "_expected_profile_manifest",
+            "_expected_content_projection",
+            "_witness_registry",
+            "_expected_suite_descriptor",
+        )
+        producer_cached_helpers = (
+            "_shared_catalogs",
+            "_persona_plan",
+            "_origin_dependencies",
+            "_canonical_origin_rows",
+            "_canonical_origin_manifest",
+            "_persona_w0_audit",
+            "_persona_inverted_rows",
+            "_canonical_profile_manifest",
+            "_canonical_suite_descriptor",
+            "_canonical_content_projection",
+        )
+        for module, names in (
+            (independent, validator_cached_helpers),
+            (package, producer_cached_helpers),
+        ):
+            for name in names:
+                helper = getattr(module, name)
+                self.assertIs(helper.immutable_cache_only, True, name)
+                self.assertTrue(callable(helper.cache_clear), name)
+        package._canonical_content_projection.cache_clear()
+        self.assertEqual(
+            package._canonical_content_projection.cache_info().currsize, 0
+        )
+
+        calls = []
+
+        @package._detached_lru_cache(maxsize=1)
+        def detached_sample():
+            calls.append(True)
+            return {"nested": [{"authority": False}]}
+
+        first = detached_sample()
+        first["nested"][0]["authority"] = True
+        second = detached_sample()
+        self.assertEqual(calls, [True])
+        self.assertIs(second["nested"][0]["authority"], False)
+        self.assertIsNot(first, second)
+        self.assertIsNot(first["nested"][0], second["nested"][0])
+
+        baseline = independent._expected_profile_manifest("p01", "pilot")
+        baseline_raw = independent._canonical(
+            baseline,
+            label="cache-poisoning regression profile",
+            maximum=independent.MAX_PROFILE_MANIFEST_BYTES,
+        )
+        poisoned = independent._expected_profile_manifest("p01", "pilot")
+        poisoned["authority"]["authorizes_g0_freeze"] = True
+        fresh = independent._expected_profile_manifest("p01", "pilot")
+        self.assertIs(
+            fresh["authority"]["authorizes_g0_freeze"], False
+        )
+        self.assertEqual(
+            independent._canonical(
+                fresh,
+                label="cache-poisoning regression profile",
+                maximum=independent.MAX_PROFILE_MANIFEST_BYTES,
+            ),
+            baseline_raw,
+        )
+        self.assertIs(
+            independent.validate_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot", copy.deepcopy(fresh)
+            ),
+            True,
+        )
+        profile_coordinate_poisoned = copy.deepcopy(fresh)
+        profile_coordinate_poisoned["persona_id"] = "p02"
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_profile_manifest",
+                return_value=copy.deepcopy(profile_coordinate_poisoned),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "persona coordinate differs from validator argument",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot", profile_coordinate_poisoned
+            )
+
+        profile_binding_poisoned = copy.deepcopy(fresh)
+        profile_binding_poisoned["origin_manifest_bindings"][0][
+            "persona_id"
+        ] = "p02"
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_profile_manifest",
+                return_value=copy.deepcopy(profile_binding_poisoned),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "origin binding coordinates drifted",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot", profile_binding_poisoned
+            )
+
+        origin_coordinate_poisoned = independent._expected_origin_manifest(
+            "p01", "pilot"
+        )
+        origin_coordinate_poisoned["origin"] = "full-residual"
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_origin_manifest",
+                return_value=copy.deepcopy(origin_coordinate_poisoned),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "origin coordinate differs from validator argument",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_origin_manifest(
+                "p01", "pilot", origin_coordinate_poisoned
+            )
+
+        origin_pin_poisoned = independent._expected_origin_manifest(
+            "p01", "pilot"
+        )
+        origin_pin_poisoned["body_descriptor"]["body_bytes"] += 1
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_origin_manifest",
+                return_value=copy.deepcopy(origin_pin_poisoned),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "representative frozen body pin drifted",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_origin_manifest(
+                "p01", "pilot", origin_pin_poisoned
+            )
+
+        with self.assertRaises(
+            independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError
+        ):
+            independent.validate_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot", copy.deepcopy(poisoned)
+            )
+
+        # Even a compromised comparison oracle cannot authorize an actual
+        # candidate: the public validator checks the detached candidate first.
+        with (
+            mock.patch.object(
+                independent,
+                "_expected_profile_manifest",
+                return_value=copy.deepcopy(poisoned),
+            ),
+            self.assertRaisesRegex(
+                independent.PersonaV2LifecycleEffectiveMembershipReconciliationValidationError,
+                "authority must be the exact all-false schema",
+            ),
+        ):
+            independent.validate_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot", copy.deepcopy(poisoned)
+            )
+
+        producer_baseline = package._canonical_profile_manifest(
+            "p01", "pilot"
+        )
+        producer_raw = package.canonical_json_bytes(producer_baseline)
+        producer_poisoned = package._canonical_profile_manifest(
+            "p01", "pilot"
+        )
+        producer_poisoned["authority"]["authorizes_g0_freeze"] = True
+        producer_fresh = (
+            package.build_lifecycle_effective_membership_profile_manifest(
+                "p01", "pilot"
+            )
+        )
+        self.assertIs(
+            producer_fresh["authority"]["authorizes_g0_freeze"], False
+        )
+        self.assertEqual(
+            package.canonical_json_bytes(producer_fresh), producer_raw
+        )
+
     def test_unknown_lifecycle_event_schema_fails_closed(self):
         malformed = {"row_kind": "source"}
         with (
