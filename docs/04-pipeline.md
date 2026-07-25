@@ -43,7 +43,7 @@ working tree の読み取りは次の規則に従う (出典: 旧 `research/fold
   では同一秒内の上書きが「stat 同一・内容相違」になる — Git index と同じ罠)。mtime が現在時刻より
   未来の実体は恒久 racy になるため、内容 hash の一致確認をもって確定してよい。**mtime を過去へ復元する
   上書き (`utimensat` / `cp -p` 相当) は本規則の検出対象外**である (Git index と同じ前提 — 確実な再判定が
-  必要な場合の脱出路は `kio reindex --force`)
+  必要な場合の脱出路は `kio reindex --regenerate`)
 
 **truth file の耐久書込 primitive (fsync 規律)**: `.kio` 配下の truth (objects/ の CAS object・
 HEAD / refs/・chunks.jsonl 等 — [03-data-model.md §4.1](03-data-model.md) の truth 列) を作成・
@@ -377,7 +377,7 @@ full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_inpu
 
 # 4. SQLite Schema (Query Acceleration Layer)
 
-`.kio/index/sqlite.db`。**真実は objects/、SQLite は再構築可能** (`kio repair --rebuild-db`。例外 = embeddings の `target_type='query_cache'` 行 — objects に由来せず復元されない、§4.3)。
+`.kio/index/sqlite.db`。**真実は objects/、SQLite は再構築可能** (`kio repair rebuild-db`。例外 = embeddings の `target_type='query_cache'` 行 — objects に由来せず復元されない、§4.3)。
 
 ## 4.1 chunks
 
@@ -543,9 +543,9 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kio repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — query_cache 等の他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kio repair rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — query_cache 等の他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
 
-**query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。`id` は [03-data-model.md §8.1](03-data-model.md) の embedding identity 式を `target_type: "query_cache"` / `target_hash: <query_vector_digest>` で適用して導出する — 同一 (digest, profile) の再挿入は同一 `id` に確定するため `ON CONFLICT(id) DO NOTHING` で冪等。**INSERT と 256 行剪定は同一 SQLite Tx で cursor 返却前に完了する** (剪定が別 Tx だと返却済み cursor の行を直後に消し得る)。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。書込先は embedding 承認の有無と無関係である (consent gate ([05-runtime.md §1.1](05-runtime.md)) は新規送信の規範であり、受信済み query vector のローカル cache 書込は対象外 — 保存物に query 本文は含まれない)。この行だけは `objects/` から再構築できないため `kio repair --rebuild-db` では復元せず破棄する (依存 cursor は `KIO-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
+**query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。`id` は [03-data-model.md §8.1](03-data-model.md) の embedding identity 式を `target_type: "query_cache"` / `target_hash: <query_vector_digest>` で適用して導出する — 同一 (digest, profile) の再挿入は同一 `id` に確定するため `ON CONFLICT(id) DO NOTHING` で冪等。**INSERT と 256 行剪定は同一 SQLite Tx で cursor 返却前に完了する** (剪定が別 Tx だと返却済み cursor の行を直後に消し得る)。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。書込先は embedding 承認の有無と無関係である (consent gate ([05-runtime.md §1.1](05-runtime.md)) は新規送信の規範であり、受信済み query vector のローカル cache 書込は対象外 — 保存物に query 本文は含まれない)。この行だけは `objects/` から再構築できないため `kio repair rebuild-db` では復元せず破棄する (依存 cursor は `KIO-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
 
 Kio は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KIO-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
@@ -594,7 +594,7 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 - tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` は tree entry の `normalize.gen` ([03-data-model.md §8](03-data-model.md)) の射影で、tree entry に `gen` 欠落時は 0 と読む。`manifest_hash` は v2 tree entry の射影 (時点条件は `chunk_publications` の introduction の ancestry — [05-runtime.md §1.6](05-runtime.md)。`first_seen_commit` は便宜列)
 - **常駐必須は HEAD commit 分のみ**。commit 作成時に新 HEAD 分を挿入する。旧 HEAD 分は cache として残してよい
 - `--at <commit>` 検索時、当該 commit 分が無ければ tree object を展開して挿入する。tree は immutable なので展開結果は常に同一
-- `kio repair --rebuild-db` は HEAD 分のみ再構築する (他 commit 分は次回 `--at` 時に再展開)。旧 HEAD 分の掃除は GC (実行系は Phase 4+、[05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
+- `kio repair rebuild-db` は HEAD 分のみ再構築する (他 commit 分は次回 `--at` 時に再展開)。旧 HEAD 分の掃除は GC (実行系は Phase 4+、[05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
 
 ## 4.6 chunk 世代と chunking 設定変更
 
@@ -873,7 +873,7 @@ CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 
 - `kio batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kio batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
 - ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)
 
-**resume / retry / reindex が駆動する enrichment**: `kio batch resume` / `kio batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kio reindex --force` / `kio repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kio batch resume` / `retry` / `kio reindex --force` がオンライン成果 (normalized / chunk) を finalize したときも、`kio index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — derived 成果の変化は tree entry の `normalize.manifest_hash` / tree の `chunking_config_hash` / tree の `chunk_set_hash` (公開 chunk 集合 — chunk のみの後着でも変わる) を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、tree_hash が変わり通常の no-op 規則のまま commit が生まれる。これが無いと完成した成果が次回 `kio index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
+**resume / retry / reindex が駆動する enrichment**: `kio batch resume` / `kio batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kio reindex --regenerate` / `kio repair rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kio batch resume` / `retry` / `kio reindex --regenerate` がオンライン成果 (normalized / chunk) を finalize したときも、`kio index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — derived 成果の変化は tree entry の `normalize.manifest_hash` / tree の `chunking_config_hash` / tree の `chunk_set_hash` (公開 chunk 集合 — chunk のみの後着でも変わる) を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、tree_hash が変わり通常の no-op 規則のまま commit が生まれる。これが無いと完成した成果が次回 `kio index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
 
 ## 5.5 冪等性
 
@@ -910,7 +910,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kio batch resume`: 中断状態 (running stale, pending) を再開
-- `kio repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**(publication event 行の) backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する。cost-ledger.sqlite の列追加 migration backfill ([10-operations.md §7.5.3](10-operations.md)) とは対象が別)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — commit object は削除されない ([05-runtime.md §2.2](05-runtime.md) の append-only・GC 対象外) ため、この publication 行は恒久に保持される (`--at` / `--all-history` の解決対象であり続ける)。
+- `kio repair rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**(publication event 行の) backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する。cost-ledger.sqlite の列追加 migration backfill ([10-operations.md §7.5.3](10-operations.md)) とは対象が別)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — commit object は削除されない ([05-runtime.md §2.2](05-runtime.md) の append-only・GC 対象外) ため、この publication 行は恒久に保持される (`--at` / `--all-history` の解決対象であり続ける)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -956,7 +956,7 @@ metadata から intent_token 規約に一致する job を全走査すること�
 
 1. **相 1 — intent 記録**: batch_requests 行を INSERT / UPDATE する (state=0、intent_token = **新規
    UUIDv7** — 時刻成分を回復期限の起点に使う、estimated_usd = 予約額)。再投入 (retry /
-   `kio reindex --force`) で相 1 を再発行する場合、**同じ UPDATE で upload_id / batch_job_id /
+   `kio reindex --regenerate`) で相 1 を再発行する場合、**同じ UPDATE で upload_id / batch_job_id /
    job_create_started_at / stale_after_at / provider_scope_id / error / completed_at を NULL へ戻す**
    (sync 行の相 1 は job_create_started_at と stale_after_at を新値で設定する — §5.4) (残存させると
    下記の照合・猶予起点が旧 attempt の値で誤判定する)。**submission_seq はこの相 1 で必ず
@@ -1048,7 +1048,7 @@ DDL の CHECK は最終防衛線であり、**CHECK 違反で Tx が失敗した
 
 **回復** (書き込み系 batch コマンド — `kio index` / `kio batch resume` / `kio batch retry` /
 `kio batch abandon`・**および online enrichment を駆動し得る `kio reindex`・
-`kio repair --rebuild-db`** — の冒頭。**これらは `.kio/.lock` を取得する書き込み系であり
+`kio repair rebuild-db`** — の冒頭。**これらは `.kio/.lock` を取得する書き込み系であり
 ([05-runtime.md §6](05-runtime.md))、相 1〜2b の遷移・token の発行も lock 保持下で行う** — 並行する
 resume/retry が同一行へ別 token を書くと、先行 job が無記録 in-flight になる。未終端の行 (state 0/1) と
 intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する。**`request_kind='sync'` の行は
@@ -1086,7 +1086,7 @@ opt-in / `--online` なしで実行できる** ([07-adapter-spec.md §3](07-adap
 **残骸掃除**: terminal な task の upload (upload_id 記録分 + intent_token 埋込 filename の一覧照合分) を
 削除する。abandon 済み task は照合・記帳を行わず掃除のみ行う。
 
-**順序規範**: 明示 retry / `kio reindex --force` が terminal task を再投入する場合、**旧 intent_token の
+**順序規範**: 明示 retry / `kio reindex --regenerate` が terminal task を再投入する場合、**旧 intent_token の
 照合・記帳・消し込みを完了してから**、retry 予算のリセットと新しい相 1 を行う (逆順だと旧 attempt の
 発見・記帳が新 attempt の予算・記録を汚す)。
 

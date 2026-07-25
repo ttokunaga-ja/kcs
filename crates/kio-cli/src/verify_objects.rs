@@ -30,8 +30,20 @@ const MAX_VERIFIED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_FINDINGS: usize = 1_024;
 const MAX_AFFECTED_COMMITS: usize = 4_096;
 
-pub(super) fn run_evidence(args: UnsupportedArgs) -> Result<Value> {
-    let (pointer_operand, strict) = parse_evidence_verify_args(without_json(args.args))?;
+pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
+    // B (2026-07-24): operand shape and `--strict` are declared on
+    // `EvidenceArgs`; only the sub-command name is checked here because
+    // `verify` is the sole one that exists (08 §4.3's `--batch` form is
+    // Phase 4+).
+    if args.subcommand.as_deref() != Some("verify") {
+        return Err(KioError::invalid_usage(
+            "evidence currently supports `evidence verify <pointer> [--strict]`",
+        ));
+    }
+    let Some(pointer_operand) = args.pointer else {
+        return Err(KioError::invalid_usage("pointer argument is required"));
+    };
+    let strict = args.strict;
     let raw = read_pointer_input(vec![pointer_operand])?;
     if raw.starts_with("sha256:") || parse_object_uri(&raw)?.is_some() {
         return Err(KioError::invalid_usage(
@@ -40,50 +52,6 @@ pub(super) fn run_evidence(args: UnsupportedArgs) -> Result<Value> {
     }
     let pointer = parse_pointer_text(&raw)?;
     verify_pointer_for_cli(&pointer, strict)
-}
-
-fn parse_evidence_verify_args(args: Vec<String>) -> Result<(String, bool)> {
-    let mut args = args.into_iter();
-    if args.next().as_deref() != Some("verify") {
-        return Err(KioError::invalid_usage(
-            "evidence currently supports `evidence verify <pointer> [--strict]`",
-        ));
-    }
-    let mut pointer = None;
-    let mut strict = false;
-    for arg in args {
-        let (flag, inline) = split_flag_value(&arg);
-        match flag {
-            "--strict" if !strict => {
-                reject_inline_value(flag, inline)?;
-                strict = true;
-            }
-            "--strict" => {
-                return Err(KioError::invalid_usage(
-                    "evidence verify accepts --strict only once",
-                ))
-            }
-            "--batch" => {
-                return Err(KioError::invalid_usage(
-                    "evidence verify --batch is outside the MVP",
-                ))
-            }
-            value if value.starts_with('-') && value != "-" => {
-                return Err(KioError::invalid_usage(format!(
-                    "unknown evidence verify flag: {value}"
-                )))
-            }
-            value if pointer.is_none() => pointer = Some(value.to_owned()),
-            _ => {
-                return Err(KioError::invalid_usage(
-                    "evidence verify accepts exactly one pointer",
-                ))
-            }
-        }
-    }
-    pointer
-        .map(|pointer| (pointer, strict))
-        .ok_or_else(|| KioError::invalid_usage("evidence verify requires a pointer"))
 }
 
 /// Read-only, content-free Evidence liveness check (08 §4.3). This deliberately
@@ -2079,6 +2047,112 @@ pub struct PruneOrphansReport {
     pub pruned_open_cache_count: u64,
 }
 
+/// H2-4 (R24b, 3/3 系統一致・うち 2 件 fatal): the exact set a prune will
+/// delete.
+///
+/// The confirmation prompt 06 §1 requires is only meaningful if the set the
+/// user approves is the set that gets deleted. Previously `prune_orphans` was
+/// called twice — once to count, once to delete — and re-derived the targets
+/// each time, so anything that became an orphan in between was deleted without
+/// ever having been shown. This type is the binding: [`prune_orphans_plan`]
+/// computes it, the prompt enumerates it, and [`prune_orphans_apply`] deletes
+/// nothing that is not in it.
+#[derive(Debug, Default)]
+pub struct PruneOrphansPlan {
+    pub status: String,
+    pub blocked_by: Option<String>,
+    pub prepared: Vec<String>,
+    pub images: Vec<String>,
+    pub cache_dirs: Vec<PathBuf>,
+}
+
+impl PruneOrphansPlan {
+    fn blocked(reason: &str) -> Self {
+        Self {
+            status: "blocked".to_owned(),
+            blocked_by: Some(reason.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[must_use]
+    pub fn is_blocked(&self) -> bool {
+        self.status == "blocked"
+    }
+
+    /// The targets as `(kind, label)` pairs, for the confirmation prompt's
+    /// enumeration (06 §1: 削除対象を先に列挙して見せてから問う).
+    #[must_use]
+    pub fn target_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for hash in &self.prepared {
+            lines.push(format!("prepared  {hash}"));
+        }
+        for hash in &self.images {
+            lines.push(format!("image     {hash}"));
+        }
+        for dir in &self.cache_dirs {
+            lines.push(format!("cache     {}", dir.display()));
+        }
+        lines
+    }
+
+    fn to_blocked_report(&self) -> PruneOrphansReport {
+        PruneOrphansReport {
+            status: self.status.clone(),
+            blocked_by: self.blocked_by.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Delete exactly what [`prune_orphans_plan`] listed — never a re-derived set.
+///
+/// The counts report what was actually removed, which can be lower than the
+/// plan's if something disappeared in between (another process, a concurrent
+/// `gc`). Lower is safe; the invariant that matters is that nothing OUTSIDE
+/// the plan is touched.
+pub fn prune_orphans_apply(
+    repo: &Repository,
+    plan: &PruneOrphansPlan,
+) -> Result<PruneOrphansReport> {
+    if plan.is_blocked() {
+        return Ok(plan.to_blocked_report());
+    }
+    let store = ObjectStore::new(repo.kio_dir());
+    let mut pruned_prepared = 0u64;
+    for hash in &plan.prepared {
+        if store
+            .remove_content(ContentObjectKind::Prepared, hash)
+            .unwrap_or(false)
+        {
+            pruned_prepared += 1;
+        }
+    }
+    let mut pruned_images = 0u64;
+    for hash in &plan.images {
+        if store
+            .remove_content(ContentObjectKind::Image, hash)
+            .unwrap_or(false)
+        {
+            pruned_images += 1;
+        }
+    }
+    let mut pruned_cache = 0u64;
+    for dir in &plan.cache_dirs {
+        if dir.exists() && fs::remove_dir_all(dir).is_ok() {
+            pruned_cache += 1;
+        }
+    }
+    Ok(PruneOrphansReport {
+        status: "pruned".to_owned(),
+        blocked_by: None,
+        pruned_prepared_count: pruned_prepared,
+        pruned_image_count: pruned_images,
+        pruned_open_cache_count: pruned_cache,
+    })
+}
+
 /// PB12-17 (§E): `kio repair --verify-objects --prune-orphans`.
 ///
 /// **Implemented this session**: PB13 (orphan prepared/image — referenced by
@@ -2100,14 +2174,13 @@ pub struct PruneOrphansReport {
 /// only ever deletes strictly-unreferenced prepared/image/cache objects, never
 /// a false-positive orphan, but it can still run while one of the two
 /// unimplemented blocker conditions is true.
-pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
+/// This computes the deletion set; it removes nothing. [`prune_orphans_apply`]
+/// does the removing, and only of what this returned — see [`PruneOrphansPlan`]
+/// for why the two are split (H2-4).
+pub fn prune_orphans_plan(repo: &Repository) -> Result<PruneOrphansPlan> {
     let purge = PurgeState::new(repo.kio_dir());
     if purge.read_journal()?.is_some() {
-        return Ok(PruneOrphansReport {
-            status: "blocked".to_owned(),
-            blocked_by: Some("active_purge_journal".to_owned()),
-            ..Default::default()
-        });
+        return Ok(PruneOrphansPlan::blocked("active_purge_journal"));
     }
     let tasks = kio_pipeline::task::TaskStore::new(repo.kio_dir())
         .all()
@@ -2118,11 +2191,7 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
             kio_pipeline::task::TaskStatus::Pending | kio_pipeline::task::TaskStatus::Running
         )
     }) {
-        return Ok(PruneOrphansReport {
-            status: "blocked".to_owned(),
-            blocked_by: Some("non_terminal_task".to_owned()),
-            ..Default::default()
-        });
+        return Ok(PruneOrphansPlan::blocked("non_terminal_task"));
     }
 
     let invocation_time = now_utc_seconds();
@@ -2131,11 +2200,7 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
     if root_state.exceeded_bounds || !root_state.findings.is_empty() {
         // A ref/inventory anomaly means the live set below cannot be trusted
         // — refuse to prune rather than risk deleting something still live.
-        return Ok(PruneOrphansReport {
-            status: "blocked".to_owned(),
-            blocked_by: Some("ref_inventory_unsafe".to_owned()),
-            ..Default::default()
-        });
+        return Ok(PruneOrphansPlan::blocked("ref_inventory_unsafe"));
     }
     let mut commits = BTreeMap::<String, CommitObject>::new();
     let mut trees = BTreeMap::<String, TreeObject>::new();
@@ -2189,25 +2254,16 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
         }
     }
 
-    let store = ObjectStore::new(repo.kio_dir());
-    let mut pruned_prepared = 0u64;
+    let mut prepared_targets = Vec::new();
     for hash in inventory_content_dir(repo.kio_dir(), ContentObjectKind::Prepared)? {
-        if !live_prepared.contains(&hash)
-            && store
-                .remove_content(ContentObjectKind::Prepared, &hash)
-                .unwrap_or(false)
-        {
-            pruned_prepared += 1;
+        if !live_prepared.contains(&hash) {
+            prepared_targets.push(hash);
         }
     }
-    let mut pruned_images = 0u64;
+    let mut image_targets = Vec::new();
     for hash in inventory_content_dir(repo.kio_dir(), ContentObjectKind::Image)? {
-        if !live_images.contains(&hash)
-            && store
-                .remove_content(ContentObjectKind::Image, &hash)
-                .unwrap_or(false)
-        {
-            pruned_images += 1;
+        if !live_images.contains(&hash) {
+            image_targets.push(hash);
         }
     }
 
@@ -2217,7 +2273,7 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
     // prepared/image CAS orphan judgment above; the raw/image cache-type
     // separation itself is C-territory, out of this contract's scope — PB17
     // only fixes that `--prune-orphans` triggers the cleanup).
-    let mut pruned_cache = 0u64;
+    let mut cache_targets: Vec<PathBuf> = Vec::new();
     let mut marker_state = State::default();
     let tombstone_hashes = marker_inventory(repo.kio_dir(), "tombstones", &mut marker_state)?;
     let receipt_hashes =
@@ -2241,10 +2297,7 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
         if let Ok(digest) = kio_core::cas::hash_path_component(raw_hash) {
             let cache_dir = crate::cache_home().join("kio/open").join(digest);
             if cache_dir.exists() {
-                fs::remove_dir_all(&cache_dir).map_err(|error| {
-                    KioError::io(error.to_string(), cache_dir.display().to_string())
-                })?;
-                pruned_cache += 1;
+                cache_targets.push(cache_dir);
             }
         }
     }
@@ -2254,20 +2307,17 @@ pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
             let leaf = entry.file_name().to_string_lossy().into_owned();
             let candidate_hash = format!("sha256:{leaf}");
             if is_hash(&candidate_hash) && !live_images.contains(&candidate_hash) {
-                let path = entry.path();
-                if fs::remove_dir_all(&path).is_ok() {
-                    pruned_cache += 1;
-                }
+                cache_targets.push(entry.path());
             }
         }
     }
 
-    Ok(PruneOrphansReport {
+    Ok(PruneOrphansPlan {
         status: "pruned".to_owned(),
         blocked_by: None,
-        pruned_prepared_count: pruned_prepared,
-        pruned_image_count: pruned_images,
-        pruned_open_cache_count: pruned_cache,
+        prepared: prepared_targets,
+        images: image_targets,
+        cache_dirs: cache_targets,
     })
 }
 
@@ -2326,17 +2376,48 @@ pub struct RegistryPruneReport {
 /// what the registry row claims (a mismatched-but-openable `.kio` is a stale
 /// registration for a DIFFERENT purpose — R15-3's `retire_stale_kio_path`
 /// already owns that case on the next `init`/`index`, not this command).
-pub fn registry_prune() -> Result<RegistryPruneReport> {
+/// `dry_run` counts the rows that WOULD be retired without touching the
+/// registry — the preview half of 06 §1's required confirmation prompt.
+/// H2-4/H2-6: the exact registry rows a prune will retire.
+#[derive(Debug, Default)]
+pub struct RegistryPrunePlan {
+    /// `(scope_id, kio_path, root_path)` per row.
+    pub rows: Vec<(String, String, String)>,
+}
+
+impl RegistryPrunePlan {
+    #[must_use]
+    pub fn target_lines(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|(scope_id, _, root_path)| format!("registry  {scope_id}  {root_path}"))
+            .collect()
+    }
+}
+
+/// Compute which registry rows are unreachable. Removes nothing.
+pub fn registry_prune_plan() -> Result<RegistryPrunePlan> {
+    let registry = RegistryDb::open_default().map_err(index_to_kio)?;
+    let mut rows = Vec::new();
+    for entry in registry.all_entries().map_err(index_to_kio)? {
+        if crate::open_scope_from_hint(&entry.root_path).is_none() {
+            rows.push((entry.scope_id, entry.kio_path, entry.root_path));
+        }
+    }
+    Ok(RegistryPrunePlan { rows })
+}
+
+/// Retire exactly the rows [`registry_prune_plan`] listed.
+///
+/// H2-6 (R24b terra-002, fatal): re-scanning here instead would let a row that
+/// became unreachable AFTER the user saw the preview be deleted without ever
+/// having been shown.
+pub fn registry_prune_apply(plan: &RegistryPrunePlan) -> Result<RegistryPruneReport> {
     let registry = RegistryDb::open_default().map_err(index_to_kio)?;
     let mut pruned = 0u64;
-    for entry in registry.all_entries().map_err(index_to_kio)? {
-        let reachable = crate::open_scope_from_hint(&entry.root_path).is_some();
-        if !reachable {
-            registry
-                .remove(&entry.scope_id, &entry.kio_path)
-                .map_err(index_to_kio)?;
-            pruned += 1;
-        }
+    for (scope_id, kio_path, _) in &plan.rows {
+        registry.remove(scope_id, kio_path).map_err(index_to_kio)?;
+        pruned += 1;
     }
     Ok(RegistryPruneReport {
         pruned_count: pruned,
@@ -3196,6 +3277,82 @@ mod tests {
         assert_eq!(
             with_invalid_leaf.inventoried_objects,
             baseline.inventoried_objects + 1
+        );
+    }
+
+    /// H2-4 (R24b, 3/3 系統一致・うち 2 件 fatal): the plan BINDS the deletion.
+    ///
+    /// `repair --prune-orphans` used to count with one scan, ask, then delete
+    /// with a SECOND scan that re-derived the targets. Anything that became an
+    /// orphan between the two — another process finishing, a concurrent
+    /// command — was deleted without ever having been shown to the user. The
+    /// prompt 06 §1 requires is only meaningful if what is approved is what is
+    /// removed, so `apply` now takes the plan and touches nothing else.
+    #[test]
+    fn apply_removes_only_what_the_plan_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.snapshot(Some("fixture"), Some("2026-07-13T00:00:00Z"))
+            .unwrap();
+        let store = ObjectStore::new(repo.kio_dir());
+
+        // An orphan that exists when the user is asked.
+        let approved = store
+            .write_content_object(ContentObjectKind::Prepared, b"approved orphan")
+            .unwrap();
+        let plan = prune_orphans_plan(&repo).unwrap();
+        assert!(
+            plan.prepared.contains(&approved),
+            "the fixture orphan must be in the plan: {plan:?}"
+        );
+
+        // A NEW orphan appears after the preview — exactly the race the split
+        // exists to close.
+        let latecomer = store
+            .write_content_object(ContentObjectKind::Prepared, b"appeared after the prompt")
+            .unwrap();
+
+        let report = prune_orphans_apply(&repo, &plan).unwrap();
+        assert_eq!(report.status, "pruned");
+        assert!(
+            store
+                .content_path(ContentObjectKind::Prepared, &latecomer)
+                .unwrap()
+                .exists(),
+            "an orphan created after the preview must NOT be deleted"
+        );
+        assert!(
+            !store
+                .content_path(ContentObjectKind::Prepared, &approved)
+                .unwrap()
+                .exists(),
+            "the approved orphan must be deleted"
+        );
+    }
+
+    /// A blocked plan deletes nothing, and `apply` cannot be talked into it.
+    #[test]
+    fn a_blocked_plan_applies_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.snapshot(Some("fixture"), Some("2026-07-13T00:00:00Z"))
+            .unwrap();
+        let store = ObjectStore::new(repo.kio_dir());
+        let orphan = store
+            .write_content_object(ContentObjectKind::Prepared, b"orphan")
+            .unwrap();
+
+        let blocked = PruneOrphansPlan::blocked("active_purge_journal");
+        let report = prune_orphans_apply(&repo, &blocked).unwrap();
+        assert_eq!(report.status, "blocked");
+        assert_eq!(report.blocked_by.as_deref(), Some("active_purge_journal"));
+        assert_eq!(report.pruned_prepared_count, 0);
+        assert!(
+            store
+                .content_path(ContentObjectKind::Prepared, &orphan)
+                .unwrap()
+                .exists(),
+            "a blocked plan must remove nothing"
         );
     }
 }

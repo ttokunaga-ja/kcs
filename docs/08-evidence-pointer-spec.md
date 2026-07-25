@@ -199,7 +199,7 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     (iv) marker (tombstone / erase receipt) が無いのに raw object が不在なら not_found — code は
     `KIO-E-STORE-CORRUPT-001` (marker なしの欠落は
     purge の痕跡ではなく **corruption の疑い** — 手順 4 の短絡と同じ not_found 扱いで返し、
-    `kio repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)。
+    `kio repair verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)。
     **(i)〜(iv) のいずれにも該当しない場合** (marker が無い・または active な erase receipt が
     あっても raw object が存在する場合を含む) は raw object が存在する通常状態であり、手順 6 へ進む
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
@@ -280,7 +280,7 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
   - scope 解決の重複 (validated ∪ live 候補 ≥2): registry_duplicate
                                         — KIO-E-REGISTRY-DUP-001 (§3.1 手順 1a)
   - tombstone / erase receipt なしで raw object 不在: not_found — KIO-E-STORE-CORRUPT-001
-                                        (corruption の疑い — §3.1 手順 5。repair --verify-objects を案内)
+                                        (corruption の疑い — §3.1 手順 5。repair verify-objects を案内)
   - 有効 erase receipt (canonical final event = `erased` — §3.1 手順 5) ありで raw object 不在:
                                         not_found — KIO-E-PURGE-NOT-FOUND-001 (§4.2。`retired` 済み
                                         receipt での欠落は上段の corruption 側 — [10-operations.md §7.5.1](10-operations.md)

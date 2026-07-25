@@ -52,7 +52,7 @@ fn json_success(dir: &TempDir, args: &[&str]) -> Value {
 }
 
 fn assert_search_hit(dir: &TempDir, needle: &str, title: &str) {
-    let search = json_success(dir, &["search", needle, "--text"]);
+    let search = json_success(dir, &["search", needle, "--mode", "text"]);
     let results = search["results"].as_array().unwrap();
     assert!(
         results.iter().any(|result| result["title"] == title),

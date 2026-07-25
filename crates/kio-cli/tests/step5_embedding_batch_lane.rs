@@ -1,0 +1,791 @@
+//! Embedding Batch lane contract (07 §5.3 の 2026-07-24 訂正 / §5.7, 04 §5.8).
+//!
+//! The Gemini Developer API bills an embedding batch at half the sync rate, so
+//! Batch is the default lane. Unlike the OCR lane its input is INLINE, so there
+//! is no upload phase and no provider residue — which is exactly why terminal
+//! here IS cleanup-complete and the `intent_token` must be cleared.
+//!
+//! **1 job = 1 task** is preserved by making the JOB the task: the batch row's
+//! `input_hash` digests the job's member set. These tests pin the observable
+//! consequences of that choice.
+
+use std::path::Path;
+
+use assert_cmd::Command;
+use serde_json::Value;
+use tempfile::TempDir;
+
+fn kio(dir: &TempDir) -> Command {
+    let mut command = Command::cargo_bin("kio").unwrap();
+    command
+        .current_dir(dir.path())
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
+        .env("KIO_TEST_MARKDOWNIZE_ADAPTER", "deterministic")
+        .env("KIO_TEST_GEMINI_EMBED", "mock")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY");
+    command
+}
+
+fn json(dir: &TempDir, batch_script: &str, args: &[&str]) -> Value {
+    let assert = kio(dir)
+        .env("KIO_TEST_GEMINI_BATCH", batch_script)
+        .arg("--json")
+        .args(args)
+        .assert()
+        .success();
+    serde_json::from_slice(&assert.get_output().stdout).unwrap()
+}
+
+/// Like [`json`] but tolerates the documented non-zero exits: a pass that
+/// leaves batch work in flight or terminally failed reports
+/// `KIO-E-BATCH-PARTIAL-001` (exit 3) by design.
+fn json_any(dir: &TempDir, batch_script: &str, args: &[&str]) -> Value {
+    let output = kio(dir)
+        .env("KIO_TEST_GEMINI_BATCH", batch_script)
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Run and discard the result. For the failure paths whose report goes to
+/// stderr, where the caller only cares about the state left behind.
+fn run_ignoring_output(dir: &TempDir, batch_script: &str, args: &[&str]) {
+    let _ = kio(dir)
+        .env("KIO_TEST_GEMINI_BATCH", batch_script)
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+}
+
+fn ledger_query(dir: &TempDir, sql: &str) -> String {
+    let db = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(sql, [], |row| row.get::<_, String>(0))
+        .unwrap_or_default()
+}
+
+/// A scope with one indexable document, not yet indexed.
+fn scope() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\nトークン TTL は 3600 秒です。\n",
+    )
+    .unwrap();
+    kio(&dir).arg("init").assert().success();
+    dir
+}
+
+/// The chunk id the submit carried, read back from the mock's capture log.
+fn submitted_key(capture: &Path) -> String {
+    let line = std::fs::read_to_string(capture).unwrap();
+    let first = line.lines().next().unwrap();
+    let value: Value = serde_json::from_str(first).unwrap();
+    value["keys"][0].as_str().unwrap().to_owned()
+}
+
+/// Every chunk id the first submit carried.
+fn submitted_keys(capture: &Path) -> Vec<String> {
+    let line = std::fs::read_to_string(capture).unwrap();
+    let first = line.lines().next().unwrap();
+    let value: Value = serde_json::from_str(first).unwrap();
+    value["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Every chunk id any submit carried, deduplicated — for fixtures with more
+/// than one job, where a per-job key list would fail the bijection check.
+fn all_submitted_keys(capture: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(capture).unwrap();
+    let mut keys = Vec::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value["call"] != "create_embedding_job" {
+            continue;
+        }
+        for key in value["keys"].as_array().into_iter().flatten() {
+            let key = key.as_str().unwrap().to_owned();
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+fn success_script(job: &str, key: &str) -> String {
+    // A unit vector: 768 identical components of 1/sqrt(768).
+    let component = 1.0f64 / (768.0f64).sqrt();
+    let values = vec![component; 768];
+    serde_json::json!({
+        "state_sequence": ["BATCH_STATE_SUCCEEDED"],
+        "job_name": job,
+        "inlined_responses": [{
+            "metadata": { "key": key },
+            "output": { "response": { "embedding": { "values": values } } },
+        }],
+    })
+    .to_string()
+}
+
+/// `index --online` on the default (Batch) lane SUBMITS a job and returns; the
+/// vectors arrive later, from `batch resume`. The ledger row it leaves behind
+/// is a `request_kind='batch'` row in state 1 (JobCreated) carrying the
+/// provider's job name — the key the §5.8 recovery walk needs.
+#[test]
+fn index_submits_a_batch_job_instead_of_embedding_inline() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let submit_script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/contract-1",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+
+    let indexed = json(&dir, &submit_script, &["index", "--approve", "--online"]);
+    assert_eq!(indexed["status"], "indexed", "{indexed}");
+    assert_eq!(
+        indexed["embedding_tasks_executed"], 0,
+        "the Batch lane must not embed inline: {indexed}"
+    );
+
+    // The adapter call carried the model, the truncated dimensionality, and the
+    // intent_token as the job's displayName (the §5.8 発見キー).
+    let captured: Value = serde_json::from_str(
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(captured["call"], "create_embedding_job", "{captured}");
+    assert_eq!(captured["model"], "gemini-embedding-2", "{captured}");
+    assert_eq!(captured["dimensions"], 768, "{captured}");
+    assert!(
+        captured["display_name"]
+            .as_str()
+            .unwrap()
+            .starts_with("kio-"),
+        "the intent_token rides in displayName: {captured}"
+    );
+
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT request_kind || '|' || state || '|' || COALESCE(batch_job_id, '')
+             FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "batch|1|batches/contract-1"
+    );
+}
+
+/// `batch resume` polls, collects the inline results, writes the vectors, and
+/// settles the row — including clearing the `intent_token`, which an inline
+/// lane MUST do (no upload residue exists, so terminal is cleanup-complete;
+/// leaving it set would permanently block re-submission of that task key).
+#[test]
+fn batch_resume_collects_the_vectors_and_clears_the_intent_token() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let submit_script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/contract-2",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    json(&dir, &submit_script, &["index", "--approve", "--online"]);
+    let key = submitted_key(&capture);
+
+    let resumed = json(
+        &dir,
+        &success_script("batches/contract-2", &key),
+        &["batch", "resume"],
+    );
+    assert_eq!(resumed["tasks_executed"], 1, "{resumed}");
+    assert_eq!(resumed["tasks_failed"], 0, "{resumed}");
+
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT state || '|' || (intent_token IS NULL)
+             FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "2|1",
+        "terminal state with the token cleared"
+    );
+    // Settled at the BATCH rate, and `estimated` because the endpoint reports
+    // no token count (QA17).
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT outcome || '|' || estimated FROM cost_ledger WHERE adapter_kind = 'embedding'"
+        ),
+        "succeeded|1"
+    );
+
+    // The collected vector is real: an explicit vector search resolves with it.
+    let searched = json(
+        &dir,
+        &success_script("batches/contract-2", &key),
+        &["search", "認証", "--mode", "vector"],
+    );
+    assert_eq!(searched["resolved_mode"], "vector", "{searched}");
+    assert_eq!(
+        searched["results"].as_array().unwrap().len(),
+        1,
+        "{searched}"
+    );
+}
+
+/// A job that ends in a non-success terminal state settles the row rather than
+/// leaving it in flight forever, and records the reservation (the provider may
+/// still have billed part of the work).
+#[test]
+fn a_failed_batch_job_terminates_the_row_instead_of_hanging() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/contract-3",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+
+    let failed_script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_FAILED"],
+        "job_name": "batches/contract-3",
+    })
+    .to_string();
+    let resumed = json_any(&dir, &failed_script, &["batch", "resume"]);
+    assert_eq!(resumed["tasks_executed"], 0, "{resumed}");
+
+    // The failed job WAS settled: a terminal ledger entry exists for it, and it
+    // is not `succeeded`. (The row itself is not asserted here because the same
+    // `batch resume` pass then re-drives enrichment and submits a fresh job for
+    // the same member set — see the KNOWN GAP below.)
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT outcome FROM cost_ledger
+             WHERE adapter_kind = 'embedding' AND outcome <> 'succeeded'
+             ORDER BY rowid LIMIT 1"
+        ),
+        "expired",
+        "a non-success terminal must be recorded, not left in flight"
+    );
+}
+
+/// A failed job IS retried — but a bounded number of times.
+///
+/// R24 (6 系統全会一致) closed what this test previously pinned as a KNOWN GAP:
+/// a job that fails settles the row and NULLs its `intent_token`, and
+/// `phase1_intent`'s ON CONFLICT clears `batch_job_id`, so the same pass
+/// re-reserved the same task key and created another job — forever. Because the
+/// endpoint reports no usage, each pass recorded a full estimate for work that
+/// produced nothing, until the budget cap hard-stopped the scope.
+///
+/// The bound rides on `batch_requests.attempts`, which that ON CONFLICT clause
+/// does NOT reset. Here one failure is retried (attempts 1 < 3), which is the
+/// behavior we want; `a_permanently_failing_job_stops_being_resubmitted` pins
+/// the other end.
+#[test]
+fn a_failed_job_is_retried_within_the_same_pass() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/gap-1",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    json_any(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_FAILED"],
+            "job_name": "batches/gap-1",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["batch", "resume"],
+    );
+    let creates = std::fs::read_to_string(&capture)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("create_embedding_job"))
+        .count();
+    assert_eq!(
+        creates, 2,
+        "a first failure is still retried — the bound is on repetition, not on retrying at all"
+    );
+}
+
+/// R24 (6 系統全会一致): the retry budget actually runs out. Repeated
+/// `batch resume` passes against a job that always fails must stop creating
+/// jobs — and stop charging for them — rather than re-reserving forever.
+#[test]
+fn a_permanently_failing_job_stops_being_resubmitted() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/gap-2",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    let failing = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_FAILED"],
+        "job_name": "batches/gap-2",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    // Far more passes than the retry budget allows.
+    for _ in 0..8 {
+        json_any(&dir, &failing, &["batch", "resume"]);
+    }
+    let creates = std::fs::read_to_string(&capture)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("create_embedding_job"))
+        .count();
+    assert!(
+        creates <= 3,
+        "the retry budget must cap job creation; created {creates} jobs across 8 passes"
+    );
+
+    // And the charging stops with it: no more cost_ledger rows than jobs.
+    let db = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let charges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cost_ledger WHERE adapter_kind = 'embedding'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        charges <= 3,
+        "a permanently failing member set must not accrue an unbounded number of \
+         settled charges; found {charges}"
+    );
+}
+
+/// A still-running job is reported as in-flight and left alone — polling is
+/// idempotent and must not settle or re-charge anything.
+#[test]
+fn a_running_batch_job_stays_in_flight_across_repeated_polls() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/contract-4",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    let running = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_RUNNING"],
+        "job_name": "batches/contract-4",
+    })
+    .to_string();
+
+    for _ in 0..2 {
+        let resumed = json_any(&dir, &running, &["batch", "resume"]);
+        assert_eq!(resumed["tasks_executed"], 0, "{resumed}");
+        assert_eq!(
+            ledger_query(
+                &dir,
+                "SELECT state || '|' || (intent_token IS NULL)
+                 FROM batch_requests WHERE adapter_kind = 'embedding'"
+            ),
+            "1|0",
+            "still JobCreated with its token held"
+        );
+    }
+    // Exactly one ledger row for the job — repeated polls never fan out.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "1"
+    );
+}
+
+/// `--realtime` moves the send to the synchronous lane, which completes inside
+/// the invocation. The ledger records a `sync` row, never a `batch` one — the
+/// two lanes must not both fire for one logical embedding.
+#[test]
+fn realtime_uses_the_synchronous_lane_and_never_creates_a_batch_row() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/contract-5",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+
+    let indexed = json(
+        &dir,
+        &script,
+        &["index", "--approve", "--online", "--realtime"],
+    );
+    assert_eq!(indexed["status"], "indexed", "{indexed}");
+    assert_eq!(
+        indexed["embedding_tasks_executed"], 1,
+        "realtime completes in-invocation: {indexed}"
+    );
+    assert!(
+        !capture.exists(),
+        "the batch client must not be called at all on the realtime lane"
+    );
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT COALESCE(MIN(request_kind), 'none')
+             FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "sync"
+    );
+}
+
+/// A second submission pass over the SAME member set lands on the same task key
+/// and must not create a second provider job — "1 job = 1 task" holds across
+/// re-runs, which is what keeps the §5.8 recovery walk unambiguous.
+#[test]
+fn resubmitting_the_same_member_set_reuses_the_row_and_creates_no_second_job() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    let script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/contract-6",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    json(&dir, &script, &["index", "--approve", "--online"]);
+    json_any(&dir, &script, &["index", "--online"]);
+
+    let creates = std::fs::read_to_string(&capture)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("create_embedding_job"))
+        .count();
+    assert_eq!(creates, 1, "the in-flight job must not be duplicated");
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "1"
+    );
+}
+
+/// R24 (4 系統一致): 07 §5.3 (1) requires the returned ids to be a BIJECTION
+/// onto the submitted ids. A provider that answers 1 of 2 requests must NOT
+/// leave the row Completed: the missing chunk would have no vector, no failed
+/// task, and — because terminal clears the `intent_token` — no way back. That
+/// is a silent, permanent hole in the index.
+///
+/// Design A makes this checkable with no schema change: the task key IS the
+/// digest of the member set, so the collect side re-derives the digest from
+/// what actually came back and compares it against the row's `input_hash`.
+#[test]
+fn a_short_result_set_does_not_settle_the_row_as_succeeded() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two documents with distinct content → two distinct embedding groups in
+    // one job, so the provider can answer one and drop the other.
+    std::fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\nトークン TTL は 3600 秒です。\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("billing.md"),
+        "# 請求仕様\n\n締め日は毎月 15 日です。\n",
+    )
+    .unwrap();
+    kio(&dir).arg("init").assert().success();
+
+    let capture = dir.path().join("capture.jsonl");
+    let submit = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "job_name": "batches/short-1",
+        "capture_path": capture.to_string_lossy(),
+    })
+    .to_string();
+    json(&dir, &submit, &["index", "--approve", "--online"]);
+
+    let keys = submitted_keys(&capture);
+    assert_eq!(keys.len(), 2, "fixture must submit two members: {keys:?}");
+
+    // The provider answers only the FIRST key.
+    let component = 1.0f64 / (768.0f64).sqrt();
+    let short = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_SUCCEEDED"],
+        "job_name": "batches/short-1",
+        "inlined_responses": [{
+            "metadata": { "key": keys[0] },
+            "output": { "response": { "embedding": { "values": vec![component; 768] } } },
+        }],
+    })
+    .to_string();
+    json_any(&dir, &short, &["batch", "resume"]);
+
+    // state 3 = Terminal, NOT 2 = Completed.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(state AS TEXT) FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "3",
+        "a short result set must not complete the row"
+    );
+    assert_ne!(
+        ledger_query(
+            &dir,
+            "SELECT outcome FROM cost_ledger WHERE adapter_kind = 'embedding'"
+        ),
+        "succeeded",
+        "a short result set must not be settled as a success"
+    );
+}
+
+/// G1 (2026-07-25): a row stranded in §5.8's job-creation window is recoverable.
+///
+/// `create_embedding_job` failing AFTER 相 2b was recorded leaves state 0 with a
+/// live reservation and no `batch_job_id`. `poll_batch_embedding_jobs` skips
+/// such a row by design (it has no job id), so recovery is `ledger reconcile`'s
+/// job — and that walk could not see it, because `configured_inventories` only
+/// enumerated the Mistral client. The reservation held the device budget cap
+/// forever; the only escape was a manual `kio batch abandon`.
+#[test]
+fn reconcile_recovers_a_row_stranded_in_the_job_creation_window() {
+    let dir = scope();
+    run_ignoring_output(
+        &dir,
+        r#"{"fail_phase":"create_job","job_name":"batches/never","state_sequence":["BATCH_STATE_PENDING"]}"#,
+        &["index", "--approve", "--online"],
+    );
+    // Stranded exactly as described: reserved, 相 2b started, no job id.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT state || '|' || (batch_job_id IS NULL) || '|' || (intent_token IS NOT NULL)
+             FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "0|1|1"
+    );
+    let token = ledger_query(
+        &dir,
+        "SELECT intent_token FROM batch_requests WHERE adapter_kind = 'embedding'",
+    );
+    assert!(!token.is_empty());
+
+    // The provider DID create the job — it is discoverable by the intent_token
+    // Kio embedded in its displayName.
+    let listing = serde_json::json!({
+        "job_name": "batches/recovered",
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "jobs_listing": [{
+            "name": "batches/recovered",
+            "state": "BATCH_STATE_PENDING",
+            "displayName": format!("kio-{token}"),
+        }],
+    })
+    .to_string();
+    let report = json(&dir, &listing, &["ledger", "reconcile"]);
+    assert_eq!(report["batch_found"], 1, "{report}");
+    assert_eq!(report["unlistable"], 0, "{report}");
+
+    // The row now carries the job id, so the poll lane can collect it.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT COALESCE(batch_job_id, 'NONE') FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "batches/recovered"
+    );
+}
+
+/// G1: a provider job that is NOT Kio's must never be claimed. A Gemini job
+/// carries no task-key metadata — only the `displayName` token — so a job whose
+/// display name does not parse is reported, not attributed (the same
+/// report-only posture 10 §7.5.2 gives an upload).
+#[test]
+fn reconcile_does_not_claim_a_foreign_provider_job() {
+    let dir = scope();
+    run_ignoring_output(
+        &dir,
+        r#"{"fail_phase":"create_job","job_name":"batches/never","state_sequence":["BATCH_STATE_PENDING"]}"#,
+        &["index", "--approve", "--online"],
+    );
+    let listing = r#"{
+        "job_name": "batches/other",
+        "state_sequence": ["BATCH_STATE_PENDING"],
+        "jobs_listing": [
+            {"name": "batches/someone-else", "state": "BATCH_STATE_PENDING",
+             "displayName": "not-a-kio-job"}
+        ]
+    }"#;
+    let report = json(&dir, listing, &["ledger", "reconcile"]);
+    assert_eq!(report["batch_found"], 0, "{report}");
+    // Still stranded — correctly, since nothing matched.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT COALESCE(batch_job_id, 'NONE') FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "NONE"
+    );
+    // And the foreign job is surfaced rather than silently ignored.
+    assert!(
+        !report["unknown"].as_array().unwrap().is_empty(),
+        "a job that cannot be attributed must be reported: {report}"
+    );
+}
+
+/// G2 (2026-07-25): a provider failure at submit fails that JOB, not the
+/// invocation.
+///
+/// These calls used to `?` straight out of the function, so one transient 429
+/// aborted `kio index` for the whole scope with `KIO-E-CONFIG-SCHEMA-001` — a
+/// permanent-looking config error for a transient network condition. The
+/// synchronous lane has always classified and recorded per chunk instead.
+#[test]
+fn a_submit_failure_does_not_abort_the_invocation() {
+    let dir = scope();
+    let output = kio(&dir)
+        .env(
+            "KIO_TEST_GEMINI_BATCH",
+            r#"{"fail_phase":"create_job","job_name":"batches/nope","state_sequence":["BATCH_STATE_PENDING"]}"#,
+        )
+        .arg("--json")
+        .args(["index", "--approve", "--online"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "index must still report on stdout; stderr was: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(report["status"], "indexed", "{report}");
+    // The chunk is accounted for as failed, not silently dropped.
+    assert!(
+        report["embedding_tasks_failed"].as_u64().unwrap_or(0) > 0,
+        "the affected chunks must be recorded as failed: {report}"
+    );
+}
+
+/// G2 flagship: one unreachable row must not block the others.
+///
+/// The poll loop used to `?` on `get_job`, so a single row the provider could
+/// not answer for aborted collection for every remaining row in the scope —
+/// head-of-line blocking on a pass that is supposed to be per-row idempotent.
+#[test]
+fn an_unreachable_row_does_not_block_collection_of_the_others() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+
+    // Row A.
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/blocked",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    // A second document makes a different member set, hence a second row.
+    std::fs::write(
+        dir.path().join("billing.md"),
+        "# 請求仕様\n\n締め日は毎月 15 日です。\n",
+    )
+    .unwrap();
+    json_any(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/ok",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM batch_requests WHERE adapter_kind = 'embedding'"
+        ),
+        "2",
+        "fixture must produce two batch rows"
+    );
+
+    // `batches/blocked` is unreachable; `batches/ok` answers normally.
+    let keys = all_submitted_keys(&capture);
+    let component = 1.0f64 / (768.0f64).sqrt();
+    let script = serde_json::json!({
+        "state_sequence": ["BATCH_STATE_SUCCEEDED"],
+        "job_name": "batches/ok",
+        "fail_job_names": ["batches/blocked"],
+        "inlined_responses": keys.iter().map(|key| serde_json::json!({
+            "metadata": { "key": key },
+            "output": { "response": { "embedding": { "values": vec![component; 768] } } },
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    json_any(&dir, &script, &["batch", "resume"]);
+
+    // The reachable row completed...
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(state AS TEXT) FROM batch_requests
+             WHERE adapter_kind = 'embedding' AND batch_job_id = 'batches/ok'"
+        ),
+        "2",
+        "the reachable row must still be collected"
+    );
+    // ...and the unreachable one is held untouched for the next pass (§5.8
+    // unknown), not settled and not charged.
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT state || '|' || (intent_token IS NOT NULL) FROM batch_requests
+             WHERE adapter_kind = 'embedding' AND batch_job_id = 'batches/blocked'"
+        ),
+        "1|1",
+        "the unreachable row must be held, not settled"
+    );
+}

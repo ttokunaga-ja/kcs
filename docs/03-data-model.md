@@ -227,7 +227,7 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
 - manifest の `units[].error_kind` は [04-pipeline.md §5.3](04-pipeline.md) の閉 enum (フリーテキストではない) —
   unit 単位の retry 可否の機械判定に使う ([10-operations.md §12.1](10-operations.md) の明示例外)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
-  done unit の差し替えは新 gen 作成のみ (`kio reindex --force`、または prepared_hash 変化起因の
+  done unit の差し替えは新 gen 作成のみ (`kio reindex --regenerate`、または prepared_hash 変化起因の
   自動 gen+1 — 下記 gen 段落の例外)
 - **manifest の各確定版は immutable object として保存する**: manifest の finalize (初回確定と、partial retry で
   `failed → done` を反映した各確定) のたびに、canonical JCS bytes を `objects/manifests/ab/cd/<manifest64>` へ
@@ -237,7 +237,7 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
   unit 完成状態を正確に列挙・検証できる (fsck の照合 = [10-operations.md §7.5.1](10-operations.md))
 
 **gen (generation)**: 同一 `(raw_hash, tool_profile_hash)` に対する instance の世代番号 (0 起点の整数)。
-通常は `g0` のみ存在する。`gen = 現最大 + 1` の新 instance を作れるのは `kio reindex --force` と、
+通常は `g0` のみ存在する。`gen = 現最大 + 1` の新 instance を作れるのは `kio reindex --regenerate` と、
 **prepare profile / renderer 変更による `prepared_hash` 変化が駆動する再 Markdownize** (§6 — first-instance-wins の
 第二の合法経路。オンライン課金を伴うため 04 §4.6 と同型の確認プロンプト + budget guardrail の対象) だけであり、
 既存 instance は保全する ([07-adapter-spec.md §9](07-adapter-spec.md))。identity はあくまで
@@ -306,7 +306,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kio/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS — **例外 = normalized_units/ 全体は path-named** (§1: unit object も content hash 不採用の path-named immutable。うち**直下の `manifest.json` のみ mutable** = 最新版の作業コピーで置換 rename 側 ([04-pipeline.md §1.1](04-pipeline.md))。確定版は objects/manifests/ の CAS — §2.1)) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kio/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kio/tombstones/` + `.kio/purge/erase-receipts/` (erase receipt) | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
-| `.kio/purge/journal` | file (単一 JSON、temp + rename — [04-pipeline.md §1.1](04-pipeline.md)) | **truth** (active purge の crash 回復正本 — 対象 closure と phase を耐久記録し各 phase を冪等再開する。完遂で削除 = 定常時は不在) | active purge 中の喪失は phase 再開情報の喪失 (closure の残骸・不整合は `kio repair --verify-objects` が corruption として検出 — [10-operations.md §7.5.1](10-operations.md)) | [05-runtime.md §3.5](05-runtime.md) |
+| `.kio/purge/journal` | file (単一 JSON、temp + rename — [04-pipeline.md §1.1](04-pipeline.md)) | **truth** (active purge の crash 回復正本 — 対象 closure と phase を耐久記録し各 phase を冪等再開する。完遂で削除 = 定常時は不在) | active purge 中の喪失は phase 再開情報の喪失 (closure の残骸・不整合は `kio repair verify-objects` が corruption として検出 — [10-operations.md §7.5.1](10-operations.md)) | [05-runtime.md §3.5](05-runtime.md) |
 | `.kio/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kio/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kio/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch、journal も無ければ全 lifecycle event の `epoch` 最大値 + 1 (event 皆無なら 1) から回復して再作成 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
@@ -314,7 +314,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kio/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kio/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
-| `.kio/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
+| `.kio/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kio/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kio` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.local/share/kio/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` / `schema_migrations` の 3 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
@@ -710,7 +710,7 @@ entry では `normalize` を**省略**する (省略 = 当該ファイルの nor
 Step 2 で Markdownize されたファイルから順に `normalize` 付き entry へ移行する。
 
 `normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1)。フィールド欠落は `gen = 0`
-と読む (forward compatible)。`kio reindex --force` 後も過去 commit の tree entry は旧 gen を
+と読む (forward compatible)。`kio reindex --regenerate` 後も過去 commit の tree entry は旧 gen を
 指し続けるため、`kio view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
 不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は gen 保全により成立する。
 
@@ -854,6 +854,11 @@ unicode_version = "17.0.0"  # slug 正規化の UCD 版 (§5.3 — 省略不可�
 enabled = true
 threshold = 0.30
 max_consecutive = 5
+[adapter]                  # online 送信レーン (07 §5.3 の 2026-07-24 裁定)
+lane = "batch"             # "batch" (既定・半額) | "realtime" (即時・単価 2 倍)
+                           # OCR と embedding の**両方**に同時に効く — 片方だけ別レーンにはできない。
+                           # 解決順は network opt-in と同形: CLI (--realtime/--batch) > 本キー
+                           # (scope) > user config の同キー > 既定 (batch)。
 [budget]                   # folder cap (任意の追加制限)。device cap との判定は 04-pipeline.md §5.4
 monthly_usd_cap = 10.0
 [gc]

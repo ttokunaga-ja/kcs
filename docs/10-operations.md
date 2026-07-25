@@ -289,7 +289,7 @@ CREATE TABLE scopes (
   stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
   になり、その行経由の Evidence Pointer は `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
   理由。**再 init・再発見のどちらも起こらない恒久消滅** (ドライブ撤去・`.kio` ごとの削除等) の
-  stale 行は、`kio repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone
+  stale 行は、`kio repair registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone
   検査 (上記) に該当しない行のみ削除。[06-cli-spec.md §1](06-cli-spec.md)) で退役できる —
   registry は検索キャッシュであり、削除しても truth は失われない (scope が再出現すれば再発見で
   再登録される)。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
@@ -303,7 +303,7 @@ CREATE TABLE scopes (
   (1) purge journal / epoch 検査
   ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KIO-E-REGISTRY-DUP-001) →
   (3) index 可用性 (KIO-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
-  コマンド自身 (`kio repair --rebuild-db`・index 未作成時の初回 `kio index`) には適用しない** —
+  コマンド自身 (`kio repair rebuild-db`・index 未作成時の初回 `kio index`) には適用しない** —
   復旧経路を preflight でブロックすると index 喪失後に恒久停止する。`kio status` も拒否対象外
   (journal active 等を拒否せず状態として表示 — [05-runtime.md §3.5](05-runtime.md))。同時成立時は先順の
   error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
@@ -480,10 +480,10 @@ Kio 自身のログのスクラブ (該当行の削除またはマスク) と、
 「`.kio` 喪失は復旧不能」(§3 不変条件 3) である以上、破損の検出手段とバックアップ手順を
 仕様として持つ。
 
-## 7.5.1 kio repair --verify-objects (fsck 相当)
+## 7.5.1 kio repair verify-objects (fsck 相当)
 
 ```bash
-kio repair --verify-objects
+kio repair verify-objects
 ```
 
 - `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
@@ -507,7 +507,7 @@ kio repair --verify-objects
   `logical_name` の対応 (digest 再計算)、torn tail (最終の不完全行のみ切詰め — 途中の malformed 行は
   corruption)、各 canonical ref ↔ 最終有効行の対応 (03 §2 と同一規則)。対応行の無い canonical ref は
   corruption (ref の無い names 行は tag 削除後の残存として正常)
-- SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため。embeddings の
+- SQLite index は検証対象外 (破損時は `rebuild-db` で再構築可能なため。embeddings の
   `target_type='query_cache'` 行のみ復元されず破棄 — 影響は cursor 拒否 [04-pipeline.md §4.3](04-pipeline.md))
 
 破損検出時の挙動:
@@ -520,7 +520,7 @@ kio repair --verify-objects
    → missing として errors.jsonl に KIO-E-STORE-CORRUPT-001 を記録し、
      (normalized unit の done object 欠落も同様 — same-gen 再生成は行わない (unit object は
       immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
-      restore、または明示の新 gen (kio reindex --force) で行う)
+      restore、または明示の新 gen (kio reindex --regenerate) で行う)
      影響を受ける commit hash の bounded 一覧と
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
@@ -583,7 +583,7 @@ terminal `retired` の `resurrection_commit` 検証も erased 側と同一に必
 (erased 開始の文法は receipt 専用)。検証失敗の marker は説明能力を持たず corruption とする —
 偽 `in_commit` を持つ構造的に正しい tombstone が genuine missing を隠さない)。
 
-**orphan 掃除 (`--prune-orphans`)**: `kio repair --verify-objects --prune-orphans` は、どの manifest
+**orphan 掃除 (`--prune-orphans`)**: `kio repair verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
 と **descriptor の無い staging root・path と不整合な staging root (descriptor の有無を問わない)・
 terminal 化済み (done / failed permanent / abandoned / settled partial — [04-pipeline.md §5.2](04-pipeline.md)) task にのみ対応する staging root
@@ -637,8 +637,8 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      **注意: この確認は check-then-act であり、確認とコピーの間の書き込みまでは防げない** —
      コピー中に kio コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
      filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
-     `kio repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
-   - sqlite.db は repair --rebuild-db で再構築可能 (例外 = embeddings の `target_type='query_cache'` 行 — 復元されず破棄、喪失影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))。ただし**最低保全集合は objects/ と refs/ では
+     `kio repair verify-objects` (§7.5.1) を必ず実行して整合を確認する
+   - sqlite.db は repair rebuild-db で再構築可能 (例外 = embeddings の `target_type='query_cache'` 行 — 復元されず破棄、喪失影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))。ただし**最低保全集合は objects/ と refs/ では
      なく、[03-data-model.md §4.1](03-data-model.md) の truth 区分の全行** (scope.json / config /
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
@@ -676,7 +676,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
    - 復元は kio import (同じく Phase 4+)
 ```
 
-復元後は `kio repair --verify-objects` で整合性を確認する。外部ドライブ・クラウド
+復元後は `kio repair verify-objects` で整合性を確認する。外部ドライブ・クラウド
 ストレージの placeholder file 上の `.kio` は破損リスクが高いため、§4 の境界方針の確定
 までは推奨しない。
 
@@ -685,7 +685,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md)。
 例外 = embeddings の `target_type='query_cache'` 行のみ再構築対象外 — 破棄で足りる、[04-pipeline.md §4.3](04-pipeline.md))。
 したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
-(sqlite.db は `kio repair --rebuild-db`、registry は各 `.kio` の rescan)。
+(sqlite.db は `kio repair rebuild-db`、registry は各 `.kio` の rescan)。
 
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration

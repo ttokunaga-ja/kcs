@@ -1782,3 +1782,324 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     actual-chunk attestation is granted.  The next required sequence is to close and independently validate the
     corpus semantic, query, and history closures plus blocker-resolution ledger, and only then invoke the joint
     solver.
+153. The lifecycle effective-membership reconciliation keeps its frozen v1 body and pin while hardening every cached
+    expectation exposed inside the producer and independent validator.  Seventeen mutable `lru_cache` results were
+    replaced by recursively immutable tuple storage whose accessors return detached values.  The public validation
+    paths now recheck the actual candidate's identity coordinates, exact all-false authority, representative p01/p12
+    owner pins, p01 projection pin, whole-suite pin, and exact integer schema versions; a Boolean can no longer pass
+    an integer-version check.  The fix also closes origin/profile coordinate substitution and representative-pin
+    oracle-poisoning regressions without changing the authenticated domain or any completion claim.
+
+    The suite remains exactly 69,195 canonical bytes with SHA-256
+    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  The final focused module passes fifteen
+    tests in 1,748.406 seconds, including cache-poisoning, detached-candidate, authority, coordinate, pin, event-domain,
+    provider, and TOCTOU regressions.  Independent final review found no remaining P0/P1/P2 issue.  Solver, post-W0
+    complete membership, compiled history, write/KCS execution, physical receipts, and G0 remain false.
+154. Persona-PC v2 freezes a projection-pin-only corpus semantic namespace as the additive
+    `kcs.persona.pc-corpus-semantic-namespace/v3` artifact.  It contains exactly 253 entries and twelve class IDs in
+    the complete-inventory order.  Every entry contains only its class, logical coordinates, ordinal, and exact
+    projection pin; no projection body, derivation receipt, owner body, inventory pin, query/oracle, review evidence,
+    blocker ledger, solver value, final ID, runtime receipt, or authority is embedded.  Its graph is one root with
+    exactly 253 direct edges, maximum depth one, and zero unused entries.
+
+    The frozen namespace is 161,665 canonical bytes with SHA-256
+    `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`.  The logged two-hash-seed cold gate
+    completes in 5,160.296 seconds total; the seed measurements are 2,586.128 and 2,573.607 seconds with maximum RSS
+    795,803,648 bytes.  Each seed authenticates 253 unique receipts and 506 projection-provider calls.  `namespace
+    golden frozen` is a local artifact claim only: `namespace issued`, source-identity authority, production corpus
+    closure, review approval, solver, G0, and every execution/write authority remain false.
+155. Persona-PC v2 represents the remaining human review work with the non-authorizing
+    `kcs.persona.pc-review-request-catalog/v1`.  It has seven exact review classes, eight subject pins, eight
+    bindings, and 65 explicit relevant projection pins selected from the independently reconstructed 253-entry
+    registry.  The route review requires reviewer kind `independent-human`.  It contains no reviewer identity,
+    decision, approval, waiver, or positive receipt, and `positive_receipt_bound` is false for every request.
+
+    The frozen request catalog is 42,931 canonical bytes with SHA-256
+    `28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab`; two isolated hash seeds agree and the
+    focused eight-test gate passes.  A review request is not review evidence and cannot satisfy the corpus input
+    closure or G0.
+156. Persona-PC v2 records the current unresolved production boundary in the bootstrap-only
+    `kcs.persona.pc-g0-blocker-resolution-ledger/v2` profile `bootstrap-three-source-v1`.  Its three historical
+    sources contain 36 claims: 21 blockers and fifteen false-completion claims, all with status `active-g0`.  The
+    ledger explicitly defers G2/G3/G4/G7 and the pre-W2 runtime patch; it reports both closure eligibility and G0
+    eligibility false.  The historical source universe and source registry are deliberately incomplete.
+
+    The frozen bootstrap is 21,645 canonical bytes with SHA-256
+    `e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2`; two seeds agree and 24 focused tests pass.
+    This artifact is not the production blocker-resolution ledger and cannot resolve or waive any claim.
+157. Persona-PC v2 binds the query/oracle/lifecycle cardinality bridge as
+    `kcs.persona.pc-query-history-target-resolution/v1`.  It contains exactly twenty personas by 105 mappings,
+    2,100 total, split into 1,800 positive and 300 negative capabilities.  Matching is constrained by semantic class
+    rather than an ordinal zip.  It also binds 5,400 distinct abstract distractor intent/document references, but it
+    maps zero concrete distractor sources and proves zero source topic, language, or fact equalities.  Scope/path,
+    compiled event identity, final source/materialization IDs, raw/chunk hashes, rendered queries, relevance, and
+    execution authority are absent.
+
+    The frozen bridge is 4,478,576 canonical bytes with SHA-256
+    `4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc`; two isolated seeds agree and eleven
+    focused tests pass.  Subsequent auditing shows this v1 bridge is not a source-semantic resolution: topic,
+    language, fact/revision visibility, 5,400 concrete distractors, and four-domain disjointness remain mandatory
+    downstream blockers.
+158. Persona-PC v2 freezes the physical path composition plan as the non-authorizing
+    `kcs.persona.pc-device-lane-compositor/v1`.  It derives the exact twenty portable role slugs from the frozen v2
+    envelope and maps three fresh replay containers to sixty distinct
+    `<replay>/devices/{persona_id}-{role_slug}` roots, sixty isolated registry roots, and 1,200 formal leaf scopes.
+    The plan carries 203,000 W0 files per replay and 609,000 across all three, with 120,000 planned current contract
+    chunks and 180,000 planned W5 current-plus-history chunks per physical persona root.  It prohibits completed-root
+    copy, cross-persona/replay/lane pooling, payload materialization reuse, hard links, clones, symlinks, and shared
+    inodes.  Historical `formal-root` and `robustness-root` templates remain logical coordinates and have no writer
+    authority.
+
+    `formal-replay-01` is only the unratified designated candidate for `ambient-home` and `byte-stress`; the G0
+    selection remains false.  The frozen compositor is 41,099 canonical bytes with SHA-256
+    `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`.  Pre- and post-freeze isolated hash seeds
+    reproduce the same body, the focused twelve-test gate and independent audit are clean, and producer/validator
+    golden drift is fail-closed.  No physical root, registry, file, chunk, inode, or receipt is claimed observed;
+    filesystem writer, capacity, lane-isolation readback, KCS/history execution, production composition, and G0 all
+    remain false.
+
+    Remote GitHub Actions for Decisions 153--160 remain unverified because the repository/account billing or spending
+    gate previously stopped the workflow before jobs.  Local frozen or candidate evidence does not imply remote green.
+159. Persona-PC v2 does not promote the v1 query-history target bridge to a source-semantic resolution.  The
+    non-authorizing `kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` joins the exact query,
+    oracle, target-resolution, source-semantic, source-matched lifecycle, and effective-membership projections used
+    by the audit, while leaving revision-chain and checkpoint-effective membership predicates explicitly unknown.
+    The in-memory twenty-person projection replay finds only 327 of 2,000 contributor targets aligned on the available baseline
+    topic, language, fact, and event-profile predicates; 1,673 mismatch.  The p01 sentinel is exactly 13 aligned and
+    87 mismatched out of 100.
+
+    The 5,400 abstract distractor references classify as 720 with no W0 profile candidate, 3,720 singleton-only,
+    600 opposite-conflict, and 360 graph-normal.  Even before the missing language/revision/checkpoint filters, the
+    maximum distinct concrete candidate capacity is only 1,060, a 4,340 shortfall.  Revision joins remain unknown
+    for all 2,000 contributor targets, all-condition exact resolution is zero, concrete distractor mappings remain
+    zero, four-domain disjointness is unproved, and query-history target resolution v2 is not issued.
+
+    The current audit candidate is 40,947 canonical bytes with SHA-256
+    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`, but its golden constants deliberately remain
+    unset pending isolated full/cold acceptance.  The in-memory all-persona projection build completes in 465.03 seconds; fourteen
+    focused tests, byte compilation, diff checks, and the final independent audit pass.  These measurements are
+    active blocker evidence, not a frozen production closure.  A v2 source-semantic resolution must add sufficient
+    persona-local membership candidates, exact revision/checkpoint ownership, all 5,400 concrete distractor source
+    mappings, and four-domain disjointness before solver, evaluation closure, G0, or execution authority can advance.
+160. Persona-PC v2 freezes the request-only corpus input closure as the additive
+    `kcs.persona.pc-corpus-input-closure-manifest/v3` artifact.  It binds exactly four direct dependencies: the
+    locally frozen corpus semantic namespace v3, complete semantic-projection inventory v2, seven-class review
+    request catalog, and bootstrap blocker-resolution ledger.  It carries seven review requests, zero positive
+    review receipts, and all 36 bootstrap G0 claims as active.  Every production, completion, G0, solver, solution,
+    render, filesystem/write, history, KCS, capacity, and evaluation authority remains exactly false.
+
+    The frozen body is 7,590 canonical bytes with SHA-256
+    `47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`.  The pre-freeze independent full gate
+    passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
+    5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
+    post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
+    seconds with 806,731,776-byte maximum RSS, eight direct-dependency provider calls, 506 projection-body calls,
+    and 253 unique projection receipts.  The focused fast gate passes 23 tests.  These results reproduce the frozen
+    request-only graph; they do not supply the absent human decisions or resolve any blocker.
+
+    This local freeze is not an authoritative production corpus closure and does not issue the namespace.  Positive
+    independent review receipts, the production blocker ledger, source-semantic query/history resolution, concrete
+    distractor mappings, authoritative corpus/evaluation/history closures, joint solver and solution/proof, G0,
+    physical materialization, and per-persona 120,000 actual-chunk attestation remain outstanding.  Remote GitHub
+    Actions is still unverified because the repository/account billing or spending gate previously stopped jobs;
+    local acceptance does not imply remote green.
+161. Persona-PC v2 freezes the non-authorizing
+    `kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` as active blocker evidence.  Its body
+    and findings remain exactly those recorded by Decision 159: the live baseline examines 2,000 contributor
+    targets, aligns 327 and mismatches 1,673; all-condition exact resolution is proved for zero targets and remains
+    `unknown-not-proved`; revision joins remain unknown for all 2,000; and the 5,400 abstract distractor references
+    have at most 1,060 distinct pre-language-filter source candidates, a 4,340 shortfall.  Concrete distractor
+    mappings remain zero, four-domain disjointness is unproved, and query-history target resolution v2 is not
+    issued.
+
+    The frozen body is exactly 40,947 canonical bytes with SHA-256
+    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`.  The pre-freeze all-persona build plus
+    producer-independent validation passes in 458.502 seconds with 301,400,064-byte maximum RSS.  Two isolated cold
+    processes under hash seeds zero and one reproduce the same bytes and digest in 452.817 and 451.303 seconds,
+    respectively, with 303,005,696-byte maximum RSS.  After both producer and independent-validator golden pairs
+    were frozen, the focused gate passes sixteen tests and the post-freeze all-persona full gate passes in 457.170
+    seconds with 303,693,824-byte maximum RSS.  Independent freeze-readiness review reports no P0/P1/P2 issue.
+
+    This working-tree-local freeze authenticates the measured insufficiency; it does not repair it.  It grants no
+    authoritative corpus or evaluation closure, source-semantic resolution, revision/checkpoint ownership,
+    compiled relevance, solver or G0 eligibility, render/write/history/KCS execution, physical materialization, or
+    actual chunk attestation.  The frozen evidence must be consumed by a still-non-authorizing evaluation closure
+    slice, while the later resolution-v2 owner must add exact topic/language/fact/revision/checkpoint mappings,
+    sufficient persona-local distractor capacity, all 5,400 concrete mappings, and four-domain disjointness.
+162. Persona-PC v2 freezes the non-authorizing
+    `kcs.persona.pc-evaluation-target-resolution-closure-slice/v1`.  It binds exactly five frozen direct
+    dependencies: corpus semantic namespace v3, complete semantic-projection inventory v2, query-history target
+    resolution v1, request-only corpus input closure v3, and the source-semantic feasibility audit v1.  It also
+    authenticates the ordered commitment to sixty transitive query-intent, semantic-oracle, and source-matched
+    lifecycle bindings without embedding those bodies.  The request-only corpus candidate remains bound but not
+    complete or authoritative; no authoritative corpus closure is available or bound.
+
+    The slice preserves the measured unresolved state rather than concealing it.  Its live join remains exactly
+    2,000 contributor targets with 327 baseline-aligned and 1,673 mismatched; all-condition exact resolution remains
+    zero with status `unknown-not-proved`, revision ownership remains unknown for all 2,000, and checkpoint-compiled
+    membership remains zero.  It carries 5,400 distractor requirements, zero concrete mappings, maximum currently
+    eligible capacity 1,060, shortfall 4,340, and unproved four-domain disjointness.  Query-history target resolution
+    v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
+
+    The frozen body is exactly 16,735 canonical bytes with SHA-256
+    `bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`.  The pre-freeze full dependency gate
+    passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
+    same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
+    independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
+    gate passes in 2,646.890 seconds; the measured closure build is 2,646.889 seconds with 827,867,136-byte maximum
+    RSS, eight direct-dependency reads, 506 projection-body calls over 253 unique receipts, and one call each to the
+    target-resolution validator, feasibility producer, and feasibility independent validator.
+
+    This working-tree-local freeze grants no authoritative corpus or evaluation closure, source-semantic resolution,
+    revision/checkpoint ownership, concrete distractor mapping, compiled relevance, solver/G0 eligibility,
+    query rendering, evaluation execution, folder/file creation, render/write/history/KCS execution, physical
+    materialization, or actual chunk attestation.  It is exact blocker-state evidence for the additive source-semantic
+    resolution v2 work.  Remote GitHub Actions remains unverified because the repository/account billing or spending
+    gate previously stopped jobs; local acceptance does not imply remote green.
+163. Persona-PC v2 adopts the formal-MVP source-semantic design as a nine-fact, replace-only capacity axis and rejects
+    the stable-seven-fact alternative with 1,440 authored distractor-fact substitutions.  The rejected alternative
+    would weaken the frozen oracle's exact distractor fact, change the hard-negative distribution, and break like-for-
+    like benchmark identity.  The adopted axis contains exactly 15,048 cells over 38 persona-language pairs, four
+    topics, nine facts, and eleven replicas.  Its branch split is 11,704 stable, 1,672 prior/stale-copy, and 1,672
+    W0-neutral-then-W1-introduced cells.
+
+    Canonical truth, source-assertion occurrence, query relevance, and selector visibility are four different owned
+    states and may not be collapsed into one visibility field.  Across the ordered checkpoints `W0`, `W1`, `W2`,
+    `W3`, `W4`, `W5-pre-purge`, and `W5-final`, the policy has 105,336 projections.  Truth and occurrence each split
+    exactly 93,632 current/fresh-current, 10,032 history-only/stale-current, and 1,672 absent, with 10,032 intentional
+    truth/occurrence divergences.  The ordered per-persona current-chunk targets are
+    `[120000,120000,120000,120000,120000,124800,120000]`; the history-only targets are
+    `[0,24000,24000,48000,60000,64800,60000]`.
+
+    The 74,529 full-residual rows are only a pre-W5 upper-bound candidate domain.  Exact W5-final current-source
+    candidate membership and eligibility are not yet owned, so the pre-solve source-to-cell assignment count remains
+    zero and no post-filter fit, source-to-cell identity binding or assignment, final plan, renderer input, compiled
+    history, or semantic-resolution completion is claimed.  Content
+    owners must first produce the axis, policy, and query-free candidate domain; the content-only namespace excludes
+    reviews, receipts, blocker ledgers, solver values, final plans, history, queries, and evaluation data.  Only after
+    that namespace and the separate pre-solve evidence closures are issued may a query-independent joint solver that
+    imports only the namespace emit a canonical solution/proof.  Final source transformations, compiled history,
+    post-solution evaluation mapping, the production
+    blocker ledger and scoped closure successors must then close before G0.  A source-slot order-digest collision is
+    fatal; enumeration order is never a tie-break fallback.
+
+    Independent review reports no remaining P0/P1/P2 issue in the source-semantic proposal at 56,602 file bytes
+    with SHA-256 `eda5b08704753c0ff70cc537de76e503c4018a944fe8eb3b551e17ba93cc27dd` or the core-mix proposal at 31,559
+    file bytes with SHA-256 `8515c7bc76796ff296e81579096d8e0c99307b49bd062aaaf818607392bb0c18`.
+    Any pre-Decision working-tree candidate build is exploratory evidence only.  Golden freeze, full/cold acceptance,
+    authoritative closures, solver execution, G0, folder/file creation, history replay, KCS execution, and actual
+    chunk attestation remain false.  Remote GitHub Actions remains unverified because the repository/account billing
+    or spending gate previously stopped jobs; local evidence does not imply remote green.
+164. Persona-PC v2 freezes the non-authorizing
+    `kcs.persona.pc-source-semantic-capacity-axis-catalog/v1`.  It defines exactly 15,048 query-independent capacity
+    cells over twenty personas, 38 eligible persona-language pairs, four semantic topics per persona, nine facts per
+    topic, and eleven replicas per fact cell.  Twenty bounded persona-sharded JSONL bodies are bound by exact receipts;
+    all full-hex cell IDs are domain-separated, globally collision-free, and ordered within each persona body by
+    lowercase ASCII bytes.  The
+    catalog binds the frozen semantic topic identity and twenty fact-graph leaves but consumes zero query, oracle,
+    answer, relevance, evaluation, clock, network, randomness, or environment input.
+
+    The frozen body is 50,473 canonical bytes with SHA-256
+    `4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29`.  After replacing self-referential
+    unexecuted-gate claims with explicit external-receipt boundaries and correcting UTF-8 byte preflight, the
+    pre-freeze full trust-root replay passes in 45.241 seconds with 66,404,352-byte maximum RSS, forty body-provider
+    calls across twenty unique personas, and one semantic-catalog body opening.  Isolated hash seeds zero and one
+    reproduce the same bytes and digest in 91.001 seconds total.  Producer and independent-validator golden pairs
+    were then frozen atomically; the focused fast gate passes 22 tests and the post-freeze full replay passes in
+    46.048 seconds with 69,287,936-byte maximum RSS.  Independent final review reports no remaining P0/P1/P2 issue.
+
+    Full/cold receipts remain external to the canonical body and cannot grant it authority.  Source-slot membership,
+    exact W5-final current-source eligibility, source-to-cell assignment, headroom and fit, semantic transformation,
+    final source identity authority, namespace v4, compiled history, evaluation mapping, G0, folder/file creation,
+    KCS execution, and actual chunk attestation remain false.  Remote GitHub Actions remains unverified because the
+    repository/account billing or spending gate previously stopped jobs; local freeze evidence does not imply remote
+    green.
+165. Persona-PC v2 freezes the non-authorizing
+    `kcs.persona.pc-capacity-fact-truth-occurrence-policy/v1`.  It joins the locally frozen, unissued capacity axis to
+    the twenty frozen fact graphs without importing query, oracle, relevance, answer, or evaluation data.  The policy
+    contains exactly 720 persona-sharded rows, 36 per persona, and covers all 15,048 capacity cells at the seven
+    ordered checkpoints for 105,336 projections.  Its branch cells split 11,704 stable, 1,672 prior/stale-copy, and
+    1,672 W0-neutral-then-W1-introduced.  Canonical truth and source-assertion occurrence each split 93,632
+    current/fresh-current, 10,032 history-only/stale-current, and 1,672 absent projections; intentional divergence is
+    10,032, neutral-required is 1,672, and future-before-introduction is zero.
+
+    The frozen body is 29,868 canonical bytes with SHA-256
+    `9f9653c1bb7a794bea33fe208b1de3c63f8dc011b8ac13f2d9a6955333681cd4`.  The pre-freeze full two-read replay
+    passes in 4.808 seconds with 62,767,104-byte maximum RSS, and isolated hash seeds zero and one reproduce the same
+    bytes and digest in 9.721 seconds total.  Producer and independent-validator golden pairs were then frozen
+    atomically.  The focused fast gate passes fourteen tests, and the post-freeze full replay passes in 4.927 seconds
+    with 61,751,296-byte maximum RSS.  Independent final review reports no remaining P0/P1/P2 issue.
+
+    The capacity-axis dependency alone is recorded as accepted and frozen but not issued.  Policy acceptance,
+    golden-freeze, full-replay, and cold-replay receipts remain external and are not embedded in the canonical body;
+    they cannot grant downstream authority.  Source-slot assignment, physical source membership, exact W5 fit,
+    rendering, compiled history, relevance and selector visibility, evaluation mapping, namespace v4, G0,
+    folder/file creation, KCS execution, and actual chunk attestation remain false.  Remote GitHub Actions remains
+    unverified because the repository/account billing or spending gate previously stopped jobs; local freeze evidence
+    does not imply remote green.
+166. Persona-PC v2 adopts the `persona-core-v1` extension-allocation design, but does not yet freeze or issue its
+    manifest.  The design binds three exact inputs: the 2,410-byte core family-count matrix at SHA-256
+    `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7`, the 71,979-byte persona envelope at
+    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`, and the 333,881-byte all-71 format
+    implementation registry at `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`.  The
+    registry proves renderer/validator feasibility only; it is not a formal source recipe, source-instance, physical
+    file, searchability, or G0 authority.
+
+    Each of the twenty persona-specific fifteen-family rows is independently allocated by
+    `hamilton-largest-remainder-v1`, breaking equal fractional remainders by the declared family-local variant
+    ordinal.  Full, exact-ten-percent pilot, and 200-file tiny profiles are computed separately from their own family
+    counts; a smaller profile is never made by truncating a full allocation.  Full remains exactly 203,000 files,
+    566 declared sparse rows and 539 non-zero rows over 71 variants and 39 filename extensions.  Gate-role totals are
+    68,761 contract contributors, 62,978 incidental searchable files, and 71,261 raw-only files.  Every persona keeps
+    its exact one-percent rare count.  Unsupported formats such as `.msg`, `.xlsm`, `.xlsb`, `.dwg`, `.dxf`, `.m4a`,
+    `.mp3`, `.mp4`, and `.mov` stay outside the core denominator unless separately implemented; documented canonical
+    fallbacks preserve each persona's exact file count.
+
+    The adopted row contract has an exact 23-key schema, schema version one, zero-based family ordinals 0--14, and
+    zero-based family-local variant ordinals.  Unknown or missing fields and Boolean-as-integer values fail closed.
+    The expected, not-yet-golden external LF-JSONL candidate is 426,889 bytes with SHA-256
+    `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`, 566 rows, 539 full non-zero rows,
+    maximum LF-inclusive row size 786 bytes, and exact first/last row identities and pins.  A bounded descriptor must
+    bind that body ID, bytes, digest, count, order, first/last rows, and two-read TOCTOU checks without embedding it.
+
+    This is the Design Adoption Decision only.  Independent producer/validator implementation, full and cold gates,
+    and a separate Manifest Golden-Freeze Decision/Gate remain required.  The frozen manifest may then enter the
+    content-only namespace before pre-solve closures; the query-independent solver imports only that namespace, and
+    the final source plan is issued only after the solution/proof and directly binds both.  Query/evaluation data,
+    history, receipts, blocker ledgers, solutions, paths, source instances, and observed chunks are absent from the
+    manifest.  G0, solver execution, source recipes/instances, rendering, physical writes, KCS/history execution, and
+    evaluation remain unauthorized.
+
+    The independently reviewed proposal is 32,084 file bytes with SHA-256
+    `5b08e9d5cae1d705ba8cfa94e86213b41205e3397a1487172f9b6a9ba67833c3`; final review reports no remaining
+    P0/P1/P2 issue.  Remote GitHub Actions remains unverified because the repository/account billing or spending gate
+    previously stopped jobs; local design evidence does not imply remote green.
+167. Persona-PC v2 freezes the non-authorizing
+    `kcs.persona.pc-history-presolve-input-closure-slice/v1`.  The compact query-independent slice binds exactly four
+    frozen roots: corpus semantic namespace v3, complete semantic-projection inventory v2, source-matched lifecycle
+    v1, and lifecycle effective-membership reconciliation v1.  It closes only structural pre-solver history demand
+    and the already-proved W0 membership and purge-witness views.  Its summary remains exactly twenty personas,
+    203,000 W0 source intents, 7,630 pre-solve lifecycle event intents, 3,630 event-created source intents, 2,300
+    lifecycle source references, 600 inverted consumer references, and 300 purge witnesses.
+
+    The frozen body is 8,455 canonical bytes with SHA-256
+    `34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8`.  The corrected pre-freeze full gate
+    passes in 2,595.206 seconds with 800,702,464-byte maximum RSS.  Isolated seed-zero and seed-one cold processes
+    reproduce the same bytes and digest in 2,604.108 and 2,588.437 seconds respectively, 5,193.170 seconds total,
+    with 804,306,944-byte maximum RSS.  Each full replay opens the namespace validator once, effective-membership
+    validators twice, lifecycle validators three times, and 506 projection bodies over 253 unique receipts.  After
+    freezing both golden pairs, the focused gate passes 24 tests and the post-freeze full gate passes in 2,599.595
+    seconds; its measured build is 2,599.593 seconds with 803,356,672-byte maximum RSS.
+
+    Final audit found and closed a freeze-regression gap: fast, full, and both cold-seed tests now unconditionally
+    require the exact frozen byte/digest tuple instead of tolerating an accidentally unset golden.  Because that fix
+    changes test assertions only and the recorded full/cold measurements already equal the newly unconditional tuple,
+    the independent reviewer determined that repeating the 43-minute full or 86-minute cold computation was not
+    required.  Final review reports no remaining P0/P1/P2 issue.
+
+    This slice is not the solution-compiled or authoritative history closure.  It imports no corpus-input,
+    evaluation, query/oracle, review, or blocker-ledger dependency and grants no post-W0 complete membership,
+    source/scope/bucket/cohort/path/quota assignment, solver solution/proof, planned or final identifier, render/write,
+    filesystem/history mutation, KCS execution, G0, or actual chunk authority.  Remote GitHub Actions remains
+    unverified because the repository/account billing or spending gate previously stopped jobs; local freeze evidence
+    does not imply remote green.

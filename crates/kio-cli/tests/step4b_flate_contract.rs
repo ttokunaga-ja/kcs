@@ -223,7 +223,7 @@ fn online_markdownize_task_for<'a>(status: &'a Value, input_path: &str) -> Optio
 }
 
 fn assert_search_hit(dir: &TempDir, needle: &str, title: &str) {
-    let search = kio(dir, &["search", needle, "--text"])
+    let search = kio(dir, &["search", needle, "--mode", "text"])
         .arg("--json")
         .assert()
         .success()

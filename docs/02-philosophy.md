@@ -517,7 +517,7 @@ Kioでは、原本ファイルから抽出されたMarkdownを編集対象にし
 ```text
 - tool_profile の更新 (Adapter / prompt / モデルの改訂) による再 Markdownize
   → identity (raw_hash, tool_profile_hash) が変わり、別 artifact として保存される
-- 同一 tool_profile での明示的な再実行 (kio reindex --force)
+- 同一 tool_profile での明示的な再実行 (kio reindex --regenerate)
 - Evidence Pointer の retarget (08-evidence-pointer-spec.md)
 ```
 

@@ -106,7 +106,7 @@ fn fixture() -> (TempDir, Value) {
     .unwrap();
     success(&dir, &["init"]);
     success(&dir, &["index", "--offline", "--approve"]);
-    let search = success(&dir, &["search", "3600", "--text"]);
+    let search = success(&dir, &["search", "3600", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     (dir, pointer)
 }

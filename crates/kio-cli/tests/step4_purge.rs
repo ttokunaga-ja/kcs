@@ -95,7 +95,7 @@ fn indexed_fixture() -> IndexedFixture {
     .unwrap();
     json_success(&dir, &["init"]);
     json_success(&dir, &["index", "--offline", "--approve"]);
-    let search = json_success(&dir, &["search", "needle-purge-content", "--text"]);
+    let search = json_success(&dir, &["search", "needle-purge-content", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     IndexedFixture {
         raw_hash: pointer["raw_hash"].as_str().unwrap().to_owned(),
@@ -373,8 +373,14 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     }
 
     for args in [
-        vec!["search", "needle-purge-content", "--text"],
-        vec!["search", "needle-purge-content", "--text", "--all-history"],
+        vec!["search", "needle-purge-content", "--mode", "text"],
+        vec![
+            "search",
+            "needle-purge-content",
+            "--mode",
+            "text",
+            "--all-history",
+        ],
     ] {
         assert!(json_success(&fixture.dir, &args)["results"]
             .as_array()
@@ -645,7 +651,7 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
         // KIO-E-INDEX-REBUILDING-001's own all-excluded promotion).
         let blocked = json_failure(
             &fixture.dir,
-            &["search", "needle-purge-content", "--text"],
+            &["search", "needle-purge-content", "--mode", "text"],
             3,
         );
         assert_eq!(blocked["error_code"], "KIO-E-PURGE-JOURNAL-ACTIVE-001");

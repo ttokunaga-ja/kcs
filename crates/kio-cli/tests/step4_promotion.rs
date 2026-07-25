@@ -264,11 +264,15 @@ fn ct4_promotion_done_batch_updates_provenance_search_and_is_idempotent() {
     drop(conn);
     let search = json_success(
         &dir,
-        &["search", "mock ocr", "--scope", ".", "--text"],
+        &["search", "mock ocr", "--scope", ".", "--mode", "text"],
         None,
     );
     assert!(search["results"].as_array().unwrap().len() >= 2);
-    let bbox_search = json_success(&dir, &["search", "1000", "--scope", ".", "--text"], None);
+    let bbox_search = json_success(
+        &dir,
+        &["search", "1000", "--scope", ".", "--mode", "text"],
+        None,
+    );
     assert!(
         bbox_search["results"].as_array().unwrap().len() >= 2,
         "promoted bbox transcriptions must be searchable"
@@ -364,11 +368,15 @@ fn ct4_bbox_006_ocr_from_scratch_promotes_scanned_pdf_and_image() {
 
     let search = json_success(
         &dir,
-        &["search", "mock ocr", "--scope", ".", "--text"],
+        &["search", "mock ocr", "--scope", ".", "--mode", "text"],
         None,
     );
     assert!(search["results"].as_array().unwrap().len() >= 2);
-    let bbox_search = json_success(&dir, &["search", "1000", "--scope", ".", "--text"], None);
+    let bbox_search = json_success(
+        &dir,
+        &["search", "1000", "--scope", ".", "--mode", "text"],
+        None,
+    );
     assert!(
         bbox_search["results"].as_array().unwrap().len() >= 2,
         "bbox annotations discovered from both inputs must be searchable"
@@ -415,7 +423,7 @@ fn ct4_promotion_respects_bbox_disabled_profile_identity() {
     );
     let search = json_success(
         &dir,
-        &["search", "mock ocr", "--scope", ".", "--text"],
+        &["search", "mock ocr", "--scope", ".", "--mode", "text"],
         None,
     );
     assert_eq!(search["results"].as_array().unwrap().len(), 1);
@@ -589,7 +597,7 @@ fn ct4_promotion_004_after_head_and_after_index_swap_faults_converge() {
     );
     let rebuilding = kio(
         &after_head,
-        &["search", "mock ocr", "--scope", ".", "--text"],
+        &["search", "mock ocr", "--scope", ".", "--mode", "text"],
         None,
     )
     .assert()
@@ -604,14 +612,14 @@ fn ct4_promotion_004_after_head_and_after_index_swap_faults_converge() {
     );
     let charged = cost_ledger(&after_head);
 
-    json_success(&after_head, &["repair", "--rebuild-db"], None);
+    json_success(&after_head, &["repair", "rebuild-db"], None);
     assert_eq!(head(&after_head), promoted_head);
     assert!(sqlite_head_rows(&after_head, &promoted_head) > 0);
     assert!(!promotion_state_path(&after_head).exists());
     assert_eq!(cost_ledger(&after_head), charged);
     let search = json_success(
         &after_head,
-        &["search", "mock ocr", "--scope", ".", "--text"],
+        &["search", "mock ocr", "--scope", ".", "--mode", "text"],
         None,
     );
     assert_eq!(search["results"].as_array().unwrap().len(), 1);

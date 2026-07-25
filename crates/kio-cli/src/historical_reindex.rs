@@ -21,57 +21,8 @@ pub(super) struct ParsedReindex {
     pub(super) offline: bool,
 }
 
-pub(super) fn parse_args(args: Vec<String>) -> Result<ParsedReindex> {
-    let mut parsed = ParsedReindex::default();
-    let mut i = 0;
-    while i < args.len() {
-        // R12-7: accept `--flag=value` before matching.
-        let (flag, inline) = split_flag_value(&args[i]);
-        match flag {
-            "--force" => {
-                // R16-6: `--force=false` must not be silently coerced to `true`.
-                reject_inline_value(flag, inline)?;
-                parsed.force = true;
-            }
-            "--yes" => {
-                reject_inline_value(flag, inline)?;
-                parsed.yes = true;
-            }
-            "--online" => {
-                reject_inline_value(flag, inline)?;
-                parsed.online = true;
-            }
-            "--offline" => {
-                reject_inline_value(flag, inline)?;
-                parsed.offline = true;
-            }
-            "--at" => {
-                let value = flag_value(&args, &mut i, inline, "--at")?;
-                if parsed.at.replace(value).is_some() {
-                    return Err(KioError::invalid_usage("reindex accepts --at at most once"));
-                }
-            }
-            value if value.starts_with('-') => {
-                return Err(KioError::invalid_usage(format!(
-                    "unknown reindex flag: {value}"
-                )));
-            }
-            _ => {
-                return Err(KioError::invalid_usage(format!(
-                    "unexpected reindex argument: {}",
-                    args[i]
-                )));
-            }
-        }
-        i += 1;
-    }
-    if parsed.online && parsed.offline {
-        return Err(KioError::invalid_usage(
-            "--online and --offline are mutually exclusive",
-        ));
-    }
-    Ok(parsed)
-}
+// B (2026-07-24): the hand-rolled `parse_args` was replaced by the clap
+// declaration on `ReindexArgs` in main.rs — see `run_reindex`.
 
 pub(super) fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Value>) {
     let seen: BTreeSet<String> = report

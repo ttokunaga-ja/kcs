@@ -40,7 +40,7 @@ fn fixture() -> (TempDir, Value, String) {
     .unwrap();
     success(&dir, &["init"]);
     success(&dir, &["index", "--offline", "--approve"]);
-    let search = success(&dir, &["search", "3600", "--text"]);
+    let search = success(&dir, &["search", "3600", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     let uri = search["results"][0]["evidence_uri"]
         .as_str()
@@ -237,7 +237,7 @@ fn ct4_verify_missing_raw_with_no_marker_is_store_corrupt_regardless_of_strict()
 fn ct4_fsck_healthy_graph_is_unchanged() {
     let (dir, _, _) = fixture();
     let head_before = fs::read(dir.path().join(".kio/HEAD")).unwrap();
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert!(output["checked"]["raw"].as_u64().unwrap() > 0);
     assert!(output["checked"]["chunks"].as_u64().unwrap() > 0);
@@ -250,7 +250,7 @@ fn ct4_fsck_recovers_identical_working_raw_and_records_repaired_commit() {
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let store = ObjectStore::new(dir.path().join(".kio"));
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["repaired_raw_count"], 1);
     assert!(output["repaired_commit_hash"].as_str().is_some());
@@ -265,7 +265,7 @@ fn ct4_fsck_replaces_corrupt_present_raw_from_identical_working_bytes() {
     let raw_path = store.object_path(ObjectKind::Raw, raw_hash).unwrap();
     fs::write(&raw_path, b"corrupt-present-raw").unwrap();
 
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["repaired_raw_count"], 1);
     assert!(output["repaired_commit_hash"].as_str().is_some());
@@ -351,7 +351,7 @@ fn ct4_fsck_unrecoverable_raw_is_bounded_partial_and_logged() {
     let store = ObjectStore::new(dir.path().join(".kio"));
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
     fs::remove_file(dir.path().join("evidence.md")).unwrap();
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -424,7 +424,7 @@ fn ct4_verify_and_fsck_accept_valid_tombstone_terminal() {
         success(&dir, &["evidence", "verify", &pointer])["status"],
         "tombstoned"
     );
-    let fsck = success(&dir, &["repair", "--verify-objects"]);
+    let fsck = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(fsck["status"], "ok", "{fsck}");
     assert_eq!(fsck["dead_by_tombstone_count"], 1);
 }
@@ -461,7 +461,7 @@ fn ct4_fsck_checks_failed_prepared_and_metadata_only_image_references() {
     }]);
     fs::write(&unit_path, serde_json::to_vec(&unit).unwrap()).unwrap();
 
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -491,7 +491,7 @@ fn ct4_fsck_accepts_erase_receipt_reachable_only_from_canonical_tag() {
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
     fs::remove_dir_all(dir.path().join(".kio/objects/normalized_units")).unwrap();
     fs::remove_dir_all(dir.path().join(".kio/objects/chunks")).unwrap();
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["dead_by_erase_receipt_count"], 1);
 }
@@ -511,7 +511,7 @@ fn ct4_fsck_live_raw_with_stale_receipt_and_no_republication_commit_is_incomplet
     let receipt = write_receipt(&dir, raw_hash, &purged_hash, timestamp);
     let receipt_before = fs::read(&receipt).unwrap();
     let head_before = fs::read(dir.path().join(".kio/HEAD")).unwrap();
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -569,7 +569,7 @@ fn ct4_fsck_live_raw_with_republication_commit_backfills_retired_receipt() {
         .unwrap();
     tag_commit(&dir, "republication", &republication_hash);
 
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert!(!output["remaining_findings"]
         .as_array()
@@ -609,7 +609,7 @@ fn ct4_fsck_active_journal_suppresses_raw_recovery_and_ref_mutation() {
     let store = ObjectStore::new(dir.path().join(".kio"));
     let raw_path = store.object_path(ObjectKind::Raw, &raw_hash).unwrap();
     fs::remove_file(&raw_path).unwrap();
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -639,7 +639,7 @@ fn ct4_fsck_rejects_linked_object_namespace_without_traversing_it() {
     fs::write(outside.path().join("secret"), b"must not be inventoried").unwrap();
     symlink(outside.path(), &chunks).unwrap();
 
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -668,7 +668,7 @@ fn ct4_fsck_live_raw_tombstone_and_dual_terminal_markers_are_incomplete_purge_no
     let purged_hash = write_purged_commit(&dir, timestamp, &[raw_hash.to_owned()]);
     tag_commit(&dir, "marker-conflict", &purged_hash);
     let tombstone = write_tombstone(&dir, raw_hash, &purged_hash, timestamp);
-    let stdout = kio(&dir, &["repair", "--verify-objects"])
+    let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")
         .assert()
         .code(3)
@@ -695,7 +695,7 @@ fn ct4_fsck_live_raw_tombstone_and_dual_terminal_markers_are_incomplete_purge_no
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
     write_receipt(&dir, raw_hash, &purged_hash, timestamp);
     assert!(tombstone.exists());
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert!(!output["remaining_findings"]
         .as_array()
         .unwrap()

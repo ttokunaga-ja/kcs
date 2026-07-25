@@ -160,7 +160,8 @@ fn pc1_pc5_offline_with_explicit_vector_is_a_hard_error() {
         &[
             "search",
             "tokentestterm",
-            "--vector",
+            "--mode",
+            "vector",
             "--offline",
             "--scope",
             ".",
@@ -186,7 +187,8 @@ fn pc2_fail_behavior_error_does_not_escalate_offline() {
         &[
             "search",
             "tokentestterm",
-            "--hybrid",
+            "--mode",
+            "hybrid",
             "--offline",
             "--scope",
             ".",
@@ -338,7 +340,14 @@ fn r23_17_bounded_escalation_recovers_eligible_row_starved_by_inner_limit() {
     // survivor is present.
     let baseline = success(
         &dir,
-        &["search", "escalationprobe", "--text", "--scope", "."],
+        &[
+            "search",
+            "escalationprobe",
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
     );
     assert_eq!(baseline["results"].as_array().unwrap().len(), 5);
 
@@ -356,7 +365,14 @@ fn r23_17_bounded_escalation_recovers_eligible_row_starved_by_inner_limit() {
     .unwrap();
     let escalated = success(
         &dir,
-        &["search", "escalationprobe", "--text", "--scope", "."],
+        &[
+            "search",
+            "escalationprobe",
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
     );
     let results = escalated["results"].as_array().unwrap();
     assert_eq!(
@@ -719,7 +735,14 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
     let trace = dir.path().join("query-embed.trace");
     let page1_output = kio(
         &dir,
-        &["search", "replaycacheterm", "--hybrid", "--limit", "1"],
+        &[
+            "search",
+            "replaycacheterm",
+            "--mode",
+            "hybrid",
+            "--limit",
+            "1",
+        ],
     )
     .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
@@ -752,7 +775,8 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
         &[
             "search",
             "replaycacheterm",
-            "--hybrid",
+            "--mode",
+            "hybrid",
             "--limit",
             "1",
             "--cursor",
@@ -815,7 +839,14 @@ fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
     let trace = dir.path().join("query-embed.trace");
     let page1_output = kio(
         &dir,
-        &["search", "evictedcacheterm", "--hybrid", "--limit", "1"],
+        &[
+            "search",
+            "evictedcacheterm",
+            "--mode",
+            "hybrid",
+            "--limit",
+            "1",
+        ],
     )
     .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
@@ -841,7 +872,8 @@ fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
         &[
             "search",
             "evictedcacheterm",
-            "--hybrid",
+            "--mode",
+            "hybrid",
             "--limit",
             "1",
             "--cursor",
@@ -880,7 +912,8 @@ fn pc24_pc27_query_vector_digest_omitted_in_text_mode() {
             "tokentestterm",
             "--limit",
             "1",
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -944,7 +977,8 @@ fn pc38_pc39_at_excludes_chunks_introduced_only_at_a_descendant_commit() {
             "rootonlyterm",
             "--at",
             &ca,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -960,7 +994,8 @@ fn pc38_pc39_at_excludes_chunks_introduced_only_at_a_descendant_commit() {
             "introducedlaterterm",
             "--at",
             &ca,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -974,7 +1009,14 @@ fn pc38_pc39_at_excludes_chunks_introduced_only_at_a_descendant_commit() {
     // absence above is the ancestor-or-equal gate, not a missing/broken chunk).
     let at_head = success(
         &dir,
-        &["search", "introducedlaterterm", "--text", "--scope", "."],
+        &[
+            "search",
+            "introducedlaterterm",
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
     );
     assert!(!at_head["results"].as_array().unwrap().is_empty());
 }
@@ -1011,7 +1053,8 @@ fn pc47_at_a_shallow_commit_itself_still_hard_fails() {
             "shallowtargetterm",
             "--at",
             &head,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -1064,7 +1107,14 @@ fn pc48_scope_flag_is_exact_match_not_string_prefix() {
     let a_str = a.display().to_string();
     let result = run_path(
         &a,
-        &["search", "prefixmatchterm", "--scope", &a_str, "--text"],
+        &[
+            "search",
+            "prefixmatchterm",
+            "--scope",
+            &a_str,
+            "--mode",
+            "text",
+        ],
     );
     assert_eq!(result["searched_scopes"].as_array().unwrap().len(), 1);
     // R23-20 (03 §4 L296): scope_path is the canonical `.kio` directory, not
@@ -1462,7 +1512,7 @@ fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
     };
     assert_eq!(introduction, ca);
 
-    success(&dir, &["repair", "--rebuild-db", "--yes"]);
+    success(&dir, &["repair", "rebuild-db"]);
     // Reopen: `repair --rebuild-db` replaces sqlite.db via temp+rename (P5),
     // so a connection opened before this would keep reading the pre-rebuild
     // inode on POSIX rather than the freshly-published file.
@@ -1510,7 +1560,8 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
             "atreeconfigtoken",
             "--at",
             &ca,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -1540,7 +1591,7 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
     fs::write(dir.path().join("b.md"), "# B\n\nunrelated filler content\n").unwrap();
     success(&dir, &["index", "--offline", "--approve"]);
 
-    let bare = success(&dir, &["search", "atreeconfigtoken", "--text"]);
+    let bare = success(&dir, &["search", "atreeconfigtoken", "--mode", "text"]);
     let chunks_bare = chunk_hash_set(&bare);
     assert!(
         chunks_bare.len() > 1,
@@ -1558,7 +1609,8 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
             "atreeconfigtoken",
             "--at",
             &ca,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -1650,7 +1702,8 @@ fn pc61_pc62_pc63_head_limited_reassociation_still_leaves_at_searchable() {
             "historyonlytoken",
             "--at",
             &c1,
-            "--text",
+            "--mode",
+            "text",
             "--scope",
             ".",
         ],
@@ -1711,7 +1764,13 @@ fn pc52_explicit_vector_excludes_only_the_incompatible_scope() {
     );
 
     let output = embed_command(&a, &data_home, "mock")
-        .args(["search", "compatiblescopetoken", "--vector", "--all-scopes"])
+        .args([
+            "search",
+            "compatiblescopetoken",
+            "--mode",
+            "vector",
+            "--all-scopes",
+        ])
         .arg("--json")
         .output()
         .unwrap();
@@ -1811,7 +1870,7 @@ fn pc12_pc13_short_token_in_mixed_query_is_dropped_not_an_and_filter() {
     init(&dir);
     success(&dir, &["index", "--offline", "--approve"]);
 
-    let search = success(&dir, &["search", "authentication AI", "--text"]);
+    let search = success(&dir, &["search", "authentication AI", "--mode", "text"]);
     let results = search["results"].as_array().unwrap();
     assert!(
         !results.is_empty(),
@@ -1849,7 +1908,7 @@ fn pc11_all_short_tokens_use_the_bounded_like_fallback_only() {
 
     // "an" and "ai" are both 2 Unicode scalars — no token reaches the
     // trigram MATCH threshold, so this must resolve via LIKE alone.
-    let search = success(&dir, &["search", "an ai", "--text"]);
+    let search = success(&dir, &["search", "an ai", "--mode", "text"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
         "an all-short-token query must still find a bounded-LIKE match: {search}"
@@ -1873,7 +1932,7 @@ fn pc8_fts5_operator_keywords_and_quotes_are_literal_not_syntax() {
 
     // A raw double quote inside the query must be escaped (`""`) rather than
     // breaking the generated MATCH expression's own quoting.
-    let (code, search) = run(&dir, &["search", "\"OR\" operator", "--text"]);
+    let (code, search) = run(&dir, &["search", "\"OR\" operator", "--mode", "text"]);
     assert_eq!(
         code, 0,
         "an FTS5-operator-shaped query must not error: {search}"
@@ -1922,7 +1981,7 @@ fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
 
     // A plain-digit query finds the doc that only spells the number with a
     // thousands separator.
-    let plain_query = success(&dir, &["search", "3600 idle units", "--text"]);
+    let plain_query = success(&dir, &["search", "3600 idle units", "--mode", "text"]);
     assert!(
         path_matches(&plain_query, "numeral-grouped"),
         "a plain-digit query must find a doc that only spells the number with a \
@@ -1931,7 +1990,7 @@ fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
 
     // The reverse direction: a comma-grouped query finds the doc that only
     // spells the number without separators.
-    let grouped_query = success(&dir, &["search", "queue depth 30,000", "--text"]);
+    let grouped_query = success(&dir, &["search", "queue depth 30,000", "--mode", "text"]);
     assert!(
         path_matches(&grouped_query, "numeral-plain"),
         "a comma-grouped query must find a doc that only spells the number \
@@ -1940,7 +1999,7 @@ fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
 
     // An English query finds a doc using only Kio's own fixed チャンク/トークン
     // dictionary translation.
-    let bilingual_query = success(&dir, &["search", "chunk size 512 token", "--text"]);
+    let bilingual_query = success(&dir, &["search", "chunk size 512 token", "--mode", "text"]);
     assert!(
         path_matches(&bilingual_query, "bilingual"),
         "an English query must find a doc using only the fixed チャンク/トークン \
@@ -1975,7 +2034,8 @@ fn r_addendum_feedback2_mixed_query_short_particle_does_not_exclude_a_document_l
         &[
             "search",
             "認証仕様のトークン TTL が 3600 秒だった資料",
-            "--text",
+            "--mode",
+            "text",
         ],
     );
     let results = search["results"].as_array().unwrap();
@@ -2019,7 +2079,8 @@ fn r_addendum_feedback2_mixed_query_slash_joined_unit_and_short_particle() {
         &[
             "search",
             "スコープが read/write/admin の 3 種類だった認証メモ",
-            "--text",
+            "--mode",
+            "text",
         ],
     );
     let results = search["results"].as_array().unwrap();

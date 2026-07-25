@@ -101,7 +101,7 @@ Step 別の目安 (テスト除く):
                                  総額上限 16,000 に切られる — 全 Step 同時に上限へ達する配分は取らない)
 ```
 
-これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kio repair --verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
+これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kio repair verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
 
 ## 3.1 機能 × Step 割当表
 
@@ -122,7 +122,7 @@ Step 別の目安 (テスト除く):
 | batch / retry / resume / budget guardrail | [04-pipeline.md §5](04-pipeline.md) | Step 2 |
 | `kio index` 完了時の auto snapshot (no-op 条件・HEAD 更新 — §1.1 の MVP 項目) | [05-runtime.md §8](05-runtime.md) | Step 2 |
 | `kio adapter revoke` (network 承認の取り消し — opt-in 系と同時) | [07-adapter-spec.md §3](07-adapter-spec.md) / [06-cli-spec.md §1](06-cli-spec.md) | Step 2 |
-| `kio repair --registry-prune` (恒久到達不能 registry 行の確認付き退役) | [10-operations.md §3](10-operations.md) | Step 3 |
+| `kio repair registry-prune` (恒久到達不能 registry 行の確認付き退役) | [10-operations.md §3](10-operations.md) | Step 3 |
 | 構造化 task/artifact descriptor (Adapter 境界の内部 API) | [06-cli-spec.md §9](06-cli-spec.md) | Step 2 |
 | secrets Tier A/B 除外 + quarantine + `--yes` 制約 + `approval_method` 記録 | [10-operations.md §1.1](10-operations.md) / [06-cli-spec.md §2](06-cli-spec.md) | Step 2 |
 | chunk / Embedding / FTS5 / sqlite-vec | [04-pipeline.md §4](04-pipeline.md) | Step 3 |
@@ -133,8 +133,8 @@ Step 別の目安 (テスト除く):
 | 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §13](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
 | `restore --to` / `--at` / `--all-history` / `--include-deleted` | [05-runtime.md §4](05-runtime.md) | Step 4 |
 | purge 最小形 (tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ [10-operations.md §7](10-operations.md)) | [05-runtime.md §3](05-runtime.md) / [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) | Step 4 |
-| `kio repair --rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
-| `kio repair --verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
+| `kio repair rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
+| `kio repair verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
 | `kio gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
@@ -270,7 +270,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 採用: 最初に確定したインスタンスを永続化、以後は再生成しない (first-instance wins)。
 実装:
   - normalization_run のキャッシュヒット判定で短絡
-  - 新 generation (gen+1) の instance 作成は kio reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
+  - 新 generation (gen+1) の instance 作成は kio reindex --regenerate、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
   - 新 instance 作成時 (raw 跨ぎ incremental の g0 を含む) は manifest の parent_gen (同一 raw 内) / parent_instance = {raw_hash, tool_profile_hash, gen} (raw 跨ぎ incremental のみ必須 — full では null) でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5

@@ -212,6 +212,127 @@ import/export (fork/kioz)・observability 深部・J 領域残。MVP 機能面�
 適用済み: #1 決定的 query 正規化 (`1c6a55d`) / #2 スクリプト境界細分 + 短語 drop (`d6e8e85`) +
 ・U+30FB 補正 (`58cea60`) / #3 FTS 有界エスカレーション (`58cea60`)。
 
+## 3.5 Embedding のコスト記帳と Batch レーン (2026-07-24)
+
+**進捗 (2026-07-24 同日)**: #1 #3 は修正済み、#4 は Adapter 層まで実装済み。**残るのは CLI の
+enrichment ドライバ (下記「残作業」)** — これが入るまで実効レーンは sync であり、
+`active_embedding_send_lane()` が sync を返すことで**記帳は実際に使うレーンの単価**を保つ。
+
+- ✅ `estimate_embedding_cost` をレーン別単価 ($0.20 sync / $0.10 batch) + `tools.toml`
+  `[embedding.*.pricing] tokens_in` 優先に変更 (定数 $0.15 = 別モデル価格を撤去)。
+- ✅ トークン換算を CJK 対応に変更 (`estimate_embedding_tokens` — CJK 1 文字 1 token、
+  その他 4 文字 1 token)。日本語の過少計上を解消。
+- ✅ query 用 embedding は**常に sync 単価** (`query_embedding_send_lane`) — 検索は batch の
+  turnaround を待てないため。
+- ✅ `EmbeddingAdapter::preferred_request_kind()` を追加 (既定 Sync / Gemini は Batch)。
+- ✅ `kio_adapter::gemini_batch_client` を新規実装 — `:asyncBatchEmbedContent` (inline 入力・
+  **upload 相なし**)、`GeminiBatchClient` trait / `EnvGeminiBatchClient` / hermetic mock
+  (`KIO_TEST_GEMINI_BATCH`)、inline 上限の局所強制、`displayName` への intent_token 埋め込み。
+  単体 16 本 green。
+- ✅ 07 §5.3 に「Vertex はバッチ推論非対応」の**根拠訂正**とレーン契約を追記。
+
+**残作業 (CLI ドライバ)**: `run_embedding_enrichment` を「submit して返る」形にし、
+`kio batch resume` に embedding の poll/collect を追加する。相 1 / 相 2b / 相 3 は
+`batch_requests` (adapter_kind 汎用・schema 変更不要) をそのまま使う。
+着手前に**既定レーンの裁定**が必要 — 下記 §3.5.1。
+
+### 3.5.1 既定レーンの裁定 (2026-07-24 確定)
+
+**案 B — Batch 既定 + 明示 opt-in の即時レーン**。追加の裁定 2 点:
+
+1. **OCR と embedding は必ず同一レーン。** 片方だけ Batch という組み合わせは作らない。
+   したがってレーンは adapter 単位ではなく **invocation 単位で 1 つ**決まる。
+2. **即時性の指定に `--online` を流用しない。** API 経由である以上 online は前提であり、
+   `--online` は「送ってよいか」(network opt-in)、新引数は「いつ返ってくるか」(turnaround)。
+   → **`--realtime`** を新設 (`index` / `batch resume` / `batch retry`)。
+
+これは 2026-07-23 の「OCR 課金は Batch レーンのみ」を**明示的に上書き**する
+(既定は従来どおり Batch のみで、倍額は明示 opt-in でしか発生しない)。
+
+**実装済み (2026-07-24)**: `--realtime` 引数 3 コマンド / invocation lane
+(`effective_invocation_lane`) / `markdownize_send_lane` のレーン上書き (飛行中の batch 行は
+乗り換えない) / OCR 予約見積りの倍額化 / 07 §5.3 + 06 §1 への規範追記。単体 4 本追加。
+
+**残 = embedding の CLI ドライバのみ**。これが入った時点で `active_embedding_send_lane()` を
+`effective_invocation_lane()` へ差し替える (それまでは実効 sync のままにして記帳の正確性を保つ)。
+
+以下は判明した事実の記録 (裁定の入力)。
+
+## 3.5-old Embedding のコスト記帳 (2026-07-24 追加 — dogfood 索引化計画の調査で判明)
+
+根拠と再現は [dogfood-index-phase-plan.md §6](dogfood-index-phase-plan.md)。公式ドキュメントで
+`gemini-embedding-2` = 標準 $0.20/1M text・**Batch $0.10/1M (50% off)** を確認済み。
+
+1. **[P1] 単価定数が別モデルの価格** — `estimate_embedding_cost()` (`kio-cli/src/main.rs:14651`)
+   は `$0.15/1M` をハードコードしている。これは `gemini-embedding-001` の価格で、
+   Kio が pin する `gemini-embedding-2` は $0.20/1M。**25% 過少**。
+   `tools.toml [embedding.*.pricing] tokens_in` は読まれないため設定では直らない。
+   03 §11 の設定例 (`tokens_in = 0.00000015`) も同じ誤り。
+2. **[P1] 見積りがそのまま確定記帳になる** — `:batchEmbedContents` の応答にトークン数が無く
+   adapter は `usage: None` を返す (`gemini_embedding.rs:437-441`)。したがって cost_ledger に
+   載るのは実測ではなく見積りで、provider 側と突合できる数値が存在しない。#1 と合わさり
+   **budget cap が守る対象の金額自体が系統的に過少**になる。
+3. **[P2] `chars / 4.0` のトークン換算が日本語で成立しない** — dogfood コーパスの正規化
+   Markdown (936,873 文字) は CJK 9.3% で既に約 1.28 倍の乖離。OCR 後は日本語比率が上がる。
+4. **[P2] embedding に Batch レーンが無い** — `PreferredRequestKind` は `MarkdownizeAdapter`
+   のみ (`traits.rs:40-44`)。07 §5.3 の根拠は「Vertex はバッチ推論非対応」だが、実装先は
+   Vertex ではなく Gemini API (`generativelanguage.googleapis.com/v1beta`) で、そちらには
+   embeddings 対応の Batch API がある (`client.batches.create_embeddings()`、24h)。
+   **根拠と実装先が食い違っている**ので、まず 07 §5.3 の記述を実装に合わせて訂正する。
+   レーン実装自体は金額効果が小さい (dogfood 規模で差 $0.1–0.4) ため優先度は低い。
+
+## 3.6 CLI 引数の整理 (2026-07-24 完了)
+
+引数の軸が混線し、8 コマンドが `--help` に何も出さない状態だったため A/B/C 一括で整理した。
+
+**A — 自動化の穴**
+- `[adapter] lane = "batch" | "realtime"` を config へ新設 (`config.schema.json` / 03 §11)。
+  解決順は network opt-in と同形 = **CLI > scope config > user config > 既定 (batch)**。
+  毎回 `--realtime` を打つ必要がなくなった。
+- 逆向き上書きの `--batch` を新設 (`--online/--offline` と同じ対称形)。
+- online 送信を駆動する全コマンドへレーン引数を伝播 — `repair --rebuild-db` / `reindex` が
+  受けていなかった (「両方バッチか両方即時」の裁定を表明できない穴だった)。
+
+**B — `--help` が機能していなかった問題**
+- `repair` / `search` / `open` / `view` / `gc` / `reindex` / `move` / `evidence` の 8 コマンドが
+  `UnsupportedArgs` (`trailing_var_arg`) で受けて手書きパースしていた。**clap 宣言へ全面移行**。
+  `search` 16 / `repair` 10 / `reindex` 7 個の引数が help に出るようになり、打ち間違いも検出される。
+- 手書きパーサ 3 本 (`parse_search_args` / `parse_repair_args` / `historical_reindex::parse_args`)
+  と補助 4 本 (`split_flag_value` / `reject_inline_value` / `flag_value` / `without_json`) を削除。
+- `--json` を raw operand から拾い直す `command_captured_json_flag` も不要になり削除
+  (clap の `global = true` が全コマンドで効く)。
+- **回帰を 1 件検出**: 移行時に PC59/PC60 (`--at` は単一 `--scope` 必須) と
+  `TimeSelectorFlags::canonicalize` の検証が落ちたが、既存の契約テストが捕捉して復旧済み。
+
+**C — 語彙の整理** (**Stable 前のため alias は残さず旧名は削除**。呼び出し側は全て更新済み)
+- `reindex --force` → **`--regenerate`**。`restore --force` = 出力先の上書き、という別軸の
+  同名衝突を解消。旧名は削除 (`reindex --force` は usage error)。
+- `search --text|--vector|--hybrid|--no-vector` → **`--mode <auto|text|vector|hybrid>` 単独**。
+  1 つの enum を 4 boolean で表していたのをやめ、config の `[search] default_mode` と 1 対 1 にした。
+  値を取るフラグになったため「boolean への inline value」の危険自体が構造的に消えた。
+- `repair` の 3 操作は **sub-command 化** (`kio repair rebuild-db|verify-objects|registry-prune`)。
+  exactly-one と入れ子 (`--prune-orphans` は verify-objects の下、online/offline・realtime/batch は
+  rebuild-db の下) が**構造で保証**され、手書きの排他・入れ子検証を全廃した。
+  clap の `requires` が `ArgAction::SetTrue` で効かない (sibling が既定値で常に present 扱い)
+  問題も、sub-command 化で回避される。
+- **死んでいた `repair --yes` を削除**。06 §1 の確認プロンプトが未実装でスキップ対象が存在せず、
+  受理して何もしない引数だった。プロンプト実装時に改めて追加する。
+
+**意図的な挙動変更 2 件**
+1. 引数の重複指定が「may be specified once」エラーではなく last-wins になった。clap 宣言済み
+   コマンド (`index --online --online`) は元々受理していたため、**不一致の解消**であって新たな
+   不整合ではない。R12-7 (`--flag=value` 受理) と R16-6 (boolean への inline value は usage error)
+   は clap 側で維持される。
+2. 旧フラグ名は**互換 alias を残さず削除**した (ユーザー裁定: Stable 前で破壊的変更を許容)。
+   契約テスト・仕様書 (`docs/02-10`) の呼び出しは全て新名へ更新済み。
+   `tasks/exploratory-audit-runbook.md` 等の**過去の監査記録は当時の名前のまま残す** (履歴の改竄になるため)。
+
+**残る確認プロンプト未実装**: 06 §1 は `repair verify-objects --prune-orphans` と
+`repair registry-prune` に確認プロンプトを要求しているが実装が無い。`--yes` は削除したので、
+プロンプト実装時にセットで追加する。
+
+検証: 1,301 tests green / clippy clean / fmt clean。
+
 ## 4. eval 由来の既知残余
 - M3-1 の 1 問 (英語 query 「vector database managed pricing around 0.12 dollars per million
   vectors」 vs 日本語本文) — 固定 5 語対訳辞書の範囲外で一致 unit が `0.12` のみ。ゲート非阻害
@@ -225,3 +346,35 @@ import/export (fork/kioz)・observability 深部・J 領域残。MVP 機能面�
   **実機再現** (purge → 復活 → search) が最短だった。
 - Sonnet は「指摘ゼロ地帯の確認声明」+「反証」で価値を出す (son1 の canonical 反証が
   codex 2 系統の fatal を落とした)。
+
+## 6. R24 / R24b 監査の残件 (2026-07-25)
+
+裁定の全文は [r24-audit-adjudication.md](r24-audit-adjudication.md)、
+各系統の報告書は [audit-reports/](audit-reports/) に退避してある。
+**修正済み 6 件は本節に載せない。** 以下は認容したが未修正の分。
+
+### 6.1 `repair` の破壊的操作 — preview が本実行を拘束しない → **修正済み (2026-07-25)**
+
+R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5 / H2-6 は解消済み**。
+`prune_orphans` / `registry_prune` を **plan / apply に分割**し、apply は plan に載った対象しか
+触らない。確認プロンプトは対象を列挙する (先頭 20 件 + 残数)。blocked の JSON には
+`KIO-E-PRUNE-ORPHANS-BLOCKED-001` が載る。
+
+**`repair` の破壊的実行を避ける必要はなくなった。**
+
+不変条件は単体テスト `apply_removes_only_what_the_plan_listed` が固定している
+(preview 取得 → **新しい orphan を作る** → apply → 新しい方は残る)。
+
+### 6.2 その他の認容分
+
+| ID | 内容 | 一致 |
+|---|---|---|
+| F5 | batch client 不可時に OCR=Batch / embedding=Sync とレーンが分裂する (ユーザー裁定「両方バッチか両方即時」違反) | 2/6 |
+| F6 | 1 job のメンバ数を 512 固定で切っており、inline 20MB 上限を**サイズで**守っていない | 1/6 |
+| F7 | 飛行中行の profile と現在 profile の一致を collect 時に確認していない | 2/6 |
+| F8 | 未知の provider state を永久に in-flight 扱いする | 1/6 |
+| F9 | `list_jobs` の 5,000 件打ち切りで §5.8 回復走査が取りこぼしうる | 1/6 (要調査) |
+| G1 の派生 | Gemini job は task_key を持たないため、逆方向の orphan 走査では常に `unknown` 止まり (upload と同じ report-only 姿勢)。帰属は intent_token で成立するので実害は無いが、将来 metadata を運べるようになったら task key 4 組を載せる | — |
+| F10 | `active_embedding_send_lane` の doc コメントが「driver は未着手」のまま陳腐化 | 3/6 |
+| H2-7 | reachability 読取り失敗を無視し、参照中オブジェクトを orphan 扱いしうる | 1/3 (要調査・fatal 候補) |
+| H2-8 | 契約テストが `registry-prune` の拒否経路を網羅していない (列挙・拘束・blocked は §6.1 で充足) | 3/3 |

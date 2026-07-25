@@ -36,7 +36,7 @@ use kio_adapter::catalog::{
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::office_convert::{is_office_media, resolve_office_converter};
 use kio_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
-use kio_adapter::traits::MarkdownizeAdapter;
+use kio_adapter::traits::{MarkdownizeAdapter, PreferredRequestKind};
 use kio_adapter::types::{
     AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, ExecutionMode, MarkdownUnit,
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
@@ -197,25 +197,25 @@ enum Command {
     /// L307-338, 10-operations.md §7.5.2 backup/restore recovery).
     Ledger(LedgerArgs),
     /// Rebuild local acceleration tables.
-    Repair(UnsupportedArgs),
+    Repair(RepairArgs),
     /// Search indexed chunks.
-    Search(UnsupportedArgs),
+    Search(SearchArgs),
     /// Open an Evidence Pointer target.
-    Open(UnsupportedArgs),
+    Open(PointerArgs),
     /// View an Evidence Pointer target.
-    View(UnsupportedArgs),
+    View(PointerArgs),
     /// Restore historical raw bytes to an explicit destination.
     Restore(RestoreArgs),
     /// Phase 4+ command placeholder.
-    Gc(UnsupportedArgs),
+    Gc(PlaceholderArgs),
     /// Remove content from KIO-managed history after preview and confirmation.
     Purge(purge::PurgeArgs),
     /// Reindex normalized instances.
-    Reindex(UnsupportedArgs),
+    Reindex(ReindexArgs),
     /// Phase 4+ command placeholder.
-    Move(UnsupportedArgs),
+    Move(PlaceholderArgs),
     /// Step 4 command placeholder.
-    Evidence(UnsupportedArgs),
+    Evidence(EvidenceArgs),
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +283,22 @@ struct IndexArgs {
     offline: bool,
     #[arg(long)]
     revoke_network: bool,
+    /// 即時 (リアルタイム) レーンを要求する。**OCR と embedding の両方**を
+    /// 同時に倒す — 片方だけ Batch という組み合わせは作らない (07 §5.3 の
+    /// 2026-07-24 裁定)。単価は両方とも 2 倍 (OCR $4/1,000 pages・embedding
+    /// $0.20/1M tokens) になる代わりに、provider の最大 24h の turnaround を
+    /// 待たずに当該実行内で完了する。
+    ///
+    /// `--online` とは別の軸である: `--online` は「送ってよいか」(network
+    /// opt-in)、こちらは「いつ返ってくるか」(turnaround)。
+    ///
+    /// 既定は config の `[adapter] lane` (未設定なら Batch = 半額)。
+    #[arg(long, conflicts_with = "batch")]
+    realtime: bool,
+    /// Batch レーン (半額・非同期) を要求する。config の `[adapter] lane =
+    /// "realtime"` を当該実行だけ打ち消すための逆向き上書き。
+    #[arg(long)]
+    batch: bool,
     /// N1: explicit approval to lift the Tier B (secrets_tier_b_warning) online
     /// hold for this scope, allowing candidate-secret files to be sent to online
     /// adapters (markdownize + embedding). Distinct from `--approve` (which is the
@@ -320,6 +336,22 @@ struct ResumeArgs {
     /// online work stays pending; 07 §3).
     #[arg(long)]
     offline: bool,
+    /// 即時 (リアルタイム) レーンを要求する。**OCR と embedding の両方**を
+    /// 同時に倒す — 片方だけ Batch という組み合わせは作らない (07 §5.3 の
+    /// 2026-07-24 裁定)。単価は両方とも 2 倍 (OCR $4/1,000 pages・embedding
+    /// $0.20/1M tokens) になる代わりに、provider の最大 24h の turnaround を
+    /// 待たずに当該実行内で完了する。
+    ///
+    /// `--online` とは別の軸である: `--online` は「送ってよいか」(network
+    /// opt-in)、こちらは「いつ返ってくるか」(turnaround)。
+    ///
+    /// 既定は config の `[adapter] lane` (未設定なら Batch = 半額)。
+    #[arg(long, conflicts_with = "batch")]
+    realtime: bool,
+    /// Batch レーン (半額・非同期) を要求する。config の `[adapter] lane =
+    /// "realtime"` を当該実行だけ打ち消すための逆向き上書き。
+    #[arg(long)]
+    batch: bool,
 }
 
 #[derive(Debug, Args)]
@@ -336,6 +368,22 @@ struct RetryArgs {
     /// QA30: forbids new online sends for this invocation.
     #[arg(long)]
     offline: bool,
+    /// 即時 (リアルタイム) レーンを要求する。**OCR と embedding の両方**を
+    /// 同時に倒す — 片方だけ Batch という組み合わせは作らない (07 §5.3 の
+    /// 2026-07-24 裁定)。単価は両方とも 2 倍 (OCR $4/1,000 pages・embedding
+    /// $0.20/1M tokens) になる代わりに、provider の最大 24h の turnaround を
+    /// 待たずに当該実行内で完了する。
+    ///
+    /// `--online` とは別の軸である: `--online` は「送ってよいか」(network
+    /// opt-in)、こちらは「いつ返ってくるか」(turnaround)。
+    ///
+    /// 既定は config の `[adapter] lane` (未設定なら Batch = 半額)。
+    #[arg(long, conflicts_with = "batch")]
+    realtime: bool,
+    /// Batch レーン (半額・非同期) を要求する。config の `[adapter] lane =
+    /// "realtime"` を当該実行だけ打ち消すための逆向き上書き。
+    #[arg(long)]
+    batch: bool,
 }
 
 #[derive(Debug, Args)]
@@ -390,10 +438,189 @@ enum LedgerCommand {
 #[derive(Debug, Args)]
 struct ReconcileArgs {}
 
+/// A command whose implementation is Phase 4+ (`gc` / `move`). Declared with
+/// no operands so `--help` says so plainly instead of silently swallowing
+/// whatever was typed.
 #[derive(Debug, Args)]
-struct UnsupportedArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
+struct PlaceholderArgs {}
+
+/// `kio open` / `kio view` — one Evidence Pointer operand (06 §1.1).
+#[derive(Debug, Args)]
+struct PointerArgs {
+    /// Evidence Pointer text, an `object:` URI, a `sha256:` hash, or `-` to
+    /// read the pointer from stdin.
+    #[arg(value_name = "POINTER")]
+    pointer: Option<String>,
+}
+
+/// `kio evidence verify <pointer> [--strict]` (08 §4).
+#[derive(Debug, Args)]
+struct EvidenceArgs {
+    /// Sub-command. Only `verify` exists today.
+    #[arg(value_name = "SUBCOMMAND")]
+    subcommand: Option<String>,
+    /// Evidence Pointer URI, inline JSON, or `-` to read from stdin.
+    #[arg(value_name = "POINTER")]
+    pointer: Option<String>,
+    /// Fail on any degraded resolution instead of reporting it.
+    #[arg(long)]
+    strict: bool,
+}
+
+/// `kio repair` (10 §7.5).
+///
+/// C (2026-07-24): the three operations are sub-commands, not flags. They were
+/// always mutually exclusive with exactly one required, and each nests its own
+/// options — a shape clap expresses natively, so the hand-written exactly-one
+/// and nesting checks are gone with them.
+#[derive(Debug, Args)]
+struct RepairArgs {
+    #[command(subcommand)]
+    operation: RepairOperation,
+}
+
+#[derive(Debug, Subcommand)]
+enum RepairOperation {
+    /// Rebuild the SQLite acceleration tables from the CAS objects. May drive a
+    /// post-rebuild enrichment pass, so it is the only operation that takes the
+    /// send-consent and lane options.
+    RebuildDb(RepairRebuildDbArgs),
+    /// Verify CAS object integrity.
+    VerifyObjects(RepairVerifyObjectsArgs),
+    /// Retire permanently unreachable scope-registry rows.
+    RegistryPrune(RepairRegistryPruneArgs),
+}
+
+#[derive(Debug, Args)]
+struct RepairRebuildDbArgs {
+    /// One-shot network opt-in for this invocation (07 §3).
+    #[arg(long, conflicts_with = "offline")]
+    online: bool,
+    /// Forbid new online sends for this invocation (07 §3).
+    #[arg(long)]
+    offline: bool,
+    /// Send on the realtime lane instead of Batch — see `kio index --realtime`.
+    #[arg(long, conflicts_with = "batch")]
+    realtime: bool,
+    /// Send on the Batch lane, overriding a `[adapter] lane = "realtime"` config.
+    #[arg(long)]
+    batch: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepairVerifyObjectsArgs {
+    /// Delete prepared/image objects no manifest references.
+    #[arg(long)]
+    prune_orphans: bool,
+    /// Skip the `--prune-orphans` confirmation prompt (06 §1).
+    ///
+    /// R24b (2 系統一致): NOT `requires = "prune_orphans"`. clap's `requires` is
+    /// inert between two `ArgAction::SetTrue` flags — the sibling counts as
+    /// "present" even when it defaulted to `false` — so the constraint never
+    /// fired and `--yes` alone was accepted and silently inert. `run_repair`
+    /// rejects that combination explicitly instead.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepairRegistryPruneArgs {
+    /// Skip the confirmation prompt (06 §1).
+    #[arg(long)]
+    yes: bool,
+}
+
+/// `kio reindex` (06 §1).
+#[derive(Debug, Args)]
+struct ReindexArgs {
+    /// Re-normalize and re-embed HEAD into a NEW generation (gen+1). This is a
+    /// mode selector, not a safety override — the confirmation is `--yes`.
+    ///
+    /// C (2026-07-24): renamed from `--force`, which collided with `restore
+    /// --force` ("overwrite the destination") — a different axis entirely.
+    #[arg(long)]
+    regenerate: bool,
+    /// Regenerate embeddings for a past snapshot instead of HEAD.
+    #[arg(long, value_name = "COMMIT", conflicts_with = "regenerate")]
+    at: Option<String>,
+    /// Skip the destructive-operation confirmation prompt.
+    #[arg(long)]
+    yes: bool,
+    /// One-shot network opt-in for this invocation (07 §3).
+    #[arg(long, conflicts_with = "offline")]
+    online: bool,
+    /// Forbid new online sends for this invocation (07 §3).
+    #[arg(long)]
+    offline: bool,
+    /// Send on the realtime lane instead of Batch — see `kio index --realtime`.
+    #[arg(long, conflicts_with = "batch")]
+    realtime: bool,
+    /// Send on the Batch lane, overriding a `[adapter] lane = "realtime"` config.
+    #[arg(long)]
+    batch: bool,
+}
+
+/// The search lane selector, mirroring `[search] default_mode` (05 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SearchModeArg {
+    /// Hybrid, falling back to text when the vector lane is unavailable.
+    Auto,
+    Text,
+    Vector,
+    Hybrid,
+}
+
+/// `kio search` (06 §3).
+#[derive(Debug, Args)]
+struct SearchArgs {
+    #[arg(value_name = "QUERY")]
+    query: Option<String>,
+    /// Retrieval mode. Defaults to the effective `[search] default_mode`
+    /// (`auto` = hybrid → text fallback).
+    ///
+    /// C (2026-07-24): the sole mode selector, mirroring the config key it
+    /// overrides. The four booleans it replaced (`--text` / `--vector` /
+    /// `--hybrid` / `--no-vector`) encoded one enum as four flags whose
+    /// interactions had to be checked by hand, and `--no-vector` vs `--text`
+    /// was not self-explanatory.
+    #[arg(long, value_name = "MODE", value_enum)]
+    mode: Option<SearchModeArg>,
+    /// Restrict the search to one scope root.
+    #[arg(long, value_name = "PATH")]
+    scope: Option<PathBuf>,
+    /// With `--scope`: include scopes below it.
+    #[arg(long)]
+    descendants: bool,
+    /// Search every registered scope (the default when `--scope` is absent).
+    #[arg(long)]
+    all_scopes: bool,
+    /// Search a past snapshot. Requires a single `--scope` (06 §3).
+    #[arg(long, value_name = "COMMIT")]
+    at: Option<String>,
+    /// Include every commit, deleted and moved files included.
+    #[arg(long)]
+    all_history: bool,
+    /// Include entries deleted from the working tree.
+    #[arg(long)]
+    include_deleted: bool,
+    /// Only entries newer than this duration (e.g. `7d`).
+    #[arg(long, value_name = "DURATION")]
+    since: Option<String>,
+    /// Maximum results (1-100).
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    limit: u64,
+    /// Skip this many results. Mutually exclusive with `--cursor`.
+    #[arg(long, value_name = "N")]
+    offset: Option<u64>,
+    /// Opaque pagination token from a previous response.
+    #[arg(long, value_name = "TOKEN")]
+    cursor: Option<String>,
+    /// One-shot network opt-in for the query embedding (07 §3).
+    #[arg(long, conflicts_with = "offline")]
+    online: bool,
+    /// Forbid the query embedding send for this invocation (07 §3).
+    #[arg(long)]
+    offline: bool,
 }
 
 fn main() {
@@ -404,7 +631,7 @@ fn main() {
         Ok(cli) => cli,
         Err(err) => exit_from_clap_error(err),
     };
-    let json = cli.json || command_captured_json_flag(&cli.command);
+    let json = cli.json;
     let exit_code = match run(cli) {
         Ok(mut output) => {
             // A command may request a non-zero success exit code (e.g. multi-scope
@@ -534,32 +761,6 @@ fn exit_override_error_code(code: ExitCode) -> &'static str {
         ExitCode::PartialFailure => "KIO-E-SEARCH-PARTIAL-001",
         ExitCode::PermanentFailure => "KIO-E-SEARCH-SCOPE-ALL-FAILED-001",
         _ => "KIO-E-INTERNAL-001",
-    }
-}
-
-fn command_captured_json_flag(command: &Command) -> bool {
-    match command {
-        Command::Repair(args)
-        | Command::Search(args)
-        | Command::Open(args)
-        | Command::View(args)
-        | Command::Gc(args)
-        | Command::Reindex(args)
-        | Command::Move(args)
-        | Command::Evidence(args) => args.args.iter().any(|arg| arg == "--json"),
-        Command::Index(_)
-        | Command::Batch(_)
-        | Command::Purge(_)
-        | Command::Adapter(_)
-        | Command::Ledger(_) => false,
-        Command::Init(_)
-        | Command::Status
-        | Command::Snapshot(_)
-        | Command::Log(_)
-        | Command::Diff(_)
-        | Command::Inspect(_)
-        | Command::Tag(_)
-        | Command::Restore(_) => false,
     }
 }
 
@@ -853,7 +1054,12 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             "--online and --offline are mutually exclusive",
         ));
     }
+    let lane_override = LaneOverride::new(args.realtime, args.batch);
     let repo = Repository::open_current()?;
+    // Resolve the invocation lane BEFORE anything plans or prices a send: the
+    // OCR lane selection and both reservation estimates read it, and by ruling
+    // OCR and embedding must never end up on different lanes.
+    resolve_invocation_lane(lane_override, Some(&repo.kio_dir().join("config.toml")))?;
     // M1(a): serialize the whole index command against concurrent index/repair/
     // reindex (05 §6). Held end-to-end, not just across the snapshot sub-step, so
     // two processes cannot interleave chunk writes / sqlite rebuilds. The lock is
@@ -924,6 +1130,8 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     // here land as Done tasks that `apply_online_promotion_to_index` below
     // folds into this run's single snapshot.
     poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
+    // 04 §5.8 相 3 for the embedding Batch lane at the same entry point.
+    poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kio_dir())?;
     materialize_tool_lock(&repo)?;
@@ -1073,18 +1281,47 @@ struct ParsedSearch {
     offline: bool,
 }
 
-fn run_repair(args: UnsupportedArgs) -> Result<Value> {
-    let args = without_json(args.args);
-    let parsed = parse_repair_args(args)?;
+/// R24b (3 系統一致): `--yes` only means anything alongside `--prune-orphans`;
+/// accepting it alone would let a user believe they had pre-authorized a prune
+/// this invocation never performs. clap cannot express the constraint between
+/// two boolean flags (see `RepairVerifyObjectsArgs::yes`), so it lives here.
+///
+/// Kept out of `run_repair`'s body so the store lock stays within the window
+/// QB11 (`step4b_p3b_contract.rs`) scans for.
+fn reject_inert_repair_yes(args: &RepairArgs) -> Result<()> {
+    if let RepairOperation::VerifyObjects(verify) = &args.operation {
+        if verify.yes && !verify.prune_orphans {
+            return Err(KioError::invalid_usage(
+                "repair verify-objects --yes requires --prune-orphans",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_repair(args: RepairArgs) -> Result<Value> {
+    reject_inert_repair_yes(&args)?;
+    let parsed = parsed_repair(&args);
     let mode = parsed.mode;
-    // PB25: `--registry-prune` operates on the device-global scope-registry,
+    // PB25: `registry-prune` operates on the device-global scope-registry,
     // not any one scope's `.kio` — it must not require the CWD to be inside a
     // scope at all (unlike every other repair mode).
-    if mode == RepairMode::RegistryPrune {
-        let report = verify_objects::registry_prune()?;
+    if let RepairOperation::RegistryPrune(prune) = &args.operation {
+        let plan = verify_objects::registry_prune_plan()?;
+        confirm_repair_prune("registry-prune", &plan.target_lines(), prune.yes)?;
+        let report = verify_objects::registry_prune_apply(&plan)?;
         return serde_json::to_value(report).map_err(|error| KioError::schema(error.to_string()));
     }
     let repo = Repository::open_current_without_head_repair()?;
+    if let RepairOperation::RebuildDb(rebuild) = &args.operation {
+        // `rebuild-db`'s post-rebuild enrichment can send, so it takes the same
+        // invocation lane every other sending command does — scope config
+        // included, which is why this waits for the repository.
+        resolve_invocation_lane(
+            LaneOverride::new(rebuild.realtime, rebuild.batch),
+            Some(&repo.kio_dir().join("config.toml")),
+        )?;
+    }
     // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
     let _lock = repo.lock_store()?;
     repo.self_heal_head_for_repair()?;
@@ -1115,13 +1352,39 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         }
         // PB12-17: `--prune-orphans` runs only after a clean verify pass.
         if mode == RepairMode::VerifyObjectsPruneOrphans {
-            let prune = verify_objects::prune_orphans(&repo)?;
+            let skip_prompt = matches!(
+                &args.operation,
+                RepairOperation::VerifyObjects(verify) if verify.yes
+            );
+            // H2-4 (R24b, 3/3 一致・2 件 fatal): the plan the user approves IS
+            // the set that gets deleted. This used to count with one call and
+            // delete with a second that re-derived the targets, so anything
+            // that became an orphan in between was removed without ever having
+            // been shown. A blocked plan also stops here rather than falling
+            // through to a destructive call that might no longer be blocked.
+            let plan = verify_objects::prune_orphans_plan(&repo)?;
+            if !plan.is_blocked() {
+                confirm_repair_prune(
+                    "verify-objects --prune-orphans",
+                    &plan.target_lines(),
+                    skip_prompt,
+                )?;
+            }
+            let prune = verify_objects::prune_orphans_apply(&repo, &plan)?;
             if let (Some(object), Ok(prune_value)) = (
                 output.as_object_mut(),
                 serde_json::to_value(&prune).map_err(|error| KioError::schema(error.to_string())),
             ) {
                 object.insert("prune_orphans".to_owned(), prune_value);
                 if prune.status == "blocked" {
+                    // H2-5 (R24b, 3/3 一致): a non-zero exit without an
+                    // `error_code` is the one asymmetry every other failure
+                    // path in this command avoids — a caller reading the JSON
+                    // saw `__exit_code: 3` and no way to tell why.
+                    object.insert(
+                        "error_code".to_owned(),
+                        json!("KIO-E-PRUNE-ORPHANS-BLOCKED-001"),
+                    );
                     object.insert("__exit_code".to_owned(), json!(3));
                 }
             }
@@ -1135,6 +1398,8 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // 04 §5.8 相 3: poll/collect in-flight Batch markdownize jobs at the same
     // write-command entry point (see `poll_batch_markdownize_jobs`).
     poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
+    // 04 §5.8 相 3 for the embedding Batch lane at the same entry point.
+    poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kio_dir())?;
     let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
@@ -1192,7 +1457,7 @@ enum RepairMode {
     RegistryPrune,
 }
 
-/// QA29 (step4b-contract-tests-p3a.md §I): [`parse_repair_args`]'s parsed
+/// QA29 (step4b-contract-tests-p3a.md §I): [`parsed_repair`]'s parsed
 /// result — the primary mode plus `--rebuild-db`'s optional
 /// `--online`/`--offline` sub-flags (06-cli-spec.md §1 L52-55).
 struct ParsedRepair {
@@ -1201,149 +1466,34 @@ struct ParsedRepair {
     offline: bool,
 }
 
-/// PB12/QA29: `kio repair` accepts exactly one of `--rebuild-db
-/// [--online|--offline]`, `--verify-objects [--prune-orphans]`, or
-/// `--registry-prune`. `--online`/`--offline` are valid ONLY alongside
-/// `--rebuild-db` (06-cli-spec.md §1 L52-55 nests them under that
-/// alternative specifically — `--rebuild-db` is the only mode whose
-/// post-rebuild enrichment pass can drive a fresh online send, 07 §3
-/// L220-222).
-fn parse_repair_args(args: Vec<String>) -> Result<ParsedRepair> {
-    if args.is_empty() {
-        return Err(KioError::invalid_usage(
-            "repair currently supports --rebuild-db",
-        ));
-    }
-    let mut rebuild_db = false;
-    let mut verify_objects = false;
-    let mut prune_orphans = false;
-    let mut registry_prune = false;
-    let mut online = false;
-    let mut offline = false;
-    for arg in &args {
-        // R12-7: accept `--flag=value` before matching so an existing flag is not
-        // misreported as unknown. R16-6: every repair flag is boolean, so an inline
-        // value is a usage error, NOT silently dropped — `--rebuild-db=false` must
-        // not still rebuild the DB.
-        let (flag, inline) = split_flag_value(arg);
-        match flag {
-            "--rebuild-db" if !rebuild_db => {
-                reject_inline_value(flag, inline)?;
-                rebuild_db = true;
-            }
-            "--rebuild-db" => {
-                reject_inline_value(flag, inline)?;
-                return Err(KioError::invalid_usage(
-                    "repair accepts --rebuild-db only once",
-                ));
-            }
-            "--online" if !online => {
-                reject_inline_value(flag, inline)?;
-                online = true;
-            }
-            "--offline" if !offline => {
-                reject_inline_value(flag, inline)?;
-                offline = true;
-            }
-            "--online" | "--offline" => {
-                reject_inline_value(flag, inline)?;
-                return Err(KioError::invalid_usage(format!(
-                    "repair accepts {flag} only once"
-                )));
-            }
-            "--yes" => reject_inline_value(flag, inline)?,
-            "--verify-objects" if !verify_objects => {
-                reject_inline_value(flag, inline)?;
-                verify_objects = true;
-            }
-            "--verify-objects" => {
-                reject_inline_value(flag, inline)?;
-                return Err(KioError::invalid_usage(
-                    "repair accepts --verify-objects only once",
-                ));
-            }
-            "--prune-orphans" if !prune_orphans => {
-                reject_inline_value(flag, inline)?;
-                prune_orphans = true;
-            }
-            "--prune-orphans" => {
-                reject_inline_value(flag, inline)?;
-                return Err(KioError::invalid_usage(
-                    "repair accepts --prune-orphans only once",
-                ));
-            }
-            "--registry-prune" if !registry_prune => {
-                reject_inline_value(flag, inline)?;
-                registry_prune = true;
-            }
-            "--registry-prune" => {
-                reject_inline_value(flag, inline)?;
-                return Err(KioError::invalid_usage(
-                    "repair accepts --registry-prune only once",
-                ));
-            }
-            value if value.starts_with('-') => {
-                return Err(KioError::invalid_usage(format!(
-                    "unknown repair flag: {value}"
-                )))
-            }
-            _ => {
-                return Err(KioError::invalid_usage(
-                    "repair accepts no positional arguments",
-                ))
-            }
-        }
-    }
-    if online && offline {
-        return Err(KioError::invalid_usage(
-            "--online and --offline are mutually exclusive",
-        ));
-    }
-    // PB12: exactly one of the three primary modes.
-    let primary_count = [rebuild_db, verify_objects, registry_prune]
-        .iter()
-        .filter(|value| **value)
-        .count();
-    if primary_count != 1 {
-        return Err(KioError::invalid_usage(
-            "repair requires exactly one of --rebuild-db, --verify-objects, or --registry-prune",
-        ));
-    }
-    // PB12: `--prune-orphans` is a `--verify-objects`-only modifier.
-    if prune_orphans && !verify_objects {
-        return Err(KioError::invalid_usage(
-            "--prune-orphans requires --verify-objects",
-        ));
-    }
-    // QA29: `--online`/`--offline` are `--rebuild-db`-only sub-flags.
-    if (online || offline) && !rebuild_db {
-        return Err(KioError::invalid_usage(
-            "--online/--offline require --rebuild-db",
-        ));
-    }
-    if registry_prune {
-        return Ok(ParsedRepair {
+/// Fold the `repair` sub-command into the mode enum the command body uses.
+///
+/// C (2026-07-24): every rule this used to check by hand — exactly one
+/// operation, `--prune-orphans` only under `verify-objects`, the send/lane
+/// options only under `rebuild-db` — is now structural in the sub-command
+/// declaration, so this is a total function with nothing left to reject.
+fn parsed_repair(args: &RepairArgs) -> ParsedRepair {
+    match &args.operation {
+        RepairOperation::RegistryPrune(_) => ParsedRepair {
             mode: RepairMode::RegistryPrune,
-            online,
-            offline,
-        });
-    }
-    if rebuild_db {
-        return Ok(ParsedRepair {
-            mode: RepairMode::RebuildDb,
-            online,
-            offline,
-        });
-    }
-    Ok(ParsedRepair {
-        mode: if prune_orphans {
-            RepairMode::VerifyObjectsPruneOrphans
-        } else {
-            RepairMode::VerifyObjects
+            online: false,
+            offline: false,
         },
-        online,
-        offline,
-    })
+        RepairOperation::RebuildDb(rebuild) => ParsedRepair {
+            mode: RepairMode::RebuildDb,
+            online: rebuild.online,
+            offline: rebuild.offline,
+        },
+        RepairOperation::VerifyObjects(verify) => ParsedRepair {
+            mode: if verify.prune_orphans {
+                RepairMode::VerifyObjectsPruneOrphans
+            } else {
+                RepairMode::VerifyObjects
+            },
+            online: false,
+            offline: false,
+        },
+    }
 }
 
 /// Resolved search mode plus the honest fallback reporting fields (05 §1.1/§1.7).
@@ -1863,7 +2013,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
-fn run_search(args: UnsupportedArgs) -> Result<Value> {
+fn run_search(args: SearchArgs) -> Result<Value> {
     // R12-4: a FAILED search (cursor mismatch, all-scope-failed, …) returns before
     // `append_search_logs`, so it never wrote a per-search metrics line and dropped
     // out of the p50/p95/p99 latency population (docs/05:578). Emit that line here on
@@ -1877,8 +2027,8 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     result
 }
 
-fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
-    let parsed = parse_search_args(without_json(args.args))?;
+fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
+    let parsed = parsed_search(args)?;
     // PC10 (05 §1.3 L115): a query that tokenizes to zero tokens (empty, or
     // whitespace-only under PC9's Unicode-whitespace split) is a usage error
     // — rejected here, before any repo/registry/index access ("起動時に...
@@ -5481,8 +5631,8 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, V
     Ok((exec, excluded))
 }
 
-fn run_open(args: UnsupportedArgs) -> Result<Value> {
-    let raw = read_pointer_input(without_json(args.args))?;
+fn run_open(args: PointerArgs) -> Result<Value> {
+    let raw = read_pointer_input(args.pointer.into_iter().collect())?;
     if let Some(object) = parse_object_uri(&raw)? {
         return resolve_object_uri(&object, false);
     }
@@ -5502,8 +5652,8 @@ fn run_open(args: UnsupportedArgs) -> Result<Value> {
     }))
 }
 
-fn run_view(args: UnsupportedArgs) -> Result<Value> {
-    let raw = read_pointer_input(without_json(args.args))?;
+fn run_view(args: PointerArgs) -> Result<Value> {
+    let raw = read_pointer_input(args.pointer.into_iter().collect())?;
     if let Some(object) = parse_object_uri(&raw)? {
         return resolve_object_uri(&object, true);
     }
@@ -5526,14 +5676,20 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
     }))
 }
 
-fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
-    let parsed = historical_reindex::parse_args(without_json(args.args))?;
-    if parsed.at.is_some() && parsed.force {
-        return Err(KioError::invalid_usage(
-            "reindex --force and --at are mutually exclusive",
-        ));
-    }
+fn run_reindex(args: ReindexArgs) -> Result<Value> {
+    // B: `--regenerate`/`--at` exclusivity and the flag vocabulary are enforced
+    // by the clap declaration on `ReindexArgs`; this only shapes the struct the
+    // command body already consumed.
+    let parsed = historical_reindex::ParsedReindex {
+        at: args.at.clone(),
+        force: args.regenerate,
+        yes: args.yes,
+        online: args.online,
+        offline: args.offline,
+    };
+    let lane_override = LaneOverride::new(args.realtime, args.batch);
     let repo = Repository::open_current()?;
+    resolve_invocation_lane(lane_override, Some(&repo.kio_dir().join("config.toml")))?;
     // M1(a): serialize both HEAD reindex and historical enrichment against
     // concurrent index/repair/reindex. Historical enrichment is derived-state
     // only, but still appends to the chunk ledger and SQLite projection.
@@ -5546,6 +5702,8 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // 04 §5.8 相 3: poll/collect in-flight Batch markdownize jobs at the same
     // write-command entry point (see `poll_batch_markdownize_jobs`).
     poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
+    // 04 §5.8 相 3 for the embedding Batch lane at the same entry point.
+    poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kio_dir())?;
     if let Some(at) = parsed.at.as_deref() {
@@ -5553,13 +5711,13 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     }
     if !parsed.force {
         return Err(KioError::invalid_usage(
-            "reindex requires --force in Step 3",
+            "reindex requires --regenerate in Step 3",
         ));
     }
     if !parsed.yes {
         return Err(KioError::new(
             "KIO-E-CONFIRM-REJECTED-001",
-            "reindex --force requires confirmation; pass --yes in non-interactive mode",
+            "reindex --regenerate requires confirmation; pass --yes in non-interactive mode",
             json!({}),
             ExitCode::ConfirmationRejected,
         ));
@@ -7007,187 +7165,41 @@ fn build_sqlite_index_at(
     Ok(())
 }
 
-/// R12-7: split a long option into `(flag, inline_value)`. `--limit=5` becomes
-/// `("--limit", Some("5"))` — the `--flag=value` form clap-derive commands already
-/// accept. Only `--`-prefixed tokens are split, so a positional operand containing
-/// `=` (e.g. a query `key=value`) is returned intact and never mangled.
-fn split_flag_value(arg: &str) -> (&str, Option<&str>) {
-    if arg.starts_with("--") {
-        if let Some((flag, value)) = arg.split_once('=') {
-            return (flag, Some(value));
-        }
+/// Fold [`SearchArgs`] into the shape the search body consumes.
+///
+/// B (2026-07-24): this replaces a ~200-line hand-rolled flag parser. clap now
+/// owns operand shape, `--flag=value` handling, mutual exclusion between the
+/// mode shorthands, and the "inline value on a boolean flag is a usage error"
+/// rule (R16-6) via `ArgAction::SetTrue`. The value-range checks that are not
+/// expressible as clap attributes stay here.
+///
+/// One deliberate behavior change: a repeated flag is now last-wins (booleans
+/// are idempotent) instead of a "may be specified once" usage error. That
+/// matches every clap-declared command in this CLI — `kio index --online
+/// --online` has always been accepted — so this removes an inconsistency
+/// rather than introducing one.
+fn parsed_search(args: SearchArgs) -> Result<ParsedSearch> {
+    let Some(query) = args.query else {
+        return Err(KioError::invalid_usage("search query is required"));
+    };
+    let (requested_mode, explicit_mode) = match args.mode {
+        Some(SearchModeArg::Auto) => (SearchMode::Auto, true),
+        Some(SearchModeArg::Text) => (SearchMode::Text, true),
+        Some(SearchModeArg::Vector) => (SearchMode::Vector, true),
+        Some(SearchModeArg::Hybrid) => (SearchMode::Hybrid, true),
+        None => (SearchMode::Auto, false),
+    };
+    // R12-7: `--limit 0` is a meaningless value, not a silent clamp-to-1. The
+    // upper cap of 100 is unchanged.
+    if args.limit == 0 {
+        return Err(KioError::invalid_usage("--limit must be at least 1"));
     }
-    (arg, None)
-}
-
-/// R16-6: a value-LESS (boolean / SetTrue) flag must reject an inline
-/// `--flag=<value>` outright — including `--flag=false` and `--flag=true`. The
-/// R12-7 `split_flag_value` rewrite made the hand-rolled parsers accept `--flag=x`
-/// for EVERY flag, but the value-less arms then silently DROPPED the inline value
-/// and set the flag `true`, so `reindex --force=false --yes=false` (an explicit
-/// negation) bypassed the confirmation gate and ran a full reindex (exit 0). Reject
-/// any inline value here so the manual parsers match clap's derived bool flags,
-/// which already reject `--json=false` (KIO-E-CONFIG-USAGE-001, exit 2). Value-taking
-/// flags (`--at` / `--scope` / `--limit` / `--offset` / `--cursor`) keep consuming the
-/// inline value via `flag_value` and never call this.
-fn reject_inline_value(flag: &str, inline: Option<&str>) -> Result<()> {
-    if inline.is_some() {
-        return Err(KioError::invalid_usage(format!(
-            "flag {flag} does not take a value"
-        )));
-    }
-    Ok(())
-}
-
-/// R12-7: the value for a value-taking flag — the inline `--flag=value` value if
-/// present, else the next argv token (advancing `i`).
-fn flag_value(args: &[String], i: &mut usize, inline: Option<&str>, flag: &str) -> Result<String> {
-    if let Some(value) = inline {
-        return Ok(value.to_owned());
-    }
-    *i += 1;
-    args.get(*i)
-        .cloned()
-        .ok_or_else(|| KioError::invalid_usage(format!("{flag} requires a value")))
-}
-
-fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
-    let mut query = None;
-    let mut requested_mode = SearchMode::Auto;
-    let mut explicit_mode = false;
-    let mut scope = None;
-    let mut descendants = false;
-    let mut all_scopes = false;
-    let mut limit = 20u64;
-    let mut offset = None;
-    let mut cursor = None;
-    let mut time_selector_flags = TimeSelectorFlags::default();
-    let mut online = false;
-    let mut offline = false;
-    let mut i = 0usize;
-    while i < args.len() {
-        // R12-7: accept `--flag=value` before matching (the manual parser used to
-        // reject it as "unknown flag" even though the flag exists).
-        let (flag, inline) = split_flag_value(&args[i]);
-        match flag {
-            "--at" => {
-                if time_selector_flags.at.is_some() {
-                    return Err(KioError::invalid_usage("--at may be specified once"));
-                }
-                time_selector_flags.at = Some(flag_value(args.as_slice(), &mut i, inline, "--at")?);
-            }
-            "--all-history" => {
-                reject_inline_value(flag, inline)?;
-                if time_selector_flags.all_history {
-                    return Err(KioError::invalid_usage(
-                        "--all-history may be specified once",
-                    ));
-                }
-                time_selector_flags.all_history = true;
-            }
-            "--include-deleted" => {
-                reject_inline_value(flag, inline)?;
-                if time_selector_flags.include_deleted {
-                    return Err(KioError::invalid_usage(
-                        "--include-deleted may be specified once",
-                    ));
-                }
-                time_selector_flags.include_deleted = true;
-            }
-            "--since" => {
-                if time_selector_flags.since.is_some() {
-                    return Err(KioError::invalid_usage("--since may be specified once"));
-                }
-                time_selector_flags.since =
-                    Some(flag_value(args.as_slice(), &mut i, inline, "--since")?);
-            }
-            "--text" | "--no-vector" => {
-                // R16-6: these are value-less mode selectors — `--text=false` must be
-                // a usage error, not a silent "text mode requested" (the inline value
-                // was previously dropped and the flag set anyway).
-                reject_inline_value(flag, inline)?;
-                requested_mode = SearchMode::Text;
-                explicit_mode = true;
-            }
-            "--vector" => {
-                reject_inline_value(flag, inline)?;
-                requested_mode = SearchMode::Vector;
-                explicit_mode = true;
-            }
-            "--hybrid" => {
-                reject_inline_value(flag, inline)?;
-                requested_mode = SearchMode::Hybrid;
-                explicit_mode = true;
-            }
-            "--all-scopes" => {
-                reject_inline_value(flag, inline)?;
-                all_scopes = true;
-            }
-            "--descendants" => {
-                reject_inline_value(flag, inline)?;
-                descendants = true;
-            }
-            "--scope" => {
-                scope = Some(PathBuf::from(flag_value(&args, &mut i, inline, "--scope")?));
-            }
-            "--limit" => {
-                let value = flag_value(&args, &mut i, inline, "--limit")?;
-                let parsed = value
-                    .parse::<u64>()
-                    .map_err(|_| KioError::invalid_usage("--limit must be an integer"))?;
-                // R12-7: `--limit 0` is a meaningless value, not a silent clamp-to-1
-                // (which faked success). The upper 100 cap is unchanged (docs-silent).
-                if parsed == 0 {
-                    return Err(KioError::invalid_usage("--limit must be at least 1"));
-                }
-                limit = parsed.min(100);
-            }
-            "--offset" => {
-                let value = flag_value(&args, &mut i, inline, "--offset")?;
-                offset = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| KioError::invalid_usage("--offset must be an integer"))?,
-                );
-            }
-            "--cursor" => {
-                cursor = Some(flag_value(&args, &mut i, inline, "--cursor")?);
-            }
-            // PC5 (05 §1.2 / 07 §3): one-shot send-consent overrides.
-            "--online" => {
-                reject_inline_value(flag, inline)?;
-                if online {
-                    return Err(KioError::invalid_usage("--online may be specified once"));
-                }
-                online = true;
-            }
-            "--offline" => {
-                reject_inline_value(flag, inline)?;
-                if offline {
-                    return Err(KioError::invalid_usage("--offline may be specified once"));
-                }
-                offline = true;
-            }
-            value if value.starts_with('-') => {
-                return Err(KioError::invalid_usage(format!(
-                    "unknown search flag: {value}"
-                )));
-            }
-            _ => {
-                if query.is_some() {
-                    return Err(KioError::invalid_usage("search accepts one query string"));
-                }
-                // A positional query is never split, so use the original token.
-                query = Some(args[i].clone());
-            }
-        }
-        i += 1;
-    }
-    if online && offline {
-        return Err(KioError::invalid_usage(
-            "--online and --offline are mutually exclusive",
-        ));
-    }
+    let time_selector_flags = TimeSelectorFlags {
+        at: args.at,
+        all_history: args.all_history,
+        include_deleted: args.include_deleted,
+        since: args.since,
+    };
     // Validate selector exclusivity/duration before repository or DB access.
     time_selector_flags.canonicalize()?;
     // PC59/PC60 (06 §3): `--at` needs a single, non-`--descendants` `--scope`
@@ -7196,25 +7208,25 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     // repository/registry access) rather than after scope enumeration, so it
     // is a uniform `KIO-E-CONFIG-USAGE-001`/exit 2 regardless of what is or
     // is not registered.
-    if time_selector_flags.at.is_some() && (scope.is_none() || descendants) {
+    if time_selector_flags.at.is_some() && (args.scope.is_none() || args.descendants) {
         return Err(KioError::invalid_usage(
             "--at requires a single --scope <path> (without --descendants); \
              multi-scope search cannot resolve one commit across independent scope DAGs",
         ));
     }
     Ok(ParsedSearch {
-        query: query.ok_or_else(|| KioError::invalid_usage("search query is required"))?,
+        query,
         requested_mode,
         explicit_mode,
-        scope,
-        descendants,
-        all_scopes,
-        limit,
-        offset,
-        cursor,
+        scope: args.scope,
+        descendants: args.descendants,
+        all_scopes: args.all_scopes,
+        limit: args.limit.min(100),
+        offset: args.offset,
+        cursor: args.cursor,
         time_selector_flags,
-        online,
-        offline,
+        online: args.online,
+        offline: args.offline,
     })
 }
 
@@ -7398,10 +7410,6 @@ fn parse_fail_behavior_name(name: &str) -> Option<SearchFailBehavior> {
         "error" => Some(SearchFailBehavior::Error),
         _ => None,
     }
-}
-
-fn without_json(args: Vec<String>) -> Vec<String> {
-    args.into_iter().filter(|arg| arg != "--json").collect()
 }
 
 /// Enumerate the scopes a search targets (K3, 05 §1.8). Default and `--all-scopes`
@@ -10327,7 +10335,15 @@ fn search_to_kio(error: kio_search::SearchError) -> KioError {
 }
 
 fn run_batch(args: BatchArgs) -> Result<Value> {
+    // Same lane contract as `run_index`: resume/retry drive real online sends,
+    // so the invocation lane has to be resolved before any of them is planned.
+    let lane_override = match &args.command {
+        Some(BatchCommand::Resume(resume)) => LaneOverride::new(resume.realtime, resume.batch),
+        Some(BatchCommand::Retry(retry)) => LaneOverride::new(retry.realtime, retry.batch),
+        Some(BatchCommand::Abandon(_)) | None => LaneOverride::default(),
+    };
     let repo = Repository::open_current()?;
+    resolve_invocation_lane(lane_override, Some(&repo.kio_dir().join("config.toml")))?;
     // O3: `batch resume` / `batch retry` read-modify-write `tasks.jsonl` and drive
     // online sends, so hold the folder store lock end-to-end — the same guard M1
     // wired onto index/repair/reindex. Without it two concurrent `batch resume`
@@ -10351,7 +10367,8 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     // Resume/Retry pass below (whose promotion step then publishes it), and a
     // still-queued job extends its poll schedule. Folded into the Resume/Retry
     // ExecOutcome so "in-flight のみ残" maps to the batch exit-3 semantics.
-    let batch_poll_outcome = poll_batch_markdownize_jobs(&repo, &store, &open_ledger_db()?)?;
+    let mut batch_poll_outcome = poll_batch_markdownize_jobs(&repo, &store, &open_ledger_db()?)?;
+    batch_poll_outcome.add(poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?);
     // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
     // approval, never by a plain `batch resume`. Without this, resume's
     // Paused -> Pending flip would silently un-hold the candidate-secret task.
@@ -11025,6 +11042,58 @@ fn confirm_batch_action(prompt: &str) -> Result<bool> {
     Ok(matches!(
         response.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
+    ))
+}
+
+/// 06 §1 requires a confirmation prompt before `repair verify-objects
+/// --prune-orphans` and `repair registry-prune` delete anything. Both first
+/// run their walk in preview mode, so `count` is what WOULD be removed.
+///
+/// Nothing to remove is an idempotent success with no prompt — the same
+/// "対象なしの冪等成功" convention `kio adapter revoke` uses.
+/// How many targets the prompt spells out before collapsing the rest to a
+/// count. Enough to make a small prune fully reviewable without turning a large
+/// one into an unreadable wall.
+const REPAIR_PRUNE_PROMPT_MAX_LINES: usize = 20;
+
+/// 06 §1's confirmation for a destructive `repair` operation.
+///
+/// H2-3 (R24b, 3/3 系統一致): the spec says 削除対象を先に列挙して見せてから問う
+/// — show WHAT will be deleted, then ask. This used to take only a count, so
+/// the user approved a number and never saw the objects behind it.
+fn confirm_repair_prune(what: &str, targets: &[String], yes: bool) -> Result<()> {
+    let count = targets.len() as u64;
+    if count == 0 || yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(KioError::new(
+            "KIO-E-CONFIRM-REJECTED-001",
+            format!("repair {what} requires confirmation; pass --yes in non-interactive mode"),
+            json!({ "target_count": count }),
+            ExitCode::ConfirmationRejected,
+        ));
+    }
+    let mut preview = format!("repair {what} will permanently remove {count} item(s):\n");
+    for line in targets.iter().take(REPAIR_PRUNE_PROMPT_MAX_LINES) {
+        preview.push_str("  ");
+        preview.push_str(line);
+        preview.push('\n');
+    }
+    if let Some(rest) = count.checked_sub(REPAIR_PRUNE_PROMPT_MAX_LINES as u64) {
+        if rest > 0 {
+            preview.push_str(&format!("  … and {rest} more\n"));
+        }
+    }
+    preview.push_str("Proceed?");
+    if confirm_batch_action(&preview)? {
+        return Ok(());
+    }
+    Err(KioError::new(
+        "KIO-E-CONFIRM-REJECTED-001",
+        format!("repair {what} confirmation was rejected"),
+        json!({ "target_count": count }),
+        ExitCode::ConfirmationRejected,
     ))
 }
 
@@ -11716,7 +11785,11 @@ fn execute_pending_markdownize_tasks(
             counts.inflight += 1;
             continue;
         }
-        let lane = markdownize_send_lane(batch_client.is_some(), existing_row.as_ref());
+        let lane = markdownize_send_lane(
+            batch_client.is_some(),
+            existing_row.as_ref(),
+            realtime_lane_requested(),
+        );
         if lane == MarkdownizeSendLane::DeferToRecovery {
             counts.inflight += 1;
             continue;
@@ -13517,7 +13590,7 @@ fn compute_query_embedding_page1(
         device_claim(
             conn,
             &key,
-            estimate_embedding_cost(query.chars().count() as u64),
+            estimate_embedding_cost(query, query_embedding_send_lane()),
             TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS,
             device_cap_config.device_cap,
             device_cap_config.device_per_adapter_cap,
@@ -13566,7 +13639,7 @@ fn compute_query_embedding_page1(
             // write-command's crash recovery.
             sync_record_provider_request_id(conn, &key, &intent_token, &intent_token)
                 .map_err(pipeline_to_kio)?;
-            let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
+            let billed_usd = estimate_embedding_cost(query, query_embedding_send_lane());
             // QA17: this Gemini `batchEmbedContents` integration has no real
             // per-call usage to report (see `EmbeddingResponse.usage`'s doc
             // comment) — the reservation estimate stands, `estimated=1`,
@@ -13586,7 +13659,7 @@ fn compute_query_embedding_page1(
                 .map(|vector| QueryEmbeddingOutcome::Vector(vector.vector)))
         }
         Err(failure) => {
-            let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
+            let billed_usd = estimate_embedding_cost(query, query_embedding_send_lane());
             settle_task_charge_unknown(&ledger, &key, &intent_token, billed_usd)?;
             // PC7: classify a contract-violation adapter failure distinctly
             // from a generic technical unavailability.
@@ -13937,6 +14010,34 @@ fn run_embedding_enrichment_for_instances(
     // keeps the per-batch write-back (O(T²) avoidance) and instead absorbs the NORMAL
     // (post-completion) crash via content-addressed reuse. R11-2: the loop also tallies
     // paused / auth / failed outcomes.
+    // 07 §5.3 の 2026-07-24 訂正: the Batch lane is the default (half rate). It
+    // SUBMITS and returns; results are collected by `poll_batch_embedding_jobs`
+    // from `kio batch resume` or any later write command. `--realtime` (and a
+    // `[adapter] lane = "realtime"` config) selects the synchronous path below,
+    // which completes inside this invocation at double the rate.
+    if effective_invocation_lane() == PreferredRequestKind::Batch {
+        let mut batch_transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
+        if let Some(submitted) = submit_embedding_batch_jobs(
+            &conn,
+            &ledger,
+            &profile,
+            &embeddable,
+            &scope_id,
+            &budget_caps,
+            override_budget,
+            &mut batch_transitions,
+        )? {
+            // Submitted members stay Pending on purpose (no transition): the
+            // job is in flight and `index_status` must keep reporting them
+            // until collect.
+            let no_reservations: BTreeMap<String, (f64, String, String)> = BTreeMap::new();
+            apply_embedding_transitions(&task_store, &batch_transitions, &now, &no_reservations)?;
+            return Ok(submitted);
+        }
+        // Lane unavailable — fall through to the synchronous loop below, which
+        // prices itself at the sync rate (`active_embedding_send_lane`).
+    }
+
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
     // R18-1: per-chunk FRESH F8 reservation `(usd, ledger_month)` for the freshly-charged
     // chunks this pass, stamped in the single end-of-pass write-back so a later non-live
@@ -14041,8 +14142,18 @@ fn run_embedding_enrichment_for_instances(
                 &representative_task.input_hash,
                 &profile.profile_hash,
             );
-            let candidate_usd =
-                estimate_embedding_cost(group.representative.text.chars().count() as u64);
+            // R24 (3 系統一致): price the string actually sent. The send below
+            // contextualizes the chunk text, so estimating the bare text
+            // undercounts by the context prefix — and `usage: None` means the
+            // shortfall is never corrected at settle time (QA17).
+            let candidate_usd = estimate_embedding_cost(
+                &embedding_store::contextualized_embedding_input(
+                    embedding_store::chunk_embedding_context(&group.representative.raw_path)
+                        .as_deref(),
+                    &group.representative.text,
+                ),
+                active_embedding_send_lane(),
+            );
             let caps = budget_cap_config(&budget_caps, &scope_id, EMBEDDING_ADAPTER_KIND);
             // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
             // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
@@ -14193,13 +14304,7 @@ fn run_embedding_enrichment_for_instances(
                 // dedicated non-Failed transition (mirrors the markdownize send
                 // handler's 3-way branch) — every other kind keeps the generic
                 // Failed transition.
-                let transition = match failure.retry_kind {
-                    RetryErrorKind::RateLimit => {
-                        embedding_rate_limit_transition(failure.retry_after_ms)
-                    }
-                    RetryErrorKind::AuthError => embedding_auth_pause_transition(),
-                    _ => embedding_fail_transition(failure.retry_kind),
-                };
+                let transition = embedding_failure_transition(&failure);
                 record_embedding_transitions(
                     &mut transitions,
                     to_send
@@ -14261,6 +14366,21 @@ fn embedding_fail_transition(kind: RetryErrorKind) -> EmbeddingTransition {
         reason: retry_reason(kind),
         failure_kind: Some(kind),
         retry_after_ms: None,
+    }
+}
+
+/// The disposition a provider-side failure gives the affected chunks.
+///
+/// QA2/QA3 (04 §5.2/§5.3): `rate_limit` and `auth_error` each land a dedicated
+/// non-Failed transition (mirroring the markdownize send handler's 3-way
+/// branch); every other kind takes the generic Failed transition. Shared by the
+/// synchronous send handler and — since G2 — the Batch submit lane, so the two
+/// cannot drift apart.
+fn embedding_failure_transition(failure: &TaskExecutionFailure) -> EmbeddingTransition {
+    match failure.retry_kind {
+        RetryErrorKind::RateLimit => embedding_rate_limit_transition(failure.retry_after_ms),
+        RetryErrorKind::AuthError => embedding_auth_pause_transition(),
+        _ => embedding_fail_transition(failure.retry_kind),
     }
 }
 
@@ -14514,36 +14634,594 @@ fn send_embed_batch(
                 retry_after_ms: None,
             });
         };
-        let bytes = f32_to_le_bytes(vector);
-        let context_key = embedding_store::chunk_embedding_context(&chunk.raw_path);
-        embedding_store::write_chunk_embedding(
-            conn,
-            &group.embedding_hash,
-            &chunk.text_hash,
-            &chunk.chunk_id,
-            &bytes,
-            profile.dimensions,
-            &profile.distance,
-            &profile.modality,
-            &profile.profile_hash,
-            context_key.as_deref(),
-        )
-        .map_err(|_| TaskExecutionFailure {
-            retry_kind: RetryErrorKind::ContractViolation,
-            retry_after_ms: None,
-        })?;
-        embedding_store::link_chunk_vecs_to_content_vector(
-            conn,
-            &group.embedding_hash,
-            group.members.iter().map(|member| member.chunk_id.as_str()),
-            &held,
-        )
-        .map_err(|_| TaskExecutionFailure {
-            retry_kind: RetryErrorKind::ContractViolation,
-            retry_after_ms: None,
-        })?;
+        persist_group_vector(conn, profile, group, vector, &held)?;
     }
     Ok(())
+}
+
+/// Write one group's content vector and fan it out to every member chunk.
+///
+/// Shared by BOTH lanes: the sync path calls it with the vector the adapter
+/// just returned, the Batch path with the vector collected from a finished
+/// provider job. 07 §5.3's acceptance checks must not exist in two versions,
+/// so neither may they diverge here.
+fn persist_group_vector(
+    conn: &Connection,
+    profile: &DeclaredEmbeddingProfile,
+    group: &EmbeddingSendGroup<'_>,
+    vector: &[f32],
+    held: &BTreeSet<String>,
+) -> std::result::Result<(), TaskExecutionFailure> {
+    let chunk = group.representative;
+    let bytes = f32_to_le_bytes(vector);
+    let context_key = embedding_store::chunk_embedding_context(&chunk.raw_path);
+    embedding_store::write_chunk_embedding(
+        conn,
+        &group.embedding_hash,
+        &chunk.text_hash,
+        &chunk.chunk_id,
+        &bytes,
+        profile.dimensions,
+        &profile.distance,
+        &profile.modality,
+        &profile.profile_hash,
+        context_key.as_deref(),
+    )
+    .map_err(|_| TaskExecutionFailure {
+        retry_kind: RetryErrorKind::ContractViolation,
+        retry_after_ms: None,
+    })?;
+    embedding_store::link_chunk_vecs_to_content_vector(
+        conn,
+        &group.embedding_hash,
+        group.members.iter().map(|member| member.chunk_id.as_str()),
+        held,
+    )
+    .map_err(|_| TaskExecutionFailure {
+        retry_kind: RetryErrorKind::ContractViolation,
+        retry_after_ms: None,
+    })
+    .map(|_| ())
+}
+
+// ===========================================================================
+// Embedding Batch lane (07 §5.3 の 2026-07-24 訂正 / §5.7, 04 §5.8)
+//
+// The Gemini Developer API bills an embedding batch at half the sync rate, so
+// the Batch lane is the default. Unlike the OCR lane it takes its input
+// INLINE, so there is no upload phase (相 2a) and no provider residue to
+// sweep — see `kio_adapter::gemini_batch_client`.
+//
+// **1 job = 1 task** (07 §5.7's v1 contract) is preserved by making the JOB
+// itself the task: the batch row's `input_hash` is a digest of the job's
+// member set. Embedding's natural task granularity is the dedup group, and a
+// realistic scope has thousands of them (2,321 in the dogfood fixture), so
+// one job per group would mean thousands of provider jobs. One row per job
+// keeps the §5.8 state machine, its crash recovery, and `kio batch abandon`
+// working unchanged.
+// ===========================================================================
+
+/// Groups carried by one embedding batch job. Well under the adapter's inline
+/// bounds (`MAX_INLINE_REQUESTS` = 2048, 16 MiB serialized), leaving room for
+/// long chunks: 6,000 chars max per chunk (`[chunking] max_chars`) × 512 ≈ 3 MB
+/// of text before JSON overhead.
+const EMBEDDING_BATCH_JOB_MAX_MEMBERS: usize = 512;
+
+/// How many non-success terminals one embedding batch task (= one job's member
+/// set) may accumulate before it is failed instead of re-sent.
+///
+/// R24: a job that keeps ending in a non-success terminal state used to be
+/// re-submitted without bound — every `batch resume` settled the failure,
+/// cleared the row, and immediately created a new job with a fresh reservation.
+/// Because the endpoint reports no usage the reservation IS the settled charge,
+/// so a permanently-failing member set recorded its full estimate once per pass
+/// until the budget cap hard-stopped the scope.
+///
+/// Counted on `contract_violation_count`, NOT on `attempts`, specifically
+/// because **`kio batch reset-violations` already exists as the operator escape
+/// hatch for it** (CL62-CL68) and nothing resets `attempts`. Bounding on
+/// `attempts` would have made an exhausted member set permanently
+/// unsubmittable — a dead end with no way out. 07 §5.3 already routes a
+/// response that yields no usable output through the contract-violation rules,
+/// so a FAILED/EXPIRED/CANCELLED job counting here is the established meaning.
+const EMBEDDING_BATCH_JOB_MAX_FAILURES: i64 = 3;
+
+/// G2: record one Batch-submit provider failure against the job's member
+/// chunks, using the same classification and the same 3-way disposition the
+/// synchronous send handler applies.
+///
+/// The reservation is deliberately LEFT IN PLACE (the F8 reserve-before-send
+/// posture): whether the provider actually created the job is unknown from
+/// here, so releasing it could double-charge on the next pass. 04 §5.8's
+/// recovery walk resolves it — found → the poll lane collects it, confirmed
+/// absent → the reservation is released.
+fn record_batch_submit_failure(
+    outcome: &mut ExecOutcome,
+    transitions: &mut BTreeMap<String, EmbeddingTransition>,
+    job_groups: &[EmbeddingSendGroup<'_>],
+    error: kio_adapter::AdapterError,
+) {
+    let failure = task_failure_from_adapter(error);
+    record_embedding_transitions(
+        transitions,
+        job_groups
+            .iter()
+            .flat_map(|group| group.members.iter().copied()),
+        embedding_failure_transition(&failure),
+    );
+    count_embedding_failure(
+        outcome,
+        failure.retry_kind,
+        job_groups.iter().map(|group| group.members.len()).sum(),
+    );
+}
+
+/// The batch row's `input_hash` for a job: a digest over the job's member
+/// content identities, in a canonical order.
+///
+/// This is what makes "1 job = 1 task" hold for a lane whose task granularity
+/// is finer than a job. Two runs that select the same member set land on the
+/// same row (so a crash-stranded reservation is reused, not duplicated); a
+/// different selection is a different task, and any member already embedded by
+/// the earlier job drops out through content-addressed reuse before it is ever
+/// selected again.
+fn embedding_job_input_hash(embedding_hashes: &BTreeSet<String>) -> String {
+    let joined = embedding_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    kio_core::cas::hash_bytes(joined.as_bytes())
+}
+
+/// 07 §5.3 (3)/(4): validate the provider's raw values, convert deterministically
+/// to unit-norm f32, then re-validate the RESULT — an underflowed zero vector or
+/// an overflowed infinity must never reach the index. The sync lane gets this
+/// inside the adapter; the Batch lane's values arrive raw from a job, so the
+/// same discipline is applied here.
+fn normalize_embedding_vector(
+    values: &[f32],
+    profile: &DeclaredEmbeddingProfile,
+) -> Result<Vec<f32>> {
+    let dimensions = u32::try_from(profile.dimensions).unwrap_or(u32::MAX);
+    kio_adapter::types::validate_cosine_vector(values, dimensions).map_err(adapter_to_kio)?;
+    let norm = values
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let normalized = values
+        .iter()
+        .map(|value| (f64::from(*value) / norm) as f32)
+        .collect::<Vec<f32>>();
+    kio_adapter::types::validate_cosine_vector(&normalized, dimensions).map_err(adapter_to_kio)?;
+    Ok(normalized)
+}
+
+/// Submit this pass's pending embeddings as provider batch jobs and return.
+///
+/// Nothing is collected here: the results arrive at a later `poll_batch_embedding_jobs`
+/// (from `kio batch resume` or any write command), the same shape the OCR lane
+/// uses. Member tasks stay Pending, so `index_status` keeps reporting them.
+#[allow(clippy::too_many_arguments)]
+fn submit_embedding_batch_jobs(
+    conn: &Connection,
+    ledger: &LedgerDb,
+    profile: &DeclaredEmbeddingProfile,
+    embeddable: &[EmbeddableChunk],
+    scope_id: &str,
+    budget_caps: &BudgetCaps,
+    override_budget: bool,
+    transitions: &mut BTreeMap<String, EmbeddingTransition>,
+) -> Result<Option<ExecOutcome>> {
+    let mut outcome = ExecOutcome::default();
+    // Lane availability probing must never be what REPORTS an auth misconfig
+    // (e.g. R13-2's loud `keychain:` not-implemented): an unresolvable
+    // credential means the lane is unusable, not that the command should fail.
+    // The synchronous send path hits the same credential and surfaces it
+    // through the established R13-2(e) path.
+    let Some(client) = kio_adapter::gemini_batch_client::resolve_gemini_batch_client()
+        .ok()
+        .flatten()
+    else {
+        // The lane is unavailable (no batch client resolvable). Report that to
+        // the caller so it can fall back to the synchronous lane, exactly as
+        // `markdownize_send_lane`'s `(false, None) => Sync` rule does — leaving
+        // the work pending forever would be worse than paying the sync rate.
+        return Ok(None);
+    };
+    let plan = plan_embed_batch(conn, profile, embeddable).map_err(|failure| {
+        KioError::schema(format!(
+            "embedding batch planning failed: {:?}",
+            failure.retry_kind
+        ))
+    })?;
+    // Reuse links are free and always succeed — settle them here exactly as the
+    // sync lane does, so an unavailable provider cannot strand an already
+    // materialized chunk.
+    if !plan.reuse.is_empty() {
+        match link_reused_chunks(conn, profile, &plan.reuse) {
+            Ok(()) => {
+                record_embedding_transitions(
+                    transitions,
+                    plan.reuse.iter().map(|(chunk, _)| *chunk),
+                    embedding_done_transition(),
+                );
+                outcome.executed += plan.reuse.len();
+            }
+            Err(failure) => {
+                record_embedding_transitions(
+                    transitions,
+                    plan.reuse.iter().map(|(chunk, _)| *chunk),
+                    embedding_fail_transition(failure.retry_kind),
+                );
+                count_embedding_failure(&mut outcome, failure.retry_kind, plan.reuse.len());
+                return Ok(Some(outcome));
+            }
+        }
+    }
+    if plan.to_send.is_empty() {
+        return Ok(Some(outcome));
+    }
+    let caps = budget_cap_config(budget_caps, scope_id, EMBEDDING_ADAPTER_KIND);
+    let bypass_cap_denial = override_budget || !budget_caps.hard_stop;
+    for job_groups in plan.to_send.chunks(EMBEDDING_BATCH_JOB_MAX_MEMBERS) {
+        let member_identities = job_groups
+            .iter()
+            .map(|group| group.embedding_hash.clone())
+            .collect::<BTreeSet<_>>();
+        let key = task_ledger_key(
+            scope_id,
+            EMBEDDING_ADAPTER_KIND,
+            &embedding_job_input_hash(&member_identities),
+            &profile.profile_hash,
+        );
+        // R24 (6 系統一致, KNOWN GAP の是正): bound the retries. A job that ends
+        // in a non-success terminal settles the row and NULLs its
+        // `intent_token`, and `phase1_intent`'s ON CONFLICT clears
+        // `batch_job_id` — so without this gate the very next pass re-reserved
+        // the same task key and created another job, forever, recording an
+        // estimate every time. Neither counter is in that ON CONFLICT SET list,
+        // so both survive re-reservation; this uses `contract_violation_count`
+        // because `kio batch reset-violations` can clear it and nothing clears
+        // `attempts` (see `EMBEDDING_BATCH_JOB_MAX_FAILURES`).
+        let existing = get_batch_request(ledger.connection(), &key).map_err(pipeline_to_kio)?;
+        if existing.as_ref().is_some_and(|row| {
+            !row.state.is_inflight()
+                && row.contract_violation_count >= EMBEDDING_BATCH_JOB_MAX_FAILURES
+        }) {
+            record_embedding_transitions(
+                transitions,
+                job_groups
+                    .iter()
+                    .flat_map(|group| group.members.iter().copied()),
+                embedding_fail_transition(RetryErrorKind::ContractViolation),
+            );
+            count_embedding_failure(
+                &mut outcome,
+                RetryErrorKind::ContractViolation,
+                job_groups
+                    .iter()
+                    .map(|group| group.members.len())
+                    .sum::<usize>(),
+            );
+            continue;
+        }
+        // R24 (3 系統一致): build the inputs BEFORE the reservation so the
+        // estimate prices the string actually sent. Estimating
+        // `representative.text` while sending
+        // `contextualized_embedding_input(context, text)` undercounts by the
+        // whole context prefix — and since the endpoint reports no usage, that
+        // shortfall is never corrected at settle time (QA17), so it is a
+        // permanent under-record of real spend.
+        let inputs = job_groups
+            .iter()
+            .map(|group| {
+                let context =
+                    embedding_store::chunk_embedding_context(&group.representative.raw_path);
+                kio_adapter::gemini_batch_client::GeminiBatchEmbedInput {
+                    // The provider echoes this back in `metadata.key`; the
+                    // collect side keys on it to find the chunk again.
+                    key: group.representative.chunk_id.clone(),
+                    text: embedding_store::contextualized_embedding_input(
+                        context.as_deref(),
+                        &group.representative.text,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        // One reservation for the whole job — the cap is checked once against
+        // the job's total, which is also what the provider will bill.
+        let candidate_usd: f64 = inputs
+            .iter()
+            .map(|input| estimate_embedding_cost(&input.text, PreferredRequestKind::Batch))
+            .sum();
+        let charge = reserve_or_reuse_task_charge(
+            ledger,
+            &key,
+            candidate_usd,
+            &caps,
+            bypass_cap_denial,
+            RequestKind::Batch,
+        )?;
+        let (intent_token, _reserved_usd) = match charge {
+            TaskChargeOutcome::BudgetExceeded => {
+                record_embedding_transitions(
+                    transitions,
+                    job_groups
+                        .iter()
+                        .flat_map(|group| group.members.iter().copied()),
+                    embedding_pause_transition(),
+                );
+                outcome.paused += job_groups
+                    .iter()
+                    .map(|group| group.members.len())
+                    .sum::<usize>();
+                continue;
+            }
+            TaskChargeOutcome::Reserved {
+                intent_token,
+                estimated_usd,
+            }
+            | TaskChargeOutcome::Reused {
+                intent_token,
+                estimated_usd,
+            } => (intent_token, estimated_usd),
+        };
+        let row = get_batch_request(ledger.connection(), &key).map_err(pipeline_to_kio)?;
+        if row
+            .as_ref()
+            .and_then(|row| row.batch_job_id.as_ref())
+            .is_some()
+        {
+            // A prior pass already created this job; the poll lane owns it.
+            continue;
+        }
+        // 相 2a is degenerate for an inline batch (no upload), so the provider
+        // scope is recorded immediately before job creation instead.
+        //
+        // G2: a provider-side failure here fails THIS job, not the invocation.
+        // These calls used to `?` straight out of the function, so one
+        // transient 429 aborted `kio index` for the whole scope — and, worse,
+        // did it after 相 2b was recorded, leaving the row stranded. The
+        // synchronous lane has always classified and recorded per chunk
+        // instead; this makes the Batch lane behave the same way. The stranded
+        // row is not a leak: §5.8's recovery walk owns it (G1 wired the Gemini
+        // provider into that walk, which is why this can safely give up here).
+        let provider_scope_id = match client.provider_scope_id() {
+            Ok(id) => id,
+            Err(error) => {
+                record_batch_submit_failure(&mut outcome, transitions, job_groups, error);
+                continue;
+            }
+        };
+        if !phase2a_record_provider_scope(
+            ledger.connection(),
+            &key,
+            &intent_token,
+            &provider_scope_id,
+        )
+        .map_err(pipeline_to_kio)?
+        {
+            continue;
+        }
+        if !phase2b_record_job_create_started(ledger.connection(), &key, &intent_token)
+            .map_err(pipeline_to_kio)?
+        {
+            continue;
+        }
+        let job = match client.create_embedding_job(
+            kio_adapter::catalog::ADOPTED_EMBEDDING_MODEL_PIN,
+            u32::try_from(profile.dimensions).unwrap_or(u32::MAX),
+            &kio_adapter::gemini_batch_client::batch_display_name(&intent_token),
+            &inputs,
+        ) {
+            Ok(job) => job,
+            Err(error) => {
+                record_batch_submit_failure(&mut outcome, transitions, job_groups, error);
+                continue;
+            }
+        };
+        phase2b_record_job_created(ledger.connection(), &key, &intent_token, &job.name)
+            .map_err(pipeline_to_kio)?;
+        outcome.inflight += job_groups
+            .iter()
+            .map(|group| group.members.len())
+            .sum::<usize>();
+    }
+    Ok(Some(outcome))
+}
+
+/// 04 §5.8 相 3 for this scope's in-flight embedding batch jobs.
+///
+/// Polling receives an EXISTING request, so like the OCR lane it needs no
+/// network opt-in. Rows whose job id is still unknown belong to the §5.8
+/// recovery walk (`kio ledger reconcile`), not here — `batch_poll_candidates`
+/// only returns rows with a durable `batch_job_id`.
+fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<ExecOutcome> {
+    let mut outcome = ExecOutcome::default();
+    let Some(execution) = embedding_execution() else {
+        return Ok(outcome);
+    };
+    let profile = declared_embedding_profile(execution);
+    // Lane availability probing must never be what REPORTS an auth misconfig
+    // (e.g. R13-2's loud `keychain:` not-implemented): an unresolvable
+    // credential means the lane is unusable, not that the command should fail.
+    // The synchronous send path hits the same credential and surfaces it
+    // through the established R13-2(e) path.
+    let Some(client) = kio_adapter::gemini_batch_client::resolve_gemini_batch_client()
+        .ok()
+        .flatten()
+    else {
+        return Ok(outcome);
+    };
+    let scope_id = repo.scope_id_for_adapter();
+    let rows = batch_poll_candidates(ledger.connection(), &scope_id, EMBEDDING_ADAPTER_KIND)
+        .map_err(pipeline_to_kio)?;
+    if rows.is_empty() {
+        return Ok(outcome);
+    }
+    let db_path = sqlite_path(repo.kio_dir());
+    if !db_path.exists() {
+        return Ok(outcome);
+    }
+    let conn = Connection::open(&db_path).map_err(|err| KioError::schema(err.to_string()))?;
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(outcome);
+    };
+    let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
+    let instances = retained_history_instances(repo.kio_dir(), &head)?;
+    let chunks = retained_history_chunks(&conn, repo.kio_dir(), &instances, &chunking_config_hash)?;
+    let by_chunk_id = chunks
+        .iter()
+        .map(|chunk| (chunk.chunk_id.clone(), chunk))
+        .collect::<BTreeMap<_, _>>();
+    let held = BTreeSet::new();
+    for row in rows {
+        let (Some(job_name), Some(intent_token)) =
+            (row.batch_job_id.as_ref(), row.intent_token.as_ref())
+        else {
+            continue;
+        };
+        // G2: 04 §5.8 unknown — 何も変更せず保持し、次回再試行する。This used to
+        // `?` out of the whole function, so ONE unreachable row blocked
+        // collection for every other row in the scope (head-of-line blocking)
+        // and reported a transient network error as a permanent config fault.
+        // The OCR lane has always held-and-retried here; this matches it.
+        let Ok(job) = client.get_job(job_name) else {
+            outcome.inflight += 1;
+            continue;
+        };
+        if !job.state.is_terminal() {
+            outcome.inflight += 1;
+            continue;
+        }
+        if job.state != kio_adapter::gemini_batch_client::GeminiBatchState::Succeeded {
+            // Failed / cancelled / expired: terminate the row so the members
+            // become eligible for a fresh submission, and record the estimate
+            // (the provider may still have billed part of the job).
+            settle_batch_charge_terminal(
+                ledger,
+                &row.key,
+                intent_token,
+                job_name,
+                // §5.8 相 3: a provider-side non-success terminal. `Expired`
+                // is the closed-enum outcome for "the job ended without
+                // usable output" (the OCR lane uses it the same way).
+                Outcome::Expired,
+                BatchState::Terminal,
+                Some("embedding batch job did not succeed"),
+                BilledAmount {
+                    usd: row.estimated_usd,
+                    estimated: true,
+                },
+                // R24: count it. This is the durable counter the submit side
+                // bounds re-sends on, and `kio batch reset-violations` is its
+                // operator escape hatch.
+                true,
+                true,
+            )?;
+            outcome.failed += 1;
+            continue;
+        }
+        // G2: same §5.8 unknown rule. The job reached a terminal state but its
+        // results are not readable right now — settling on that would either
+        // discard the vectors (Succeeded with nothing persisted) or burn a
+        // retry (Terminal). Hold the row instead; the next pass re-reads it.
+        let Ok(results) = client.fetch_inlined_results(job_name) else {
+            outcome.inflight += 1;
+            continue;
+        };
+        let mut persisted = 0usize;
+        // R24 (4 系統一致): 07 §5.3 (1) requires the result ids to be a BIJECTION
+        // onto the input ids, and this loop checked neither direction — it
+        // iterated the results and `continue`d past anything it could not
+        // resolve, then settled `Succeeded` unconditionally. A provider that
+        // returned 511 of 512 embeddings therefore completed the row, cleared
+        // its `intent_token`, and left the missing chunk with no vector and no
+        // failed task: a silent, permanent hole in the index.
+        //
+        // The bijection is checkable with no schema change because the task key
+        // IS the member digest (design A): re-derive the digest from the
+        // results that actually resolved and compare it with the row's own
+        // `input_hash`.
+        let mut collected_identities = BTreeSet::new();
+        for result in &results {
+            let Some(chunk) = by_chunk_id.get(&result.key) else {
+                // The chunk is gone (purged / reconfigured) since submission —
+                // nothing to write, and nothing to fail either.
+                continue;
+            };
+            let Some(values) = result.values.as_ref() else {
+                continue;
+            };
+            let embedding_hash = chunk_embedding_hash(chunk, &profile)?;
+            collected_identities.insert(embedding_hash.clone());
+            // Re-derive the group from the CURRENT chunk set rather than
+            // trusting the submitted membership: a chunk added since
+            // submission that shares this content identity must be linked too.
+            let members = chunks
+                .iter()
+                .filter(|candidate| {
+                    chunk_embedding_hash(candidate, &profile)
+                        .map(|hash| hash == embedding_hash)
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            let group = EmbeddingSendGroup {
+                embedding_hash,
+                representative: chunk,
+                members,
+            };
+            let normalized = normalize_embedding_vector(values, &profile)?;
+            persist_group_vector(&conn, &profile, &group, &normalized, &held).map_err(
+                |failure| {
+                    KioError::schema(format!(
+                        "embedding batch collect failed to persist: {:?}",
+                        failure.retry_kind
+                    ))
+                },
+            )?;
+            persisted += group.members.len();
+        }
+        // Everything that resolved has been persisted, so a shortfall costs no
+        // re-send of what DID arrive (content-addressed reuse drops it from the
+        // next plan). What must not happen is calling the row Succeeded: settle
+        // it as a contract violation instead, which leaves the still-missing
+        // members eligible for a fresh, smaller job under a different task key.
+        let complete = embedding_job_input_hash(&collected_identities) == row.key.input_hash;
+        settle_batch_charge_terminal(
+            ledger,
+            &row.key,
+            intent_token,
+            job_name,
+            if complete {
+                Outcome::Succeeded
+            } else {
+                Outcome::Expired
+            },
+            if complete {
+                BatchState::Completed
+            } else {
+                BatchState::Terminal
+            },
+            (!complete)
+                .then_some("embedding batch results are not a bijection onto the job's inputs"),
+            // QA17 posture: the endpoint reports no token count, so the
+            // reservation estimate stands as the settled charge.
+            BilledAmount {
+                usd: row.estimated_usd,
+                estimated: true,
+            },
+            !complete,
+            true,
+        )?;
+        outcome.executed += persisted;
+        if !complete {
+            outcome.failed += 1;
+        }
+    }
+    Ok(outcome)
 }
 
 /// L2(ii)/L7 target selection: drop chunks whose embedding task must not run in
@@ -14646,11 +15324,188 @@ fn chunk_embedding_hash(
     .map_err(index_to_kio)
 }
 
-/// Cost estimate for embedding `chars` of text: ~4 chars/token, $0.15 per 1M
-/// tokens, consistent with the 07 §5.3 fixed adopted-profile budget figure.
-fn estimate_embedding_cost(chars: u64) -> f64 {
-    let tokens = chars as f64 / 4.0;
-    tokens / 1_000_000.0 * 0.15
+/// Published `gemini-embedding-2` STANDARD (sync) text input rate, per token
+/// (07 §5.3 の 2026-07-24 訂正: $0.20 / 1M sync, $0.10 / 1M batch). Used when
+/// `tools.toml` declares no `[embedding.*.pricing] tokens_in`; the declared
+/// table is the normative source when it is present.
+const EMBEDDING_SYNC_USD_PER_TOKEN: f64 = 0.000_000_2; // $0.20 / 1M
+
+/// R24: the Batch lane is billed at half the standard rate. This is a
+/// MULTIPLIER rather than a second absolute constant because the price itself
+/// comes from `tools.toml`, whose `[pricing]` keys are a closed enum
+/// (`pages` / `tokens_in` / `tokens_out`, `tool_lock::PRICING_KIND_ENUM`) with
+/// no lane dimension — a declaration cannot state both lanes. The declared
+/// `tokens_in` is therefore read as the STANDARD rate and the batch rate is
+/// derived, so a user who corrects the published price keeps the 2:1 ratio the
+/// provider actually bills.
+const EMBEDDING_BATCH_RATE_MULTIPLIER: f64 = 0.5;
+
+/// The online send lane resolved for THIS invocation.
+///
+/// 2026-07-24 ユーザー裁定: OCR と embedding は**必ず同一レーン**で送る — 片方
+/// だけ Batch という組み合わせは作らない。したがってレーンは adapter ごとでは
+/// なく invocation ごとに 1 つ決まり、この 1 セルがそれを持つ。
+///
+/// 解決順は network opt-in (07 §3) と同じ形: **CLI → scope config → user config
+/// → 既定 (Batch)**。既定を Batch にするのは半額 (OCR $2/1,000 pages・embedding
+/// $0.10/1M tokens) だからで、`--realtime` は倍額を承知の明示 opt-in である。
+/// これは 2026-07-23 の「OCR 課金は Batch レーンのみ」裁定を明示的に上書きする。
+///
+/// 0 = 未解決 (= 既定の Batch として読む), 1 = Batch, 2 = Realtime.
+static INVOCATION_LANE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+const LANE_CELL_BATCH: u8 = 1;
+const LANE_CELL_REALTIME: u8 = 2;
+
+/// The `--realtime` / `--batch` pair as parsed off one command.
+#[derive(Debug, Clone, Copy, Default)]
+struct LaneOverride {
+    realtime: bool,
+    batch: bool,
+}
+
+impl LaneOverride {
+    fn new(realtime: bool, batch: bool) -> Self {
+        Self { realtime, batch }
+    }
+}
+
+/// Resolve and record the invocation lane. Call once per command, before any
+/// online send is planned or priced — both the OCR lane selection and the
+/// reservation estimates read the result.
+///
+/// `scope_config` is the scope's `.kio/config.toml` when the command has a
+/// repository open; `None` skips straight to the user config.
+fn resolve_invocation_lane(over: LaneOverride, scope_config: Option<&Path>) -> Result<()> {
+    if over.realtime && over.batch {
+        return Err(KioError::invalid_usage(
+            "--realtime and --batch are mutually exclusive",
+        ));
+    }
+    let lane = if over.realtime {
+        LANE_CELL_REALTIME
+    } else if over.batch {
+        LANE_CELL_BATCH
+    } else {
+        let configured = scope_config
+            .and_then(kio_core::scope::read_adapter_lane)
+            .or_else(|| kio_core::scope::read_adapter_lane(&user_config_toml_path()));
+        match configured.as_deref() {
+            Some("realtime") => LANE_CELL_REALTIME,
+            _ => LANE_CELL_BATCH,
+        }
+    };
+    INVOCATION_LANE.store(lane, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// The lane BOTH online adapters send on this invocation. There is no
+/// per-adapter answer by ruling — see [`INVOCATION_LANE`].
+fn effective_invocation_lane() -> PreferredRequestKind {
+    if INVOCATION_LANE.load(std::sync::atomic::Ordering::SeqCst) == LANE_CELL_REALTIME {
+        PreferredRequestKind::Sync
+    } else {
+        PreferredRequestKind::Batch
+    }
+}
+
+#[must_use]
+fn realtime_lane_requested() -> bool {
+    matches!(effective_invocation_lane(), PreferredRequestKind::Sync)
+}
+
+/// The lane the SYNCHRONOUS enrichment path sends on — always `Sync`.
+///
+/// R24 (3 系統一致) corrected this comment, which still claimed the Batch driver
+/// "is still to land". It has landed: [`effective_invocation_lane`] chooses the
+/// lane, and when it selects Batch the work goes to
+/// [`submit_embedding_batch_jobs`] and never reaches the code that calls this.
+///
+/// So the callers of this function are, by construction, the ones already on the
+/// synchronous lane — either because the invocation asked for `--realtime` or
+/// because the batch lane was unavailable and the send fell back. Pricing them
+/// at the sync rate is therefore correct, not a placeholder: the adapter reports
+/// no usage, so this estimate IS the settled charge (QA17).
+fn active_embedding_send_lane() -> PreferredRequestKind {
+    PreferredRequestKind::Sync
+}
+
+/// The query lane is ALWAYS synchronous: a search cannot wait out a batch
+/// job's turnaround (up to 24 h), so a query embedding is priced at the sync
+/// rate regardless of what the enrichment path does.
+fn query_embedding_send_lane() -> PreferredRequestKind {
+    PreferredRequestKind::Sync
+}
+
+/// The per-token rate for `lane`.
+///
+/// R24 (5 系統一致): this used to `return declared` BEFORE looking at `lane`,
+/// so declaring `tokens_in` in `tools.toml` — which the spec calls the
+/// normative source, and which the dogfood config does declare — silently
+/// collapsed the two lanes to one price. Because the endpoint reports no usage,
+/// the reservation estimate IS the settled charge (QA17), so that recorded
+/// every Batch job at the sync rate: a 2x over-record that consumes the budget
+/// cap twice as fast as the provider actually bills.
+fn embedding_usd_per_token(lane: PreferredRequestKind) -> f64 {
+    let standard = kio_adapter::tool_lock::registered_declared_pricing("embedding")
+        .get("tokens_in")
+        .copied()
+        .unwrap_or(EMBEDDING_SYNC_USD_PER_TOKEN);
+    embedding_lane_rate(standard, lane)
+}
+
+/// The lane split applied to a STANDARD per-token rate, whatever its source.
+/// Split out from [`embedding_usd_per_token`] so the declared-pricing path is
+/// testable: `register_declared_pricing` is a process-global `OnceLock`, so a
+/// unit test cannot install a `tools.toml` price and observe the result.
+fn embedding_lane_rate(standard: f64, lane: PreferredRequestKind) -> f64 {
+    match lane {
+        PreferredRequestKind::Batch => standard * EMBEDDING_BATCH_RATE_MULTIPLIER,
+        PreferredRequestKind::Sync => standard,
+    }
+}
+
+/// Rough token count for `text`.
+///
+/// The previous `chars / 4` assumed Latin script throughout and undercounts
+/// CJK badly — a Japanese chunk is closer to one token per character, so a
+/// mixed corpus was estimated (and, because `EmbeddingResponse.usage` is
+/// `None`, *charged*) well under what it costs. Count CJK scalars as one token
+/// each and the rest at the ~4-chars/token Latin ratio.
+fn estimate_embedding_tokens(text: &str) -> f64 {
+    let mut cjk = 0u64;
+    let mut other = 0u64;
+    for ch in text.chars() {
+        if is_cjk_scalar(ch) {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    cjk as f64 + other as f64 / 4.0
+}
+
+/// Scalars that tokenize at roughly one token each: Han, kana, Hangul, and the
+/// CJK punctuation/fullwidth blocks that sit between them.
+fn is_cjk_scalar(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3000..=0x30FF      // CJK symbols and punctuation, hiragana, katakana
+        | 0x3130..=0x318F    // Hangul compatibility jamo
+        | 0x3400..=0x4DBF    // CJK unified ideographs extension A
+        | 0x4E00..=0x9FFF    // CJK unified ideographs
+        | 0xAC00..=0xD7AF    // Hangul syllables
+        | 0xF900..=0xFAFF    // CJK compatibility ideographs
+        | 0xFF00..=0xFFEF    // Halfwidth and fullwidth forms
+        | 0x20000..=0x2FA1F  // CJK extensions B-F and compatibility supplement
+    )
+}
+
+/// Cost estimate for embedding `text` on `lane`. Because the adapter reports
+/// no usage (`EmbeddingResponse.usage` is `None` — the endpoint returns no
+/// token count), this estimate is what the ledger records as the settled
+/// charge, so both the token count and the per-token rate have to be right.
+fn estimate_embedding_cost(text: &str, lane: PreferredRequestKind) -> f64 {
+    estimate_embedding_tokens(text) * embedding_usd_per_token(lane)
 }
 
 /// Retained current-config chunks that have no usable current-profile vector.
@@ -15399,10 +16254,17 @@ fn duration_secs_field(inner: &str, key: &str) -> Option<i64> {
 
 fn estimate_online_markdownize_cost(size_bytes: u64, bbox_annotation_enabled: bool) -> f64 {
     let unannotated = estimate_local_baseline_cost(size_bytes) * 10.0;
-    if bbox_annotation_enabled {
+    let annotated = if bbox_annotation_enabled {
         unannotated * 1.25
     } else {
         unannotated
+    };
+    // The realtime (sync) lane bills exactly double the Batch lane per page
+    // ($4 vs $2 per 1,000 pages), so a `--realtime` run must reserve double —
+    // otherwise the budget cap guards half the money actually being spent.
+    match effective_invocation_lane() {
+        PreferredRequestKind::Sync => annotated * 2.0,
+        PreferredRequestKind::Batch => annotated,
     }
 }
 
@@ -17881,6 +18743,7 @@ enum MarkdownizeSendLane {
 fn markdownize_send_lane(
     batch_client_present: bool,
     open_row: Option<&BatchRequestRow>,
+    realtime: bool,
 ) -> MarkdownizeSendLane {
     let open_row_kind = open_row
         .filter(|row| row.state.is_inflight())
@@ -17891,6 +18754,9 @@ fn markdownize_send_lane(
         // `request_kind='sync'` row would hide its upload/job from §5.8
         // recovery (sync rows are exempt from job/upload matching — 04 §5.4).
         (_, Some(RequestKind::Sync)) => MarkdownizeSendLane::Sync,
+        // An open batch row owns its provider job regardless of `--realtime`:
+        // switching lanes mid-flight would strand that job outside §5.8
+        // recovery. Realtime only chooses the lane for a NEW send.
         (false, Some(RequestKind::Batch)) => MarkdownizeSendLane::DeferToRecovery,
         (true, Some(RequestKind::Batch)) => MarkdownizeSendLane::Batch,
         (false, None) => MarkdownizeSendLane::Sync,
@@ -17899,6 +18765,12 @@ fn markdownize_send_lane(
         // (`effective_bbox_annotation_policy`), so a bbox exception here
         // would silently keep production on the sync lane. `ocr_batch_body`
         // carries `bbox_annotation_format` exactly like the sync request.
+        //
+        // 2026-07-24 ruling AMENDS that: `--realtime` is an explicit, opt-in
+        // request for immediate turnaround that accepts the sync lane's double
+        // rate ($4 vs $2 per 1,000 pages), and it moves OCR and embedding
+        // together — never one lane each.
+        (true, None) if realtime => MarkdownizeSendLane::Sync,
         (true, None) => MarkdownizeSendLane::Batch,
     }
 }
@@ -18321,6 +19193,13 @@ fn settle_batch_charge_terminal(
     error: Option<&str>,
     billed: BilledAmount,
     increment_contract_violation: bool,
+    // §5.8: NULL 化は残骸掃除の完了時のみ. For the OCR lane that means never in
+    // the collect Tx (an upload still has to be deleted). The embedding lane
+    // submits INLINE, so it leaves no provider residue at all and terminal IS
+    // cleanup-complete — the same reasoning §5.4 applies to sync rows. Leaving
+    // the token set there would permanently block re-submission of that task
+    // key ("旧 token の消し込み完了後にのみ再投入可").
+    clear_intent_token: bool,
 ) -> Result<()> {
     terminal_transaction(
         ledger.connection(),
@@ -18333,8 +19212,7 @@ fn settle_batch_charge_terminal(
             error,
             increment_contract_violation,
             attempts_delta: 1,
-            // §5.8: NULL 化は残骸掃除の完了時のみ — never in the collect Tx.
-            clear_intent_token: false,
+            clear_intent_token,
             intent_token_guard: Some(intent_token),
             reseat_submission_seq: false,
         },
@@ -18582,6 +19460,7 @@ fn settle_failed_batch_job(
         Some(error),
         billed,
         false,
+        false,
     )?;
     cleanup_batch_residue(
         ledger,
@@ -18676,6 +19555,7 @@ fn collect_batch_markdownize_output(
             Some("unknown_settled"),
             estimated,
             false,
+            false,
         )?;
         cleanup_batch_residue(
             ledger,
@@ -18704,6 +19584,7 @@ fn collect_batch_markdownize_output(
                 estimated: false,
             },
             false,
+            false,
         )?;
         cleanup_batch_residue(
             ledger,
@@ -18730,6 +19611,7 @@ fn collect_batch_markdownize_output(
             BatchState::Terminal,
             Some("purged"),
             estimated,
+            false,
             false,
         )?;
         cleanup_batch_residue(
@@ -18771,6 +19653,7 @@ fn collect_batch_markdownize_output(
                 BatchState::Terminal,
                 Some("unknown_settled"),
                 estimated,
+                false,
                 false,
             )?;
             cleanup_batch_residue(
@@ -18897,6 +19780,7 @@ fn collect_batch_markdownize_output(
         None,
         billed,
         false,
+        false,
     )?;
     cleanup_batch_residue(
         ledger,
@@ -18961,6 +19845,7 @@ fn settle_batch_contract_reject(
         Some("contract_violation"),
         estimated,
         true,
+        false,
     )?;
     cleanup_batch_residue(
         ledger,
@@ -20625,7 +21510,13 @@ mod tests {
     use clap::Parser;
     use kio_adapter::catalog::deterministic_embedding_vector;
 
-    use super::{command_captured_json_flag, terminal_safe_text, Cli, Command};
+    use super::{
+        effective_invocation_lane, embedding_lane_rate, embedding_usd_per_token,
+        estimate_embedding_cost, estimate_embedding_tokens, markdownize_send_lane, parsed_repair,
+        parsed_search, query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
+        terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
+        RepairMode, SearchMode,
+    };
 
     /// R23-13 (06 §7 L343-344 "KIO-E-STORE-CONSTRAINT-001 ... permanent・
     /// 非再試行で command を即時中止・exit 4"): `pipeline_to_kio` maps this ONE
@@ -21934,6 +22825,306 @@ mod tests {
         assert!(bilingual_equivalents("チャンク").is_empty());
     }
 
+    fn search_args_of(argv: &[&str]) -> super::SearchArgs {
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Search(args) => args,
+            other => panic!("expected search, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_mode_is_the_only_mode_selector() {
+        // C (2026-07-24): `--mode` mirrors the `[search] default_mode` enum. The
+        // four booleans it replaced (`--text` / `--vector` / `--hybrid` /
+        // `--no-vector`) are gone, not aliased — pre-stable, so the vocabulary
+        // is cleaned rather than accumulated.
+        for (value, expected) in [
+            ("text", SearchMode::Text),
+            ("vector", SearchMode::Vector),
+            ("hybrid", SearchMode::Hybrid),
+            ("auto", SearchMode::Auto),
+        ] {
+            let parsed =
+                parsed_search(search_args_of(&["kio", "search", "q", "--mode", value])).unwrap();
+            assert_eq!(parsed.requested_mode, expected, "{value}");
+            assert!(parsed.explicit_mode, "{value}");
+        }
+        for removed in ["--text", "--vector", "--hybrid", "--no-vector"] {
+            assert!(
+                Cli::try_parse_from(["kio", "search", "q", removed]).is_err(),
+                "{removed} must no longer parse"
+            );
+        }
+        assert!(Cli::try_parse_from(["kio", "search", "q", "--mode", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn search_without_a_mode_flag_defers_to_the_config_default() {
+        let parsed = parsed_search(search_args_of(&["kio", "search", "q"])).unwrap();
+        assert_eq!(parsed.requested_mode, SearchMode::Auto);
+        assert!(
+            !parsed.explicit_mode,
+            "no flag means `[search] default_mode` supplies the mode"
+        );
+    }
+
+    #[test]
+    fn search_limit_bounds_are_enforced_after_parsing() {
+        assert!(parsed_search(search_args_of(&["kio", "search", "q", "--limit", "0"])).is_err());
+        assert_eq!(
+            parsed_search(search_args_of(&["kio", "search", "q", "--limit", "500"]))
+                .unwrap()
+                .limit,
+            100,
+            "the documented upper cap still applies"
+        );
+    }
+
+    #[test]
+    fn search_at_still_requires_a_single_non_descendant_scope() {
+        // PC59/PC60 — a usage-level check that must survive the move to clap.
+        assert!(parsed_search(search_args_of(&["kio", "search", "q", "--at", "HEAD"])).is_err());
+        assert!(parsed_search(search_args_of(&[
+            "kio",
+            "search",
+            "q",
+            "--at",
+            "HEAD",
+            "--scope",
+            ".",
+            "--descendants"
+        ]))
+        .is_err());
+        assert!(parsed_search(search_args_of(&[
+            "kio", "search", "q", "--at", "HEAD", "--scope", "."
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn reindex_regenerate_replaces_force_outright() {
+        // C: `--force` collided with `restore --force` (overwrite the
+        // destination). Pre-stable, so it is renamed, not aliased.
+        match Cli::try_parse_from(["kio", "reindex", "--regenerate"])
+            .unwrap()
+            .command
+        {
+            Command::Reindex(args) => assert!(args.regenerate),
+            other => panic!("expected reindex, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["kio", "reindex", "--force"]).is_err());
+    }
+
+    #[test]
+    fn repair_operations_are_subcommands_with_their_own_options() {
+        let repair_of = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Repair(args) => args,
+            other => panic!("expected repair, got {other:?}"),
+        };
+        // C: exactly-one is structural now — no operation, or two, will not parse.
+        assert!(Cli::try_parse_from(["kio", "repair"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "rebuild-db", "verify-objects"]).is_err());
+        // …and so is the nesting the old flag form had to police by hand.
+        assert!(Cli::try_parse_from(["kio", "repair", "rebuild-db", "--prune-orphans"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "verify-objects", "--online"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "verify-objects", "--realtime"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "registry-prune", "--online"]).is_err());
+        // The dead `--yes` (06 §1 requires a prompt that was never implemented,
+        // so it had nothing to skip) is gone rather than kept as a no-op.
+        assert!(Cli::try_parse_from(["kio", "repair", "rebuild-db", "--yes"]).is_err());
+        // The old flag spellings are removed, not aliased.
+        assert!(Cli::try_parse_from(["kio", "repair", "--rebuild-db"]).is_err());
+
+        assert_eq!(
+            parsed_repair(&repair_of(&[
+                "kio",
+                "repair",
+                "verify-objects",
+                "--prune-orphans"
+            ]))
+            .mode,
+            RepairMode::VerifyObjectsPruneOrphans
+        );
+        assert_eq!(
+            parsed_repair(&repair_of(&["kio", "repair", "verify-objects"])).mode,
+            RepairMode::VerifyObjects
+        );
+        assert_eq!(
+            parsed_repair(&repair_of(&["kio", "repair", "registry-prune"])).mode,
+            RepairMode::RegistryPrune
+        );
+        let rebuild = parsed_repair(&repair_of(&["kio", "repair", "rebuild-db", "--online"]));
+        assert_eq!(rebuild.mode, RepairMode::RebuildDb);
+        assert!(rebuild.online);
+    }
+
+    #[test]
+    fn lane_override_rejects_asking_for_both_lanes() {
+        assert!(resolve_invocation_lane(LaneOverride::new(true, true), None).is_err());
+    }
+
+    #[test]
+    fn every_command_declares_its_arguments() {
+        // B: `search`/`repair`/`reindex`/`open`/`view`/`gc`/`move`/`evidence`
+        // used to swallow their operands into a `trailing_var_arg` catch-all, so
+        // `--help` advertised nothing and typos were not caught. An unknown flag
+        // must now be a parse error on every one of them.
+        for argv in [
+            vec!["kio", "search", "q", "--bogus"],
+            vec!["kio", "repair", "--bogus"],
+            vec!["kio", "reindex", "--bogus"],
+            vec!["kio", "open", "p", "--bogus"],
+            vec!["kio", "view", "p", "--bogus"],
+            vec!["kio", "gc", "--bogus"],
+            vec!["kio", "move", "--bogus"],
+            vec!["kio", "evidence", "verify", "p", "--bogus"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "unknown flag must be rejected: {argv:?}"
+            );
+        }
+    }
+
+    /// A `BatchRequestRow` shaped only enough for the lane decision.
+    fn lane_test_row(kind: super::RequestKind) -> super::BatchRequestRow {
+        super::BatchRequestRow {
+            key: kio_pipeline::ledger::model::TaskKey {
+                scope_id: "scope".to_owned(),
+                adapter_kind: "markdownize".to_owned(),
+                input_hash: "sha256:input".to_owned(),
+                tool_profile_hash: "sha256:tool".to_owned(),
+            },
+            state: kio_pipeline::ledger::model::BatchState::Intent,
+            request_kind: kind,
+            intent_token: Some("tok".to_owned()),
+            upload_id: None,
+            batch_job_id: None,
+            provider_scope_id: None,
+            job_create_started_at: None,
+            stale_after_at: None,
+            submission_seq: 0,
+            attempts: 0,
+            contract_violation_count: 0,
+            estimated_usd: 0.0,
+            error: None,
+            completed_at: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn realtime_moves_a_new_ocr_send_to_the_sync_lane() {
+        // Default (Batch lane) is unchanged...
+        assert_eq!(
+            markdownize_send_lane(true, None, false),
+            MarkdownizeSendLane::Batch
+        );
+        // ...and `--realtime` opts into the sync lane's double rate.
+        assert_eq!(
+            markdownize_send_lane(true, None, true),
+            MarkdownizeSendLane::Sync
+        );
+    }
+
+    #[test]
+    fn realtime_never_hijacks_an_in_flight_batch_row() {
+        // An open batch row owns a live provider job; switching it to the sync
+        // lane mid-flight would strand that job outside §5.8 recovery.
+        let row = lane_test_row(super::RequestKind::Batch);
+        assert_eq!(
+            markdownize_send_lane(true, Some(&row), true),
+            MarkdownizeSendLane::Batch
+        );
+        // Without a batch client the row still defers to recovery, not to sync.
+        assert_eq!(
+            markdownize_send_lane(false, Some(&row), true),
+            MarkdownizeSendLane::DeferToRecovery
+        );
+    }
+
+    #[test]
+    fn realtime_leaves_the_no_batch_client_case_on_sync() {
+        assert_eq!(
+            markdownize_send_lane(false, None, false),
+            MarkdownizeSendLane::Sync
+        );
+        assert_eq!(
+            markdownize_send_lane(false, None, true),
+            MarkdownizeSendLane::Sync
+        );
+    }
+
+    #[test]
+    fn the_invocation_lane_defaults_to_batch() {
+        // No `--realtime` was recorded by these unit tests, so the default the
+        // ruling fixes (Batch = half price) is what both adapters would take.
+        assert!(!realtime_lane_requested());
+        assert_eq!(effective_invocation_lane(), PreferredRequestKind::Batch);
+    }
+
+    #[test]
+    fn embedding_token_estimate_counts_cjk_at_one_token_per_char() {
+        // 4 Latin chars ≈ 1 token; 4 CJK scalars ≈ 4 tokens. The old
+        // `chars / 4` rule charged the Japanese case at a quarter of its cost.
+        assert!((estimate_embedding_tokens("abcd") - 1.0).abs() < 1e-9);
+        assert!((estimate_embedding_tokens("日本語だ") - 4.0).abs() < 1e-9);
+        // Mixed text adds the two ratios rather than picking one.
+        assert!((estimate_embedding_tokens("abcd日本語だ") - 5.0).abs() < 1e-9);
+        assert!(estimate_embedding_tokens("").abs() < 1e-9);
+    }
+
+    #[test]
+    fn embedding_rate_is_lane_aware_and_batch_is_half_of_sync() {
+        // Published `gemini-embedding-2` text rates (07 §5.3 の 2026-07-24 訂正):
+        // $0.20 / 1M sync, $0.10 / 1M batch.
+        let sync = embedding_usd_per_token(PreferredRequestKind::Sync);
+        let batch = embedding_usd_per_token(PreferredRequestKind::Batch);
+        assert!((sync - 0.000_000_2).abs() < 1e-15, "sync rate: {sync}");
+        assert!((batch - 0.000_000_1).abs() < 1e-15, "batch rate: {batch}");
+        assert!((sync - batch * 2.0).abs() < 1e-15);
+    }
+
+    /// R24 (5 系統一致): a DECLARED `tools.toml` price must still split by lane.
+    /// The pre-R24 code returned the declared value before consulting `lane`,
+    /// so the moment a user declared `[embedding.*.pricing] tokens_in` — which
+    /// 07 §5.3 calls the normative source — Batch and Sync collapsed to one
+    /// price and every batch job was recorded at double what it cost.
+    #[test]
+    fn a_declared_price_is_the_standard_rate_and_batch_is_still_half() {
+        // An arbitrary declared rate, deliberately not the published one.
+        let declared = 0.000_000_5;
+        let sync = embedding_lane_rate(declared, PreferredRequestKind::Sync);
+        let batch = embedding_lane_rate(declared, PreferredRequestKind::Batch);
+        assert!(
+            (sync - declared).abs() < 1e-15,
+            "sync must be the declared rate: {sync}"
+        );
+        assert!(
+            (batch - declared / 2.0).abs() < 1e-15,
+            "batch must be half the declared rate, not equal to it: {batch}"
+        );
+    }
+
+    #[test]
+    fn embedding_cost_multiplies_the_token_estimate_by_the_lane_rate() {
+        // 1M Latin chars ≈ 250k tokens → $0.05 at the sync rate.
+        let text = "a".repeat(1_000_000);
+        let usd = estimate_embedding_cost(&text, PreferredRequestKind::Sync);
+        assert!((usd - 0.05).abs() < 1e-9, "usd: {usd}");
+        // The same text on the Batch lane costs exactly half.
+        let batch_usd = estimate_embedding_cost(&text, PreferredRequestKind::Batch);
+        assert!((usd - batch_usd * 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn query_embedding_is_always_priced_on_the_sync_lane() {
+        // A search cannot wait out a batch job's turnaround, so the query lane
+        // must never be priced at the batch rate even once the enrichment
+        // driver moves to Batch.
+        assert_eq!(query_embedding_send_lane(), PreferredRequestKind::Sync);
+    }
+
     #[test]
     fn r11_2_exit_override_priority_batch_vs_enrichment() {
         use super::{batch_exit_override, enrichment_exit_override, ExecOutcome};
@@ -22416,9 +23607,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_out_of_scope_commands_as_placeholders() {
+    fn json_is_a_global_flag_on_every_command() {
+        // B (2026-07-24): `search` used to swallow `--json` into a trailing
+        // catch-all, so the CLI had to re-scan the raw operands for it. Now that
+        // every command declares its arguments, clap's `global = true` carries
+        // the flag and `command_captured_json_flag` is gone.
         let cli = Cli::try_parse_from(["kio", "search", "query", "--json"]).unwrap();
-        assert!(command_captured_json_flag(&cli.command));
+        assert!(cli.json);
         assert!(Cli::try_parse_from(["kio", "index", "--preview"]).is_ok());
     }
 

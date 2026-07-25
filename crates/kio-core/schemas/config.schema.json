@@ -131,6 +131,10 @@
     "adapter": {
       "type": "object",
       "properties": {
+        "lane": {
+          "type": "string",
+          "enum": ["batch", "realtime"]
+        },
         "policy": {
           "type": "object",
           "properties": {

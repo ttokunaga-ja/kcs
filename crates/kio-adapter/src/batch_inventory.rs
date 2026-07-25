@@ -8,14 +8,21 @@
 //! providers. Since `batch_client::EnvMistralBatchClient` (07 §5.7, the
 //! 2026-07-23 Batch-lane ruling), production enumerates the configured
 //! Mistral Batch client's own list-jobs / list-uploads calls — one
-//! [`ProviderInventory`] per configured client (currently 0 or 1: the
-//! built-in Mistral lane), scoped by that client's `provider_scope_id`. The
-//! `KIO_TEST_BATCH_INVENTORY` fixture seam takes precedence when set so the
-//! walk stays deterministic in tests.
+//! [`ProviderInventory`] per configured client (0 to 2: the built-in Mistral
+//! OCR lane and the Gemini embedding lane), scoped by that client's
+//! `provider_scope_id`. The `KIO_TEST_BATCH_INVENTORY` fixture seam takes
+//! precedence when set so the walk stays deterministic in tests.
+//!
+//! G1 (2026-07-25): the Gemini embedding lane was missing here. Its
+//! `list_jobs` existed but had no caller, so a row stranded in §5.8's
+//! job-creation window (相 2b started, job create failed) could never be
+//! recovered — `kio ledger reconcile` reported it `unlistable` and its
+//! reservation held the device budget cap forever.
 
 use serde::Deserialize;
 
 use crate::batch_client::{BatchJobRecord, MistralBatchClient};
+use crate::gemini_batch_client::{display_name_intent_token, GeminiBatchClient};
 use crate::Result;
 
 /// 10 §7.5.2's job "帰属" (attribution) key: the same 4-tuple task identity
@@ -116,10 +123,50 @@ pub fn configured_inventories() -> Result<Vec<ProviderInventory>> {
         return serde_json::from_str(&text)
             .map_err(|err| crate::AdapterError::ConfigSchema(format!("{fixture_path}: {err}")));
     }
-    let Some(client) = crate::batch_client::configured_mistral_batch_client()? else {
-        return Ok(Vec::new());
-    };
-    Ok(vec![inventory_from_client(client.as_ref())?])
+    let mut inventories = Vec::new();
+    if let Some(client) = crate::batch_client::configured_mistral_batch_client()? {
+        inventories.push(inventory_from_client(client.as_ref())?);
+    }
+    // G1: the embedding lane's provider. Unconfigured = contributes nothing,
+    // exactly as the Mistral arm does.
+    if let Some(client) = crate::gemini_batch_client::resolve_gemini_batch_client()? {
+        inventories.push(gemini_inventory_from_client(client.as_ref())?);
+    }
+    Ok(inventories)
+}
+
+/// One configured Gemini embedding Batch client's job listing.
+///
+/// `uploads` is ALWAYS empty and that is not an omission: the embedding lane
+/// submits its input INLINE (07 §5.3 の 2026-07-24 訂正), so 相 2a does not
+/// exist and no upload residue can be created. 10 §7.5.2's upload
+/// reconciliation simply has nothing to reconcile for this provider.
+fn gemini_inventory_from_client(client: &dyn GeminiBatchClient) -> Result<ProviderInventory> {
+    let provider_scope_id = client.provider_scope_id()?;
+    let jobs = client
+        .list_jobs()?
+        .into_iter()
+        .map(|job| ProviderJobRecord {
+            job_id: job.name,
+            // A Gemini batch job carries no structured metadata — the
+            // `displayName` is the only field Kio controls, so the
+            // intent_token embedded there is its whole attribution
+            // (`batch_display_name`). That is enough for §5.8's recovery
+            // direction, which matches on `intent_token`.
+            intent_token: display_name_intent_token(&job.display_name).map(str::to_owned),
+            // No task-key 4-tuple exists to carry. `job_is_accounted_for`
+            // falls back to `intent_token`, so attribution still works; a job
+            // that matches nothing locally is reported `unknown` rather than
+            // claimed — the same report-only posture 10 §7.5.2 gives an
+            // upload, whose filename token is likewise its only attribution.
+            task_key: None,
+        })
+        .collect();
+    Ok(ProviderInventory {
+        provider_scope_id,
+        jobs,
+        uploads: Vec::new(),
+    })
 }
 
 /// One configured client's full listing, mapped to the reconcile walk's

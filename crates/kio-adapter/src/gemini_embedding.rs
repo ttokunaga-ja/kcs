@@ -15,7 +15,7 @@ use crate::http_policy::{
     MODEL_CATALOG_MAX_BYTES,
 };
 use crate::identity::{is_mutable_model_alias, tool_profile_hash};
-use crate::traits::EmbeddingAdapter;
+use crate::traits::{EmbeddingAdapter, PreferredRequestKind};
 use crate::types::{
     validate_cosine_vector, AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest,
     EmbeddingResponse, EmbeddingVector, ExecutionMode,
@@ -173,8 +173,13 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
         idempotency_header: Option<(&str, &str)>,
     ) -> Result<Vec<EmbeddingVector>> {
         let api_key = Self::api_key()?;
-        // `:batchEmbedContents` embeds the whole batch in one request. Vertex has
-        // no batch inference, so batching is client-side (07 §5.3).
+        // `:batchEmbedContents` embeds the whole batch in ONE SYNCHRONOUS
+        // request — the batching here is client-side, and this is the Sync lane
+        // even though the endpoint name contains "batch". The provider's actual
+        // Batch lane (half price, async) is `:asyncBatchEmbedContent`, driven by
+        // `crate::gemini_batch_client` — see `preferred_request_kind` and the
+        // 2026-07-24 correction in 07 §5.3. (The earlier comment here claimed
+        // Vertex has no batch inference; this adapter does not call Vertex.)
         let requests = items
             .iter()
             .map(|item| {
@@ -390,6 +395,13 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             // `with_provider_idempotency`.
             provider_idempotency: self.provider_idempotency.clone(),
         }
+    }
+
+    /// 07 §5.3 の 2026-07-24 訂正: the Gemini Developer API bills an embedding
+    /// batch at half the sync rate, so this adapter's production sends prefer
+    /// the Batch lane (`gemini_batch_client`, inline input / no upload phase).
+    fn preferred_request_kind(&self) -> PreferredRequestKind {
+        PreferredRequestKind::Batch
     }
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {

@@ -3440,7 +3440,7 @@ fn r15_4_shallow_head_degrades_reads_and_rejects_writes() {
     );
 
     // (c) `reindex --force --yes` likewise fails with the shallow error.
-    let reindex_err = json_failure(&dir, ["reindex", "--force", "--yes"], 1);
+    let reindex_err = json_failure(&dir, ["reindex", "--regenerate", "--yes"], 1);
     assert_eq!(
         reindex_err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
         "{reindex_err}"

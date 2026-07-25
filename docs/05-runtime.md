@@ -51,18 +51,18 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 相 1 claim Tx 内 (`BEGIN IMMEDIATE` 保持下) で approvals[] / boolean を再読して最終検証する** (読み取り開始時の値を
 使い回さない — 検証後に revoke が完了した場合の当該送信は in-flight として許容 (送信済みの取り消し
 非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
-(かつ `--online` 一時 opt-in なし) の場合、auto / `--hybrid` は text fallback
-(`fallback_reason="embedding_not_authorized"`)、`--vector` 明示は KIO-E-SEARCH-VEC-UNAUTHORIZED-001
+(かつ `--online` 一時 opt-in なし) の場合、auto / `--mode hybrid` は text fallback
+(`fallback_reason="embedding_not_authorized"`)、`--mode vector` 明示は KIO-E-SEARCH-VEC-UNAUTHORIZED-001
 で error。**ユーザー意思由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
 失敗 (INCOMPAT / UNAVAIL 等) への応答方針であり、`embedding_not_authorized` (承認なし) と `offline`
-(`--offline` 指定) には適用しない (設定値に関わらず auto / `--hybrid` は常に text fallback、`--vector`
-のみ error — §1.2 / [06-cli-spec.md §3](06-cli-spec.md) の `--hybrid` 行の注記も同旨)。一方
+(`--offline` 指定) には適用しない (設定値に関わらず auto / `--mode hybrid` は常に text fallback、`--mode vector`
+のみ error — §1.2 / [06-cli-spec.md §3](06-cli-spec.md) の `--mode hybrid` 行の注記も同旨)。一方
 **`embedding_in_flight` (同一 query の並行実行 — [04-pipeline.md §5.4](04-pipeline.md)) と
 `embedding_contract_violation` (query embedding 応答の受入検査違反 — [07-adapter-spec.md §5.3](07-adapter-spec.md))
-は技術的な過渡失敗であり `fail_behavior` の対象**: auto は text fallback、`--hybrid` は fail_behavior に従い、
-`--vector` 明示は KIO-E-SEARCH-VEC-UNAVAIL-001 で error。`--online` / `--offline` は他コマンドと
+は技術的な過渡失敗であり `fail_behavior` の対象**: auto は text fallback、`--mode hybrid` は fail_behavior に従い、
+`--mode vector` 明示は KIO-E-SEARCH-VEC-UNAVAIL-001 で error。`--online` / `--offline` は他コマンドと
 同義の当該実行限りの上書き (07 §3)。**`--offline` 指定時は承認の有無に関わらず query embedding を送信
-しない** — auto / `--hybrid` は text fallback (`fallback_reason="offline"`)、`--vector` 明示は
+しない** — auto / `--mode hybrid` は text fallback (`fallback_reason="offline"`)、`--mode vector` 明示は
 KIO-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
 `scope_id='device'` の sync request として縮退 2 相に記帳する ([04-pipeline.md §5.4](04-pipeline.md)
 — folder cap 対象外・device cap / per_adapter は通常合算)。
@@ -71,10 +71,9 @@ KIO-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
 
 ```bash
 kio search "..."             # auto
-kio search "..." --text      # text only
-kio search "..." --vector    # vector only。失敗時は error
-kio search "..." --hybrid    # hybrid 強制。vector 失敗時は fail_behavior に従う (承認なし・--offline は対象外 — 常に text fallback。embedding_in_flight は対象 — §1.1)
-kio search "..." --no-vector # 明示無効
+kio search "..." --mode text    # text only
+kio search "..." --mode vector  # vector only。失敗時は error
+kio search "..." --mode hybrid  # hybrid 強制。vector 失敗時は fail_behavior に従う (承認なし・--offline は対象外 — 常に text fallback。embedding_in_flight は対象 — §1.1)
 kio search "..." [--online|--offline]  # query embedding の一時 opt-in / 当該実行の新規送信禁止 (§1.1 consent gate)
 ```
 
@@ -212,7 +211,7 @@ kio search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 
 scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
-`index_generation` は **rebuild (`kio repair --rebuild-db`)・purge・embedding enrichment の finalize・
+`index_generation` は **rebuild (`kio repair rebuild-db`)・purge・embedding enrichment の finalize・
 index / batch finalize で `chunk_fts` の内容が変化した場合・tombstone lifecycle の更新
 (retire・再 purge — tombstone 状態の判定 (canonical final event — [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) が検索の可視集合を変えるため、purge の回転と対称。
 [§3.5](05-runtime.md))・および GC の shallow 化実行
@@ -425,7 +424,7 @@ score/rank をコピーして、group 内を
    異なる folder 値の統合は定義しない。cursor が bind する実効値 (§1.5) もこの解決に従う —
    **ただし fail_behavior は挙動方針であり確定順序に影響しないため bind / query_hash preimage の
    対象外**)
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--mode vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -561,7 +560,7 @@ gc_policy(commit_type):
 
 **full (commit object の削除) はどの commit_type にも適用しない。** commit object は append-only であり、これを消す操作は Kio に存在しない (purge も commit / tree を書き換えない、§3.5)。
 
-なお `kio repair --verify-objects` ([10-operations.md §7.5](10-operations.md)) が生成する `repaired` commit は破損 object の再取り込みによる復旧点であり、その復元した raw object は GC 対象外 (§2.6)。したがって commit の tree が shallow 化されても復旧した raw 内容は保持され、object としては実効的に none 相当である。
+なお `kio repair verify-objects` ([10-operations.md §7.5](10-operations.md)) が生成する `repaired` commit は破損 object の再取り込みによる復旧点であり、その復元した raw object は GC 対象外 (§2.6)。したがって commit の tree が shallow 化されても復旧した raw 内容は保持され、object としては実効的に none 相当である。
 
 `shallow` は履歴 DAG の連続性を保つため commit を残し tree のみ破棄する。実行時は
 `(commit_hash, tree_hash, gc_policy, shallowed_at)` を持つ non-content receipt
@@ -749,7 +748,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
   (closure の列挙正本 = 当該 (raw_hash, tool_profile_hash) の全 gen manifest。**どの manifest からも
    参照されない orphan prepared / image** (公開前 crash の残骸) は解決経路に乗らず、GC の
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
-   `kio repair --verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
+   `kio repair verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
 - SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす。書き換えは [04-pipeline.md §1.1](04-pipeline.md) の耐久書込 primitive (temp + rename) に従う)
@@ -795,7 +794,7 @@ tombstoned)。retire append の完了時に index_generation を新規採番す�
 SQLite Tx は index_metadata の **`last_lifecycle_epoch`** ([04-pipeline.md §4.1](04-pipeline.md)) へ
 反映済み counter 値を記録する。append と回転の間で crash した場合は、書き込み系コマンド冒頭の
 回復が **counter > last_lifecycle_epoch** を検出して回転を補完する (UTC ms の時刻比較は同一ミリ秒・
-時計逆行で補完を見逃すため使わない。`kio repair --rebuild-db` は完了 Tx で現 counter 値に初期化する
+時計逆行で補完を見逃すため使わない。`kio repair rebuild-db` は完了 Tx で現 counter 値に初期化する
 — DEFAULT 0 のままの全件誤検出を防ぐ)。**counter の耐久順序と回復**: counter の +1 (fsync) を
 event append より先に行い、**全ての新規 lifecycle event (purged・erased・retired・legacy 変換の
 書込) に、その時点の counter 値を `lifecycle_epoch` として必須記録する** (purge の `epoch`
@@ -1070,7 +1069,7 @@ Kio は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 
 ```text
 kio index / kio snapshot (= kio commit) / kio tag (refs/tags-v1 更新) / kio gc / kio purge /
-kio repair --rebuild-db / kio repair --verify-objects / kio move --accept /
+kio repair rebuild-db / kio repair verify-objects / kio move --accept /
 kio batch resume / kio batch retry / kio batch abandon / kio reindex /
 kio adapter revoke
 ```
@@ -1090,8 +1089,8 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
 - `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
-- `kio repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
-- `kio repair --rebuild-db` 実行中の `kio search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KIO-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
+- `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
+- `kio repair rebuild-db` 実行中の `kio search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KIO-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kio/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kio` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
 - purge の log scrub と通常 append/rotation は、device logs では `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`、scope access logs では `.kio/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 
@@ -1118,7 +1117,7 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 
 1. 明示的 `kio snapshot` / `kio commit` (commit_type=manual)
 2. `kio index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
-3. `kio batch resume` / `kio batch retry` / `kio reindex --force` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` / **tree の `chunk_set_hash` (公開 chunk 集合の digest — chunk のみが後着した finalize でも変わる)** を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kio index` まで検索対象にならないか、manifest 反映済み snapshot が先行したケースで introduction を刻む commit を作れない (§1.6)
+3. `kio batch resume` / `kio batch retry` / `kio reindex --regenerate` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` / **tree の `chunk_set_hash` (公開 chunk 集合の digest — chunk のみが後着した finalize でも変わる)** を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kio index` まで検索対象にならないか、manifest 反映済み snapshot が先行したケースで introduction を刻む commit を作れない (§1.6)
 
 **no-op 規則の例外 (2026-07-18 確定)**: (a) **resurrection finalize** (erase / purge 済み raw の再 ingest) は、同一 bytes の再現で tree_hash・chunk_set_hash が HEAD と一致しても publication commit を作る — retire event と introduction を刻む commit が無いと、復活した chunk を検索対象化できないか旧 introduction へ遡及するため。(b) **no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する** — embedding profile のみの更新でも lock が変われば commit を作る (現行 vector index と HEAD の provenance を一致させる)
 

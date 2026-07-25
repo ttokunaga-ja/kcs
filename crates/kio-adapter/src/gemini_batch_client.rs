@@ -1,0 +1,1034 @@
+//! Gemini embedding Batch lane client (07 §5.3 の 2026-07-24 訂正 / §5.7).
+//!
+//! Mirrors [`crate::batch_client`] (the Mistral OCR Batch lane) with one
+//! structural difference the spec calls out: the Gemini embedding batch takes
+//! its input **inline** (`batch.inputConfig.requests.requests[]`), so there is
+//! **no upload phase (相 2a)**. Nothing is ever written to the provider's File
+//! API, so no upload residue can exist and this trait deliberately omits
+//! `list_uploads` / `delete_upload`. `provider_scope_id` is recorded by the
+//! caller immediately before job creation instead.
+//!
+//! Wire contract (2026-07-24 documentation record):
+//!
+//! - create: `POST {base}/v1beta/{model}:asyncBatchEmbedContent`
+//! - poll:   `GET  {base}/v1beta/{name}` where `name` = `batches/{id}`
+//! - list:   `GET  {base}/v1beta/batches?pageSize=N[&pageToken=…]`
+//! - cancel: `POST {base}/v1beta/{name}:cancel`
+//! - results: inline in the poll response under `response.inlinedResponses[]`
+//!
+//! Job-level attribution: the Gemini batch object exposes only `displayName`
+//! as a free-form job-level string (unlike Mistral's `metadata` object), so the
+//! intent_token rides there under the same convention the Mistral lane uses for
+//! its upload filename — see [`batch_display_name`]. That name is the recovery
+//! walk's 発見キー (04 §5.8 / 10 §7.5.2).
+//!
+//! Like the sibling embedding adapter, the live HTTP path is not exercised in
+//! the hermetic suite (decision #28); the contract is covered through the mock
+//! seam ([`TEST_GEMINI_BATCH_ENV`]).
+
+use std::io::Write as _;
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::http_policy::{
+    authenticated_agent, read_json_bounded, HttpPolicy, EMBEDDING_RESPONSE_MAX_BYTES,
+};
+use crate::{AdapterError, Result};
+
+/// Hermetic test seam: an inline JSON [`MockGeminiBatchScript`]. When set, the
+/// resolver returns the mock client and no network call is ever made.
+pub const TEST_GEMINI_BATCH_ENV: &str = "KIO_TEST_GEMINI_BATCH";
+
+/// Provider-scope override, mirroring `KIO_MISTRAL_WORKSPACE_ID`.
+pub const GEMINI_PROJECT_ID_ENV: &str = "KIO_GEMINI_PROJECT_ID";
+
+/// The provider scope recorded when no project is configured. A Gemini API key
+/// is itself project-scoped, so one constant scope per client configuration is
+/// a faithful v1 identity (same posture as [`crate::batch_client`]).
+pub const DEFAULT_PROVIDER_SCOPE_ID: &str = "gemini:default";
+
+const GEMINI_API_ORIGIN: &str = "https://generativelanguage.googleapis.com";
+
+/// Metadata-class responses (one batch object, one listing page) are small.
+const BATCH_METADATA_MAX_BYTES: usize = 1024 * 1024;
+
+/// Listing pagination page size (`pageSize` query parameter).
+const BATCH_LIST_PAGE_SIZE: usize = 100;
+
+/// Hard bound on the pagination walk — same posture as the Mistral lane: the
+/// walk STOPS at the bound (bounded, report-only inventory scan), it does not
+/// error.
+const BATCH_LIST_MAX_PAGES: usize = 50;
+
+/// Provider cap on an inline batch is 20 MB. Bound the serialized request array
+/// below that with margin, so a job is rejected locally (a contract error the
+/// caller can split on) rather than by the provider after a round trip.
+pub const MAX_INLINE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// Secondary bound on one job's request count. 07 §5.3 requires the caller to
+/// keep a job bounded; this is the ceiling the client itself enforces.
+pub const MAX_INLINE_REQUESTS: usize = 2_048;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// `BatchState` enum of the Gemini batch object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeminiBatchState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Expired,
+    Other(String),
+}
+
+impl GeminiBatchState {
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "BATCH_STATE_PENDING" | "JOB_STATE_PENDING" | "PENDING" => Self::Pending,
+            "BATCH_STATE_RUNNING" | "JOB_STATE_RUNNING" | "RUNNING" => Self::Running,
+            "BATCH_STATE_SUCCEEDED" | "JOB_STATE_SUCCEEDED" | "SUCCEEDED" => Self::Succeeded,
+            "BATCH_STATE_FAILED" | "JOB_STATE_FAILED" | "FAILED" => Self::Failed,
+            "BATCH_STATE_CANCELLED" | "JOB_STATE_CANCELLED" | "CANCELLED" => Self::Cancelled,
+            "BATCH_STATE_EXPIRED" | "JOB_STATE_EXPIRED" | "EXPIRED" => Self::Expired,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// Terminal states — the poll lane stops re-scheduling on these.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Expired
+        )
+    }
+}
+
+/// One Gemini batch job as the provider reports it.
+#[derive(Debug, Clone)]
+pub struct GeminiBatchJobRecord {
+    /// Resource name, `batches/{id}` — the value stored in `batch_job_id`.
+    pub name: String,
+    pub state: GeminiBatchState,
+    /// The job-level free-form label the intent_token rides in
+    /// ([`batch_display_name`]).
+    pub display_name: String,
+    /// Set when the provider chose the file-output form instead of inline.
+    /// The embedding lane always submits inline input, but a provider that
+    /// answers with `responsesFile` is surfaced rather than silently treated
+    /// as an empty result.
+    pub responses_file: Option<String>,
+}
+
+/// One embedding result line, keyed back to the caller's request key.
+#[derive(Debug, Clone)]
+pub struct GeminiBatchEmbedOutput {
+    /// The caller's key, echoed through the per-request `metadata.key`.
+    pub key: String,
+    /// `Some` on success; `None` when this line carries an error instead.
+    pub values: Option<Vec<f32>>,
+    /// Provider error object for this line, when present.
+    pub error: Option<Value>,
+}
+
+/// One inline request element: the caller's key plus the text to embed.
+#[derive(Debug, Clone)]
+pub struct GeminiBatchEmbedInput {
+    pub key: String,
+    pub text: String,
+}
+
+/// Job-level attribution. The intent_token embedding is the ONLY attribution a
+/// Gemini batch job carries (04 §5.8 発見キー / 10 §7.5.2 — a job whose display
+/// name cannot be parsed is unknown, report-only).
+#[must_use]
+pub fn batch_display_name(intent_token: &str) -> String {
+    format!("kio-{intent_token}")
+}
+
+/// Inverse of [`batch_display_name`].
+#[must_use]
+pub fn display_name_intent_token(display_name: &str) -> Option<&str> {
+    let token = display_name.strip_prefix("kio-")?;
+    (!token.is_empty()).then_some(token)
+}
+
+/// Build the `batch` create body for an inline embedding job. Separated from
+/// the client so the shape is unit-testable without any network seam.
+///
+/// `model` is the pinned model id (e.g. `gemini-embedding-2`); it is sent both
+/// on the batch and on every inner request, which is what the REST reference's
+/// `EmbedContentRequest` requires.
+pub fn inline_embed_batch_body(
+    model: &str,
+    display_name: &str,
+    dimensions: u32,
+    inputs: &[GeminiBatchEmbedInput],
+) -> Result<Value> {
+    if inputs.is_empty() {
+        return Err(AdapterError::ContractViolation(
+            "Gemini embedding batch requires at least one request".to_owned(),
+        ));
+    }
+    if inputs.len() > MAX_INLINE_REQUESTS {
+        return Err(AdapterError::ContractViolation(format!(
+            "Gemini embedding batch has {} requests, over the {MAX_INLINE_REQUESTS} inline bound",
+            inputs.len()
+        )));
+    }
+    let model_name = qualified_model(model);
+    let requests = inputs
+        .iter()
+        .map(|input| {
+            json!({
+                "request": {
+                    "model": model_name,
+                    "content": { "parts": [{ "text": input.text }] },
+                    "outputDimensionality": dimensions,
+                },
+                "metadata": { "key": input.key },
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = json!({
+        "batch": {
+            "displayName": display_name,
+            "inputConfig": { "requests": { "requests": requests } },
+        }
+    });
+    let encoded = serde_json::to_vec(&body).map_err(|error| {
+        AdapterError::ContractViolation(format!("Gemini embedding batch body: {error}"))
+    })?;
+    if encoded.len() > MAX_INLINE_REQUEST_BYTES {
+        return Err(AdapterError::ContractViolation(format!(
+            "Gemini embedding batch body is {} bytes, over the {MAX_INLINE_REQUEST_BYTES} inline bound",
+            encoded.len()
+        )));
+    }
+    Ok(body)
+}
+
+/// `models/x` passes through; a bare `x` is qualified.
+fn qualified_model(model: &str) -> String {
+    if model.starts_with("models/") {
+        model.to_owned()
+    } else {
+        format!("models/{model}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait
+// ---------------------------------------------------------------------------
+
+/// 07 §5.7 client operations for the embedding Batch lane. One provider job
+/// carries ONE task's input (1 job = 1 task), the same v1 posture the OCR lane
+/// takes, so the per-task-key `batch_job_id` column keys the recovery walk.
+///
+/// No upload operations: the input is inline, so 相 2a does not exist and the
+/// provider holds no residue to sweep.
+pub trait GeminiBatchClient {
+    fn provider_scope_id(&self) -> Result<String>;
+
+    /// Create an inline embedding batch job; returns the created job record.
+    fn create_embedding_job(
+        &self,
+        model: &str,
+        dimensions: u32,
+        display_name: &str,
+        inputs: &[GeminiBatchEmbedInput],
+    ) -> Result<GeminiBatchJobRecord>;
+
+    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord>;
+
+    fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>>;
+
+    /// Read the inline results of a succeeded job.
+    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>>;
+}
+
+// ---------------------------------------------------------------------------
+// Parsing (shared by the real client and the mock)
+// ---------------------------------------------------------------------------
+
+/// A create/get response wraps the batch either at the top level or under
+/// `metadata` / `response` (long-running-operation envelope). Accept both.
+fn batch_object(value: &Value) -> &Value {
+    for key in ["response", "metadata"] {
+        if let Some(inner) = value.get(key) {
+            if inner.get("state").is_some() || inner.get("name").is_some() {
+                return inner;
+            }
+        }
+    }
+    value
+}
+
+pub(crate) fn parse_job_record(value: &Value) -> Result<GeminiBatchJobRecord> {
+    let object = batch_object(value);
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            AdapterError::ContractViolation("Gemini batch response missing name".to_owned())
+        })?
+        .to_owned();
+    let state = object
+        .get("state")
+        .and_then(Value::as_str)
+        .map(GeminiBatchState::parse)
+        .ok_or_else(|| {
+            AdapterError::ContractViolation("Gemini batch response missing state".to_owned())
+        })?;
+    let display_name = object
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let responses_file = object
+        .get("dest")
+        .and_then(|dest| dest.get("responsesFile"))
+        .or_else(|| object.get("responsesFile"))
+        .and_then(Value::as_str)
+        .filter(|file| !file.is_empty())
+        .map(str::to_owned);
+    Ok(GeminiBatchJobRecord {
+        name,
+        state,
+        display_name,
+        responses_file,
+    })
+}
+
+/// Extract `inlinedResponses[]` into keyed outputs. A line without a usable
+/// `metadata.key` is a contract violation: silently dropping it would leave the
+/// caller's chunk permanently unembedded while the job counted as complete.
+pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbedOutput>> {
+    let object = batch_object(value);
+    let lines = object
+        .get("dest")
+        .and_then(|dest| dest.get("inlinedResponses"))
+        .or_else(|| object.get("inlinedResponses"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AdapterError::ContractViolation(
+                "Gemini batch result missing inlinedResponses".to_owned(),
+            )
+        })?;
+    let mut outputs = Vec::with_capacity(lines.len());
+    for line in lines {
+        let key = line
+            .get("metadata")
+            .and_then(|metadata| metadata.get("key"))
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                AdapterError::ContractViolation(
+                    "Gemini batch result line missing metadata.key".to_owned(),
+                )
+            })?
+            .to_owned();
+        let output = line.get("output").unwrap_or(line);
+        if let Some(error) = output.get("error").filter(|error| !error.is_null()) {
+            outputs.push(GeminiBatchEmbedOutput {
+                key,
+                values: None,
+                error: Some(error.clone()),
+            });
+            continue;
+        }
+        let raw = output
+            .get("response")
+            .and_then(|response| response.get("embedding"))
+            .and_then(|embedding| embedding.get("values"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AdapterError::ContractViolation(format!(
+                    "Gemini batch result line {key} missing embedding values"
+                ))
+            })?;
+        let mut values = Vec::with_capacity(raw.len());
+        for element in raw {
+            let number = element.as_f64().ok_or_else(|| {
+                AdapterError::ContractViolation(format!(
+                    "Gemini batch result line {key} has a non-numeric embedding element"
+                ))
+            })?;
+            values.push(number as f32);
+        }
+        outputs.push(GeminiBatchEmbedOutput {
+            key,
+            values: Some(values),
+            error: None,
+        });
+    }
+    Ok(outputs)
+}
+
+// ---------------------------------------------------------------------------
+// Real client
+// ---------------------------------------------------------------------------
+
+/// Real Gemini Batch REST client. Auth and base-url posture mirror the
+/// embedding adapter exactly: a declared `tools.toml [embedding] auth` wins,
+/// `GEMINI_API_KEY` is the fallback, and `GEMINI_API_BASE` is honored only when
+/// no `[embedding]` adapter is declared.
+#[derive(Debug, Clone, Default)]
+pub struct EnvGeminiBatchClient {
+    base_url: Option<String>,
+    http_policy: HttpPolicy,
+}
+
+impl EnvGeminiBatchClient {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base_url: None,
+            http_policy: HttpPolicy::default(),
+        }
+    }
+
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            http_policy: HttpPolicy::default(),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        self.base_url
+            .clone()
+            .or_else(|| {
+                crate::tool_lock::registered_declared_adapter("embedding")
+                    .is_none()
+                    .then(|| std::env::var("GEMINI_API_BASE").ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| GEMINI_API_ORIGIN.to_owned())
+            .trim_end_matches('/')
+            .to_owned()
+    }
+
+    fn api_key() -> Result<String> {
+        crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.ok_or_else(|| {
+            AdapterError::Auth(
+                "no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth`"
+                    .to_owned(),
+            )
+        })
+    }
+
+    fn get_json(&self, url: &str, max_bytes: usize, context: &str) -> Result<Value> {
+        let api_key = Self::api_key()?;
+        let response = authenticated_agent(self.http_policy)
+            .get(url)
+            .set("x-goog-api-key", &api_key)
+            .set("Accept-Encoding", "identity")
+            .call()
+            .map_err(http_error)?;
+        read_json_bounded(response, max_bytes, context)
+    }
+}
+
+impl GeminiBatchClient for EnvGeminiBatchClient {
+    fn provider_scope_id(&self) -> Result<String> {
+        match std::env::var(GEMINI_PROJECT_ID_ENV) {
+            Ok(raw) if !raw.trim().is_empty() => Ok(raw.trim().to_owned()),
+            _ => Ok(DEFAULT_PROVIDER_SCOPE_ID.to_owned()),
+        }
+    }
+
+    fn create_embedding_job(
+        &self,
+        model: &str,
+        dimensions: u32,
+        display_name: &str,
+        inputs: &[GeminiBatchEmbedInput],
+    ) -> Result<GeminiBatchJobRecord> {
+        let body = inline_embed_batch_body(model, display_name, dimensions, inputs)?;
+        let api_key = Self::api_key()?;
+        let url = format!(
+            "{}/v1beta/{}:asyncBatchEmbedContent",
+            self.base_url(),
+            qualified_model(model)
+        );
+        let response = authenticated_agent(self.http_policy)
+            .post(&url)
+            .set("x-goog-api-key", &api_key)
+            .set("Accept-Encoding", "identity")
+            .send_json(body)
+            .map_err(http_error)?;
+        let value = read_json_bounded(
+            response,
+            BATCH_METADATA_MAX_BYTES,
+            "Gemini batch create response",
+        )?;
+        parse_job_record(&value)
+    }
+
+    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord> {
+        let value = self.get_json(
+            &format!("{}/v1beta/{name}", self.base_url()),
+            BATCH_METADATA_MAX_BYTES,
+            "Gemini batch job response",
+        )?;
+        parse_job_record(&value)
+    }
+
+    fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>> {
+        let base = self.base_url();
+        let mut records = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..BATCH_LIST_MAX_PAGES {
+            let url = match page_token.as_deref() {
+                Some(token) => format!(
+                    "{base}/v1beta/batches?pageSize={BATCH_LIST_PAGE_SIZE}&pageToken={token}"
+                ),
+                None => format!("{base}/v1beta/batches?pageSize={BATCH_LIST_PAGE_SIZE}"),
+            };
+            let value = self.get_json(&url, BATCH_METADATA_MAX_BYTES, "Gemini batch listing")?;
+            let entries = value
+                .get("batches")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if entries.is_empty() {
+                break;
+            }
+            for entry in &entries {
+                records.push(parse_job_record(entry)?);
+            }
+            page_token = value
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned);
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(records)
+    }
+
+    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
+        let value = self.get_json(
+            &format!("{}/v1beta/{name}", self.base_url()),
+            EMBEDDING_RESPONSE_MAX_BYTES,
+            "Gemini batch result response",
+        )?;
+        parse_inlined_results(&value)
+    }
+}
+
+fn http_error(error: ureq::Error) -> AdapterError {
+    match error {
+        ureq::Error::Status(401 | 403, response) => AdapterError::Auth(format!(
+            "Gemini batch HTTP auth: {}",
+            response.status_text()
+        )),
+        // QA16 posture (mirrors `gemini_embedding::http_error`): capture a real
+        // `Retry-After` when the provider sent one, never a fabricated value.
+        ureq::Error::Status(429, response) => {
+            let retry_after_ms = response
+                .header("Retry-After")
+                .and_then(crate::http_policy::parse_retry_after_ms);
+            AdapterError::RateLimit {
+                message: format!("Gemini batch HTTP 429: {}", response.status_text()),
+                retry_after_ms,
+            }
+        }
+        ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
+            "Gemini batch HTTP quota: {}",
+            response.status_text()
+        )),
+        ureq::Error::Status(status, response) => AdapterError::Network(format!(
+            "Gemini batch HTTP {status}: {}",
+            response.status_text()
+        )),
+        ureq::Error::Transport(transport) => {
+            AdapterError::Network(format!("Gemini batch transport: {transport}"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hermetic mock (KIO_TEST_GEMINI_BATCH)
+// ---------------------------------------------------------------------------
+
+/// Inline mock script, mirroring [`crate::batch_client::MockBatchScript`]
+/// minus the upload phase.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MockGeminiBatchScript {
+    #[serde(default = "default_scope")]
+    pub provider_scope_id: String,
+    #[serde(default = "default_job")]
+    pub job_name: String,
+    /// One entry consumed per `get_job` call when `state_path` is set.
+    #[serde(default = "default_sequence")]
+    pub state_sequence: Vec<String>,
+    /// Inline result lines returned verbatim by `fetch_inlined_results`.
+    #[serde(default)]
+    pub inlined_responses: Vec<Value>,
+    /// Fail the NEXT phase after this one completes: "create_job" fails
+    /// `get_job`, "get_job" fails `fetch_inlined_results` (crash-window
+    /// emulation).
+    #[serde(default)]
+    pub fail_phase: Option<String>,
+    /// G2: fail `get_job`/`fetch_inlined_results` for these job names ONLY.
+    /// `fail_phase` is all-or-nothing, which cannot express the case the Batch
+    /// poll lane has to survive — one unreachable row among several — so this
+    /// selects by job name instead.
+    #[serde(default)]
+    pub fail_job_names: Vec<String>,
+    #[serde(default)]
+    pub jobs_listing: Vec<Value>,
+    #[serde(default)]
+    pub state_path: Option<String>,
+    /// When set, every client call appends one JSON line here so contract
+    /// tests can assert call order and payloads.
+    #[serde(default)]
+    pub capture_path: Option<String>,
+}
+
+fn default_scope() -> String {
+    "mock-gemini-project".to_owned()
+}
+fn default_job() -> String {
+    "batches/mock-embed-job-1".to_owned()
+}
+fn default_sequence() -> Vec<String> {
+    vec!["BATCH_STATE_SUCCEEDED".to_owned()]
+}
+
+pub struct MockGeminiBatchClient {
+    script: MockGeminiBatchScript,
+}
+
+impl MockGeminiBatchClient {
+    pub fn from_env_value(raw: &str) -> Result<Self> {
+        let script: MockGeminiBatchScript = serde_json::from_str(raw).map_err(|error| {
+            AdapterError::ConfigSchema(format!("{TEST_GEMINI_BATCH_ENV} script: {error}"))
+        })?;
+        Ok(Self { script })
+    }
+
+    fn capture(&self, event: Value) {
+        let Some(path) = self.script.capture_path.as_deref() else {
+            return;
+        };
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{event}");
+        }
+    }
+
+    fn fail_if_scripted(&self, phase: &str) -> Result<()> {
+        if self.script.fail_phase.as_deref() == Some(phase) {
+            return Err(AdapterError::Network(format!(
+                "scripted {phase} failure (mock crash window)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// G2: one named job is unreachable while its siblings are fine.
+    fn fail_if_named(&self, name: &str) -> Result<()> {
+        if self.script.fail_job_names.iter().any(|job| job == name) {
+            return Err(AdapterError::Network(format!(
+                "scripted per-job failure for {name} (mock)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Current poll step (0-based), advanced by one per call when a
+    /// `state_path` is configured; single-entry sequences are stateless.
+    fn poll_step(&self) -> usize {
+        let Some(path) = self.script.state_path.as_deref() else {
+            return self.script.state_sequence.len().saturating_sub(1);
+        };
+        let current: usize = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or(0);
+        let next = current.saturating_add(1);
+        let _ = std::fs::write(path, next.to_string());
+        current.min(self.script.state_sequence.len().saturating_sub(1))
+    }
+
+    fn record(&self, state: &str) -> Result<GeminiBatchJobRecord> {
+        Ok(GeminiBatchJobRecord {
+            name: self.script.job_name.clone(),
+            state: GeminiBatchState::parse(state),
+            display_name: String::new(),
+            responses_file: None,
+        })
+    }
+}
+
+impl GeminiBatchClient for MockGeminiBatchClient {
+    fn provider_scope_id(&self) -> Result<String> {
+        Ok(self.script.provider_scope_id.clone())
+    }
+
+    fn create_embedding_job(
+        &self,
+        model: &str,
+        dimensions: u32,
+        display_name: &str,
+        inputs: &[GeminiBatchEmbedInput],
+    ) -> Result<GeminiBatchJobRecord> {
+        // Validate the real body shape even in the mock, so a caller that
+        // would exceed the inline bounds fails identically offline.
+        inline_embed_batch_body(model, display_name, dimensions, inputs)?;
+        self.capture(json!({
+            "call": "create_embedding_job",
+            "model": model,
+            "dimensions": dimensions,
+            "display_name": display_name,
+            "keys": inputs.iter().map(|input| input.key.clone()).collect::<Vec<_>>(),
+        }));
+        self.fail_if_scripted("create_job")?;
+        let mut record = self.record(
+            self.script
+                .state_sequence
+                .first()
+                .map_or("BATCH_STATE_PENDING", String::as_str),
+        )?;
+        record.display_name = display_name.to_owned();
+        Ok(record)
+    }
+
+    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord> {
+        self.capture(json!({ "call": "get_job", "name": name }));
+        self.fail_if_named(name)?;
+        self.fail_if_scripted("get_job")?;
+        let step = self.poll_step();
+        let state = self
+            .script
+            .state_sequence
+            .get(step)
+            .map_or("BATCH_STATE_SUCCEEDED", String::as_str);
+        self.record(state)
+    }
+
+    fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>> {
+        self.capture(json!({ "call": "list_jobs" }));
+        self.fail_if_scripted("list_jobs")?;
+        self.script
+            .jobs_listing
+            .iter()
+            .map(parse_job_record)
+            .collect()
+    }
+
+    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
+        self.capture(json!({ "call": "fetch_inlined_results", "name": name }));
+        self.fail_if_named(name)?;
+        self.fail_if_scripted("fetch_results")?;
+        parse_inlined_results(&json!({ "inlinedResponses": self.script.inlined_responses }))
+    }
+}
+
+/// The active embedding Batch client: the mock seam when
+/// [`TEST_GEMINI_BATCH_ENV`] is set, otherwise the real client when an API key
+/// is resolvable (a declared `tools.toml [embedding] auth` or `GEMINI_API_KEY`).
+/// `None` means the lane is unavailable and the caller must not send.
+pub fn resolve_gemini_batch_client() -> Result<Option<Box<dyn GeminiBatchClient>>> {
+    if let Ok(raw) = std::env::var(TEST_GEMINI_BATCH_ENV) {
+        return Ok(Some(Box::new(MockGeminiBatchClient::from_env_value(&raw)?)));
+    }
+    if crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.is_some() {
+        return Ok(Some(Box::new(EnvGeminiBatchClient::new())));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_parses_batch_and_job_prefixes_and_marks_terminals() {
+        assert_eq!(
+            GeminiBatchState::parse("BATCH_STATE_RUNNING"),
+            GeminiBatchState::Running
+        );
+        assert_eq!(
+            GeminiBatchState::parse("JOB_STATE_SUCCEEDED"),
+            GeminiBatchState::Succeeded
+        );
+        assert!(!GeminiBatchState::parse("BATCH_STATE_PENDING").is_terminal());
+        assert!(GeminiBatchState::parse("BATCH_STATE_EXPIRED").is_terminal());
+        assert!(matches!(
+            GeminiBatchState::parse("SOMETHING_NEW"),
+            GeminiBatchState::Other(_)
+        ));
+        // An unknown state is NOT terminal: the poll lane keeps the row alive
+        // rather than settling a job it does not understand.
+        assert!(!GeminiBatchState::parse("SOMETHING_NEW").is_terminal());
+    }
+
+    #[test]
+    fn display_name_round_trips_the_intent_token() {
+        let name = batch_display_name("01KY-token");
+        assert_eq!(name, "kio-01KY-token");
+        assert_eq!(display_name_intent_token(&name), Some("01KY-token"));
+        assert_eq!(display_name_intent_token("kio-"), None);
+        assert_eq!(display_name_intent_token("someone-elses-job"), None);
+    }
+
+    #[test]
+    fn inline_body_carries_model_dimensions_and_per_request_keys() {
+        let inputs = vec![
+            GeminiBatchEmbedInput {
+                key: "chunk-a".to_owned(),
+                text: "hello".to_owned(),
+            },
+            GeminiBatchEmbedInput {
+                key: "chunk-b".to_owned(),
+                text: "世界".to_owned(),
+            },
+        ];
+        let body = inline_embed_batch_body("gemini-embedding-2", "kio-tok", 768, &inputs).unwrap();
+        assert_eq!(body["batch"]["displayName"], "kio-tok");
+        let requests = body["batch"]["inputConfig"]["requests"]["requests"]
+            .as_array()
+            .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["request"]["model"], "models/gemini-embedding-2");
+        assert_eq!(requests[0]["request"]["outputDimensionality"], 768);
+        assert_eq!(
+            requests[0]["request"]["content"]["parts"][0]["text"],
+            "hello"
+        );
+        assert_eq!(requests[0]["metadata"]["key"], "chunk-a");
+        assert_eq!(requests[1]["metadata"]["key"], "chunk-b");
+    }
+
+    #[test]
+    fn inline_body_rejects_empty_and_oversized_request_sets() {
+        assert!(inline_embed_batch_body("gemini-embedding-2", "kio-tok", 768, &[]).is_err());
+        let too_many = (0..MAX_INLINE_REQUESTS + 1)
+            .map(|index| GeminiBatchEmbedInput {
+                key: format!("chunk-{index}"),
+                text: "x".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            inline_embed_batch_body("gemini-embedding-2", "kio-tok", 768, &too_many).is_err(),
+            "request-count bound must be enforced locally, not by the provider"
+        );
+    }
+
+    #[test]
+    fn inline_body_rejects_a_payload_over_the_byte_bound() {
+        // One request whose text alone exceeds the inline byte bound.
+        let huge = GeminiBatchEmbedInput {
+            key: "chunk-huge".to_owned(),
+            text: "x".repeat(MAX_INLINE_REQUEST_BYTES + 1),
+        };
+        let error = inline_embed_batch_body("gemini-embedding-2", "kio-tok", 768, &[huge])
+            .expect_err("oversized inline payload must be rejected before the round trip");
+        assert!(matches!(error, AdapterError::ContractViolation(_)));
+    }
+
+    #[test]
+    fn qualified_model_is_idempotent() {
+        assert_eq!(
+            qualified_model("gemini-embedding-2"),
+            "models/gemini-embedding-2"
+        );
+        assert_eq!(
+            qualified_model("models/gemini-embedding-2"),
+            "models/gemini-embedding-2"
+        );
+    }
+
+    #[test]
+    fn job_record_parses_top_level_and_lro_envelopes() {
+        let flat = json!({
+            "name": "batches/abc",
+            "state": "BATCH_STATE_RUNNING",
+            "displayName": "kio-tok",
+        });
+        let record = parse_job_record(&flat).unwrap();
+        assert_eq!(record.name, "batches/abc");
+        assert_eq!(record.state, GeminiBatchState::Running);
+        assert_eq!(record.display_name, "kio-tok");
+        assert!(record.responses_file.is_none());
+
+        let wrapped = json!({
+            "name": "operations/xyz",
+            "metadata": {
+                "name": "batches/abc",
+                "state": "BATCH_STATE_PENDING",
+                "displayName": "kio-tok",
+            },
+        });
+        let record = parse_job_record(&wrapped).unwrap();
+        assert_eq!(record.name, "batches/abc");
+        assert_eq!(record.state, GeminiBatchState::Pending);
+    }
+
+    #[test]
+    fn job_record_surfaces_a_file_output_instead_of_treating_it_as_empty() {
+        let value = json!({
+            "name": "batches/abc",
+            "state": "BATCH_STATE_SUCCEEDED",
+            "dest": { "responsesFile": "files/out-1" },
+        });
+        let record = parse_job_record(&value).unwrap();
+        assert_eq!(record.responses_file.as_deref(), Some("files/out-1"));
+    }
+
+    #[test]
+    fn job_record_rejects_a_response_without_name_or_state() {
+        assert!(parse_job_record(&json!({ "state": "BATCH_STATE_RUNNING" })).is_err());
+        assert!(parse_job_record(&json!({ "name": "batches/abc" })).is_err());
+    }
+
+    #[test]
+    fn inlined_results_key_back_to_the_request_and_carry_errors_separately() {
+        let value = json!({
+            "dest": {
+                "inlinedResponses": [
+                    {
+                        "metadata": { "key": "chunk-a" },
+                        "output": { "response": { "embedding": { "values": [0.5, -0.25] } } },
+                    },
+                    {
+                        "metadata": { "key": "chunk-b" },
+                        "output": { "error": { "code": 400, "message": "bad" } },
+                    },
+                ]
+            }
+        });
+        let outputs = parse_inlined_results(&value).unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].key, "chunk-a");
+        assert_eq!(outputs[0].values.as_deref(), Some(&[0.5f32, -0.25f32][..]));
+        assert!(outputs[0].error.is_none());
+        assert_eq!(outputs[1].key, "chunk-b");
+        assert!(outputs[1].values.is_none());
+        assert_eq!(outputs[1].error.as_ref().unwrap()["code"], 400);
+    }
+
+    #[test]
+    fn a_result_line_without_a_key_is_a_contract_violation_not_a_silent_drop() {
+        let value = json!({
+            "inlinedResponses": [
+                { "output": { "response": { "embedding": { "values": [1.0] } } } }
+            ]
+        });
+        let error = parse_inlined_results(&value)
+            .expect_err("an unkeyed line would strand a chunk unembedded");
+        assert!(matches!(error, AdapterError::ContractViolation(_)));
+    }
+
+    #[test]
+    fn a_result_line_with_non_numeric_values_is_rejected() {
+        let value = json!({
+            "inlinedResponses": [
+                {
+                    "metadata": { "key": "chunk-a" },
+                    "output": { "response": { "embedding": { "values": ["nope"] } } },
+                }
+            ]
+        });
+        assert!(parse_inlined_results(&value).is_err());
+    }
+
+    #[test]
+    fn missing_inlined_responses_is_an_error_not_an_empty_result() {
+        let value = json!({ "name": "batches/abc", "state": "BATCH_STATE_SUCCEEDED" });
+        assert!(parse_inlined_results(&value).is_err());
+    }
+
+    #[test]
+    fn mock_client_progresses_through_the_scripted_states() {
+        let dir =
+            std::env::temp_dir().join(format!("kio-gemini-batch-mock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_path = dir.join("poll-state");
+        let script = json!({
+            "state_sequence": ["BATCH_STATE_PENDING", "BATCH_STATE_RUNNING", "BATCH_STATE_SUCCEEDED"],
+            "state_path": state_path.to_string_lossy(),
+            "inlined_responses": [
+                {
+                    "metadata": { "key": "chunk-a" },
+                    "output": { "response": { "embedding": { "values": [0.1, 0.2] } } },
+                }
+            ],
+        })
+        .to_string();
+        let client = MockGeminiBatchClient::from_env_value(&script).unwrap();
+        let created = client
+            .create_embedding_job(
+                "gemini-embedding-2",
+                768,
+                "kio-tok",
+                &[GeminiBatchEmbedInput {
+                    key: "chunk-a".to_owned(),
+                    text: "hello".to_owned(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(created.state, GeminiBatchState::Pending);
+        assert_eq!(created.display_name, "kio-tok");
+        assert_eq!(
+            client.get_job(&created.name).unwrap().state,
+            GeminiBatchState::Pending
+        );
+        assert_eq!(
+            client.get_job(&created.name).unwrap().state,
+            GeminiBatchState::Running
+        );
+        assert_eq!(
+            client.get_job(&created.name).unwrap().state,
+            GeminiBatchState::Succeeded
+        );
+        let outputs = client.fetch_inlined_results(&created.name).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].key, "chunk-a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mock_client_emulates_a_scripted_phase_failure() {
+        let script = json!({ "fail_phase": "create_job" }).to_string();
+        let client = MockGeminiBatchClient::from_env_value(&script).unwrap();
+        let error = client
+            .create_embedding_job(
+                "gemini-embedding-2",
+                768,
+                "kio-tok",
+                &[GeminiBatchEmbedInput {
+                    key: "chunk-a".to_owned(),
+                    text: "hello".to_owned(),
+                }],
+            )
+            .expect_err("scripted create_job failure");
+        assert!(matches!(error, AdapterError::Network(_)));
+    }
+
+    #[test]
+    fn mock_client_enforces_the_same_inline_bounds_as_the_real_one() {
+        let client = MockGeminiBatchClient::from_env_value("{}").unwrap();
+        assert!(client
+            .create_embedding_job("gemini-embedding-2", 768, "kio-tok", &[])
+            .is_err());
+    }
+}

@@ -232,11 +232,11 @@ hold_reason は変更しない ([04-pipeline.md §5.2/§5.4](04-pipeline.md) —
 pending 可視化)。`--override-budget` と併用した場合も budget pause の解除のみ行い、送信はしない)。
 適用対象は online 作業を駆動し得る全コマンド
 (`kio index` / `kio batch resume` / `kio batch retry` / `kio reindex` — `--force` / `--at <commit>`
-のいずれも online embedding を駆動し得る — / `kio repair --rebuild-db` (rebuild 後の enrichment —
+のいずれも online embedding を駆動し得る — / `kio repair rebuild-db` (rebuild 後の enrichment —
 [04-pipeline.md §5.4](04-pipeline.md)) / **`kio search` — vector|hybrid の page 1 の query embedding**
 ([05-runtime.md §1.1](05-runtime.md) の consent gate: payload は query 文字列のみ。送信可否 = 参加
 scope の 1 つ以上に当該 embedding Adapter の active 承認 + 当該 scope の実効 `allow_network` = true
-(§3 の gate と同一規範 — 未設定・key 喪失は不成立)。承認ゼロ・gate 不成立は text fallback / `--vector` は
+(§3 の gate と同一規範 — 未設定・key 喪失は不成立)。承認ゼロ・gate 不成立は text fallback / `--mode vector` は
 error。課金は `scope_id='device'` — [04-pipeline.md §5.4](04-pipeline.md))。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
 request の照会・出力取得・upload 掃除 ([04-pipeline.md §5.8](04-pipeline.md) 回復) は新規送信に
 当たらず、opt-in / `--online` なしで実行できる** (opt-in が制御するのは新規 upload・job 作成・
@@ -489,6 +489,122 @@ metadata:
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
 > **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
+
+> **訂正 — Embedding にも Batch レーンがある (2026-07-24)**: 直前の段落が採用理由に挙げる
+> 「Vertex はバッチ推論非対応のため sync 呼出」は、**根拠と実装先が食い違っていた**。
+> 実装のエンドポイントは Vertex AI ではなく **Gemini Developer API**
+> (`https://generativelanguage.googleapis.com/v1beta`) であり、そちらは
+> **embedding の Batch を提供している** ([Batch API](https://ai.google.dev/api/batch-api) /
+> [発表](https://developers.googleblog.com/en/gemini-batch-api-now-supports-embeddings-and-openai-compatibility/))。
+> Vertex AI Batch Prediction が `gemini-embedding-001` を除外している事実と混線したものである。
+> 単価は **標準 $0.20 / 1M tokens・Batch $0.10 / 1M tokens (50% off)** (text、`gemini-embedding-2`)。
+>
+> したがって Embedding Adapter も **`preferred_request_kind` を持つ** (§5.7 のレーン選択子を
+> `MarkdownizeAdapter` 専用にしない)。Embedding の Batch レーンは次の形をとる。
+>
+> - 投入: `POST {base}/v1beta/models/{model}:asyncBatchEmbedContent`。
+>   入力は **inline** (`batch.inputConfig.requests.requests[]`、各要素が `request` (EmbedContentRequest) +
+>   `metadata`) を用い、**File API へのアップロードは行わない**。
+> - **したがって相 2a (upload) が存在しない。** `upload_id` は恒久 NULL、`provider_scope_id` は
+>   **job 作成の直前**に記録する (相 2a 着手の印としての意味を job 作成が引き継ぐ)。
+>   upload 残骸が原理的に生じないため、[10-operations.md §7.5.2](10-operations.md) の
+>   upload 照合・orphan 掃除は embedding 行に適用しない (`list_uploads` / `delete_upload` は
+>   embedding の Batch trait に含めない)。相 1 / 相 2b / 相 3 と
+>   [04-pipeline.md §5.8](04-pipeline.md) の状態機械はそのまま適用する。
+> - 照会: `GET {base}/v1beta/{name=batches/*}`。state は
+>   `BATCH_STATE_PENDING | RUNNING | SUCCEEDED | FAILED | CANCELLED | EXPIRED`。
+> - 回収: `inlinedResponses[]` の `output.response.embedding.values` を `metadata` で入力へ対応づける。
+>   受入検査は本節の (1)〜(5) をそのまま適用する (id 全単射・次元・有限非ゼロ・正規化後再検査・profile 一致)。
+> - inline の上限 (20 MB) に収まるよう、1 job あたりの request 数を実装側で有界にする。
+> - **task 単位 = job (2026-07-25 確定)**: §5.7 の v1 契約「1 job = 1 task」を embedding でも
+>   保つため、**job そのものを 1 task として台帳に載せる**。`batch_requests.input_hash` は
+>   当該 job のメンバ (= 各 group の `embedding_hash`) を整列・連結した digest とする。
+>   embedding の自然な task 粒度は重複排除 group であり実規模で数千個 (dogfood fixture で
+>   2,321) になるため、group 単位で job を作ると provider job が数千個になる。job 単位に
+>   することで §5.8 の状態機械・crash 回復・`kio batch abandon` が無改造で適用できる。
+>   同じメンバ集合を選び直した再実行は同じ task キーに落ち (= 宙に浮いた予約を再利用し
+>   二重予約しない)、別の集合は別 task となる。先行 job が埋め込み済みのメンバは
+>   content-addressed reuse で選択前に脱落するため無駄な再送は生じない。
+> - **終端で `intent_token` を NULL 化する。** §5.8 の「NULL 化は残骸掃除の完了時のみ」は
+>   upload 残骸を持つ OCR レーンの規則であり、inline の embedding レーンは残骸を作らない
+>   ので**終端 = 掃除完了**である (§5.4 が sync 行に与える規則と同じ理由)。NULL 化しないと
+>   「旧 token の消し込み完了後にのみ再投入可」と衝突し、同一 task キーの再投入が恒久停止する。
+> - **レーンが使えない場合は sync へ落とす。** batch client を解決できない実行では、
+>   `markdownize_send_lane` の `(batch client 無し, 開いた行無し) → Sync` と同じ規則で
+>   同期レーンへフォールバックする (単価は sync の 2 倍で記帳する)。仕事を永久に pending の
+>   まま残すより安全側。レーン可用性の判定は**認証不備の報告経路にしない** — 資格情報の
+>   解決失敗は送信経路が R13-2(e) で報告する。
+> - **課金報告**: `:asyncBatchEmbedContent` の応答もトークン数を返さないため `usage` は
+>   引き続き `None` に degrade する。**単価はレーンに依存する** ため、見積り (= 確定記帳)
+>   はレーンを見て $0.10 / $0.20 を選ぶこと。実装が単価を定数で持つのは誤りで、
+>   `tools.toml` の `[embedding.*.pricing] tokens_in` を正本とする (§4 の billable_units 換算と同じ扱い)。
+>
+>   **宣言値の解釈 (2026-07-25 R24 で確定)**: `[pricing]` のキーは
+>   `pages` / `tokens_in` / `tokens_out` の閉じた enum であり (`PRICING_KIND_ENUM`)、
+>   **レーンの次元を持たない**。したがって 1 つの宣言で両レーンの単価を書き分けることは
+>   できない。宣言された `tokens_in` は **標準 (sync) 単価**と解釈し、**Batch レーンは
+>   その 0.5 倍**として導出する。宣言が無い場合のみ既定値 ($0.20 / 1M) に落ちる。
+>
+>   > R24 で 3 系統が fatal として指摘した実装欠陥: 宣言値をレーン判定より**前に**
+>   > return していたため、`tools.toml` に `tokens_in` を書いた瞬間に両レーンが同額に
+>   > 潰れていた。`usage: None` により見積り = 確定記帳なので、Batch ジョブが実額の
+>   > 2 倍で記帳され、budget cap が守る金額が倍速で消費される状態だった。
+>
+> - **失敗ジョブの再投入は有界にする (2026-07-25 R24 で確定)**: 非成功終端は行を settle し
+>   `intent_token` を NULL 化する。一方 §5.8 相 1 の `ON CONFLICT` は `batch_job_id` を
+>   NULL に戻すため、**同じ task キーが即座に再予約・再投入できてしまう**。`usage: None` で
+>   見積りがそのまま確定記帳になる以上、これは「成果ゼロの記帳が pass ごとに増え続ける」
+>   ことを意味する。`batch_requests.attempts` は当該 `ON CONFLICT` の SET 対象外＝
+>   **再予約をまたいで保存される**ので、これを上限 (既定 3) と突き合わせて打ち切る。
+>
+> - **回復走査の対象に含める (2026-07-25 G1 で確定)**: embedding の Batch client も
+>   [10-operations.md §7.5.2](10-operations.md) の provider inventory に**必ず載せる**。
+>   相 2b 開始済み・job 作成前で中断した行は `batch_poll_candidates` の対象外
+>   (`batch_job_id` が無い) なので、**回復は `kio ledger reconcile` だけが担う**。
+>   inventory に載っていないと `unlistable` のまま恒久的に宙吊りとなり、予約が
+>   device budget cap を食い続ける。attribution は **job の `displayName` に埋めた
+>   intent_token** で行う (Gemini の job は task key 4 組を運べる metadata を持たない)。
+>   §5.8 の回復方向は intent_token 一致で成立するので、これで足りる。
+>   逆方向 (provider 側 job の orphan 判定) で帰属できない job は upload と同じく
+>   `unknown` として**報告のみ**とする。upload は inline のため常に空である。
+>
+> - **provider エラーは分類して保持する (2026-07-25 G2 で確定)**: 送信・照会の
+>   provider エラーで**実行全体を落としてはならない**。§5.8 の unknown 規則
+>   (「何も変更せず保持し、次回再試行する」) を OCR レーンと同じく適用する。
+>   - 送信 (`provider_scope_id` / job 作成) の失敗は**その job だけ**を諦め、
+>     同じ pass の他の job は続行する。分類は同期レーンと同一 (rate_limit は
+>     `Pending + next_retry_at`、auth_error は `Paused(hold_reason=auth)`、他は Failed)。
+>     予約は保持し、回収は上記の回復走査に委ねる (F8 の reserve-before-send 姿勢)。
+>   - 照会 (`get_job` / 結果取得) の失敗は**その行だけ**を in-flight のまま保持し、
+>     次の行の処理を続ける。1 行の不達が同一 scope の残り全部の回収を止めてはならない。
+>   - ネットワークエラーを `KIO-E-CONFIG-SCHEMA-001` のような恒久エラーとして
+>     報告しない。
+>
+> - **回収は入力との全単射を検査する (2026-07-25 R24 で確定)**: 本節 (1) の全単射契約は
+>   collect 側にも適用する。task キーが**メンバ集合の digest** である (上記「task 単位 = job」)
+>   ことを利用し、**回収できた結果から digest を再計算して行の `input_hash` と突き合わせる**。
+>   一致しなければ `Succeeded` ではなく contract violation として終端し、
+>   欠けたメンバを次の (より小さい) job の対象として残す。スキーマ変更は不要。
+>
+> **レーンは invocation 単位で 1 つ (2026-07-24 ユーザー裁定)**: OCR と embedding を
+> **別レーンに分けない** — 1 回の実行では**両方 Batch か、両方即時か**のいずれかである。
+> したがってレーン選択は adapter ごとの `preferred_request_kind()` を既定値としつつ、
+> **実行時に CLI 引数が両方まとめて上書きする**。
+>
+> - 既定 = **Batch** (OCR $2/1,000 pages・embedding $0.10/1M tokens。turnaround は最大 24h)。
+> - `kio index --realtime` / `kio batch resume --realtime` / `kio batch retry --realtime` =
+>   **両方を即時レーンへ倒す** (OCR $4/1,000 pages・embedding $0.20/1M tokens = いずれも 2 倍)。
+> - **これは 2026-07-23 の「OCR 課金は Batch レーンのみ・sync を本番送信に使わない」裁定を
+>   明示的に上書きする。** 即時性が要る実行では倍額を承知で sync レーンを使う、が新しい規範。
+>   ただし**既定では従来どおり Batch のみ**であり、倍額は明示 opt-in でしか発生しない。
+> - `--realtime` は `--online` とは**別の軸**である: `--online` は「送ってよいか」
+>   (network opt-in、§3)、`--realtime` は「いつ返ってくるか」(turnaround)。
+>   API 経由である以上 online は前提なので、即時性の指定に `--online` を流用しない。
+> - **飛行中の batch 行は `--realtime` で乗り換えない** — 既に provider job を持つ
+>   `request_kind='batch'` 行を sync へ移すと、その job が [04-pipeline.md §5.8](04-pipeline.md)
+>   の回復から外れて残骸化する。`--realtime` が効くのは**新規送信のレーン選択のみ**。
+> - 例外 = **query embedding は常に即時**。検索は batch の turnaround を待てないため、
+>   `kio search` の query 埋め込みはレーン裁定の対象外で、常に sync 単価で記帳する。
 
 embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeline.md §4.3](04-pipeline.md)
 とする (本節は profile — モデル / 次元 / 距離 / modality — の正本。SQL 定義の重複記載は 2026-07-14 に
@@ -856,7 +972,7 @@ Adapter の完全な再実行決定性は要求しない。Kio が保証する�
 raw_hash 不変                既存 artifact を尊重 (first-instance-wins)
 raw_hash 変化                 新 artifact 候補を作る
 explicit re-normalize         同 (raw_hash, tool_profile_hash) に対して gen+1 の新 normalized
-                              instance を作る (kio reindex --force、または prepared_hash 変化起因の
+                              instance を作る (kio reindex --regenerate、または prepared_hash 変化起因の
                               自動 gen+1 — 03-data-model.md §2.1 の例外)。旧 instance は
                               保全され、既存 commit / Evidence Pointer は旧 gen を参照し続ける
                               (03-data-model.md §2.1)

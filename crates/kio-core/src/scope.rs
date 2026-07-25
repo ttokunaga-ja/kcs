@@ -2142,6 +2142,26 @@ pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
         .or_else(|| retention_days_from_section(&value, "logs"))
 }
 
+/// `[adapter] lane` — the online send lane this config prefers, as a raw
+/// string (`"batch"` | `"realtime"`; the schema constrains the enum, so this
+/// read is defensive). `None` when the key is absent or unreadable, which
+/// leaves the caller on its own default.
+///
+/// One key governs BOTH online adapters by ruling (07 §5.3, 2026-07-24): a
+/// run never splits markdownize onto one lane and embedding onto the other,
+/// so there is deliberately no per-adapter form of this key.
+#[must_use]
+pub fn read_adapter_lane(config_toml_path: &Path) -> Option<String> {
+    let text = fs::read_to_string(config_toml_path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("adapter")
+        .and_then(|adapter| adapter.get("lane"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .filter(|lane| lane == "batch" || lane == "realtime")
+}
+
 fn retention_days_from_section(value: &toml::Value, section: &str) -> Option<u32> {
     value
         .get(section)
@@ -4245,7 +4265,7 @@ mod tests {
         append_jsonl_rotating, civil_from_days, discard_network_approval_pending,
         format_unix_seconds, format_utc_seconds, network_approvals_initialized,
         open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
-        read_logs_retention_days, read_network_approval_pending, redact_context,
+        read_adapter_lane, read_logs_retention_days, read_network_approval_pending, redact_context,
         redact_message_paths, rotate_stale_log, write_network_approval_pending, ArchiveLimits,
         PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
         MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
@@ -5340,5 +5360,25 @@ mod tests {
         // (100,000 -- `history::DEFAULT_MAX_HISTORY_COMMITS`), confirmed not
         // to trip for this tiny chain.
         assert!(!repo.log().unwrap().truncated);
+    }
+    #[test]
+    fn adapter_lane_reads_only_the_two_declared_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Absent key / absent file → the caller keeps its own default.
+        assert_eq!(read_adapter_lane(&path), None);
+        std::fs::write(&path, "[chunking]\nstrategy = \"heading\"\n").unwrap();
+        assert_eq!(read_adapter_lane(&path), None);
+        // Both declared values round-trip.
+        std::fs::write(&path, "[adapter]\nlane = \"batch\"\n").unwrap();
+        assert_eq!(read_adapter_lane(&path).as_deref(), Some("batch"));
+        std::fs::write(&path, "[adapter]\nlane = \"realtime\"\n").unwrap();
+        assert_eq!(read_adapter_lane(&path).as_deref(), Some("realtime"));
+        // Anything else is ignored here; the JSON schema is what rejects it
+        // loudly at startup, and this defensive read must not invent a lane.
+        std::fs::write(&path, "[adapter]\nlane = \"sometimes\"\n").unwrap();
+        assert_eq!(read_adapter_lane(&path), None);
+        std::fs::write(&path, "[adapter]\nlane = 3\n").unwrap();
+        assert_eq!(read_adapter_lane(&path), None);
     }
 }

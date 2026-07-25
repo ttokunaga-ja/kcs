@@ -93,7 +93,7 @@ fn indexed_fixture() -> IndexedFixture {
     .unwrap();
     json_success(&dir, &["init"]);
     json_success(&dir, &["index", "--offline", "--approve"]);
-    let search = json_success(&dir, &["search", "needle-p2a-content", "--text"]);
+    let search = json_success(&dir, &["search", "needle-p2a-content", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     IndexedFixture {
         raw_hash: pointer["raw_hash"].as_str().unwrap().to_owned(),
@@ -561,7 +561,7 @@ fn pa14_pa15_prune_orphans_recovers_purged_raw_and_type_separated_image_cache() 
 
     let report = json_success(
         &fixture.dir,
-        &["repair", "--verify-objects", "--prune-orphans"],
+        &["repair", "verify-objects", "--prune-orphans", "--yes"],
     );
     assert!(
         report["prune_orphans"]["pruned_open_cache_count"]

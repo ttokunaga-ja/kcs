@@ -254,7 +254,7 @@ fn office_01_docx_offline_pages_searchable() {
     );
 
     // The phrase is searchable offline.
-    let search = kio(&dir, &["search", "kilogram", "--text"])
+    let search = kio(&dir, &["search", "kilogram", "--mode", "text"])
         .arg("--json")
         .assert()
         .success()
@@ -349,7 +349,7 @@ fn office_02_pptx_slide_units_offline() {
     }
 
     // Slide text is searchable offline.
-    let search = kio(&dir, &["search", "office02", "--text"])
+    let search = kio(&dir, &["search", "office02", "--mode", "text"])
         .arg("--json")
         .assert()
         .success()
@@ -462,7 +462,7 @@ fn office_04_converter_absent_no_doomed_task() {
     );
 
     // index_status carries office_conversion_unavailable with the file.
-    let search = kio(&dir, &["search", "anything", "--text"])
+    let search = kio(&dir, &["search", "anything", "--mode", "text"])
         .arg("--json")
         .assert()
         .success()
@@ -496,7 +496,7 @@ fn office_04_converter_absent_no_doomed_task() {
         "a markdownize task must exist once a converter resolves: {status}"
     );
 
-    let search2 = kio(&dir, &["search", "anything", "--text"])
+    let search2 = kio(&dir, &["search", "anything", "--mode", "text"])
         .arg("--json")
         .assert()
         .success()

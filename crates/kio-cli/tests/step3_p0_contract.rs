@@ -243,7 +243,11 @@ fn ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion() {
     // Vector recall contributes candidates the text backend never matched: the
     // hybrid result set is a strict superset of the text-only set (RRF fusion —
     // the order/content genuinely changes vs text alone).
-    let text = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン", "--text"]);
+    let text = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "認証仕様 トークン", "--mode", "text"],
+    );
     let hybrid_set = chunk_hash_set(&hybrid);
     let text_set = chunk_hash_set(&text);
     assert!(
@@ -289,7 +293,7 @@ fn ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly() {
 #[test]
 fn ct3_hybrid_006_text_mode_uses_text_rank_without_fusion() {
     let dir = indexed_scope();
-    let search = json_success(&dir, &["search", "RRF k 60", "--text"]);
+    let search = json_success(&dir, &["search", "RRF k 60", "--mode", "text"]);
     assert_eq!(search["requested_mode"], "text");
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], false);
@@ -318,7 +322,7 @@ fn f2_nfd_body_is_found_by_nfc_query() {
 
     // Composed (NFC) query "café": the byte substring is absent from the NFD
     // content, so only the normalized index projection makes this hit.
-    let search = json_success(&dir, &["search", "caf\u{e9} latte", "--text"]);
+    let search = json_success(&dir, &["search", "caf\u{e9} latte", "--mode", "text"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
         "NFC query must find NFD-stored content: {search}"
@@ -344,7 +348,7 @@ fn ct3_embed_002_incompatible_profile_falls_back_or_errors() {
     let err = json_failure_embed(
         &dir,
         "incompatible_profile",
-        &["search", "トークン", "--vector"],
+        &["search", "トークン", "--mode", "vector"],
         8,
     );
     assert_eq!(err["error_code"], "KIO-E-SEARCH-VEC-INCOMPAT-001");
@@ -355,7 +359,7 @@ fn ct3_embed_002_incompatible_profile_falls_back_or_errors() {
 #[test]
 fn ct3_embed_007_vector_only_without_index_is_an_error() {
     let dir = indexed_scope();
-    let err = json_failure_embed(&dir, "mock", &["search", "トークン", "--vector"], 1);
+    let err = json_failure_embed(&dir, "mock", &["search", "トークン", "--mode", "vector"], 1);
     assert_eq!(err["error_code"], "KIO-E-SEARCH-VEC-UNAVAIL-001");
 }
 
@@ -384,7 +388,10 @@ fn r11_7_default_mode_config_seeds_requested_mode() {
     let search = json_success(&dir, &["search", "トークン TTL", "--scope", "."]);
     assert_eq!(search["requested_mode"], "hybrid");
     // An explicit flag still wins over the config default.
-    let text = json_success(&dir, &["search", "トークン TTL", "--text", "--scope", "."]);
+    let text = json_success(
+        &dir,
+        &["search", "トークン TTL", "--mode", "text", "--scope", "."],
+    );
     assert_eq!(text["requested_mode"], "text");
 }
 
@@ -398,7 +405,7 @@ fn r11_7_fail_behavior_error_makes_hybrid_hard_error() {
     // error the explicit --vector path returns, not a silent exit-0 text fallback.
     let err = json_failure(
         &dir,
-        &["search", "トークン TTL", "--hybrid", "--scope", "."],
+        &["search", "トークン TTL", "--mode", "hybrid", "--scope", "."],
         1,
     );
     assert_eq!(err["error_code"], "KIO-E-SEARCH-VEC-UNAVAIL-001");
@@ -412,7 +419,7 @@ fn r11_7_fail_behavior_warn_falls_back_with_warnings() {
     // see `r11_7_default_mode_config_seeds_requested_mode`.
     let search = json_success(
         &dir,
-        &["search", "トークン TTL", "--hybrid", "--scope", "."],
+        &["search", "トークン TTL", "--mode", "hybrid", "--scope", "."],
     );
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], true);
@@ -619,7 +626,7 @@ fn ct3_obs_003_access_jsonl_records_redacted_search() {
 #[test]
 fn ct3_reindex_003_force_requires_yes_in_noninteractive_mode() {
     let dir = indexed_scope();
-    let err = json_failure(&dir, &["reindex", "--force"], 9);
+    let err = json_failure(&dir, &["reindex", "--regenerate"], 9);
     assert_eq!(err["error_code"], "KIO-E-CONFIRM-REJECTED-001");
 }
 
@@ -627,7 +634,7 @@ fn ct3_reindex_003_force_requires_yes_in_noninteractive_mode() {
 fn ct3_reindex_001_force_creates_new_generation_and_preserves_old_chunks() {
     let dir = indexed_scope();
     let before = line_count(dir.path().join(".kio/index/chunks.jsonl"));
-    let out = json_success(&dir, &["reindex", "--force", "--yes"]);
+    let out = json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     assert_eq!(out["status"], "reindexed");
     let after = line_count(dir.path().join(".kio/index/chunks.jsonl"));
     assert!(after > before);
@@ -702,7 +709,7 @@ fn ct3_chunk_012_repair_rebuild_db_preserves_search_result() {
     let dir = indexed_scope();
     let before = json_success(&dir, &["search", "トークン TTL 3600"]);
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
-    json_success(&dir, &["repair", "--rebuild-db"]);
+    json_success(&dir, &["repair", "rebuild-db"]);
     let after = json_success(&dir, &["search", "トークン TTL 3600"]);
     assert_eq!(
         first_result(&before)["evidence_uri"],
@@ -722,7 +729,7 @@ fn r11_4_transactional_rebuild_preserves_full_result_set() {
     let before_set = chunk_hash_set(&before);
     assert!(!before_set.is_empty(), "fixture must return chunks");
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
-    json_success(&dir, &["repair", "--rebuild-db"]);
+    json_success(&dir, &["repair", "rebuild-db"]);
     let after = json_success(&dir, &["search", "認証仕様", "--limit", "20"]);
     assert_eq!(before_set, chunk_hash_set(&after));
     assert_eq!(before["results"], after["results"]);
@@ -787,7 +794,7 @@ fn ct3_reindex_002_existing_pointer_still_resolves_old_chunk_after_reindex() {
         .as_str()
         .unwrap()
         .to_owned();
-    json_success(&dir, &["reindex", "--force", "--yes"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     let viewed = json_success(&dir, &["view", &uri]);
     assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
 }
@@ -1588,7 +1595,7 @@ fn ct3_embed_005_rebuild_db_preserves_vector_search() {
     let dir = indexed_scope_embed("mock");
     let before = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
     assert_eq!(before["resolved_mode"], "hybrid");
-    json_success_embed(&dir, "mock", &["repair", "--rebuild-db"]);
+    json_success_embed(&dir, "mock", &["repair", "rebuild-db"]);
     let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
     assert_eq!(after["resolved_mode"], "hybrid");
     assert_eq!(after["fallback"], false);
@@ -1750,7 +1757,7 @@ fn ct3_fts_004_rebuild_db_reenables_fts_search() {
     // With the only scope's index gone, text and vector are both unavailable.
     let err = json_failure(&dir, &["search", "認証仕様"], 3);
     assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
-    json_success(&dir, &["repair", "--rebuild-db"]);
+    json_success(&dir, &["repair", "rebuild-db"]);
     let after = json_success(&dir, &["search", "認証仕様"]);
     assert!(!after["results"].as_array().unwrap().is_empty());
 }
@@ -1803,12 +1810,17 @@ fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
     let text_only = json_success_embed(
         &dir,
         "mock",
-        &["search", "depthprobe divergence fixture", "--text"],
+        &["search", "depthprobe divergence fixture", "--mode", "text"],
     );
     let vector_only = json_success_embed(
         &dir,
         "mock",
-        &["search", "depthprobe divergence fixture", "--vector"],
+        &[
+            "search",
+            "depthprobe divergence fixture",
+            "--mode",
+            "vector",
+        ],
     );
     let text_top1 = text_only["results"][0]["chunk_hash"].as_str().unwrap();
     let vector_top1 = vector_only["results"][0]["chunk_hash"].as_str().unwrap();
@@ -1835,7 +1847,8 @@ fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
         &[
             "search",
             "depthprobe divergence fixture",
-            "--hybrid",
+            "--mode",
+            "hybrid",
             "--limit",
             "20",
             "--scope",
@@ -2414,7 +2427,7 @@ fn ct3_l1_reindex_enriches_new_generation_embeddings() {
         "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
-    let out = json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    let out = json_success_embed(&dir, "mock", &["reindex", "--regenerate", "--yes"]);
     assert_eq!(out["status"], "reindexed");
 
     let status = json_success_embed(&dir, "mock", &["status"]);
@@ -2447,7 +2460,7 @@ fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
     json_success_embed(&dir, "mock", &["index", "--yes"]);
     let before = tasks_of_type(&json_success_embed(&dir, "mock", &["status"]), "embedding").len();
 
-    json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    json_success_embed(&dir, "mock", &["reindex", "--regenerate", "--yes"]);
     let status = json_success_embed(&dir, "mock", &["status"]);
     let emb = tasks_of_type(&status, "embedding");
     assert!(
@@ -2683,7 +2696,7 @@ fn ct3_l4_embedding_without_own_optin_is_enqueue_only() {
     json_success(&dir, &["index", "--approve"]);
     // Now configure the embedding adapter (mock) and re-drive enrichment via
     // reindex. The scope has no embedding opt-in row → enqueue-only.
-    json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    json_success_embed(&dir, "mock", &["reindex", "--regenerate", "--yes"]);
     let status = json_success_embed(&dir, "mock", &["status"]);
     let emb = tasks_of_type(&status, "embedding");
     assert!(!emb.is_empty(), "embedding tasks must be enqueued");
@@ -3267,7 +3280,7 @@ fn n5_pointer_rejects_generation_mixing_after_reindex() {
     let dir = indexed_scope();
     let before = json_success(&dir, &["search", "トークン TTL 3600"]);
     let old_pointer = first_result(&before)["evidence_pointer"].clone();
-    json_success(&dir, &["reindex", "--force", "--yes"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     let after = json_success(&dir, &["search", "トークン TTL 3600"]);
     let new_chunk_hash = first_result(&after)["evidence_pointer"]["chunk_hash"].clone();
     assert_ne!(
@@ -3421,7 +3434,7 @@ fn o2_text_search_never_sends_query_embedding() {
         .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
         .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
-        .args(["search", "認証仕様 トークン", "--text", "--json"])
+        .args(["search", "認証仕様 トークン", "--mode", "text", "--json"])
         .assert()
         .success();
     assert!(
@@ -3794,7 +3807,7 @@ fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
     };
     assert!(run(&["init"]).status.success());
     assert!(run(&["index", "--approve"]).status.success());
-    let baseline = run(&["search", "alphaunique", "--text", "--json"]);
+    let baseline = run(&["search", "alphaunique", "--mode", "text", "--json"]);
     assert!(baseline.status.success());
     let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let expected = baseline["results"].as_array().unwrap().len();
@@ -3809,7 +3822,7 @@ fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
             let mut spins = 0;
             while !stop.load(Ordering::Relaxed) && spins < 200 {
                 let _ = hermetic_process_command(&bin)
-                    .args(["repair", "--rebuild-db"])
+                    .args(["repair", "rebuild-db"])
                     .current_dir(&root)
                     .env("XDG_DATA_HOME", &data)
                     .env("XDG_CONFIG_HOME", &config)
@@ -3821,7 +3834,7 @@ fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
     };
 
     for _ in 0..60 {
-        let out = run(&["search", "alphaunique", "--text", "--json"]);
+        let out = run(&["search", "alphaunique", "--mode", "text", "--json"]);
         // Any exit-0 search must return the full result set — never a silent
         // empty/partial (the P5 false negative). Non-zero exits (REBUILDING /
         // transient) are tolerated by the contract.
@@ -4014,7 +4027,7 @@ fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--approve"]);
 
-    let baseline = json_success(&dir, &["search", "alphaunique", "--text"]);
+    let baseline = json_success(&dir, &["search", "alphaunique", "--mode", "text"]);
     let expected = baseline["results"].as_array().unwrap().len();
     assert!(expected > 0);
 
@@ -4024,15 +4037,15 @@ fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
 
     // A completed reindex advances HEAD and atomically swaps in a fresh sqlite; the
     // search still returns the full set — no false REBUILDING.
-    json_success(&dir, &["reindex", "--force", "--yes"]);
-    let after = json_success(&dir, &["search", "alphaunique", "--text"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
+    let after = json_success(&dir, &["search", "alphaunique", "--mode", "text"]);
     assert_eq!(after["results"].as_array().unwrap().len(), expected);
 
     // Restore the generation-N sqlite while HEAD is at generation N+1 — the exact
     // state a concurrent search observes inside the reindex window (HEAD=C_new,
     // on-disk sqlite still the old generation, no live chunk for C_new).
     fs::copy(&backup, &db).unwrap();
-    let err = json_failure(&dir, &["search", "alphaunique", "--text"], 3);
+    let err = json_failure(&dir, &["search", "alphaunique", "--mode", "text"], 3);
     assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
     // The offending scope is reported as a part-failure exclusion, not dropped.
     assert_eq!(
@@ -4041,8 +4054,8 @@ fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
     );
 
     // The state is transient: rebuilding the index recovers the full result set.
-    json_success(&dir, &["reindex", "--force", "--yes"]);
-    let recovered = json_success(&dir, &["search", "alphaunique", "--text"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
+    let recovered = json_success(&dir, &["search", "alphaunique", "--mode", "text"]);
     assert_eq!(recovered["results"].as_array().unwrap().len(), expected);
 }
 
@@ -4085,7 +4098,7 @@ fn p10_partial_index_window_does_not_false_rebuilding() {
     // reindex, b.md's chunk is still live for HEAD, so a query for the unchanged
     // doc must return its hit (exit 0) — never a spurious REBUILDING.
     fs::copy(&backup, &db).unwrap();
-    let search = json_success(&dir, &["search", "betaword", "--text"]);
+    let search = json_success(&dir, &["search", "betaword", "--mode", "text"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
         "unchanged doc must stay searchable in the index window (not REBUILDING)"
@@ -4102,12 +4115,12 @@ fn p10_genuine_no_hit_and_empty_scope_stay_exit_zero() {
     // honest exit-0 empty page (live chunks exist -> fast-path returns not-rebuilding).
     let dir = indexed_scope();
     assert!(
-        !json_success(&dir, &["search", "認証仕様", "--text"])["results"]
+        !json_success(&dir, &["search", "認証仕様", "--mode", "text"])["results"]
             .as_array()
             .unwrap()
             .is_empty()
     );
-    let miss = json_success(&dir, &["search", "zzznotpresentquery", "--text"]);
+    let miss = json_success(&dir, &["search", "zzznotpresentquery", "--mode", "text"]);
     assert!(miss["results"].as_array().unwrap().is_empty());
     assert!(miss["excluded_scopes"].as_array().unwrap().is_empty());
 
@@ -4115,7 +4128,7 @@ fn p10_genuine_no_hit_and_empty_scope_stay_exit_zero() {
     let empty = tempfile::tempdir().unwrap();
     kio(&empty, &["init"]).assert().success();
     kio(&empty, &["index", "--approve"]).assert().success();
-    let search = json_success(&empty, &["search", "anything", "--text"]);
+    let search = json_success(&empty, &["search", "anything", "--mode", "text"]);
     assert!(search["results"].as_array().unwrap().is_empty());
     assert!(search["excluded_scopes"].as_array().unwrap().is_empty());
 }
@@ -4165,7 +4178,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
     };
     assert!(run(&["init"]).status.success());
     assert!(run(&["index", "--approve"]).status.success());
-    let baseline = run(&["search", "alphaunique", "--text", "--json"]);
+    let baseline = run(&["search", "alphaunique", "--mode", "text", "--json"]);
     assert!(baseline.status.success());
     let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let expected = baseline["results"].as_array().unwrap().len();
@@ -4180,7 +4193,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
             let mut spins = 0;
             while !stop.load(Ordering::Relaxed) && spins < 50 {
                 let _ = hermetic_process_command(&bin)
-                    .args(["reindex", "--force", "--yes"])
+                    .args(["reindex", "--regenerate", "--yes"])
                     .current_dir(&root)
                     .env("XDG_DATA_HOME", &data)
                     .env("XDG_CONFIG_HOME", &config)
@@ -4195,7 +4208,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
 
     let mut saw_success = false;
     for _ in 0..150 {
-        let out = run(&["search", "alphaunique", "--text", "--json"]);
+        let out = run(&["search", "alphaunique", "--mode", "text", "--json"]);
         if out.status.success() {
             saw_success = true;
             let json: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -4263,7 +4276,7 @@ fn q1_torn_chunk_tail_fully_self_heals_across_index_repair_index() {
     // Full self-heal cycle. Every step must exit 0 — the middle `repair` was the
     // one that used to exit 4 (KIO-E-STORE-CORRUPT-001).
     json_success(&dir, &["index", "--yes"]);
-    json_success(&dir, &["repair", "--rebuild-db", "--yes"]);
+    json_success(&dir, &["repair", "rebuild-db"]);
     json_success(&dir, &["index", "--yes"]);
 
     // chunks.jsonl is now fully valid with no duplicated chunk_id (no torn-line
@@ -4350,9 +4363,13 @@ fn r6_reindex_rejects_force_at_and_extra_operands() {
     let dir = indexed_scope();
     // Step 4 decision #67: historical enrichment and generation-forcing are
     // mutually exclusive. The extra positional remains a usage error too.
-    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 2);
+    let at = json_failure(
+        &dir,
+        &["reindex", "--regenerate", "--yes", "--at", "HEAD"],
+        2,
+    );
     assert_eq!(at["error_code"], "KIO-E-CONFIG-USAGE-001");
-    let extra = json_failure(&dir, &["reindex", "--force", "--yes", "HEAD"], 2);
+    let extra = json_failure(&dir, &["reindex", "--regenerate", "--yes", "HEAD"], 2);
     assert_eq!(extra["error_code"], "KIO-E-CONFIG-USAGE-001");
 }
 
@@ -4387,7 +4404,7 @@ fn r6_default_search_rereads_current_global_opt_out() {
     let search = json_success_path(
         b.path(),
         data_home.path(),
-        &["search", "alphaonly", "--text"],
+        &["search", "alphaonly", "--mode", "text"],
     );
     assert!(
         search["results"].as_array().unwrap().is_empty(),
@@ -4428,7 +4445,7 @@ fn r6_corrupt_normalized_unit_is_store_corrupt_not_config_schema() {
     // SKIPS that document, recording it under KIO-E-STORE-CORRUPT-001 (the original R6
     // concern: NOT a CONFIG-SCHEMA misclassification) with recovery guidance, instead
     // of the former whole-scope exit-4 failure.
-    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let out = json_success(&dir, &["repair", "rebuild-db"]);
     let skipped = out["skipped_units"].as_array().unwrap();
     assert_eq!(
         skipped.len(),
@@ -4539,12 +4556,12 @@ fn r7_repair_rejects_unknown_flags_and_extra_operands() {
     let dir = indexed_scope();
     let unknown = json_failure(
         &dir,
-        &["repair", "--rebuild-db", "--definitely-invalid", "EXTRA"],
+        &["repair", "rebuild-db", "--definitely-invalid", "EXTRA"],
         2,
     );
     assert_eq!(unknown["error_code"], "KIO-E-CONFIG-USAGE-001");
 
-    let verify = json_success(&dir, &["repair", "--verify-objects"]);
+    let verify = json_success(&dir, &["repair", "verify-objects"]);
     assert_eq!(verify["status"], "ok");
 }
 
@@ -4626,7 +4643,7 @@ fn r9_5_reindex_survives_junk_in_gen_dir() {
     fs::write(gen_dir.join(".DS_Store"), b"\0\0mac junk").unwrap();
 
     // Before the fix this exited 4 (STORE-CORRUPT); now it succeeds.
-    json_success(&dir, &["reindex", "--force", "--yes"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
 
     // The orphan temp was GC'd from the old gen dir (Q1-style self-heal).
     assert!(
@@ -4634,7 +4651,7 @@ fn r9_5_reindex_survives_junk_in_gen_dir() {
         "orphan .tmp-* must be cleaned up by reindex"
     );
     // Search still resolves the document (index rebuilt cleanly).
-    let search = json_success(&dir, &["search", "r9five", "--text"]);
+    let search = json_success(&dir, &["search", "r9five", "--mode", "text"]);
     assert!(!search["results"].as_array().unwrap().is_empty());
 }
 
@@ -5020,7 +5037,11 @@ fn r12_3_reconcile_completes_committed_embedding_tasks() {
     fs::write(&tasks_path, flipped).unwrap();
 
     // The phantom: index_status reports the stranded tasks as pending enrichment.
-    let before = json_success_embed(&dir, "mock", &["search", "トークン TTL", "--hybrid"]);
+    let before = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "トークン TTL", "--mode", "hybrid"],
+    );
     assert_eq!(
         before["index_status"]["pending_enrichment_tasks"], embedding_pending,
         "flipped tasks must read as pending before reconcile"
@@ -5035,7 +5056,11 @@ fn r12_3_reconcile_completes_committed_embedding_tasks() {
     );
 
     // Tasks converge to Done and index_status reports zero pending.
-    let after = json_success_embed(&dir, "mock", &["search", "トークン TTL", "--hybrid"]);
+    let after = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "トークン TTL", "--mode", "hybrid"],
+    );
     assert_eq!(after["index_status"]["pending_enrichment_tasks"], 0);
     let final_tasks = fs::read_to_string(&tasks_path).unwrap();
     for line in final_tasks.lines() {
@@ -5519,8 +5544,8 @@ fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
     for (args, label) in [
         (vec!["snapshot", "-m", "x"], "snapshot"),
         (vec!["index", "--yes"], "index"),
-        (vec!["reindex", "--force", "--yes"], "reindex"),
-        (vec!["repair", "--rebuild-db"], "repair"),
+        (vec!["reindex", "--regenerate", "--yes"], "reindex"),
+        (vec!["repair", "rebuild-db"], "repair"),
     ] {
         let err = json_failure(&dir, &args, 1);
         assert_eq!(
@@ -5607,7 +5632,7 @@ fn r17_1_n5_forged_commit_cannot_bypass_generation_binding() {
     let dir = indexed_scope();
     let before = json_success(&dir, &["search", "トークン TTL 3600"]);
     let old_pointer = first_result(&before)["evidence_pointer"].clone();
-    json_success(&dir, &["reindex", "--force", "--yes"]);
+    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     let after = json_success(&dir, &["search", "トークン TTL 3600"]);
     let new_chunk_hash = first_result(&after)["evidence_pointer"]["chunk_hash"].clone();
     assert_ne!(
@@ -5819,7 +5844,7 @@ fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
     ))
     .unwrap();
 
-    let err = json_failure(&dir, &["repair", "--rebuild-db"], 1);
+    let err = json_failure(&dir, &["repair", "rebuild-db"], 1);
     assert_eq!(
         err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
         "repair must report the shallow HEAD, not a raw STORE-NOT-FOUND: {err}"
@@ -5852,7 +5877,7 @@ fn r16_4_repair_skips_missing_unit_and_rebuilds_the_rest() {
 
     // repair completes (exit 0): it rebuilds the healthy document and reports the
     // skipped one loudly, rather than aborting the whole scope.
-    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let out = json_success(&dir, &["repair", "rebuild-db"]);
     let skipped = out["skipped_units"].as_array().unwrap();
     assert_eq!(skipped.len(), 1, "exactly one document is skipped: {out}");
     assert_eq!(skipped[0]["reason"], "KIO-E-STORE-IO-001");
@@ -6001,7 +6026,7 @@ fn r17_2_reindex_force_skips_corrupt_unit_and_renormalizes_healthy() {
     fs::write(&manifest, r#"{"torn":"#).unwrap();
 
     // Before the fix: exit 4 (KIO-E-STORE-CORRUPT-001), no re-normalization at all.
-    let out = json_success(&dir, &["reindex", "--force", "--yes"]);
+    let out = json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     // The healthy document IS re-normalized (the loop no longer dies on the corrupt one).
     assert_eq!(
         out["reindexed_files"].as_u64().unwrap(),
@@ -6165,7 +6190,7 @@ fn r17_6_repair_softens_guidance_for_searchable_cached_document() {
     fs::write(&unit, r#"{"torn":"#).unwrap();
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
 
-    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let out = json_success(&dir, &["repair", "rebuild-db"]);
     let skipped = out["skipped_units"].as_array().unwrap();
     assert_eq!(skipped.len(), 1, "{out}");
     assert_eq!(
@@ -6217,7 +6242,7 @@ fn r17_6_repair_keeps_emergency_guidance_when_no_cached_chunks_survive() {
     fs::write(&unit, r#"{"torn":"#).unwrap();
     fs::remove_file(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
 
-    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let out = json_success(&dir, &["repair", "rebuild-db"]);
     let skipped = out["skipped_units"].as_array().unwrap();
     assert_eq!(skipped.len(), 1, "{out}");
     assert_eq!(
@@ -6254,28 +6279,36 @@ fn r17_6_repair_keeps_emergency_guidance_when_no_cached_chunks_survive() {
 fn r16_6_valueless_flag_inline_value_is_a_usage_error() {
     let dir = indexed_scope();
 
-    // reindex: the reported gate bypass. `--force=false` must not be coerced to true.
-    let err = json_failure(&dir, &["reindex", "--force=false"], 2);
+    // reindex: the reported gate bypass. `--regenerate=false` must not be
+    // coerced to true. B/C (2026-07-24): clap owns this rejection now, and the
+    // flag is `--regenerate` (the old `--force` was removed outright, not
+    // aliased). The contract asserted here is the rejection plus its
+    // code/exit, not the wording.
+    let err = json_failure(&dir, &["reindex", "--regenerate=false"], 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001", "{err}");
+    let message = err["message"].as_str().unwrap();
     assert!(
-        err["message"]
-            .as_str()
-            .unwrap()
-            .contains("--force does not take a value"),
+        message.contains("unexpected value") && message.contains("regenerate"),
         "{err}"
     );
     // The negated confirmation flag is equally rejected (would have bypassed --yes).
-    let err = json_failure(&dir, &["reindex", "--force", "--yes=false"], 2);
+    let err = json_failure(&dir, &["reindex", "--regenerate", "--yes=false"], 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001", "{err}");
 
-    // repair: `--rebuild-db=false` must not still rebuild the DB.
+    // repair: the operations are sub-commands, so an inline value cannot reach
+    // one at all — `--rebuild-db=false` is simply not an argument any more.
     let err = json_failure(&dir, &["repair", "--rebuild-db=false"], 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001", "{err}");
 
-    // search: `--text=false` must not be read as "text mode requested".
-    let err = json_failure(&dir, &["search", "トークン", "--text=false"], 2);
+    // search: the mode selector takes a value, so the boolean-coercion hazard
+    // is gone by construction; `--prune-orphans=false` covers a real boolean.
+    let err = json_failure(
+        &dir,
+        &["repair", "verify-objects", "--prune-orphans=false"],
+        2,
+    );
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001", "{err}");
-    // A second boolean search flag, for good measure.
+    // A boolean search flag, for good measure.
     let err = json_failure(&dir, &["search", "トークン", "--all-scopes=false"], 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001", "{err}");
 
@@ -6286,7 +6319,7 @@ fn r16_6_valueless_flag_inline_value_is_a_usage_error() {
         search["results"].as_array().unwrap().len() <= 1,
         "value-taking --limit=1 must be honored, not rejected: {search}"
     );
-    let reindexed = json_success(&dir, &["reindex", "--force", "--yes"]);
+    let reindexed = json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     assert_eq!(reindexed["status"], "reindexed", "{reindexed}");
 }
 
@@ -7527,7 +7560,7 @@ fn r21_4_uppercase_and_octet_stream_text_enqueue_no_online_ocr() {
         "R21-4: text files must not enqueue online OCR tasks: {online:?} in {status}"
     );
     // The text is still locally searchable.
-    let search = json_success(&dir, &["search", "acme", "--text"]);
+    let search = json_success(&dir, &["search", "acme", "--mode", "text"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
         "R21-4: octet-stream text must still be indexed locally: {search}"

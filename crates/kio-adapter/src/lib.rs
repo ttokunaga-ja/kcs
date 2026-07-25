@@ -5,6 +5,7 @@ pub mod batch_inventory;
 pub mod bbox_annotation;
 pub mod catalog;
 pub mod deterministic;
+pub mod gemini_batch_client;
 mod gemini_embedding;
 mod http_policy;
 pub mod identity;

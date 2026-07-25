@@ -901,7 +901,7 @@ fn qa68_evidence_verify_still_fails_closed_on_registry_duplicate() {
     .unwrap();
     kio(&dir_a, &["init"]).assert().success();
     json_success(&dir_a, &["index", "--offline", "--approve"]);
-    let search = json_success(&dir_a, &["search", "3600", "--text"]);
+    let search = json_success(&dir_a, &["search", "3600", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     let scope_id = scope_json(&dir_a)["scope_id"].as_str().unwrap().to_owned();
     let _dir_b = make_registry_duplicate(&dir_a, &scope_id);
@@ -1367,13 +1367,13 @@ fn qa29_repair_rebuild_db_online_reaches_the_post_rebuild_enrichment() {
 
     // Without --online, the gate stays closed (key loss) and rebuild-db's
     // enrichment pass sends nothing.
-    let without_online = mock_embed_json(&dir, &["repair", "--rebuild-db"]);
+    let without_online = mock_embed_json(&dir, &["repair", "rebuild-db"]);
     assert_eq!(
         without_online["embedding_tasks_executed"], 0,
         "no --online: nothing should send: {without_online}"
     );
 
-    let with_online = mock_embed_json(&dir, &["repair", "--rebuild-db", "--online"]);
+    let with_online = mock_embed_json(&dir, &["repair", "rebuild-db", "--online"]);
     assert_eq!(
         with_online["embedding_tasks_executed"], 1,
         "--online must reach the enrichment pass and send the pending task: {with_online}"
@@ -1442,14 +1442,14 @@ fn qa31_reindex_force_online_reaches_the_embedding_enrichment_pass() {
     // generations' worth of Pending embedding tasks for the second call to
     // pick up, confounding the count.
     let dir_without = setup_pending_mock_embedding_scope();
-    let without_online = mock_embed_json(&dir_without, &["reindex", "--force", "--yes"]);
+    let without_online = mock_embed_json(&dir_without, &["reindex", "--regenerate", "--yes"]);
     assert_eq!(
         without_online["embedding_tasks_executed"], 0,
         "no --online: nothing should send: {without_online}"
     );
 
     let dir_with = setup_pending_mock_embedding_scope();
-    let with_online = mock_embed_json(&dir_with, &["reindex", "--force", "--yes", "--online"]);
+    let with_online = mock_embed_json(&dir_with, &["reindex", "--regenerate", "--yes", "--online"]);
     let executed = with_online["embedding_tasks_executed"]
         .as_u64()
         .expect("embedding_tasks_executed must be a number");

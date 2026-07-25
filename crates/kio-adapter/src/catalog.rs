@@ -50,6 +50,11 @@ pub fn builtin_offline_markdownize_adapter() -> Box<dyn MarkdownizeAdapter> {
     Box::new(DeterministicAdapter)
 }
 
+/// The adopted embedding model pin, re-exported so the CLI's Batch lane can
+/// name the model a job is created with without reaching into the private
+/// adapter module.
+pub use crate::gemini_embedding::ADOPTED_MODEL_PIN as ADOPTED_EMBEDDING_MODEL_PIN;
+
 #[must_use]
 pub fn adopted_embedding_profile() -> AdapterProfile {
     GeminiEmbeddingAdapter::default().profile()

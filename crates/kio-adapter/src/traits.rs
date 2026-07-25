@@ -41,6 +41,19 @@ pub trait EmbeddingAdapter {
     fn profile(&self) -> AdapterProfile;
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
+
+    /// Which request lane this adapter's online sends should take (07 §5.3 の
+    /// 2026-07-24 訂正 / §5.7). Default = Sync, same as
+    /// [`MarkdownizeAdapter::preferred_request_kind`]. The built-in Gemini
+    /// adapter overrides this to Batch: the Gemini Developer API bills an
+    /// embedding batch at half the sync rate ($0.10 vs $0.20 per 1M text
+    /// tokens), and the earlier "Vertex はバッチ推論非対応" rationale did not
+    /// apply to the endpoint this adapter actually calls. Like the markdownize
+    /// selector, a trait default (not an `AdapterProfile` field) keeps the lane
+    /// OUT of identity — the same vectors come back either way.
+    fn preferred_request_kind(&self) -> PreferredRequestKind {
+        PreferredRequestKind::Sync
+    }
 }
 
 pub trait SummaryAdapter {

@@ -98,12 +98,40 @@ missing projection class ledgerは空である。descriptorは697,466 canonical 
 v2候補は局所completion claimを満たすだけで、`corpus_semantic_namespace_issued=false`、
 `g0_contract_frozen=false`、全authority fieldはfalseである。最終local acceptanceはall-253 independent full
 replayと独立した2 hash-seed cold buildが上記literalを再現して成立した。
-overlay scope placement、positive independent review、corpus/evaluation/history closure、blocker resolution ledger、
-実行可能solver、solution、proofは含まず、現input-closureはfull body DAGの互換性候補に限る。
+その下流ではprojection bodyを含まない253-entry/12-classの
+`kcs.persona.pc-corpus-semantic-namespace/v3`を161,665 canonical bytes / SHA-256
+`a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`で局所golden固定した。
+これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
+`kcs.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
+`47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`で局所golden固定した。
+同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
+ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
+さらに20 x 105 query-history target-resolution bridgeを固定したが、
+positive review receipt、production blocker ledger、topic/language/fact/revision source-semantic resolution、
+5,400 concrete distractor mappings、production corpus/evaluation/history closureは未完成である。
+このgapのin-memory projection feasibility auditは、contributor target 2,000件中baseline全predicate一致327、不一致1,673、
+distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000、all-condition exact 0を示す。
+同auditは40,947 canonical bytes / SHA-256
+`890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`で局所golden固定したが、
+不足を認証するactive blocker evidenceに限り、resolution v2やcompletion evidenceではない。
+その下流の`kcs.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
+v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
+dependenciesを束縛し、16,735 canonical bytes / SHA-256
+`bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`で局所golden固定した。
+同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
+4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
+evaluation execution authorityを与えない。
+物理pathについては`kcs.persona.pc-device-lane-compositor/v1`が20 logical personasを3 fresh replayの60 distinct
+device roots、60 isolated registries、1,200 formal scopes、609,000 W0 source filesへ写像する。bodyは41,099
+canonical bytes / SHA-256 `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`である。
+`formal-replay-01`はambient/byte-stressのunratified candidateに限り、writer/materialization/readback/G0 authorityはfalseである。
+overlay scope placement、positive independent review、authoritative production corpus/evaluation/history closure、
+production blocker resolution ledger、
+実行可能solver、solution、proofは含まず、局所凍結したrequest-only closureをproduction closureへ読み替えない。
 `g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
-Date: 2026-07-16
+Date: 2026-07-17
 
 ## 1. 目的とversion境界
 
@@ -1124,8 +1152,12 @@ IDs、rendered corpus bytesを変更してはならない。route bodyそのも�
 各upstream bodyがauthority/completion/blockerなど可変の証拠metadataを同居させる場合、semantic namespaceは
 schema別にallowlistした`semantic_payload` projectionのbytes/SHAだけを束縛し、corpus input closureがfull body
 とmetadataを束縛する。complete v2 projection inventory候補は存在するが、そのdescriptor自体をsemantic
-namespaceとして採用してはならない。projection pinsをexactly once束縛するnamespace manifest、positive review、
-corpus input closureが未完成であるため、現時点のsemantic namespace/rootは未発行である。
+namespaceとして採用してはならない。projection pinsをexactly once束縛するnamespace v3 manifestは局所golden
+として固定済みであり、corpus input closure v3もrequest-onlyの非authoritative局所成果物として固定済みである。
+さらに評価側の5 direct dependenciesを束縛するevaluation target-resolution closure slice v1も局所golden固定済み
+だが、source-semantic resolution v2とauthoritative corpus closureが欠けるためfull evaluation input closureではない。
+ただしproduction namespaceは未発行、positive review receiptは0件、G0 blockerはactiveのままであり、
+authoritative corpus closureは成立していないため、現時点でもproduction semantic namespace/rootは未発行である。
 
 production projectionはfull artifactを丸ごとhashするaliasではなく、schema別のcontent-only bodyとする。
 projection自身にfull upstream SHA、authority/completion/blocker/review status、runtime receipt、query/oracle/

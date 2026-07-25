@@ -373,7 +373,7 @@ fn b2_collect_completes_task_and_makes_output_searchable() {
     );
 
     // The collected markdown is searchable (promotion + index rebuild ran).
-    let search = json_success(&dir, &["search", "b2marker", "--text"]);
+    let search = json_success(&dir, &["search", "b2marker", "--mode", "text"]);
     let results = search["results"].as_array().unwrap();
     assert!(!results.is_empty(), "{search}");
     assert!(
@@ -501,7 +501,7 @@ fn b3_create_job_crash_window_reconcile_found_then_resume_collects() {
     assert_eq!(collected["tasks_executed"], 1, "{collected}");
     let status = json_success(&dir, &["status"]);
     assert_eq!(scanned_markdownize_task(&status)["status"], "done");
-    let search = json_success(&dir, &["search", "b3marker", "--text"]);
+    let search = json_success(&dir, &["search", "b3marker", "--mode", "text"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
         "{search}"

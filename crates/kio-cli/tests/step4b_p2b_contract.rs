@@ -79,7 +79,7 @@ fn fixture() -> (TempDir, Value, String) {
     .unwrap();
     success(&dir, &["init"]);
     success(&dir, &["index", "--offline", "--approve"]);
-    let search = success(&dir, &["search", "3600", "--text"]);
+    let search = success(&dir, &["search", "3600", "--mode", "text"]);
     let pointer = search["results"][0]["evidence_pointer"].clone();
     let uri = search["results"][0]["evidence_uri"]
         .as_str()
@@ -100,7 +100,7 @@ fn kio_dir(dir: &TempDir) -> std::path::PathBuf {
 /// command with `KIO-E-INDEX-REBUILDING-001` until it does. `repair
 /// --rebuild-db` is the standard resync path (PB28).
 fn resync_index_metadata(dir: &TempDir) {
-    success(dir, &["repair", "--rebuild-db"]);
+    success(dir, &["repair", "rebuild-db"]);
 }
 
 /// Fan-out CAS path for a raw content-addressed object under
@@ -140,7 +140,7 @@ fn pb01_embedding_valid_vector_passes_verification() {
             .unwrap()
             .as_bytes(),
     );
-    let output = success(&dir, &["repair", "--verify-objects"]);
+    let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["checked"]["embeddings"], 1, "{output}");
 }
@@ -156,7 +156,7 @@ fn pb01_embedding_length_mismatch_is_a_finding() {
             .unwrap()
             .as_bytes(),
     );
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -177,7 +177,7 @@ fn pb01_embedding_non_finite_vector_element_is_a_finding() {
         ContentObjectKind::Embedding.directory(),
         br#"{"dimensions": 1, "vector": [NaN]}"#,
     );
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -202,7 +202,7 @@ fn pb01_embedding_digest_mismatch_is_a_finding() {
         &hash,
     );
     fs::write(&path, br#"{"dimensions": 1, "vector": [0.9]}"#).unwrap();
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -233,7 +233,7 @@ fn pb02_manifest_and_toollock_join_the_verification_closure() {
     );
     fs::write(&toollock_path, br#"{"kind":"corrupted-in-place"}"#).unwrap();
 
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     // PB04: `fixture()`'s own `kio index` now durably CAS-writes ITS
     // normalized instance's genuine manifest object too (NormalizeRef's new
@@ -268,7 +268,7 @@ fn pb03_regression_chunk_span_mismatch_still_a_finding() {
     // Rewrite the object directly (bypassing CAS identity re-derivation) so
     // the exact on-disk bytes disagree with the normalized span.
     fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -298,7 +298,7 @@ fn pb07_names_jsonl_schema_and_digest_recompute() {
     assert!(record["digest64"].as_str().unwrap().len() == 64);
 
     // Baseline: a freshly-tagged scope has no findings.
-    let clean = success(&dir, &["repair", "--verify-objects"]);
+    let clean = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(clean["status"], "ok", "{clean}");
 
     // Corrupt digest64 -> finding.
@@ -309,7 +309,7 @@ fn pb07_names_jsonl_schema_and_digest_recompute() {
         format!("{}\n", serde_json::to_string(&corrupted).unwrap()),
     )
     .unwrap();
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -334,7 +334,7 @@ fn pb08_names_jsonl_torn_tail_tolerated_mid_malformed_rejected() {
         format!("{good_line}\n{{\"digest64\":\"ab"),
     )
     .unwrap();
-    let torn = success(&dir, &["repair", "--verify-objects"]);
+    let torn = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(
         torn["status"], "ok",
         "torn tail must not be a finding: {torn}"
@@ -346,7 +346,7 @@ fn pb08_names_jsonl_torn_tail_tolerated_mid_malformed_rejected() {
         format!("{{\"digest64\":\"ab\n{good_line}\n"),
     )
     .unwrap();
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -371,7 +371,7 @@ fn pb09_canonical_ref_names_correspondence_is_asymmetric() {
             fs::remove_file(entry.path()).unwrap();
         }
     }
-    let ref_less = success(&dir, &["repair", "--verify-objects"]);
+    let ref_less = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(
         ref_less["status"], "ok",
         "a names row with no ref must be normal: {ref_less}"
@@ -382,7 +382,7 @@ fn pb09_canonical_ref_names_correspondence_is_asymmetric() {
     let head = fs::read_to_string(kio_dir(&dir).join("HEAD")).unwrap();
     let orphan_leaf = format!("tag-{}", "1".repeat(64));
     fs::write(canonical_dir.join(&orphan_leaf), head.trim()).unwrap();
-    let (code, output) = run(&dir, &["repair", "--verify-objects"]);
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
@@ -403,17 +403,68 @@ fn pb09_canonical_ref_names_correspondence_is_asymmetric() {
 #[test]
 fn pb12_prune_orphans_flag_parsing() {
     let (dir, ..) = fixture();
-    let accepted = success(&dir, &["repair", "--verify-objects", "--prune-orphans"]);
+    let accepted = success(
+        &dir,
+        &["repair", "verify-objects", "--prune-orphans", "--yes"],
+    );
     assert_eq!(accepted["status"], "ok", "{accepted}");
 
     kio(&dir, &["repair", "--prune-orphans"])
         .arg("--json")
         .assert()
         .code(2);
-    kio(&dir, &["repair", "--rebuild-db", "--prune-orphans"])
+    kio(&dir, &["repair", "rebuild-db", "--prune-orphans"])
         .arg("--json")
         .assert()
         .code(2);
+}
+
+/// 06 §1 requires a confirmation prompt before either destructive `repair`
+/// operation removes anything. Implemented 2026-07-25 — until then `--yes` was
+/// accepted and inert, so the prompt it was meant to skip did not exist.
+///
+/// Non-interactive (no TTY, as every contract run is) without `--yes` must
+/// refuse, and must refuse WITHOUT deleting: the second call proves the same
+/// orphans are still there to be pruned.
+#[test]
+fn repair_prune_requires_confirmation_and_refuses_without_deleting() {
+    let (dir, ..) = fixture();
+    let prepared_hash = write_content_bytes(
+        &kio_dir(&dir),
+        ContentObjectKind::Prepared.directory(),
+        b"orphan prepared bytes for the confirmation contract",
+    );
+    let store = ObjectStore::new(kio_dir(&dir));
+
+    let (code, output) = run(&dir, &["repair", "verify-objects", "--prune-orphans"]);
+    assert_eq!(code, 9, "confirmation-rejected exit: {output}");
+    assert_eq!(
+        output["error_code"], "KIO-E-CONFIRM-REJECTED-001",
+        "{output}"
+    );
+    assert!(
+        output["context"]["target_count"].as_u64().unwrap() >= 1,
+        "the refusal reports what it would have removed: {output}"
+    );
+    // The refusal removed nothing: the orphan is still accounted for.
+    assert!(
+        store
+            .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
+            .is_ok(),
+        "a rejected confirmation must not delete anything"
+    );
+    let accepted = success(
+        &dir,
+        &["repair", "verify-objects", "--prune-orphans", "--yes"],
+    );
+    assert_eq!(accepted["prune_orphans"]["status"], "pruned", "{accepted}");
+    assert!(
+        accepted["prune_orphans"]["pruned_prepared_count"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "the refused run must not have consumed the orphans: {accepted}"
+    );
 }
 
 /// PB13: an orphan prepared/image object (referenced by no live manifest) is
@@ -436,7 +487,10 @@ fn pb13_prune_orphans_deletes_unreferenced_prepared_and_image() {
         .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
         .is_ok());
 
-    let output = success(&dir, &["repair", "--verify-objects", "--prune-orphans"]);
+    let output = success(
+        &dir,
+        &["repair", "verify-objects", "--prune-orphans", "--yes"],
+    );
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["prune_orphans"]["status"], "pruned", "{output}");
     assert_eq!(
@@ -479,7 +533,10 @@ fn pb15_prune_orphans_blocked_by_active_purge_journal() {
         )
         .unwrap();
 
-    let (code, output) = run(&dir, &["repair", "--verify-objects", "--prune-orphans"]);
+    let (code, output) = run(
+        &dir,
+        &["repair", "verify-objects", "--prune-orphans", "--yes"],
+    );
     // The underlying verify pass itself reports the active journal as a
     // `purge_incomplete` finding (exit 3) before prune-orphans would even run.
     assert_eq!(code, 3, "{output}");
@@ -601,7 +658,7 @@ fn pb25_registry_prune_removes_only_unreachable_rows() {
         "fixture's own scope + the stale one"
     );
 
-    let output = success(&dir, &["repair", "--registry-prune"]);
+    let output = success(&dir, &["repair", "registry-prune", "--yes"]);
     assert_eq!(output["pruned_count"], 1, "{output}");
     let remaining = registry.all_entries().unwrap();
     assert_eq!(
@@ -651,7 +708,7 @@ fn pb28_rebuild_db_initializes_last_lifecycle_epoch_to_current_value() {
         "purge must have advanced the lifecycle-epoch counter"
     );
 
-    success(&dir, &["repair", "--rebuild-db"]);
+    success(&dir, &["repair", "rebuild-db"]);
 
     let db_path = kio_dir(&dir).join("index/sqlite.db");
     let conn = rusqlite::Connection::open(db_path).unwrap();
@@ -1047,7 +1104,7 @@ fn pb67_regression_malformed_tombstone_is_store_corrupt_in_both_commands() {
     fs::create_dir_all(tombstone_path.parent().unwrap()).unwrap();
     fs::write(&tombstone_path, b"not valid json").unwrap();
 
-    let (fsck_code, fsck_output) = run(&dir, &["repair", "--verify-objects"]);
+    let (fsck_code, fsck_output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(fsck_code, 3, "{fsck_output}");
     assert_eq!(
         fsck_output["error_code"], "KIO-E-STORE-CORRUPT-001",
@@ -1132,7 +1189,7 @@ fn pb48_pb49_manifest_missing_resolves_via_resurrection_link_after_reingest() {
     .unwrap();
     success(&dir, &["init"]);
     success(&dir, &["index", "--offline", "--approve"]);
-    let search = success(&dir, &["search", "3600", "--text"]);
+    let search = success(&dir, &["search", "3600", "--mode", "text"]);
     let old_pointer = search["results"][0]["evidence_pointer"].clone();
     let old_pointer_json = serde_json::to_string(&old_pointer).unwrap();
     let raw_hash = old_pointer["raw_hash"].as_str().unwrap().to_owned();

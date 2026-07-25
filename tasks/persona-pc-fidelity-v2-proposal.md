@@ -15,8 +15,10 @@ membership packageを実装し、40 origin + 40 profile manifests、25,560 draft
 さらに71 variant-level formal recipe profile policyを、inventory slot、semantic content/filename slot、
 all-71 runtime contract/receiptへ推移的に束縛した。その下流のsource-instance parameter assignmentが
 203,000 source-instanceごとのrecipe/renderer/complexity/bytes/laneをexplicit cell foreign keyで束縛する。
-12/12分類のschema別content-only semantic projectionを持つv2候補はあるが、solved scope placement、
-corpus semantic namespace/closureはなく、既存structural packageの
+12/12分類のschema別content-only semantic projectionを持つv2候補と、253 projection pinだけを持つ
+局所golden固定済み・production未発行のcorpus semantic namespace v3、そのexact dependencyを束縛する
+7,590-byte request-only corpus input closure v3はあるが、positive receipt、solved scope placement、
+production corpus closureはなく、既存structural packageの
 `source_intent_inventory_complete=false`を変更しない。history-intentもsolver後のcompiled event planではない。
 さらにaggregate byte-distribution catalogで566 persona-variant行、300 persona-family投影、20 persona集計を
 束縛し、pilot/full-residual/fullの件数、complexity histogram、raw-byte sum、nearest-rank p50/p95/max、
@@ -88,8 +90,24 @@ equivalence、scope placement、raw/rendered identityと検索参加の実測は
 同一subject/predicate・異なる値を持つunordered W0-current fact pairとsource-owned distinct A/B branch profilesは
 実装済みである。
 schema別content-only `semantic_payload` projectionは12/12分類のv2候補まで実装したが、corpus semantic namespaceの
-発行、positive independent review、corpus/evaluation/history closure、blocker resolution ledger、joint
+production発行、positive independent review、production corpus/evaluation/history closure、production blocker
+resolution ledger、topic/language/fact/revision source-semantic resolutionと5,400 concrete distractor mappings、joint
 scope/quota/cohort allocation、canonical solution/proof、正式G0 rootは未実装である。
+in-memory projection feasibility auditでも、2,000 contributor targetsのbaseline一致は327、distractor候補上限は
+1,060 / 5,400、revision join unknownは2,000、all-condition exact resolutionは0であり、このblockerを確認した。
+同auditは40,947 canonical bytes / SHA-256
+`890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`で局所golden固定済みだが、
+active blocker evidenceに限りresolution v2を発行しない。
+さらに`kcs.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
+query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
+16,735 canonical bytes / SHA-256
+`bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`で局所golden固定した。
+これは327 aligned / 1,673 mismatch、concrete distractor 0 / shortfall 4,340を保持するnon-authorizing sliceであり、
+authoritative corpus/evaluation closureやresolution v2ではない。
+一方、non-authorizing device-lane compositorは20 logical personasを3 fresh replayの60 distinct roots、60 isolated
+registries、1,200 formal scopes、609,000 W0 source filesへexact mappingした。41,099 canonical bytes / SHA-256
+`eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`で、ambient/byte-stress designated replayは
+unratified、writer/materialization/readback/G0 authorityはfalseである。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
@@ -97,7 +115,12 @@ G0のversion境界、pilot projection、joint solver、source recipe、negative 
 sidecar化済みで必要条件も全20人で通過したが、joint solver/source recipe/oracle完了までは
 `g0_contract_frozen=false`である。
 
-Date: 2026-07-16
+Date: 2026-07-17
+
+人物らしさとformat coverage stressを分離する追加候補は
+[`persona-pc-fidelity-v2-core-mix-proposal.md`](persona-pc-fidelity-v2-core-mix-proposal.md)に置く。
+同補足はproposal-onlyであり、採用判断と新profile artifactが完成するまで、本書§4の
+`benchmark_stress_mix_v2`や既存goldenを置き換えない。
 
 ## 1. 結論
 
@@ -1092,7 +1115,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suite、203,000 W0 + 3,630 event-createdを閉じるeffective-membership reconciliation、12/12分類・253-body complete semantic-projection derivation inventory v2候補（67 JSON / 186 JSONL）まで完成。solved placement、semantic namespace発行、positive independent review、corpus/evaluation/history closure、blocker resolution ledger、solution-compiled planned history plan、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suite、203,000 W0 + 3,630 event-createdを閉じるeffective-membership reconciliation、12/12分類・253-body complete semantic-projection derivation inventory v2候補（67 JSON / 186 JSONL）、局所golden固定済み・production未発行のsemantic namespace v3と局所golden固定済みrequest-only corpus closure v3まで完成。solved placement、semantic namespace発行、positive independent review、authoritative production corpus/evaluation/history closure、production blocker resolution ledger、solution-compiled planned history plan、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化。stable move 4 sourcesのpositive W0 receiptを作る | streaming writer、完全attestor、qIM patcherが未実装 |
 | G3 pilot W1-W5 | W1 typed edit/index後にI-edit 1 sourceをattestし、stable 4件のW0 receiptと合わせたpre-W2 qIM patchをmove前に検証して、以後rename/move/duplicate/derive/archive/delete/restore/purgeを実行 | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop。I-edit current mismatch、missing/range外qIM patchはfail closed | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -1548,8 +1571,10 @@ v2で実装済み（planning only、non-authorizing）:
   vocabulary attestation、compiled `(raw_hash, section)` relevanceはfalse
 - content、evidence、evaluationを別DAGへ注入し、query変更や同一bodyのreview receipt差替えがcorpus
   identityへ逆流しないinput-closure候補を実装した。ただし現upstream full bodyにはcontentと
-  authority/completion/blocker metadataが同居する。schema別content-only `semantic_payload` projectionが
-  未実装なので、現candidate semantic rootはsource ID namespaceとして不適格で、G0 rootとして発行しない。
+  authority/completion/blocker metadataが同居する。この段落のp01 representative live-DAG candidate時点では
+  schema別content-only `semantic_payload` projectionが未実装だったため、当該旧candidate semantic rootは
+  source ID namespaceとして不適格であり、G0 rootとして発行しない。その後の12/12 projection inventoryと
+  253-body namespace v3の局所golden固定は、この旧p01 candidateの履歴的評価を書き換えない。
   p01 representative live-DAG compatibility pinはsemantic 48,210 bytes /
   `57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3`、corpus 3,496 /
   `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`、evaluation 5,032 /
@@ -1573,9 +1598,14 @@ pre-solve graphは`source-intent-origin-shard`、`fact-membership`、`history-in
 content-only `semantic_payload` projectionだけをidentity namespaceへ入れ、full body/statusはcorpus input closureへ
 置く。immutable historical blockerはresolution ledgerでexact pin/pathごとにactive/resolved/deferredへ分類し、
 ledger full bodyをcorpus input closureとG0 descriptorへ束縛するがsemantic namespaceへ入れない。
-現在は最小12分類を12/12覆うcomplete projection derivation inventory v2候補まで実装したが、projection pinを
-exactly once束縛するcorpus semantic namespace、positive independent review、corpus/evaluation/history closure、
-blocker resolution ledgerは未実装である。complete inventory descriptor自体をsemantic rootやG0 rootとして発行しない。
+現在は最小12分類を12/12覆うcomplete projection derivation inventory v2候補に加え、projection pinを
+exactly once束縛する局所golden固定済み・production未発行のcorpus semantic namespace v3、review request、
+bootstrap blocker ledger、query-history target bridge、7,590-byte request-only corpus closure v3の局所goldenまで実装した。
+さらにquery-history semantic-resolution feasibility auditを40,947-byteのactive blocker evidenceとして局所golden固定した。
+同blocker stateと5 direct dependenciesを束縛する16,735-byte evaluation target-resolution closure slice v1も
+局所golden固定したが、authoritative evaluation input closureやresolution v2へ昇格していない。
+positive independent review、authoritative production corpus/evaluation/history closure、production blocker
+resolution ledger、source-semantic resolution v2は未完成である。complete inventory descriptor自体をsemantic rootやG0 rootとして発行しない。
 
 production projectionはfull artifact SHAを内包しないschema別content-only bodyとし、full pinからprojection pinへの
 対応は別derivation receiptで証明する。projectionにはauthority/completion/blocker/review、query/oracle、runtime
