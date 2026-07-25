@@ -10429,6 +10429,10 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 // Batch lane (04 §5.8): jobs submitted or still queued/running
                 // provider-side after this pass — completed by a later resume's poll.
                 "tasks_inflight": outcome.inflight,
+                // Subset of the above that is held because the provider's
+                // response could not be READ. Non-zero = a fault to look at,
+                // not a job to wait for.
+                "tasks_inflight_unreadable": outcome.held_unreadable,
             });
             // R11-2: report the batch exit code (docs/04 §5.6) from what this pass did
             // — auth (5) / budget-paused (6) / partial (3) / all-permanent (4) — while
@@ -10499,6 +10503,10 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 "tasks_paused": outcome.paused,
                 // Batch lane (04 §5.8): see the Resume arm's `tasks_inflight`.
                 "tasks_inflight": outcome.inflight,
+                // Subset of the above that is held because the provider's
+                // response could not be READ. Non-zero = a fault to look at,
+                // not a job to wait for.
+                "tasks_inflight_unreadable": outcome.held_unreadable,
             });
             // R14-5: batch-owned error_code on the Partial(3)/Permanent(4) override.
             apply_batch_exit_override(&mut output, &outcome);
@@ -11395,6 +11403,18 @@ struct ExecOutcome {
     /// exits 3 exactly like a retryable failure would, since a later
     /// `kio batch resume` is what makes progress.
     inflight: usize,
+    /// Subset of `inflight` held because the provider's response could NOT be
+    /// read — not because the job is still running. 04 §5.8's unknown rule says
+    /// to hold and retry such a row, which is right, but a bare hold is
+    /// indistinguishable from a healthy queued job and so hides a permanent
+    /// fault behind an ordinary-looking count.
+    ///
+    /// Two real defects reached production behind exactly that silence (a
+    /// result parser that could not read the live shape, then a size bound that
+    /// rejected any job past ~20 members): in both cases the provider had every
+    /// vector ready and `tasks_inflight` simply never dropped. A non-zero value
+    /// here means "stop waiting and look", not "wait longer".
+    held_unreadable: usize,
 }
 
 impl ExecOutcome {
@@ -11409,6 +11429,7 @@ impl ExecOutcome {
         self.auth_failed += other.auth_failed;
         self.failed_retryable += other.failed_retryable;
         self.inflight += other.inflight;
+        self.held_unreadable += other.held_unreadable;
     }
 }
 
@@ -15088,9 +15109,16 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
         // collection for every other row in the scope (head-of-line blocking)
         // and reported a transient network error as a permanent config fault.
         // The OCR lane has always held-and-retried here; this matches it.
-        let Ok(job) = client.get_job(job_name) else {
-            outcome.inflight += 1;
-            continue;
+        let job = match client.get_job(job_name) {
+            Ok(job) => job,
+            Err(error) => {
+                // Held, not failed — but say so. A bare `inflight += 1` here
+                // reads as "still queued" and hid two permanent faults.
+                eprintln!("kio: holding {job_name}: job state unreadable: {error}");
+                outcome.inflight += 1;
+                outcome.held_unreadable += 1;
+                continue;
+            }
         };
         if !job.state.is_terminal() {
             outcome.inflight += 1;
@@ -15128,9 +15156,14 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
         // results are not readable right now — settling on that would either
         // discard the vectors (Succeeded with nothing persisted) or burn a
         // retry (Terminal). Hold the row instead; the next pass re-reads it.
-        let Ok(results) = client.fetch_inlined_results(job_name) else {
-            outcome.inflight += 1;
-            continue;
+        let results = match client.fetch_inlined_results(job_name) {
+            Ok(results) => results,
+            Err(error) => {
+                eprintln!("kio: holding {job_name}: results unreadable: {error}");
+                outcome.inflight += 1;
+                outcome.held_unreadable += 1;
+                continue;
+            }
         };
         let mut persisted = 0usize;
         // R24 (4 系統一致): 07 §5.3 (1) requires the result ids to be a BIJECTION

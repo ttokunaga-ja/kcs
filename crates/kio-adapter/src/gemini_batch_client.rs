@@ -42,7 +42,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy, EMBEDDING_RESPONSE_MAX_BYTES,
+    authenticated_agent, read_json_bounded, HttpPolicy,
 };
 use crate::{AdapterError, Result};
 
@@ -60,8 +60,27 @@ pub const DEFAULT_PROVIDER_SCOPE_ID: &str = "gemini:default";
 
 const GEMINI_API_ORIGIN: &str = "https://generativelanguage.googleapis.com";
 
-/// Metadata-class responses (one batch object, one listing page) are small.
+/// A listing page IS metadata-class: its entries carry `state`/`batchStats` and
+/// never an `output`, so 100 of them stay well under this.
 const BATCH_METADATA_MAX_BYTES: usize = 1024 * 1024;
+
+/// A **poll** response is not metadata-class, however tempting the name is.
+/// `GET /v1beta/{name}` is the only batch endpoint there is, so the moment a job
+/// succeeds that same document carries every inline result — and carries them
+/// TWICE, under `metadata.output` and again under `response`.
+///
+/// Measured against the live API at 768 dimensions: 47,905 response bytes per
+/// member. At the caller's 512-member ceiling
+/// (`EMBEDDING_BATCH_JOB_MAX_MEMBERS`) that is ~24.5 MB, so this is sized to
+/// cover it with margin and is used for **both** the record and the results —
+/// they are one HTTP response and must not be bounded differently.
+///
+/// Reading the record as metadata (1 MB) is what stranded a real 33-member job:
+/// `get_job` failed the size check, the poll site's hold-and-retry rule
+/// (04 §5.8 unknown) swallowed the error, and the row sat in flight with no
+/// diagnostic while the provider had all 33 vectors ready. The bound scaled
+/// with job size, so it passed on every small scope and failed on the big one.
+const BATCH_POLL_MAX_BYTES: usize = 48 * 1024 * 1024;
 
 /// Listing pagination page size (`pageSize` query parameter).
 const BATCH_LIST_PAGE_SIZE: usize = 100;
@@ -538,7 +557,8 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
     fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord> {
         let value = self.get_json(
             &format!("{}/v1beta/{name}", self.base_url()),
-            BATCH_METADATA_MAX_BYTES,
+            // Same URL and same document as `fetch_inlined_results` — one bound.
+            BATCH_POLL_MAX_BYTES,
             "Gemini batch job response",
         )?;
         parse_job_record(&value)
@@ -576,7 +596,10 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
     fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
         let value = self.get_json(
             &format!("{}/v1beta/{name}", self.base_url()),
-            EMBEDDING_RESPONSE_MAX_BYTES,
+            // `EMBEDDING_RESPONSE_MAX_BYTES` (8 MB) is the SYNCHRONOUS
+            // single-embedding bound and is too small here: it caps a batch at
+            // ~170 members, well under the caller's 512-member ceiling.
+            BATCH_POLL_MAX_BYTES,
             "Gemini batch result response",
         )?;
         parse_inlined_results(&value)

@@ -392,6 +392,8 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | I1 | `parse_inlined_results` が実応答の**二重ネスト** `inlinedResponses.inlinedResponses[]` を解決できない | **実 job が 1 件も回収できない。** 終端した job が診断なしで永久に in-flight。G2 の「その行だけ保持」規則がエラーを飲み込むため無症状 |
 | I2 | `list_jobs` が一覧キーを `batches` で読む (実物は `operations`) | 回復走査の inventory が**常に空**。相 2b 中断行が恒久に宙吊り |
 | I3 | モック seam が `{"inlinedResponses": [...]}` という**実 API が返さない形**をパーサへ直接与えていた | I1/I2 を契約テストで検出できなかった原因。`list_jobs` も封筒を迂回していた |
+| I5 | `get_job` が poll 応答を **metadata 級 (1 MB)** として読む。実際は `GET /v1beta/{name}` が唯一の endpoint で、成功した job の応答は**全 inline 結果を 2 重に**載せる (実測 47,905 B/member) | **メンバ数に比例して踏む。** p01 の 33 メンバ job が 40 回のポーリングで一度も回収されず、provider 側には全ベクトルが揃っていた。小さい scope では通るため規模を上げるまで出ない |
+| I6 | 「読めなかったので保持」が `tasks_inflight` に混ざり、**正常な待機と区別できない** | I1 と I5 の両方をこの沈黙が隠した。`tasks_inflight_unreadable` を追加し、保持理由を stderr に出す |
 
 修正: 封筒解決を `batch_object` / `parse_job_listing` / `inlined_response_lines` に集約し、
 **モックを provider と同じ封筒へ通した**。採取した実応答そのものを固定する回帰テスト 4 本
@@ -402,6 +404,8 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | ID | 内容 |
 |---|---|
 | I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される。実測は予約見積りの約 1/2 なので**安全側**だが台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せて `estimated: false` へ移す |
+| I7 | **XLSX が黙って pending のまま滞留する。** 07 §5.1 は XLSX 変換機構を「本追記の対象外 (将来ラウンド)」と明記しており除外自体は仕様どおりだが、**その帰結の報告が無い**: task は `status: pending` / `fallback_reason: "network_opt_in_required"` (opt-in 済みでも変わらない) のまま残り、`unsupported_inputs: []` ・ `task_errors: []` ・ `tasks_complete: true` は異常なしと報告する。`enriched_ratio` だけが 1.0 に届かない。**正しい disposition は仕様寄りの判断** (`unsupported_inputs` へ載せるか、`deferred` の別バケットを作るか) なので未着手。corpus 全体で xlsx 20 件が該当 |
+| I8 | `get_job` と `fetch_inlined_results` が**同じ URL を 2 回叩く** (成功 job では 1.5 MB を二重にダウンロード)。上限が分岐したのはこの構造が原因なので、1 回取得して両方を parse する形へ寄せると I5 の再発経路自体が消える |
 
 ### 7.3 運用上の学び
 

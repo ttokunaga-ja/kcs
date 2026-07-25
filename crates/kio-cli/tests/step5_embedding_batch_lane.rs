@@ -765,7 +765,17 @@ fn an_unreachable_row_does_not_block_collection_of_the_others() {
         })).collect::<Vec<_>>(),
     })
     .to_string();
-    json_any(&dir, &script, &["batch", "resume"]);
+    let resumed = json_any(&dir, &script, &["batch", "resume"]);
+
+    // A hold must SAY it is a hold. `tasks_inflight` alone reads exactly like a
+    // healthy queued job, and twice that silence let a permanent fault (a result
+    // parser that could not read the live shape, then a size bound that rejected
+    // any job past ~20 members) look like "still waiting" for as long as anyone
+    // cared to poll.
+    assert_eq!(
+        resumed["tasks_inflight_unreadable"], 1,
+        "an unreadable row must be distinguishable from one that is merely queued"
+    );
 
     // The reachable row completed...
     assert_eq!(
