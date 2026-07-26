@@ -927,8 +927,15 @@ fn delete_derived_surfaces(
             // still referenced by a surviving chunk's `text_hash` is shared
             // content and is preserved on both sides by the same rule
             // (05 §3.5, "live 参照が 0 の場合のみ物理削除する").
+            //
+            // `remove_embedding`, never `remove_content`: the embeddings
+            // namespace is keyed by the vector's IDENTITY hash, so the
+            // byte-hash check `remove_content` performs rejects every healthy
+            // embedding object as `KIO-E-STORE-CORRUPT-001` — which used to
+            // abort this whole phase, leaving the purge permanently
+            // `purge_incomplete` for any document that had been embedded.
             for embedding_id in &deleted.deleted_embedding_ids {
-                store.remove_content(ContentObjectKind::Embedding, embedding_id)?;
+                store.remove_embedding(embedding_id)?;
             }
         }
         drop(index);
