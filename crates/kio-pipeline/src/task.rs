@@ -1356,6 +1356,15 @@ mod tests {
                 AdapterError::ConfigSchema("x".to_owned()),
                 RetryErrorKind::ContractViolation,
             ),
+            // Carrying an operator-facing code does not change what the
+            // AdapterRun path sees: still a contract violation.
+            (
+                AdapterError::ConfigSchemaCoded {
+                    code: "KIO-E-EMBED-MODALITY-001",
+                    message: "x".to_owned(),
+                },
+                RetryErrorKind::ContractViolation,
+            ),
             (
                 AdapterError::NotImplemented("x".to_owned()),
                 RetryErrorKind::InvalidInput,

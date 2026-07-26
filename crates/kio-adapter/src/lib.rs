@@ -44,6 +44,19 @@ pub enum AdapterError {
     Network(String),
     #[error("schema validation failed: {0}")]
     ConfigSchema(String),
+    /// A config-schema violation that owns a user-facing error code.
+    ///
+    /// `error_code()` below is pinned to `retry_policy`'s table (see its doc
+    /// comment), so a bespoke code cannot be returned from there — a config
+    /// violation is a `ContractViolation` on the AdapterRun path no matter what
+    /// the operator is shown. This variant carries the operator-facing code
+    /// alongside, letting `adapter_to_kio` surface it structurally instead of
+    /// re-reading it out of the message text.
+    ///
+    /// Codes are declared in [06-cli-spec.md §8] / [10-operations.md §12.1] and
+    /// all resolve to exit 2.
+    #[error("{code}: {message}")]
+    ConfigSchemaCoded { code: &'static str, message: String },
     /// R13-2: a documented-but-unimplemented capability (currently `keychain:`
     /// auth resolution) surfaced LOUDLY rather than silently ignored.
     #[error("not implemented: {0}")]
@@ -80,7 +93,9 @@ impl AdapterError {
             Self::RateLimit { .. } => "KIO-E-BATCH-RATE-001",
             Self::QuotaExceeded(_) => "KIO-E-BATCH-QUOTA-001",
             Self::Network(_) | Self::Io { .. } => "KIO-E-BATCH-NET-001",
-            Self::ContractViolation(_) | Self::ConfigSchema(_) => "KIO-E-ADAPTER-CONTRACT-001",
+            Self::ContractViolation(_) | Self::ConfigSchema(_) | Self::ConfigSchemaCoded { .. } => {
+                "KIO-E-ADAPTER-CONTRACT-001"
+            }
             // R13-2: mirrors `task_failure_from_adapter`'s NotImplemented ->
             // InvalidInput mapping (a permanent config gap, never retried).
             Self::NotImplemented(_) => "KIO-E-BATCH-INPUT-001",
@@ -107,7 +122,8 @@ impl AdapterError {
             | Self::Network(_)
             | Self::Io { .. }
             | Self::ContractViolation(_)
-            | Self::ConfigSchema(_) => ErrorCategory::Transient,
+            | Self::ConfigSchema(_)
+            | Self::ConfigSchemaCoded { .. } => ErrorCategory::Transient,
         }
     }
 

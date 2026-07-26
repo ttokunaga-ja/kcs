@@ -223,6 +223,175 @@ fn validate_tools_adapter_entry(role: &str, tool_id: &str, entry: &toml::Value) 
     Ok(())
 }
 
+/// One embedding implementation this build can execute (07 §5.3).
+///
+/// Before 2026-07-26 these values were inlined as Gemini's, which is why the
+/// `offline_api` half of `ExecutionMode` was unreachable for the embedding role.
+struct EmbeddingRuntimeTarget {
+    tool_id: &'static str,
+    /// `execution_mode` as spelled in `tools.toml`.
+    kind: &'static str,
+    mode: &'static str,
+    model: &'static str,
+    dimensions: i64,
+    distance: &'static str,
+    modality: &'static str,
+}
+
+pub(crate) const LOCAL_EMBEDDING_TOOL_ID: &str = "qwen3_vl_embedding_local";
+
+/// Dimensions stay 768 across both targets: `chunk_vec`'s sqlite-vec width is
+/// fixed at `kio_index::fts::CHUNK_VEC_DIMENSIONS` (04 §4.3), so a target
+/// declaring anything else would produce vectors vector search cannot read.
+const EMBEDDING_RUNTIME_TARGETS: &[EmbeddingRuntimeTarget] = &[
+    EmbeddingRuntimeTarget {
+        tool_id: "gemini_embedding_2",
+        kind: "online_api",
+        mode: "online",
+        model: "gemini-embedding-2",
+        dimensions: 768,
+        distance: "cosine",
+        modality: "multimodal",
+    },
+    EmbeddingRuntimeTarget {
+        tool_id: LOCAL_EMBEDDING_TOOL_ID,
+        kind: "offline_api",
+        mode: "offline",
+        model: "Qwen/Qwen3-VL-Embedding-2B",
+        dimensions: 768,
+        distance: "cosine",
+        modality: "multimodal",
+    },
+];
+
+/// Which target a declaration means.
+///
+/// A `[embedding.<tool_id>]` section names it outright. The flat `[embedding]`
+/// form cannot, so it is resolved by declared `kind`, defaulting to the online
+/// target — which is what the flat form has always meant. That resolution is
+/// unambiguous only while one target exists per kind; adding a second offline
+/// embedding implementation must make `tool_id` mandatory rather than pick one.
+fn embedding_runtime_target(
+    tool_id: Option<&str>,
+    table: &toml::value::Table,
+) -> Result<&'static EmbeddingRuntimeTarget> {
+    if let Some(tool_id) = tool_id {
+        return EMBEDDING_RUNTIME_TARGETS
+            .iter()
+            .find(|target| target.tool_id == tool_id)
+            .ok_or_else(|| {
+                AdapterError::ConfigSchema(format!(
+                    "unsupported embedding adapter `{tool_id}`; this build executes only {}",
+                    supported_embedding_tool_ids()
+                ))
+            });
+    }
+    let kind = table
+        .get("kind")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("online_api");
+    EMBEDDING_RUNTIME_TARGETS
+        .iter()
+        .find(|target| target.kind == kind)
+        .ok_or_else(|| {
+            AdapterError::ConfigSchema(format!(
+                "tools.toml `embedding.kind` must be `online_api` or `offline_api` (got `{kind}`)"
+            ))
+        })
+}
+
+/// The execution-time twin of [`embedding_runtime_target`], resolving from a
+/// registered [`DeclaredAdapter`] instead of the raw TOML table. Same rule:
+/// `tool_id` when it names one, otherwise the declared `kind`.
+fn declared_embedding_runtime_target(
+    declared: &DeclaredAdapter,
+) -> Result<&'static EmbeddingRuntimeTarget> {
+    if let Some(tool_id) = declared.tool_id.as_deref() {
+        return EMBEDDING_RUNTIME_TARGETS
+            .iter()
+            .find(|target| target.tool_id == tool_id)
+            .ok_or_else(|| {
+                AdapterError::ConfigSchema(format!(
+                    "declared embedding adapter `{tool_id}` does not match effective runtime {}",
+                    supported_embedding_tool_ids()
+                ))
+            });
+    }
+    let kind = declared.kind.as_deref().unwrap_or("online_api");
+    EMBEDDING_RUNTIME_TARGETS
+        .iter()
+        .find(|target| target.kind == kind)
+        .ok_or_else(|| {
+            AdapterError::ConfigSchema(format!(
+                "declared embedding kind `{kind}` does not match any built-in runtime"
+            ))
+        })
+}
+
+fn supported_embedding_tool_ids() -> String {
+    EMBEDDING_RUNTIME_TARGETS
+        .iter()
+        .map(|target| format!("`{}`", target.tool_id))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// D1 (07 §3): an `offline_api` target may only address the local machine.
+///
+/// The check is on the literal host and never on a resolved address. A name
+/// that resolves to loopback at validation time can resolve anywhere at request
+/// time, so accepting "it resolves to 127.0.0.1" would reopen exactly the hole
+/// this closes — and `offline_api` bypasses the §3 consent gate precisely
+/// because it is defined not to transmit.
+fn validate_offline_url(role: &str, url: &str) -> Result<()> {
+    const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+    let reject = |reason: &str| {
+        Err(AdapterError::ConfigSchemaCoded {
+            code: "KIO-E-CONFIG-OFFLINE-URL-001",
+            message: format!(
+                "tools.toml `{role}.url` = `{url}` is not a loopback target ({reason}); \
+                 `offline_api` accepts only http(s) to 127.0.0.1 / localhost / [::1], \
+                 or a `unix:` socket path"
+            ),
+        })
+    };
+
+    // A UNIX domain socket cannot leave the machine by construction.
+    if url.starts_with("unix:") {
+        return if url.len() > "unix:".len() {
+            Ok(())
+        } else {
+            reject("empty unix socket path")
+        };
+    }
+
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return reject("missing http:// or https:// scheme");
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // `http://127.0.0.1@evil.example/` has an authority whose HOST is
+    // `evil.example`; everything before `@` is userinfo. Rejecting userinfo
+    // outright is simpler than parsing it and cannot be got wrong.
+    if authority.contains('@') {
+        return reject("userinfo is not accepted in an offline_api url");
+    }
+    let host = match authority.rsplit_once(':') {
+        // `[::1]:8000` splits correctly; bare `[::1]` must not be split on its
+        // own colons, which the bracket check below distinguishes.
+        Some((head, port)) if !head.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => authority,
+    };
+    if LOOPBACK_HOSTS.contains(&host) {
+        Ok(())
+    } else {
+        reject("host is not a loopback literal")
+    }
+}
+
 fn validate_supported_runtime_target(
     role: &str,
     tool_id: Option<&str>,
@@ -254,61 +423,79 @@ fn validate_supported_runtime_target(
             }
         }
         "embedding" => {
-            if tool_id.is_some_and(|id| id != "gemini_embedding_2") {
+            let target = embedding_runtime_target(tool_id, table)?;
+            // `cmd`/`args` stay refused for both kinds: Kio never spawns a
+            // process (05 §5), and the external dispatcher that would is still
+            // future work (07 §7). `url` is what an offline_api target needs,
+            // and it is admissible only after the D1 loopback check.
+            if table.contains_key("cmd") || table.contains_key("args") {
                 return Err(AdapterError::ConfigSchema(format!(
-                    "unsupported embedding adapter `{}`; this build executes only `gemini_embedding_2`",
-                    tool_id.unwrap_or_default()
+                    "embedding cmd/args targets are unsupported by the built-in runtime \
+                     (`{}`)",
+                    target.tool_id
                 )));
             }
-            if unsupported_target {
-                return Err(AdapterError::ConfigSchema(
-                    "embedding cmd/args/url targets are unsupported by the built-in Gemini runtime"
-                        .to_owned(),
-                ));
-            }
-            require_online_kind("embedding", table)?;
-            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
-                if model != "gemini-embedding-2" {
+            match table.get("url").and_then(toml::Value::as_str) {
+                Some(url) if target.kind == "offline_api" => {
+                    validate_offline_url("embedding", url)?;
+                }
+                Some(_) => {
                     return Err(AdapterError::ConfigSchema(format!(
-                        "unsupported embedding model `{model}`; expected `gemini-embedding-2`"
+                        "embedding url targets are unsupported for `{}`; only an \
+                         `offline_api` adapter may declare one",
+                        target.tool_id
+                    )));
+                }
+                None => {}
+            }
+            require_declared_kind("embedding", table, target.kind)?;
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
+                if model != target.model {
+                    return Err(AdapterError::ConfigSchema(format!(
+                        "unsupported embedding model `{model}`; expected `{}` for `{}`",
+                        target.model, target.tool_id
                     )));
                 }
             }
             if table
                 .get("dimensions")
                 .and_then(toml::Value::as_integer)
-                .is_some_and(|dimensions| dimensions != 768)
+                .is_some_and(|dimensions| dimensions != target.dimensions)
             {
-                return Err(AdapterError::ConfigSchema(
-                    "embedding dimensions must be 768 for `gemini_embedding_2`".to_owned(),
-                ));
+                return Err(AdapterError::ConfigSchema(format!(
+                    "embedding dimensions must be {} for `{}`",
+                    target.dimensions, target.tool_id
+                )));
             }
             if table
                 .get("distance")
                 .and_then(toml::Value::as_str)
-                .is_some_and(|distance| distance != "cosine")
+                .is_some_and(|distance| distance != target.distance)
             {
-                return Err(AdapterError::ConfigSchema(
-                    "embedding distance must be `cosine` for `gemini_embedding_2`".to_owned(),
-                ));
+                return Err(AdapterError::ConfigSchema(format!(
+                    "embedding distance must be `{}` for `{}`",
+                    target.distance, target.tool_id
+                )));
             }
             if table
                 .get("modality")
                 .and_then(toml::Value::as_str)
-                .is_some_and(|modality| modality != "multimodal")
+                .is_some_and(|modality| modality != target.modality)
             {
-                return Err(AdapterError::ConfigSchema(
-                    "embedding modality must be `multimodal` for `gemini_embedding_2`".to_owned(),
-                ));
+                return Err(AdapterError::ConfigSchema(format!(
+                    "embedding modality must be `{}` for `{}`",
+                    target.modality, target.tool_id
+                )));
             }
             if table
                 .get("mode")
                 .and_then(toml::Value::as_str)
-                .is_some_and(|mode| mode != "online")
+                .is_some_and(|mode| mode != target.mode)
             {
-                return Err(AdapterError::ConfigSchema(
-                    "embedding mode must be `online` for `gemini_embedding_2`".to_owned(),
-                ));
+                return Err(AdapterError::ConfigSchema(format!(
+                    "embedding mode must be `{}` for `{}`",
+                    target.mode, target.tool_id
+                )));
             }
         }
         _ => {}
@@ -317,13 +504,17 @@ fn validate_supported_runtime_target(
 }
 
 fn require_online_kind(role: &str, table: &toml::value::Table) -> Result<()> {
+    require_declared_kind(role, table, "online_api")
+}
+
+fn require_declared_kind(role: &str, table: &toml::value::Table, expected: &str) -> Result<()> {
     if table
         .get("kind")
         .and_then(toml::Value::as_str)
-        .is_some_and(|kind| kind != "online_api")
+        .is_some_and(|kind| kind != expected)
     {
         return Err(AdapterError::ConfigSchema(format!(
-            "tools.toml `{role}.kind` must be `online_api` for the built-in runtime"
+            "tools.toml `{role}.kind` must be `{expected}` for the built-in runtime"
         )));
     }
     Ok(())
@@ -520,10 +711,13 @@ fn validate_embedding_entry(value: &Value) -> Result<()> {
     // 03 §7: modality は "multimodal" に固定。別ベクトル空間 (text 専用等) の
     // embedding profile は tool-lock materialize の時点で採用拒否する。
     if modality.as_str() != Some("multimodal") {
-        return Err(AdapterError::ConfigSchema(format!(
-            "KIO-E-EMBED-MODALITY-001: embedding.modality must be \"multimodal\" \
-             (got {modality}); non-multimodal embedding profiles are not adoptable"
-        )));
+        return Err(AdapterError::ConfigSchemaCoded {
+            code: "KIO-E-EMBED-MODALITY-001",
+            message: format!(
+                "embedding.modality must be \"multimodal\" (got {modality}); \
+                 non-multimodal embedding profiles are not adoptable"
+            ),
+        });
     }
     Ok(())
 }
@@ -755,45 +949,66 @@ pub fn resolve_role_api_key(role: &str, fallback_env: &str) -> Result<Option<Str
 }
 
 pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) -> Result<()> {
-    let expected_tool = match role {
-        "markdown" => Some("mistral_ocr_markdownize"),
-        "embedding" => Some("gemini_embedding_2"),
-        _ => None,
+    // The embedding role resolves against the same target table as the
+    // config-load gate. Both must agree: this one runs at execution time
+    // (`resolve_role_api_key`, `run_adopted_embedding`), so a relaxation
+    // applied only to the other one would accept a declaration at startup and
+    // then refuse it at the moment of use.
+    let embedding_target = if role == "embedding" {
+        Some(declared_embedding_runtime_target(declared)?)
+    } else {
+        None
     };
-    if let (Some(expected), Some(actual)) = (expected_tool, declared.tool_id.as_deref()) {
-        if actual != expected {
-            return Err(AdapterError::ConfigSchema(format!(
-                "declared {role} adapter `{actual}` does not match effective runtime `{expected}`"
-            )));
+    if role == "markdown" {
+        if let Some(actual) = declared.tool_id.as_deref() {
+            if actual != "mistral_ocr_markdownize" {
+                return Err(AdapterError::ConfigSchema(format!(
+                    "declared {role} adapter `{actual}` does not match effective runtime \
+                     `mistral_ocr_markdownize`"
+                )));
+            }
         }
     }
     if matches!(role, "markdown" | "embedding")
-        && (declared.cmd.is_some() || declared.url.is_some() || !declared.args.is_empty())
+        && (declared.cmd.is_some() || !declared.args.is_empty())
     {
         return Err(AdapterError::ConfigSchema(format!(
             "declared {role} target cannot be executed by the built-in runtime"
         )));
     }
+    match (declared.url.as_deref(), embedding_target) {
+        (Some(url), Some(target)) if target.kind == "offline_api" => {
+            validate_offline_url("embedding", url)?;
+        }
+        (Some(_), _) if matches!(role, "markdown" | "embedding") => {
+            return Err(AdapterError::ConfigSchema(format!(
+                "declared {role} target cannot be executed by the built-in runtime"
+            )));
+        }
+        _ => {}
+    }
+    let expected_kind = embedding_target.map_or("online_api", |target| target.kind);
     if matches!(role, "markdown" | "embedding")
         && declared
             .kind
             .as_deref()
-            .is_some_and(|kind| kind != "online_api")
+            .is_some_and(|kind| kind != expected_kind)
     {
         return Err(AdapterError::ConfigSchema(format!(
-            "declared {role} kind does not match effective `online_api` runtime"
+            "declared {role} kind does not match effective `{expected_kind}` runtime"
         )));
     }
-    if role == "embedding"
-        && declared
+    if let Some(target) = embedding_target {
+        if declared
             .model
             .as_deref()
-            .is_some_and(|model| model != "gemini-embedding-2")
-    {
-        return Err(AdapterError::ConfigSchema(
-            "declared embedding model does not match effective `gemini-embedding-2` runtime"
-                .to_owned(),
-        ));
+            .is_some_and(|model| model != target.model)
+        {
+            return Err(AdapterError::ConfigSchema(format!(
+                "declared embedding model does not match effective `{}` runtime",
+                target.model
+            )));
+        }
     }
     if role == "markdown"
         && declared
@@ -998,6 +1213,113 @@ auth = "env:MISTRAL_API_KEY"
             b"[embedding.custom]\nurl = \"https://example.test\"\nauth = \"plain:key\"\n"
         )
         .is_err());
+    }
+
+    /// Stage 1 (07 §3 / D1): an `offline_api` embedding target is accepted, and
+    /// its `url` may only name the local machine.
+    #[test]
+    fn offline_embedding_accepts_only_a_loopback_url() {
+        let entry = |url: &str| {
+            format!(
+                "[embedding.{LOCAL_EMBEDDING_TOOL_ID}]\n\
+                 kind = \"offline_api\"\n\
+                 url = \"{url}\"\n\
+                 model = \"Qwen/Qwen3-VL-Embedding-2B\"\n\
+                 dimensions = 768\n\
+                 distance = \"cosine\"\n\
+                 modality = \"multimodal\"\n\
+                 mode = \"offline\"\n"
+            )
+        };
+
+        for url in [
+            "http://127.0.0.1:8000",
+            "http://127.0.0.1",
+            "http://localhost:8000/v1",
+            "http://[::1]:8000",
+            "https://127.0.0.1:8443",
+            "unix:/tmp/kio-embed.sock",
+        ] {
+            validate_tools_toml(entry(url).as_bytes())
+                .unwrap_or_else(|error| panic!("{url} must be accepted: {error}"));
+        }
+
+        for url in [
+            // The reason D1 judges literals: each of these can resolve to
+            // loopback at validation time and elsewhere at request time.
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            // Userinfo puts the real host after the `@`.
+            "http://127.0.0.1@evil.example/",
+            "https://api.example.com",
+            "http://10.0.0.5:8000",
+            // A scheme is required so the authority is unambiguous.
+            "127.0.0.1:8000",
+            "unix:",
+        ] {
+            let error = validate_tools_toml(entry(url).as_bytes())
+                .expect_err(&format!("{url} must be rejected"));
+            assert!(
+                error.to_string().contains("KIO-E-CONFIG-OFFLINE-URL-001"),
+                "{url} must be refused as a non-loopback target, got: {error}"
+            );
+        }
+    }
+
+    /// The relaxation is scoped to `offline_api`. An online target still cannot
+    /// name a `url`, and neither kind may name a `cmd`/`args` (05 §5: Kio never
+    /// spawns a process; the external dispatcher is future work, 07 §7).
+    #[test]
+    fn offline_relaxation_does_not_leak_to_other_targets() {
+        assert!(validate_tools_toml(
+            b"[embedding.gemini_embedding_2]\nurl = \"http://127.0.0.1:8000\"\n"
+        )
+        .is_err());
+        let cmd_entry = format!(
+            "[embedding.{LOCAL_EMBEDDING_TOOL_ID}]\n\
+             kind = \"offline_api\"\n\
+             cmd = \"vllm\"\n"
+        );
+        assert!(validate_tools_toml(cmd_entry.as_bytes()).is_err());
+        // markdown has no offline target yet (Stage 3), so it stays online-only.
+        assert!(validate_tools_toml(
+            b"[markdown.mistral_ocr_markdownize]\nkind = \"offline_api\"\n"
+        )
+        .is_err());
+    }
+
+    /// The execution-time gate must reach the same verdict as the config-load
+    /// gate. When it did not, a declaration accepted at startup was refused at
+    /// the moment of use.
+    #[test]
+    fn declared_runtime_target_agrees_with_the_config_gate() {
+        let offline = |url: &str| DeclaredAdapter {
+            tool_id: Some(LOCAL_EMBEDDING_TOOL_ID.to_owned()),
+            kind: Some("offline_api".to_owned()),
+            url: Some(url.to_owned()),
+            model: Some("Qwen/Qwen3-VL-Embedding-2B".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        validate_declared_runtime_target("embedding", &offline("http://127.0.0.1:8000")).unwrap();
+        let error =
+            validate_declared_runtime_target("embedding", &offline("https://api.example.com"))
+                .expect_err("a remote url must be refused at execution time too");
+        assert!(error.to_string().contains("KIO-E-CONFIG-OFFLINE-URL-001"));
+
+        // The online target is unchanged: still no url, still Gemini's model.
+        let online_with_url = DeclaredAdapter {
+            tool_id: Some("gemini_embedding_2".to_owned()),
+            url: Some("http://127.0.0.1:8000".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        assert!(validate_declared_runtime_target("embedding", &online_with_url).is_err());
+        let wrong_model = DeclaredAdapter {
+            tool_id: Some(LOCAL_EMBEDDING_TOOL_ID.to_owned()),
+            kind: Some("offline_api".to_owned()),
+            model: Some("gemini-embedding-2".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        assert!(validate_declared_runtime_target("embedding", &wrong_model).is_err());
     }
 
     #[test]

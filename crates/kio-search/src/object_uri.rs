@@ -195,10 +195,9 @@ mod tests {
     #[test]
     fn rejects_evidence_pointer_uris_and_malformed_shapes() {
         // An Evidence Pointer has five segments and no `object` literal.
-        assert!(parse_object_uri(&format!(
-            "kio://scope/{HASH_A}/{HASH_A}/{HASH_A}/{HASH_A}"
-        ))
-        .is_err());
+        assert!(
+            parse_object_uri(&format!("kio://scope/{HASH_A}/{HASH_A}/{HASH_A}/{HASH_A}")).is_err()
+        );
         assert!(parse_object_uri("https://example.com/object/image/x").is_err());
         assert!(parse_object_uri(&format!("kio://scope/objekt/image/{HASH_A}")).is_err());
         assert!(parse_object_uri(&format!("kio:///object/image/{HASH_A}")).is_err());

@@ -14206,7 +14206,8 @@ fn task_failure_from_adapter(error: kio_adapter::AdapterError) -> TaskExecutionF
             RetryErrorKind::NetworkError
         }
         kio_adapter::AdapterError::ContractViolation(_)
-        | kio_adapter::AdapterError::ConfigSchema(_) => RetryErrorKind::ContractViolation,
+        | kio_adapter::AdapterError::ConfigSchema(_)
+        | kio_adapter::AdapterError::ConfigSchemaCoded { .. } => RetryErrorKind::ContractViolation,
         // R13-2: a `keychain:` not-implemented auth is a permanent config gap, not a
         // transient — never retry/re-bill it.
         kio_adapter::AdapterError::NotImplemented(_) => RetryErrorKind::InvalidInput,
@@ -21394,18 +21395,9 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
     }
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|err| KioError::schema(err.to_string()))?;
-    if let Err(error) = load_tool_lock(&bytes) {
-        let message = error.to_string();
-        if message.contains("KIO-E-EMBED-MODALITY-001") {
-            return Err(KioError::new(
-                "KIO-E-EMBED-MODALITY-001",
-                message,
-                json!({}),
-                ExitCode::InvalidUsage,
-            ));
-        }
-        return Err(adapter_to_kio(error));
-    }
+    // `adapter_to_kio` reads the code off `ConfigSchemaCoded` and gives it
+    // exit 2, so KIO-E-EMBED-MODALITY-001 needs no special case here.
+    load_tool_lock(&bytes).map_err(adapter_to_kio)?;
     let path = repo.kio_dir().join("tool-lock.json");
     atomic_overwrite_file(&path, &bytes)
 }
@@ -22510,6 +22502,14 @@ fn adapter_to_kio(error: kio_adapter::AdapterError) -> KioError {
             json!({}),
             ExitCode::Failure,
         ),
+        // A config violation that named its own operator-facing code (06 §8).
+        // `AdapterError::error_code()` cannot carry it — that one is pinned to
+        // the retry-policy table — so the code travels on the variant and is
+        // read structurally here rather than sniffed out of the message text.
+        // Every code in this class is exit 2.
+        kio_adapter::AdapterError::ConfigSchemaCoded { code, message } => {
+            KioError::new(code, message, json!({}), ExitCode::InvalidUsage)
+        }
         other => KioError::schema(other.to_string()),
     }
 }

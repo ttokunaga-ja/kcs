@@ -394,17 +394,38 @@ KNN 検索できる vec0 テーブルが chunk 用しか無い)。
 
 ---
 
-## 6. Stage 1 — ゲート解放
+## 6. Stage 1 — ゲート解放 (**embedding 分は 2026-07-26 完了**)
 
-[tool_lock.rs:226](../crates/kio-adapter/src/tool_lock.rs) `validate_supported_runtime_target` に
-`offline_api` 分岐を追加する。
+> 🔴 **本節の当初の記述は誤っていた** — 「`validate_supported_runtime_target` が唯一の
+> ゲート」としていたが、**同じ規則が独立に 2 箇所へ実装されていた**。
+>
+> | | 場所 | 発火時点 |
+> |---|---|---|
+> | config 読込時 | `validate_supported_runtime_target` | 起動時の `tools.toml` 検証 |
+> | **実行時** | **`validate_declared_runtime_target`** | `resolve_role_api_key` / `run_adopted_embedding` の Real arm |
+>
+> 後者だけを見落とすと、起動時検証を通った loopback url が**実行の瞬間に**拒否される。
+> 両方を対称に緩和すること。
 
-- `require_online_kind` → `require_supported_kind` (`online_api` | `offline_api`)
-- `offline_api` では `url` を受理する (D1 の loopback 判定を必ず通す)。`cmd` / `args` は**引き続き拒否**
-- `offline_api` の許可 tool_id を built-in 実装のホワイトリストで管理する
-  (`qwen3_vl_embedding_local` / `paddleocr_vl_local` / `sarashina_ocr_local`)
-- embedding の `dimensions`/`distance`/`modality`/`mode` 検証を tool_id ごとの表に一般化する
-  (現在は Gemini の 768/cosine/multimodal/online にハードコード)
+実施済み (embedding role のみ。markdown の offline は Stage 3):
+
+- `require_online_kind` を `require_declared_kind(role, table, expected)` へ一般化
+- **`EMBEDDING_RUNTIME_TARGETS` 表**を新設し、tool_id → `kind`/`mode`/`model`/
+  `dimensions`/`distance`/`modality` を引く。Gemini の 768/cosine/multimodal/online
+  ハードコードはこの表の 1 行になった
+- `offline_api` では `url` を受理し、**D1 の loopback 判定** (`validate_offline_url`) を通す。
+  `cmd` / `args` は**両 kind で拒否のまま** (Kio はプロセスを起動しない — [05 §5](../docs/05-runtime.md))
+- 新 error code は `AdapterError::ConfigSchemaCoded { code, message }` で構造的に運ぶ。
+  **`error_code()` に独自コードを返させることはできない** — あれは `retry_policy` の表に
+  束縛されており `qa16_adapter_error_code_matches_retry_policy` が cross-check している。
+  既存の `KIO-E-EMBED-MODALITY-001` の文字列 sniff もこの variant へ移行し、機構を 1 つにした
+- **flat `[embedding]` 形は `kind` で target を解決する** (tool_id を書けないため)。
+  offline embedding 実装が 2 つ目になったら tool_id 必須へ変える必要がある
+
+**未実施 (Chunk B)**: 認証なし offline adapter の活性化。
+`real_embedding_activation` は `declared.auth.is_some()` を見るが offline サーバは auth 不要。
+これを先に広げると offline 宣言が `AdoptedEmbeddingExecution::Real` を活性化し
+`GeminiEmbeddingAdapter` が loopback URL に対して構築されるため、**resolver と同時に入れる**。
 
 ```toml
 # ~/.config/kio/tools.toml
