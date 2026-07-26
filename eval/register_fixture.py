@@ -112,7 +112,12 @@ def run_kio(
 
 
 def register_scope(
-    binary: Path, scope: Path, env: dict[str, str], online: bool, timeout: float
+    binary: Path,
+    scope: Path,
+    env: dict[str, str],
+    online: bool,
+    realtime: bool,
+    timeout: float,
 ) -> dict[str, Any] | None:
     """`init` + `index` one scope. Returns None on success, else a failure record."""
     if not (scope / ".kio").is_dir():
@@ -120,13 +125,59 @@ def register_scope(
         if code != 0:
             return {"scope": str(scope), "step": "init", "exit": code, "body": body}
 
-    index_args = ["index", "--approve", "--yes"] if online else ["index", "--offline", "--yes"]
+    if online:
+        index_args = ["index", "--approve", "--yes"]
+        if realtime:
+            index_args.append("--realtime")
+    else:
+        index_args = ["index", "--offline", "--yes"]
     code, body = run_kio(binary, index_args, scope, env, timeout)
     # Exit 3 is documented partial success (06 §7); the scope IS indexed and the
     # runners can search it. Anything else is a real failure.
     if code not in (0, 3):
         return {"scope": str(scope), "step": "index", "exit": code, "body": body}
     return None
+
+
+def pending_tasks(binary: Path, scope: Path, env: dict[str, str], timeout: float) -> int:
+    """How many enrichment tasks this scope is still waiting on."""
+    code, body = run_kio(binary, ["status"], scope, env, timeout)
+    if code != 0 or not isinstance(body, dict):
+        return -1
+    return sum(
+        1 for task in body.get("tasks", []) if task.get("status") not in ("done", "partial")
+    )
+
+
+def drain_scope(
+    binary: Path, scope: Path, env: dict[str, str], rounds: int, interval: float, timeout: float
+) -> int:
+    """Collect Batch results until the scope stops making progress.
+
+    Without `--realtime`, `index` does not finish the online work — it hands the
+    OCR and embedding off to the provider's Batch lane, which 07 §5.3 allows up
+    to a 24h turnaround. So indexing alone leaves a fixture that has been PAID
+    for and cannot answer anything: the answers sit behind tasks nobody
+    collected. This is the collection.
+
+    Stops when a round changes nothing rather than when the count hits zero, so
+    a job the provider has not finished yet ends the loop instead of spinning
+    for hours. Whatever remains is reported, and re-running the script drains it
+    (already-indexed scopes are skipped, so no send is repeated).
+    """
+    remaining = pending_tasks(binary, scope, env, timeout)
+    for _ in range(rounds):
+        if remaining <= 0:
+            break
+        run_kio(binary, ["batch", "resume", "--online"], scope, env, timeout)
+        now = pending_tasks(binary, scope, env, timeout)
+        if now < 0 or now >= remaining:
+            remaining = now
+            break
+        remaining = now
+        if remaining > 0 and interval > 0:
+            time.sleep(interval)
+    return remaining
 
 
 def main() -> int:
@@ -156,6 +207,23 @@ def main() -> int:
         help="run the OCR + embedding lanes. SPENDS MONEY (~$1.07 recorded for "
         "20 personas, OCR only; embedding is extra). Effectively REQUIRED for a "
         "usable baseline — see the note this prints without it.",
+    )
+    parser.add_argument(
+        "--realtime",
+        action="store_true",
+        help="online only: take the realtime lane instead of Batch. Finishes "
+        "within the run rather than waiting on a turnaround of up to 24h, at "
+        "DOUBLE the unit price (07 §5.3).",
+    )
+    parser.add_argument(
+        "--drain-rounds",
+        type=int,
+        default=12,
+        help="online+Batch only: how many `batch resume` passes per scope before "
+        "leaving the rest pending (default 12)",
+    )
+    parser.add_argument(
+        "--drain-interval", type=float, default=20.0, help="seconds between drain passes"
     )
     parser.add_argument(
         "--no-resume",
@@ -217,22 +285,46 @@ def main() -> int:
         failures: list[dict[str, Any]] = []
         indexed_ok = 0
         for scope in leaves:
-            failure = register_scope(args.bin, scope, env, args.online, args.timeout)
+            failure = register_scope(
+                args.bin, scope, env, args.online, args.realtime, args.timeout
+            )
             if failure is None:
                 indexed_ok += 1
             else:
                 failures.append(failure)
+
+        # Batch hands the work to the provider and returns; without collecting
+        # it the fixture is paid for and still cannot answer.
+        still_pending = 0
+        if args.online and not args.realtime:
+            for scope in leaves:
+                remaining = drain_scope(
+                    args.bin,
+                    scope,
+                    env,
+                    args.drain_rounds,
+                    args.drain_interval,
+                    args.timeout,
+                )
+                still_pending += max(remaining, 0)
+
         results.append(
             {
                 "persona": persona,
                 "leaves": len(leaves),
                 "indexed_ok": indexed_ok,
+                "pending_after_drain": still_pending,
                 "failures": failures,
             }
         )
+        # Flushed, because this is the only progress signal on a run that takes
+        # an hour and spends money — redirected to a file it would otherwise sit
+        # in a buffer until the very end, which is exactly when it is useless.
         print(
             f"[{persona}] {indexed_ok}/{len(leaves)} scopes"
             + (f"  ({len(failures)} failed)" if failures else "")
+            + (f"  [{still_pending} tasks still pending]" if still_pending else ""),
+            flush=True,
         )
 
     report = {
@@ -249,7 +341,14 @@ def main() -> int:
 
     total = sum(r.get("leaves", 0) for r in results)
     ok = sum(r.get("indexed_ok", 0) for r in results)
+    pending = sum(r.get("pending_after_drain", 0) for r in results)
     print(f"\n{ok}/{total} scopes across {len(results)} personas -> {args.out}")
+    if pending:
+        print(
+            f"  {pending} enrichment tasks are still pending at the provider.\n"
+            "  Re-run this exact command to collect them — indexed scopes are\n"
+            "  skipped, so nothing is sent or paid for twice."
+        )
     if not args.online:
         print(
             "\n  NOTE: built --offline. This is a PLUMBING CHECK, not a baseline.\n"
