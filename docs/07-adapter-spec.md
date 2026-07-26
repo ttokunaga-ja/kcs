@@ -479,8 +479,14 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
   - wire は次の exact `bbox_annotation_format` JSON Schema 1 個を使い、説明/書き起こし指示は schema
     field description に固定する (bbox 専用 prompt parameter は使わない)。各 `pages[].images[]` の
     `image_annotation` は `short_description` / `transcribed_text` の厳密 JSON とする。JCS byte 列の
-    sha256 `sha256:9404f8ffe2983113f082d255a61817ad0798e74aeb82cb5063a391fbcbea9ca8`
+    sha256 `sha256:79443071238e373b41e34818e91d52ea69d2bba70a30169cda2cf98bfd8bea76`
     を enabled profile の `prompt_template_hash` とする
+    (2026-07-27 訂正: 従前ここに書かれていた `sha256:9404f8ff…` は下記 JSON のどの版
+    — 外側込み / `json_schema` のみ / `schema` のみ — の JCS とも一致せず、由来を再現できない。
+    正しい値は `bbox_annotation.rs` の `BBOX_ANNOTATION_FORMAT_HASH` および
+    同ファイルの凍結 JCS byte 列と一致し、下記 JSON から再現できる。
+    §5.3 の D3 が「§5.2 と同型」と述べる参照実装がここなので、誤った定数は
+    ローカル embedding profile の算出まで波及する)
 
     ```json
     {
