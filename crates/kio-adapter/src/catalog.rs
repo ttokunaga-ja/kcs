@@ -11,6 +11,7 @@ use crate::deterministic::DeterministicAdapter;
 use crate::gemini_embedding::{
     GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
 };
+use crate::local_embedding::{LocalEmbeddingAdapter, LocalEmbeddingExecution};
 use crate::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
     OcrResponse,
@@ -19,13 +20,19 @@ use crate::office_convert::{is_office_media, resolve_office_converter};
 use crate::traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 use crate::types::{
     AdapterProfile, AdapterUsage, EmbeddingInputType, EmbeddingItem, EmbeddingRequest,
-    EmbeddingVector, IncrementalHints, MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse,
-    PreparedUnitHint, PreviousMarkdownizeContext, ProviderIdempotency, RawInput,
+    EmbeddingVector, ExecutionMode, IncrementalHints, MarkdownizeMode, MarkdownizeRequest,
+    MarkdownizeResponse, PreparedUnitHint, PreviousMarkdownizeContext, ProviderIdempotency,
+    RawInput,
 };
 use crate::{AdapterError, Result};
 
 pub const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 pub const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+/// The offline embedding seam. Separate from `TEST_ADOPTED_EMBEDDING_ENV` on
+/// purpose: that one names Gemini's seams and is read at 21 call sites across
+/// 17 test files, none of which should change meaning because a second
+/// implementation appeared.
+pub const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
 
 #[must_use]
 pub fn builtin_prepare_profile() -> AdapterProfile {
@@ -663,6 +670,134 @@ pub enum AdoptedEmbeddingExecution {
     Real,
 }
 
+/// Which embedding implementation is active, and therefore which posture the
+/// caller must take toward consent, billing, and send lanes.
+///
+/// [`AdoptedEmbeddingExecution`] above answers a narrower question — *which
+/// Gemini test seam* — and every one of its variants builds a
+/// `GeminiEmbeddingAdapter`. It was standing in for "which adapter" because
+/// there was only ever one. This is the selector that actually distinguishes
+/// implementations; keeping them separate is what leaves the 21 existing
+/// `KIO_TEST_GEMINI_EMBED` call sites untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingExecution {
+    /// The adopted online adapter, under one of its seams (or `Real`).
+    Online(AdoptedEmbeddingExecution),
+    /// The `offline_api` adapter, reached over loopback (07 §3).
+    Offline(LocalEmbeddingExecution),
+}
+
+impl EmbeddingExecution {
+    #[must_use]
+    pub fn execution_mode(self) -> ExecutionMode {
+        match self {
+            Self::Online(_) => ExecutionMode::OnlineApi,
+            Self::Offline(_) => ExecutionMode::OfflineApi,
+        }
+    }
+
+    /// Whether this send leaves the machine — the question 07 §3's consent
+    /// gate, the cost ledger, and the batch lane all actually mean to ask.
+    /// Call sites used to spell it `execution == Some(Real)`, which conflated
+    /// "is online" with "is not a test seam".
+    #[must_use]
+    pub fn is_online(self) -> bool {
+        self.execution_mode() == ExecutionMode::OnlineApi
+    }
+
+    /// The Gemini seam, when this is the online adapter. `None` offline.
+    #[must_use]
+    pub fn online_seam(self) -> Option<AdoptedEmbeddingExecution> {
+        match self {
+            Self::Online(seam) => Some(seam),
+            Self::Offline(_) => None,
+        }
+    }
+}
+
+/// Resolves the active embedding implementation, or `None` when none is
+/// configured — in which case the existing degradations apply unchanged
+/// (search falls back to text, no embedding tasks are generated).
+///
+/// Shaped after [`crate::gemini_batch_client::resolve_gemini_batch_client`]:
+/// resolve to `Option`, let `None` mean "this lane is unavailable, degrade".
+#[must_use]
+pub fn active_embedding_execution() -> Option<EmbeddingExecution> {
+    if let Some(local) = active_local_embedding_execution() {
+        return Some(EmbeddingExecution::Offline(local));
+    }
+    active_adopted_embedding_execution().map(EmbeddingExecution::Online)
+}
+
+/// The offline test seam. Mirrors `KIO_TEST_GEMINI_EMBED`'s shape so hermetic
+/// tests drive the offline path the same way they drive the online one.
+fn active_local_embedding_execution() -> Option<LocalEmbeddingExecution> {
+    match std::env::var(TEST_LOCAL_EMBEDDING_ENV).ok().as_deref() {
+        Some("mock") => Some(LocalEmbeddingExecution::Mock),
+        Some(_) => None,
+        // A declared `offline_api` adapter activates with no auth of its own:
+        // there is nothing to authenticate to. `real_embedding_activation`'s
+        // `auth.is_some()` signal is meaningless here, so the declaration
+        // itself is the signal.
+        None => declared_offline_embedding().then_some(LocalEmbeddingExecution::Mock),
+    }
+}
+
+/// Whether `tools.toml` declares the embedding role as `offline_api`.
+fn declared_offline_embedding() -> bool {
+    crate::tool_lock::registered_declared_adapter("embedding")
+        .and_then(|declared| declared.kind)
+        .is_some_and(|kind| kind == "offline_api")
+}
+
+/// Builds the adapter for a resolved execution.
+///
+/// The `EmbeddingAdapter` trait was already the right abstraction — it carries
+/// `profile()` (hence `execution_mode`, `allow_network`, `billable_kinds`) and
+/// `preferred_request_kind()`, which is every input the offline forks need. It
+/// simply had one implementor. Note the seam is at the *adapter* level and not
+/// at `GeminiEmbeddingClient`, whose `resolve_model_pin` and
+/// `(model_pin, dimensions, idempotency_header)` signature encode Gemini's
+/// model catalog and `outputDimensionality` and describe no other provider.
+pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn EmbeddingAdapter>> {
+    match execution {
+        EmbeddingExecution::Offline(local) => Ok(Box::new(LocalEmbeddingAdapter::new(local))),
+        EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real) => {
+            let declared = crate::tool_lock::registered_declared_adapter("embedding");
+            if let Some(declared) = declared.as_ref() {
+                crate::tool_lock::validate_declared_runtime_target("embedding", declared)?;
+            }
+            let configured_model = declared
+                .and_then(|declared| declared.model)
+                .unwrap_or_else(|| ADOPTED_MODEL_PIN.to_owned());
+            Ok(Box::new(GeminiEmbeddingAdapter::new(
+                crate::gemini_embedding::EnvGeminiEmbeddingClient::new(),
+                configured_model,
+                ADOPTED_DIMENSIONS,
+            )))
+        }
+        EmbeddingExecution::Online(AdoptedEmbeddingExecution::RequireIdempotencyToken) => {
+            Ok(Box::new(
+                GeminiEmbeddingAdapter::new(
+                    MockAdoptedEmbeddingClient {
+                        execution: AdoptedEmbeddingExecution::RequireIdempotencyToken,
+                    },
+                    ADOPTED_MODEL_PIN,
+                    ADOPTED_DIMENSIONS,
+                )
+                .with_provider_idempotency(ProviderIdempotency::HttpHeader(
+                    "Idempotency-Key".to_owned(),
+                )),
+            ))
+        }
+        EmbeddingExecution::Online(other) => Ok(Box::new(GeminiEmbeddingAdapter::new(
+            MockAdoptedEmbeddingClient { execution: other },
+            ADOPTED_MODEL_PIN,
+            ADOPTED_DIMENSIONS,
+        ))),
+    }
+}
+
 #[must_use]
 pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution> {
     match std::env::var(TEST_ADOPTED_EMBEDDING_ENV).ok().as_deref() {
@@ -710,6 +845,28 @@ pub struct DeclaredEmbeddingProfile {
     pub profile_hash: String,
 }
 
+/// The lock-facing profile for whichever implementation is active.
+///
+/// The offline adapter reports its own identity — a different
+/// `profile_hash` from the online one, which is exactly what 03 §7's
+/// compatibility gate needs in order to refuse to mix the two vector spaces.
+#[must_use]
+pub fn declared_embedding_profile_for(execution: EmbeddingExecution) -> DeclaredEmbeddingProfile {
+    match execution {
+        EmbeddingExecution::Online(seam) => declared_adopted_embedding_profile(seam),
+        EmbeddingExecution::Offline(local) => {
+            let profile = LocalEmbeddingAdapter::new(local).profile();
+            DeclaredEmbeddingProfile {
+                tool_id: profile.adapter_id,
+                dimensions: u64::from(crate::local_embedding::LOCAL_EMBEDDING_DIMENSIONS),
+                distance: "cosine".to_owned(),
+                modality: "multimodal".to_owned(),
+                profile_hash: profile.tool_profile_hash,
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn declared_adopted_embedding_profile(
     execution: AdoptedEmbeddingExecution,
@@ -755,6 +912,45 @@ pub fn declared_adopted_embedding_profile(
 pub struct AdoptedEmbeddingOutcome {
     pub vectors: Vec<EmbeddingVector>,
     pub usage: Option<AdapterUsage>,
+}
+
+/// Runs whichever embedding implementation is active over one batch.
+///
+/// Replaces the per-seam `match` that used to build a `GeminiEmbeddingAdapter`
+/// in every arm; construction now lives in [`embedding_adapter_for`] and this
+/// is the trait call plus the shared acceptance checks.
+pub fn run_embedding(
+    execution: EmbeddingExecution,
+    items: Vec<EmbeddingItem>,
+    input_type: EmbeddingInputType,
+    idempotency_token: Option<String>,
+) -> Result<AdoptedEmbeddingOutcome> {
+    let adapter = embedding_adapter_for(execution)?;
+    let response = adapter.embed(EmbeddingRequest {
+        input_type,
+        items,
+        idempotency_token,
+    })?;
+    Ok(AdoptedEmbeddingOutcome {
+        vectors: response.vectors,
+        usage: response.usage,
+    })
+}
+
+/// The send lane the active implementation prefers (07 §5.7). The offline
+/// adapter has no batch lane to prefer — there is no provider job queue — so
+/// this is what keeps `poll_batch_embedding_jobs` from running for it.
+pub fn embedding_preferred_request_kind(
+    execution: EmbeddingExecution,
+) -> Result<crate::traits::PreferredRequestKind> {
+    Ok(embedding_adapter_for(execution)?.preferred_request_kind())
+}
+
+/// The active implementation's `AdapterProfile` — the source for
+/// `execution_mode`, `allow_network`, and `billable_kinds`, which the consent,
+/// ledger, and lane decisions all key off.
+pub fn embedding_adapter_profile(execution: EmbeddingExecution) -> Result<AdapterProfile> {
+    Ok(embedding_adapter_for(execution)?.profile())
 }
 
 pub fn run_adopted_embedding(

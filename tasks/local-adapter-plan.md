@@ -499,9 +499,54 @@ purge 済み画像の URI が chunk 本文に残る場合がある。`related_im
 
 ## 8. Stage 2 — ローカル Embedding Adapter (段階 B・画像埋め込みを含む)
 
-新規モジュール `crates/kio-adapter/src/local_embedding.rs`。
-`ExecutionMode::OfflineApi` / `allow_network: false` / `billable_kinds: []` /
-`reject_billing: None` / `preferred_request_kind: Sync`。
+> **U1 と配線は 2026-07-26 完了。** `crates/kio-adapter/src/local_embedding.rs` が
+> `ExecutionMode::OfflineApi` / `allow_network: false` / `billable_kinds: []` /
+> `preferred_request_kind: Sync` を宣言し、mock 実装で end-to-end に動作する。
+> **実 HTTP wire (U2) は V4 (chat template の実物) 待ち** — D3 が template を
+> identity へ畳み込むため、暫定値で出荷すると placeholder profile でベクトルを
+> 作り、後から全再埋め込みになる。seam 無しの offline 宣言は当面 mock に落ちる。
+>
+> 実装した dispatch:
+>
+> - `EmbeddingExecution { Online(AdoptedEmbeddingExecution) | Offline(LocalEmbeddingExecution) }` —
+>   `AdoptedEmbeddingExecution` は Gemini の test seam 選択子という本来の役割に戻した
+>   (`KIO_TEST_GEMINI_EMBED` の文字列値は不変。17 テストファイル 21 箇所が緑のまま)
+> - `active_embedding_execution()` / `embedding_adapter_for()` →
+>   `Box<dyn EmbeddingAdapter>`。**trait は既に正しい抽象だった** — `profile()` が
+>   `execution_mode` / `allow_network` / `billable_kinds` を、
+>   `preferred_request_kind()` が lane を持つので、offline の 3 分岐すべてが賄える
+> - offline seam は `KIO_TEST_LOCAL_EMBED`。CI は GPU を持たないので、
+>   **実モデル無しで offline の意味論を検証する唯一の手段**
+>
+> 🔴 **consent gate も ledger も「2 箇所」だった** (Chunk A のゲートと同じ構図):
+>
+> | 分岐 | 見つけた場所 |
+> |---|---|
+> | consent | 検索の precheck **と** `compute_query_embedding_page1` の PC6 再読 |
+> | ledger | query 側の `device_claim` **と** index 側の `reserve_or_reuse_task_charge` |
+>
+> さらに `scope_embedding_state` の期待値が **Gemini profile 固定**で、
+> offline で index した scope の全ベクトルを incompatible と誤判定していた
+> (`adopted_embedding_profile_summary` → `active_embedding_profile_summary`)。
+> index は正しく、期待値だけが古かった。
+>
+> **その修正で 1 度踏んだ罠**: 期待値を `declared_embedding_profile` から取ると
+> `IncompatibleProfile` seam が壊れる。この seam は「declared が adapter の実出力と
+> 食い違う」ことで stale/foreign index を模しているので、declared を期待値にすると
+> **seam が自分自身と一致してしまい compatible と報告する**。
+> 正しい参照は **adapter 自身の `profile()`** — 「今書くベクトルがどの空間に落ちるか」
+> の正直な答え。`declared_embedding_profile` は lock 向けの view であって
+> compat 判定の基準ではない。
+>
+> **もう 1 つ踏んだ罠**: 免除条件を「オンラインでない」と書くと
+> **adapter 未設定の場合まで免除してしまう**。`--offline` は
+> [05 §1.1](../docs/05-runtime.md) PC1 line (a) で**最優先・無条件**であり
+> 「ユーザーの意思決定であって探査結果ではない」ため、未設定時は従来どおり
+> `fallback_reason="offline"` を返さなければならない
+> (`pc1_pc5_offline_flag_forces_text_fallback_with_no_error_code` が検出)。
+> 正しい述語は「**active かつ offline_api**」。
+> `is_some_and(|e| !is_online(e))` と `!is_some_and(is_online)` の違いがこれ。
+
 課金 0 の配線は既存 ([main.rs:21035](../crates/kio-cli/src/main.rs))。
 受入検査 (1)〜(5) ([07 §5.3](../docs/07-adapter-spec.md)) は core 側を再利用する。
 

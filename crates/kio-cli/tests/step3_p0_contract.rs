@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use kio_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV};
+use kio_adapter::catalog::{
+    TEST_ADOPTED_EMBEDDING_ENV, TEST_LOCAL_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
+};
 use kio_index::aggregator::Aggregator;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -12,6 +14,7 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "MISTRAL_API_KEY",
     "KIO_FIXED_NOW",
     "KIO_TEST_GEMINI_EMBED",
+    "KIO_TEST_LOCAL_EMBED",
     "KIO_TEST_MISTRAL_OCR",
     "KIO_TEST_MISTRAL_BATCH",
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
@@ -6113,6 +6116,140 @@ fn r13_2_undeclared_env_only_embedding_activation_warns_once() {
         warns, 1,
         "env-only (undeclared) activation must warn exactly once per run: {errors}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1/2 — the `offline_api` embedding adapter (07 §3 D9, 07 §5.3, 07 §5.7).
+//
+// The offline adapter runs a local model server, so CI can never exercise the
+// real one — there is no GPU runner and vLLM does not run on the macOS one
+// either. `KIO_TEST_LOCAL_EMBED` is what makes the PATH testable without the
+// model: what these tests pin is the offline posture (no consent, no charge,
+// no batch lane), which is where the design risk lives.
+// ---------------------------------------------------------------------------
+
+fn json_success_local_embed(dir: &TempDir, args: &[&str]) -> Value {
+    let output = kio(dir, args)
+        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+/// A scope indexed entirely through the offline embedding adapter. Note there
+/// is no `--approve` of any network policy and no `approvals[]` row anywhere:
+/// that is the point.
+fn indexed_scope_local_embed() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n\n## Scopes\nスコープは read write admin です。\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n\n## MMR 多様化\nMMR の係数 lambda 0.7 で多様化します。\n",
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success_local_embed(&dir, &["index", "--approve"]);
+    dir
+}
+
+/// 07 §3 (D9): an `offline_api` adapter transmits nothing, so vector search
+/// works with no `approvals[]` row and no `allow_network` — the machinery that
+/// gates transmission has nothing here to gate.
+#[test]
+fn offline_embedding_serves_vector_search_without_any_approval() {
+    let dir = indexed_scope_local_embed();
+    let search = json_success_local_embed(&dir, &["search", "トークン", "--mode", "vector"]);
+    assert_eq!(search["resolved_mode"], "vector", "{search}");
+    assert_eq!(search["fallback"], false, "{search}");
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "offline vector search must return hits: {search}"
+    );
+
+    // No embedding approval exists, because none was required. (markdownize is
+    // still an online adapter and keeps its own row — the exemption is
+    // per-adapter, not per-scope.)
+    let scope: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(".kio/scope.json")).unwrap()).unwrap();
+    let approvals = scope["approvals"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !approvals
+            .iter()
+            .any(|row| row["tool_id"] == "qwen3_vl_embedding_local"),
+        "an offline embedding adapter must not publish an approvals[] row: {scope}"
+    );
+}
+
+/// `--offline` forbids new transmission for one run (07 §3). A local adapter
+/// has none to forbid, so the flag must not knock it down to text — otherwise
+/// a local-only user could never use vectors at all.
+#[test]
+fn offline_flag_does_not_degrade_the_offline_embedding_adapter() {
+    let dir = indexed_scope_local_embed();
+    let search = json_success_local_embed(
+        &dir,
+        &["search", "トークン", "--mode", "vector", "--offline"],
+    );
+    assert_eq!(search["resolved_mode"], "vector", "{search}");
+    assert_eq!(search["fallback"], false, "{search}");
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "{search}"
+    );
+}
+
+/// A local model runs on hardware the user already owns: the adapter declares
+/// no billable kinds, so no reservation is taken and no charge is settled.
+#[test]
+fn offline_embedding_never_touches_the_cost_ledger() {
+    let dir = indexed_scope_local_embed();
+    json_success_local_embed(&dir, &["search", "トークン", "--mode", "vector"]);
+    assert_eq!(
+        reservation_row_count(&dir, "embedding"),
+        0,
+        "an offline adapter must not reserve against the ledger"
+    );
+    assert_eq!(reservation_or_charged_usd(&dir, "embedding"), 0.0);
+}
+
+/// 07 §6: the lock is provenance. `kind`/`mode` were literals reading
+/// `online_api`/`online`, which recorded an offline run as an online one.
+#[test]
+fn tool_lock_records_the_offline_execution_mode() {
+    let dir = indexed_scope_local_embed();
+    let lock: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(".kio/tool-lock.json")).unwrap()).unwrap();
+    let embedding = &lock["embedding"];
+    assert_eq!(embedding["kind"], "offline_api", "{lock}");
+    assert_eq!(embedding["mode"], "offline", "{lock}");
+    assert_eq!(embedding["tool_id"], "qwen3_vl_embedding_local", "{lock}");
+    // 03 §7: a different vector space, and the compat gate has only the hash
+    // to notice that with.
+    assert_ne!(
+        embedding["profile_hash"],
+        Value::Null,
+        "the offline profile must be pinned: {lock}"
+    );
+}
+
+/// The online seam must behave exactly as before. A second implementation
+/// appearing is not allowed to change what `KIO_TEST_GEMINI_EMBED` means.
+#[test]
+fn the_online_adapter_still_records_online_provenance() {
+    let dir = indexed_scope_embed("mock");
+    let lock: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(".kio/tool-lock.json")).unwrap()).unwrap();
+    assert_eq!(lock["embedding"]["kind"], "online_api", "{lock}");
+    assert_eq!(lock["embedding"]["mode"], "online", "{lock}");
+    assert_eq!(lock["embedding"]["tool_id"], "gemini_embedding_2", "{lock}");
 }
 
 /// R13-2: write a user tools.toml under the test's XDG_CONFIG_HOME.

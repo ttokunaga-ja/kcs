@@ -26,12 +26,13 @@ use kio_adapter::batch_client::{
     BatchJobStatus, BatchOutputLine, MistralBatchClient,
 };
 use kio_adapter::catalog::{
-    active_adopted_embedding_execution, adopted_embedding_profile,
-    builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
-    declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile_with_bbox,
-    run_adopted_embedding, run_standard_online_markdownize_with_bytes,
-    standard_online_markdownize_profile, standard_online_markdownize_profile_with_bbox,
-    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, StandardOnlineMarkdownizeRequest,
+    active_embedding_execution, adopted_embedding_profile, builtin_offline_markdownize_adapter,
+    builtin_prepare_profile, convert_office_to_pdf, declared_embedding_profile_for,
+    embedding_adapter_profile, embedding_preferred_request_kind,
+    resolve_standard_online_markdownize_profile_with_bbox, run_embedding,
+    run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
+    standard_online_markdownize_profile_with_bbox, AdoptedEmbeddingExecution,
+    DeclaredEmbeddingProfile, EmbeddingExecution, StandardOnlineMarkdownizeRequest,
 };
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::office_convert::{is_office_media, resolve_office_converter};
@@ -1576,13 +1577,38 @@ enum ScopeEmbedState {
     Absent,
 }
 
-fn adopted_embedding_profile_summary() -> embedding_store::EmbeddingProfileSummary {
-    let profile = adopted_embedding_profile();
+/// The vector space the ACTIVE embedding adapter writes into, which is what a
+/// stored vector has to match to be usable (03 §7).
+///
+/// This used to name the adopted online profile unconditionally. With a second
+/// implementation that is wrong in the direction that matters: a scope indexed
+/// by the offline adapter stores the offline profile hash, and comparing it
+/// against Gemini's reports every one of its vectors as incompatible — the
+/// index is fine and the expectation is what is stale.
+///
+/// The hash comes from the ADAPTER's own profile, not from
+/// [`declared_embedding_profile`]. The two differ on purpose for the
+/// `IncompatibleProfile` seam, which simulates a stale or foreign index by
+/// declaring a hash the adapter would never produce — reading the declared
+/// value here would make that seam agree with itself and report compatible.
+/// The adapter's profile is the honest answer to "what space do vectors
+/// written right now land in".
+///
+/// When nothing is active there is no space to be compatible WITH, so the
+/// online profile stays the answer; `resolve_vector_availability` has already
+/// declined on `endpoint_configured` before this can matter.
+fn active_embedding_profile_summary() -> embedding_store::EmbeddingProfileSummary {
+    let profile_hash = embedding_execution()
+        .and_then(|execution| embedding_adapter_profile(execution).ok())
+        .map_or_else(
+            || adopted_embedding_profile().tool_profile_hash,
+            |profile| profile.tool_profile_hash,
+        );
     embedding_store::EmbeddingProfileSummary {
         dimensions: CHUNK_VEC_DIMENSIONS as u64,
         distance: "cosine".to_owned(),
         modality: "multimodal".to_owned(),
-        profile_hash: profile.tool_profile_hash,
+        profile_hash,
     }
 }
 
@@ -1603,7 +1629,7 @@ fn scope_embedding_state(kio_dir: &Path) -> ScopeEmbedState {
     if profiles.is_empty() {
         return ScopeEmbedState::Absent;
     }
-    let expected = adopted_embedding_profile_summary();
+    let expected = active_embedding_profile_summary();
     if profiles
         .iter()
         .all(|profile| profile.matches_profile(&expected))
@@ -2731,18 +2757,36 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     let adapter_id = adapter_identity.as_ref().map(|(id, _)| id.clone());
     // PC4/PC5: OR-across-scopes consent (embedding_opt_in_for_scopes), folding
     // in the one-shot `--online` opt-in per scope.
-    let embedding_opt_in = match &adapter_identity {
-        Some((id, tool_profile_hash)) => {
-            embedding_opt_in_for_scopes(&exec_scopes, id, tool_profile_hash, parsed.online)?
+    let active_embedding = embedding_execution();
+    // 07 §3 / 05 §1.1 (D9): an ACTIVE `offline_api` adapter is exempt from the
+    // two inputs below that exist to control transmission, because it performs
+    // none. "No adapter configured" is emphatically NOT exempt — PC1 line (a)
+    // still resolves `--offline` first in that case, since it is a user
+    // decision and not a probe result.
+    let embedding_is_local =
+        active_embedding.is_some_and(|execution| !embedding_is_online(execution));
+    let embedding_opt_in = if embedding_is_local {
+        // Not "approved" — out of scope. There is no `approvals[]` row to look
+        // for and none is required.
+        true
+    } else {
+        match &adapter_identity {
+            Some((id, tool_profile_hash)) => {
+                embedding_opt_in_for_scopes(&exec_scopes, id, tool_profile_hash, parsed.online)?
+            }
+            None => false,
         }
-        None => false,
     };
     let query_embeddable = parsed.query.chars().count() >= 2;
     let vector_precheck = resolve_vector_availability(
         requested_mode,
         &exec_scopes,
-        parsed.offline,
-        embedding_execution().is_some(),
+        // `--offline` forbids new transmission for the duration of one run
+        // (07 §3). A local adapter has none to forbid, so the flag must not
+        // degrade it to text — that would leave a local-only user unable to
+        // use vectors at all.
+        parsed.offline && !embedding_is_local,
+        active_embedding.is_some(),
         embedding_opt_in,
         query_embeddable,
     );
@@ -13287,6 +13331,15 @@ fn embedding_online_allowed(
     online: bool,
     online_confirmed: bool,
 ) -> Result<bool> {
+    // 07 §3 (2026-07-26, D9): an `offline_api` adapter is exempt from this
+    // gate outright. §3's opt-in unit is an `online_api` adapter, and D1
+    // restricts an offline target's url to a loopback literal, so there is no
+    // transmission here for consent to be about — nor any for `--offline` to
+    // forbid. Answering before the `offline` check is what lets a local-only
+    // user run `kio index --offline` and still get vectors.
+    if embedding_execution().is_some_and(|execution| !embedding_is_online(execution)) {
+        return Ok(true);
+    }
     // Precedence (N7): `--offline` forces enqueue-only; then the per-invocation
     // `--online` temporary opt-in; then the persistent embedding opt-in row. The
     // `online` arm was missing, so `index --online` left embedding Pending even
@@ -14231,12 +14284,14 @@ const EMBEDDING_ADAPTER_KIND: &str = "embedding";
 /// that row. This only bounds how much work one plan/reserve cycle takes on.
 const EMBEDDING_BATCH_SIZE: usize = 32;
 
-fn embedding_execution() -> Option<AdoptedEmbeddingExecution> {
-    let execution = active_adopted_embedding_execution();
+fn embedding_execution() -> Option<EmbeddingExecution> {
+    let execution = active_embedding_execution();
     // R13-2(4): a Real activation with no tools.toml `[embedding]` declaration is
     // env-only drift (GEMINI_API_KEY alone). Record it once per run. Test seams
     // (Mock/AuthError/…) are not Real, so hermetic tests never trip this.
-    if execution == Some(AdoptedEmbeddingExecution::Real)
+    // The offline adapter cannot drift this way: it activates only FROM a
+    // declaration, never from a stray env key.
+    if execution == Some(EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real))
         && kio_adapter::tool_lock::registered_declared_adapter("embedding").is_none()
     {
         warn_undeclared_adapter_once("embedding");
@@ -14244,21 +14299,24 @@ fn embedding_execution() -> Option<AdoptedEmbeddingExecution> {
     execution
 }
 
-fn declared_embedding_profile(execution: AdoptedEmbeddingExecution) -> DeclaredEmbeddingProfile {
-    declared_adopted_embedding_profile(execution)
+fn declared_embedding_profile(execution: EmbeddingExecution) -> DeclaredEmbeddingProfile {
+    declared_embedding_profile_for(execution)
 }
 
-fn active_embedding_adapter_id() -> Result<Option<String>> {
-    let Some(execution) = embedding_execution() else {
-        return Ok(None);
-    };
-    Ok(Some(declared_embedding_profile(execution).tool_id))
+/// Whether the active embedding send leaves this machine (07 §3).
+///
+/// The consent gate, the cost ledger, and the batch lane each need this and
+/// nothing finer. Reading it off the adapter's own profile keeps the answer
+/// with the implementation that knows it, rather than restating it per call
+/// site.
+fn embedding_is_online(execution: EmbeddingExecution) -> bool {
+    execution.is_online()
 }
 
 /// Run the active embedding adapter over a batch of items, returning one vector
 /// per item.
 fn run_embedding_adapter(
-    execution: AdoptedEmbeddingExecution,
+    execution: EmbeddingExecution,
     items: Vec<EmbeddingItem>,
     input_type: EmbeddingInputType,
     // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the caller's
@@ -14266,7 +14324,7 @@ fn run_embedding_adapter(
     // `kio_adapter::types::EmbeddingRequest::idempotency_token`'s doc.
     idempotency_token: Option<String>,
 ) -> std::result::Result<kio_adapter::catalog::AdoptedEmbeddingOutcome, TaskExecutionFailure> {
-    run_adopted_embedding(execution, items, input_type, idempotency_token).map_err(|error| {
+    run_embedding(execution, items, input_type, idempotency_token).map_err(|error| {
         // R13-2(e): a `keychain:` (not-implemented) auth must be LOUD — the query
         // path degrades to text fallback and the index path only counts a failed
         // task, so without this the specific misconfig never reaches any log. Record
@@ -14370,6 +14428,15 @@ fn compute_query_embedding_page1(
     let Some(execution) = embedding_execution() else {
         return Ok(None);
     };
+    // 07 §3 (D9) / 04 §5.4: an `offline_api` adapter neither transmits nor
+    // bills. Everything below this point exists for one of those two — the
+    // PC6 consent re-read, and the device-budget claim/settle around the call
+    // — so the offline path takes neither. Reserving against a device cap for
+    // a model running on the user's own hardware would consume a budget that
+    // guards spending against a send that costs nothing.
+    if !embedding_is_online(execution) {
+        return local_query_embedding(execution, query);
+    }
     let profile = declared_embedding_profile(execution);
     let ledger = open_ledger_db()?;
     let conn = ledger.connection();
@@ -14506,6 +14573,41 @@ fn compute_query_embedding_page1(
     }
 }
 
+/// The offline counterpart of [`compute_query_embedding_page1`]: embed the
+/// query and return the vector, with no consent check and no ledger row.
+///
+/// The failure classification is deliberately identical to the online path's —
+/// a contract violation is still a contract violation when it comes from a
+/// local server, and 05 §1.1 keeps `embedding_contract_violation` subject to
+/// `fail_behavior` regardless of where the vector came from.
+fn local_query_embedding(
+    execution: EmbeddingExecution,
+    query: &str,
+) -> Result<Option<QueryEmbeddingOutcome>> {
+    // O2 seam: the query is about to be embedded. That `--text` must never
+    // reach this point holds for a local adapter exactly as for a remote one.
+    record_query_embed_trace(query);
+    let items = vec![EmbeddingItem {
+        id: "query".to_owned(),
+        text: Some(query.to_owned()),
+        path: None,
+        mime: None,
+    }];
+    // No `idempotency_token`: that identifies a ledger reservation, and this
+    // path makes none.
+    match run_embedding_adapter(execution, items, EmbeddingInputType::Query, None) {
+        Ok(outcome) => Ok(outcome
+            .vectors
+            .into_iter()
+            .next()
+            .map(|vector| QueryEmbeddingOutcome::Vector(vector.vector))),
+        Err(failure) if failure.retry_kind == RetryErrorKind::ContractViolation => {
+            Ok(Some(QueryEmbeddingOutcome::ContractViolation))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Append the query to the file named by `KIO_TEST_QUERY_EMBED_TRACE`, if set, at
 /// the point the query embedding is sent (O2 test seam only; no-op in production).
 fn record_query_embed_trace(query: &str) {
@@ -14527,14 +14629,25 @@ fn embedding_tool_lock_entry() -> Result<Option<Value>> {
         return Ok(None);
     };
     let profile = declared_embedding_profile(execution);
+    // `kind`/`mode` used to be literals, which recorded an offline adapter as
+    // having run online. They are properties of the adapter, so they come from
+    // its profile — the lock is provenance, and provenance that always says
+    // "online" is not provenance (07 §6).
+    let execution_mode = embedding_adapter_profile(execution)
+        .map_err(adapter_to_kio)?
+        .execution_mode;
+    let (kind, mode) = match execution_mode {
+        ExecutionMode::OfflineApi => ("offline_api", "offline"),
+        _ => ("online_api", "online"),
+    };
     Ok(Some(json!({
         "tool_id": profile.tool_id,
         "profile_hash": profile.profile_hash,
         "dimensions": profile.dimensions,
         "distance": profile.distance,
         "modality": profile.modality,
-        "kind": "online_api",
-        "mode": "online",
+        "kind": kind,
+        "mode": mode,
     })))
 }
 
@@ -14979,7 +15092,10 @@ fn run_embedding_enrichment_for_instances(
         // cap check below), independent of why that prior attempt left it open.
         struct GroupCharge {
             key: LedgerTaskKey,
-            intent_token: String,
+            /// `None` for an `offline_api` adapter: it makes no reservation, so
+            /// there is no intent to settle against and no provider that could
+            /// want an idempotency key (04 §5.4 / 07 §3).
+            intent_token: Option<String>,
             reserved_usd: f64,
         }
         let mut charge_by_group: Vec<Option<GroupCharge>> = Vec::with_capacity(plan.to_send.len());
@@ -15006,6 +15122,19 @@ fn run_embedding_enrichment_for_instances(
                 ),
                 active_embedding_send_lane(),
             );
+            // 04 §5.4 / 07 §3: a local model bills nothing, so it reserves
+            // nothing. Skipping the reservation outright rather than reserving
+            // $0 is what keeps `batch_requests` free of rows that can never be
+            // settled against an invoice — and a $0 row still consumes the
+            // per-key slot that crash recovery walks.
+            if !embedding_is_online(execution) {
+                charge_by_group.push(Some(GroupCharge {
+                    key,
+                    intent_token: None,
+                    reserved_usd: 0.0,
+                }));
+                continue;
+            }
             let caps = budget_cap_config(&budget_caps, &scope_id, EMBEDDING_ADAPTER_KIND);
             // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
             // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
@@ -15029,7 +15158,7 @@ fn run_embedding_enrichment_for_instances(
                     estimated_usd,
                 } => Some(GroupCharge {
                     key,
-                    intent_token,
+                    intent_token: Some(intent_token),
                     reserved_usd: estimated_usd,
                 }),
             });
@@ -15088,32 +15217,32 @@ fn run_embedding_enrichment_for_instances(
                 execution,
                 &profile,
                 group,
-                Some(charge.intent_token.clone()),
+                charge.intent_token.clone(),
                 &mut replica,
             ) {
                 Ok(usage) => {
-                    settle_task_charge_success(
-                        &ledger,
-                        &charge.key,
-                        &charge.intent_token,
-                        embedding_billed_from_usage(
-                            usage.as_ref(),
-                            active_embedding_send_lane(),
-                            charge.reserved_usd,
-                        ),
-                    )?;
-                    // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
-                    // et al. can find this group's ledger selector via
-                    // `task.reservation_id` without reconstructing the key from
-                    // possibly-since-changed config.
-                    reserved_by_ref.insert(
-                        embedding_task_output_ref(&group.representative.chunk_id),
-                        (
-                            charge.reserved_usd,
-                            month.clone(),
-                            charge.intent_token.clone(),
-                        ),
-                    );
+                    // No reservation was made offline, so there is nothing to
+                    // settle and no `reservation_id` for recovery to walk.
+                    if let Some(intent_token) = charge.intent_token.as_ref() {
+                        settle_task_charge_success(
+                            &ledger,
+                            &charge.key,
+                            intent_token,
+                            embedding_billed_from_usage(
+                                usage.as_ref(),
+                                active_embedding_send_lane(),
+                                charge.reserved_usd,
+                            ),
+                        )?;
+                        // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
+                        // et al. can find this group's ledger selector via
+                        // `task.reservation_id` without reconstructing the key from
+                        // possibly-since-changed config.
+                        reserved_by_ref.insert(
+                            embedding_task_output_ref(&group.representative.chunk_id),
+                            (charge.reserved_usd, month.clone(), intent_token.clone()),
+                        );
+                    }
                     record_embedding_transitions(
                         &mut transitions,
                         group.members.iter().copied(),
@@ -15481,7 +15610,7 @@ fn link_reused_chunks(
 fn send_embed_group(
     conn: &Connection,
     kio_dir: &Path,
-    execution: AdoptedEmbeddingExecution,
+    execution: EmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
     group: &EmbeddingSendGroup<'_>,
     // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this group's own
@@ -15988,6 +16117,15 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
     let Some(execution) = embedding_execution() else {
         return Ok(outcome);
     };
+    // 07 §5.7: the lane is a property of the adapter. An `offline_api` adapter
+    // prefers Sync because a local server has no provider job queue to submit
+    // to, and the half-price rationale that puts Gemini on Batch does not
+    // exist for it. There can be no in-flight rows to poll.
+    if embedding_preferred_request_kind(execution).map_err(adapter_to_kio)?
+        != PreferredRequestKind::Batch
+    {
+        return Ok(outcome);
+    }
     let profile = declared_embedding_profile(execution);
     // Lane availability probing must never be what REPORTS an auth misconfig
     // (e.g. R13-2's loud `keychain:` not-implemented): an unresolvable
@@ -21704,12 +21842,28 @@ fn write_device_consent(
 
 fn active_online_tool_ids() -> Result<Vec<String>> {
     let mut tool_ids = vec![online_markdownize_profile().adapter_id];
-    if let Some(adapter_id) = active_embedding_adapter_id()? {
+    // An `offline_api` embedding adapter must not appear here. These ids drive
+    // `approvals[]` publication and the `--send-secrets` consent (07 §3), and
+    // listing a local adapter would ask the user to approve a transmission
+    // that cannot happen — then record consent for it.
+    if let Some(adapter_id) = active_online_embedding_adapter_id()? {
         tool_ids.push(adapter_id);
     }
     tool_ids.sort();
     tool_ids.dedup();
     Ok(tool_ids)
+}
+
+/// [`active_embedding_adapter_id`] restricted to an adapter that actually
+/// transmits — the only kind the consent machinery has anything to say about.
+fn active_online_embedding_adapter_id() -> Result<Option<String>> {
+    let Some(execution) = embedding_execution() else {
+        return Ok(None);
+    };
+    if !embedding_is_online(execution) {
+        return Ok(None);
+    }
+    Ok(Some(declared_embedding_profile(execution).tool_id))
 }
 
 /// QA21/23 (step4b-contract-tests-p3a.md §G): the same tool_id set as
@@ -21726,8 +21880,13 @@ fn active_online_tool_identities(repo: &Repository) -> Result<Vec<(String, Strin
         markdown_profile.adapter_id,
         markdown_profile.tool_profile_hash,
     )];
-    if let Some((tool_id, tool_profile_hash)) = active_embedding_adapter_identity()? {
-        identities.push((tool_id, tool_profile_hash));
+    // Same exclusion as `active_online_tool_ids`: an offline adapter has no
+    // `approvals[]` row to publish or match.
+    if let Some(execution) = embedding_execution() {
+        if embedding_is_online(execution) {
+            let profile = declared_embedding_profile(execution);
+            identities.push((profile.tool_id, profile.profile_hash));
+        }
     }
     identities.sort();
     identities.dedup();

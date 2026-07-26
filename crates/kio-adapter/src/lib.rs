@@ -9,6 +9,7 @@ pub mod gemini_batch_client;
 mod gemini_embedding;
 mod http_policy;
 pub mod identity;
+mod local_embedding;
 mod mistral_ocr;
 pub mod office_convert;
 pub mod pdf_decode;
