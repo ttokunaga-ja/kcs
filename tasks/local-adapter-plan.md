@@ -763,6 +763,35 @@ UTF-8 byte order 最小**の chunk を指す。逆引きの探索範囲は検索
 > identity 由来で rebuild に不変であり、かつ §1.3 / §1.4 / §1.7 で既に横断使用されている
 > tie-break idiom なので新概念がゼロ。
 
+### 品質計器 — V3 の前提 (2026-07-27 調査)
+
+**V3 は「劣化幅を測る」項目なので、測れる計器が要る。合成 eval では測れない。**
+
+| 計器 | 実測 | 使えるか |
+|---|---|---|
+| `eval/run_eval.py` (合成・CI 常時) | M3-1/2/3 = 1.0 / 1.0 / 1.0 (目標 0.8) | ❌ 天井。劣化を検出できない |
+| `eval/run_baseline.py` (fixture-b 24 問) | kio 0.9167、hard3 は 6/8 | ✅ 余地がある |
+
+その fixture は失われていなかった。改名前の名前 `kcs` で残っている:
+
+- `~/kcs-baseline-corpus` (14 MB) — **原本**。1,015 ファイル、golden query の正解を全て含み `.kcs` なし
+- `/private/tmp/kcs-fixture-run` (1.4 GB) — index 済み store。**`/tmp` なので再起動で消える**が、
+  中身は再 index で再生成できる派生物
+- qhard の 24 ファイルは `/tmp` にしか無かったため `~/kcs-baseline-corpus-qhard` へ保全済み
+  (バイト一致確認済み)
+
+`register_fixture.py` は**削除されたのではなく、一度も commit されていなかった**
+(`git log --all --diff-filter=D` が何も返さない)。生き残った fixture から仕様を採取して
+再実装した (`eval/register_fixture.py`) — scope の規則は「`<persona>/home` 配下で
+ファイルを直接含むディレクトリ」で、p01〜p20 すべて 20 個ちょうど、
+`scope-registry.sqlite` と当時の `registration-report.json` に一致する。
+
+**残るのは費用の判断だけ。** 24 問の正解担体は `.md` が 4・
+`.pdf`/`.docx`/`.pptx`/`.png`/`.jpeg` が 20 で、後者は全て OCR lane を通る。
+つまり **`--offline` 構築では上限 4/24 = 0.167** にしかならず、0.8 のゲートに対して
+品質を何も測らない。実測には `--online` が要り、記録上の費用は **OCR $1.07 /
+1,112 ledger 行** (埋め込みは別)。
+
 ---
 
 ## 12. 作業順
