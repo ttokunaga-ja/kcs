@@ -23,6 +23,15 @@ mdfind and rga on a PRISTINE copy — baselines must not see Kio-derived
 artifacts — so the tree that gets `.kio` directories has to be a copy, and the
 one the baselines read stays clean.
 
+**A built fixture cannot be relocated.** `scope-registry.sqlite` records each
+scope by absolute path, so moving `<fixture-root>` leaves all 400 of them
+pointing at a directory that no longer exists — `kio` then reports the scopes as
+unregistered and every query returns nothing. (Learned the hard way: a `mv` of a
+finished 20-persona fixture broke all 400 registrations instantly; moving it back
+restored them, and the baseline re-measured identically.) Choose `--out` as the
+final home before spending anything, and if it must end up somewhere else,
+rebuild there rather than copying.
+
 ## Which directories become scopes
 
 Every directory under `<persona>/home` that DIRECTLY contains at least one file.
@@ -188,7 +197,15 @@ def main() -> int:
         required=True,
         help="pristine source tree holding <persona>/home/... — never modified",
     )
-    parser.add_argument("--out", type=Path, required=True, help="fixture root to build")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="fixture root to build. PICK THE FINAL LOCATION NOW — the result "
+        "cannot be moved afterwards (the scope registry stores absolute paths, "
+        "so a `mv` leaves every scope pointing at a directory that is gone). "
+        "Do not build it under a temp dir you expect to keep.",
+    )
     parser.add_argument("--bin", type=Path, required=True, help="the kio binary")
     parser.add_argument(
         "--personas",
