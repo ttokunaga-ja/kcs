@@ -73,6 +73,18 @@ pub struct AggChunk {
     pub embedding: Option<Vec<f32>>,
 }
 
+/// One image object's projected vector (04 §4.3's `image_vec`).
+///
+/// Unlike [`AggChunk`] the embedding is not optional: an image with no vector
+/// has nothing to contribute to this replica at all — it carries no text, so it
+/// would be a row that no lane can score and no statistic counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggImage {
+    /// The `objects/image/` content hash, which is `image_vec`'s primary key.
+    pub image_id: String,
+    pub embedding: Vec<f32>,
+}
+
 /// BM25 against the WHOLE corpus. Lower is better — SQLite's `bm25()` sign
 /// convention, kept rather than negated so a value can be compared against a
 /// per-scope score during debugging without a mental flip.
@@ -87,7 +99,15 @@ pub struct TextScore {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorScore {
     pub scope_id: String,
-    pub chunk_id: String,
+    /// The scored row's own identity: a `chunk_id` from [`Aggregator::vector_scores`],
+    /// an image object hash from [`Aggregator::image_vector_scores`].
+    ///
+    /// Not `chunk_id`, because the two sources are meant to be CONCATENATED
+    /// before [`vector_ranks`] runs. 03 §7 fixes one multimodal space, so a
+    /// chunk's cosine and an image's are the same quantity, and ranking them
+    /// separately would hand each list its own rank 1 — the very scale mixture
+    /// the replica exists to remove (05 §1.8), one level down.
+    pub row_id: String,
     pub cosine: f64,
 }
 
@@ -179,6 +199,20 @@ impl Aggregator {
             );
             CREATE INDEX IF NOT EXISTS agg_embeddings_scope
                 ON agg_embeddings(scope_id);
+            -- Image object vectors (04 §4.3's `image_vec`, projected). No join
+            -- to `agg_chunks` and no FTS row: an image contributes nothing to
+            -- BM25 — its text-lane standing is INHERITED from the chunk that
+            -- cites it (05 §1.7 / U5), and a duplicate document here would
+            -- corrupt the very `N`/`df`/`avgdl` this replica exists to get
+            -- right. What it needs from the collection is one thing: a global
+            -- cosine rank on the same scale as `agg_embeddings`.
+            CREATE TABLE IF NOT EXISTS agg_image_embeddings (
+                scope_id   TEXT NOT NULL,
+                image_id   TEXT NOT NULL,
+                vector     BLOB NOT NULL,
+                dimensions INTEGER NOT NULL,
+                PRIMARY KEY (scope_id, image_id)
+            );
             "#,
         )?;
         Ok(Self { conn })
@@ -253,6 +287,7 @@ impl Aggregator {
         scope_id: &str,
         index_generation: &str,
         chunks: &[AggChunk],
+        images: &[AggImage],
         now_ms: i64,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -285,6 +320,28 @@ impl Aggregator {
                         vector.len() as i64
                     ])?;
                 }
+            }
+        }
+        {
+            // No rowid to join through, unlike `agg_embeddings`: an image is
+            // addressed by its own content hash and has no `agg_chunks` row to
+            // hang off (05 §1.7 / U5 — it carries no text).
+            //
+            // `OR REPLACE` rather than a plain insert because `images` is the
+            // caller's list and a duplicate `image_id` in it must not abort a
+            // projection: the same figure appearing twice is a fact about the
+            // corpus, and the two rows carry the same vector by construction.
+            let mut image_vecs = tx.prepare(
+                "INSERT OR REPLACE INTO agg_image_embeddings(scope_id, image_id, vector, dimensions)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for image in images {
+                image_vecs.execute(params![
+                    scope_id,
+                    image.image_id,
+                    f32_to_le_bytes(&image.embedding),
+                    image.embedding.len() as i64
+                ])?;
             }
         }
         // Written LAST, deliberately: the generation stamp is this projection's
@@ -502,34 +559,44 @@ impl Aggregator {
                 row.get::<_, i64>(3)?,
             ))
         })?;
-        let mut scored = Vec::new();
-        for row in rows {
-            let (scope_id, chunk_id, blob, dimensions) = row?;
-            if dimensions as usize != query.len() {
-                continue;
-            }
-            let vector = f32_from_le_bytes(&blob);
-            if vector.len() != query.len() {
-                continue;
-            }
-            let cosine = cosine_similarity(query, &vector);
-            if cosine.is_finite() {
-                scored.push(VectorScore {
-                    scope_id,
-                    chunk_id,
-                    cosine,
-                });
-            }
-        }
-        // Descending cosine, then the merge's own deterministic tie-break, so
-        // the rank a candidate gets does not depend on scan order.
-        scored.sort_by(|a, b| {
-            b.cosine
-                .total_cmp(&a.cosine)
-                .then_with(|| a.scope_id.cmp(&b.scope_id))
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-        });
-        scored.truncate(limit as usize);
+        let mut scored = score_rows(rows, query)?;
+        sort_and_truncate(&mut scored, limit);
+        Ok(scored)
+    }
+
+    /// [`Self::vector_scores`]' image counterpart (04 §4.3's `image_vec`).
+    ///
+    /// Same scan, same skip-on-dimension-mismatch, same order — because these
+    /// scores are meant to be CONCATENATED with the chunk ones before
+    /// [`vector_ranks`] assigns a rank. 03 §7 fixes one multimodal space, so
+    /// separate rank sequences would give each list its own rank 1 and let the
+    /// nearest image tie the nearest chunk however far away it actually is.
+    ///
+    /// `limit` is applied to this list on its own, as a scan bound. The caller's
+    /// concatenation is then re-cut by whatever depth it wants; taking the cut
+    /// only after the merge would mean materializing both full lists.
+    pub fn image_vector_scores(
+        &self,
+        query: &[f32],
+        scopes: &BTreeSet<String>,
+        limit: u64,
+    ) -> Result<Vec<VectorScore>> {
+        self.load_query_scopes(scopes)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT i.scope_id, i.image_id, i.vector, i.dimensions
+             FROM agg_image_embeddings i
+             JOIN query_scopes q ON q.scope_id = i.scope_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut scored = score_rows(rows, query)?;
+        sort_and_truncate(&mut scored, limit);
         Ok(scored)
     }
 
@@ -571,6 +638,50 @@ impl Aggregator {
 }
 
 /// Drop every row of one scope (the scope itself is leaving).
+/// Turn one `(scope_id, row_id, blob, dimensions)` projection into scores.
+///
+/// Shared by both vector lanes so they cannot drift on the two rules that
+/// matter: a row whose dimensionality differs from the query is SKIPPED rather
+/// than scored (a profile mismatch must not silently yield a garbage cosine),
+/// and a non-finite cosine is dropped rather than ranked.
+fn score_rows(
+    rows: impl Iterator<Item = rusqlite::Result<(String, String, Vec<u8>, i64)>>,
+    query: &[f32],
+) -> Result<Vec<VectorScore>> {
+    let mut scored = Vec::new();
+    for row in rows {
+        let (scope_id, row_id, blob, dimensions) = row?;
+        if dimensions as usize != query.len() {
+            continue;
+        }
+        let vector = f32_from_le_bytes(&blob);
+        if vector.len() != query.len() {
+            continue;
+        }
+        let cosine = cosine_similarity(query, &vector);
+        if cosine.is_finite() {
+            scored.push(VectorScore {
+                scope_id,
+                row_id,
+                cosine,
+            });
+        }
+    }
+    Ok(scored)
+}
+
+/// Descending cosine, then the merge's own deterministic tie-break, so the rank
+/// a candidate gets does not depend on scan order.
+fn sort_and_truncate(scored: &mut Vec<VectorScore>, limit: u64) {
+    scored.sort_by(|a, b| {
+        b.cosine
+            .total_cmp(&a.cosine)
+            .then_with(|| a.scope_id.cmp(&b.scope_id))
+            .then_with(|| a.row_id.cmp(&b.row_id))
+    });
+    scored.truncate(limit as usize);
+}
+
 fn delete_scope_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<()> {
     let doomed = stored_rows(
         tx,
@@ -580,6 +691,10 @@ fn delete_scope_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<(
     unindex(tx, &doomed)?;
     tx.execute(
         "DELETE FROM agg_embeddings WHERE scope_id = ?1",
+        params![scope_id],
+    )?;
+    tx.execute(
+        "DELETE FROM agg_image_embeddings WHERE scope_id = ?1",
         params![scope_id],
     )?;
     tx.execute(
@@ -676,9 +791,12 @@ pub fn text_ranks(scores: &[TextScore]) -> BTreeMap<(String, String), u64> {
         .collect()
 }
 
-/// Dense 1-based ranks by descending cosine. `vector_scores` already returns
-/// this order; re-sorting here keeps the function total for callers that
-/// filtered or concatenated.
+/// Dense 1-based ranks by descending cosine, keyed by `(scope_id, row_id)`.
+///
+/// `vector_scores` already returns this order; re-sorting here keeps the
+/// function total for callers that filtered or concatenated — and concatenating
+/// the chunk and image lists is exactly how a caller gets ONE rank sequence
+/// over the single multimodal space 03 §7 defines.
 #[must_use]
 pub fn vector_ranks(scores: &[VectorScore]) -> BTreeMap<(String, String), u64> {
     let mut ordered = scores.to_vec();
@@ -686,12 +804,12 @@ pub fn vector_ranks(scores: &[VectorScore]) -> BTreeMap<(String, String), u64> {
         b.cosine
             .total_cmp(&a.cosine)
             .then_with(|| a.scope_id.cmp(&b.scope_id))
-            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+            .then_with(|| a.row_id.cmp(&b.row_id))
     });
     ordered
         .into_iter()
         .enumerate()
-        .map(|(index, score)| ((score.scope_id, score.chunk_id), index as u64 + 1))
+        .map(|(index, score)| ((score.scope_id, score.row_id), index as u64 + 1))
         .collect()
 }
 
@@ -733,11 +851,17 @@ mod tests {
         // because their folders differ in size.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("tiny", "gen1", &[chunk("a", "rollback window minutes")], 1)
+            .refresh_scope(
+                "tiny",
+                "gen1",
+                &[chunk("a", "rollback window minutes")],
+                &[],
+                1,
+            )
             .unwrap();
         let mut big = vec![chunk("b", "rollback window minutes")];
         big.extend((0..40).map(|i| chunk(&format!("f{i}"), "unrelated filler about invoices")));
-        index.refresh_scope("big", "gen1", &big, 1).unwrap();
+        index.refresh_scope("big", "gen1", &big, &[], 1).unwrap();
 
         let scores = index
             .text_scores("rollback", &only(&["tiny", "big"]), 100)
@@ -760,7 +884,13 @@ mod tests {
         // unrelated rebuild happened to rotate the generation.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s", "gen1", &[chunk("a", "alpha"), chunk("b", "beta")], 1)
+            .refresh_scope(
+                "s",
+                "gen1",
+                &[chunk("a", "alpha"), chunk("b", "beta")],
+                &[],
+                1,
+            )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 0));
 
@@ -772,7 +902,7 @@ mod tests {
 
         let scored = index.vector_scores(&[1.0, 0.0], &only(&["s"]), 10).unwrap();
         assert_eq!(scored.len(), 1);
-        assert_eq!(scored[0].chunk_id, "a");
+        assert_eq!(scored[0].row_id, "a");
     }
 
     #[test]
@@ -808,13 +938,14 @@ mod tests {
                     vectored("a", "alpha secret", vec![1.0, 0.0]),
                     chunk("b", "beta public"),
                 ],
+                &[],
                 1,
             )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 1));
 
         index
-            .refresh_scope("s", "gen2", &[chunk("b", "beta public")], 2)
+            .refresh_scope("s", "gen2", &[chunk("b", "beta public")], &[], 2)
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(
@@ -841,7 +972,7 @@ mod tests {
         // orphan vector row would just be unreachable by every join.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], 1)
+            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], &[], 1)
             .unwrap();
         let delta = ScopeDelta {
             vectors_added: vec![("not-yet-projected".to_owned(), vec![1.0, 0.0])],
@@ -856,11 +987,17 @@ mod tests {
         // every other chunk's IDF for those terms.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s", "gen1", &[chunk("a", "alpha"), chunk("b", "beta")], 1)
+            .refresh_scope(
+                "s",
+                "gen1",
+                &[chunk("a", "alpha"), chunk("b", "beta")],
+                &[],
+                1,
+            )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 0));
         index
-            .refresh_scope("s", "gen2", &[chunk("a", "alpha")], 2)
+            .refresh_scope("s", "gen2", &[chunk("a", "alpha")], &[], 2)
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(
@@ -890,17 +1027,24 @@ mod tests {
                     vectored("a", "alpha", vec![1.0, 0.0]),
                     vectored("b", "beta", vec![0.0, 1.0]),
                 ],
+                &[],
                 1,
             )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 2));
         index
-            .refresh_scope("s", "gen2", &[vectored("a", "alpha", vec![1.0, 0.0])], 2)
+            .refresh_scope(
+                "s",
+                "gen2",
+                &[vectored("a", "alpha", vec![1.0, 0.0])],
+                &[],
+                2,
+            )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 1));
         let hits = index.vector_scores(&[0.0, 1.0], &only(&["s"]), 10).unwrap();
         assert!(
-            hits.iter().all(|hit| hit.chunk_id != "b"),
+            hits.iter().all(|hit| hit.row_id != "b"),
             "a dropped chunk's vector must not survive the refresh: {hits:?}"
         );
     }
@@ -911,10 +1055,16 @@ mod tests {
         // very next search, not at some later rebuild.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("live", "g", &[chunk("a", "alpha")], 1)
+            .refresh_scope("live", "g", &[chunk("a", "alpha")], &[], 1)
             .unwrap();
         index
-            .refresh_scope("dead", "g", &[vectored("b", "alpha", vec![1.0, 0.0])], 1)
+            .refresh_scope(
+                "dead",
+                "g",
+                &[vectored("b", "alpha", vec![1.0, 0.0])],
+                &[],
+                1,
+            )
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (2, 2, 1));
         let live: BTreeSet<String> = ["live".to_owned()].into_iter().collect();
@@ -932,19 +1082,123 @@ mod tests {
     fn vectors_rank_by_cosine_across_scopes() {
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s1", "g", &[vectored("near", "x", vec![1.0, 0.1])], 1)
+            .refresh_scope("s1", "g", &[vectored("near", "x", vec![1.0, 0.1])], &[], 1)
             .unwrap();
         index
-            .refresh_scope("s2", "g", &[vectored("far", "y", vec![0.0, 1.0])], 1)
+            .refresh_scope("s2", "g", &[vectored("far", "y", vec![0.0, 1.0])], &[], 1)
             .unwrap();
         let scores = index
             .vector_scores(&[1.0, 0.0], &only(&["s1", "s2"]), 10)
             .unwrap();
-        assert_eq!(scores[0].chunk_id, "near");
-        assert_eq!(scores[1].chunk_id, "far");
+        assert_eq!(scores[0].row_id, "near");
+        assert_eq!(scores[1].row_id, "far");
         let ranks = vector_ranks(&scores);
         assert_eq!(ranks[&("s1".into(), "near".into())], 1);
         assert_eq!(ranks[&("s2".into(), "far".into())], 2);
+    }
+
+    fn image(id: &str, embedding: Vec<f32>) -> AggImage {
+        AggImage {
+            image_id: id.to_owned(),
+            embedding,
+        }
+    }
+
+    /// 03 §7 fixes ONE multimodal space, so an image's cosine and a chunk's are
+    /// the same quantity. Concatenating the two score lists before `vector_ranks`
+    /// is what puts them on one rank sequence; ranking each separately would give
+    /// the nearest image rank 1 alongside the nearest chunk however far away it
+    /// actually is.
+    #[test]
+    fn image_and_chunk_vectors_rank_in_one_sequence() {
+        let (_dir, mut index) = store();
+        index
+            .refresh_scope(
+                "s",
+                "g",
+                &[
+                    vectored("near-chunk", "x", vec![1.0, 0.05]),
+                    vectored("far-chunk", "y", vec![0.0, 1.0]),
+                ],
+                &[image("mid-image", vec![1.0, 0.5])],
+                1,
+            )
+            .unwrap();
+        let mut scores = index.vector_scores(&[1.0, 0.0], &only(&["s"]), 10).unwrap();
+        scores.extend(
+            index
+                .image_vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
+                .unwrap(),
+        );
+        let ranks = vector_ranks(&scores);
+        assert_eq!(ranks[&("s".into(), "near-chunk".into())], 1);
+        assert_eq!(
+            ranks[&("s".into(), "mid-image".into())],
+            2,
+            "the image sits BETWEEN the two chunks, which is only possible on a \
+             shared sequence"
+        );
+        assert_eq!(ranks[&("s".into(), "far-chunk".into())], 3);
+    }
+
+    /// An image is live exactly while some live chunk still cites it, so a
+    /// re-projection that no longer carries it must take its vector out — the
+    /// same rule `a_refresh_drops_the_vectors_the_scope_no_longer_has` pins for
+    /// chunks.
+    #[test]
+    fn a_refresh_drops_the_images_the_scope_no_longer_has() {
+        let (_dir, mut index) = store();
+        index
+            .refresh_scope(
+                "s",
+                "gen1",
+                &[chunk("a", "alpha")],
+                &[image("fig", vec![1.0, 0.0])],
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            index
+                .image_vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        index
+            .refresh_scope("s", "gen2", &[chunk("a", "alpha")], &[], 2)
+            .unwrap();
+        assert!(
+            index
+                .image_vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
+                .unwrap()
+                .is_empty(),
+            "an image no live chunk cites must stop being rankable"
+        );
+    }
+
+    /// The replica's reason for existing is correct corpus statistics, so an
+    /// image must not become a document in it. Its text-lane standing is
+    /// inherited from the citing chunk (05 §1.7 / U5); a duplicate FTS row here
+    /// would inflate `N` and `df` and quietly re-rank unrelated text hits.
+    #[test]
+    fn an_image_adds_nothing_to_the_text_collection() {
+        let (_dir, mut index) = store();
+        index
+            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], &[], 1)
+            .unwrap();
+        let without = index.text_scores("alpha", &only(&["s"]), 10).unwrap();
+        index
+            .refresh_scope(
+                "s",
+                "gen2",
+                &[chunk("a", "alpha")],
+                &[image("fig", vec![1.0, 0.0])],
+                2,
+            )
+            .unwrap();
+        let with = index.text_scores("alpha", &only(&["s"]), 10).unwrap();
+        assert_eq!(with, without, "adding a figure must not move a text score");
+        assert_eq!(index.corpus_size().unwrap().1, 1);
     }
 
     #[test]
@@ -959,7 +1213,7 @@ mod tests {
         // projection, and the chunk is gone from the corpus for good.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], 1)
+            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], &[], 1)
             .unwrap();
 
         // The scope has moved on to gen2 and grown a chunk `b` the replica
@@ -991,7 +1245,7 @@ mod tests {
         let big: Vec<AggChunk> = (0..8)
             .map(|n| chunk(&format!("b{n}"), "rollback rollback rollback"))
             .collect();
-        index.refresh_scope("big", "g", &big, 1).unwrap();
+        index.refresh_scope("big", "g", &big, &[], 1).unwrap();
         index
             .refresh_scope(
                 "small",
@@ -1000,6 +1254,7 @@ mod tests {
                     "s0",
                     "rollback happened once in a much longer document",
                 )],
+                &[],
                 1,
             )
             .unwrap();
@@ -1033,9 +1288,9 @@ mod tests {
         let big: Vec<AggChunk> = (0..8)
             .map(|n| chunk(&format!("b{n}"), "rollback rollback rollback"))
             .collect();
-        index.refresh_scope("big", "g", &big, 1).unwrap();
+        index.refresh_scope("big", "g", &big, &[], 1).unwrap();
         index
-            .refresh_scope("small", "g", &[chunk("s0", "rollback once")], 1)
+            .refresh_scope("small", "g", &[chunk("s0", "rollback once")], &[], 1)
             .unwrap();
 
         let whole = index
@@ -1059,12 +1314,12 @@ mod tests {
         // df/N/avgdl and therefore the ranks of the scopes they did search.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("a", "gen1", &[chunk("x", "alpha")], 1)
+            .refresh_scope("a", "gen1", &[chunk("x", "alpha")], &[], 1)
             .unwrap();
         let before = index.collection_generation().unwrap();
 
         index
-            .refresh_scope("a", "gen1", &[chunk("x", "alpha")], 2)
+            .refresh_scope("a", "gen1", &[chunk("x", "alpha")], &[], 2)
             .unwrap();
         assert_eq!(
             index.collection_generation().unwrap(),
@@ -1073,7 +1328,7 @@ mod tests {
         );
 
         index
-            .refresh_scope("unsearched", "gen1", &[chunk("y", "beta")], 3)
+            .refresh_scope("unsearched", "gen1", &[chunk("y", "beta")], &[], 3)
             .unwrap();
         let after_new_scope = index.collection_generation().unwrap();
         assert_ne!(
@@ -1082,7 +1337,7 @@ mod tests {
         );
 
         index
-            .refresh_scope("a", "gen2", &[chunk("x", "alpha")], 4)
+            .refresh_scope("a", "gen2", &[chunk("x", "alpha")], &[], 4)
             .unwrap();
         assert_ne!(
             index.collection_generation().unwrap(),
@@ -1097,7 +1352,13 @@ mod tests {
         // then outranks a correctly-scored chunk.
         let (_dir, mut index) = store();
         index
-            .refresh_scope("s", "g", &[vectored("wrong", "x", vec![1.0, 0.0, 0.0])], 1)
+            .refresh_scope(
+                "s",
+                "g",
+                &[vectored("wrong", "x", vec![1.0, 0.0, 0.0])],
+                &[],
+                1,
+            )
             .unwrap();
         assert!(index
             .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)

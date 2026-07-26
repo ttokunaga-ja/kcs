@@ -609,7 +609,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 `kio repair rebuild-db` の再構築順 (`objects/` → `embeddings` → `chunk_vec`) にも
 `image_vec` を追加する。
 
-#### U4 画像ヒットの結果行 — `payload_uri` と `evidence_pointer` の分離 [P0]
+#### U4 画像ヒットの結果行 — `payload_uri` と `evidence_pointer` の分離 [P0] ✅ 2026-07-26 実装
 §4.1 の裁定を実装する。
 
 - `result_type: "image"`
@@ -629,13 +629,42 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 既存の `kio open` / restore / `evidence verify` 経路がそのまま動く。ただし §7.1 の古い
 検索結果例は Stage 0 で正本への参照に置き換えた (`preview` field が実在しなかった)。
 
-#### U5 ランキング — 問題 A (RRF の構造的不利) の解消 [P0]
+#### U5 ランキング — 問題 A (RRF の構造的不利) の解消 [P0] ✅ 2026-07-26 実装
 §4.2 問題 A の対処案 (a) を実装する: 画像の text lane 表現 (参照元 chunk 本文 / alt / caption) を
-FTS に載せ、画像も 2 lane から reciprocal rank を得られるようにする。
+与え、画像も 2 lane から reciprocal rank を得られるようにする。
 
-#### U6 ランキング — 問題 B (`max_per_raw_hash` / MMR) の実装 [P0]
+> **実装時の裁定 (2026-07-26)**: 「**FTS に載せる**」という当初の書き方は採らず、
+> **参照元 chunk の text rank を継承させた**。結果として得られる順位は (a) と同一だが、
+> FTS へ重複 document を入れる方は **BM25 のコーパス統計を壊す** —
+> 画像 1 件につき `N` が増え、その本文に含まれる全 term の `df` が増え、`avgdl` がずれるため、
+> **ある文書に図を足すと無関係な text ヒットの順位が動く**。これは
+> [05 §1.8](../docs/05-runtime.md) が replica を導入して除去した欠陥そのものであり、
+> 一段下の層で再導入することになる。継承なら (a) の言う「画像の text lane 表現は
+> 参照元 chunk 本文である」を満たしたままコーパスに触れない。
+>
+> alt/caption を採らなかった理由も併記する: OCR が書く alt は `img-0` のような
+> 機械生成ラベルで、検索語と一致しない ([07 §5.2](../docs/07-adapter-spec.md) の置換は
+> alt を保存するだけで内容を保証しない)。
+>
+> 継承は 2 箇所にある。per-scope は text rank 表への挿入 (参照元 chunk の直後 —
+> `fuse_rrf` の `take(candidate_depth)` 窓から落ちないため)、replica 経路は
+> `apply_global_ranks` が text lane を **参照元 chunk_hash で引く**ことで同じ規則になる。
+> vector lane だけは行自身の identity で引く (画像は自分の vector で順位が付くため)。
+
+#### U6 ランキング — 問題 B (`max_per_raw_hash` / MMR) の実装 [P0] ✅ 2026-07-26 実装
 §4.2 問題 B。**裁定は Stage 0 で確定済み** ([05 §1.4](../docs/05-runtime.md) へ反映)。
 本項に残るのは実装のみ。
+
+> **実装時の所見 (2026-07-26)**: 「型で分岐させない」という Stage 0 の裁定が正しかったことが
+> 実装で裏付けられた。**`diversify_merged` / `mmr.rs` は 1 行も変えていない。**
+> image 行が `meta` に参照元 chunk のものを持ち `embedding` に自分の vector を持つだけで、
+> `max_per_raw_hash` の計数先も MMR の無効化条件も pairwise cosine も自動的に規約どおりになる。
+> MMR の候補 id は既に `"{index}\0{chunk_hash}"` の合成キーなので、
+> image 行と参照元 chunk が同じ `chunk_hash` を持っても衝突しない。
+>
+> 一方 **`chunk_hash` を行の identity として使っていた層は分離が必要だった** —
+> vector lane のキー、および最終ソートの tie-break。ここだけ `ResultPayload::row_id()`
+> (chunk なら chunk_hash、image なら image_hash) を使う。
 
 - **`max_per_raw_hash` は同枠**。画像専用の quota も lane も作らない。cap の目的
   (同一原文が上位を独占しない) は結果が chunk か image かで変わらないため。
@@ -751,6 +780,15 @@ tool_lock.rs ゲート解放        related_images[] — 画像埋め込み不�
    └─────────────┬───────────────┘
                  ↓
 Stage 2 (段階 B・U1-U11)  local_embedding.rs + 画像埋め込み + ランキング問題 A/B
+   ├ U1  ✅ role dispatch + mock offline adapter (Chunk B)
+   ├ U3  ✅ image_vec + 書き込み / rebuild / purge (C1)
+   ├ U4/V6 ✅ result_type / payload_uri / 参照元 chunk の逆引き (C2)
+   ├ U5  ✅ 問題 A — 参照元 chunk の text rank 継承 (C2)
+   ├ U6  ✅ 問題 B — 同枠 quota / 型非依存 MMR (C2、既存コード無改修)
+   ├ U2  ⏳ 実 vLLM の messages 配線 — V4 (chat template 実測) 待ち
+   ├ U7  ⏳ image/text 同一空間の数値一致検査 — 実モデル待ち
+   └ U8  — image_object_hashes の writer — C1 が chunk 本文の逆引きで代替。
+          埋め込み対象の列挙としては不要になった (writer なき宣言は残る)
                  ↓
 Stage 3           local_ocr_markdownize.rs (PaddleOCR-VL 既定 / Sarashina 任意)
                  ↓

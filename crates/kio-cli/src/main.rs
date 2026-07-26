@@ -1875,12 +1875,72 @@ struct ExecScope {
     from_cursor: bool,
 }
 
+/// What a result row POINTS AT — 05 §1.7's `result_type` (2026-07-26).
+///
+/// The distinction is not cosmetic. An image row and the chunk row that cites
+/// it carry the SAME `chunk_hash`, because 05 §1.7 anchors an image's
+/// `evidence_pointer` to its referencing chunk (an object URI has no commit,
+/// tree or path, so it satisfies neither time-travel nor `evidence verify`).
+/// So `chunk_hash` stopped being a row identity the moment images could rank:
+/// it is what the row CITES, and this is what the row IS.
+///
+/// Everything downstream keeps working off `chunk_hash` on purpose — the
+/// evidence pointer, `max_per_raw_hash`'s counting key (05 §1.4: "1 result 行 =
+/// 1 evidence_pointer = 1 raw_hash"), the alias expansion, and the MMR
+/// tie-break all want the citing chunk. Only two things want the row's own
+/// identity: the vector rank (an image is ranked by ITS vector, not the
+/// chunk's) and `payload_uri`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResultPayload {
+    /// The row is the chunk its pointer names; `evidence_uri` already points
+    /// at the payload, so 05 §1.7 omits `payload_uri` here.
+    Chunk,
+    /// The row is an image object cited by that chunk.
+    Image {
+        /// `objects/image/` content hash — the `image_vec` key.
+        image_hash: String,
+        /// The URI **exactly as the chunk body writes it** (05 §1.7): never
+        /// re-derived from the live `scope_id`, so a fork copy carrying the
+        /// original scope's id round-trips unchanged and stays resolvable by
+        /// hash.
+        image_uri: String,
+    },
+}
+
+impl ResultPayload {
+    /// 05 §1.7's `result_type`, which is required on every row.
+    fn result_type(&self) -> &'static str {
+        match self {
+            Self::Chunk => "chunk",
+            Self::Image { .. } => kio_search::object_uri::IMAGE_OBJECT_TYPE,
+        }
+    }
+
+    /// The row's own identity in the ranking pipeline, distinct from the
+    /// `chunk_hash` it cites. Used as the vector lane's key and as the final
+    /// sort's last tie-break, so an image and its citing chunk can never
+    /// collapse into one another.
+    fn row_id<'a>(&'a self, chunk_hash: &'a str) -> &'a str {
+        match self {
+            Self::Chunk => chunk_hash,
+            Self::Image { image_hash, .. } => image_hash,
+        }
+    }
+}
+
 /// A candidate that survived per-scope RRF, carried into the cross-scope merge.
 struct ScoredCandidate {
     scope_index: usize,
     scope_id: String,
     scope_path: PathBuf,
+    /// The chunk this row CITES — for a `ResultPayload::Image` row that is the
+    /// referencing chunk V6 chose, not the row's own identity. See
+    /// [`ResultPayload`].
     chunk_hash: String,
+    /// 05 §1.7: what this row points at. `Chunk` for every row until image
+    /// embedding existed, which is why so much of the pipeline keys on
+    /// `chunk_hash` alone.
+    payload: ResultPayload,
     rrf_score: f64,
     /// This candidate's per-scope text/vector backend ranks (from `fuse_rrf`),
     /// carried up so the cross-scope merge can re-fuse the VECTOR backend by a
@@ -2094,9 +2154,9 @@ fn global_ranks_for(
     let projections = multi_scope::run_ordered(stale.len(), settings, |index, _deadline| {
         collect_scope_projection(&stale[index].scope_path)
     });
-    for (scope, projection) in stale.iter().zip(projections) {
-        let chunks = match projection {
-            multi_scope::ScopeExecution::Completed(Ok(chunks)) => chunks,
+    for (scope, execution) in stale.iter().zip(projections) {
+        let projection = match execution {
+            multi_scope::ScopeExecution::Completed(Ok(projection)) => projection,
             multi_scope::ScopeExecution::Completed(Err(error)) => {
                 // A scope we cannot read is one we cannot account for in the
                 // collection statistics, so the collection is not the corpus
@@ -2110,9 +2170,13 @@ fn global_ranks_for(
                 return Err("scope_read_timeout".to_owned());
             }
         };
-        if let Err(error) =
-            replica.refresh_scope(&scope.scope_id, &scope.index_generation, &chunks, now_ms)
-        {
+        if let Err(error) = replica.refresh_scope(
+            &scope.scope_id,
+            &scope.index_generation,
+            &projection.chunks,
+            &projection.images,
+            now_ms,
+        ) {
             log_aggregator_degraded(&format!("refresh {} failed: {error}", scope.scope_id));
             return Err("refresh_failed".to_owned());
         }
@@ -2150,16 +2214,27 @@ fn global_ranks_for(
         }
     }
     if let Some(query_vec) = query_vec {
-        match replica.vector_scores(query_vec, &participating, depth) {
-            Ok(scores) => {
-                ranks.vector = kio_index::aggregator::vector_ranks(&scores);
-                ranks.scored_vector = true;
-            }
+        // Chunk and image scores are ranked as ONE sequence, the same merge the
+        // per-scope lane does (`merge_vector_lane`) and for the same reason:
+        // 03 §7 fixes one multimodal space, so two rank sequences would give
+        // each its own rank 1 and reintroduce, between the two tables, the
+        // scale mixture the replica exists to remove (05 §1.8).
+        let mut scores = match replica.vector_scores(query_vec, &participating, depth) {
+            Ok(scores) => scores,
             Err(error) => {
                 log_aggregator_degraded(&format!("vector score failed: {error}"));
                 return Err("vector_score_failed".to_owned());
             }
+        };
+        match replica.image_vector_scores(query_vec, &participating, depth) {
+            Ok(images) => scores.extend(images),
+            Err(error) => {
+                log_aggregator_degraded(&format!("image vector score failed: {error}"));
+                return Err("image_vector_score_failed".to_owned());
+            }
         }
+        ranks.vector = kio_index::aggregator::vector_ranks(&scores);
+        ranks.scored_vector = true;
     }
     if !ranks.scored_text && !ranks.scored_vector {
         // Unreachable while `aggregator_decline_reason` gates the call — it
@@ -2169,6 +2244,19 @@ fn global_ranks_for(
         return Err("no_lane_scored".to_owned());
     }
     Ok(ranks)
+}
+
+/// One scope's live rows for the replica: the text collection and the image
+/// vectors that hang off it.
+///
+/// Two lists rather than one because they are not the same kind of row. Every
+/// chunk counts toward BM25's `N`/`df`/`avgdl` whether or not it has a vector;
+/// an image counts toward nothing and exists here only to be cosine-ranked
+/// (05 §1.7 / U5 — an image's text-lane standing is inherited from the chunk
+/// that cites it, never indexed as a document of its own).
+struct ScopeProjection {
+    chunks: Vec<kio_index::aggregator::AggChunk>,
+    images: Vec<kio_index::aggregator::AggImage>,
 }
 
 /// Project one scope's live chunks into the replica.
@@ -2186,7 +2274,7 @@ fn global_ranks_for(
 /// reason: `rebuild_chunk_vec` has already resolved which of several rows
 /// sharing a `text_hash` is this chunk's (07 §5.3 contextual embedding), and
 /// re-running that choice here would be the same duplication one level over.
-fn collect_scope_projection(kio_dir: &Path) -> Result<Vec<kio_index::aggregator::AggChunk>> {
+fn collect_scope_projection(kio_dir: &Path) -> Result<ScopeProjection> {
     let db = kio_dir.join("index/sqlite.db");
     // `chunk_vec` is a vec0 virtual table, so the extension must be live on
     // this connection before the table can be opened.
@@ -2215,7 +2303,10 @@ fn collect_scope_projection(kio_dir: &Path) -> Result<Vec<kio_index::aggregator:
     // rule of its own.
     let repo = Repository::open(kio_dir.parent().unwrap_or(kio_dir))?;
     let Some(head) = repo.head_commit_hash()? else {
-        return Ok(Vec::new());
+        return Ok(ScopeProjection {
+            chunks: Vec::new(),
+            images: Vec::new(),
+        });
     };
     let plan = current_history_plan_from_cache(&conn, &head)?;
     install_eligible_identities(&conn, &plan)?;
@@ -2261,7 +2352,45 @@ fn collect_scope_projection(kio_dir: &Path) -> Result<Vec<kio_index::aggregator:
     for row in rows {
         chunks.push(row.map_err(|error| KioError::schema(format!("aggregator row: {error}")))?);
     }
-    Ok(chunks)
+    drop(stmt);
+
+    // The image half. Liveness is not re-derived here either: an image is live
+    // exactly when some live chunk still cites it, and `chunks` above IS the
+    // live set — so the work is reading their bodies with the same parser the
+    // per-scope reverse lookup uses, not writing a second rule.
+    //
+    // Skipped outright when the scope predates `image_vec`: every read would
+    // fail on the missing table, once per cited figure, for a projection that
+    // could only ever be empty.
+    if !table_exists(&conn, "image_vec")? {
+        return Ok(ScopeProjection {
+            chunks,
+            images: Vec::new(),
+        });
+    }
+    let referenced = chunks
+        .iter()
+        .flat_map(|chunk| extract_related_images(&chunk.text))
+        .filter_map(|image| {
+            kio_search::object_uri::parse_object_uri(&image.image_uri)
+                .ok()
+                .filter(|object| object.is_image())
+                .map(|object| object.hash().to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut images = Vec::new();
+    for image_hash in referenced {
+        // A cited image with no vector yet contributes nothing to either lane —
+        // unlike a chunk, which still counts toward the text statistics.
+        if let Ok(Some(vector)) = kio_index::embedding_store::read_image_vector(&conn, &image_hash)
+        {
+            images.push(kio_index::aggregator::AggImage {
+                image_id: image_hash,
+                embedding: vector,
+            });
+        }
+    }
+    Ok(ScopeProjection { chunks, images })
 }
 
 /// Bookkeeping only — `index_generation` decides staleness, so a clock that
@@ -2317,12 +2446,18 @@ fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
     let Some((scope_id, generation)) = replica_scope_stamp(kio_dir) else {
         return Ok(());
     };
-    let chunks = collect_scope_projection(kio_dir)
+    let projection = collect_scope_projection(kio_dir)
         .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
     let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
         .map_err(|error| format!("write-through open failed: {error}"))?;
     replica
-        .refresh_scope(&scope_id, &generation, &chunks, replica_now_ms())
+        .refresh_scope(
+            &scope_id,
+            &generation,
+            &projection.chunks,
+            &projection.images,
+            replica_now_ms(),
+        )
         .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
 }
 
@@ -2411,12 +2546,23 @@ fn publish_in_place_delta(
 /// carried — that lane was never re-based, so there are no two scales to mix.
 fn apply_global_ranks(candidates: &mut [ScoredCandidate], ranks: &GlobalRanks, config: RrfConfig) {
     for candidate in candidates.iter_mut() {
-        let key = (candidate.scope_id.clone(), candidate.chunk_hash.clone());
+        // The two lanes key differently on purpose. The text lane is keyed by
+        // the CITING chunk, which for an image row is U5's inheritance rule
+        // restated at collection scale — an image has no text of its own and
+        // deliberately contributes none to the corpus. The vector lane is keyed
+        // by the row's OWN identity, because an image is ranked by ITS vector.
+        // Keying both the same way would have made an image inherit its chunk's
+        // cosine standing and rank identically to it forever.
+        let text_key = (candidate.scope_id.clone(), candidate.chunk_hash.clone());
+        let vector_key = (
+            candidate.scope_id.clone(),
+            candidate.payload.row_id(&candidate.chunk_hash).to_owned(),
+        );
         if ranks.scored_text && candidate.text_rank.is_some() {
-            candidate.text_rank = ranks.text.get(&key).copied();
+            candidate.text_rank = ranks.text.get(&text_key).copied();
         }
         if ranks.scored_vector && candidate.vector_rank.is_some() {
-            candidate.vector_rank = ranks.vector.get(&key).copied();
+            candidate.vector_rank = ranks.vector.get(&vector_key).copied();
         }
         let text_term = candidate
             .text_rank
@@ -3530,6 +3676,17 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             .total_cmp(&a.rrf_score)
             .then_with(|| a.scope_id.as_bytes().cmp(b.scope_id.as_bytes()))
             .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
+            // 05 §1.7 puts the CITING chunk's pointer on an image row, so an
+            // image and its chunk reach here with the same `chunk_hash` and the
+            // documented `(scope_id, chunk_hash)` key no longer separates them.
+            // Falling through to the row's own identity keeps the order a
+            // function of content rather than of pool arrival, which is what
+            // pagination (§1.5) needs. Chunk-only pools never reach this arm.
+            .then_with(|| {
+                a.payload
+                    .row_id(&a.chunk_hash)
+                    .cmp(b.payload.row_id(&b.chunk_hash))
+            })
     });
 
     // Diversify the merged pool once (05 §1.8 step 4). Text-only -> MMR is skipped;
@@ -3723,19 +3880,37 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         })
         .map_err(search_to_kio)?;
         let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kio)?;
+        // 05 §1.7: every row declares what it points at, and `evidence_pointer`
+        // is a CHUNK's either way — an object URI carries no commit, tree or
+        // path, so it satisfies neither time-travel nor `evidence verify`.
         let mut result = json!({
-            // 05 §1.7: every row declares what it points at. Only chunk rows
-            // exist today; image rows arrive with the image-embedding lane and
-            // additionally carry `payload_uri`.
-            "result_type": "chunk",
+            "result_type": candidate.payload.result_type(),
             "chunk_hash": candidate.chunk_hash,
             "evidence_pointer": pointer,
             "evidence_uri": uri,
             "score": candidate.rrf_score,
             "scope_path": candidate.scope_path,
             "title": binding.path_at_commit,
-            "snippet": candidate.meta.text.chars().take(200).collect::<String>(),
         });
+        match &candidate.payload {
+            ResultPayload::Chunk => {
+                // The payload IS this chunk, so `evidence_uri` already points at
+                // it and 05 §1.7 omits `payload_uri` here.
+                result["snippet"] =
+                    json!(candidate.meta.text.chars().take(200).collect::<String>());
+            }
+            ResultPayload::Image { image_uri, .. } => {
+                // What the Agent opens to get the bytes. Never base64 — 05 §1.7
+                // is explicit that the response passes URIs, since inlining
+                // images would hit the Agent's context and cost directly and
+                // contradict a contract that otherwise returns pointers.
+                result["payload_uri"] = json!(image_uri);
+                // No `snippet`: its documented meaning is the start of THIS
+                // row's chunk body, and this row is not a chunk. The citing
+                // text is reachable through the chunk row that carries the same
+                // pointer, where it means what it says.
+            }
+        }
         if time_selector.all_history() && !binding.current_paths.is_empty() {
             result["current_paths"] = json!(binding.current_paths);
             if let Some(current_path) = binding.current_path() {
@@ -3747,9 +3922,16 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // index lookup and no existence check (a purged image may still be
         // named here; `kio open`'s purge barrier is what terminates that).
         // Omitted entirely when empty, like `current_paths` above.
-        let related_images = extract_related_images(&candidate.meta.text);
-        if !related_images.is_empty() {
-            result["related_images"] = json!(related_images);
+        //
+        // Chunk rows only. 05 §1.7 defines the field as "この chunk 本文が参照
+        // している画像の列挙", and on an image row the enumeration would be of
+        // the CITING chunk's figures — including this row's own payload, which
+        // is already `payload_uri`.
+        if candidate.payload == ResultPayload::Chunk {
+            let related_images = extract_related_images(&candidate.meta.text);
+            if !related_images.is_empty() {
+                result["related_images"] = json!(related_images);
+            }
         }
         results.push(result);
     }
@@ -4446,17 +4628,19 @@ fn search_one_scope_inner(
 
     // FTS5 text ranks (empty when the query has no indexable token). Vector-only
     // mode skips the text backend entirely (05 §1.3: no fusion, use vector order).
-    let (text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
+    let (mut text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
         (Vec::new(), BTreeMap::new())
     } else {
         fts_scope_search(&conn, match_expr, filter).map_err(ScopeSearchError::Fatal)?
     };
     scope_deadline_check(deadline)?;
 
-    // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
+    // Vector lane: `chunk_vec` and `image_vec` KNN merged into ONE rank order
+    // (hybrid/vector mode with a query embedding).
+    let mut image_rows = BTreeMap::<String, ImageCandidate>::new();
     let vector_ranks = if want_vector {
         if let Some(query_vec) = query_embedding {
-            let (ranks, vmeta) = match vector_scope_search(&conn, query_vec, filter) {
+            let (chunk_hits, vmeta) = match vector_scope_search(&conn, query_vec, filter) {
                 Ok(result) => result,
                 // R10-1(a): a sqlite-vec capacity limit degrades THIS scope's vector
                 // backend to text-only (05 §1.8 per-scope isolation) instead of a
@@ -4471,7 +4655,10 @@ fn search_one_scope_inner(
             for (chunk_id, chunk_meta) in vmeta {
                 meta.entry(chunk_id).or_insert(chunk_meta);
             }
-            ranks
+            let (image_hits, rows) = image_vector_scope_search(&conn, query_vec, filter)
+                .map_err(ScopeSearchError::Fatal)?;
+            image_rows = rows;
+            merge_vector_lane(chunk_hits, image_hits, rrf_config.candidate_depth)
         } else {
             Vec::new()
         }
@@ -4479,6 +4666,11 @@ fn search_one_scope_inner(
         Vec::new()
     };
     scope_deadline_check(deadline)?;
+
+    // U5 / 問題 A: give every image candidate the text-lane standing of the
+    // chunk that cites it, so RRF stops adding two reciprocal terms for a chunk
+    // and one for an image.
+    give_images_their_chunks_text_rank(&mut text_ranks, &image_rows);
 
     // R12-1: fuse with the effective `[search.rrf]` (was hardcoded 60/1/1/200).
     let mut fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
@@ -4500,15 +4692,40 @@ fn search_one_scope_inner(
     let mut candidates = Vec::new();
     for candidate in fused {
         scope_deadline_check(deadline)?;
-        let Some(chunk_meta) = meta.get(&candidate.chunk_hash) else {
-            continue;
+        // `fuse_rrf` keyed this row by its OWN identity, which for an image is
+        // the object hash and not a chunk hash — so the image map is consulted
+        // first, and only a miss means "this is a chunk".
+        let (payload, chunk_hash, chunk_meta) = match image_rows.get(&candidate.chunk_hash) {
+            Some(image) => (
+                ResultPayload::Image {
+                    image_hash: image.image_hash.clone(),
+                    image_uri: image.image_uri.clone(),
+                },
+                image.chunk_hash.clone(),
+                image.meta.clone(),
+            ),
+            None => match meta.get(&candidate.chunk_hash) {
+                Some(chunk_meta) => (
+                    ResultPayload::Chunk,
+                    candidate.chunk_hash.clone(),
+                    chunk_meta.clone(),
+                ),
+                None => continue,
+            },
         };
-        // In hybrid/vector mode, carry the chunk's embedding so MMR can run
-        // (05 §1.4). Text mode leaves this `None` (MMR skips, dedup only).
+        // In hybrid/vector mode, carry the row's OWN embedding so MMR can run
+        // (05 §1.4). Text mode leaves this `None` (MMR skips, dedup only). An
+        // image reads `image_vec`: 03 §7 fixes one multimodal space, so the two
+        // are directly comparable and MMR needs no type branch (05 §1.4).
         let embedding = if want_vector {
-            embedding_store::read_chunk_vector(&conn, &candidate.chunk_hash)
-                .ok()
-                .flatten()
+            match &payload {
+                ResultPayload::Chunk => embedding_store::read_chunk_vector(&conn, &chunk_hash),
+                ResultPayload::Image { image_hash, .. } => {
+                    embedding_store::read_image_vector(&conn, image_hash)
+                }
+            }
+            .ok()
+            .flatten()
         } else {
             None
         };
@@ -4520,7 +4737,8 @@ fn search_one_scope_inner(
             // relayed unchanged into both `results[].scope_path` and the
             // Evidence Pointer issue request's `scope_path` hint below.
             scope_path: exec.target.kio_dir.clone(),
-            chunk_hash: candidate.chunk_hash,
+            chunk_hash,
+            payload,
             rrf_score: candidate.rrf_score,
             text_rank: candidate.text_rank,
             vector_rank: candidate.vector_rank,
@@ -4814,6 +5032,14 @@ fn resolve_target_chunking_config_hash(
     Ok(resolved.unwrap_or_else(|| live_chunking_config_hash.to_owned()))
 }
 
+/// One vector backend's hits as `(row identity, cosine distance)`, nearest
+/// first — the row identity being a `chunk_id` from `chunk_vec` or an image
+/// object hash from `image_vec`.
+///
+/// Distances rather than ranks, because the two backends are merged into one
+/// rank sequence before anything downstream sees them ([`merge_vector_lane`]).
+type VectorLaneHits = Vec<(String, f64)>;
+
 /// Per-scope vector backend: brute-force cosine distance over `chunk_vec`,
 /// joined to `chunks` and filtered by the SAME eligibility predicate the text
 /// backend uses (PC16 — eligibility applies BEFORE the distance ordering and
@@ -4823,13 +5049,20 @@ fn resolve_target_chunking_config_hash(
 /// `float[dim] distance_metric=cosine` vec0 declaration), so `vec0`'s own KNN
 /// query is *already* an unindexed linear scan under the hood — routing
 /// through the `vec_distance_cosine` scalar function directly instead costs
-/// nothing extra and lets the eligibility `WHERE` run first. Ranks are
-/// 1-based over the (distance, chunk_id) order.
+/// nothing extra and lets the eligibility `WHERE` run first.
+///
+/// It returns DISTANCES rather than 1-based ranks, because the vector lane has
+/// two physical tables now (`chunk_vec` and `image_vec`) and exactly one vector
+/// space (03 §7 / 04 §4.3 — "物理分割は sqlite-vec の制約であって意味的分離では
+/// ない"). Ranking each table separately would let an image at cosine distance
+/// 0.4 tie the best chunk in the corpus for rank 1; [`merge_vector_lane`]
+/// assigns the ranks over the union of the two, which is the one lane the spec
+/// describes. The `(distance, chunk_id)` order this returns is unchanged.
 fn vector_scope_search(
     conn: &Connection,
     query_embedding: &[f32],
     filter: ScopeQueryFilter<'_>,
-) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+) -> Result<(VectorLaneHits, BTreeMap<String, ChunkMeta>)> {
     if query_embedding.len() != CHUNK_VEC_DIMENSIONS {
         return Ok((Vec::new(), BTreeMap::new()));
     }
@@ -4850,10 +5083,14 @@ fn vector_scope_search(
     // anonymous (`?`, not `?N`) so the dynamic `short_token_clause` can carry
     // a variable number of its own without renumbering the fixed ones —
     // `bound` (below) supplies values in the SAME order they appear in the
-    // text.
+    // text. That is why the query vector now binds FIRST: its
+    // `vec_distance_cosine` moved into the SELECT list so the caller can read
+    // the distance, and `ORDER BY` refers to the output alias rather than
+    // repeating the expression — one bind, one evaluation, same order.
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen,
+                vec_distance_cosine(cv.embedding, ?) AS kio_distance
          FROM chunk_vec cv
          JOIN chunks c ON c.chunk_id = cv.chunk_id
          WHERE c.first_seen_commit IS NOT NULL
@@ -4874,7 +5111,7 @@ fn vector_scope_search(
              AND (? IS NULL OR c.created_at >= ?)
              {ancestor_clause}
              {short_token_clause}
-         ORDER BY vec_distance_cosine(cv.embedding, ?), c.chunk_id
+         ORDER BY kio_distance, c.chunk_id
          LIMIT ?",
         config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
         ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
@@ -4891,6 +5128,7 @@ fn vector_scope_search(
     // (above) expects — see `short_token_bind_values`.
     let short_token_forms = short_token_bind_values(filter.short_tokens);
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+        &query_bytes,
         &max_rowid_i64,
         &filter.chunking_config_hash,
         &max_association_rowid_i64,
@@ -4900,9 +5138,11 @@ fn vector_scope_search(
     for form in &short_token_forms {
         bound.push(form);
     }
-    bound.push(&query_bytes);
     bound.push(&candidate_depth_i64);
-    let rows = stmt.query_map(rusqlite::params_from_iter(bound), chunk_meta_row);
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |row| {
+        let (chunk_id, chunk_meta) = chunk_meta_row(row)?;
+        Ok((chunk_id, chunk_meta, row.get::<_, f64>(9)?))
+    });
     let rows = match rows {
         Ok(rows) => rows,
         Err(err) if is_vector_capacity_message(&err.to_string()) => {
@@ -4911,23 +5151,300 @@ fn vector_scope_search(
         Err(err) => return Err(KioError::schema(err.to_string())),
     };
 
-    let mut ranks = Vec::new();
+    let mut hits = Vec::new();
     let mut meta = BTreeMap::new();
-    for (index, row) in rows.enumerate() {
-        let (chunk_id, chunk_meta) = match row {
+    for row in rows {
+        let (chunk_id, chunk_meta, distance) = match row {
             Ok(value) => value,
             Err(err) if is_vector_capacity_message(&err.to_string()) => {
                 return Err(vector_capacity_error())
             }
             Err(err) => return Err(KioError::schema(err.to_string())),
         };
-        ranks.push(BackendRank {
-            chunk_hash: chunk_id.clone(),
-            rank: index as u64 + 1,
-        });
+        hits.push((chunk_id.clone(), distance));
         meta.insert(chunk_id, chunk_meta);
     }
-    Ok((ranks, meta))
+    Ok((hits, meta))
+}
+
+/// Rank `chunk_vec` and `image_vec` hits as the single vector lane they are.
+///
+/// 03 §7 fixes ONE multimodal embedding space and 04 §4.3 says so explicitly of
+/// these two tables: the split is sqlite-vec's one-primary-key-type-per-table
+/// constraint, not a semantic boundary. So the cosine distances are directly
+/// comparable, and merging them before ranks are assigned is what stops the
+/// nearest image in the corpus from tying the nearest chunk for rank 1 no
+/// matter how far away it actually is.
+///
+/// Ordering is `(distance, id)` — the same shape as each backend's own
+/// `ORDER BY`, which keeps a chunk-only corpus byte-identical to what it
+/// produced before images existed. Ids are content hashes from different byte
+/// streams, so the second key is a total order in practice as well as in form.
+fn merge_vector_lane(
+    chunk_hits: VectorLaneHits,
+    image_hits: VectorLaneHits,
+    candidate_depth: u64,
+) -> Vec<BackendRank> {
+    if image_hits.is_empty() {
+        return chunk_hits
+            .into_iter()
+            .enumerate()
+            .map(|(index, (id, _))| BackendRank {
+                chunk_hash: id,
+                rank: index as u64 + 1,
+            })
+            .collect();
+    }
+    let mut merged = chunk_hits;
+    merged.extend(image_hits);
+    merged.sort_by(|left, right| {
+        left.1
+            .total_cmp(&right.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    merged.truncate(candidate_depth as usize);
+    merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, _))| BackendRank {
+            chunk_hash: id,
+            rank: index as u64 + 1,
+        })
+        .collect()
+}
+
+/// U5 / §4.2 問題 A: an image has no text-lane presence of its own, so RRF adds
+/// two reciprocal terms for a chunk and one for an image — images sink
+/// structurally, whatever the vector lane thinks of them.
+///
+/// The fix is the plan's option (a) — "画像に text 表現を与える", using the body
+/// of the chunk that cites it — implemented by **inheriting that chunk's rank
+/// rather than indexing a copy of its text**.
+///
+/// Indexing a duplicate FTS document was the literal reading and is the wrong
+/// one. BM25's statistics are corpus-wide: an extra document per image inflates
+/// `N`, inflates `df` for every term in an image-bearing body, and shifts
+/// `avgdl` — so adding figures to one document would quietly re-rank every
+/// unrelated text hit on the device. That is the exact defect 05 §1.8 built the
+/// replica to remove, and it would be reintroduced one layer down. Inheritance
+/// gets the identical ranking outcome (the image's text-lane standing IS its
+/// citing chunk's, which is what option (a) says) while leaving the corpus
+/// alone.
+///
+/// The entry is inserted immediately AFTER its chunk so the list stays in rank
+/// order for `fuse_rrf`'s `take(candidate_depth)` window — appending at the end
+/// would drop every image's text term as soon as the text lane was full.
+fn give_images_their_chunks_text_rank(
+    text_ranks: &mut Vec<BackendRank>,
+    image_rows: &BTreeMap<String, ImageCandidate>,
+) {
+    if image_rows.is_empty() || text_ranks.is_empty() {
+        return;
+    }
+    let mut by_chunk = BTreeMap::<&str, Vec<&ImageCandidate>>::new();
+    for image in image_rows.values() {
+        by_chunk
+            .entry(image.chunk_hash.as_str())
+            .or_default()
+            .push(image);
+    }
+    let mut widened = Vec::with_capacity(text_ranks.len());
+    for entry in text_ranks.iter() {
+        widened.push(entry.clone());
+        for image in by_chunk
+            .get(entry.chunk_hash.as_str())
+            .into_iter()
+            .flatten()
+        {
+            widened.push(BackendRank {
+                chunk_hash: image.image_hash.clone(),
+                rank: entry.rank,
+            });
+        }
+    }
+    *text_ranks = widened;
+}
+
+/// Whether this index has `name` at all — the question an index written by an
+/// older build makes necessary.
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1)",
+        rusqlite::params![name],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|found| found != 0)
+    .map_err(|error| KioError::schema(error.to_string()))
+}
+
+/// One image object that can be returned as a search result (05 §1.7).
+#[derive(Clone)]
+struct ImageCandidate {
+    /// The `image_vec` key — this row's own identity.
+    image_hash: String,
+    /// The URI as the referencing body writes it, never re-derived (05 §1.7).
+    image_uri: String,
+    /// V6's choice of referencing chunk, whose pointer this row will carry.
+    chunk_hash: String,
+    meta: ChunkMeta,
+}
+
+/// V6 (05 §1.7): for every image object referenced by a chunk this search can
+/// return, the referencing chunk with the **lowest `chunk_hash` in UTF-8 byte
+/// order**.
+///
+/// # Why the search's own filter and not a bare table scan
+///
+/// "逆引きの探索範囲は検索対象 commit に限る" — `chunks` rows are never deleted
+/// except by purge, so an unrestricted lookup would happily anchor an image to
+/// a chunk of a superseded chunking generation or of a file deleted three
+/// commits ago. [`ScopeQueryFilter`] is the same predicate bundle both backends
+/// use, so the reverse lookup inherits whatever the search is scoped to
+/// (`--at`, `--since`, the cursor's frozen rowid bounds) rather than restating
+/// it and drifting.
+///
+/// # Why one scan rather than one query per image
+///
+/// The narrowing predicate is a single `instr` for the marker every image URI
+/// contains, so a corpus with no figures pays one cheap pass over the eligible
+/// rows and parses nothing. Per-image queries would each be a full scan — a
+/// vector lane returning `candidate_depth` images would run 200 of them.
+///
+/// `ORDER BY c.chunk_id` is what makes the FIRST writer the V6 winner:
+/// `chunk_id` is the chunk object's `chunk_hash` (04 §4.1) and SQLite's default
+/// TEXT collation is BINARY, i.e. UTF-8 byte order. The rejected alternative was
+/// rowid order — `index/sqlite.db` is a rebuildable cache (04 §4.3), so a
+/// citation an Agent stored would point somewhere else after `repair
+/// rebuild-db`.
+fn referencing_chunks_for_images(
+    conn: &Connection,
+    filter: ScopeQueryFilter<'_>,
+) -> Result<BTreeMap<String, ImageCandidate>> {
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+         FROM chunks c
+         WHERE c.first_seen_commit IS NOT NULL
+             AND c.rowid <= ?
+             AND EXISTS (
+                 SELECT 1 FROM chunk_config_generations cg
+                 WHERE cg.chunk_id = c.chunk_id
+                   AND cg.chunking_config_hash = ?
+                   AND cg.association_rowid <= ?
+                   {config_ancestor_clause}
+             )
+             AND EXISTS (
+                 SELECT 1 FROM kio_eligible_identity eligible
+                 WHERE eligible.raw_hash = c.raw_hash
+                   AND eligible.tool_profile_hash = c.tool_profile_hash
+                   AND eligible.gen = c.gen
+             )
+             AND (? IS NULL OR c.created_at >= ?)
+             AND instr(c.text, ?) > 0
+             {ancestor_clause}
+         ORDER BY c.chunk_id",
+        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
+        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| KioError::schema(err.to_string()))?;
+    let max_rowid_i64 = filter.max_rowid as i64;
+    let max_association_rowid_i64 = filter.max_association_rowid as i64;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                max_rowid_i64,
+                filter.chunking_config_hash,
+                max_association_rowid_i64,
+                filter.since_cutoff,
+                filter.since_cutoff,
+                kio_search::object_uri::IMAGE_OBJECT_URI_MARKER,
+            ],
+            chunk_meta_row,
+        )
+        .map_err(|err| KioError::schema(err.to_string()))?;
+
+    let mut by_image = BTreeMap::<String, ImageCandidate>::new();
+    for row in rows {
+        let (chunk_id, chunk_meta) = row.map_err(|err| KioError::schema(err.to_string()))?;
+        // `instr` only says the bytes are in there somewhere; the parser is what
+        // decides a reference is real. A doc quoting an example URI in prose
+        // matches the marker and yields nothing here, which is the whole reason
+        // `extract_related_images` is stricter than the liveness scanner.
+        for image in extract_related_images(&chunk_meta.text) {
+            let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) else {
+                continue;
+            };
+            if !object.is_image() {
+                continue;
+            }
+            by_image
+                .entry(object.hash().to_owned())
+                .or_insert_with(|| ImageCandidate {
+                    image_hash: object.hash().to_owned(),
+                    image_uri: image.image_uri.clone(),
+                    chunk_hash: chunk_id.clone(),
+                    meta: chunk_meta.clone(),
+                });
+        }
+    }
+    Ok(by_image)
+}
+
+/// `image_vec` KNN, nearest first, paired with the referencing chunk each hit
+/// needs before it can be a result row.
+///
+/// An image with no referencing chunk **this search can return** is dropped
+/// rather than anchored to something out of scope: 05 §1.7 requires an image
+/// row to carry a real `evidence_pointer`, and there is no pointer without a
+/// chunk. That is also the whole of the eligibility gate images need — a live
+/// citation is what makes an image live.
+fn image_vector_scope_search(
+    conn: &Connection,
+    query_embedding: &[f32],
+    filter: ScopeQueryFilter<'_>,
+) -> Result<(VectorLaneHits, BTreeMap<String, ImageCandidate>)> {
+    if query_embedding.len() != CHUNK_VEC_DIMENSIONS {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    // A scope last indexed before `image_vec` existed simply has no table. The
+    // search path opens the database directly and never runs `ensure_schema`
+    // (creating tables on a read would be the read path writing to the store),
+    // so this has to be asked rather than assumed — otherwise every search over
+    // an older index dies on "no such table". An absent table means no image
+    // vectors, which is exactly what an empty one means; the next `kio index`
+    // creates it.
+    if !table_exists(conn, "image_vec")? {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    if embedding_store::image_vec_count(conn).map_err(index_to_kio)? == 0 {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let query_bytes = f32_to_le_bytes(query_embedding);
+    let knn = match embedding_store::knn_image_distances(conn, &query_bytes, filter.candidate_depth)
+    {
+        Ok(knn) => knn,
+        // Same per-scope degradation the chunk lane takes (R10-1(a)): a
+        // sqlite-vec capacity limit costs this scope its image candidates,
+        // never the whole search.
+        Err(error) if is_vector_capacity_message(&error.to_string()) => Vec::new(),
+        Err(error) => return Err(index_to_kio(error)),
+    };
+    if knn.is_empty() {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let referencing = referencing_chunks_for_images(conn, filter)?;
+    let mut hits = Vec::new();
+    let mut rows = BTreeMap::new();
+    for (image_hash, distance) in knn {
+        let Some(candidate) = referencing.get(&image_hash) else {
+            continue;
+        };
+        hits.push((image_hash.clone(), distance));
+        rows.insert(image_hash, candidate.clone());
+    }
+    Ok((hits, rows))
 }
 
 /// Parse the shared 9-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
@@ -23752,6 +24269,7 @@ mod tests {
                 scope_id: scope_id.to_owned(),
                 scope_path: std::path::PathBuf::from("/x/.kio"),
                 chunk_hash: chunk_hash.to_owned(),
+                payload: super::ResultPayload::Chunk,
                 rrf_score: 1.0 / (60.0 + vector_rank as f64),
                 text_rank: None,
                 vector_rank: Some(vector_rank),
@@ -23812,6 +24330,109 @@ mod tests {
             before, after,
             "single-scope pool must be left byte-identical"
         );
+    }
+
+    /// 04 §4.3: `chunk_vec` / `image_vec` are one vector space split by a
+    /// sqlite-vec constraint. Ranking each table on its own would hand the
+    /// nearest image rank 1 next to the nearest chunk, whatever its distance;
+    /// merging on distance first is what makes the lane mean one thing.
+    #[test]
+    fn merge_vector_lane_ranks_both_tables_on_one_distance_order() {
+        use super::merge_vector_lane;
+
+        let chunks = vec![
+            ("sha256:chunk-near".to_owned(), 0.10),
+            ("sha256:chunk-far".to_owned(), 0.90),
+        ];
+        let images = vec![("sha256:image-mid".to_owned(), 0.50)];
+        let ranks = merge_vector_lane(chunks.clone(), images, 200);
+        assert_eq!(
+            ranks
+                .iter()
+                .map(|rank| (rank.chunk_hash.as_str(), rank.rank))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sha256:chunk-near", 1),
+                ("sha256:image-mid", 2),
+                ("sha256:chunk-far", 3),
+            ]
+        );
+
+        // A corpus with no image vectors must produce exactly what it produced
+        // before images existed — same ids, same dense ranks, no re-sort.
+        let unchanged = merge_vector_lane(chunks, Vec::new(), 200);
+        assert_eq!(
+            unchanged
+                .iter()
+                .map(|rank| (rank.chunk_hash.as_str(), rank.rank))
+                .collect::<Vec<_>>(),
+            vec![("sha256:chunk-near", 1), ("sha256:chunk-far", 2)]
+        );
+    }
+
+    /// U5 / §4.2 問題 A: without a text term an image can never reach the score
+    /// of a chunk that appears on both lanes, however close its vector is. It
+    /// inherits the rank of the chunk that cites it — inserted next to that
+    /// chunk, so `fuse_rrf`'s `take(candidate_depth)` window cannot drop it.
+    #[test]
+    fn images_take_the_text_rank_of_their_citing_chunk() {
+        use super::{give_images_their_chunks_text_rank, ChunkMeta, ImageCandidate};
+        use kio_search::rrf::BackendRank;
+        use std::collections::BTreeMap;
+
+        fn cited_by(image: &str, chunk: &str) -> ImageCandidate {
+            ImageCandidate {
+                image_hash: image.to_owned(),
+                image_uri: format!("kio://s/object/image/{image}"),
+                chunk_hash: chunk.to_owned(),
+                meta: ChunkMeta {
+                    raw_hash: "sha256:r".to_owned(),
+                    tool_profile_hash: "sha256:p".to_owned(),
+                    gen: 0,
+                    heading_path: None,
+                    section_id: None,
+                    byte_start: 0,
+                    byte_end: 1,
+                    text: String::new(),
+                },
+            }
+        }
+        let images = BTreeMap::from([
+            ("img-a".to_owned(), cited_by("img-a", "c1")),
+            ("img-b".to_owned(), cited_by("img-b", "c1")),
+            // Cites a chunk the text lane never returned: no rank to inherit.
+            ("img-z".to_owned(), cited_by("img-z", "c9")),
+        ]);
+        let mut text_ranks = vec![
+            BackendRank {
+                chunk_hash: "c1".to_owned(),
+                rank: 1,
+            },
+            BackendRank {
+                chunk_hash: "c2".to_owned(),
+                rank: 2,
+            },
+        ];
+        give_images_their_chunks_text_rank(&mut text_ranks, &images);
+        assert_eq!(
+            text_ranks
+                .iter()
+                .map(|rank| (rank.chunk_hash.as_str(), rank.rank))
+                .collect::<Vec<_>>(),
+            vec![("c1", 1), ("img-a", 1), ("img-b", 1), ("c2", 2)],
+            "each image sits next to its citing chunk, carrying that chunk's rank"
+        );
+
+        // No images, or no text lane at all: byte-identical passthrough.
+        let mut untouched = vec![BackendRank {
+            chunk_hash: "c1".to_owned(),
+            rank: 1,
+        }];
+        give_images_their_chunks_text_rank(&mut untouched, &BTreeMap::new());
+        assert_eq!(untouched.len(), 1);
+        let mut empty = Vec::new();
+        give_images_their_chunks_text_rank(&mut empty, &images);
+        assert!(empty.is_empty());
     }
 
     #[test]

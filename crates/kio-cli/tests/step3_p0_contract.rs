@@ -6412,6 +6412,397 @@ fn rebuild_db_restores_image_vectors_from_objects() {
     );
 }
 
+/// Every `result_type: "image"` row of a response, in rank order.
+fn image_rows(search: &Value) -> Vec<&Value> {
+    search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["result_type"] == "image")
+        .collect()
+}
+
+/// U4 (05 §1.7): an embedded image is returned as its own row — `result_type`
+/// says what it is, `payload_uri` is what the Agent opens to get the bytes.
+#[test]
+fn an_embedded_image_is_returned_as_an_image_row_with_a_payload_uri() {
+    let dir = indexed_scope_local_embed_with_images();
+    let search = json_success_local_embed(&dir, &["search", "figure page one", "--limit", "20"]);
+    let images = image_rows(&search);
+    assert!(
+        !images.is_empty(),
+        "an indexed corpus with image vectors must be able to return one: {search}"
+    );
+    for image in &images {
+        let payload = image["payload_uri"].as_str().unwrap_or_default();
+        assert!(
+            payload.starts_with("kio://") && payload.contains("/object/image/sha256:"),
+            "payload_uri must be an image object URI: {image}"
+        );
+        // `snippet` means "the start of THIS row's chunk body", and this row is
+        // not a chunk — carrying the citing chunk's text would make the field
+        // mean different things on different rows (05 §1.7).
+        assert!(image.get("snippet").is_none(), "{image}");
+        // 05 §1.7 is explicit that the response passes URIs and never inlines
+        // bytes — base64 would hit the Agent's context and cost directly.
+        assert!(image.get("payload").is_none(), "{image}");
+        assert!(image.get("image_base64").is_none(), "{image}");
+        // `related_images[]` is defined as what a CHUNK body references; on an
+        // image row it would re-list this row's own payload.
+        assert!(image.get("related_images").is_none(), "{image}");
+    }
+    // The chunk rows are unchanged, and still carry the field Stage 1.5 added.
+    let chunks = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["result_type"] == "chunk")
+        .collect::<Vec<_>>();
+    assert!(!chunks.is_empty(), "{search}");
+    assert!(chunks.iter().all(|hit| hit.get("payload_uri").is_none()));
+}
+
+/// U4 / V6 (05 §1.7): an image row's `evidence_pointer` is a CHUNK's — an object
+/// URI has no commit, tree or `path_at_commit`, so it supports neither
+/// time-travel nor `evidence verify`. Anchoring to the referencing chunk is what
+/// lets an image be handed over while the citation stays verifiable.
+#[test]
+fn an_image_row_carries_the_referencing_chunks_evidence_pointer() {
+    let dir = indexed_scope_local_embed_with_images();
+    let search = json_success_local_embed(&dir, &["search", "figure page one", "--limit", "20"]);
+    let image = image_rows(&search).first().copied().cloned().unwrap();
+    let pointer = &image["evidence_pointer"];
+    for field in ["commit", "raw_hash", "chunk_hash", "path_at_commit"] {
+        assert!(
+            pointer[field].is_string(),
+            "image row pointer must carry {field}: {image}"
+        );
+    }
+    assert_eq!(pointer["chunk_hash"], image["chunk_hash"], "{image}");
+    // The strongest form of "it is a chunk's pointer": the same key set a chunk
+    // row's carries, not a shape of its own.
+    let chunk_pointer = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["result_type"] == "chunk")
+        .map(|hit| hit["evidence_pointer"].clone())
+        .unwrap();
+    let keys = |value: &Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(pointer), keys(&chunk_pointer), "{image}");
+
+    // The claim the pointer makes is checkable, which is the entire reason it
+    // is a chunk's and not the object URI.
+    let uri = image["evidence_uri"].as_str().unwrap();
+    let verified = json_success_local_embed(&dir, &["evidence", "verify", uri]);
+    assert_eq!(verified["status"], "alive", "{verified}");
+
+    // V6: where several chunks cite one image, the pointer takes the lowest
+    // `chunk_hash` in UTF-8 byte order. Compute the citing set from the chunk
+    // rows' own `related_images[]` rather than restating the rule.
+    let payload = image["payload_uri"].as_str().unwrap();
+    let mut citing = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["result_type"] == "chunk")
+        .filter(|hit| {
+            hit["related_images"]
+                .as_array()
+                .is_some_and(|images| images.iter().any(|item| item["image_uri"] == payload))
+        })
+        .map(|hit| hit["chunk_hash"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    citing.sort();
+    assert!(!citing.is_empty(), "{search}");
+    assert_eq!(
+        image["chunk_hash"].as_str().unwrap(),
+        citing[0],
+        "V6: the pointer must be the lowest-`chunk_hash` citing chunk"
+    );
+}
+
+/// V6 (05 §1.7), on a corpus where the rule actually bites: several chunks cite
+/// ONE image, and the pointer must take the lowest `chunk_hash` in UTF-8 byte
+/// order.
+///
+/// The fixture is two single-page PDFs. The OCR mock derives an image's bytes
+/// from the unit key, which is the page position — so two different documents'
+/// first pages carry byte-identical figures, one CAS object, and two chunks
+/// citing it. (Two pages of ONE document would not do: their unit keys differ,
+/// so their images do too.)
+///
+/// The rejected alternative was SQLite rowid order. `index/sqlite.db` is a
+/// rebuildable cache (04 §4.3), so a citation an Agent stored would point at a
+/// different chunk after `repair rebuild-db` — hence the rebuild half of this
+/// test, which is the whole reason the rule names `chunk_hash`.
+#[test]
+fn v6_the_pointer_is_the_lowest_chunk_hash_citing_the_image() {
+    let dir = tempfile::tempdir().unwrap();
+    // Different page text so the two files are different units; same page
+    // POSITION so the mock gives them the same figure.
+    fs::write(dir.path().join("alpha.pdf"), fake_pdf(&["figure alpha"])).unwrap();
+    fs::write(dir.path().join("beta.pdf"), fake_pdf(&["figure beta"])).unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success_local_embed(&dir, &["index", "--approve"]);
+    kio(&dir, &["batch", "resume"])
+        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
+        .arg("--json")
+        .assert()
+        .success();
+    json_success_local_embed(&dir, &["index"]);
+
+    // The citing set, read from the index rather than restated from the rule.
+    let conn = index_db(&dir);
+    let mut stmt = conn
+        .prepare("SELECT chunk_id, text FROM chunks ORDER BY chunk_id")
+        .unwrap();
+    let bodies = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect::<Vec<_>>();
+    let image_hash: String = conn
+        .query_row("SELECT image_id FROM image_vec LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|error| panic!("no image vector ({error}); bodies: {bodies:#?}"));
+    let citing = bodies
+        .iter()
+        .filter(|(_, text)| text.contains(&image_hash))
+        .map(|(chunk_id, _)| chunk_id.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        citing.len() >= 2,
+        "the fixture must produce several citing chunks or this proves nothing; \
+         got {citing:?} from {bodies:?}"
+    );
+
+    let search = json_success_local_embed(
+        &dir,
+        &["search", "mock ocr figure", "--scope", ".", "--limit", "50"],
+    );
+    let image = image_rows(&search)
+        .first()
+        .copied()
+        .cloned()
+        .unwrap_or_else(|| panic!("no image row: {search}"));
+    assert_eq!(
+        image["chunk_hash"].as_str().unwrap(),
+        citing[0],
+        "V6: lowest chunk_hash in UTF-8 byte order"
+    );
+
+    // And it survives the cache being rebuilt, which rowid order would not.
+    drop(stmt);
+    drop(conn);
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    kio(&dir, &["repair", "rebuild-db"])
+        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .arg("--json")
+        .assert()
+        .success();
+    let after = json_success_local_embed(
+        &dir,
+        &["search", "mock ocr figure", "--scope", ".", "--limit", "50"],
+    );
+    assert_eq!(
+        image_rows(&after).first().unwrap()["chunk_hash"]
+            .as_str()
+            .unwrap(),
+        citing[0],
+        "a stored citation must survive `repair rebuild-db`"
+    );
+}
+
+/// The read-side half of the capability gate: an adapter that writes no image
+/// vectors returns no image rows. Without this, "no images came back" could
+/// equally mean the search path silently dropped them.
+#[test]
+fn the_online_adapter_returns_no_image_rows_because_it_embeds_none() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("figures.pdf"),
+        fake_pdf(&["figure page one"]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+    kio(&dir, &["batch", "resume"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
+        .arg("--json")
+        .assert()
+        .success();
+    json_success_embed(&dir, "mock", &["index"]);
+    let search = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "figure page one", "--limit", "20"],
+    );
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "{search}"
+    );
+    assert!(image_rows(&search).is_empty(), "{search}");
+}
+
+/// 05 §1.7: image rows come from the vector lane only. An image's own score is
+/// its vector; ranking one by its citing chunk's text rank alone would return a
+/// duplicate of that chunk under a different name. The figure stays reachable in
+/// text mode through the chunk row's `related_images[]`, which is what Stage 1.5
+/// added it for.
+#[test]
+fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
+    let dir = indexed_scope_local_embed_with_images();
+    let text = json_success_local_embed(
+        &dir,
+        &[
+            "search",
+            "figure page one",
+            "--mode",
+            "text",
+            "--limit",
+            "20",
+        ],
+    );
+    assert_eq!(text["resolved_mode"], "text", "{text}");
+    assert!(!text["results"].as_array().unwrap().is_empty(), "{text}");
+    assert!(image_rows(&text).is_empty(), "{text}");
+    assert!(
+        text["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit.get("related_images").is_some()),
+        "the figures must still be named on the chunk rows: {text}"
+    );
+}
+
+/// An index written before `image_vec` existed must still be searchable. The
+/// search path opens the database directly and never runs `ensure_schema` —
+/// creating tables on a read would be the read path writing to the store — so
+/// the missing table has to be tolerated rather than assumed away.
+#[test]
+fn a_scope_indexed_before_image_vec_existed_still_searches() {
+    let dir = indexed_scope_local_embed_with_images();
+    {
+        let conn = index_db(&dir);
+        conn.execute_batch("DROP TABLE image_vec;").unwrap();
+    }
+    let search = json_success_local_embed(
+        &dir,
+        &["search", "figure page one", "--scope", ".", "--limit", "20"],
+    );
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "chunk results must survive a missing image_vec: {search}"
+    );
+    assert!(image_rows(&search).is_empty(), "{search}");
+    // And `kio index` is what brings it back, without a manual repair.
+    json_success_local_embed(&dir, &["index"]);
+    let restored = json_success_local_embed(
+        &dir,
+        &["search", "figure page one", "--scope", ".", "--limit", "20"],
+    );
+    assert!(!image_rows(&restored).is_empty(), "{restored}");
+}
+
+/// U5 / §4.2 問題 A: an image is not in the FTS index, so RRF would add two
+/// reciprocal terms for a chunk and one for an image and sink every figure
+/// structurally. The image inherits the text-lane standing of the chunk that
+/// cites it, so a hybrid search scores it on both lanes.
+///
+/// The evidence is comparative: the same corpus, the same query, `--mode vector`
+/// (one lane, no inheritance possible) against `--mode hybrid`. The vector lane
+/// is byte-identical between the two runs — same KNN, same `candidate_depth`,
+/// same merge — so any score difference IS the inherited text term.
+///
+/// The query is chosen to land in the OCR body that carries the image reference
+/// (`... mock ocr page:1 ![img-0](kio://…)`), not in the page text beside it, so
+/// the citing chunk certainly has a text rank to be inherited.
+#[test]
+fn an_image_inherits_the_text_lane_standing_of_the_chunk_that_cites_it() {
+    let dir = indexed_scope_local_embed_with_images();
+    let search = |mode: &str| {
+        json_success_local_embed(
+            &dir,
+            &["search", "mock ocr page", "--mode", mode, "--limit", "20"],
+        )
+    };
+    let vector_only = search("vector");
+    let hybrid = search("hybrid");
+    let image_score = |search: &Value| -> f64 {
+        image_rows(search)
+            .first()
+            .and_then(|hit| hit["score"].as_f64())
+            .unwrap_or_default()
+    };
+    let one_lane = image_score(&vector_only);
+    let two_lanes = image_score(&hybrid);
+    assert!(one_lane > 0.0, "{vector_only}");
+    assert!(
+        two_lanes > one_lane,
+        "an image whose citing chunk matched the text query must gain a text \
+         term: hybrid {two_lanes} vs vector-only {one_lane}"
+    );
+}
+
+/// U6 / §4.2 問題 B (05 §1.4): `max_per_raw_hash` counts image rows in the same
+/// budget as chunk rows — no image quota, no image lane. The cap exists so one
+/// document cannot occupy the top of the results, and a document does not become
+/// acceptable by flooding with figures.
+#[test]
+fn images_and_chunks_share_one_max_per_raw_hash_budget() {
+    let dir = indexed_scope_local_embed_with_images();
+    // PC49/PC50: folder config is only effective under a single-scope search.
+    write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 10\n");
+    let uncapped = json_success_local_embed(
+        &dir,
+        &["search", "figure page one", "--scope", ".", "--limit", "20"],
+    );
+    assert!(
+        !image_rows(&uncapped).is_empty(),
+        "the cap must be tested against a pool that HAS an image row: {uncapped}"
+    );
+
+    write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 1\n");
+    let capped = json_success_local_embed(
+        &dir,
+        &["search", "figure page one", "--scope", ".", "--limit", "20"],
+    );
+    let by_raw = capped["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["evidence_pointer"]["raw_hash"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for raw_hash in &by_raw {
+        assert_eq!(
+            by_raw.iter().filter(|other| *other == raw_hash).count(),
+            1,
+            "one budget for both types, counted on evidence_pointer.raw_hash: {capped}"
+        );
+    }
+    // And the cap is what produced that, not an empty corpus. Without the shared
+    // budget an image row would sit alongside its citing chunk under the same
+    // raw_hash and the count above would be 2.
+    assert!(
+        uncapped["results"].as_array().unwrap().len() > capped["results"].as_array().unwrap().len(),
+        "capped {capped}\nuncapped {uncapped}"
+    );
+}
+
 /// R13-2: write a user tools.toml under the test's XDG_CONFIG_HOME.
 fn write_tools_toml(dir: &TempDir, body: &str) {
     let cfg = dir.path().join(".test-config/kio");

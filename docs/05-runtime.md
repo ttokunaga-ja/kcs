@@ -466,7 +466,9 @@ Kio の主たる消費者は LLM Agent であり ([06-cli-spec.md §9](06-cli-sp
 | `result_type` | `"chunk"` \| `"image"` — この行が何を指すか | **常に必須** |
 | `evidence_pointer` | **引用の不変固定**。time-travel と `kio evidence verify` が成立する | 常に必須 (従来どおり) |
 | `payload_uri` | **Agent が `kio open` して実体を得るハンドル** | `result_type: "chunk"` では省略 (実体は chunk 自身であり `evidence_uri` が既にそれを指す) |
-| `related_images[]` | この chunk 本文が参照している画像の列挙。`{image_uri, order}` の配列 | **空なら field ごと省略** (`current_paths` / `current_path` と同じ姿勢) |
+| `related_images[]` | この chunk 本文が参照している画像の列挙。`{image_uri, order}` の配列 | **空なら field ごと省略**。かつ `result_type: "chunk"` の行のみ (image 行では列挙対象が「参照元 chunk の図」になり、その先頭は自分自身の `payload_uri` である) |
+| `snippet` | **この行の chunk 本文**の冒頭 | `result_type: "image"` では省略。image 行は chunk ではなく、参照元 chunk の本文を載せると field の意味が行の型で変わる。参照元の本文は同じ pointer を持つ chunk 行から取れる |
+| `title` | pointer が解決する path (`path_at_commit`) | 常に必須。意味は型に依らない (どちらの行も同じ chunk pointer を指す) |
 
 `related_images[]` の抽出規則 (決定論。推論も追加索引も行わない):
 
@@ -516,6 +518,12 @@ Agent が保存し後から検証する**永続的な引用**の選択根拠に 
 rebuild 後に同じ検索が別 chunk を引用し得る。`chunk_hash` は content-addressed identity 由来で
 rebuild に不変である。**逆引きの探索範囲は検索対象 commit に限る** (§1.6 の既定と同じ) —
 `chunks` 行は purge 以外で削除されないため、限定しないと旧 gen の chunk が候補に残る。
+
+**image 行は vector lane からのみ生じる** (2026-07-26 確定)。`--mode text` や
+embedding 未承認の text fallback (§1.1) では image 行を返さない。画像が自前で持つ得点は
+vector だけであり、参照元 chunk の text rank だけで順位を付けると**その chunk の重複行を
+別名で返す**ことになるためである。text 経路でも図には到達できる — chunk 行の
+`related_images[]` がそれを担う。
 
 `related_images[]` は **参照の列挙であって存在保証ではない。** purge 済み画像の URI が
 chunk 本文に残ることがある。検索時に存在確認 I/O は行わず、終端は `kio open` 側の既存 barrier

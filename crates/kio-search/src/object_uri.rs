@@ -18,6 +18,15 @@ use crate::{Result, SearchError};
 pub const OBJECT_SEGMENT: &str = "object";
 pub const IMAGE_OBJECT_TYPE: &str = "image";
 
+/// The substring every image object URI contains, for narrowing a scan to the
+/// bodies that could possibly reference one before the real parser runs.
+///
+/// A cheap *predicate*, never a parser: it matches a URI quoted in prose or
+/// fenced in a code block just as readily as a real Markdown image reference,
+/// which is precisely the case [`extract_related_images`] exists to reject.
+/// Callers narrow with this and then confirm with that.
+pub const IMAGE_OBJECT_URI_MARKER: &str = "/object/image/";
+
 const OBJECT_URI_REQUIREMENT: &str =
     "object URI must be kio://<scope_id>/object/<type>/<hash> with a full sha256 hash";
 
