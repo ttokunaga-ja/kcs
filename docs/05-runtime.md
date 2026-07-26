@@ -25,9 +25,9 @@ fail_behavior = "fallback"       # "fallback" | "error" | "warn"
 `auto` の解決順:
 
 ```
---offline 指定 → text fallback (fallback_reason="offline" — 送信自体を行わない短絡。下記)
+--offline 指定 かつ embedding Adapter が online_api → text fallback (fallback_reason="offline" — 送信自体を行わない短絡。下記)
 embedding profile_hash 不一致 → text fallback (KIO-E-SEARCH-VEC-INCOMPAT-001)
-embedding 承認なし (下記 consent gate) → text fallback (KIO-E-SEARCH-VEC-UNAUTHORIZED-001)
+embedding 承認なし (下記 consent gate。online_api のみ) → text fallback (KIO-E-SEARCH-VEC-UNAUTHORIZED-001)
 同一 query が in-flight ([04-pipeline.md §5.4](04-pipeline.md)) → text fallback (fallback_reason="embedding_in_flight")
 query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spec.md)) で contract violation → text fallback (fallback_reason="embedding_contract_violation")
 上記のいずれにも該当せず vector のみ利用不能 (index 未構築等の技術的理由) → text
@@ -42,7 +42,8 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 しない)。
 
 **query embedding の consent gate**: vector | hybrid の page 1 は query embedding (07 §5.3 の
-`input_type: "query"` — sync 呼出) を要し、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
+`input_type: "query"` — sync 呼出) を要する。**採用中の embedding Adapter の `execution_mode` が
+`online_api` の場合に限り**、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
 の opt-in gate の対象である (payload は query 文字列のみで folder 内容を含まない)。**送信可否 =
 参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope の
 実効 `allow_network` が true であること** (未設定・設定 key の喪失は gate 不成立 —
@@ -66,6 +67,23 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 KIO-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
 `scope_id='device'` の sync request として縮退 2 相に記帳する ([04-pipeline.md §5.4](04-pipeline.md)
 — folder cap 対象外・device cap / per_adapter は通常合算)。
+
+> **`offline_api` は本 gate の対象外 (2026-07-26 確定)**: ローカル embedding server
+> ([07-adapter-spec.md §3](07-adapter-spec.md) — url は loopback リテラルに限定される) は
+> 送信を行わないため、**送信を gate する本節の機構には適用対象が無い**。
+> `approvals[]` 行・`allow_network` boolean のいずれも要求せず、上の解決順の
+> `embedding_not_authorized` / `offline` にも該当しない (どちらも「送信の可否」に
+> 由来する縮退であり、送信が存在しない経路には生じ得ない)。したがって
+> **`--offline` 指定下でも local embedding による vector / hybrid 検索は成立する**
+> (上の「`--offline` 指定時は承認の有無に関わらず query embedding を送信しない」は
+> online_api Adapter についての規範である — 送信しない Adapter に禁止する送信は無い)。
+> `--online` も同様に無関係である (開くべき閉鎖が存在しない)。
+> 課金はローカル単価 0 として記帳されるため device cap の扱いも変わらない。
+>
+> **本節の残りの規範は execution_mode に依らず適用する** — profile_hash 不一致
+> (INCOMPAT)・`embedding_in_flight`・`embedding_contract_violation`・
+> [07-adapter-spec.md §5.3](07-adapter-spec.md) の受入検査はいずれも「送信してよいか」
+> ではなく **vector が正当か**を問う規範であり、ローカル生成のベクトルにも等しく効く。
 
 ## 1.2 CLI
 
@@ -187,10 +205,33 @@ selected = ∅ の初手は similarity 項を 0 とする (= relevance 最高の
 適用範囲と決定性:
 
 - MMR は候補プールの RRF 上位 `mmr_depth` 件 (デフォルト 100、`candidate_depth` 以下) に対して **1 回だけ** 適用し、並べ替え済みの**確定順序**を得る。`mmr_depth` 以降の候補は RRF 順のまま末尾に接続する
-- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。**hybrid の候補プールに embedding 未付与、または profile 非互換で cosine を計算できない chunk が 1 件でも混在する場合 (部分 enrichment / §1.8 の profile 不一致 text fallback を含む) も MMR は適用しない** — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
+- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。**hybrid の候補プールに embedding 未付与、または profile 非互換で cosine を計算できない候補が 1 件でも混在する場合 (部分 enrichment / §1.8 の profile 不一致 text fallback を含む) も MMR は適用しない** — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
 - `max_per_raw_hash` は alias 展開**前**の unique semantic chunk stream に適用する (ページを跨いで
   raw_hash あたり最大 N semantic chunks)。retained chunk の historical path aliases は provenance 行で
   あり、この上限へ再カウントせず全件を返す
+
+> **image 行の扱い (2026-07-26 確定)**: [04-pipeline.md §4.3](04-pipeline.md) の `image_vec`
+> 新設により、候補プールには chunk 行に加えて **image 行** (`result_type: "image"` — §1.7) が
+> 混在し得る。本節の規則はいずれも**型で分岐させない**。
+>
+> - **`max_per_raw_hash` は image 行も同じ枠を消費する。** 画像専用の quota も lane も
+>   設けない。本節冒頭が述べる cap の目的は「同一原文が上位を独占しない」ことであり、
+>   その原文から出た結果が chunk か image かは Agent から見た占有度を変えないためである。
+>   カウント先の raw_hash は当該 result 行の `evidence_pointer.raw_hash`
+>   (= §1.7 が定める参照元 chunk のもの) — **1 result 行 = 1 evidence_pointer = 1 raw_hash**
+>   で一貫させる。
+> - **MMR の無効化条件は型に依らない。** 上の「候補が 1 件でも混在する場合」は
+>   chunk・image のどちらにも等しく適用する。「image は必ず embedding を持つ」という
+>   前提は置かない — 画像埋め込みも chunk と同じ Batch / budget 機構に載るため、
+>   同じく部分 enrichment 状態 (§1.7 の `enriched_ratio`) を取り得る。
+> - **MMR の tie-break key `(scope_id, chunk_hash)` はそのまま使える。** §1.7 のとおり
+>   image 行も参照元 chunk の `evidence_pointer` を持つため `chunk_hash` が定まる。
+>   新しいキーを導入しない。
+> - **pairwise similarity に特別扱いは要らない。** [03-data-model.md §7](03-data-model.md) と
+>   [07-adapter-spec.md §5.3](07-adapter-spec.md) が単一マルチモーダル空間を強制するため、
+>   image と chunk の vector は定義上そのまま cosine 比較できる
+>   ([04-pipeline.md §4.3](04-pipeline.md) — `chunk_vec` / `image_vec` の物理分割は
+>   sqlite-vec の制約であって意味的分離ではない)。
 - 入力 (chunk 集合・query・設定) が同じなら確定順序は常に同一 (決定論)。これがページング (§1.5) の前提
 
 ```toml
@@ -340,8 +381,14 @@ commit/evidence restore は ancestry walk を必要としない。
     "pending_enrichment_tasks": 3120,
     "budget_paused": true
   },
+  "aggregator": {
+    "applied": false,
+    "fallback_reason": "replica_stale",
+    "collection_generation": 41
+  },
   "results": [
     {
+      "result_type": "chunk",
       "chunk_hash": "sha256:...",
       "evidence_pointer": {
         "schema_version": 1,
@@ -357,12 +404,19 @@ commit/evidence restore は ancestry walk を必要としない。
         "scope_id": "scope_01J8ZQ..."
       },
       "evidence_uri": "kio://scope_01J8ZQ.../sha256:9f2c.../sha256:.../sha256:.../sha256:...",
+      "related_images": [
+        { "image_uri": "kio://scope_01J8ZQ.../object/image/sha256:a1b2...", "order": 0 }
+      ],
       "score": 0.87,
       "scope_path": "/Users/foo/Research/.kio"
     }
   ]
 }
 ```
+
+`aggregator` は §1.8 の replica 経路がどう解決されたかを示す (`applied` / `fallback_reason` /
+`collection_generation`)。どの段が採点したかが機械可読でないと順位品質の劣化を検出できないため、
+scatter-gather へ委譲した場合も含めて常に返す (正本 §1.8)。
 
 **成功応答 (exit 0) の `error_code` は縮退原因の機械可読分類であり、失敗判定には使わない** — 失敗判定は exit code (非 0) が正 ([06-cli-spec.md §7](06-cli-spec.md)。上例は vector 未承認の text fallback で、`results` は有効な結果である)。`evidence_pointer` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の schema を **そのまま** 埋め込む。root (`.kio`) の信頼は `evidence_pointer.scope_id` を正とし、`results[].scope_path` は解決を高速化する表示・ヒント用の絶対パスである (truth vs cache の不変条件。解決手順は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
@@ -399,6 +453,77 @@ score/rank をコピーして、group 内を
 `(scope_id,chunk_hash,path_at_commit,evidence_pointer.commit)` の UTF-8 byte order で整列してから paginate
 する。`scope_path` は display hint なので順序に使わない。alias は MMR cosine competition や
 `max_per_raw_hash` へ再投入せず、distinct alias は path/commit により comparator equality にならない。
+
+### result 行が指すもの — pointer と payload の分離 (2026-07-26 確定)
+
+Kio の主たる消費者は LLM Agent であり ([06-cli-spec.md §9](06-cli-spec.md) — MVP の導線は
+`kio search --json` + `kio open`)、**適切な画像を Agent へ渡すことは Kio の役割に含まれる**。
+一方で本契約が返すのは pointer であって本文ではない (上例のとおり chunk 本文すら含まない)。
+両者を混同しないため、result 行のフィールドを役割で分ける。
+
+| field | 役割 | 省略規約 |
+|---|---|---|
+| `result_type` | `"chunk"` \| `"image"` — この行が何を指すか | **常に必須** |
+| `evidence_pointer` | **引用の不変固定**。time-travel と `kio evidence verify` が成立する | 常に必須 (従来どおり) |
+| `payload_uri` | **Agent が `kio open` して実体を得るハンドル** | `result_type: "chunk"` では省略 (実体は chunk 自身であり `evidence_uri` が既にそれを指す) |
+| `related_images[]` | この chunk 本文が参照している画像の列挙。`{image_uri, order}` の配列 | **空なら field ごと省略** (`current_paths` / `current_path` と同じ姿勢) |
+
+`related_images[]` の抽出規則 (決定論。推論も追加索引も行わない):
+
+- 対象は chunk 本文中の **Markdown 画像参照** `![alt](kio://<scope_id>/object/image/<hash>)` —
+  [07-adapter-spec.md §5.2](07-adapter-spec.md) の画像参照置換が発行する形。
+  リンク (`[text](uri)`) や地の文に現れた URI は対象にしない
+- **`image_uri` は本文の字面をそのまま返す。** 正規化しない
+  ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) — object URI は opaque に扱い
+  `scope_id` の大文字小文字を保存する)。fork 複製由来の旧 `scope_id` もそのまま返し、
+  自 store での解決は `kio open` 側の既存規則 (hash が identity) に委ねる
+- **同一 URI が複数回出現する場合は最初の 1 件に畳む。** `order` は畳んだ後の
+  出現順 (0 始まり) — 同じ画像を 2 回返しても Agent には情報が増えず `kio open` が
+  重複するだけであるため
+- **不完全な参照は落とす (fail-empty)。** chunk は normalized unit 本文の byte span であり
+  ([03-data-model.md §8.1](03-data-model.md))、`[chunking].max_chars` の切断が参照の途中に
+  落ちると URI が分断され得る。閉じ括弧を欠く断片・64 桁に満たない hash などは抽出しない —
+  誤った hash を持つ URI を返すより安全側である
+
+**画像ヒットは `payload_uri` に画像オブジェクト URI、`evidence_pointer` に参照元 chunk を持つ。**
+
+```json
+{
+  "result_type": "image",
+  "chunk_hash": "sha256:...",
+  "evidence_pointer": { "...": "参照元 chunk の pointer (08 §2 の schema をそのまま)" },
+  "evidence_uri": "kio://scope_01J8ZQ.../sha256:9f2c.../sha256:.../sha256:.../sha256:...",
+  "payload_uri": "kio://scope_01J8ZQ.../object/image/sha256:a1b2...",
+  "score": 0.81,
+  "scope_path": "/Users/foo/Research/.kio"
+}
+```
+
+`evidence_pointer` を画像オブジェクト URI にはできない。
+[08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) のとおり
+`kio://<scope_id>/object/image/<hash>` は **object 参照であって Evidence Pointer ではなく**、
+commit も tree も `path_at_commit` も持たないため時点指定も検証も成立しないためである。
+参照元 chunk を pointer に据えることで、**画像を渡しつつ引用の不変性・検証可能性・
+time-travel を保てる**。
+
+**参照元 chunk が複数ある場合は `chunk_hash` の UTF-8 byte order 最小のものを選ぶ。**
+この tie-break は §1.3 (RRF) / §1.4 (MMR) / 本節 (alias 整列) で既に横断使用している idiom で
+あり、`chunk_id` の値は chunk object の `chunk_hash` と同一文字列である
+([04-pipeline.md §4.1](04-pipeline.md))。**SQLite の rowid 順は採らない** —
+`index/sqlite.db` は `objects/` から再構築可能な cache であり
+([04-pipeline.md §4.3](04-pipeline.md))、rowid は `kio repair rebuild-db` をまたいで安定しない。
+Agent が保存し後から検証する**永続的な引用**の選択根拠に cache の再構築順を使うと、
+rebuild 後に同じ検索が別 chunk を引用し得る。`chunk_hash` は content-addressed identity 由来で
+rebuild に不変である。**逆引きの探索範囲は検索対象 commit に限る** (§1.6 の既定と同じ) —
+`chunks` 行は purge 以外で削除されないため、限定しないと旧 gen の chunk が候補に残る。
+
+`related_images[]` は **参照の列挙であって存在保証ではない。** purge 済み画像の URI が
+chunk 本文に残ることがある。検索時に存在確認 I/O は行わず、終端は `kio open` 側の既存 barrier
+(`KIO-E-PURGE-NOT-FOUND-001`) が担う。
+
+**検索レスポンスに画像を base64 で埋めてはならない。** 実体の受け渡しは常に URI 経由とし、
+Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 は Agent の
+コンテキストとコストを直接圧迫するうえ、本契約が pointer を返す設計と矛盾する。
 
 ## 1.8 複数 scope 横断検索 (multi-scope search)
 
@@ -997,7 +1122,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
    `kio repair verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
-- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)
+- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)。**`image_vec` 行と `target_type='image'` の embeddings 行も同じ規則で列挙する** (2026-07-26 — [04-pipeline.md §4.3](04-pipeline.md) の `image_vec` 新設に対応。判定単位は `image_hash`。上の bullet が image object そのものを「live 参照が残る共有 image は削除しない」としているのと同じく、**共有画像のベクトルも live 参照 0 の場合のみ削除する** — 同一の画像が非対象文書からも参照されている場合に消すと、その文書の画像検索が rebuild まで欠ける)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす。書き換えは [04-pipeline.md §1.1](04-pipeline.md) の耐久書込 primitive (temp + rename) に従う)
 - 対象 raw_hash に帰属する task の **staging** ([07-adapter-spec.md §8.3](07-adapter-spec.md)) — **task の状態を問わず** (retryable failed の保全 staging を含む。以後の再生成は persist 直前の tombstone 再検査が防ぐ)。**帰属列挙の正本 = `.kio/staging/` の耐久 descriptor 全走査** ([03-data-model.md §2](03-data-model.md) — tasks.jsonl 非依存。task 記録の喪失後も削除対象を列挙できる)
 - **device replica (`~/.cache/kio/aggregator.sqlite`) の当該 scope の投影** — purge 成功時に
@@ -1312,6 +1437,7 @@ Kio は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 - interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から CLI を起動する委譲方式とする (§8.2)
 - idle 検出 (GC on_idle, Phase 4+) も同様に委譲実行時に判定し、Kio 自身は常駐しない (§2.3)
 - 同一 `.kio` に対する多重起動は `.kio/.lock` で防止する (§6)
+- **ローカルモデルサーバ (`execution_mode = "offline_api"`) の重み常駐は、サーバ側の責務であって Kio の責務ではない** (2026-07-26)。Kio はプロセスを起動も管理も常駐もせず、[07-adapter-spec.md §3](07-adapter-spec.md) が定める loopback url を呼ぶだけである — この点で online_api Adapter の呼出と何ら変わらない。モデルの遅延ロード・idle TTL による重み解放は当該サーバの設定であり、Kio の「常駐なし」原則と矛盾しない。サーバが起動していない場合の扱いは §1 の既存縮退に従う (embedding なら text fallback)。**`cmd` によるプロセス起動は将来仕様のままである** ([07-adapter-spec.md §7](07-adapter-spec.md)) — offline_api の導入はこれを前倒ししない
 
 # 6. 並行性 / Locking
 

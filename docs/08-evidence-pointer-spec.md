@@ -448,17 +448,22 @@ Kio は Evidence Pointer を **JSON object として AI Agent に返す**。Agen
 
 ## 7.1 検索結果に含める形
 
-```json
-{
-  "results": [
-    {
-      "score": 0.87,
-      "evidence_pointer": { /* §2 schema */ },
-      "preview": "API Token の有効期限は 30 日です..."
-    }
-  ]
-}
-```
+**検索レスポンス schema の正本は [05-runtime.md §1.7](05-runtime.md) とする**
+(本節は従属記述であり、差分が生じた場合は 05 側を正とする — 06 §8 と
+[10-operations.md §12.1](10-operations.md) の関係と同型)。
+`results[]` の各行は `evidence_pointer` に §2 の schema を**そのまま**埋め込み、
+その正規テキスト形を `evidence_uri` として併記する。
+
+> 2026-07-26 の整理: 本節はかつて `preview` field を持つ独自の例を掲げていたが、
+> 05 §1.7 が実契約の正本になった際に追随しておらず、実在しない field を示していた。
+> 例の二重管理をやめ、正本への参照に置き換えた。
+
+Evidence Pointer との関係で本書が定める点は 1 つある。**`result_type: "image"` の行でも
+`evidence_pointer` は画像そのものではなく参照元 chunk を指す** (05 §1.7)。
+§2.3 のとおり `kio://<scope_id>/object/image/<hash>` は **object 参照であって
+Evidence Pointer ではなく**、commit も tree も `path_at_commit` も持たないため
+§3 の解決手順にも §6 の不変性保証にも乗らないからである。画像の実体は同行の
+`payload_uri` (object URI) が指し、`kio open` で取得する。
 
 Agent は `evidence_pointer` を保存し、後続のセッションで以下を実行できる:
 

@@ -359,6 +359,13 @@ adapter_kind          "prepare" | "markdownize" | "embedding" | ...
 adapter_role          "text" | "image" | "multimodal"
 model_or_tool_family  "gemini-2.5-pro" | "gpt-4o" | "tesseract" の正規化名
 model_version_pin     ベンダー側 immutable tag (latest 等の可変 alias は禁止)
+                      **runtime_kind="local" かつ execution_mode="offline_api" (重みを持つ
+                      ローカルモデル) では、重みファイル (GGUF / safetensors) の sha256 を
+                      pin とする** — `gemma-3-4b-it-q4_k_m` 等のタグ名は量子化違いで同名に
+                      なり得て、ベンダー側 immutable tag と同じ強さを持たないため。
+                      **deterministic_library の同梱 Adapter は semver 規約のまま**
+                      ([07-adapter-spec.md §2.1](07-adapter-spec.md) の PDF text layer 抽出が
+                      1.0.0 → 1.1.0 として運用中 — 重みを持たないため sha256 が定義できない)
 prompt_template_id    Kio が管理する prompt 識別子
 prompt_template_hash  prompt 本文を canonical 化した sha256
 sampling              {temperature, top_p, top_k, max_tokens, seed}

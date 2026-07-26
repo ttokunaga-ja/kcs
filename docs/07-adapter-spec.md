@@ -260,6 +260,42 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 記録する。オフライン API / 決定論的ライブラリの場合も `execution_mode` と `profile_hash` は
 記録する。
 
+> **`offline_api` の url 制限と consent gate 免除 (2026-07-26 確定)**:
+> ローカル LLM / ローカル embedding server (`execution_mode = "offline_api"`) の導入にあたり、
+> 本節の opt-in 機構との関係を確定させる。**両者は表裏一体である** — 免除が成立するのは
+> 「送信が構造的に起こり得ない」ことを url 制限が保証する場合に限る。
+>
+> **(1) url は loopback リテラルに限定する。**
+> 受理するのは `127.0.0.1` / `localhost` / `[::1]` / UNIX domain socket **のみ**。
+> **判定はリテラル文字列に対して行い、ホスト名解決の結果を見ない** (解決結果を信用すると
+> DNS rebinding で loopback を名乗る外部ホストへ送信できてしまう)。違反は
+> `KIO-E-CONFIG-OFFLINE-URL-001` (exit 2、[06-cli-spec.md §8](06-cli-spec.md) /
+> [10-operations.md §12.1](10-operations.md))。検証点は tool-lock materialize /
+> adapter 登録時 — §2 が `offline_api` を「ネット送信なし」と**定義**している以上、
+> 定義に反する構成は実行前に拒否する。
+>
+> この制限が無いと `kind = "offline_api"` + `url = "https://api.example.com"` が
+> **同意記録なしに全ファイル本文を外部へ送る**経路になる。本節の gate は
+> `execution_mode == online_api` を前提に組まれているため、この構成を素通ししてしまう。
+>
+> **(2) `offline_api` Adapter は approvals[] / `allow_network` gate の対象外とする。**
+> 本節の opt-in 単位は冒頭のとおり「どの `online_api` Adapter (tool_id) に送るか」であり、
+> 上記のとおり offline_api については `execution_mode` と `profile_hash` の記録のみを
+> 求めている。(1) により送信が構造的に起こり得ない以上、**送信を gate する機構には
+> 適用対象が無い**。承認記録・`allow_network` boolean・失効判定のいずれも要求しない。
+>
+> **`--offline` も offline_api Adapter を止めない。** `--offline` の定義は上記のとおり
+> 「当該実行の**新規送信**を禁止する」であり、送信を行わない Adapter には適用対象が無い。
+> したがって `--offline` 指定下でも local embedding による vector 検索は成立する
+> (適用形は [05-runtime.md §1.1](05-runtime.md) の consent gate)。逆に `--online` が
+> offline_api Adapter に対して何かを開くこともない (開くべき閉鎖が存在しない)。
+>
+> **現行実装との関係**: §1 / §7 のとおり、R23 の同梱 runtime は Markdownize / Embedding の
+> `cmd` / `args` / `url` を**一律 schema error として拒否する**。本 addendum は
+> その拒否を今すぐ緩めるものではなく、offline_api 対応を実装する際に `url` を受理する
+> **条件**を先に確定させたものである (`cmd` / `args` は将来の外部 dispatcher の領分として
+> 引き続き拒否 — §7)。
+
 ---
 
 # 4. 共通メタデータ
@@ -719,6 +755,66 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 > deferred: (1) context に heading path を併記する変種 (今回は stem のみが最良で不採用)、
 > (2) 純記号ファイル名や意味の薄いファイル名 (`IMG_1234`) での寄与低下の定量化。
 
+> **ローカル multimodal embedding の identity 規約 (2026-07-26 確定)**:
+> `execution_mode = "offline_api"` の Embedding Adapter (ローカル embedding server) を
+> 導入するための規約。**3 項目とも「同一 profile_hash を名乗る 2 つのベクトル空間」を
+> 生まないための規範**である — [03-data-model.md §7](03-data-model.md) の互換ゲートが
+> 見るのは次元 / distance / modality / `profile_hash` の 4 つだけなので、
+> 同じ profile を名乗る限り**空間の分裂を原理的に検知できない**。しかも embedding は
+> content-addressed identity を持ち first-instance-wins で永続化されるため、
+> 誤った空間のベクトルは**恒久的に凍結される**。事後検知に頼らず構成段階で塞ぐ。
+>
+> **(1) chat template と instruction を `prompt_template_hash` へ畳み込む。**
+> ローカルの multimodal embedding は chat template でラップされて初めてトークン列が
+> 決まり、タスク別 instruction (例: `"Represent the user's input."`) の有無・文面が
+> 出力ベクトルを変える。**同じ重みでも template が違えば別のベクトル空間である。**
+> [03-data-model.md §5.1](03-data-model.md) の `prompt_template_id` /
+> `prompt_template_hash` に固定する (どちらも既存の hash 入力フィールドであり、
+> 現行の cloud embedding profile では未設定のまま — ローカル profile で初めて埋まる)。
+>
+> **結合規則を固定する** — 区切り文字連結は実装差を生むため、次の 2 key object を
+> JCS した byte 列の sha256 を `prompt_template_hash` とする
+> (§5.2 の `bbox_annotation` が `sha256(JCS(json_schema))` を採るのと同型 —
+> このフィールドは artifact 種別ごとに異なる canonicalization を既に許容している)。
+>
+> ```json
+> { "chat_template": "<template 本文>", "instruction": "<instruction 本文>" }
+> ```
+>
+> 各値は [03-data-model.md §5.1](03-data-model.md) の `prompt_template_hash` 前処理
+> (行末空白除去 → 改行正規化 → NFC → 末尾空行削除) を**適用してから** object に入れる。
+> instruction を使わない構成では `"instruction": ""` を明示する (key の省略と空文字を
+> 識別しない — 同節の null 規約と同じ姿勢)。
+>
+> **(2) wire 形式を `messages` に一本化する。**
+> ローカル embedding server の OpenAI 互換エンドポイントは、テキストを
+> `input: ["text"]` で受ける一方、**マルチモーダル入力には chat 形式の `messages` を
+> 要求する**。`messages` は chat template でラップされるため、**同じモデル・同じ文字列でも
+> `input` 経由と `messages` 経由ではトークン列が異なりベクトルが異なる。**
+>
+> テキストチャンクを `input` で埋め込み、後から画像を `messages` で追加すると、
+> 同一 profile を名乗ったまま実質 2 空間に分裂する。したがって
+> **テキストのみのチャンクでも常に `messages` 形式を使う。** 代償は 1 リクエスト
+> 1 アイテム (バッチ不可) だが、Kio の送信は既に重複排除 group ごとに 1 コールであり、
+> ローカルサーバ側の continuous batching が吸収する。
+>
+> **(3) serving backend は identity に含めない。**
+> [03-data-model.md §5.1](03-data-model.md) が「実装バイナリのバージョン・OS・ハードウェアは
+> `binary_hash` として別保存し `tool_profile_hash` には含めない」と規定している系として、
+> **同一の重み・同一の chat template であれば、どの推論ランタイムが生成したベクトルでも
+> 同一 profile として扱う。** これにより serving backend の乗り換え (別 OS への移行等) が
+> **再埋め込みなしに**成立する。
+>
+> したがって **`model_or_tool_family` をはじめ、いかなる hash 入力フィールドにも
+> backend 名を混ぜてはならない** (`"qwen3-vl-embedding-vllm"` のような命名の禁止)。
+> 混ぜると backend を替えただけで profile_hash が変わり、互換ゲートが全 chunk の
+> 再埋め込みを要求する。
+>
+> **ただし identity が同じことは数値が同じことを保証しない。** backend を乗り換える際は
+> 参照実装との数値一致を確認する責務が実装側にある — 本節が定めるのは identity の
+> **規則**のみであり、検証手続きは別途とする。「テキストは一致・画像だけ乖離」という
+> 失敗モードは本節冒頭のとおり互換ゲートで検知できないため、これは形式的な注意ではない。
+
 ## 5.4 Summary (optional)
 
 ```
@@ -872,6 +968,26 @@ store_request_body = false
 store_response_body = false
 require_command_confirmation = true
 ```
+
+> **execution_mode 別の上書き (2026-07-26 確定)**: `[adapter.policy]` は全 Adapter 共通の
+> 既定だが、CPU 推論のローカル VLM は 1 ページの OCR で `timeout_seconds = 300` を超え得る。
+> **`[adapter.policy.<execution_mode>]` の sub-table による上書きを認める** (`online_api` /
+> `offline_api` / `deterministic_library`)。未指定のキーは親の値を継承する。
+>
+> ```toml
+> [adapter.policy]
+> timeout_seconds = 300
+>
+> [adapter.policy.offline_api]
+> timeout_seconds = 1800          # 親を上書き。他のキーは親から継承
+> ```
+>
+> **enforcement の単位は変えない** — §7.1 のとおり AdapterRun 1 回 (= 1 request / job) に
+> 適用する。上書きが変えるのは値だけであり、適用対象・適用時点は共通である。
+> `offline_api` の既定値は Stage 3 のローカル OCR 実測をもって確定する
+> ([tasks/local-adapter-plan.md](../tasks/local-adapter-plan.md))。
+> なお `max_input_bytes` など他のキーも同じ機構で上書きできるが、**現時点で
+> execution_mode 差を必要とするのは `timeout_seconds` のみ**である。
 
 任意コマンド/任意 URL を使う外部 Adapter dispatcher は将来仕様とする。実装する場合は
 **初回実行時** に command / URL / scope / network policy を preview し、ユーザー承認を

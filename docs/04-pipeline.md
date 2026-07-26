@@ -538,11 +538,19 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
   chunk_id TEXT PRIMARY KEY,
   embedding float[768] distance_metric=cosine
 );
+
+-- 2026-07-26: 画像埋め込み用。embeddings.target_type は当初から 'image' を許容していたが、
+-- KNN 検索できる vec0 テーブルが chunk 用しか無く、画像ベクトルを引く経路が存在しなかった。
+-- image_id = objects/image/ の image_hash (07-adapter-spec.md §5.2 の画像参照置換が用いる値)
+CREATE VIRTUAL TABLE image_vec USING vec0(
+  image_id TEXT PRIMARY KEY,
+  embedding float[768] distance_metric=cosine
+);
 ```
 
-`chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
+`chunk_vec` / `image_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。**両者は同一のベクトル空間である** — [03-data-model.md §7](03-data-model.md) が `modality="multimodal"` を固定し、[07-adapter-spec.md §5.3](07-adapter-spec.md) が単一 Adapter による多モダリティの単一空間写像を要求しているため、物理テーブルの分割は sqlite-vec の制約 (1 テーブル 1 主キー型) に由来するものであって、意味的な分離ではない。したがって chunk ベクトルと image ベクトルの cosine は直接比較可能であり、検索側は両者を 1 つのランキングへ統合してよい ([05-runtime.md §1.4](05-runtime.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kio repair rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。**`objects/embeddings/` への書き出しは vector を persist する経路が行い、SQLite 行より先に書く** (2026-07-26、R25-6)
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` / `image_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。これらの間では **`embeddings` テーブルを正** とし、`chunk_vec` / `image_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kio repair rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` → `image_vec` の順に再構築する。**`objects/embeddings/` への書き出しは vector を persist する経路が行い、SQLite 行より先に書く** (2026-07-26、R25-6)
 — 両者の間で crash した場合、object があって行が無い状態は次の rebuild が復元できるが、行があって object が無い状態は
 `rebuild-db` が復元できない vector になる。**object から `embeddings` への replay は `chunks.text_hash` との結合で行う**
 (object は「この vector が何の vector か」を持つが、その本文を今どの chunk 行が担っているかは持たない —
@@ -550,6 +558,8 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 `(text_hash, context, profile)` の関数であり、同一本文・別ファイル名の 2 chunk を交差させてはならない)。
 **旧 DB からの snapshot は第 2 の source として残す** — object 導入前に書かれた store を運ぶのはこれだけであり、
 snapshot 由来の行はその場で object を書き出すので、1 回の rebuild で object 側が正になり fallback は空になる。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — query_cache 等の他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
+
+`image_vec` の導出は同型だが**結合が要らない**点だけが異なる — 結合対象は **`target_type='image'` の行のみ**で、`embeddings.target_id` がそのまま `image_vec.image_id` (= `objects/image/` の `image_hash`) になる。chunk 側の `chunks.text_hash` 結合は「その本文を今どの chunk 行が担っているか」を再導出するためのものだが、画像は content-addressed object そのものが target であり、担い手を探す必要が無いためである (`context_key` も画像には適用しない — 入力構築 ([07-adapter-spec.md §5.3](07-adapter-spec.md) の `chunk_filename_context_v1`) は chunk 本文に対する規約であり画像には掛からない)。**現行 tool-lock の embedding profile への限定は chunk 側と同一**に適用し、`image_hash` ごとに候補が 0 件または 1 件であることを検証する (0 件 = 未 enrichment で行を作らない。2 件以上は corruption)。
 
 **query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。`id` は [03-data-model.md §8.1](03-data-model.md) の embedding identity 式を `target_type: "query_cache"` / `target_hash: <query_vector_digest>` で適用して導出する — 同一 (digest, profile) の再挿入は同一 `id` に確定するため `ON CONFLICT(id) DO NOTHING` で冪等。**INSERT と 256 行剪定は同一 SQLite Tx で cursor 返却前に完了する** (剪定が別 Tx だと返却済み cursor の行を直後に消し得る)。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。書込先は embedding 承認の有無と無関係である (consent gate ([05-runtime.md §1.1](05-runtime.md)) は新規送信の規範であり、受信済み query vector のローカル cache 書込は対象外 — 保存物に query 本文は含まれない)。この行だけは `objects/` から再構築できないため `kio repair rebuild-db` では復元せず破棄する (依存 cursor は `KIO-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
 
