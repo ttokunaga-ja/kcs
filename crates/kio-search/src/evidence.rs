@@ -260,7 +260,11 @@ pub fn parse_evidence_pointer_uri(uri: &str) -> Result<EvidencePointer> {
         ));
     }
     let parts = path.split('/').collect::<Vec<_>>();
-    if parts.len() == 3 && parts.get(1) == Some(&"object") {
+    // `kio://<scope_id>/object/<type>/<hash>` — four segments, not three
+    // (08 §2.3). The earlier `len() == 3` guard never fired for a real object
+    // URI, so those fell through to the generic segment-count error below and
+    // reported a misleading reason. Grammar lives in `crate::object_uri`.
+    if parts.get(1) == Some(&crate::object_uri::OBJECT_SEGMENT) {
         return Err(SearchError::Evidence(
             "object reference URI is not an evidence pointer".to_owned(),
         ));
@@ -343,6 +347,25 @@ mod tests {
     #[test]
     fn ct3_uri_002_object_reference_is_distinct_from_evidence_pointer() {
         assert!(parse_evidence_pointer_uri("kio://scope/object/image/sha256:abc").is_err());
+    }
+
+    #[test]
+    fn object_reference_is_rejected_for_being_an_object_reference() {
+        // The assertion above only demanded *an* error, which let a stale
+        // `len() == 3` guard sit dead while real four-segment object URIs fell
+        // through to the generic segment-count message. Pin the reason.
+        let digest = "a".repeat(SHA256_DIGEST_LENGTH);
+        for uri in [
+            format!("kio://scope/object/image/sha256:{digest}"),
+            "kio://scope/object/image/sha256:abc".to_owned(),
+            "kio://scope/object/raw/sha256:abc".to_owned(),
+        ] {
+            let error = parse_evidence_pointer_uri(&uri).unwrap_err().to_string();
+            assert!(
+                error.contains("object reference URI is not an evidence pointer"),
+                "{uri} reported: {error}"
+            );
+        }
     }
 
     #[test]

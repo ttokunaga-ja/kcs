@@ -9,6 +9,7 @@
 pub mod cursor;
 pub mod evidence;
 pub mod mmr;
+pub mod object_uri;
 pub mod query;
 pub mod rrf;
 
@@ -16,6 +17,7 @@ use thiserror::Error;
 
 pub use cursor::{CursorExcludedScope, CursorToken, ScopeCursor, ScopeMode};
 pub use evidence::EvidencePointer;
+pub use object_uri::{extract_related_images, ObjectUri, RelatedImage};
 pub use query::{ChunkingConfigBinding, TimeTravelSelector};
 
 pub type Result<T> = std::result::Result<T, SearchError>;

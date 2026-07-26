@@ -1760,6 +1760,66 @@ fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
     assert!(!unit.markdown.contains("](img-0.png)"));
 }
 
+/// Stage 1.5 (05 §1.7): a chunk that references image objects carries them as
+/// `related_images[]` so a multimodal Agent can `kio open` them, and a chunk
+/// with no reference omits the field entirely rather than sending `[]` (the
+/// `current_paths` convention). The plain Markdown link in the same body must
+/// not be mistaken for an image reference.
+#[test]
+fn w2_related_images_are_derived_from_chunk_bodies_and_omitted_when_absent() {
+    let dir = scope();
+    // R9-2: image-link replacement only happens on the online OCR path, which
+    // non-text-native files reach → PDF fixture.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello image link"])).unwrap();
+    fs::write(
+        dir.path().join("notes.md"),
+        "# plain\n\nplaintextmarker has no figures at all.\n",
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")],
+    );
+
+    let search = json_success(&dir, ["search", "ocr", "--mode", "text"]);
+    let hit = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["title"] == "a.pdf")
+        .unwrap_or_else(|| panic!("expected an a.pdf hit: {search}"));
+    assert_eq!(hit["result_type"], "chunk", "{hit}");
+    let images = hit["related_images"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected related_images on an OCR chunk: {hit}"));
+    // One image per page, and the `[source](https://…)` link in the same body
+    // is a link — not an image — so it must not appear here.
+    assert_eq!(images.len(), 1, "{hit}");
+    assert_eq!(images[0]["order"], 0, "{hit}");
+    let uri = images[0]["image_uri"].as_str().unwrap();
+    assert!(uri.contains("/object/image/sha256:"), "{uri}");
+
+    // The whole point of the field is that the Agent can fetch what it names.
+    let opened = json_success(&dir, ["open", uri]);
+    assert_eq!(opened["status"], "opened");
+    assert_eq!(opened["object_type"], "image");
+
+    let plain = json_success(&dir, ["search", "plaintextmarker", "--mode", "text"]);
+    let plain_hit = plain["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["title"] == "notes.md")
+        .unwrap_or_else(|| panic!("expected a notes.md hit: {plain}"));
+    assert_eq!(plain_hit["result_type"], "chunk", "{plain_hit}");
+    assert!(
+        plain_hit.get("related_images").is_none(),
+        "an image-free chunk must omit the field, not send []: {plain_hit}"
+    );
+}
+
 /// QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2 L679-683): an auth failure
 /// lands `paused` with `hold_reason="auth"`, never `failed` — this test used
 /// to assert `status=="failed"` + `attempts==1` (the pre-QA2 shape). Under

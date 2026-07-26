@@ -120,6 +120,7 @@ use kio_search::evidence::{
     EvidencePointerIssueRequest, EVIDENCE_POINTER_SCHEMA_VERSION,
 };
 use kio_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
+use kio_search::object_uri::extract_related_images;
 use kio_search::query::{
     query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
     ScopeSelectionMode, SearchMode, TimeTravelSelector,
@@ -3680,6 +3681,10 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         .map_err(search_to_kio)?;
         let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kio)?;
         let mut result = json!({
+            // 05 §1.7: every row declares what it points at. Only chunk rows
+            // exist today; image rows arrive with the image-embedding lane and
+            // additionally carry `payload_uri`.
+            "result_type": "chunk",
             "chunk_hash": candidate.chunk_hash,
             "evidence_pointer": pointer,
             "evidence_uri": uri,
@@ -3693,6 +3698,15 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             if let Some(current_path) = binding.current_path() {
                 result["current_path"] = json!(current_path);
             }
+        }
+        // 05 §1.7: the images this chunk body references, so a multimodal Agent
+        // can `kio open` them. Derived from the already-loaded chunk text — no
+        // index lookup and no existence check (a purged image may still be
+        // named here; `kio open`'s purge barrier is what terminates that).
+        // Omitted entirely when empty, like `current_paths` above.
+        let related_images = extract_related_images(&candidate.meta.text);
+        if !related_images.is_empty() {
+            result["related_images"] = json!(related_images);
         }
         results.push(result);
     }
