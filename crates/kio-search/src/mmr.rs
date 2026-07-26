@@ -32,14 +32,6 @@ pub struct DiversifiedCandidate {
     pub final_rank: u64,
 }
 
-pub trait Diversifier {
-    fn diversify(
-        &self,
-        candidates: &[MmrCandidate],
-        config: MmrConfig,
-    ) -> Result<Vec<DiversifiedCandidate>>;
-}
-
 pub fn diversify_candidates(
     candidates: &[MmrCandidate],
     config: MmrConfig,

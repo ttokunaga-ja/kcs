@@ -51,10 +51,10 @@ impl DeterministicAdapter {
             // REQUIRED for a billable adapter (07 §5.7 condition 6). Per the
             // QA18 ruling, a non-billable adapter still states its billing
             // posture explicitly (`Nonbillable`) rather than leaving
-            // `reject_billing` at `None` — `None` is reserved for a legacy
-            // profile predating this field, which a consumer must fail-closed
-            // interpret as "billable" (07 §4: "legacy/未知値は fail-closed =
-            // billable として扱う"). This adapter is not legacy; it declares.
+            // `reject_billing` at `None` — a consumer must fail-closed
+            // interpret an absent declaration as "billable" (07 §4: "欠落・
+            // 未知値は fail-closed = billable として扱う"), so declaring is
+            // the only way to say "this adapter does not bill".
             billable_kinds: Vec::new(),
             reject_billing: Some(crate::types::BillingDeclaration::Nonbillable),
             // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this
@@ -587,11 +587,6 @@ fn normalize_pdf_page_count(mut pages: Vec<String>, page_count: usize) -> Vec<St
 /// that a literal occurrence of the word "endstream" inside page text — e.g. a
 /// document that discusses PDF internals — is not mistaken for the real stream
 /// boundary and does not truncate the page to empty markdown (Step2c I3).
-#[must_use]
-pub fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
-    pdf_stream_text_pages_bounded(bytes, MAX_DETERMINISTIC_PDF_PAGES).unwrap_or_default()
-}
-
 pub fn pdf_stream_text_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<Vec<String>> {
     let text = String::from_utf8_lossy(bytes);
     let mut rest = text.as_ref();

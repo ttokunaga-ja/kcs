@@ -31,6 +31,9 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"
+# ct3_multi_011 asserts on the device replica through its own public API,
+# rather than pinning the rule to a hand-tuned BM25 ranking.
+kio-index = { path = "../kio-index" }
 base64.workspace = true
 # step4b_flate_contract.rs compresses its PDF fixtures at test time so the
 # FlateDecode extraction path is exercised against real zlib streams.

@@ -485,6 +485,37 @@ fn execute_phase_machine(
             // every read command until an unrelated index-touching write
             // happened to run.
             crate::recover_index_generation(repo.kio_dir())?;
+            // 05 §1.8 write-through. Ranking is not the reason here: the
+            // rotation above already guarantees the next search re-projects
+            // this scope, which would drop the purged rows on its own. The
+            // reason is that the replica holds the chunk TEXT, on the device,
+            // under the cache root — and purge exists to make that text stop
+            // existing. Waiting for a reader to notice would leave purged
+            // content readable in `aggregator.sqlite` for as long as nobody
+            // searched.
+            //
+            // A full re-projection rather than a delta, deliberately: purge
+            // deletes chunk rows, config associations, chunk vectors AND
+            // orphaned embeddings, and it is rare and already expensive. Being
+            // exactly right about the surviving set matters more here than
+            // saving the milliseconds a delta would.
+            //
+            // R25-5: and this is the one caller that FAILS on a lost cache
+            // write. Everywhere else the replica is a cache and a cache may not
+            // break a command (03 §4). Here the "cache" is a second copy of the
+            // text the user asked to stop existing, so reporting success while
+            // it is still readable under the cache root is not a degraded
+            // result — it is a false one.
+            crate::write_through_projection(repo.kio_dir()).map_err(|reason| {
+                KioError::new(
+                    "KIO-E-PURGE-REPLICA-001",
+                    "purge removed the content but could not remove it from the \
+                     device search replica; re-run purge, or delete \
+                     `aggregator.sqlite` under the cache root",
+                    json!({ "reason": reason }),
+                    ExitCode::Failure,
+                )
+            })?;
             Ok(attach_working_tree_warning(
                 success_report(&locked_plan, &report),
                 working_tree_alias_count,
@@ -831,6 +862,19 @@ fn delete_derived_surfaces(
                 .deleted
                 .sqlite_orphan_embeddings
                 .saturating_add(deleted.deleted_orphan_embeddings);
+            // R25-6: the vector now also exists as a CAS object, and purge is
+            // about making content stop existing. Deleting only the SQLite row
+            // would leave the embedding readable in `objects/embeddings/` — and
+            // worse, the next `rebuild-db` replays from there, so the purged
+            // vector would come back.
+            //
+            // Only the rows SQLite already decided were orphans: an embedding
+            // still referenced by a surviving chunk's `text_hash` is shared
+            // content and is preserved on both sides by the same rule
+            // (05 §3.5, "live 参照が 0 の場合のみ物理削除する").
+            for embedding_id in &deleted.deleted_embedding_ids {
+                store.remove_content(ContentObjectKind::Embedding, embedding_id)?;
+            }
         }
         drop(index);
         store_phase_chunk_ids(
@@ -973,8 +1017,6 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
                 .insert(kio_core::cas::hash_json(&value)?);
         }
         if !identities.insert(identity.clone()) {
-            // A canonical/legacy duplicate is validated together by the loader;
-            // only its physical directory still needs removal.
             continue;
         }
         let instance =
@@ -1005,16 +1047,7 @@ fn validate_instance_leaf(path: &Path, manifest: &NormalizedInstanceManifest) ->
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| store_corrupt(path, "normalized instance leaf is not valid UTF-8"))?;
-    let canonical = format!("{raw}.{tool}.g{}", manifest.gen);
-    #[cfg(not(windows))]
-    let legacy = format!(
-        "{}.{}.g{}",
-        manifest.raw_hash, manifest.tool_profile_hash, manifest.gen
-    );
-    #[cfg(windows)]
-    let valid_name = name == canonical;
-    #[cfg(not(windows))]
-    let valid_name = name == canonical || name == legacy;
+    let valid_name = name == format!("{raw}.{tool}.g{}", manifest.gen);
     let fanout = path
         .parent()
         .and_then(Path::file_name)
@@ -1121,12 +1154,7 @@ fn remove_target_normalized_views(kio_dir: &Path, targets: &BTreeSet<&str>) -> R
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| store_corrupt(&path, "normalized view leaf is not valid UTF-8"))?;
-            let canonical = name.starts_with(&format!("{digest}."));
-            #[cfg(not(windows))]
-            let legacy = name.starts_with(&format!("{raw_hash}."));
-            #[cfg(windows)]
-            let legacy = false;
-            if (canonical || legacy) && name.ends_with(".md") {
+            if name.starts_with(&format!("{digest}.")) && name.ends_with(".md") {
                 validate_existing_regular(&path, Some(256 * 1024 * 1024))?;
                 candidates.push(path);
             }

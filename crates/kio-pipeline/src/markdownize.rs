@@ -575,19 +575,6 @@ fn normalized_instance_relative_path(raw_hash: &str, tool_profile_hash: &str, ge
         .join(format!("{digest}.{tool_digest}.g{gen}"))
 }
 
-#[cfg(not(windows))]
-fn legacy_normalized_instance_relative_path(
-    raw_hash: &str,
-    tool_profile_hash: &str,
-    gen: u64,
-) -> PathBuf {
-    let digest = normalized_path_digest(raw_hash);
-    Path::new("objects/normalized_units")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(format!("{raw_hash}.{tool_profile_hash}.g{gen}"))
-}
-
 #[must_use]
 pub fn normalized_view_path(
     kio_dir: impl AsRef<Path>,
@@ -611,19 +598,6 @@ fn normalized_view_relative_path(raw_hash: &str, tool_profile_hash: &str, gen: u
         .join(fanout_a)
         .join(fanout_b)
         .join(format!("{digest}.{tool_digest}.g{gen}.md"))
-}
-
-#[cfg(not(windows))]
-fn legacy_normalized_view_relative_path(
-    raw_hash: &str,
-    tool_profile_hash: &str,
-    gen: u64,
-) -> PathBuf {
-    let digest = normalized_path_digest(raw_hash);
-    Path::new("objects/normalized")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(format!("{raw_hash}.{tool_profile_hash}.g{gen}.md"))
 }
 
 /// Return only a portable path component. I/O entry points validate hashes before
@@ -666,76 +640,18 @@ pub fn load_validated_normalized_instance(
         &canonical_relative,
         StorePathKind::Directory,
     )?;
-    #[cfg(not(windows))]
-    {
-        let legacy_relative =
-            legacy_normalized_instance_relative_path(raw_hash, tool_profile_hash, gen);
-        let legacy_existing = resolve_existing_store_path(
-            kio_dir.as_ref(),
-            &legacy_relative,
-            StorePathKind::Directory,
-        )?;
-        match (canonical_existing, legacy_existing) {
-            (Some(canonical_dir), Some(legacy_dir)) => {
-                let canonical = load_validated_normalized_instance_at(
-                    kio_dir.as_ref(),
-                    &canonical_relative,
-                    &canonical_dir,
-                    &identity,
-                )?;
-                let legacy = load_validated_normalized_instance_at(
-                    kio_dir.as_ref(),
-                    &legacy_relative,
-                    &legacy_dir,
-                    &identity,
-                )?;
-                if canonical.manifest != legacy.manifest || canonical.units != legacy.units {
-                    return Err(normalized_corrupt(
-                        &kio_dir.as_ref().join(&canonical_relative),
-                        "canonical and legacy normalized instances disagree",
-                    ));
-                }
-                Ok(ValidatedNormalizedInstance {
-                    manifest: canonical.manifest,
-                    units: canonical.units,
-                    verified_bytes: canonical
-                        .verified_bytes
-                        .saturating_add(legacy.verified_bytes),
-                })
-            }
-            (Some(canonical_dir), None) => load_validated_normalized_instance_at(
-                kio_dir.as_ref(),
-                &canonical_relative,
-                &canonical_dir,
-                &identity,
-            ),
-            (None, Some(legacy_dir)) => load_validated_normalized_instance_at(
-                kio_dir.as_ref(),
-                &legacy_relative,
-                &legacy_dir,
-                &identity,
-            ),
-            (None, None) => Err(missing_normalized_object(
-                &kio_dir.as_ref().join(&canonical_relative),
-                "normalized instance does not exist",
-            )),
-        }
-    }
-    #[cfg(windows)]
-    {
-        let canonical_dir = canonical_existing.ok_or_else(|| {
-            missing_normalized_object(
-                &kio_dir.as_ref().join(&canonical_relative),
-                "normalized instance does not exist",
-            )
-        })?;
-        load_validated_normalized_instance_at(
-            kio_dir.as_ref(),
-            &canonical_relative,
-            &canonical_dir,
-            &identity,
+    let canonical_dir = canonical_existing.ok_or_else(|| {
+        missing_normalized_object(
+            &kio_dir.as_ref().join(&canonical_relative),
+            "normalized instance does not exist",
         )
-    }
+    })?;
+    load_validated_normalized_instance_at(
+        kio_dir.as_ref(),
+        &canonical_relative,
+        &canonical_dir,
+        &identity,
+    )
 }
 
 /// Conservatively account every bounded physical file that the normalized
@@ -769,17 +685,11 @@ fn normalized_instance_read_budget_with_file_limit(
             "requested normalized instance has an invalid hash identity".to_owned(),
         ));
     }
-    let mut relatives = vec![normalized_instance_relative_path(
+    let relatives = [normalized_instance_relative_path(
         raw_hash,
         tool_profile_hash,
         gen,
     )];
-    #[cfg(not(windows))]
-    relatives.push(legacy_normalized_instance_relative_path(
-        raw_hash,
-        tool_profile_hash,
-        gen,
-    ));
 
     let mut total = 0_u64;
     let mut visited_files = 0_usize;
@@ -1138,8 +1048,7 @@ pub fn persist_normalized_instance(
 
     let expected_view = build_normalized_view(manifest, units);
 
-    // Validate both physical layouts before creating either object. Legacy data
-    // remains in place: exact data is reused, while retries update the legacy slot.
+    // Validate the physical layout before creating either object.
     resolve_existing_store_path(
         kio_dir.as_ref(),
         instance_parent_relative,
@@ -1150,115 +1059,18 @@ pub fn persist_normalized_instance(
         view_parent_relative,
         StorePathKind::Directory,
     )?;
-    let canonical_instance = resolve_existing_store_path(
+    resolve_existing_store_path(
         kio_dir.as_ref(),
         &instance_relative,
         StorePathKind::Directory,
     )?;
-    #[cfg(not(windows))]
-    let legacy_instance_relative = legacy_normalized_instance_relative_path(
-        &manifest.raw_hash,
-        &manifest.tool_profile_hash,
-        manifest.gen,
-    );
-    #[cfg(not(windows))]
-    let legacy_instance = resolve_existing_store_path(
-        kio_dir.as_ref(),
-        &legacy_instance_relative,
-        StorePathKind::Directory,
-    )?;
-    #[cfg(windows)]
-    let (target_instance_relative, skip_instance_write) = {
-        let _ = canonical_instance;
-        (instance_relative.clone(), false)
-    };
-    #[cfg(not(windows))]
-    let (target_instance_relative, skip_instance_write) =
-        match (canonical_instance.as_ref(), legacy_instance.as_ref()) {
-            (Some(_), Some(_)) => {
-                let existing = load_validated_normalized_instance(
-                    kio_dir.as_ref(),
-                    &manifest.raw_hash,
-                    &manifest.tool_profile_hash,
-                    manifest.gen,
-                )?;
-                if existing.manifest != *manifest || existing.units.as_slice() != units {
-                    return Err(normalized_corrupt(
-                        &dir,
-                        "dual normalized instances cannot be rewritten inconsistently",
-                    ));
-                }
-                (instance_relative.clone(), true)
-            }
-            (Some(_), None) => (instance_relative.clone(), false),
-            (None, Some(_)) => {
-                let existing = load_validated_normalized_instance(
-                    kio_dir.as_ref(),
-                    &manifest.raw_hash,
-                    &manifest.tool_profile_hash,
-                    manifest.gen,
-                )?;
-                let exact = existing.manifest == *manifest && existing.units.as_slice() == units;
-                (legacy_instance_relative.clone(), exact)
-            }
-            (None, None) => (instance_relative.clone(), false),
-        };
+    resolve_existing_store_path(kio_dir.as_ref(), &view_relative, StorePathKind::RegularFile)?;
 
-    let canonical_view =
-        resolve_existing_store_path(kio_dir.as_ref(), &view_relative, StorePathKind::RegularFile)?;
-    #[cfg(not(windows))]
-    let (legacy_view_relative, legacy_view) = {
-        let relative = legacy_normalized_view_relative_path(
-            &manifest.raw_hash,
-            &manifest.tool_profile_hash,
-            manifest.gen,
-        );
-        let existing =
-            resolve_existing_store_path(kio_dir.as_ref(), &relative, StorePathKind::RegularFile)?;
-        (relative, existing)
-    };
-    #[cfg(windows)]
-    let (target_view_relative, skip_view_write) = {
-        let _ = canonical_view;
-        (view_relative.clone(), false)
-    };
-    #[cfg(not(windows))]
-    let (target_view_relative, skip_view_write) =
-        match (canonical_view.as_deref(), legacy_view.as_deref()) {
-            (Some(canonical), Some(legacy)) => {
-                let canonical_bytes =
-                    read_normalized_view_at(kio_dir.as_ref(), &view_relative, canonical)?;
-                let legacy_bytes =
-                    read_normalized_view_at(kio_dir.as_ref(), &legacy_view_relative, legacy)?;
-                if canonical_bytes != legacy_bytes || canonical_bytes != expected_view.as_bytes() {
-                    return Err(normalized_corrupt(
-                        &view_path,
-                        "dual normalized views disagree with each other or the request",
-                    ));
-                }
-                (view_relative.clone(), true)
-            }
-            (Some(_), None) => (view_relative.clone(), false),
-            (None, Some(legacy)) => {
-                let bytes =
-                    read_normalized_view_at(kio_dir.as_ref(), &legacy_view_relative, legacy)?;
-                (
-                    legacy_view_relative.clone(),
-                    bytes == expected_view.as_bytes(),
-                )
-            }
-            (None, None) => (view_relative.clone(), false),
-        };
-
-    if skip_instance_write && skip_view_write {
-        return Ok(());
-    }
-
-    let dir = kio_dir.as_ref().join(&target_instance_relative);
-    let view_path = kio_dir.as_ref().join(&target_view_relative);
+    let dir = kio_dir.as_ref().join(&instance_relative);
+    let view_path = kio_dir.as_ref().join(&view_relative);
     ensure_store_directory_path(kio_dir.as_ref(), instance_parent_relative)?;
     ensure_store_directory_path(kio_dir.as_ref(), view_parent_relative)?;
-    if !skip_instance_write {
+    {
         let tmp_dir = atomic_temp_path(&dir);
         let tmp_relative = tmp_dir.strip_prefix(kio_dir.as_ref()).map_err(|_| {
             normalized_corrupt(
@@ -1286,29 +1098,9 @@ pub fn persist_normalized_instance(
                 StorePathKind::Directory,
             )?
             .ok_or_else(|| normalized_corrupt(&view_path, "normalized view parent disappeared"))?;
-            #[cfg(not(windows))]
-            {
-                let alternate = if target_instance_relative == instance_relative {
-                    &legacy_instance_relative
-                } else {
-                    &instance_relative
-                };
-                if resolve_existing_store_path(
-                    kio_dir.as_ref(),
-                    alternate,
-                    StorePathKind::Directory,
-                )?
-                .is_some()
-                {
-                    return Err(normalized_corrupt(
-                        &dir,
-                        "alternate normalized instance appeared during publish",
-                    ));
-                }
-            }
             if let Some(existing) = resolve_existing_store_path(
                 kio_dir.as_ref(),
-                &target_instance_relative,
+                &instance_relative,
                 StorePathKind::Directory,
             )? {
                 fs::remove_dir_all(&existing).pipeline_io(&existing)?;
@@ -1325,29 +1117,7 @@ pub fn persist_normalized_instance(
         }
     }
 
-    if !skip_view_write {
-        #[cfg(not(windows))]
-        {
-            let alternate = if target_view_relative == view_relative {
-                &legacy_view_relative
-            } else {
-                &view_relative
-            };
-            if resolve_existing_store_path(kio_dir.as_ref(), alternate, StorePathKind::RegularFile)?
-                .is_some()
-            {
-                return Err(normalized_corrupt(
-                    &view_path,
-                    "alternate normalized view appeared during publish",
-                ));
-            }
-        }
-        atomic_overwrite_store_file(
-            kio_dir.as_ref(),
-            &target_view_relative,
-            expected_view.as_bytes(),
-        )?;
-    }
+    atomic_overwrite_store_file(kio_dir.as_ref(), &view_relative, expected_view.as_bytes())?;
 
     let persisted = load_validated_normalized_instance(
         kio_dir.as_ref(),
@@ -1361,41 +1131,16 @@ pub fn persist_normalized_instance(
             "published normalized instance does not match the request",
         ));
     }
-    let canonical_view =
-        resolve_existing_store_path(kio_dir.as_ref(), &view_relative, StorePathKind::RegularFile)?;
-    if let Some(canonical) = canonical_view.as_deref() {
-        let bytes = read_normalized_view_at(kio_dir.as_ref(), &view_relative, canonical)?;
-        if bytes != expected_view.as_bytes() {
-            return Err(normalized_corrupt(
-                &view_path,
-                "published canonical normalized view does not match the request",
-            ));
-        }
-    }
-    #[cfg(not(windows))]
-    let legacy_view = resolve_existing_store_path(
-        kio_dir.as_ref(),
-        &legacy_view_relative,
-        StorePathKind::RegularFile,
-    )?;
-    #[cfg(not(windows))]
-    if let Some(legacy) = legacy_view.as_deref() {
-        let bytes = read_normalized_view_at(kio_dir.as_ref(), &legacy_view_relative, legacy)?;
-        if bytes != expected_view.as_bytes() {
-            return Err(normalized_corrupt(
-                &view_path,
-                "published legacy normalized view does not match the request",
-            ));
-        }
-    }
-    #[cfg(windows)]
-    let any_view = canonical_view.is_some();
-    #[cfg(not(windows))]
-    let any_view = canonical_view.is_some() || legacy_view.is_some();
-    if !any_view {
-        return Err(missing_normalized_object(
+    let published_view =
+        resolve_existing_store_path(kio_dir.as_ref(), &view_relative, StorePathKind::RegularFile)?
+            .ok_or_else(|| {
+                missing_normalized_object(&view_path, "published normalized view does not exist")
+            })?;
+    let bytes = read_normalized_view_at(kio_dir.as_ref(), &view_relative, &published_view)?;
+    if bytes != expected_view.as_bytes() {
+        return Err(normalized_corrupt(
             &view_path,
-            "published normalized view does not exist",
+            "published normalized view does not match the request",
         ));
     }
     Ok(())
@@ -2490,141 +2235,6 @@ mod tests {
         ))
         .unwrap()
         .contains("retry output"));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn legacy_normalized_layout_is_loaded_and_reused_in_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let (identity, manifest, units) = normalized_fixture();
-        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
-
-        let canonical_instance = normalized_instance_dir(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        );
-        let legacy_instance = dir.path().join(legacy_normalized_instance_relative_path(
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        ));
-        let canonical_view = normalized_view_path(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        );
-        let legacy_view = dir.path().join(legacy_normalized_view_relative_path(
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        ));
-        fs::rename(&canonical_instance, &legacy_instance).unwrap();
-        fs::rename(&canonical_view, &legacy_view).unwrap();
-
-        let loaded = load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .unwrap();
-        assert_eq!(loaded.manifest, manifest);
-        assert_eq!(loaded.units, units);
-        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
-        assert!(legacy_instance.is_dir());
-        assert!(legacy_view.is_file());
-        assert!(!canonical_instance.exists());
-        assert!(!canonical_view.exists());
-
-        let mut retried_manifest = manifest.clone();
-        let mut retried_units = units.clone();
-        retried_manifest.run_id = "run_legacy_retry".to_owned();
-        retried_manifest.generated_at = "2026-07-13T00:00:00Z".to_owned();
-        retried_units[0].markdown = "legacy retry output".to_owned();
-        retried_units[0].generated_at = retried_manifest.generated_at.clone();
-        persist_normalized_instance(dir.path(), &retried_manifest, &retried_units).unwrap();
-        let retried = load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .unwrap();
-        assert_eq!(retried.manifest, retried_manifest);
-        assert_eq!(retried.units, retried_units);
-        assert!(legacy_instance.is_dir());
-        assert!(legacy_view.is_file());
-        assert!(!canonical_instance.exists());
-        assert!(!canonical_view.exists());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn dual_normalized_layout_requires_equivalent_instance_and_view() {
-        let dir = tempfile::tempdir().unwrap();
-        let (identity, manifest, units) = normalized_fixture();
-        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
-
-        let canonical_instance = normalized_instance_dir(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        );
-        let legacy_instance = dir.path().join(legacy_normalized_instance_relative_path(
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        ));
-        fs::create_dir_all(&legacy_instance).unwrap();
-        for entry in fs::read_dir(&canonical_instance).unwrap() {
-            let entry = entry.unwrap();
-            fs::copy(entry.path(), legacy_instance.join(entry.file_name())).unwrap();
-        }
-        let canonical_view = normalized_view_path(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        );
-        let legacy_view = dir.path().join(legacy_normalized_view_relative_path(
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        ));
-        fs::copy(&canonical_view, &legacy_view).unwrap();
-
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_ok());
-        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
-
-        fs::write(&legacy_view, b"different cached view").unwrap();
-        assert!(persist_normalized_instance(dir.path(), &manifest, &units).is_err());
-        fs::copy(&canonical_view, &legacy_view).unwrap();
-
-        let unit_name = format!("{}.json", prepared_unit_ref(&manifest.units[0].unit_key));
-        let mut divergent = units[0].clone();
-        divergent.markdown = "different normalized markdown".to_owned();
-        fs::write(
-            legacy_instance.join(unit_name),
-            serde_json::to_vec_pretty(&divergent).unwrap(),
-        )
-        .unwrap();
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_err());
     }
 
     #[test]

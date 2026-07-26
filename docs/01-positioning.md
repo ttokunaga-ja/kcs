@@ -231,24 +231,27 @@ Phase 5: Agent
 
 # 7. 二層構造: truth と cache
 
-データ・所有権・権限の正本は **各フォルダ直下の `.kio`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。device-global の例外は **cost-ledger.sqlite** (再構築不可の運用台帳 — cache ではない、[03-data-model.md §4.1](03-data-model.md))。
+データ・所有権・権限の正本は **各フォルダ直下の `.kio`** に閉じる。device-local な `scope_registry` と global aggregator は **検索キャッシュ** に過ぎない。device-global の例外は **cost-ledger.sqlite** (再構築不可の運用台帳 — cache ではない、[03-data-model.md §4.1](03-data-model.md))。
 
 ```
 truth = folder-local .kio
   - raw object / normalized / chunks / commits / refs
   - 権限境界 / partial sync / purge / export の単位
 
-cache = scope_registry / aggregator
-  - 検索の探索対象一覧
-  - stale 検出
-  - UI 統合
+cache = scope_registry
+  - 検索の探索対象一覧 / stale 検出
+cache = aggregator
+  - 全 scope の live chunk 集合を複製した device-level read replica
+  - 横断検索の採点・候補選択、権限状態の横断投影
 ```
 
 ルール:
 
-- aggregator のみを更新して `.kio` の状態が変わる実装は禁止。
-- aggregator 喪失は再構築可能 (各 `.kio` を rescan)。`.kio` 喪失は復旧不能。
+- scope_registry / aggregator のみを更新して `.kio` の状態が変わる実装は禁止。
+- scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。`.kio` 喪失は復旧不能。
 - 検索結果メタには「正本の `.kio` パス」を必ず含める。
+- **aggregator は安全性判定の最終権限を持たない** — 結果を返す scope は live `.kio` で再確認する
+  ([05-runtime.md §1.8](05-runtime.md))。**権限の書き込みは常に `.kio` へ行う**。
 
 ---
 

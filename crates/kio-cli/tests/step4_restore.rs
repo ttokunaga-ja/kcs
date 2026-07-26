@@ -315,9 +315,15 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
         tombstone,
         serde_json::to_vec(&json!({
             "raw_hash": raw_hash,
-            "purged_at": "2026-07-13T00:00:00Z",
-            "purged_reason": "legal",
-            "purged_in_commit": commit,
+            "events": [{
+                "kind": "purged",
+                "at": "2026-07-13T00:00:00Z",
+                "in_commit": commit,
+                "actor": "operator",
+                "reason": "legal",
+                "epoch": 1,
+                "lifecycle_epoch": 1,
+            }],
         }))
         .unwrap(),
     )

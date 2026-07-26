@@ -1456,16 +1456,6 @@ fn image_object_path(kio_dir: &Path, hash: &str) -> Result<PathBuf> {
         .join(digest))
 }
 
-#[cfg(not(windows))]
-fn legacy_image_object_path(kio_dir: &Path, hash: &str) -> Result<PathBuf> {
-    let digest = image_hash_digest(hash)?;
-    Ok(kio_dir
-        .join("objects/image")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(hash))
-}
-
 fn image_object_slot_exists(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -1475,22 +1465,6 @@ fn image_object_slot_exists(path: &Path) -> Result<bool> {
             message: err.to_string(),
         }),
     }
-}
-
-fn existing_image_object_paths(kio_dir: &Path, hash: &str) -> Result<Vec<PathBuf>> {
-    let canonical = image_object_path(kio_dir, hash)?;
-    let mut paths = Vec::with_capacity(2);
-    if image_object_slot_exists(&canonical)? {
-        paths.push(canonical);
-    }
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_image_object_path(kio_dir, hash)?;
-        if image_object_slot_exists(&legacy)? {
-            paths.push(legacy);
-        }
-    }
-    Ok(paths)
 }
 
 fn verify_existing_image_object(path: &Path, hash: &str, max_bytes: usize) -> Result<()> {
@@ -1573,8 +1547,10 @@ fn persist_image_refs_bounded(
     let mut new_bytes = 0_usize;
     let mut hashes_to_write = BTreeSet::new();
     for (hash, bytes) in &unique {
-        let existing_paths = existing_image_object_paths(kio_dir, hash)?;
-        if existing_paths.is_empty() {
+        let path = image_object_path(kio_dir, hash)?;
+        if image_object_slot_exists(&path)? {
+            verify_existing_image_object(&path, hash, max_new_bytes)?;
+        } else {
             new_bytes = new_bytes.checked_add(bytes.len()).ok_or_else(|| {
                 AdapterError::ContractViolation("image persistence byte count overflow".to_owned())
             })?;
@@ -1584,12 +1560,6 @@ fn persist_image_refs_bounded(
                 )));
             }
             hashes_to_write.insert(hash.clone());
-        } else {
-            // Verify every occupied representation. A valid canonical object must not
-            // shadow a corrupt legacy object, or vice versa.
-            for path in existing_paths {
-                verify_existing_image_object(&path, hash, max_new_bytes)?;
-            }
         }
     }
 
@@ -1597,14 +1567,13 @@ fn persist_image_refs_bounded(
         if !hashes_to_write.contains(&hash) {
             continue;
         }
-        let raced_paths = existing_image_object_paths(kio_dir, &hash)?;
-        if !raced_paths.is_empty() {
-            for path in raced_paths {
-                verify_existing_image_object(&path, &hash, max_new_bytes)?;
-            }
+        let path = image_object_path(kio_dir, &hash)?;
+        // Another writer may have published this digest between the scan above and
+        // now; verify what it left rather than overwriting it.
+        if image_object_slot_exists(&path)? {
+            verify_existing_image_object(&path, &hash, max_new_bytes)?;
             continue;
         }
-        let path = image_object_path(kio_dir, &hash)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| AdapterError::Io {
                 path: parent.display().to_string(),
@@ -1614,16 +1583,13 @@ fn persist_image_refs_bounded(
         // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot leave
         // a partial image object under the final digest leaf.
         atomic_write_image_object(&path, bytes)?;
-        let published_paths = existing_image_object_paths(kio_dir, &hash)?;
-        if published_paths.is_empty() {
+        if !image_object_slot_exists(&path)? {
             return Err(AdapterError::ContractViolation(format!(
                 "published image object is missing: {}",
                 path.display()
             )));
         }
-        for published_path in published_paths {
-            verify_existing_image_object(&published_path, &hash, max_new_bytes)?;
-        }
+        verify_existing_image_object(&path, &hash, max_new_bytes)?;
     }
     Ok(images
         .iter()
@@ -1876,35 +1842,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    /// An occupied digest slot is reused without a rewrite, but only after it
+    /// verifies: the object standing in for this digest must hash back to it.
     #[test]
-    fn legacy_image_object_is_verified_and_reused() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = OcrImage {
-            bytes: b"legacy image bytes".to_vec(),
-            media_type: "image/png".to_owned(),
-            bbox: None,
-            confidence: None,
-            annotation: None,
-        };
-        let hash = image_hash(&image.bytes);
-        let canonical = image_object_path(dir.path(), &hash).unwrap();
-        let legacy = legacy_image_object_path(dir.path(), &hash).unwrap();
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, &image.bytes).unwrap();
-
-        let hashes = persist_image_refs_bounded(dir.path(), &[&image], 1024).unwrap();
-        assert_eq!(hashes, vec![hash]);
-        assert_eq!(std::fs::read(&legacy).unwrap(), image.bytes);
-        assert!(
-            !canonical.exists(),
-            "a verified legacy object must be reused without an unbudgeted migration write"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn canonical_and_legacy_image_objects_must_both_verify() {
+    fn an_existing_image_object_is_reused_only_when_it_matches_its_hash() {
         let image = OcrImage {
             bytes: b"authentic image bytes".to_vec(),
             media_type: "image/png".to_owned(),
@@ -1914,39 +1855,33 @@ mod tests {
         };
         let hash = image_hash(&image.bytes);
 
+        let fresh = OcrImage {
+            bytes: b"a second, absent image".to_vec(),
+            media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
+            annotation: None,
+        };
+
         let valid_dir = tempfile::tempdir().unwrap();
-        let valid_canonical = image_object_path(valid_dir.path(), &hash).unwrap();
-        let valid_legacy = legacy_image_object_path(valid_dir.path(), &hash).unwrap();
-        std::fs::create_dir_all(valid_canonical.parent().unwrap()).unwrap();
-        std::fs::write(&valid_canonical, &image.bytes).unwrap();
-        std::fs::write(&valid_legacy, &image.bytes).unwrap();
+        let valid = image_object_path(valid_dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(valid.parent().unwrap()).unwrap();
+        std::fs::write(&valid, &image.bytes).unwrap();
+        // The budget covers only the ABSENT image. Passing means the present one
+        // was reused rather than counted as bytes to write.
         assert_eq!(
-            persist_image_refs_bounded(valid_dir.path(), &[&image], image.bytes.len()).unwrap(),
-            vec![hash.clone()]
+            persist_image_refs_bounded(valid_dir.path(), &[&image, &fresh], fresh.bytes.len())
+                .unwrap(),
+            vec![hash.clone(), image_hash(&fresh.bytes)]
         );
 
-        for corrupt_canonical in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let canonical = image_object_path(dir.path(), &hash).unwrap();
-            let legacy = legacy_image_object_path(dir.path(), &hash).unwrap();
-            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-            let canonical_bytes: &[u8] = if corrupt_canonical {
-                b"corrupt canonical"
-            } else {
-                image.bytes.as_slice()
-            };
-            let legacy_bytes: &[u8] = if corrupt_canonical {
-                image.bytes.as_slice()
-            } else {
-                b"corrupt legacy"
-            };
-            std::fs::write(&canonical, canonical_bytes).unwrap();
-            std::fs::write(&legacy, legacy_bytes).unwrap();
-
-            let error = persist_image_refs_bounded(dir.path(), &[&image], 1024).unwrap_err();
-            assert!(matches!(error, AdapterError::ContractViolation(message)
-                if message.contains("does not match its hash")));
-        }
+        let corrupt_dir = tempfile::tempdir().unwrap();
+        let corrupt = image_object_path(corrupt_dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+        std::fs::write(&corrupt, b"corrupt bytes").unwrap();
+        let error = persist_image_refs_bounded(corrupt_dir.path(), &[&image], 1024).unwrap_err();
+        assert!(matches!(error, AdapterError::ContractViolation(message)
+            if message.contains("does not match its hash")));
     }
 
     #[test]

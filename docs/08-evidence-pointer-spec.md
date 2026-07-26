@@ -216,9 +216,6 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     再評価できる。**sqlite.db 自体の不在・再構築中はこの検証を実行できない — not_found ではなく
     `KIO-E-INDEX-REBUILDING-001` の再構築要求を返し ([05-runtime.md §6](05-runtime.md))、検証不能を
     「不在の確定」と混同しない**)。
-    v1 tree (manifest_hash 欠落) はこれらの検証を行えない — legacy 解決とし、
-    --strict verify は shallow 経路と同じ降格で unverifiable を返す (reason = tree_v1 は恒久のため
-    exit は 4 — §4.3)
 6b. entry の manifest object が purge により欠落している場合 (raw_hash の **tombstone または
     erase receipt** の lifecycle — active / retired を問わず — が説明する欠落。**説明範囲は fsck と
     同一** ([10-operations.md §7.5.1](10-operations.md)): 当該 purged / erased event の `in_commit`
@@ -359,10 +356,8 @@ kio evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 ```
 
 `unverifiable` は `--strict` 時の「時点帰属を検証できない解決」であり、`details.reason` で区別する:
-`commit_shallow` (§3.1 手順 8 — 状況により解消し得る) / `tree_v1` (手順 6a — **恒久**: 既発行 pointer の
-commit は不変であり再 snapshot では解消しない。v2/v3 snapshot 後に新規発行・明示 retarget した pointer
-では生じない) /
-`manifest_missing` (手順 6b — **恒久**)。exit は reason の再試行可能性に従い分岐する — `commit_shallow` のみなら 3 (unshallow で解消し得る)、`tree_v1` / `manifest_missing` を 1 件でも含めば **4** (恒久 — 再試行で進展しない。[06-cli-spec.md §7](06-cli-spec.md) / [10-operations.md §12.2](10-operations.md) の横断規約「4 = 再試行で進展しない」どおり。details.reason は引き続き全 reason を返す)。
+`commit_shallow` (§3.1 手順 8 — 状況により解消し得る) /
+`manifest_missing` (手順 6b — **恒久**)。exit は reason の再試行可能性に従い分岐する — `commit_shallow` のみなら 3 (unshallow で解消し得る)、`manifest_missing` を 1 件でも含めば **4** (恒久 — 再試行で進展しない。[06-cli-spec.md §7](06-cli-spec.md) / [10-operations.md §12.2](10-operations.md) の横断規約「4 = 再試行で進展しない」どおり。details.reason は引き続き全 reason を返す)。
 live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
 status にこれらをそのまま用いる。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
 retryable error `KIO-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも

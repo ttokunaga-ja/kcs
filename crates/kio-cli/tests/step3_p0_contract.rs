@@ -3,7 +3,8 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use kio_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV};
-use serde_json::Value;
+use kio_index::aggregator::Aggregator;
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
@@ -1295,10 +1296,610 @@ fn ct3_multi_009_text_rank_is_global_not_per_scope() {
     assert!((results[1]["score"].as_f64().unwrap() - 1.0 / 62.0).abs() < 1e-12);
 }
 
-/// A single-scope search is byte-identical to the per-scope fusion: one scope
-/// IS the collection, so there is nothing to re-rank and no cache to consult.
+/// A departed scope stops contributing to the collection immediately.
+///
+/// The replica is a device-wide corpus, so a folder that left the registry
+/// keeps depressing every surviving chunk's IDF for its terms until something
+/// evicts it. An all-scopes search is the one caller that knows the live set,
+/// so it is the one that prunes.
 #[test]
-fn ct3_multi_010_single_scope_search_needs_no_global_text_index() {
+fn ct3_multi_011_a_departed_scope_stops_skewing_corpus_statistics() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let (a, b, c) = (
+        parent.path().join("a"),
+        parent.path().join("b"),
+        parent.path().join("c"),
+    );
+    for (dir, body) in [
+        (&a, "# A\n\n## Sec\nzephyrterm alpha\n"),
+        (&b, "# B\n\n## Sec\nzephyrterm beta\n"),
+        (&c, "# C\n\n## Sec\nzephyrterm gamma\n"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("hit.md"), body).unwrap();
+    }
+    for dir in [&a, &b, &c] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    // Read before the folder goes away — the assertion below needs the id.
+    let c_scope_id: String =
+        serde_json::from_str::<Value>(&fs::read_to_string(c.join(".kio/scope.json")).unwrap())
+            .unwrap()["scope_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+    let with_c = json_success_path(&a, &data_home, &["search", "--mode", "text", "zephyrterm"]);
+    assert_eq!(with_c["searched_scopes"].as_array().unwrap().len(), 3);
+    let (scopes_with_c, chunks_with_c) = {
+        let replica = Aggregator::open(&replica_path).unwrap();
+        let (scopes, chunks, _) = replica.corpus_size().unwrap();
+        assert!(
+            replica
+                .text_scores("zephyrterm", &replica.scope_ids().unwrap(), 100)
+                .unwrap()
+                .iter()
+                .any(|score| score.scope_id == c_scope_id),
+            "`c` must be part of the scored collection to begin with"
+        );
+        (scopes, chunks)
+    };
+    assert_eq!(scopes_with_c, 3, "every searched scope must be projected");
+
+    // `c` goes away. Nothing else changes.
+    fs::remove_dir_all(&c).unwrap();
+
+    // Exit 3 is the established partial-failure contract: `c` is unreachable,
+    // so the search returns results AND reports the exclusion.
+    let stdout = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "--mode", "text", "zephyrterm", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let without_c: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(without_c["excluded_scopes"][0]["reason"], "unreachable");
+
+    let replica = Aggregator::open(&replica_path).unwrap();
+    let (scopes, chunks, _) = replica.corpus_size().unwrap();
+    assert_eq!(scopes, 2, "the departed scope must leave `agg_scopes`");
+    assert!(
+        chunks < chunks_with_c,
+        "the departed scope's chunks must leave the collection too ({chunks} vs \
+         {chunks_with_c}), or they keep inflating document frequency for every \
+         surviving chunk"
+    );
+    assert!(
+        replica
+            .text_scores("zephyrterm", &replica.scope_ids().unwrap(), 100)
+            .unwrap()
+            .iter()
+            .all(|score| score.scope_id != c_scope_id),
+        "no row of the departed scope may survive in the scored collection"
+    );
+    let results = without_c["results"].as_array().unwrap();
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit["evidence_pointer"]["scope_id"] != c_scope_id.as_str()),
+        "a departed scope must not return results either: {without_c:#?}"
+    );
+}
+
+/// A narrowed search READS the collection; it does not redefine it.
+///
+/// Pruning to `searched` is right for an all-scopes search and destructive for
+/// a `--scope`/`--descendants` one, whose scope set is a deliberate subset —
+/// pruning to it would evict every scope the user did not ask about and force a
+/// full re-projection on the next default search.
+#[test]
+fn ct3_multi_012_a_narrowed_search_does_not_prune_the_replica() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let nest = parent.path().join("nest");
+    let sub = nest.join("sub");
+    let other = parent.path().join("other");
+    for dir in [&nest, &sub, &other] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for (dir, body) in [
+        (&nest, "zephyrterm nest"),
+        (&sub, "zephyrterm sub"),
+        (&other, "zephyrterm other"),
+    ] {
+        fs::write(dir.join("hit.md"), format!("# H\n\n## Sec\n{body}\n")).unwrap();
+    }
+    for dir in [&nest, &sub, &other] {
+        json_success_path(dir, &data_home, &["init"]);
+    }
+    // `nest`'s own index must not pull `sub` in: scopes are non-recursive, and
+    // this test needs them to be two separate members of the collection.
+    for dir in [&nest, &sub, &other] {
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+
+    let all = json_success_path(&other, &data_home, &["search", "--mode", "text", "zephyrterm"]);
+    assert_eq!(all["searched_scopes"].as_array().unwrap().len(), 3);
+    let full = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    assert_eq!(full.0, 3, "the default search projects every scope");
+
+    // Narrow to `nest` + its descendant — two scopes, so the merge path that
+    // consults the replica is reached, but `other` is deliberately not touched.
+    let narrowed = json_success_path(
+        &nest,
+        &data_home,
+        &[
+            "search",
+            "--mode",
+            "text",
+            "zephyrterm",
+            "--scope",
+            ".",
+            "--descendants",
+        ],
+    );
+    assert_eq!(narrowed["searched_scopes"].as_array().unwrap().len(), 2);
+
+    let after = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    assert_eq!(
+        after, full,
+        "a narrowed search must leave the collection intact, not evict the \
+         scopes it was told to skip"
+    );
+}
+
+/// Indexing replicates. The first cross-scope search finds a complete corpus
+/// without projecting anything itself.
+///
+/// The reader-driven refresh this replaces could only notice a scope whose
+/// `index_generation` had moved since the replica last stamped it, which made
+/// every in-place index writer a potential silent hole: the batch embedding
+/// collect, the sync embedding lane, and `reindex --at` all write the live
+/// `sqlite.db` without rebuilding it, and two of the three rotated nothing. The
+/// fix is direction, not detection — the writer tells the replica.
+#[test]
+fn ct3_multi_013_indexing_replicates_without_waiting_for_a_search() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nquillvane appears here\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nquillvane appears here too\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // No search has run. Both scopes are already in the collection.
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    let replica = Aggregator::open(&replica_path).unwrap();
+    let (scopes, chunks, _) = replica.corpus_size().unwrap();
+    assert_eq!(scopes, 2, "both indexed scopes replicated before any search");
+    assert!(chunks >= 2, "with their chunks: {chunks}");
+    let scored = replica
+        .text_scores("quillvane", &replica.scope_ids().unwrap(), 100)
+        .unwrap();
+    let hit_scopes = scored
+        .iter()
+        .map(|score| score.scope_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        hit_scopes.len(),
+        2,
+        "one BM25 over one corpus, spanning both scopes: {scored:#?}"
+    );
+    drop(replica);
+
+    // And the search that follows agrees with what was already replicated.
+    let search = json_success_path(&a, &data_home, &["search", "quillvane", "--all-scopes"]);
+    assert_eq!(search["results"].as_array().unwrap().len(), 2);
+}
+
+/// R25-1: a history search is not re-ranked against the live collection.
+///
+/// 05 §1.8 lists "no time selector" as a condition for the replica answering,
+/// and nothing evaluated it. The replica holds each scope's LIVE chunks, so a
+/// chunk that history is being searched FOR is by definition absent from it —
+/// `apply_global_ranks` reads that absence as "no rank" and drops the term to
+/// zero. The deleted answer `--include-deleted` exists to resurface would be
+/// ranked below every chunk that merely still exists, which is north-star
+/// scenario M3-3 exactly.
+///
+/// (`--at` reaches the same defect on paper but not in practice: PC59/PC60
+/// forces it to a single non-`--descendants` scope, which the single-scope
+/// condition already declines. `--all-history` / `--since` /
+/// `--include-deleted` carry no such restriction and are the reachable form.)
+#[test]
+fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("keep.md"), "# A\n\n## Sec\nvellichor stays put\n").unwrap();
+    fs::write(a.join("gone.md"), "# G\n\n## Sec\nvellichor will be deleted\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nvellichor over here\n").unwrap();
+    for dir in [&a, &b] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+
+    // The chunk leaves the live index — and, via write-through, the replica.
+    fs::remove_file(a.join("gone.md")).unwrap();
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+
+    let live = json_success_path(&a, &data_home, &["search", "vellichor", "--mode", "text"]);
+    assert_eq!(live["aggregator"]["applied"], json!(true));
+    assert_eq!(live["searched_scopes"].as_array().unwrap().len(), 2);
+
+    let history = json_success_path(
+        &a,
+        &data_home,
+        &["search", "vellichor", "--mode", "text", "--include-deleted"],
+    );
+    assert_eq!(
+        history["aggregator"],
+        json!({ "applied": false, "fallback_reason": "time_selector" }),
+        "a history search must be ranked by the tier that read the history: {history:#?}"
+    );
+    let results = history["results"].as_array().unwrap();
+    assert!(
+        results.len() > live["results"].as_array().unwrap().len(),
+        "premise: --include-deleted must resurface the deleted chunk: {history:#?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit["score"].as_f64().unwrap() > 0.0),
+        "no historical hit may be scored 0 — a zero means its term was dropped \
+         for not existing in the live replica: {history:#?}"
+    );
+}
+
+/// R25-2: a query the text lane cannot rank globally does not get a globally
+/// ranked vector lane bolted onto a per-scope text one.
+///
+/// `build_query_plan` yields no MATCH expression below the trigram minimum of
+/// 3 characters, so the replica cannot score the text lane at all. Re-basing
+/// only the OTHER lane puts the two RRF addends back on different scales —
+/// which is the defect the replica was built to remove. In Japanese this is
+/// not an edge case: 認証, 設計, 課金, 障害, 監査 are all two characters.
+#[test]
+fn ct3_multi_015_a_query_the_text_lane_cannot_rank_globally_declines() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\n認証 と halcyon の話\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\n認証 と halcyon の続き\n").unwrap();
+    for dir in [&a, &b] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+
+    let long = json_success_path(&a, &data_home, &["search", "halcyon", "--mode", "text"]);
+    assert_eq!(
+        long["aggregator"]["applied"],
+        json!(true),
+        "premise: a rankable query on this corpus does use the replica: {long:#?}"
+    );
+
+    let short = json_success_path(&a, &data_home, &["search", "認証", "--mode", "text"]);
+    assert_eq!(
+        short["aggregator"],
+        json!({ "applied": false, "fallback_reason": "text_lane_not_rankable" }),
+        "a lane the replica cannot re-base must not be fused with one it can: \
+         {short:#?}"
+    );
+    assert!(
+        !short["results"].as_array().unwrap().is_empty(),
+        "declining is a ranking decision, not an empty page: {short:#?}"
+    );
+}
+
+/// R25 (found while implementing the guard): a narrowed search is ranked among
+/// the scopes it searched, not shut out by a device-wide depth cut.
+///
+/// The replica's `LIMIT candidate_depth` used to be taken over the whole
+/// device. A `--scope`/`--descendants` subtree that ranks below that cut got
+/// back no rows at all, so every one of its candidates lost its text term, and
+/// the merge fell through to its `(scope_id, chunk_hash)` tie-break — results
+/// ordered by hash, every score 0. Measured on the dogfood corpus with the
+/// default depth of 200: for the query `the `, 263 scopes held a matching
+/// chunk and the cut reached 76 of them, leaving 187 whose narrowed search
+/// returned nothing but zeroes.
+#[test]
+fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let nest = parent.path().join("nest");
+    let sub = nest.join("sub");
+    let loud = parent.path().join("loud");
+    for dir in [&nest, &sub, &loud] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    // `loud` matches far more strongly and would fill any small global cut.
+    for n in 0..6 {
+        fs::write(
+            loud.join(format!("l{n}.md")),
+            "# L\n\n## Sec\nsemaphore semaphore semaphore\n",
+        )
+        .unwrap();
+    }
+    for (dir, body) in [
+        (
+            &nest,
+            "semaphore appears once, in a much longer sentence than the others",
+        ),
+        (
+            &sub,
+            "semaphore appears once here too, likewise buried in prose",
+        ),
+    ] {
+        fs::write(dir.join("hit.md"), format!("# H\n\n## Sec\n{body}\n")).unwrap();
+    }
+    for dir in [&nest, &sub, &loud] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    // Multi-scope search resolves `[search]` from the DEVICE layer (05 §1.8
+    // step 5), so a small depth has to be set there, not in a folder config.
+    let user_config = data_home.join("config/kio");
+    fs::create_dir_all(&user_config).unwrap();
+    fs::write(
+        user_config.join("config.toml"),
+        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
+    )
+    .unwrap();
+
+    let narrowed = json_success_path(
+        &nest,
+        &data_home,
+        &[
+            "search",
+            "--mode",
+            "text",
+            "semaphore",
+            "--scope",
+            ".",
+            "--descendants",
+        ],
+    );
+    assert_eq!(narrowed["searched_scopes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        narrowed["aggregator"]["applied"],
+        json!(true),
+        "premise: the narrowed search must reach the replica at all: {narrowed:#?}"
+    );
+    let results = narrowed["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "both narrowed scopes answer: {narrowed:#?}");
+    assert!(
+        results
+            .iter()
+            .all(|hit| hit["score"].as_f64().unwrap() > 0.0),
+        "every candidate the user narrowed to must carry a rank — a zero means \
+         `loud` consumed the depth cut and the ordering fell through to the \
+         chunk-hash tie-break: {narrowed:#?}"
+    );
+}
+
+/// R25-1 (cursor half): a page replays against the collection that produced
+/// page 1, or it fails — it does not silently re-rank against a different one.
+///
+/// The per-scope `index_generation`s a cursor already freezes pin each searched
+/// scope's ROWS, which is not enough. Global BM25 also reads the collection's
+/// df/`N`/`avgdl`, so indexing a folder nobody searched moves the ranks of the
+/// ones they did while every per-scope stamp still matches — and page 2 orders
+/// the stream differently from page 1, dropping or repeating results across
+/// the boundary. `KIO-E-SEARCH-CURSOR-001` is the same remedy PC19/PC21
+/// already gives for the per-scope case: re-run without a cursor.
+#[test]
+fn ct3_multi_017_a_cursor_replays_against_the_collection_that_ranked_page_1() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    let late = parent.path().join("late");
+    for dir in [&a, &b, &late] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nquokka one\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nquokka two\n").unwrap();
+    fs::write(late.join("l.md"), "# L\n\n## Sec\nquokka three\n").unwrap();
+    for dir in [&a, &b] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+
+    let page1 = json_success_path(
+        &a,
+        &data_home,
+        &["search", "quokka", "--mode", "text", "--limit", "1"],
+    );
+    assert_eq!(page1["aggregator"]["applied"], json!(true));
+    let cursor = page1["paging"]["next_cursor"].as_str().unwrap().to_owned();
+
+    // Neither searched scope moves. A third one joins the device, which
+    // write-through lands in the replica immediately.
+    json_success_path(&late, &data_home, &["init"]);
+    json_success_path(&late, &data_home, &["index", "--approve"]);
+
+    let stderr = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args([
+            "search", "quokka", "--mode", "text", "--limit", "1", "--cursor", &cursor, "--json",
+        ])
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-SEARCH-CURSOR-001");
+    assert_eq!(error["context"]["reason"], "collection_generation_mismatch");
+}
+
+/// R25-9: the replica holds the LIVE set, not every chunk ever committed.
+///
+/// The projection was `first_seen_commit IS NOT NULL`, which a deleted file's
+/// chunks and a superseded chunking generation's chunks both satisfy. Those
+/// rows cannot be returned by any search, but they still counted toward the
+/// collection's `N` and document frequency — distorting every surviving chunk's
+/// IDF — and still occupied slots in the depth cut ahead of chunks that can be
+/// returned. Deleting one of three files here leaves the index with all six
+/// committed rows (history is kept, as it must be) and the replica with four.
+#[test]
+fn ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in 1..=3 {
+        fs::write(
+            dir.path().join(format!("d{n}.md")),
+            format!("# D{n}\n\n## Sec\nliveprobe body {n}\n"),
+        )
+        .unwrap();
+    }
+    kio(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    let committed = || -> i64 {
+        let conn = rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE first_seen_commit IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let replicated = || -> u64 {
+        let replica = Aggregator::open(&dir.path().join(".test-cache/kio/aggregator.sqlite"))
+            .expect("the replica must exist after indexing");
+        replica.corpus_size().unwrap().1
+    };
+    let all_committed = committed();
+    assert_eq!(
+        replicated(),
+        all_committed as u64,
+        "premise: with nothing deleted, live and committed agree"
+    );
+
+    fs::remove_file(dir.path().join("d2.md")).unwrap();
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    assert_eq!(
+        committed(),
+        all_committed,
+        "premise: the deleted file's chunks stay in the index — that is history"
+    );
+    assert!(
+        replicated() < all_committed as u64,
+        "but they must leave the collection: {} replicated of {all_committed} \
+         committed",
+        replicated()
+    );
+}
+
+/// R25-4/R25-12: `reindex --at` rotates `index_generation`.
+///
+/// It publishes chunk TEXT into the live `sqlite.db` in place — no temp+rename
+/// — and until R25 it rotated nowhere in the whole command. Two things break on
+/// that. LC25: a command that republishes the text corpus can certainly make a
+/// cursor replay rank differently, so outstanding cursors must retire. And
+/// R25-4: the stamp is the replica's ONLY staleness signal, so a stamp that
+/// never moves means a failed write-through is never noticed by the lazy
+/// refresh that is supposed to be the safety net — the replica stays wrong
+/// forever, where a rebuild path would have self-healed.
+#[test]
+fn ct3_multi_018_reindex_at_rotates_the_generation_it_publishes_under() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\n## Sec\nzephyrterm here\n").unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    let generation = || -> String {
+        let db = dir.path().join(".kio/index/sqlite.db");
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.query_row(
+            "SELECT index_generation FROM index_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let before = generation();
+    json_success(&dir, &["reindex", "--at", "HEAD"]);
+    assert_ne!(
+        before,
+        generation(),
+        "an in-place republication of the text corpus must mint a fresh \
+         generation, or nothing can ever notice it went wrong"
+    );
+}
+
+/// R25-5: purge does not report success while the purged text is still
+/// readable in the device replica.
+///
+/// Everywhere else the replica is a cache and a cache may not break a command
+/// (03 §4) — a lost write costs one re-projection. Purge is the exception, and
+/// not by degree: the "cache" is a second copy, on this device, under the cache
+/// root, of the text the user invoked a legal instrument to make stop existing.
+#[test]
+fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    fs::create_dir_all(&a).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nzephyrterm secret\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--offline", "--approve"]);
+
+    // Make the replica impossible to open: a directory where the database
+    // belongs. Done after indexing so the failure is purge's alone.
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    fs::remove_file(&replica_path).unwrap();
+    fs::create_dir_all(&replica_path).unwrap();
+
+    let stderr = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["purge", "a.md", "--reason", "legal", "--yes", "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-PURGE-REPLICA-001");
+}
+
+/// A single-scope search is byte-identical to the per-scope fusion: one scope
+/// IS the collection, so there is nothing to re-rank — and that stays true even
+/// though `kio index` has already written this scope into the replica.
+///
+/// The write-through is unconditional on purpose. A scope cannot know whether
+/// it is alone: `kio index` runs inside one `.kio` folder, and making the write
+/// conditional on the device having other scopes would leave the first scope
+/// missing from the collection the moment a second one appeared.
+#[test]
+fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -1306,15 +1907,27 @@ fn ct3_multi_010_single_scope_search_needs_no_global_text_index() {
     fs::write(a.join("a.md"), "# A\n\n## Sec\nzephyrterm alone\n").unwrap();
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&a, &data_home, &["index", "--approve"]);
+
+    // Write-through, not a search side effect: nothing has searched yet.
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    assert!(
+        replica_path.exists(),
+        "indexing a scope must replicate it, whether or not anything searches"
+    );
+    let projected = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    assert_eq!(projected.0, 1, "one scope replicated: {projected:?}");
+    assert!(projected.1 > 0, "its chunks came with it: {projected:?}");
+
     let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
     assert_eq!(search["results"].as_array().unwrap().len(), 1);
     assert!(
         (search["results"][0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12,
         "unchanged per-scope rank-1 score: {search:#?}"
     );
-    assert!(
-        !data_home.join("cache/kio/global-text.sqlite").exists(),
-        "a single-scope search must not build the cross-scope cache"
+    let after = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    assert_eq!(
+        after, projected,
+        "a single-scope search reads nothing and writes nothing here"
     );
 }
 
@@ -1683,6 +2296,45 @@ fn ct3_embed_005_rebuild_db_preserves_vector_search() {
     json_success_embed(&dir, "mock", &["repair", "rebuild-db"]);
     let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
     assert_eq!(after["resolved_mode"], "hybrid");
+    assert_eq!(after["fallback"], false);
+    assert_eq!(after["diversify"]["strategy"], "mmr");
+}
+
+/// R25-6: `repair rebuild-db` restores vector search from `objects/`, not from
+/// the database it is about to replace.
+///
+/// The spec has always listed `embedding (CAS)` among the object types and put
+/// the rebuild order at `objects/` → `embeddings` → `chunk_vec` (04 §4.3). No
+/// code wrote those objects, so `rebuild-db` snapshotted vectors out of the
+/// very database it was replacing — a guarantee that held only while that
+/// database was intact, which is the one condition under which nobody runs it.
+/// Deleting `sqlite.db` meant buying every vector from the API again.
+///
+/// So this test deletes it. `ct3_embed_005` covers the intact case, which the
+/// old snapshot path also passed.
+#[test]
+fn ct3_embed_009_rebuild_db_restores_vectors_from_objects_after_the_db_is_lost() {
+    let dir = indexed_scope_embed("mock");
+    let before = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(before["resolved_mode"], "hybrid");
+
+    let objects = dir.path().join(".kio/objects/embeddings");
+    assert!(
+        objects.is_dir(),
+        "indexing must publish embedding objects, or there is nothing to rebuild from"
+    );
+
+    // The acceleration layer is gone. Only `objects/` remains.
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    // Rebuilt with NO embedding adapter configured, so re-sending is not merely
+    // undesirable but impossible: any vector that comes back came off disk.
+    json_success(&dir, &["repair", "rebuild-db"]);
+
+    let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(
+        after["resolved_mode"], "hybrid",
+        "vector search must come back without re-sending anything: {after:#?}"
+    );
     assert_eq!(after["fallback"], false);
     assert_eq!(after["diversify"]["strategy"], "mmr");
 }
@@ -2181,9 +2833,15 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
         &tomb,
         serde_json::json!({
             "raw_hash": raw_hash,
-            "purged_at": "2026-04-25T12:00:00Z",
-            "purged_reason": "legal",
-            "purged_in_commit": commit,
+            "events": [{
+                "kind": "purged",
+                "at": "2026-04-25T12:00:00Z",
+                "in_commit": commit,
+                "actor": "operator",
+                "reason": "legal",
+                "epoch": 1,
+                "lifecycle_epoch": 1,
+            }],
         })
         .to_string(),
     )

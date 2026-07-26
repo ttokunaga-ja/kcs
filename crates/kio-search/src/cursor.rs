@@ -65,6 +65,20 @@ pub struct CursorToken {
     /// only for a vector|hybrid page 1; omitted (not `null`) in text mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_vector_digest: Option<String>,
+    /// R25 (05 §1.8 "replica 世代が cursor と一致する page N"): the
+    /// `aggregator.sqlite` collection stamp that produced page 1's ranks, or
+    /// absent when page 1 ranked without the replica.
+    ///
+    /// The per-scope `index_generation`s below pin each searched scope's ROWS,
+    /// which is not enough: global BM25 also reads the collection's df/`N`/
+    /// `avgdl`, so indexing a folder nobody searched moves the ranks of the
+    /// ones they did while every per-scope stamp still matches. Both states
+    /// have to be pinned — a page that ranked through the replica must replay
+    /// against the same collection, and a page that did NOT must not suddenly
+    /// start, or the two pages order the same stream differently and the
+    /// boundary between them drops or repeats results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_generation: Option<String>,
     pub time_travel: TimeTravelSelector,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_cutoff: Option<String>,
@@ -95,6 +109,13 @@ impl CursorToken {
             if !is_sha256_hash(digest) {
                 return Err(
                     "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
+                );
+            }
+        }
+        if let Some(generation) = &self.collection_generation {
+            if !is_sha256_hash(generation) {
+                return Err(
+                    "collection_generation must be sha256: plus 64 lowercase hex digits".to_owned(),
                 );
             }
         }
@@ -351,6 +372,7 @@ mod tests {
             scope_mode: ScopeMode::All,
             query_hash: hash('e'),
             query_vector_digest: None,
+            collection_generation: None,
             time_travel: TimeTravelSelector::default(),
             since_cutoff: None,
             excluded_scopes: vec![CursorExcludedScope {

@@ -446,14 +446,7 @@ impl TaskStore {
         Ok(changed)
     }
 
-    pub fn pending_count(&self) -> Result<usize> {
-        Ok(self
-            .all()?
-            .iter()
-            .filter(|task| task.status == TaskStatus::Pending)
-            .count())
-    }
-
+ 
     pub fn done_output_for(
         &self,
         input_hash: &str,
@@ -1275,8 +1268,8 @@ mod tests {
         assert_eq!(hold_reason_for_reason("network_error"), None);
         assert_eq!(hold_reason_for_reason("rate_limit"), None);
 
-        // A legacy Paused row without `hold_reason` deserializes to `None`
-        // (backward compatible with a pre-QA1 `tasks.jsonl`).
+        // `hold_reason` is only carried by a Paused row that has one; its
+        // absence round-trips to `None` rather than failing to parse.
         let mut task = valid_task();
         task.status = TaskStatus::Paused;
         task.fallback_reason = Some(BUDGET_EXCEEDED_REASON.to_owned());
@@ -1284,8 +1277,8 @@ mod tests {
         let mut value = serde_json::to_value(&task).unwrap();
         assert_eq!(value["hold_reason"], "budget");
         value.as_object_mut().unwrap().remove("hold_reason");
-        let legacy: TaskDescriptor = serde_json::from_value(value).unwrap();
-        assert_eq!(legacy.hold_reason, None);
+        let without: TaskDescriptor = serde_json::from_value(value).unwrap();
+        assert_eq!(without.hold_reason, None);
     }
 
     #[test]

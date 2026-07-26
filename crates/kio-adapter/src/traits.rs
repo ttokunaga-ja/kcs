@@ -1,9 +1,8 @@
 //! Adapter trait groups.
 
 use crate::types::{
-    AdapterProfile, ClassificationRequest, ClassificationResponse, EmbeddingRequest,
-    EmbeddingResponse, MarkdownizeRequest, MarkdownizeResponse, PrepareRequest, PrepareResponse,
-    RerankRequest, RerankResponse, SummaryRequest, SummaryResponse,
+    AdapterProfile, EmbeddingRequest, EmbeddingResponse, MarkdownizeRequest, MarkdownizeResponse,
+    PrepareRequest, PrepareResponse,
 };
 use crate::Result;
 
@@ -54,24 +53,6 @@ pub trait EmbeddingAdapter {
     fn preferred_request_kind(&self) -> PreferredRequestKind {
         PreferredRequestKind::Sync
     }
-}
-
-pub trait SummaryAdapter {
-    fn profile(&self) -> AdapterProfile;
-
-    fn summarize(&self, request: SummaryRequest) -> Result<SummaryResponse>;
-}
-
-pub trait ClassificationAdapter {
-    fn profile(&self) -> AdapterProfile;
-
-    fn classify(&self, request: ClassificationRequest) -> Result<ClassificationResponse>;
-}
-
-pub trait RerankAdapter {
-    fn profile(&self) -> AdapterProfile;
-
-    fn rerank(&self, request: RerankRequest) -> Result<RerankResponse>;
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use kio_core::cas::{
     hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError, ChunkObject,
-    ContentObjectKind, EmbeddingObject, EmbeddingValidationError, ObjectKind, ObjectStore,
+    ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore,
     MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitObject, TreeObject};
@@ -76,8 +76,8 @@ pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
 /// shared canonical dispatch) — still propagate as a raw `KioError`.
 ///
 /// Procedures 6a/6b (08§3.1, PB45-50/55) are implemented via the shared
-/// `verify_point_in_time_attribution` (main.rs) — `unverifiable`'s `tree_v1`
-/// and `manifest_missing` reasons, the v2/v3 publication/config-association
+/// `verify_point_in_time_attribution` (main.rs) — `unverifiable`'s
+/// `manifest_missing` reason, the publication/config-association
 /// ancestor-or-equal checks, and 6b's in_commit-scoped manifest-missing
 /// downgrade (with resurrection-link fallback) all flow through the same
 /// judgment `resolve_pointer_for_cli` (open/view/restore) uses — PB66's
@@ -215,12 +215,9 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     // 08 §3.1 procedures 6a/6b (PB45-50/55, §P/§Q; item 2 of this session's
     // task): point-in-time attribution, shared with `resolve_pointer_for_cli`
     // (main.rs, PB66's structural requirement) rather than a parallel
-    // judgment. `PB45`'s unit-status check is folded into this shared path —
-    // a v1 tree still gets the same lenient (no-manifest-hash) resolution it
-    // always did, now expressed as `LegacyTreeV1` rather than a bespoke
-    // best-effort read here.
+    // judgment. `PB45`'s unit-status check is folded into this shared path
+    // rather than a bespoke best-effort read here.
     let mut manifest_missing = false;
-    let mut tree_v1 = false;
     if !commit_shallow {
         if let Some(normalize) = &entry_normalize {
             match verify_point_in_time_attribution(
@@ -233,7 +230,6 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
                 &pointer.commit,
             )? {
                 PointInTimeAttribution::Alive => {}
-                PointInTimeAttribution::LegacyTreeV1 => tree_v1 = true,
                 PointInTimeAttribution::ManifestMissing => manifest_missing = true,
                 PointInTimeAttribution::NotFound => {
                     return checkpoint.finish(verify_exit_override(
@@ -262,19 +258,16 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
         );
     }
 
-    // PB55/56 (§S/§N): the closed 3-value `unverifiable` reason union.
-    if strict && (commit_shallow || manifest_missing || tree_v1) {
+    // PB55/56 (§S/§N): the closed `unverifiable` reason union.
+    if strict && (commit_shallow || manifest_missing) {
         let reason = if manifest_missing {
             "manifest_missing"
-        } else if tree_v1 {
-            "tree_v1"
         } else {
             "commit_shallow"
         };
         // PB41/56: `commit_shallow` alone is retryable (unshallow may
-        // resolve it, exit 3); `tree_v1`/`manifest_missing` are permanent
-        // (exit 4).
-        let exit = if manifest_missing || tree_v1 { 4 } else { 3 };
+        // resolve it, exit 3); `manifest_missing` is permanent (exit 4).
+        let exit = if manifest_missing { 4 } else { 3 };
         return checkpoint.finish(verify_exit_override(
             json!({
                 "status": "unverifiable",
@@ -1270,15 +1263,19 @@ fn verify_objects_with_limits(
     Ok(finish_report(state, repaired, repaired_commit_hash))
 }
 
-/// PB01 (§A, 10 §7.5.1 L489): `objects/embeddings/` CAS objects — content
-/// digest (a)(c)(f)(g) via [`ObjectStore::inspect_content_accounted`] (the
-/// same byte-hash check every other content-addressed kind uses), plus the
-/// declared-length/finite-vector semantic check (b)(d)(e) via
-/// [`EmbeddingObject::validate_vector`]. A digest mismatch and a vector
-/// validation failure are reported as the same `embedding_corrupt` finding
-/// kind (the contract does not require distinguishing them, only that both
-/// are detected — PB01's (b)(d)(e)(g) are each individually parameterized as
-/// separate test fixtures, not separate finding kinds).
+/// PB01 (§A, 10 §7.5.1 L489 → 03 §8.1): `objects/embeddings/` CAS objects.
+///
+/// The per-type algorithm is 03 §8.1's, not the generic byte-hash every other
+/// content-addressed kind uses, because an embedding's storage key is its
+/// IDENTITY hash — what the vector is OF (target, profile, context) — rather
+/// than a hash of the bytes. Recomputing the identity from the parsed header
+/// and comparing it to the leaf name is the equivalent check, and it catches
+/// something the byte hash cannot: an object filed under the wrong identity.
+///
+/// [`EmbeddingObject::from_bytes`] performs the rest of what 03 §8.1 asks for —
+/// vector length against declared `dimensions`, NaN/infinity rejection, and the
+/// trailing vector digest (which is what detects a bit flip INSIDE the vector,
+/// since the storage key says nothing about the body).
 fn verify_embeddings(store: &ObjectStore, kio_dir: &Path, state: &mut State) -> Result<()> {
     let hashes = inventory(kio_dir, ContentObjectKind::Embedding.directory(), state)?;
     if state.exceeded_bounds || state.unsafe_namespace {
@@ -1289,22 +1286,6 @@ fn verify_embeddings(store: &ObjectStore, kio_dir: &Path, state: &mut State) -> 
         if state.exceeded_bounds {
             return Ok(());
         }
-        match store.inspect_content_accounted(ContentObjectKind::Embedding, &hash) {
-            Ok(metadata) => {
-                state.add_bytes(metadata.size_bytes);
-                if state.exceeded_bounds {
-                    return Ok(());
-                }
-            }
-            Err(failure) => {
-                state.add_bytes(failure.consumed_bytes);
-                if state.exceeded_bounds {
-                    return Ok(());
-                }
-                state.finding("embedding_corrupt", &hash, &failure.error.to_string(), &[]);
-                continue;
-            }
-        }
         let bytes =
             match store.read_content_object_bytes(ContentObjectKind::Embedding, &hash, 1 << 20) {
                 Ok(bytes) => bytes,
@@ -1313,21 +1294,22 @@ fn verify_embeddings(store: &ObjectStore, kio_dir: &Path, state: &mut State) -> 
                     continue;
                 }
             };
-        match serde_json::from_slice::<EmbeddingObject>(&bytes) {
-            Ok(embedding) => match embedding.validate_vector() {
-                Ok(()) => state.checked.embeddings += 1,
-                Err(EmbeddingValidationError::LengthMismatch) => state.finding(
+        state.add_bytes(bytes.len() as u64);
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        match EmbeddingObject::from_bytes(&bytes) {
+            Ok(embedding) => match embedding.identity_hash() {
+                Ok(identity) if identity == hash => state.checked.embeddings += 1,
+                Ok(identity) => state.finding(
                     "embedding_corrupt",
                     &hash,
-                    "declared dimensions does not match vector length",
+                    &format!("embedding identity hashes to {identity}, not its storage key"),
                     &[],
                 ),
-                Err(EmbeddingValidationError::NonFinite) => state.finding(
-                    "embedding_corrupt",
-                    &hash,
-                    "vector contains a non-finite element (NaN/Infinity)",
-                    &[],
-                ),
+                Err(error) => {
+                    state.finding("embedding_corrupt", &hash, &error.to_string(), &[]);
+                }
             },
             Err(error) => {
                 state.finding("embedding_corrupt", &hash, &error.to_string(), &[]);
@@ -1873,7 +1855,6 @@ fn reachable_commits(
 fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>> {
     const MAX_REF_BYTES: u64 = 128;
     let mut roots = BTreeSet::new();
-    let mut tag_targets = BTreeMap::<String, String>::new();
     let head_path = repo.kio_dir().join("HEAD");
     match read_bounded_regular_file(&head_path, MAX_REF_BYTES) {
         Ok(bytes) => {
@@ -1891,7 +1872,7 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
         }
         Err(error) => state.finding("ref_corrupt", "", &error.to_string(), &[]),
     }
-    for relative in ["refs/heads", "refs/tags-v1", "refs/tags"] {
+    for relative in ["refs/heads", "refs/tags-v1"] {
         let base = repo.kio_dir().join(relative);
         let metadata = match fs::symlink_metadata(&base) {
             Ok(metadata) => metadata,
@@ -1998,27 +1979,6 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
                 if !is_hash(value) {
                     state.finding("ref_corrupt", value, "ref value is not a commit hash", &[]);
                     continue;
-                }
-                let tag_key = if relative == "refs/tags-v1" {
-                    Some(entry.file_name().to_string_lossy().into_owned())
-                } else if relative == "refs/tags" {
-                    let logical = entry.file_name().to_string_lossy().into_owned();
-                    Some(kio_core::portable::portable_tag_leaf(&logical))
-                } else {
-                    None
-                };
-                if let Some(tag_key) = tag_key {
-                    if tag_targets
-                        .insert(tag_key, value.to_owned())
-                        .is_some_and(|existing| existing != value)
-                    {
-                        state.finding(
-                            "ref_corrupt",
-                            value,
-                            "canonical and legacy tag refs disagree",
-                            &[],
-                        );
-                    }
                 }
                 roots.insert(value.to_owned());
                 if roots.len() > state.max_objects {
@@ -3188,26 +3148,27 @@ mod tests {
         assert!(verify_prepared_reference(&store, &hash, true).is_err());
     }
 
+    /// A tag ref pointing at a hash with no commit object behind it is a
+    /// dangling root, not a silently-skipped ref.
     #[test]
-    fn canonical_and_legacy_tag_forms_must_agree() {
+    fn a_tag_ref_to_a_missing_commit_is_a_finding() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("doc.md"), "tag conflict").unwrap();
+        std::fs::write(dir.path().join("doc.md"), "tag target").unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         repo.snapshot(Some("fixture"), Some("2026-07-13T00:00:00Z"))
             .unwrap();
-        let canonical = repo
+        let tag = repo
             .kio_dir()
             .join("refs/tags-v1")
             .join(kio_core::portable::portable_tag_leaf("Release"));
-        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-        std::fs::write(&canonical, repo.head_commit_hash().unwrap().unwrap()).unwrap();
-        std::fs::write(repo.kio_dir().join("refs/tags/Release"), hash('f')).unwrap();
+        std::fs::create_dir_all(tag.parent().unwrap()).unwrap();
+        std::fs::write(&tag, hash('f')).unwrap();
 
         let report = verify_objects(&repo).unwrap();
-        assert!(report.remaining_findings.iter().any(|finding| {
-            finding.kind == "ref_corrupt"
-                && finding.reason == "canonical and legacy tag refs disagree"
-        }));
+        assert!(report
+            .remaining_findings
+            .iter()
+            .any(|finding| finding.object_hash == hash('f')));
     }
 
     #[test]

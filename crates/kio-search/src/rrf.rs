@@ -28,15 +28,6 @@ pub struct FusedCandidate {
     pub vector_rank: Option<u64>,
 }
 
-pub trait RrfScorer {
-    fn fuse(
-        &self,
-        text_ranks: &[BackendRank],
-        vector_ranks: &[BackendRank],
-        config: RrfConfig,
-    ) -> Result<Vec<FusedCandidate>>;
-}
-
 pub fn fuse_rrf(
     text_ranks: &[BackendRank],
     vector_ranks: &[BackendRank],

@@ -1915,164 +1915,485 @@ struct SearchedScopeInfo {
     shallow_skipped: u64,
 }
 
-/// Re-fuse each candidate's `rrf_score` with a GLOBAL vector rank (05 §1.8,
-/// 2026-07-24). Only vector/hybrid mode with a page-1 query vector reaches here.
-///
-/// The TEXT term is preserved exactly (per-scope `text_rank`, never a raw-BM25
-/// cross-corpus comparison — CT3-MULTI-002). The VECTOR term is rebuilt: among
-/// the per-scope vector candidates (`vector_rank.is_some()`), rank every one by
-/// its cosine to the query — a quantity that IS comparable across scopes because
-/// all scopes share one embedding profile (03 §7) — and use that global rank in
-/// the RRF term in place of the per-scope one. Cosine order is deterministic and
-/// the query vector is replayed byte-identically on later pages (R23-01), so the
-/// resulting merge order is stable across pagination.
-///
-/// The caller guards on >1 distinct scope: a single-scope pool's global vector
-/// rank already equals its per-scope one, so re-fusing there would only risk a
-/// float tie-flip against the pinned per-scope order. This function re-checks the
-/// guard so it is safe to call unconditionally.
-/// `$XDG_CACHE_HOME/kio/global-text.sqlite` — the device-level collection BM25
-/// is scored against. Cache root, not data root: it is derived entirely from
-/// the scopes and costs only a rebuild to lose.
-fn global_text_index_path() -> PathBuf {
-    cache_home().join("kio/global-text.sqlite")
+/// `$XDG_CACHE_HOME/kio/aggregator.sqlite` — the device-level read replica both
+/// lanes are scored against (05 §1.8). Cache root, not data root: it is derived
+/// entirely from the scopes and costs only a re-projection to lose.
+fn aggregator_path() -> PathBuf {
+    cache_home().join("kio/aggregator.sqlite")
 }
 
-/// Bring the global text cache level with the scopes this search just read,
-/// then rank the query against the whole collection.
+/// Both lanes' ranks over the whole collection, plus what the collection held
+/// when they were computed.
+struct GlobalRanks {
+    text: BTreeMap<(String, String), u64>,
+    vector: BTreeMap<(String, String), u64>,
+    /// True once a lane actually scored, so a caller can tell "the replica
+    /// declined" from "the replica ran and this candidate simply has no term".
+    scored_text: bool,
+    scored_vector: bool,
+    /// The collection these ranks were computed over, frozen into the next
+    /// page's cursor so a later page can tell it is replaying against the same
+    /// one (05 §1.8).
+    collection_generation: String,
+}
+
+/// Why the replica is not answering this search — `None` means it may.
+///
+/// 05 §1.8 states the conditions in prose ("aggregator は既定検索 — 次を
+/// すべて満たすもの — を答える"); until R25 nothing evaluated them, and the
+/// replica re-ranked every search including the ones the prose excludes. The
+/// values are the strings reported in `aggregator.fallback_reason`, so a
+/// search that quietly reverted to scatter-gather ranks says so in its own
+/// output rather than only on stderr.
+fn aggregator_decline_reason(
+    searched: &[SearchedScopeInfo],
+    time_selector: &TimeSelector,
+    mode: SearchMode,
+    match_expr: Option<&str>,
+    query_vec: Option<&[f32]>,
+) -> Option<&'static str> {
+    if searched.len() <= 1 {
+        // One scope IS the collection; its own ranks are already global, and
+        // re-ranking through the replica would only risk a float tie-flip
+        // against the order the per-scope tier already pinned.
+        return Some("single_scope");
+    }
+    if !matches!(time_selector, TimeSelector::Current) {
+        // The replica holds each scope's LIVE chunks and nothing else, so a
+        // chunk that exists only in history is absent from it. `apply_global_
+        // ranks` reads that absence as "no rank" and drops the candidate's term
+        // to zero — the deleted-and-rediscovered answer `--at` exists to return
+        // would be ranked below every chunk that merely still exists. A history
+        // search must be ranked by the per-scope tier, which read that history.
+        return Some("time_selector");
+    }
+    // Every lane the fusion will ADD has to be re-based, or the sum mixes
+    // scales again — the exact defect the replica was built to remove. The
+    // text lane is unrankable here whenever the query is pure-short
+    // (`build_query_plan` yields no MATCH expression below the trigram
+    // minimum), which in Japanese is the most ordinary query length there is:
+    // 認証, 設計, 課金, 障害, 監査. Vector-only and text-only searches are fine
+    // — a single addend has no scale to disagree with.
+    let text_lane_fuses = matches!(mode, SearchMode::Text | SearchMode::Hybrid);
+    let vector_lane_fuses = matches!(mode, SearchMode::Vector | SearchMode::Hybrid);
+    if text_lane_fuses && match_expr.is_none() {
+        return Some("text_lane_not_rankable");
+    }
+    if vector_lane_fuses && query_vec.is_none() {
+        return Some("vector_lane_not_rankable");
+    }
+    None
+}
+
+/// Bring the replica level with the scopes this search just read, then rank the
+/// query against the whole collection on both lanes (05 §1.8).
 ///
 /// Refresh is lazy and driven by `index_generation`, which rotates on any
-/// change to a scope's index — so an unchanged scope costs one string compare.
-/// The first search after this lands pays a full build (1.26 MB of chunk text
-/// for the dogfood corpus); later ones pay only for scopes that moved.
+/// change to a scope's index — so an unchanged scope costs one string compare
+/// and a device with nothing new costs none at all. The first search after this
+/// lands pays a full projection (428 scopes / 3851 chunks measured at 2.3 s);
+/// later ones pay only for the scopes that moved.
 ///
-/// Every failure here returns `None` and leaves the per-scope ranks alone. A
-/// cache is not allowed to break a search: the worst it may do is decline to
-/// improve one.
-fn global_text_ranks_for(
+/// Every failure here returns `Err(reason)` and leaves the scatter-gather ranks
+/// alone. A cache is not allowed to break a search: the worst it may do is
+/// decline to improve one (05 §1.8, "aggregator が答える条件と fallback").
+/// Callers must have cleared `aggregator_decline_reason` first — this function
+/// covers only the failures that cannot be predicted from the request.
+fn global_ranks_for(
     searched: &[SearchedScopeInfo],
-    match_expr: &str,
+    scope_mode: ScopeSelectionMode,
+    is_cursor_replay: bool,
+    settings: multi_scope::MultiScopeSettings,
+    match_expr: Option<&str>,
+    query_vec: Option<&[f32]>,
     config: RrfConfig,
-) -> Option<BTreeMap<(String, String), u64>> {
-    if searched.len() <= 1 {
-        // One scope IS the collection; its per-scope ranks are already global.
-        return None;
-    }
-    let mut index = match kio_index::global_text::GlobalTextIndex::open(&global_text_index_path()) {
-        Ok(index) => index,
+) -> std::result::Result<GlobalRanks, String> {
+    let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
+        Ok(replica) => replica,
         Err(error) => {
-            log_global_text_degraded(&format!("open failed: {error}"));
-            return None;
+            log_aggregator_degraded(&format!("open failed: {error}"));
+            return Err("open_failed".to_owned());
         }
     };
-    // Bookkeeping only — `index_generation` decides staleness, so a clock that
-    // jumps changes nothing but this timestamp.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or_default();
-    for scope in searched {
-        let cached = index.scope_generation(&scope.scope_id).ok().flatten();
-        if cached.as_deref() == Some(scope.index_generation.as_str()) {
-            continue;
+    // A scope that left the registry must stop contributing document frequency
+    // and cosine candidates immediately, not at some later rebuild — a deleted
+    // folder otherwise keeps depressing every surviving chunk's IDF.
+    //
+    // Only an all-scopes search may prune: under `--scope`/`--descendants`,
+    // `searched` is a deliberate SUBSET of the device, and pruning to it would
+    // evict every scope the user did not ask about — silently destroying the
+    // replica and forcing a full re-projection on the next default search.
+    // A narrowed search reads the collection; it does not redefine it.
+    //
+    // A cursor replay may not prune either, for the same reason one step
+    // removed: its scope set is the one page 1 FROZE, not the one the device
+    // has now, so pruning to it evicts every scope registered since page 1 on
+    // the authority of a stale list — and hides the very collection change the
+    // frozen `collection_generation` exists to detect.
+    let participating: BTreeSet<String> = searched
+        .iter()
+        .map(|scope| scope.scope_id.clone())
+        .collect();
+    if scope_mode == ScopeSelectionMode::All && !is_cursor_replay {
+        if let Err(error) = replica.retain_scopes(&participating) {
+            log_aggregator_degraded(&format!("retain failed: {error}"));
+            return Err("retain_failed".to_owned());
         }
-        match collect_scope_chunks(&scope.scope_path) {
-            Ok(chunks) => {
-                if let Err(error) =
-                    index.refresh_scope(&scope.scope_id, &scope.index_generation, &chunks, now_ms)
-                {
-                    log_global_text_degraded(&format!(
-                        "refresh {} failed: {error}",
-                        scope.scope_id
-                    ));
-                    return None;
-                }
-            }
-            Err(error) => {
+    }
+    let now_ms = replica_now_ms();
+    // Only the scopes whose stamp actually moved. With write-through in place
+    // this is normally empty — the writer already told the replica — so what
+    // remains here is the repair path and the first-ever projection.
+    let stale = searched
+        .iter()
+        .filter(|scope| {
+            replica
+                .scope_generation(&scope.scope_id)
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(scope.index_generation.as_str())
+        })
+        .collect::<Vec<_>>();
+    // R25-8: reads run on the bounded pool the per-scope search already uses —
+    // `min(4, 差分 scope 数)` with a per-scope timeout — because the cost here is
+    // opening one `.kio` per scope (the first-ever projection measured 2.3 s over
+    // 428 of them), and because an unreadable scope on a disconnected drive must
+    // not hold a search open indefinitely.
+    //
+    // Reads only. The writes below stay serial: `Aggregator` owns one SQLite
+    // connection, and a second one would be contending for the same file rather
+    // than doing anything in parallel.
+    let projections = multi_scope::run_ordered(stale.len(), settings, |index, _deadline| {
+        collect_scope_projection(&stale[index].scope_path)
+    });
+    for (scope, projection) in stale.iter().zip(projections) {
+        let chunks = match projection {
+            multi_scope::ScopeExecution::Completed(Ok(chunks)) => chunks,
+            multi_scope::ScopeExecution::Completed(Err(error)) => {
                 // A scope we cannot read is one we cannot account for in the
                 // collection statistics, so the collection is not the corpus
                 // and its ranks are not global. Decline rather than rank
                 // against a corpus with a hole in it.
-                log_global_text_degraded(&format!("read {} failed: {error}", scope.scope_id));
-                return None;
+                log_aggregator_degraded(&format!("read {} failed: {error}", scope.scope_id));
+                return Err("scope_read_failed".to_owned());
+            }
+            multi_scope::ScopeExecution::TimedOut => {
+                log_aggregator_degraded(&format!("read {} timed out", scope.scope_id));
+                return Err("scope_read_timeout".to_owned());
+            }
+        };
+        if let Err(error) =
+            replica.refresh_scope(&scope.scope_id, &scope.index_generation, &chunks, now_ms)
+        {
+            log_aggregator_degraded(&format!("refresh {} failed: {error}", scope.scope_id));
+            return Err("refresh_failed".to_owned());
+        }
+    }
+    // Read AFTER every refresh: the stamp has to describe the collection these
+    // ranks are actually computed over, not the one that existed on entry.
+    let collection_generation = match replica.collection_generation() {
+        Ok(generation) => generation,
+        Err(error) => {
+            log_aggregator_degraded(&format!("collection generation failed: {error}"));
+            return Err("collection_generation_failed".to_owned());
+        }
+    };
+    // Depth matches the per-scope candidate depth on BOTH lanes: a chunk that
+    // cannot reach the fusion cannot be helped by a better rank inside it, and
+    // an asymmetric depth would make one lane's terms systematically denser.
+    let depth = config.candidate_depth.max(1);
+    let mut ranks = GlobalRanks {
+        text: BTreeMap::new(),
+        vector: BTreeMap::new(),
+        scored_text: false,
+        scored_vector: false,
+        collection_generation,
+    };
+    if let Some(expr) = match_expr {
+        match replica.text_scores(expr, &participating, depth) {
+            Ok(scores) => {
+                ranks.text = kio_index::aggregator::text_ranks(&scores);
+                ranks.scored_text = true;
+            }
+            Err(error) => {
+                log_aggregator_degraded(&format!("text score failed: {error}"));
+                return Err("text_score_failed".to_owned());
             }
         }
     }
-    // Depth matches the per-scope candidate depth: a chunk that cannot reach
-    // the fusion cannot be helped by a better rank inside it.
-    match index.scores(match_expr, config.candidate_depth.max(1)) {
-        Ok(scores) => Some(kio_index::global_text::global_text_ranks(&scores)),
-        Err(error) => {
-            log_global_text_degraded(&format!("score failed: {error}"));
-            None
+    if let Some(query_vec) = query_vec {
+        match replica.vector_scores(query_vec, &participating, depth) {
+            Ok(scores) => {
+                ranks.vector = kio_index::aggregator::vector_ranks(&scores);
+                ranks.scored_vector = true;
+            }
+            Err(error) => {
+                log_aggregator_degraded(&format!("vector score failed: {error}"));
+                return Err("vector_score_failed".to_owned());
+            }
         }
     }
+    if !ranks.scored_text && !ranks.scored_vector {
+        // Unreachable while `aggregator_decline_reason` gates the call — it
+        // rejects a request with no rankable lane before we get here — but a
+        // rank set with nothing in it must never reach `apply_global_ranks`,
+        // which would zero every candidate's terms.
+        return Err("no_lane_scored".to_owned());
+    }
+    Ok(ranks)
 }
 
-/// Read one scope's chunk text for the global collection.
+/// Project one scope's live chunks into the replica.
 ///
 /// Membership is `first_seen_commit IS NOT NULL` — the chunk is committed
 /// rather than mid-write. The query-time liveness filters (cursor bound,
 /// config-generation association, eligible identity, ancestor gate) are
-/// deliberately NOT replicated: they decide what a search may RETURN, and this
-/// index never returns anything. It only supplies collection statistics, and
-/// the per-scope tier remains the sole gate on candidates. Duplicating those
-/// predicates here would put the liveness rules in two places, which is how
-/// they drift apart.
-fn collect_scope_chunks(kio_dir: &Path) -> Result<Vec<kio_index::global_text::GlobalChunk>> {
+/// deliberately NOT re-derived here: they decide what a search may RETURN, and
+/// the replica returns nothing — it supplies collection statistics and ranks,
+/// while the per-scope tier remains the sole gate on candidates. Re-deriving
+/// those predicates here would put the liveness rules in two places, which is
+/// how they drift apart (03 §4 invariant 7).
+///
+/// The vector comes from `chunk_vec`, not from `embeddings`, for the same
+/// reason: `rebuild_chunk_vec` has already resolved which of several rows
+/// sharing a `text_hash` is this chunk's (07 §5.3 contextual embedding), and
+/// re-running that choice here would be the same duplication one level over.
+fn collect_scope_projection(kio_dir: &Path) -> Result<Vec<kio_index::aggregator::AggChunk>> {
     let db = kio_dir.join("index/sqlite.db");
-    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| KioError::schema(format!("global text read {}: {error}", db.display())))?;
-    // `chunk_id` is what `ScoredCandidate.chunk_hash` carries (the merge names
-    // the column after the identity it is, not after the table's column), so
-    // the key this index stores lines up with the key the merge looks up.
+    // `chunk_vec` is a vec0 virtual table, so the extension must be live on
+    // this connection before the table can be opened.
+    kio_index::vec::ensure_registered();
+    // Read-write so the eligible-identity TEMP table below can be created. It
+    // lives in this connection's temp schema and never touches the store; the
+    // per-scope search path installs the same table the same way.
+    let conn = Connection::open(&db)
+        .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
+    // R25-9: liveness is asked for, not re-derived.
+    //
+    // The projection used to be every row with `first_seen_commit IS NOT NULL`
+    // — every chunk ever committed. That is not the live set: a deleted file's
+    // chunks and a superseded chunking generation's chunks both satisfy it.
+    // Measured on a 3-file fixture, deleting one file left the replica holding
+    // 6 chunks for 4 live ones, so a third of the collection's `N` and document
+    // frequency described text no search can return, and those rows also
+    // consumed slots in the depth cut ahead of chunks that can.
+    //
+    // The bindings come from the SAME functions the per-scope search calls
+    // (`current_history_plan_from_cache` + `install_eligible_identities`) and
+    // the predicate is the one its own SQL uses, minus the parts that are not
+    // liveness: the cursor's `rowid`/`association_rowid` bounds freeze a PAGE,
+    // and the ancestor gate belongs to `--at`. Calling rather than copying is
+    // what keeps 03 §4 invariant 7 true — this file still states no liveness
+    // rule of its own.
+    let repo = Repository::open(kio_dir.parent().unwrap_or(kio_dir))?;
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(Vec::new());
+    };
+    let plan = current_history_plan_from_cache(&conn, &head)?;
+    install_eligible_identities(&conn, &plan)?;
+    let chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
     let mut stmt = conn
         .prepare(
-            "SELECT chunk_id, text, heading_path FROM chunks
-             WHERE first_seen_commit IS NOT NULL",
+            // `chunk_id` is what `ScoredCandidate.chunk_hash` carries (the merge
+            // names the field after the identity it is, not after the table's
+            // column), so the key stored here lines up with the key the merge
+            // looks up. LEFT JOIN: a chunk with no vector is still part of the
+            // text collection and must count toward N and avgdl.
+            "SELECT c.chunk_id, c.text, c.heading_path, v.embedding
+             FROM chunks c
+             LEFT JOIN chunk_vec v ON v.chunk_id = c.chunk_id
+             WHERE c.first_seen_commit IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1 FROM chunk_config_generations cg
+                     WHERE cg.chunk_id = c.chunk_id
+                       AND cg.chunking_config_hash = ?1
+                 )
+                 AND EXISTS (
+                     SELECT 1 FROM kio_eligible_identity eligible
+                     WHERE eligible.raw_hash = c.raw_hash
+                       AND eligible.tool_profile_hash = c.tool_profile_hash
+                       AND eligible.gen = c.gen
+                 )",
         )
-        .map_err(|error| KioError::schema(format!("global text query: {error}")))?;
+        .map_err(|error| KioError::schema(format!("aggregator query: {error}")))?;
     let rows = stmt
-        .query_map([], |row| {
-            Ok(kio_index::global_text::GlobalChunk {
-                chunk_hash: row.get(0)?,
+        .query_map(rusqlite::params![chunking_config_hash], |row| {
+            let blob: Option<Vec<u8>> = row.get(3)?;
+            Ok(kio_index::aggregator::AggChunk {
+                chunk_id: row.get(0)?,
                 text: row.get(1)?,
                 heading_path: row.get(2)?,
+                embedding: blob
+                    .as_deref()
+                    .map(kio_index::embedding_store::f32_from_le_bytes),
             })
         })
-        .map_err(|error| KioError::schema(format!("global text rows: {error}")))?;
-    let mut out = Vec::new();
+        .map_err(|error| KioError::schema(format!("aggregator rows: {error}")))?;
+    let mut chunks = Vec::new();
     for row in rows {
-        out.push(row.map_err(|error| KioError::schema(format!("global text row: {error}")))?);
+        chunks.push(row.map_err(|error| KioError::schema(format!("aggregator row: {error}")))?);
     }
-    Ok(out)
+    Ok(chunks)
 }
 
-/// Swap each candidate's per-scope text rank for its rank over the whole
-/// collection.
+/// Bookkeeping only — `index_generation` decides staleness, so a clock that
+/// jumps changes nothing but this timestamp.
+fn replica_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// `(scope_id, index_generation)` as this scope's live index reports them right
+/// now. `None` when either is unavailable — a scope with no index yet, or one
+/// whose `scope.json` cannot be read. Neither is an error for a cache write.
 ///
-/// A candidate the collection has no score for loses its text term rather than
-/// keeping the per-scope one: mixing the two scales back together is the defect
-/// this replaces. Losing the term costs that candidate its text contribution;
-/// keeping a per-scope rank-1 would hand it the largest term available.
-fn apply_global_text_ranks(
+/// The generation is read here rather than passed in so that a write-through
+/// always stamps the state the index is actually in, whatever rotations the
+/// command ran before reaching this point. Callers hold `.kio/.lock`, so no
+/// concurrent writer can rotate between this read and the replica write.
+fn replica_scope_stamp(kio_dir: &Path) -> Option<(String, String)> {
+    let scope_id = scope_id(kio_dir).ok()?;
+    let db = sqlite_path(kio_dir);
+    if !db.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let generation = kio_index::fts::read_index_metadata(&conn)
+        .ok()
+        .flatten()?
+        .index_generation;
+    Some((scope_id, generation))
+}
+
+/// Project this scope into the replica now that its index has been replaced
+/// (05 §1.8 write-through).
+///
+/// The search path can still repair a scope lazily, but it only knows to when
+/// `index_generation` moved, and that stamp is rotated by whichever command
+/// happens to remember. Writing here makes the replica track the index because
+/// the writer told it, not because a later reader noticed.
+///
+/// A full projection rather than a delta: a rebuild builds a fresh temp db and
+/// renames it over `sqlite.db` (P5), so every rowid is new and the live chunk
+/// set may have changed arbitrarily.
+///
+/// Returns the reason it could not, so a caller that must not report success
+/// without it (purge — 05 §3.5) can refuse, while every other caller logs and
+/// carries on: losing this write leaves the replica's stamp behind the index
+/// and the next search re-projects the scope — the same repair path that
+/// carried the whole design before write-through existed (03 §4: the replica is
+/// a cache, and a cache may not break a write).
+fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
+    let Some((scope_id, generation)) = replica_scope_stamp(kio_dir) else {
+        return Ok(());
+    };
+    let chunks = collect_scope_projection(kio_dir)
+        .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
+    let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
+        .map_err(|error| format!("write-through open failed: {error}"))?;
+    replica
+        .refresh_scope(&scope_id, &generation, &chunks, replica_now_ms())
+        .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
+}
+
+/// [`write_through_projection`] for the callers that treat a lost cache write
+/// as survivable — every one except purge.
+fn write_through_projection_or_log(kio_dir: &Path) {
+    if let Err(reason) = write_through_projection(kio_dir) {
+        log_aggregator_degraded(&reason);
+    }
+}
+
+/// Publish an in-place index change: rotate the scope's `index_generation`,
+/// then tell the replica what changed (05 §1.8 write-through, LC25 rotation).
+///
+/// This is the path for writers that mutate `sqlite.db` directly instead of
+/// rebuilding it — the two embedding lanes. They differ from a rebuild in both
+/// directions: they know exactly which chunks they touched, so they send that
+/// instead of a re-projection; and they do not mint a new generation on their
+/// own, which is exactly why a reader-driven refresh cannot be relied on to
+/// notice them.
+///
+/// Both halves belong to one function because doing either without the other is
+/// a defect that has now been found twice:
+///
+/// - Rotating without replicating retires cursors and then makes the next
+///   search re-project for nothing.
+/// - Replicating without rotating (R25-4) leaves NOTHING able to notice a
+///   failed write-through: the stamp never moves, so the lazy refresh that is
+///   supposed to be the safety net never fires and the replica stays wrong
+///   forever. A rebuild path self-heals precisely because its stamp moved.
+///
+/// `before` is the generation the index carried when the delta was computed. If
+/// the replica is not exactly there, the delta cannot be trusted to complete it
+/// (`apply_delta` refuses) and a full projection is taken instead — the same
+/// answer, at the cost of re-reading the scope.
+fn publish_in_place_delta(
+    kio_dir: &Path,
+    before: Option<&str>,
+    delta: &kio_index::aggregator::ScopeDelta,
+) -> Result<()> {
+    if delta.is_empty() {
+        return Ok(());
+    }
+    // Rotate FIRST, so the stamp the replica is about to receive is the one the
+    // index now carries rather than one this function is about to invalidate.
+    rotate_index_generation_unconditionally(kio_dir)?;
+    let (Some((scope_id, generation)), Some(before)) = (replica_scope_stamp(kio_dir), before) else {
+        return Ok(());
+    };
+    let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
+        Ok(replica) => replica,
+        Err(error) => {
+            log_aggregator_degraded(&format!("write-through open failed: {error}"));
+            return Ok(());
+        }
+    };
+    match replica.apply_delta(&scope_id, before, &generation, delta, replica_now_ms()) {
+        Ok(true) => {}
+        Ok(false) => {
+            // The replica is not where this delta assumed. Falling back to a
+            // projection is what keeps the refusal cheap instead of leaving the
+            // scope stale until someone searches it.
+            drop(replica);
+            write_through_projection_or_log(kio_dir);
+        }
+        Err(error) => {
+            log_aggregator_degraded(&format!("write-through delta {scope_id} failed: {error}"));
+        }
+    }
+    Ok(())
+}
+
+/// Replace each candidate's per-scope ranks with its ranks over the whole
+/// collection, then recompute `rrf_score` from them.
+///
+/// A candidate the collection has no rank for loses that lane's term rather
+/// than keeping the per-scope one: mixing the two scales back together is the
+/// defect this replaces. Losing a term costs that candidate a contribution;
+/// keeping a per-scope rank-1 would hand it the largest term available, which
+/// is precisely how a 6-chunk folder's best hit used to tie a corpus-wide best
+/// hit.
+///
+/// A lane the replica did not score (text-only mode has no query vector; a
+/// pure-short query has no MATCH expression) keeps whatever rank it already
+/// carried — that lane was never re-based, so there are no two scales to mix.
+fn apply_global_ranks(
     candidates: &mut [ScoredCandidate],
-    ranks: &BTreeMap<(String, String), u64>,
+    ranks: &GlobalRanks,
+    config: RrfConfig,
 ) {
     for candidate in candidates.iter_mut() {
-        if candidate.text_rank.is_none() {
-            continue;
+        let key = (candidate.scope_id.clone(), candidate.chunk_hash.clone());
+        if ranks.scored_text && candidate.text_rank.is_some() {
+            candidate.text_rank = ranks.text.get(&key).copied();
         }
-        candidate.text_rank = ranks
-            .get(&(candidate.scope_id.clone(), candidate.chunk_hash.clone()))
-            .copied();
-    }
-}
-
-/// Recompute `rrf_score` from whatever ranks the candidates now carry. Used by
-/// text-only mode, where no vector pass follows to do it.
-fn rescore_from_ranks(candidates: &mut [ScoredCandidate], config: RrfConfig) {
-    for candidate in candidates.iter_mut() {
+        if ranks.scored_vector && candidate.vector_rank.is_some() {
+            candidate.vector_rank = ranks.vector.get(&key).copied();
+        }
         let text_term = candidate
             .text_rank
             .map(|rank| config.w_text / (config.k + rank) as f64)
@@ -2085,12 +2406,33 @@ fn rescore_from_ranks(candidates: &mut [ScoredCandidate], config: RrfConfig) {
     }
 }
 
-/// One line to `errors.jsonl` when the global text cache steps aside, so a
-/// search that silently reverted to per-scope ranks is still explicable.
-fn log_global_text_degraded(detail: &str) {
-    eprintln!("kio: global text index unavailable, using per-scope text ranks ({detail})");
+/// One stderr line when the replica steps aside, so a search that silently
+/// reverted to scatter-gather ranks is still explicable.
+fn log_aggregator_degraded(detail: &str) {
+    eprintln!("kio: aggregator unavailable, using per-scope ranks ({detail})");
 }
 
+/// SCATTER-GATHER FALLBACK ONLY (05 §1.8). The replica ranks both lanes over
+/// the collection; this runs when the replica declined — it cannot open, cannot
+/// read a scope, or the search is single-scope.
+///
+/// It re-fuses `rrf_score` with a vector rank taken over the CANDIDATE POOL,
+/// not the collection: only chunks some scope already returned can be ranked
+/// here, so a chunk absent from every scope's local top-N has no rank and
+/// silently shifts everyone else's. That limitation is why the replica exists.
+///
+/// The TEXT term is preserved exactly (per-scope `text_rank`, never a raw-BM25
+/// cross-corpus comparison — the withdrawn CT3-MULTI-002 rule still governs
+/// this path, because on it there really are several corpora). The VECTOR term
+/// is rebuilt: among the per-scope vector candidates (`vector_rank.is_some()`),
+/// rank every one by its cosine to the query — a quantity that IS comparable
+/// across scopes because all scopes share one embedding profile (03 §7). Cosine
+/// order is deterministic and the query vector is replayed byte-identically on
+/// later pages (R23-01), so the merge order is stable across pagination.
+///
+/// A single-scope pool's global vector rank already equals its per-scope one,
+/// so re-fusing there would only risk a float tie-flip against the pinned
+/// per-scope order; this function checks that itself and returns early.
 fn regrade_vector_rank_globally(
     candidates: &mut [ScoredCandidate],
     query_vec: &[f32],
@@ -3059,29 +3401,85 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // embeddings were bought to reach.
     //
     // The premise is what had to go, not the fusion: BM25 is incomparable
-    // across corpora only while there are several corpora.
-    // `global_text_ranks_for` scores the query once against a device-level
-    // index holding every scope's chunks, so the text term becomes a rank over
-    // the whole collection — the answer `dfs_query_then_fetch` gives a sharded
-    // Elasticsearch, which reports the same distortion for the same reason
-    // (tiny shards see too little of the corpus to score it). No normalization
-    // function, no tuned constant: one collection, one BM25.
-    let global_text = query_plan
-        .match_expr
-        .as_deref()
-        .and_then(|expr| global_text_ranks_for(&searched, expr, rrf_config));
-    if let Some(ranks) = global_text.as_ref() {
-        apply_global_text_ranks(&mut candidates, ranks);
-    }
-    if matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid) {
-        if let Some(query_vec) = query_embedding.as_deref() {
-            regrade_vector_rank_globally(&mut candidates, query_vec, rrf_config);
+    // across corpora only while there are several corpora. Since 2026-07-25 the
+    // device keeps ONE collection — `aggregator.sqlite`, a replica of every
+    // scope's live chunks (05 §1.8) — and both terms are ranks over it. That is
+    // the answer `dfs_query_then_fetch` gives a sharded Elasticsearch, which
+    // reports the same distortion for the same reason (tiny shards see too
+    // little of the corpus to score it). No normalization function, no tuned
+    // constant: one collection, one BM25 and one cosine ordering.
+    //
+    // The replica also fixes what the in-memory vector re-rank could not: that
+    // pass ranked only among candidates the fan-out happened to return, so a
+    // chunk missing from every scope's local top-N simply had no rank and
+    // shifted everyone else's. Ranking against the collection is a true global
+    // rank.
+    //
+    // None of that licenses the replica to answer EVERY search, which is what
+    // it did until R25: the conditions 05 §1.8 states in prose went
+    // unevaluated, so a `--at` history search — whose answer is by definition
+    // not in a replica of live chunks — was re-ranked against live chunks.
+    // `aggregator_decline_reason` is those conditions.
+    let query_vec_for_ranks = matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid)
+        .then(|| query_embedding.as_deref())
+        .flatten();
+    // A cursor replay must reproduce page 1's ordering, so page 1's DECISION is
+    // part of the frozen state, not just its inputs: a page 1 that ranked
+    // without the replica (a transient open failure, say) must not have page 2
+    // rank with it.
+    let cursor_collection_generation = decoded_cursor
+        .as_ref()
+        .map(|cursor| cursor.collection_generation.clone());
+    let global_ranks = match aggregator_decline_reason(
+        &searched,
+        &time_selector,
+        mode.resolved,
+        query_plan.match_expr.as_deref(),
+        query_vec_for_ranks,
+    ) {
+        Some(reason) => Err(reason.to_owned()),
+        None if cursor_collection_generation == Some(None) => {
+            Err("cursor_pinned_scatter_gather".to_owned())
         }
-    } else if global_text.is_some() {
-        // Text-only mode has no second pass to fold the new ranks into the
-        // score, so do it here rather than leaving `rrf_score` describing the
-        // per-scope ranks the candidates no longer carry.
-        rescore_from_ranks(&mut candidates, rrf_config);
+        None => global_ranks_for(
+            &searched,
+            scope_mode,
+            decoded_cursor.is_some(),
+            multi_scope_settings,
+            query_plan.match_expr.as_deref(),
+            query_vec_for_ranks,
+            rrf_config,
+        ),
+    };
+    // PC19/PC21's per-scope `index_generation` check has the same shape and the
+    // same remedy: the state this page is replaying against moved, so the page
+    // cannot be served and the caller re-runs without a cursor.
+    if let Some(Some(frozen)) = &cursor_collection_generation {
+        let current = global_ranks.as_ref().map(|ranks| &ranks.collection_generation);
+        if current != Ok(frozen) {
+            return Err(KioError::new(
+                "KIO-E-SEARCH-CURSOR-001",
+                "search cursor aggregator collection generation changed",
+                json!({
+                    "reason": "collection_generation_mismatch",
+                    "expected": frozen,
+                    "actual": current.ok(),
+                }),
+                ExitCode::InvalidUsage,
+            ));
+        }
+    }
+    match global_ranks.as_ref() {
+        Ok(ranks) => apply_global_ranks(&mut candidates, ranks, rrf_config),
+        Err(_) => {
+            // Scatter-gather fallback (05 §1.8): the old regime applies
+            // unchanged — text stays per-scope, and only the vector lane is
+            // re-ranked globally, over the candidate pool rather than the
+            // collection.
+            if let Some(query_vec) = query_vec_for_ranks {
+                regrade_vector_rank_globally(&mut candidates, query_vec, rrf_config);
+            }
+        }
     }
     candidates.sort_by(|a, b| {
         b.rrf_score
@@ -3240,6 +3638,14 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     scope_mode: cursor_mode_from_selection(scope_mode),
                     query_hash: qhash,
                     query_vector_digest: cursor_query_vector_digest,
+                    // Freshly computed rather than carried over from the
+                    // replayed cursor: the two are equal by the mismatch check
+                    // above, and re-deriving keeps the field describing the
+                    // collection that actually ranked THIS page.
+                    collection_generation: global_ranks
+                        .as_ref()
+                        .ok()
+                        .map(|ranks| ranks.collection_generation.clone()),
                     time_travel: selector_for_search(&time_selector),
                     since_cutoff: since_cutoff.clone(),
                     excluded_scopes: signed_exclusions,
@@ -3329,6 +3735,18 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // [search].fail_behavior = "warn" text fallback.
         "warnings": mode.warnings.clone(),
         "diversify": diversify_summary,
+        // 05 §1.8: which tier ranked this search, and when it was not the
+        // replica, why. A silent revert to scatter-gather ranks is a real
+        // quality change (per-scope text ranks, a candidate-pool vector rank)
+        // and used to be visible only as a stderr line, which nothing
+        // machine-readable could see.
+        "aggregator": match &global_ranks {
+            Ok(ranks) => json!({
+                "applied": true,
+                "collection_generation": ranks.collection_generation,
+            }),
+            Err(reason) => json!({ "applied": false, "fallback_reason": reason }),
+        },
         "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
         "searched_scopes": searched_scopes,
         "excluded_scopes": excluded,
@@ -5953,15 +6371,13 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
                 // PB04: the copied instance's manifest.json now declares
                 // `gen: new_gen` (different bytes than the source gen's
                 // manifest), so its manifest_hash must be recomputed, not
-                // carried forward. Best-effort: a hashing fault alone should
-                // not turn an otherwise-successful reindex into a failure.
+                // carried forward.
                 let manifest_hash = compute_manifest_hash(
                     repo.kio_dir(),
                     &entry.raw_hash,
                     &normalize.tool_profile_hash,
                     new_gen,
-                )
-                .ok();
+                )?;
                 normalize_by_path.insert(
                     entry.path.clone(),
                     PendingNormalizeRef {
@@ -6502,6 +6918,18 @@ fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kio_dir
 
 /// R17-2: merge the reindex copy-loop's per-document skips into the rebuild report,
 /// deduplicated by raw_hash so a document reported by BOTH phases surfaces once.
+/// Split a normalized-instance directory leaf into the `(tool_profile_hash,
+/// gen)` it encodes. The leaf is `<raw64>.<tool64>.g<gen>` (03 §2 — digest-only
+/// components), so anything else in the fan-out directory is skipped rather
+/// than guessed at.
+fn parse_normalized_instance_leaf(name: &str, raw_digest: &str) -> Option<(String, u64)> {
+    let rest = name.strip_prefix(raw_digest)?.strip_prefix('.')?;
+    let (tool_digest, gen_part) = rest.rsplit_once(".g")?;
+    let gen = gen_part.parse::<u64>().ok()?;
+    let tool_profile_hash = format!("sha256:{tool_digest}");
+    is_hash(&tool_profile_hash).then_some((tool_profile_hash, gen))
+}
+
 fn latest_normalize_ref(kio_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
     let digest = hash_path_component(raw_hash)?;
     let dir = kio_dir
@@ -6521,43 +6949,19 @@ fn latest_normalize_ref(kio_dir: &Path, raw_hash: &str) -> Result<Option<Normali
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let parsed = name
-            .strip_prefix(digest)
-            .and_then(|value| value.strip_prefix('.'))
-            .map(|rest| (rest, true))
-            .or_else(|| {
-                name.strip_prefix(raw_hash)
-                    .and_then(|value| value.strip_prefix('.'))
-                    .map(|rest| (rest, false))
-            });
-        let Some((rest, portable)) = parsed else {
+        let Some((tool_profile_hash, gen)) = parse_normalized_instance_leaf(&name, digest) else {
             continue;
         };
-        let Some((tool_component, gen_part)) = rest.rsplit_once(".g") else {
-            continue;
-        };
-        let Ok(gen) = gen_part.parse::<u64>() else {
-            continue;
-        };
-        let tool_profile_hash = if portable {
-            format!("sha256:{tool_component}")
-        } else {
-            tool_component.to_owned()
-        };
-        if !is_hash(&tool_profile_hash) {
-            continue;
-        }
         if best
             .as_ref()
             .map(|current| gen > current.gen)
             .unwrap_or(true)
         {
-            // PB04: best-effort — this is a filesystem-name recovery scan,
-            // not a fresh normalize; a hashing fault should not block
-            // recovery, it just yields a v1-legacy (manifest_hash: None)
-            // normalize ref for this instance.
+            // PB04: the pin is what makes this ref resolvable point-in-time.
+            // A hashing fault here means the recovered instance cannot be
+            // pinned, which is a failure to report, not a ref to write.
             let manifest_hash =
-                compute_manifest_hash(kio_dir, raw_hash, &tool_profile_hash, gen).ok();
+                compute_manifest_hash(kio_dir, raw_hash, &tool_profile_hash, gen)?;
             best = Some(NormalizeRef {
                 tool_profile_hash,
                 gen,
@@ -7085,16 +7489,26 @@ fn rebuild_sqlite_index(
         fs::create_dir_all(parent)
             .map_err(|err| KioError::io(err.to_string(), parent.display().to_string()))?;
     }
-    // Embeddings live only in SQLite (objects/ holds no embedding objects in the
-    // MVP), so snapshot them from the CURRENT db (without removing it) and replay
-    // them into the fresh db, then rebuild chunk_vec from them (04 §4.3). This
-    // keeps `kio repair --rebuild-db` / reindex from wiping vector search.
+    // Vectors are replayed from `objects/embeddings/` — the CAS truth — and only
+    // then from the database being replaced (04 §4.3: `objects/` → `embeddings`
+    // → `chunk_vec`).
+    //
+    // R25-6: the db WAS the only source. `repair rebuild-db` snapshotted vectors
+    // out of the very database it was about to replace, so its guarantee held
+    // only while that database was intact — the one condition under which nobody
+    // runs it. Losing `sqlite.db` meant buying every vector from the API again.
+    //
+    // The db snapshot stays as a second source rather than being deleted,
+    // because it is what carries a store written before objects existed. Any row
+    // it contributes gets its object written on the way past, so a scope
+    // converges to object-backed after one rebuild and the fallback stops
+    // finding anything to do.
     let (preserved, preserved_tree_entries) = if path.exists() {
         let existing = Connection::open(&path).map_err(|err| KioError::schema(err.to_string()))?;
         let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kio)?;
         let tree_rows = snapshot_tree_entries(&existing)?;
         drop(existing);
-        (rows, tree_rows)
+        (backfill_embedding_objects(kio_dir, rows), tree_rows)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -7121,13 +7535,189 @@ fn rebuild_sqlite_index(
         retained_instances,
         chunking_config_hash,
     ) {
-        Ok(()) => fs::rename(&temp_path, &path)
-            .map_err(|err| KioError::io(err.to_string(), path.display().to_string())),
+        Ok(()) => {
+            fs::rename(&temp_path, &path)
+                .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
+            // 05 §1.8 write-through, placed on the rename rather than in each
+            // command that triggers a rebuild: `index`, `reindex` and
+            // `repair --rebuild-db` all reach cross-scope search through this
+            // one line, and a fourth caller would otherwise have to remember.
+            // No rotation here: the rebuild minted a fresh `index_generation`
+            // into the temp db moments ago (PB28), so the stamp already moved.
+            write_through_projection_or_log(kio_dir);
+            Ok(())
+        }
         Err(error) => {
             let _ = fs::remove_file(&temp_path);
             Err(error)
         }
     }
+}
+
+/// Every vector `objects/` holds, matched to the chunks of the index being
+/// built — the `objects/` → `embeddings` step of 04 §4.3's rebuild order.
+///
+/// An object records what the vector is OF (`target_hash` = the chunk's
+/// `text_hash`, plus the filename context and the profile) but not which chunk
+/// rows carry that text today, because that is exactly the part a rebuild is
+/// re-deriving. The join is therefore against the freshly built `chunks` table,
+/// and one object legitimately fans out to several chunks — content-based reuse
+/// (04 §5.5) is the same identity seen from the other side.
+///
+/// `context_key` participates in the match: since 07 §5.3's addendum a vector
+/// is a function of `(text_hash, context, profile)`, so two chunks with
+/// identical bodies in differently named files have different vectors and must
+/// not be crossed. Objects whose profile is not the live one are skipped rather
+/// than replayed — 04 §4.3 requires the rebuild to bind exactly one candidate
+/// per chunk, and several profiles can legitimately coexist in the store.
+fn embeddings_from_objects(
+    kio_dir: &Path,
+    conn: &Connection,
+) -> Result<Vec<embedding_store::ChunkEmbeddingSnapshotRow>> {
+    let store = ObjectStore::new(kio_dir);
+    let hashes = store.embedding_hashes()?;
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The profile the device would embed with today. Objects from a superseded
+    // profile stay on disk (they are still truth for the commits that used
+    // them) but must not be replayed, because 04 §4.3 requires a rebuild to
+    // bind exactly ONE candidate per chunk and several profiles can legitimately
+    // coexist. `None` — no embedding adapter configured at all — replays
+    // whatever is there rather than nothing: a scope with vectors and no
+    // adapter is the ordinary offline rebuild.
+    let live_profile =
+        embedding_execution().map(|execution| declared_embedding_profile(execution).profile_hash);
+    let mut chunks_by_text: BTreeMap<String, Vec<(String, Option<String>)>> = BTreeMap::new();
+    {
+        let mut statement = conn
+            .prepare("SELECT chunk_id, text_hash, raw_path FROM chunks")
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        for row in rows {
+            let (chunk_id, text_hash, raw_path) =
+                row.map_err(|error| KioError::schema(error.to_string()))?;
+            let context = raw_path
+                .as_deref()
+                .and_then(embedding_store::chunk_embedding_context);
+            chunks_by_text
+                .entry(text_hash)
+                .or_default()
+                .push((chunk_id, context));
+        }
+    }
+
+    let mut replayed = Vec::new();
+    for hash in hashes {
+        let object = match store.read_embedding(&hash) {
+            Ok(object) => object,
+            Err(error) => {
+                // A cache layer may not refuse to rebuild over one bad file.
+                // `repair verify-objects` is what reports and quarantines it.
+                eprintln!("kio: skipping unreadable embedding object {hash}: {error}");
+                continue;
+            }
+        };
+        if object.target_type != "chunk" {
+            continue;
+        }
+        if live_profile
+            .as_deref()
+            .is_some_and(|live| live != object.profile_hash)
+        {
+            continue;
+        }
+        let Some(candidates) = chunks_by_text.get(&object.target_hash) else {
+            continue;
+        };
+        let vector = kio_index::embedding_store::f32_to_le_bytes(&object.vector);
+        for (chunk_id, context) in candidates {
+            if context.as_deref() != object.context.as_deref() {
+                continue;
+            }
+            replayed.push(embedding_store::ChunkEmbeddingSnapshotRow {
+                embedding_hash: hash.clone(),
+                text_hash: object.target_hash.clone(),
+                chunk_id: chunk_id.clone(),
+                vector: vector.clone(),
+                dimensions: object.dimensions,
+                distance: object.distance.clone(),
+                modality: object.modality.clone(),
+                profile_hash: object.profile_hash.clone(),
+                context_key: object.context.clone(),
+            });
+        }
+    }
+    Ok(replayed)
+}
+
+/// Make `objects/embeddings/` the complete record of this scope's vectors,
+/// then hand back the rows to replay.
+///
+/// Every vector the database holds and the object store does not is written out
+/// here. That covers two cases with one pass: a store written before embedding
+/// objects existed (R25-6), and a vector whose object write failed at send time
+/// while its SQLite row succeeded. After one rebuild the object store is
+/// authoritative and this finds nothing.
+///
+/// The returned rows carry the object's OWN vector wherever an object exists,
+/// so `objects/` beats the database on any disagreement — that is what "truth"
+/// means here, and it is the only way a corrupted `embeddings` BLOB gets
+/// corrected rather than copied forward.
+fn backfill_embedding_objects(
+    kio_dir: &Path,
+    rows: Vec<embedding_store::ChunkEmbeddingSnapshotRow>,
+) -> Vec<embedding_store::ChunkEmbeddingSnapshotRow> {
+    let store = ObjectStore::new(kio_dir);
+    rows.into_iter()
+        .map(|mut row| {
+            match store.read_embedding(&row.embedding_hash) {
+                Ok(object) => {
+                    row.vector = kio_index::embedding_store::f32_to_le_bytes(&object.vector);
+                    return row;
+                }
+                Err(error) if error.error_code() == "KIO-E-STORE-CORRUPT-001" => {
+                    // A corrupt object cannot be trusted and must not be
+                    // silently overwritten by the db copy either: say so, keep
+                    // the row, and let `repair verify-objects` be the place
+                    // that quarantines it.
+                    eprintln!(
+                        "kio: embedding object {} is corrupt ({error}); replaying the \
+                         database copy instead",
+                        row.embedding_hash
+                    );
+                    return row;
+                }
+                Err(_) => {}
+            }
+            let object = kio_core::cas::EmbeddingObject {
+                spec_version: 1,
+                target_type: "chunk".to_owned(),
+                target_hash: row.text_hash.clone(),
+                profile_hash: row.profile_hash.clone(),
+                modality: row.modality.clone(),
+                dimensions: row.dimensions,
+                distance: row.distance.clone(),
+                context: row.context_key.clone(),
+                vector: kio_index::embedding_store::f32_from_le_bytes(&row.vector),
+            };
+            if let Err(error) = store.write_embedding(&object) {
+                eprintln!(
+                    "kio: could not back-fill embedding object {}: {error}",
+                    row.embedding_hash
+                );
+            }
+            row
+        })
+        .collect()
 }
 
 /// Preserve immutable historical tree projections across an atomic rebuild.
@@ -7288,7 +7878,32 @@ fn build_sqlite_index_at(
             )
             .map_err(|err| KioError::schema(err.to_string()))?;
     }
-    // Replay preserved embeddings (source of truth) and re-derive chunk_vec.
+    // Replay embeddings (source of truth) and re-derive chunk_vec.
+    //
+    // `objects/` first (04 §4.3), which is what makes a rebuild survive the loss
+    // of `sqlite.db` — the case `rebuild-db` exists for and the one the old
+    // db-snapshot source could not serve (R25-6). The snapshot rows follow and
+    // fill anything the object store has no object for; `write_chunk_embedding`
+    // is idempotent on `embedding_hash`, so an id present in both is written
+    // once, from the object.
+    for row in embeddings_from_objects(kio_dir, fts.connection())? {
+        if !live_chunk_ids.contains(&row.chunk_id) {
+            continue;
+        }
+        embedding_store::write_chunk_embedding(
+            fts.connection(),
+            &row.embedding_hash,
+            &row.text_hash,
+            &row.chunk_id,
+            &row.vector,
+            row.dimensions,
+            &row.distance,
+            &row.modality,
+            &row.profile_hash,
+            row.context_key.as_deref(),
+        )
+        .map_err(index_to_kio)?;
+    }
     for row in preserved {
         if !live_chunk_ids.contains(&row.chunk_id) {
             continue;
@@ -8597,10 +9212,6 @@ enum PointInTimeAttribution {
     /// v2/v3 tree, procedure 6a's unit-status and publication/association
     /// ancestry checks all passed.
     Alive,
-    /// v1 tree (`normalize.manifest_hash` absent) — 6a/6b cannot run;
-    /// resolved leniently as before this session (`--strict` downgrades this
-    /// to `unverifiable(reason=tree_v1)` separately, PB40/PB55).
-    LegacyTreeV1,
     /// 6a's manifest-done check, or the v2/v3 publication/association
     /// ancestry check, failed outright — not admissible evidence for this
     /// commit (`not_found`).
@@ -8633,9 +9244,7 @@ fn verify_point_in_time_attribution(
     chunk: &ChunkObject,
     pointer_commit: &str,
 ) -> Result<PointInTimeAttribution> {
-    let Some(manifest_hash) = &normalize.manifest_hash else {
-        return Ok(PointInTimeAttribution::LegacyTreeV1);
-    };
+    let manifest_hash = &normalize.manifest_hash;
     let store = ObjectStore::new(&target.kio_dir);
     let manifest_path = store.content_path(ContentObjectKind::Manifest, manifest_hash)?;
     if !path_entry_exists(&manifest_path)? {
@@ -9113,7 +9722,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 &chunk,
                 &pointer.commit,
             )? {
-                PointInTimeAttribution::Alive | PointInTimeAttribution::LegacyTreeV1 => {}
+                PointInTimeAttribution::Alive => {}
                 PointInTimeAttribution::ManifestMissing => manifest_missing = true,
                 PointInTimeAttribution::NotFound => {
                     return Err(purge_not_found_error(&target, &pointer.raw_hash));
@@ -12363,9 +12972,7 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
 /// (`.kio/scope.json` `approvals[]`) network opt-in AND-gate for one
 /// specific online adapter, keyed by `(tool_id, tool_profile_hash)` (opt-in
 /// unit is scope × adapter, and a profile change invalidates the row until
-/// re-approval — QA23). Backward compatibility: a scope approved before
-/// per-adapter rows existed carries only the then-active markdownize row, so
-/// an embedding adapter reads no matching row and stays enqueue-only
+/// re-approval — QA23). An adapter with no matching row stays enqueue-only
 /// (decision #35).
 fn persistent_network_allowed_for(
     repo: &Repository,
@@ -12506,9 +13113,8 @@ fn try_materialize_initial_network_approval(
 /// `try_materialize_initial_network_approval` re-checking the boolean its
 /// own caller already checked. Three cases, checked in this order:
 ///
-/// (a) **Legacy** — `approved_at`/`approval_method` absent or non-string (10
-///     §12.3 element-level backward compat: not a schema error, but never
-///     eligible for self-heal's exact-match). Cleaned up via
+/// (a) **Malformed** — `approved_at`/`approval_method` absent or non-string,
+///     so it can never satisfy self-heal's exact-match. Cleaned up via
 ///     `discard_network_approval_pending`, which removes the pending AND
 ///     sets `approvals_initialized` in the same atomic write if it was not
 ///     already set (07 §3 L202-205 — otherwise "true × 行ゼロ × marker 無
@@ -12516,7 +13122,7 @@ fn try_materialize_initial_network_approval(
 ///     initial-materialize exception would silently bypass the explicit
 ///     -approval requirement this cleanup enforces). This check runs BEFORE
 ///     the tuple-match check below regardless of what the tuple would have
-///     matched — a legacy pending is unconditionally self-heal-ineligible.
+///     matched — a malformed pending is unconditionally self-heal-ineligible.
 ///     Returns `Ok(false)`.
 /// (b) **Well-formed AND 4-tuple-matching** — `scope_id` (against THIS
 ///     scope's current `scope.json`), `tool_id`, `execution_mode` (against
@@ -14228,6 +14834,17 @@ fn run_embedding_enrichment_for_instances(
     // from `kio batch resume` or any later write command. `--realtime` (and a
     // `[adapter] lane = "realtime"` config) selects the synchronous path below,
     // which completes inside this invocation at double the rate.
+    // 05 §1.8 write-through. Accumulated across every batch and flushed once
+    // per exit path: the replica is a separate database, so folding the write
+    // into the per-group loop would cost one transaction per group (2,321 of
+    // them in the dogfood fixture) to record a set the pass already knows.
+    //
+    // The generation is read BEFORE the first vector lands: it names the state
+    // the delta is a change TO, which is the state the replica has to already
+    // be in for the delta to complete it (R25-3). Nothing rotates during the
+    // loop, so one read at the top is the whole answer.
+    let replica_before = replica_scope_stamp(repo.kio_dir()).map(|(_, generation)| generation);
+    let mut replica = kio_index::aggregator::ScopeDelta::default();
     if effective_invocation_lane() == PreferredRequestKind::Batch {
         let mut batch_transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
         if let Some(submitted) = submit_embedding_batch_jobs(
@@ -14239,12 +14856,19 @@ fn run_embedding_enrichment_for_instances(
             &budget_caps,
             override_budget,
             &mut batch_transitions,
+            &mut replica,
         )? {
             // Submitted members stay Pending on purpose (no transition): the
             // job is in flight and `index_status` must keep reporting them
             // until collect.
             let no_reservations: BTreeMap<String, (f64, String, String)> = BTreeMap::new();
             apply_embedding_transitions(&task_store, &batch_transitions, &now, &no_reservations)?;
+            // Submitting sends nothing to the index, but the reuse links it
+            // settled on the way past did — this lane's early return must carry
+            // them too, rotation included: a content-addressed reuse hit writes
+            // `chunk_vec` with no adapter call and no rebuild, and a vector
+            // appearing is exactly the kind of change LC25 retires cursors for.
+            publish_in_place_delta(repo.kio_dir(), replica_before.as_deref(), &replica)?;
             return Ok(submitted);
         }
         // Lane unavailable — fall through to the synchronous loop below, which
@@ -14301,7 +14925,7 @@ fn run_embedding_enrichment_for_instances(
         // front so an API failure on the *sent* portion can never contaminate an
         // already-materialized (chunk_vec written) chunk into a stuck Failed task.
         if !plan.reuse.is_empty() {
-            match link_reused_chunks(&conn, &profile, &plan.reuse) {
+            match link_reused_chunks(&conn, &profile, &plan.reuse, &mut replica) {
                 Ok(()) => {
                     record_embedding_transitions(
                         &mut transitions,
@@ -14445,10 +15069,12 @@ fn run_embedding_enrichment_for_instances(
             // rather than a representative standing in for the batch.
             match send_embed_group(
                 &conn,
+                repo.kio_dir(),
                 execution,
                 &profile,
                 group,
                 Some(charge.intent_token.clone()),
+                &mut replica,
             ) {
                 Ok(usage) => {
                     settle_task_charge_success(
@@ -14543,6 +15169,16 @@ fn run_embedding_enrichment_for_instances(
     // split (R11-2). `fallback_reason` per chunk (done/paused/failed) is preserved.
     outcome.failed_retryable +=
         apply_embedding_transitions(&task_store, &transitions, &now, &reserved_by_ref)?;
+    // 05 §1.8 write-through, after the loop's `break` paths as well as its
+    // normal exit: a pass that gave up halfway still linked every vector it got
+    // to, and those belong in the corpus.
+    //
+    // R25-4/R25-12: this lane writes `chunk_vec` straight into the live index.
+    // Under `kio index` a rebuild has already rotated, but the same function is
+    // reached from `kio batch resume` when the batch lane is unavailable, and
+    // there nothing else rotates at all — leaving both the cursor contract and
+    // the replica's only staleness signal on a stamp that never moves.
+    publish_in_place_delta(repo.kio_dir(), replica_before.as_deref(), &replica)?;
     Ok(outcome)
 }
 
@@ -14790,14 +15426,28 @@ fn link_reused_chunks(
     conn: &Connection,
     profile: &DeclaredEmbeddingProfile,
     reuse: &[(&EmbeddableChunk, Vec<u8>)],
+    replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> std::result::Result<(), TaskExecutionFailure> {
     for (chunk, bytes) in reuse {
-        embedding_store::link_chunk_vec(conn, &chunk.chunk_id, bytes, profile.dimensions).map_err(
-            |_| TaskExecutionFailure {
-                retry_kind: RetryErrorKind::ContractViolation,
-                retry_after_ms: None,
-            },
-        )?;
+        let linked = embedding_store::link_chunk_vec(
+            conn,
+            &chunk.chunk_id,
+            bytes,
+            profile.dimensions,
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
+        })?;
+        // A content-addressed reuse hit writes `chunk_vec` with no adapter call
+        // and no rebuild, so it moves the vector corpus as surely as a send
+        // does — and just as invisibly to a reader-driven refresh (05 §1.8).
+        if linked {
+            replica.vectors_added.push((
+                chunk.chunk_id.clone(),
+                embedding_store::f32_from_le_bytes(bytes),
+            ));
+        }
     }
     Ok(())
 }
@@ -14815,6 +15465,7 @@ fn link_reused_chunks(
 /// default path.
 fn send_embed_group(
     conn: &Connection,
+    kio_dir: &Path,
     execution: AdoptedEmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
     group: &EmbeddingSendGroup<'_>,
@@ -14823,6 +15474,7 @@ fn send_embed_group(
     // and one call is now one group, so there is nothing to pick a
     // representative from.
     idempotency_token: Option<String>,
+    replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> std::result::Result<Option<kio_adapter::types::AdapterUsage>, TaskExecutionFailure> {
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): the adapter input is
     // the humanized filename context prepended to the chunk body. Every member
@@ -14855,7 +15507,15 @@ fn send_embed_group(
             retry_after_ms: None,
         });
     };
-    persist_group_vector(conn, profile, group, &vector.vector, &BTreeSet::new())?;
+    persist_group_vector(
+        conn,
+        kio_dir,
+        profile,
+        group,
+        &vector.vector,
+        &BTreeSet::new(),
+        replica,
+    )?;
     Ok(outcome.usage)
 }
 
@@ -14865,16 +15525,37 @@ fn send_embed_group(
 /// just returned, the Batch path with the vector collected from a finished
 /// provider job. 07 §5.3's acceptance checks must not exist in two versions,
 /// so neither may they diverge here.
+///
+/// `replica` accumulates what to write through to the device replica (05 §1.8).
+/// It is threaded down to here — rather than reconstructed by each lane — for
+/// the same reason the acceptance checks are: this is the single point that
+/// knows which chunks actually gained a vector, and both lanes write into the
+/// LIVE index without rebuilding it, so nothing downstream re-reads the scope.
+/// The caller flushes once, with `write_through_delta`.
 fn persist_group_vector(
     conn: &Connection,
+    kio_dir: &Path,
     profile: &DeclaredEmbeddingProfile,
     group: &EmbeddingSendGroup<'_>,
     vector: &[f32],
     held: &BTreeSet<String>,
+    replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> std::result::Result<(), TaskExecutionFailure> {
     let chunk = group.representative;
     let bytes = f32_to_le_bytes(vector);
     let context_key = embedding_store::chunk_embedding_context(&chunk.raw_path);
+    // CAS first, table second (04 §4.3: `objects/` → `embeddings` → `chunk_vec`).
+    // The order is what makes a crash between them recoverable in the direction
+    // that matters: an object with no row is replayed by the next rebuild, while
+    // a row with no object is a vector `rebuild-db` cannot restore.
+    publish_embedding_object(
+        kio_dir,
+        &group.embedding_hash,
+        &chunk.text_hash,
+        vector,
+        profile,
+        context_key.as_deref(),
+    );
     embedding_store::write_chunk_embedding(
         conn,
         &group.embedding_hash,
@@ -14891,7 +15572,7 @@ fn persist_group_vector(
         retry_kind: RetryErrorKind::ContractViolation,
         retry_after_ms: None,
     })?;
-    embedding_store::link_chunk_vecs_to_content_vector(
+    let linked = embedding_store::link_chunk_vecs_to_content_vector(
         conn,
         &group.embedding_hash,
         group.members.iter().map(|member| member.chunk_id.as_str()),
@@ -14900,8 +15581,17 @@ fn persist_group_vector(
     .map_err(|_| TaskExecutionFailure {
         retry_kind: RetryErrorKind::ContractViolation,
         retry_after_ms: None,
-    })
-    .map(|_| ())
+    })?;
+    // The ids the link REPORTED, never `group.members`. A secrets-held member
+    // (R20-10) is deliberately kept out of `chunk_vec` so it cannot be reached
+    // by vector search without `--send-secrets`, and a width-mismatched member
+    // is dropped as incompatible. Mirroring either rule here would put it in
+    // two places, and the day they drifted the replica would expose a held
+    // chunk (03 §4 invariant 8).
+    replica
+        .vectors_added
+        .extend(linked.into_iter().map(|chunk_id| (chunk_id, vector.to_vec())));
+    Ok(())
 }
 
 // ===========================================================================
@@ -15051,6 +15741,7 @@ fn submit_embedding_batch_jobs(
     budget_caps: &BudgetCaps,
     override_budget: bool,
     transitions: &mut BTreeMap<String, EmbeddingTransition>,
+    replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> Result<Option<ExecOutcome>> {
     let mut outcome = ExecOutcome::default();
     // Lane availability probing must never be what REPORTS an auth misconfig
@@ -15078,7 +15769,7 @@ fn submit_embedding_batch_jobs(
     // sync lane does, so an unavailable provider cannot strand an already
     // materialized chunk.
     if !plan.reuse.is_empty() {
-        match link_reused_chunks(conn, profile, &plan.reuse) {
+        match link_reused_chunks(conn, profile, &plan.reuse, replica) {
             Ok(()) => {
                 record_embedding_transitions(
                     transitions,
@@ -15316,6 +16007,11 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
         .map(|chunk| (chunk.chunk_id.clone(), chunk))
         .collect::<BTreeMap<_, _>>();
     let held = BTreeSet::new();
+    // 05 §1.8 write-through, accumulated across every collected job and flushed
+    // once below — see the sync lane's identical accumulator, including why the
+    // generation is read here rather than at the flush.
+    let replica_before = replica_scope_stamp(repo.kio_dir()).map(|(_, generation)| generation);
+    let mut replica = kio_index::aggregator::ScopeDelta::default();
     for row in rows {
         let (Some(job_name), Some(intent_token)) =
             (row.batch_job_id.as_ref(), row.intent_token.as_ref())
@@ -15427,7 +16123,16 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
                 members,
             };
             let normalized = normalize_embedding_vector(values, &profile)?;
-            persist_group_vector(&conn, &profile, &group, &normalized, &held).map_err(
+            persist_group_vector(
+                &conn,
+                repo.kio_dir(),
+                &profile,
+                &group,
+                &normalized,
+                &held,
+                &mut replica,
+            )
+            .map_err(
                 |failure| {
                     KioError::schema(format!(
                         "embedding batch collect failed to persist: {:?}",
@@ -15498,6 +16203,21 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
             outcome.failed += 1;
         }
     }
+    // A collected batch writes vectors straight into the LIVE index, and
+    // `run_batch` — unlike `run_index`/`run_reindex` — never rebuilds it
+    // afterward, so `index_generation` would otherwise still name the
+    // pre-embedding state. That retires every outstanding search cursor, which
+    // is what LC25 requires of any change that can make a replay rank
+    // differently. `publish_in_place_delta` owns both halves — it rotates and
+    // then stamps the replica with what the index now carries.
+    //
+    // Its empty-delta no-op replaces the former `outcome.executed > 0` test,
+    // and narrows it: a group whose every member is secrets-held writes a
+    // `content_vectors` row (so `executed` counts it) but links nothing into
+    // `chunk_vec`, and search reads `chunk_vec`. No replay can rank
+    // differently, so LC25 asks for no rotation — the old trigger retired
+    // cursors for a change no search could see.
+    publish_in_place_delta(repo.kio_dir(), replica_before.as_deref(), &replica)?;
     Ok(outcome)
 }
 
@@ -15579,6 +16299,56 @@ fn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {
 
 /// Embedding identity hash (03 §8.1) keyed on the chunk's `text_hash` so identical
 /// content shares one `embeddings` row (content-based reuse).
+/// Publish one vector into `objects/embeddings/` — the CAS truth the
+/// `embeddings` table and `chunk_vec` are an acceleration layer over (04 §4.3,
+/// 03 §8.1).
+///
+/// R25-6: the object type was declared in the spec and produced by nothing, so
+/// `kio repair rebuild-db` snapshotted vectors out of the very database it was
+/// about to replace. Losing `sqlite.db` meant buying every vector from the API
+/// again. This is the write half of closing that.
+///
+/// Failure is not fatal to the send that produced the vector: the SQLite row is
+/// already durable and the search works from it. What is lost is the rebuild
+/// guarantee, which is exactly what the log line says.
+fn publish_embedding_object(
+    kio_dir: &Path,
+    embedding_hash: &str,
+    text_hash: &str,
+    vector: &[f32],
+    profile: &DeclaredEmbeddingProfile,
+    context: Option<&str>,
+) {
+    let object = kio_core::cas::EmbeddingObject {
+        spec_version: 1,
+        target_type: "chunk".to_owned(),
+        target_hash: text_hash.to_owned(),
+        profile_hash: profile.profile_hash.clone(),
+        modality: "multimodal".to_owned(),
+        dimensions: profile.dimensions,
+        distance: "cosine".to_owned(),
+        context: context.map(str::to_owned),
+        vector: vector.to_vec(),
+    };
+    let store = ObjectStore::new(kio_dir);
+    match store.write_embedding(&object) {
+        Ok(hash) if hash == embedding_hash => {}
+        Ok(hash) => {
+            // The object's own identity must be the one the SQLite row is keyed
+            // by, or a rebuild would replay this vector under a key nothing
+            // looks up. Two formulas that can disagree is the defect; saying so
+            // loudly is how it gets found.
+            eprintln!(
+                "kio: embedding object identity {hash} does not match the row key \
+                 {embedding_hash}; rebuild-db will not restore this vector"
+            );
+        }
+        Err(error) => {
+            eprintln!("kio: could not publish embedding object {embedding_hash}: {error}");
+        }
+    }
+}
+
 fn chunk_embedding_hash(
     chunk: &EmbeddableChunk,
     profile: &DeclaredEmbeddingProfile,
@@ -17409,11 +18179,9 @@ fn run_index_pipeline(
                 continue;
             }
             // PB04: this candidate's gen=0 output is already `done`
-            // (verified above) — its manifest.json is expected to be
-            // hashable now. Best-effort so a hashing fault alone does not
-            // newly block an otherwise-successful offline index.
+            // (verified above), so its manifest.json is hashable now.
             let manifest_hash =
-                compute_manifest_hash(repo.kio_dir(), &raw_hash, &markdown_profile_hash, 0).ok();
+                compute_manifest_hash(repo.kio_dir(), &raw_hash, &markdown_profile_hash, 0)?;
             result.normalize_by_path.insert(
                 candidate.input_path.clone(),
                 PendingNormalizeRef {
@@ -17665,9 +18433,7 @@ fn run_index_pipeline(
         persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(pipeline_to_kio)?;
         // PB04: `manifest` was just durably persisted above — hash the
         // in-memory value directly rather than re-reading it from disk.
-        // Best-effort so a hashing fault alone does not newly block an
-        // otherwise-successful local markdownize.
-        let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest).ok();
+        let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest)?;
         let task = task_descriptor(
             repo,
             TaskType::Markdownize,
@@ -17957,10 +18723,7 @@ fn create_prepared_hash_drift_instance(
         RetryErrorKind::ContractViolation,
     );
     persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(pipeline_to_kio)?;
-    // PB04: best-effort, same posture as the ordinary offline markdownize path
-    // -- a hashing fault alone must not newly block an otherwise-successful
-    // `kio index`.
-    let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest).ok();
+    let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest)?;
     let mut task = task_descriptor(
         repo,
         TaskType::Markdownize,
@@ -22133,7 +22896,7 @@ mod tests {
             normalize: kio_core::dag::NormalizeRef {
                 tool_profile_hash: profile_hash,
                 gen: 0,
-                manifest_hash: None,
+                manifest_hash: kio_core::cas::hash_bytes(b"manifest"),
             },
             raw_path: "reintroduced.md".to_owned(),
             embedding_path: "reintroduced.md".to_owned(),
@@ -24238,137 +25001,37 @@ mod tests {
     }
 
     #[test]
-    fn latest_normalize_ref_parses_portable_digest_basename() {
-        use super::{hash_bytes, latest_normalize_ref};
+    fn normalized_instance_leaf_parses_only_the_digest_only_form() {
+        use super::{hash_bytes, parse_normalized_instance_leaf};
 
-        let dir = tempfile::tempdir().unwrap();
-        let raw_hash = hash_bytes(b"raw");
+        let raw_digest = hash_bytes(b"raw").strip_prefix("sha256:").unwrap().to_owned();
         let tool_hash = hash_bytes(b"tool");
-        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
         let tool_digest = tool_hash.strip_prefix("sha256:").unwrap();
-        let instance = dir
-            .path()
-            .join("objects/normalized_units")
-            .join(&raw_digest[0..2])
-            .join(&raw_digest[2..4])
-            .join(format!("{raw_digest}.{tool_digest}.g2"));
-        std::fs::create_dir_all(instance).unwrap();
 
-        let reference = latest_normalize_ref(dir.path(), &raw_hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(reference.tool_profile_hash, tool_hash);
-        assert_eq!(reference.gen, 2);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn latest_normalize_ref_also_parses_legacy_prefixed_basename() {
-        use super::{hash_bytes, latest_normalize_ref};
-
-        let dir = tempfile::tempdir().unwrap();
-        let raw_hash = hash_bytes(b"raw");
-        let tool_hash = hash_bytes(b"tool");
-        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
-        let instance = dir
-            .path()
-            .join("objects/normalized_units")
-            .join(&raw_digest[0..2])
-            .join(&raw_digest[2..4])
-            .join(format!("{raw_hash}.{tool_hash}.g3"));
-        std::fs::create_dir_all(instance).unwrap();
-
-        let reference = latest_normalize_ref(dir.path(), &raw_hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(reference.tool_profile_hash, tool_hash);
-        assert_eq!(reference.gen, 3);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn tombstone_reader_projects_v1_legacy_flat_and_rejects_dual_path_conflict() {
-        use super::{hash_bytes, read_tombstone, ScopeTarget};
-        use kio_core::cas::{canonical_json_bytes, ObjectKind, ObjectStore};
-        use kio_core::dag::{CommitObject, CommitStats};
-
-        let dir = tempfile::tempdir().unwrap();
-        let kio_dir = dir.path().join(".kio");
-        std::fs::create_dir(&kio_dir).unwrap();
-        let raw_hash = hash_bytes(b"purged raw");
-        let digest = raw_hash.strip_prefix("sha256:").unwrap();
-        let legacy = kio_dir
-            .join("tombstones")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(&raw_hash);
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        // R23-11: `read_tombstone` now semantically validates an active
-        // tail's `in_commit` against a real, verified commit object, so the
-        // legacy flat record's `purged_in_commit` must resolve to one
-        // (unlike before, when it was an arbitrary, never-verified hash
-        // literal — this test is about LC5's legacy-conversion projection
-        // and the dual-path conflict below, not marker semantics, so the
-        // backing commit only needs to be valid, not otherwise interesting).
-        let purge_commit = CommitObject::new_purged(
-            hash_bytes(b"tree"),
-            Vec::new(),
-            "2026-07-13T00:00:00Z".to_owned(),
-            "purge".to_owned(),
-            hash_bytes(b"toollock"),
-            CommitStats {
-                files_added: 0,
-                files_modified: 0,
-                files_deleted: 0,
-            },
-            vec![raw_hash.clone()],
-        )
-        .unwrap();
-        let commit_bytes =
-            canonical_json_bytes(&serde_json::to_value(&purge_commit).unwrap()).unwrap();
-        let commit_hash = hash_bytes(&commit_bytes);
-        ObjectStore::new(&kio_dir)
-            .write_object_bytes(ObjectKind::Commit, &commit_hash, &commit_bytes)
-            .unwrap();
-
-        // LC5: a pre-Step4b v1 flat record (no `events` key) is read-only
-        // converted and projected into the same flat response shape.
-        let record = serde_json::json!({
-            "raw_hash": raw_hash,
-            "purged_at": "2026-07-13T00:00:00Z",
-            "purged_reason": "privacy",
-            "purged_in_commit": commit_hash,
-        });
-        std::fs::write(&legacy, serde_json::to_vec(&record).unwrap()).unwrap();
-        let target = ScopeTarget {
-            repo_root: dir.path().to_path_buf(),
-            kio_dir: kio_dir.clone(),
-            scope_id: "scope_test".to_owned(),
-        };
-        let loaded = read_tombstone(&target, &raw_hash).unwrap().unwrap();
-        assert_eq!(loaded["raw_hash"], raw_hash);
-        assert_eq!(loaded["purged_reason"], "privacy");
-        assert_eq!(loaded["purged_at"], "2026-07-13T00:00:00Z");
-
-        // Dual-path (canonical vs legacy leaf) disagreement fails closed.
-        let canonical = kio_dir
-            .join("tombstones")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(digest);
-        std::fs::write(
-            &canonical,
-            serde_json::to_vec(&serde_json::json!({
-                "raw_hash": raw_hash,
-                "purged_at": "2026-07-13T00:00:00Z",
-                "purged_reason": "legal",
-                "purged_in_commit": hash_bytes(b"purge commit"),
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let error = read_tombstone(&target, &raw_hash).unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+        assert_eq!(
+            parse_normalized_instance_leaf(
+                &format!("{raw_digest}.{tool_digest}.g2"),
+                &raw_digest
+            ),
+            Some((tool_hash.clone(), 2))
+        );
+        // A `sha256:`-prefixed leaf is not a form this store writes or reads.
+        assert_eq!(
+            parse_normalized_instance_leaf(
+                &format!("sha256:{raw_digest}.{tool_hash}.g3"),
+                &raw_digest
+            ),
+            None
+        );
+        // Another raw's instance, a malformed gen, and a non-hash tool
+        // component are all skipped rather than guessed at.
+        for leaf in [
+            format!("{}.{tool_digest}.g2", "f".repeat(64)),
+            format!("{raw_digest}.{tool_digest}.gX"),
+            format!("{raw_digest}.not-a-digest.g2"),
+        ] {
+            assert_eq!(parse_normalized_instance_leaf(&leaf, &raw_digest), None);
+        }
     }
 
     #[test]

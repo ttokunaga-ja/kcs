@@ -5,11 +5,9 @@ use unicode_normalization::UnicodeNormalization;
 
 const MAX_PORTABLE_LEAF_UTF16_UNITS: usize = 255;
 
-/// Versioned directory below `.kio/refs` for canonical portable tag refs.
-///
-/// Keeping canonical hashed refs outside the legacy `refs/tags/<logical-name>`
-/// directory prevents an old raw tag that happens to look like `tag-<digest>`
-/// from being mistaken for another logical tag's canonical representation.
+/// Versioned directory below `.kio/refs` holding every tag ref, each named by
+/// [`portable_tag_leaf`]. Versioning the directory rather than the leaves keeps
+/// a future change to the naming rule from having to coexist with this one.
 pub const PORTABLE_TAGS_DIRECTORY: &str = "tags-v1";
 
 /// Return a stable, case-insensitive key for a logical tag name.

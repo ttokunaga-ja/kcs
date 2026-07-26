@@ -168,39 +168,20 @@ fn tag_names_use_portable_leaves_and_case_insensitive_collisions() {
     let error = json_failure(scope.path(), device.path(), &["diff", "head", "HEAD"], 2);
     assert_eq!(error["error_code"], "KIO-E-CONFIG-USAGE-001");
 
-    // A raw-name Unix legacy ref remains readable. If both representations exist,
-    // conflicting targets fail closed rather than choosing by host enumeration.
-    let legacy = scope.path().join(".kio/refs/tags/legacy");
-    fs::write(&legacy, first["commit_hash"].as_str().unwrap()).unwrap();
-    json_success(scope.path(), device.path(), &["diff", "legacy", "HEAD"]);
-
+    // A tag whose logical name is literally another tag's canonical leaf is
+    // still its own tag: the leaf is `sha256` over the folded logical name, so
+    // naming the digest cannot alias the tag that digest belongs to.
     fs::write(scope.path().join("doc.md"), "second").unwrap();
     let second = json_success(scope.path(), device.path(), &["snapshot", "-m", "second"]);
-
-    // A pre-upgrade raw tag whose logical name happens to look exactly like
-    // another tag's canonical leaf remains its own ref. The disjoint canonical
-    // directory prevents it from aliasing `Release`.
-    fs::write(
-        scope.path().join(".kio/refs/tags").join(leaf),
-        second["commit_hash"].as_str().unwrap(),
-    )
-    .unwrap();
-    let legacy_copy = json_success(scope.path(), device.path(), &["tag", "legacy-copy", leaf]);
-    assert_eq!(legacy_copy["commit_hash"], second["commit_hash"]);
+    json_success(scope.path(), device.path(), &["tag", leaf]);
+    let leaf_copy = json_success(scope.path(), device.path(), &["tag", "leaf-copy", leaf]);
+    assert_eq!(leaf_copy["commit_hash"], second["commit_hash"]);
     let canonical_copy = json_success(
         scope.path(),
         device.path(),
         &["tag", "canonical-copy", "Release"],
     );
     assert_eq!(canonical_copy["commit_hash"], first["commit_hash"]);
-
-    fs::write(
-        scope.path().join(".kio/refs/tags/release"),
-        second["commit_hash"].as_str().unwrap(),
-    )
-    .unwrap();
-    let conflict = json_failure(scope.path(), device.path(), &["diff", "Release", "HEAD"], 4);
-    assert_eq!(conflict["error_code"], "KIO-E-STORE-CORRUPT-001");
 }
 
 #[test]

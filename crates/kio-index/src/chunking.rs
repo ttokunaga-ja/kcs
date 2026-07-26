@@ -35,10 +35,6 @@ pub struct ChunkingInput {
     pub created_at: String,
 }
 
-pub trait Chunker {
-    fn chunk(&self, input: ChunkingInput) -> Result<Vec<ChunkRow>>;
-}
-
 pub fn default_chunking_config() -> Result<ChunkingConfig> {
     let hash = chunking_config_hash("heading", 6000)?;
     Ok(ChunkingConfig {

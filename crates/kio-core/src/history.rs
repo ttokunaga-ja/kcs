@@ -335,12 +335,6 @@ impl FirstParentHistory {
             .filter_map(|hash| self.nodes.get(hash))
     }
 
-    #[must_use]
-    pub fn binding_at(&self, commit_hash: &str, path: &str) -> Option<HistoryBinding> {
-        let node = self.nodes.get(commit_hash)?;
-        node.entry(path).map(|entry| node.binding(entry))
-    }
-
     /// The newest exact persisted binding for `path` on the snapshot's
     /// first-parent ancestry.
     #[must_use]
@@ -991,7 +985,7 @@ mod tests {
         NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
             gen: 7,
-            manifest_hash: None,
+            manifest_hash: hash_bytes(b"manifest"),
         }
     }
 

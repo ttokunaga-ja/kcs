@@ -50,18 +50,6 @@ pub const MAX_EPOCH_COUNTER_BYTES: u64 = 64;
 // `.kio/purge/journal-closure` sidecar ([`PurgeClosure`]).
 const JOURNAL_SCHEMA_VERSION: u64 = 3;
 const RECEIPT_SCHEMA_VERSION: u64 = 2;
-const LEGACY_RECEIPT_SCHEMA_VERSION: u64 = 1;
-/// Actor recorded for an event materialized purely by the v1-flat -> v2
-/// `events[]` legacy conversion. LC3/LC16 require `actor` on every event with
-/// no legacy carve-out (unlike `epoch`/`lifecycle_epoch`, whose legacy
-/// omission LC3 explicitly tabulates); the pre-Step4b flat schema never
-/// recorded an actor, so there is no real value to preserve. This sentinel
-/// keeps the field populated (satisfying the stricter, explicit "always
-/// required" reading of LC3/LC16) while remaining visibly synthetic — a
-/// tension between LC3/LC16 ("always required, no exception") and LC5's
-/// looser in-memory description ("actor: omit if no source") that this
-/// module resolves in favor of the more explicit, doubly-stated rule.
-pub const LEGACY_ACTOR: &str = "legacy";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,14 +117,9 @@ pub enum EventKind {
 /// One `events[]` element (05-runtime.md §3.5, 10-operations.md §7.5.1). Field
 /// presence follows the LC3/10§7.5.1 L557-562 "complete enumeration" table:
 /// `at`/`in_commit`/`actor` are always required; `reason` is always required
-/// on `purged`/`erased` (M-ruling #1: the only way to lack it is the v1
-/// legacy-conversion `other` synthesis, so any other absence is a hard
-/// reject); `resurrection_commit` is always required on `retired`;
-/// `epoch`/`lifecycle_epoch` are required on every newly-written event and
-/// may be absent only on a legacy-converted event (never on `retired`, which
-/// is never legacy-born); `legacy_reason` is optional and legal only on a
-/// legacy-converted `purged`/`erased` event whose `reason` normalized to
-/// `other`.
+/// on `purged`/`erased`; `resurrection_commit` is always required on
+/// `retired`; `lifecycle_epoch` is required on every event, and `epoch` on
+/// every `purged`/`erased` one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleEvent {
@@ -147,8 +130,6 @@ pub struct LifecycleEvent {
     pub actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<PurgeReason>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,7 +156,6 @@ impl LifecycleEvent {
             in_commit: in_commit.into(),
             actor: Some(actor.into()),
             reason: Some(reason),
-            legacy_reason: None,
             epoch: Some(epoch),
             lifecycle_epoch: None,
             resurrection_commit: None,
@@ -197,7 +177,6 @@ impl LifecycleEvent {
             in_commit: in_commit.into(),
             actor: Some(actor.into()),
             reason: Some(reason),
-            legacy_reason: None,
             epoch: Some(epoch),
             lifecycle_epoch: None,
             resurrection_commit: None,
@@ -222,25 +201,14 @@ impl LifecycleEvent {
             in_commit: commit.clone(),
             actor: Some(actor.into()),
             reason: None,
-            legacy_reason: None,
             epoch: None,
             lifecycle_epoch: None,
             resurrection_commit: Some(commit),
         }
     }
 
-    /// LC3's legacy carve-out proxy: an event with neither `epoch` nor
-    /// `lifecycle_epoch` can only have arisen from the v1-flat one-shot
-    /// conversion (LC5/LC6), since every event this module appends itself
-    /// stamps both. `retired` events never take this path (never legacy-born).
-    #[must_use]
-    pub fn is_legacy_origin(&self) -> bool {
-        self.epoch.is_none() && self.lifecycle_epoch.is_none()
-    }
-
-    /// Structural (schema-level) validation: kind closure per marker (LC1/LC2),
-    /// the LC3/LC16 required-field matrix, and the legacy_reason gate (LC3
-    /// table's rightmost column). This does NOT perform the semantic,
+    /// Structural (schema-level) validation: kind closure per marker (LC1/LC2)
+    /// and the LC3/LC16 required-field matrix. This does NOT perform the semantic,
     /// CAS/ref-bound checks of LC17/LC18/LC20 (`in_commit` ref-reachability,
     /// `purged_raws` membership, `at`==commit.created_at, resurrection
     /// ancestry) — those require DAG access this module does not have and are
@@ -261,21 +229,6 @@ impl LifecycleEvent {
             return Err(corrupt_state("lifecycle event is missing its actor"));
         }
 
-        let legacy_origin = self.is_legacy_origin();
-        if let Some(legacy_reason) = &self.legacy_reason {
-            if !legacy_origin {
-                return Err(corrupt_state(
-                    "legacy_reason is only allowed on a legacy-converted event",
-                ));
-            }
-            if legacy_reason.is_empty() {
-                return Err(corrupt_state("legacy_reason must not be empty"));
-            }
-            if self.reason != Some(PurgeReason::Other) {
-                return Err(corrupt_state("legacy_reason requires reason=other"));
-            }
-        }
-
         match self.kind {
             EventKind::Purged | EventKind::Erased => {
                 if self.reason.is_none() {
@@ -286,22 +239,13 @@ impl LifecycleEvent {
                         "purged/erased event must not carry resurrection_commit",
                     ));
                 }
-                if legacy_origin {
-                    if self.epoch.is_some() {
-                        return Err(corrupt_state("a legacy-converted event must omit epoch"));
-                    }
-                } else if self.epoch.is_none() {
-                    return Err(corrupt_state(
-                        "a non-legacy purged/erased event is missing its epoch",
-                    ));
+                if self.epoch.is_none() {
+                    return Err(corrupt_state("purged/erased event is missing its epoch"));
                 }
             }
             EventKind::Retired => {
                 if self.reason.is_some() {
                     return Err(corrupt_state("retired event must not carry reason"));
-                }
-                if self.legacy_reason.is_some() {
-                    return Err(corrupt_state("retired event must not carry legacy_reason"));
                 }
                 if self.epoch.is_some() {
                     return Err(corrupt_state("retired event must not carry epoch"));
@@ -317,17 +261,11 @@ impl LifecycleEvent {
                         "retired event in_commit must equal resurrection_commit",
                     ));
                 }
-                if legacy_origin {
-                    // LC3: retired is never legacy-born ("(該当なし)").
-                    return Err(corrupt_state(
-                        "retired event must carry lifecycle_epoch (never legacy-born)",
-                    ));
-                }
             }
         }
-        if !legacy_origin && self.lifecycle_epoch.is_none() {
+        if self.lifecycle_epoch.is_none() {
             return Err(corrupt_state(
-                "a non-legacy lifecycle event is missing its lifecycle_epoch",
+                "lifecycle event is missing its lifecycle_epoch",
             ));
         }
         Ok(())
@@ -432,105 +370,14 @@ impl EraseReceipt {
     }
 }
 
-/// LC5: the pre-Step4b flat tombstone shape, read as a legacy compatibility
-/// input only. `purged_reason` is read as a raw string (not the closed
-/// `PurgeReason` enum) so an out-of-enum free-text legacy value can be
-/// normalized to `other` + `legacy_reason` (LC7) instead of failing to parse.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyTombstoneV1 {
-    raw_hash: String,
-    purged_at: String,
-    purged_reason: String,
-    purged_in_commit: String,
-}
-
-impl LegacyTombstoneV1 {
-    fn into_v2(self) -> Result<TombstoneRecord> {
-        validate_hash("tombstone raw_hash", &self.raw_hash)?;
-        let (reason, legacy_reason) = normalize_legacy_reason(&self.purged_reason);
-        let record = TombstoneRecord {
-            raw_hash: self.raw_hash,
-            events: vec![LifecycleEvent {
-                kind: EventKind::Purged,
-                at: self.purged_at,
-                in_commit: self.purged_in_commit,
-                actor: Some(LEGACY_ACTOR.to_owned()),
-                reason: Some(reason),
-                legacy_reason,
-                epoch: None,
-                lifecycle_epoch: None,
-                resurrection_commit: None,
-            }],
-        };
-        record.validate_structure()?;
-        Ok(record)
-    }
-}
-
-/// LC6: the pre-Step4b flat erase-receipt shape (`schema_version: 1`). v1 has
-/// no reason field at all, so conversion always synthesizes `reason: other`
-/// with no `legacy_reason` (no original free-text value ever existed to
-/// preserve).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyEraseReceiptV1 {
-    schema_version: u64,
-    raw_hash: String,
-    purged_in_commit: String,
-    erased_at: String,
-}
-
-impl LegacyEraseReceiptV1 {
-    fn into_v2(self) -> Result<EraseReceipt> {
-        if self.schema_version != LEGACY_RECEIPT_SCHEMA_VERSION {
-            return Err(corrupt_state("erase receipt schema_version is invalid"));
-        }
-        validate_hash("erase receipt raw_hash", &self.raw_hash)?;
-        let receipt = EraseReceipt {
-            schema_version: RECEIPT_SCHEMA_VERSION,
-            raw_hash: self.raw_hash,
-            events: vec![LifecycleEvent {
-                kind: EventKind::Erased,
-                at: self.erased_at,
-                in_commit: self.purged_in_commit,
-                actor: Some(LEGACY_ACTOR.to_owned()),
-                reason: Some(PurgeReason::Other),
-                legacy_reason: None,
-                epoch: None,
-                lifecycle_epoch: None,
-                resurrection_commit: None,
-            }],
-        };
-        receipt.validate_structure()?;
-        Ok(receipt)
-    }
-}
-
-/// LC7: map a legacy free-text reason onto the closed 5-value enum, preserving
-/// an out-of-enum original as `legacy_reason`. A value that already matches
-/// the enum (including the literal string `"other"`) maps cleanly with no
-/// `legacy_reason` — there is nothing extra to preserve.
-fn normalize_legacy_reason(raw: &str) -> (PurgeReason, Option<String>) {
-    match raw.parse::<PurgeReason>() {
-        Ok(reason) => (reason, None),
-        Err(_) => (PurgeReason::Other, Some(raw.to_owned())),
-    }
-}
-
 fn parse_tombstone_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<TombstoneRecord> {
+    // Syntax and schema stay separate diagnostics: a torn write and a
+    // well-formed record of the wrong shape need different operator responses.
     let generic: Value =
         serde_json::from_slice(bytes).map_err(|_| corrupt_state("tombstone has invalid JSON"))?;
-    let record = if generic.get("events").is_some() {
-        let record: TombstoneRecord = serde_json::from_value(generic)
-            .map_err(|_| corrupt_state("tombstone v2 has an invalid strict schema"))?;
-        record.validate_structure()?;
-        record
-    } else {
-        let legacy: LegacyTombstoneV1 = serde_json::from_value(generic)
-            .map_err(|_| corrupt_state("tombstone has an invalid strict schema"))?;
-        legacy.into_v2()?
-    };
+    let record: TombstoneRecord = serde_json::from_value(generic)
+        .map_err(|_| corrupt_state("tombstone has an invalid strict schema"))?;
+    record.validate_structure()?;
     if record.raw_hash != expected_raw_hash {
         return Err(corrupt_state("tombstone identity does not match leaf"));
     }
@@ -540,16 +387,9 @@ fn parse_tombstone_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<Tombst
 fn parse_erase_receipt_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<EraseReceipt> {
     let generic: Value = serde_json::from_slice(bytes)
         .map_err(|_| corrupt_state("erase receipt has invalid JSON"))?;
-    let receipt = if generic.get("events").is_some() {
-        let receipt: EraseReceipt = serde_json::from_value(generic)
-            .map_err(|_| corrupt_state("erase receipt v2 has an invalid strict schema"))?;
-        receipt.validate_structure()?;
-        receipt
-    } else {
-        let legacy: LegacyEraseReceiptV1 = serde_json::from_value(generic)
-            .map_err(|_| corrupt_state("erase receipt has an invalid strict schema"))?;
-        legacy.into_v2()?
-    };
+    let receipt: EraseReceipt = serde_json::from_value(generic)
+        .map_err(|_| corrupt_state("erase receipt has an invalid strict schema"))?;
+    receipt.validate_structure()?;
     if receipt.raw_hash != expected_raw_hash {
         return Err(corrupt_state("erase receipt identity does not match leaf"));
     }
@@ -933,17 +773,6 @@ impl PurgeState {
         Ok(Some(closure))
     }
 
-    /// Remove the closure sidecar (LC51-style: quarantine-then-unlink, same as
-    /// the journal itself). Called once the purge reaches `done` — mirrors
-    /// `remove_purge_sidecars`' cleanup of the CLI-owned chunk-id/report
-    /// sidecars, for the core-owned closure sidecar.
-    pub fn remove_closure(&self) -> Result<()> {
-        if read_bounded_regular(&self.closure_path(), MAX_PURGE_CLOSURE_BYTES)?.is_none() {
-            return Ok(());
-        }
-        quarantine_then_unlink(&self.closure_path(), MAX_PURGE_CLOSURE_BYTES)
-    }
-
     pub fn tombstone_path(&self, raw_hash: &str) -> Result<PathBuf> {
         fanout_path(self.kio_dir.join("tombstones"), raw_hash)
     }
@@ -1117,24 +946,9 @@ impl PurgeState {
 
     pub fn read_tombstone(&self, raw_hash: &str) -> Result<Option<TombstoneRecord>> {
         validate_hash("tombstone lookup", raw_hash)?;
-        let canonical = self.tombstone_path(raw_hash)?;
-        let legacy = legacy_tombstone_path(&self.kio_dir, raw_hash)?;
-        let canonical = read_bounded_regular(&canonical, MAX_PURGE_RECORD_BYTES)?
+        read_bounded_regular(&self.tombstone_path(raw_hash)?, MAX_PURGE_RECORD_BYTES)?
             .map(|bytes| parse_tombstone_bytes(&bytes, raw_hash))
-            .transpose()?;
-        let legacy = match legacy {
-            Some(path) => read_bounded_regular(&path, MAX_PURGE_RECORD_BYTES)?
-                .map(|bytes| parse_tombstone_bytes(&bytes, raw_hash))
-                .transpose()?,
-            None => None,
-        };
-        match (canonical, legacy) {
-            (Some(left), Some(right)) if left != right => {
-                Err(corrupt_state("portable and legacy tombstones disagree"))
-            }
-            (Some(record), _) | (_, Some(record)) => Ok(Some(record)),
-            (None, None) => Ok(None),
-        }
+            .transpose()
     }
 
     pub fn read_erase_receipt(&self, raw_hash: &str) -> Result<Option<EraseReceipt>> {
@@ -1183,11 +997,6 @@ impl PurgeState {
             &record_bytes(&record)?,
             MAX_PURGE_RECORD_BYTES,
         )?;
-        if let Some(legacy_path) =
-            legacy_tombstone_path(&self.kio_dir, raw_hash)?.filter(|path| path.exists())
-        {
-            quarantine_then_unlink(&legacy_path, MAX_PURGE_RECORD_BYTES)?;
-        }
         Ok(record)
     }
 
@@ -1509,24 +1318,14 @@ impl PurgeState {
 }
 
 /// Reconstruct the canonical `sha256:<64hex>` raw_hash from a fanout leaf
-/// path's file name. R23-23 (03-data-model.md §2 L118-121): a leaf under a
-/// scan-walked fanout directory can be EITHER a canonical portable leaf
-/// (bare 64-hex digest, no prefix) or a legacy Unix-store leaf (the literal
-/// `sha256:<64hex>` string as its own file name — [`legacy_tombstone_path`]
-/// builds exactly this). Blindly prepending `sha256:` therefore double-
-/// prefixed every legacy leaf (`sha256:sha256:<hex>`, 71 chars — not a valid
-/// hash per [`crate::cas::is_hash`]), which made [`PurgeState::scan_all_events`]
-/// (the epoch-recovery max-scans) treat a legitimate legacy store as
-/// `KIO-E-STORE-CORRUPT-001`. Stripping an existing `sha256:` prefix first
-/// (a no-op for the canonical bare-digest case) normalizes either input to
-/// the same single-prefixed form.
+/// path's file name (03-data-model.md §2: the physical leaf is the bare
+/// 64-hex digest, so the logical hash is that name single-prefixed).
 fn leaf_raw_hash(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    let digest = name.strip_prefix("sha256:").unwrap_or(name);
-    format!("sha256:{digest}")
+    format!("sha256:{name}")
 }
 
 /// Enumerate every leaf file under a two-level fanout directory
@@ -1806,28 +1605,6 @@ fn is_valid_utc(value: &str) -> bool {
         _ => 31,
     };
     (1..=max_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
-}
-
-fn legacy_tombstone_path(kio_dir: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
-    #[cfg(not(windows))]
-    {
-        let digest = raw_hash
-            .strip_prefix("sha256:")
-            .filter(|digest| digest.len() == 64)
-            .ok_or_else(|| corrupt_state("invalid legacy tombstone hash"))?;
-        Ok(Some(
-            kio_dir
-                .join("tombstones")
-                .join(&digest[0..2])
-                .join(&digest[2..4])
-                .join(raw_hash),
-        ))
-    }
-    #[cfg(windows)]
-    {
-        let _ = (kio_dir, raw_hash);
-        Ok(None)
-    }
 }
 
 fn read_bounded_regular(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
@@ -2428,79 +2205,6 @@ mod tests {
     }
 
     #[test]
-    fn lc5_legacy_flat_tombstone_reads_as_one_purged_event_then_migrates_once() {
-        let (_dir, state) = setup();
-        let path = state.tombstone_path(&raw()).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "raw_hash": raw(),
-                "purged_at": NOW,
-                "purged_reason": "legal",
-                "purged_in_commit": commit(),
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let read = state.read_tombstone(&raw()).unwrap().unwrap();
-        assert_eq!(read.events.len(), 1);
-        assert_eq!(read.tail().kind, EventKind::Purged);
-        assert!(read.is_active());
-        // Read-only: on-disk bytes are untouched.
-        let on_disk: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(on_disk.get("events").is_none());
-
-        // A locked mutation (retire) performs the one-shot conversion.
-        state
-            .retire_tombstone(&raw(), &other_commit(), LATER, "user")
-            .unwrap();
-        let on_disk: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(on_disk.get("events").is_some());
-        let migrated = state.read_tombstone(&raw()).unwrap().unwrap();
-        assert_eq!(migrated.events.len(), 2);
-        assert_eq!(migrated.events[0].actor.as_deref(), Some(LEGACY_ACTOR));
-    }
-
-    #[test]
-    fn lc6_legacy_erase_receipt_synthesizes_other_reason_with_no_legacy_reason() {
-        let (_dir, state) = setup();
-        let path = state.erase_receipt_path(&raw()).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "schema_version": 1,
-                "raw_hash": raw(),
-                "purged_in_commit": commit(),
-                "erased_at": NOW,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let read = state.read_erase_receipt(&raw()).unwrap().unwrap();
-        assert_eq!(read.tail().reason, Some(PurgeReason::Other));
-        assert_eq!(read.tail().legacy_reason, None);
-        assert_eq!(read.schema_version, 2);
-    }
-
-    #[test]
-    fn lc7_out_of_enum_legacy_reason_normalizes_to_other_plus_legacy_reason() {
-        let (reason, legacy) = normalize_legacy_reason("policy-cleanup");
-        assert_eq!(reason, PurgeReason::Other);
-        assert_eq!(legacy.as_deref(), Some("policy-cleanup"));
-
-        let (reason, legacy) = normalize_legacy_reason("legal");
-        assert_eq!(reason, PurgeReason::Legal);
-        assert_eq!(legacy, None);
-
-        let (reason, legacy) = normalize_legacy_reason("other");
-        assert_eq!(reason, PurgeReason::Other);
-        assert_eq!(legacy, None);
-    }
-
-    #[test]
     fn lc8_lc9_lc10_canonical_final_event_picks_max_lifecycle_epoch_tombstone_tie_break() {
         let purged10 = LifecycleEvent {
             lifecycle_epoch: Some(10),
@@ -3073,53 +2777,12 @@ mod tests {
     }
 
     #[test]
-    fn r23_23_leaf_raw_hash_normalizes_bare_and_legacy_prefixed_leaves() {
+    fn leaf_raw_hash_prefixes_the_bare_digest_leaf() {
         let digest = "c".repeat(64);
-        // Canonical portable leaf: bare digest, no prefix.
-        let bare = Path::new(&digest);
-        assert_eq!(leaf_raw_hash(bare), format!("sha256:{digest}"));
-
-        // Legacy Unix-store leaf: the literal `sha256:<hex>` string as the
-        // leaf's own file name (`legacy_tombstone_path` builds exactly
-        // this). Pre-R23-23, blindly prepending `sha256:` doubled this to
-        // `sha256:sha256:<hex>` (71 chars, fails `is_hash`).
-        let legacy_name = format!("sha256:{digest}");
-        let legacy = Path::new(&legacy_name);
-        assert_eq!(leaf_raw_hash(legacy), format!("sha256:{digest}"));
-    }
-
-    #[test]
-    fn r23_23_scan_all_events_reads_legacy_prefixed_leaves_without_double_prefixing() {
-        let (dir, state) = setup();
-        let kio_dir = dir.path().join(".kio");
-        let raw_hash = raw();
-        let digest = raw_hash.strip_prefix("sha256:").unwrap();
-        // Write directly to the LEGACY leaf path (literal "sha256:<hex>" as
-        // the leaf's own file name) -- the canonical write API
-        // (`append_tombstone_event`) only ever writes the portable
-        // bare-digest path, so a legacy-store record must be planted
-        // manually to exercise the compatibility-fallback scan this test
-        // targets.
-        let mut event = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 7);
-        event.lifecycle_epoch = Some(9);
-        let record = TombstoneRecord {
-            raw_hash: raw_hash.clone(),
-            events: vec![event],
-        };
-        let legacy_path = kio_dir
-            .join("tombstones")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(&raw_hash);
-        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        fs::write(&legacy_path, record_bytes(&record).unwrap()).unwrap();
-
-        // Before R23-23: `leaf_raw_hash` double-prefixed this leaf's name,
-        // which fails `is_hash`, so `parse_tombstone_bytes`'s identity check
-        // rejected it and the whole scan failed closed as corrupt instead of
-        // finding this legitimate legacy record.
-        assert_eq!(state.max_recorded_lifecycle_epoch().unwrap(), 9);
-        assert_eq!(state.max_recorded_purge_epoch().unwrap(), Some(7));
+        assert_eq!(
+            leaf_raw_hash(Path::new(&digest)),
+            format!("sha256:{digest}")
+        );
     }
 
     #[test]

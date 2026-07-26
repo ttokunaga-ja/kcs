@@ -38,6 +38,10 @@ pub struct PurgeRawIndexReport {
     pub deleted_associations: u64,
     pub deleted_chunk_vectors: u64,
     pub deleted_orphan_embeddings: u64,
+    /// The `embeddings.id` of every orphan row just deleted — the CAS objects
+    /// purge must remove alongside them (05 §3.5). A count cannot name a file,
+    /// and the rows are gone by the time the caller could ask.
+    pub deleted_embedding_ids: Vec<String>,
 }
 
 pub struct SqliteFtsIndex {
@@ -240,18 +244,7 @@ impl SqliteFtsIndex {
         })
     }
 
-    pub fn delete_chunk(&mut self, chunk_id: &str) -> Result<()> {
-        with_savepoint(&self.conn, "kio_delete_chunk", || {
-            self.conn.execute(
-                "DELETE FROM chunk_config_generations WHERE chunk_id = ?1",
-                params![chunk_id],
-            )?;
-            self.conn
-                .execute("DELETE FROM chunks WHERE chunk_id = ?1", params![chunk_id])?;
-            Ok(())
-        })
-    }
-
+ 
     /// Transactionally remove every derived-index row owned by `raw_hash`.
     ///
     /// Embeddings are keyed by normalized text rather than raw objects, so an
@@ -305,16 +298,24 @@ impl SqliteFtsIndex {
             .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
 
             for text_hash in text_hashes {
-                report.deleted_orphan_embeddings += u64::try_from(self.conn.execute(
+                // RETURNING the ids rather than only counting them: the CAS
+                // object under `objects/embeddings/<id>` is the same vector and
+                // purge has to take it too, but nothing can enumerate the rows
+                // once they are deleted.
+                let mut orphans = self.conn.prepare(
                     "DELETE FROM embeddings
                      WHERE target_type = 'chunk'
                        AND target_id = ?1
                        AND NOT EXISTS (
                            SELECT 1 FROM chunks WHERE text_hash = ?1 LIMIT 1
-                       )",
-                    params![text_hash],
-                )?)
-                .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+                       )
+                     RETURNING id",
+                )?;
+                let ids = orphans.query_map(params![text_hash], |row| row.get::<_, String>(0))?;
+                for id in ids {
+                    report.deleted_embedding_ids.push(id?);
+                    report.deleted_orphan_embeddings += 1;
+                }
             }
 
             Ok(report)
@@ -558,11 +559,6 @@ pub fn chunk_publication_introductions(conn: &Connection, chunk_id: &str) -> Res
     let rows = stmt.query_map(params![chunk_id], |row| row.get::<_, String>(0))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(IndexError::from)
-}
-
-pub fn ensure_fts_external_content_schema(config: FtsSchemaConfig) -> Result<()> {
-    let conn = Connection::open_in_memory()?;
-    ensure_schema_on_connection(&conn, config)
 }
 
 pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -> Result<()> {
@@ -952,7 +948,7 @@ mod tests {
         .unwrap();
         fts.index_chunk(&row("c1", "認証仕様の更新")).unwrap();
         assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
-        fts.delete_chunk("c1").unwrap();
+        fts.purge_raw(&row("c1", "認証仕様の更新").raw_hash).unwrap();
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
     }
 
@@ -1062,6 +1058,9 @@ mod tests {
                 deleted_associations: 2,
                 deleted_chunk_vectors: 2,
                 deleted_orphan_embeddings: 1,
+                // The unique chunk's own embedding; the shared one survives
+                // because another chunk still carries its `text_hash`.
+                deleted_embedding_ids: vec!["sha256:embedding-unique".to_owned()],
             }
         );
         assert_eq!(
@@ -1195,9 +1194,13 @@ mod tests {
 
     #[test]
     fn ct3_fts_004_schema_can_be_rebuilt_from_chunks() {
-        ensure_fts_external_content_schema(FtsSchemaConfig {
-            tokenizer: FtsTokenizer::Trigram,
-        })
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema_on_connection(
+            &conn,
+            FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram,
+            },
+        )
         .unwrap();
     }
 

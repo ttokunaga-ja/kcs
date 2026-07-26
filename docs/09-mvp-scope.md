@@ -376,7 +376,20 @@ Status: decided
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
-| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 Q_hard 増補は 2026-07-23 完了・再凍結** (§4.2 の一回限り例外の完遂 — 本追記は §6.2 凍結対象外の完遂手続き): 「Step 3 着手前」の期日は失効していたため同日のユーザー裁定で失効後実行。増補 8 問 (hard1 ×4 + hard3 ×4、全問を結果測定前に投入 = 事前コミット) は実データ fixture (raster PDF / PPTX 図表 / 画像) を正解担体とするため合成コーパスに載らず、**別ファイル方式**で再凍結する: 既存 `eval/golden-queries.jsonl` は 50 件のまま不変 (digest sha256:b7183fa3586383883ec522256696268eab8e607c1a032020e09223158a5bf08d)、増補分は `eval/golden-queries-qhard.jsonl` 8 件 (digest sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163、専用ランナー `eval/run_qhard.py`)。M3-1 の Done 判定は以後**合算 26 問で Recall@10 >= 0.8 (= 21 問以上)**) | 充足 (2026-07-23 増補完了 — 窓失効後実行の裁定含め本行が機械記録) |
+| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 Q_hard 増補は 2026-07-23 完了・再凍結** (§4.2 の一回限り例外の完遂 — 本追記は §6.2 凍結対象外の完遂手続き): 「Step 3 着手前」の期日は失効していたため同日のユーザー裁定で失効後実行。増補 8 問 (hard1 ×4 + hard3 ×4、全問を結果測定前に投入 = 事前コミット) は実データ fixture (raster PDF / PPTX 図表 / 画像) を正解担体とするため合成コーパスに載らず、**別ファイル方式**で再凍結する: 既存 `eval/golden-queries.jsonl` は 50 件のまま不変 (digest sha256:b7183fa3586383883ec522256696268eab8e607c1a032020e09223158a5bf08d)、増補分は `eval/golden-queries-qhard.jsonl` 8 件 (digest sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163、専用ランナー `eval/run_qhard.py`)。M3-1 の Done 判定は以後**合算 26 問で Recall@10 >= 0.8 (= 21 問以上)**)。**横断増補は 2026-07-26 完了・再凍結** (§4.2 の別ファイル方式を再適用): 既存 50 問は
+**全問 expected が単一 scope に閉じており**、`--all-scopes` で 7 scope を横断はするものの「複数 scope から答えを
+組み立てる」形が 1 問も無かった。増補 16 問 (M3-1 ×8 / M3-2 ×4 / M3-3 ×4、全問 expected が 2 scope に跨る) を
+`eval/golden-queries-crossscope.jsonl`
+(digest sha256:1fe0ebf2b51f35323d91bb1a235a282b5fa68a59de7a9c0bac2bc0f4ebade868、専用ランナー
+`eval/run_crossscope.py`) として凍結する。**正解担体は合成コーパスの既存 anchor そのもの**であり
+`corpus_spec.py`・コーパス・履歴・決定論には一切手を入れていない (既存 2 ファイルの digest は不変を実測確認)。
+専用ランナーである理由は `HISTORY_QUERY_COUNT`(=16 厳密一致) と `assess_history_coverage`(rename 7/edit 3/delete 9 の
+全 anchor 掘り起こし) が**セット全体の契約**であり、部分集合に当てると必ず落ちるためである。
+**重要な計測所見: Recall@10 はこの欠陥クラスをほぼ検出できない** — replica を無効化しても 16 問すべて 1.000 のままだった
+(合成コーパスは小さく各 expected が固有数値を持つので per-scope 順位でも 10 位以内に入る)。横断融合の欠陥が動かすのは
+**順位**なので、専用ランナーは診断値 `worst_expected_rank` (2 つの expected の遅い方の 1-based 順位) を併記する。
+実測: **replica が採点する 8 問で 4.75 → 2.00** (2.00 は expected 2 件時の理論下限、8 問すべて到達)、
+**replica が辞退する履歴 8 問は 5.38 → 5.38 で完全同値** (時間選択子ガードにより replica が触れないことの裏付け) | 充足 (2026-07-23 増補完了 — 窓失効後実行の裁定含め本行が機械記録) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |
 
 Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2/#3 の残未決は実装が Phase 4+ に割当てられた機能 (§3.1) にのみ関わるため、Step 1-4 をブロックしない。

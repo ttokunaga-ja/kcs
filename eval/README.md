@@ -18,6 +18,8 @@
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
 | `run_eval.py` | 評価ランナー。`kio search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
+| `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
+| `run_crossscope.py` | 横断増補の専用ランナー。`run_eval.py` の `HISTORY_QUERY_COUNT` / `assess_history_coverage` は**セット全体**の契約であり部分集合には当てられないため別立て。診断値 `worst_expected_rank` を併記する (Recall@10 は横断融合の欠陥をほぼ検出できない — 実測で replica 有無ともに 1.000) |
 | `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
@@ -39,6 +41,10 @@ python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
 
 # 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
 python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+
+# 3c. 横断増補 (別ファイル・専用ランナー、09 §4.3)。既存 50 問とは独立に走る
+python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run
+python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3a. dry-run: golden-queries の expected {scope,file,section} が
 #     corpus-manifest.json / history-manifest.json に実在し、かつ

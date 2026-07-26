@@ -43,10 +43,14 @@ kio open <検索結果の pointer>
 
 ```
 truth = folder-local .kio                正本: raw object / normalized / chunks / commits / refs
-cache = scope_registry / aggregator      検索キャッシュ: 探索対象一覧 / stale 検出 / UI 統合
+cache = scope_registry                   探索対象一覧 / stale 検出
+cache = aggregator                       全 scope の live chunk 集合の read replica
+                                         (横断検索の採点・候補選択 / 権限状態の横断投影)
 ```
 
-`scope_registry` のみで `.kio` の状態を変える実装は禁止。詳細 [03-data-model.md §4](03-data-model.md)。
+`scope_registry` / `aggregator` のみで `.kio` の状態を変える実装は禁止。aggregator は安全性判定の
+最終権限を持たず、結果を返す scope は live `.kio` で再確認する。詳細 [03-data-model.md §4](03-data-model.md) /
+[05-runtime.md §1.8](05-runtime.md)。
 
 ---
 

@@ -117,10 +117,17 @@ fn write_receipt(
     fs::write(
         &receipt,
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "raw_hash": raw_hash,
-            "purged_in_commit": purged_hash,
-            "erased_at": timestamp,
+            "events": [{
+                "kind": "erased",
+                "at": timestamp,
+                "in_commit": purged_hash,
+                "actor": "operator",
+                "reason": "legal",
+                "epoch": 1,
+                "lifecycle_epoch": 1,
+            }],
         }))
         .unwrap(),
     )
@@ -151,9 +158,15 @@ fn write_tombstone(
         &path,
         serde_json::to_vec(&serde_json::json!({
             "raw_hash": raw_hash,
-            "purged_at": timestamp,
-            "purged_reason": "legal",
-            "purged_in_commit": purged_hash,
+            "events": [{
+                "kind": "purged",
+                "at": timestamp,
+                "in_commit": purged_hash,
+                "actor": "operator",
+                "reason": "legal",
+                "epoch": 1,
+                "lifecycle_epoch": 1,
+            }],
         }))
         .unwrap(),
     )
@@ -409,9 +422,15 @@ fn ct4_verify_and_fsck_accept_valid_tombstone_terminal() {
         &tombstone,
         serde_json::to_vec(&serde_json::json!({
             "raw_hash": raw_hash,
-            "purged_at": purged_at,
-            "purged_reason": "legal",
-            "purged_in_commit": purged_hash,
+            "events": [{
+                "kind": "purged",
+                "at": purged_at,
+                "in_commit": purged_hash,
+                "actor": "operator",
+                "reason": "legal",
+                "epoch": 1,
+                "lifecycle_epoch": 1,
+            }],
         }))
         .unwrap(),
     )

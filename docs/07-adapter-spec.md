@@ -177,8 +177,8 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
         tool_profile_hash / approved_at / approval_method / **status (`active` | `revoked`)** —
         status=revoked の行は **revoked_at** も必須 ([10-operations.md §12.3](10-operations.md) の
-        schema 定義と一致)。status を持たない legacy 行は `active` として読む (10 §12.3 の
-        要素単位後方互換 — schema error にしない)。
+        schema 定義と一致)。**status を持たない行は送信を許可しない** — 既定値で active と
+        読む経路は持たない (fail-closed、[10-operations.md §12.3](10-operations.md))。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
         (b) の config boolean は scope 内の全 online_api Adapter の**送信 gate 条件** (false で全停止)
@@ -282,7 +282,7 @@ AdapterProfile:
                         送信前の pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
   reject_billing        billable を宣言する Adapter (§5.7 条件 6) は必須 — "billable" | "nonbillable"
                         の閉 enum (投入拒否 (permanent 4xx) に課金する provider か否かの機械可読宣言。
-                        billable_kinds と同じく出力非影響 = tool_profile_hash 非対象。legacy / 未知値
+                        billable_kinds と同じく出力非影響 = tool_profile_hash 非対象。欠落・未知値
                         は fail-closed = "billable" として扱う)。usage 欠落の permanent 4xx を
                         「正当な非課金 reject (確定額 0)」と「billable provider の欠落 (estimated
                         縮退)」に分離する判定源 ([04-pipeline.md §5.4](04-pipeline.md))

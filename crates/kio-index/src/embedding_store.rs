@@ -208,11 +208,36 @@ pub fn write_chunk_embedding(
 ) -> Result<()> {
     validate_embedding_vector(vector, dimensions)?;
     with_savepoint(conn, "kio_write_chunk_embedding", || {
-        conn.execute(
+        let evicted = conn.execute(
             "DELETE FROM embeddings
              WHERE target_type = 'chunk' AND target_id = ?1 AND profile_hash <> ?2",
             params![text_hash, profile_hash],
         )?;
+        // R25-11: when — and only when — that eviction removed something, drop
+        // the `chunk_vec` rows derived from it.
+        //
+        // `chunk_vec` is defined as a derivation of `embeddings` (04 §4.3), so a
+        // row whose backing embedding is gone is not stale data, it is invalid.
+        // The chunk being written is re-linked below, but a chunk that shares
+        // this `text_hash` and is not being re-sent (secrets-held,
+        // budget-paused, failed) would otherwise keep a vector from the retired
+        // profile and go on being cosine-ranked against queries embedded in a
+        // different space. Dropping it costs that chunk vector search until it
+        // is re-embedded, which is the honest outcome; keeping it is a silently
+        // wrong ranking.
+        //
+        // Gated on `evicted` because the ordinary case — two chunks sharing one
+        // `text_hash`, written one after another under the SAME profile — evicts
+        // nothing, and an unconditional delete would have the second write wipe
+        // the first chunk's row.
+        if evicted > 0 {
+            conn.execute(
+                "DELETE FROM chunk_vec WHERE chunk_id IN (
+                     SELECT chunk_id FROM chunks WHERE text_hash = ?1
+                 )",
+                params![text_hash],
+            )?;
+        }
         conn.execute(
             "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
              VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -242,7 +267,7 @@ pub fn write_chunk_embedding(
                 "embedding identity already has a different canonical vector".to_owned(),
             ));
         }
-        link_chunk_vec(conn, chunk_id, &canonical.vector, canonical.dimensions)?;
+        let _ = link_chunk_vec(conn, chunk_id, &canonical.vector, canonical.dimensions)?;
         Ok(())
     })
 }
@@ -250,14 +275,18 @@ pub fn write_chunk_embedding(
 /// Map a `chunk_id` to a vector in `chunk_vec` (idempotent). No-op if the vector
 /// width is not the adopted `chunk_vec` dimension (incompatible-width embeddings
 /// never enter the KNN table).
+///
+/// Reports whether the row was actually written, for the same reason
+/// `link_chunk_vecs_to_content_vector` reports which ids it linked: the width
+/// check is decided here, and the device replica must follow the outcome
+/// instead of re-deriving the rule.
 pub fn link_chunk_vec(
     conn: &Connection,
     chunk_id: &str,
     vector: &[u8],
     dimensions: u64,
-) -> Result<()> {
-    link_chunk_vec_if_compatible(conn, chunk_id, vector, dimensions)?;
-    Ok(())
+) -> Result<bool> {
+    link_chunk_vec_if_compatible(conn, chunk_id, vector, dimensions)
 }
 
 fn link_chunk_vec_if_compatible(
@@ -301,12 +330,21 @@ pub fn link_chunk_vec_unless_held(
 /// Fan one persisted content vector out to several chunk ids. This gives callers
 /// a transactional primitive for duplicate same-batch identities: persist one
 /// canonical row, then link every member from those persisted bytes.
+///
+/// Returns the ids that were actually linked, not merely how many. Two callers
+/// need the identities: `link_chunk_vec_unless_held` silently drops a secrets-
+/// held chunk (R20-10) and `link_chunk_vec_if_compatible` drops a width
+/// mismatch, so "which members gained a vector" is a decision made HERE and
+/// nowhere else. The device replica mirrors `chunk_vec` and must follow that
+/// decision rather than re-evaluate the rule against its own copy of `held` —
+/// a replica that re-derived it would expose a held chunk to vector search the
+/// moment the two rules drifted (03 §4 invariant 8).
 pub fn link_chunk_vecs_to_content_vector<'a>(
     conn: &Connection,
     embedding_hash: &str,
     chunk_ids: impl IntoIterator<Item = &'a str>,
     held_chunk_ids: &BTreeSet<String>,
-) -> Result<usize> {
+) -> Result<Vec<String>> {
     let chunk_ids = chunk_ids.into_iter().collect::<Vec<_>>();
     with_savepoint(conn, "kio_link_chunk_vecs_to_content_vector", || {
         let canonical = stored_embedding_vector(conn, embedding_hash)?.ok_or_else(|| {
@@ -314,7 +352,7 @@ pub fn link_chunk_vecs_to_content_vector<'a>(
                 "missing canonical embedding vector for {embedding_hash}"
             ))
         })?;
-        let mut linked = 0usize;
+        let mut linked = Vec::new();
         for chunk_id in &chunk_ids {
             if link_chunk_vec_unless_held(
                 conn,
@@ -323,7 +361,7 @@ pub fn link_chunk_vecs_to_content_vector<'a>(
                 canonical.dimensions,
                 held_chunk_ids,
             )? {
-                linked += 1;
+                linked.push((*chunk_id).to_string());
             }
         }
         Ok(linked)
@@ -401,24 +439,6 @@ pub fn rebuild_chunk_vec(conn: &Connection, held_chunk_ids: &BTreeSet<String>) -
 /// Return the subset of supplied chunk ids that currently have a materialized
 /// `chunk_vec` row. Task-state callers can use this to distinguish an already
 /// materialized budget pause from a still-unpublished authorization hold.
-pub fn materialized_chunk_ids<'a>(
-    conn: &Connection,
-    chunk_ids: impl IntoIterator<Item = &'a str>,
-) -> Result<BTreeSet<String>> {
-    let mut stmt = conn.prepare("SELECT 1 FROM chunk_vec WHERE chunk_id = ?1 LIMIT 1")?;
-    let mut out = BTreeSet::new();
-    for chunk_id in chunk_ids {
-        let exists = stmt
-            .query_row(params![chunk_id], |_| Ok(()))
-            .optional()?
-            .is_some();
-        if exists {
-            out.insert(chunk_id.to_owned());
-        }
-    }
-    Ok(out)
-}
-
 /// Snapshot every chunk embedding row (content + all mapped chunk_ids) so the
 /// acceleration DB can be dropped and rebuilt without losing vectors (they live
 /// only in SQLite; objects/ holds no embedding objects in the MVP). Returns one
@@ -1078,7 +1098,7 @@ mod tests {
             &std::collections::BTreeSet::new(),
         )
         .unwrap();
-        assert_eq!(linked, 2);
+        assert_eq!(linked, ["c-a", "c-b"]);
         assert_eq!(read_chunk_vector(conn, "c-a").unwrap().unwrap()[0], 1.0);
         let c_b = read_chunk_vector(conn, "c-b").unwrap().unwrap();
         assert_eq!(c_b[0], 1.0);
@@ -1118,6 +1138,67 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_switch_drops_a_sibling_chunk_vec_it_cannot_re_link() {
+        // R25-11: two chunks share a `text_hash`, so they share one `embeddings`
+        // row and each carry their own `chunk_vec` row. The device switches
+        // embedding profile and only ONE of them is re-sent — the other is
+        // secrets-held, budget-paused or failed. Evicting the old `embeddings`
+        // row without its derived `chunk_vec` rows left the un-re-sent sibling
+        // holding a vector from the retired profile, still cosine-ranked against
+        // queries embedded in a different space.
+        let mut store = schema_conn();
+        store
+            .index_chunk(&chunk_row("c-resent", "sha256:t-shared"))
+            .unwrap();
+        store
+            .index_chunk(&chunk_row("c-stranded", "sha256:t-shared"))
+            .unwrap();
+        let conn = store.connection();
+        for chunk_id in ["c-resent", "c-stranded"] {
+            write_chunk_embedding(
+                conn,
+                "sha256:old-embedding",
+                "sha256:t-shared",
+                chunk_id,
+                &basis_vector(0),
+                CHUNK_VEC_DIMENSIONS as u64,
+                "cosine",
+                "multimodal",
+                "sha256:old-profile",
+                None,
+            )
+            .unwrap();
+        }
+        assert!(read_chunk_vector(conn, "c-stranded").unwrap().is_some());
+
+        // The new profile arrives, and only `c-resent` is re-embedded.
+        write_chunk_embedding(
+            conn,
+            "sha256:new-embedding",
+            "sha256:t-shared",
+            "c-resent",
+            &basis_vector(1),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:new-profile",
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            read_chunk_vector(conn, "c-stranded").unwrap().is_none(),
+            "a chunk whose backing embedding was evicted must lose its derived \
+             chunk_vec row, not keep ranking from a retired profile"
+        );
+        assert_eq!(
+            read_chunk_vector(conn, "c-resent").unwrap(),
+            Some(f32_from_le_bytes(&basis_vector(1))),
+            "the re-sent chunk carries the new profile's vector"
+        );
+    }
+
+    #[test]
     fn held_publication_guard_and_materialized_helper_preserve_secret_hold_control() {
         let mut store = schema_conn();
         store
@@ -1144,11 +1225,14 @@ mod tests {
 
         let held = std::collections::BTreeSet::from(["c-secret".to_owned()]);
         rebuild_chunk_vec(conn, &held).unwrap();
-        let materialized =
-            materialized_chunk_ids(conn, ["c-budget", "c-secret", "missing"].iter().copied())
-                .unwrap();
-        assert!(materialized.contains("c-budget"));
-        assert!(!materialized.contains("c-secret"));
+        let materialized = |chunk_id: &str| {
+            conn.prepare("SELECT 1 FROM chunk_vec WHERE chunk_id = ?1 LIMIT 1")
+                .unwrap()
+                .query_row(params![chunk_id], |_| Ok(()))
+                .is_ok()
+        };
+        assert!(materialized("c-budget"));
+        assert!(!materialized("c-secret"));
 
         let linked = link_chunk_vec_unless_held(
             conn,
@@ -1168,7 +1252,7 @@ mod tests {
             &std::collections::BTreeSet::new(),
         )
         .unwrap();
-        assert_eq!(linked, 1);
+        assert_eq!(linked, ["c-secret"]);
         assert!(read_chunk_vector(conn, "c-secret").unwrap().is_some());
     }
 
@@ -1201,7 +1285,7 @@ mod tests {
             &held,
         )
         .unwrap();
-        assert_eq!(linked, 0);
+        assert!(linked.is_empty());
         assert!(read_chunk_vector(conn, "c-fan-a").unwrap().is_none());
         assert!(read_chunk_vector(conn, "c-fan-b").unwrap().is_none());
     }
@@ -1238,7 +1322,7 @@ mod tests {
             &held,
         )
         .unwrap();
-        assert_eq!(linked, 2);
+        assert_eq!(linked, ["c-fan-a", "c-fan-b"]);
         assert!(read_chunk_vector(conn, "c-fan-a").unwrap().is_some());
         assert!(read_chunk_vector(conn, "c-fan-b").unwrap().is_some());
     }

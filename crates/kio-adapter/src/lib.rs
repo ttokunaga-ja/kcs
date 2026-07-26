@@ -122,11 +122,10 @@ impl AdapterError {
     }
 
     /// QA16: render this error as the terminal `AdapterRun` a real Adapter
-    /// trait boundary would report for it (07 §4 L278-307) — `error_kind`
-    /// keeps the legacy free-text `Display` message (orchestrator ruling:
-    /// "既存 error_kind は当面残す — 消すのは別ラウンド"); `error_code`/
-    /// `error_category`/`retry_after_ms` are the new machine-readable fields,
-    /// individually queryable instead of folded into one free-text string.
+    /// trait boundary would report for it (07 §4 L278-307). `error_code`/
+    /// `error_category`/`retry_after_ms` are individually queryable instead of
+    /// folded into one free-text string; the free text itself lives only in
+    /// [`Display`], which is a presentation concern and not part of the record.
     #[must_use]
     pub fn as_adapter_run(&self, task_id: impl Into<String>) -> crate::types::AdapterRun {
         crate::types::AdapterRun {
@@ -134,7 +133,6 @@ impl AdapterError {
             input_hashes: Vec::new(),
             output_hashes: Vec::new(),
             status: crate::types::AdapterRunStatus::Failed,
-            error_kind: Some(self.to_string()),
             error_code: Some(self.error_code().to_owned()),
             error_category: Some(self.error_category()),
             retry_after_ms: self.retry_after_ms(),
@@ -143,10 +141,7 @@ impl AdapterError {
     }
 }
 
-pub use traits::{
-    ClassificationAdapter, EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter, RerankAdapter,
-    SummaryAdapter,
-};
+pub use traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 
 #[cfg(test)]
 mod adapter_error_tests {
@@ -235,7 +230,7 @@ mod adapter_error_tests {
     /// Adapter 呼出が transient エラー (429相当、Retry-After ヘッダ付き) で失敗する"
     /// — the resulting `AdapterRun` carries `error_code`, `error_category` =
     /// `rate_limit`, and `retry_after_ms` as individually-queryable fields
-    /// (not folded into one free-text `error_kind` string).
+    /// (not folded into one free-text string).
     #[test]
     fn rate_limit_with_retry_after_becomes_a_failed_adapter_run_with_all_three_fields() {
         let error = AdapterError::RateLimit {
@@ -248,9 +243,6 @@ mod adapter_error_tests {
         assert_eq!(run.error_code.as_deref(), Some("KIO-E-BATCH-RATE-001"));
         assert_eq!(run.error_category, Some(ErrorCategory::RateLimit));
         assert_eq!(run.retry_after_ms, Some(30_000));
-        // error_kind stays populated too (backward compatibility, orchestrator
-        // ruling: "既存 error_kind は当面残す").
-        assert!(run.error_kind.is_some());
         assert_eq!(run.usage, None);
     }
 }

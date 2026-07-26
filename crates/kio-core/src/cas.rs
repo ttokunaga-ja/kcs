@@ -18,6 +18,12 @@ pub const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
 /// Semantic chunk objects contain bounded normalized text, never raw file bytes.
 pub const MAX_CHUNK_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 
+/// An embedding object is an identity header plus one base64 vector line.
+/// The adopted profile is 768 f32 (03 §7), so a real object runs ~4.4 KB; the
+/// cap is generous enough for any plausible future width and still small enough
+/// that a corrupt length is rejected before it is read.
+pub const MAX_EMBEDDING_OBJECT_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentObjectKind {
     Prepared,
@@ -58,50 +64,6 @@ impl ContentObjectKind {
     }
 }
 
-/// PB01 (step4b-contract-tests-p2b.md §A): a content-addressed embedding CAS
-/// object. Storage key is `hash_json` of the canonical JSON body (matching
-/// the manifest/toollock "canonical JCS bytes content hash" convention, 10
-/// §7.5.1 L489), not a semantic identity hash like [`ChunkObject`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmbeddingObject {
-    pub dimensions: u64,
-    pub vector: Vec<f64>,
-}
-
-/// Reasons an [`EmbeddingObject`] fails PB01's per-type validation. Distinct
-/// from a CAS digest mismatch (checked separately by the caller against the
-/// storage key) so fsck can report a precise finding kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbeddingValidationError {
-    /// (b): declared `dimensions` does not equal `vector.len()`.
-    LengthMismatch,
-    /// (d)/(e): a vector element is `NaN` or `Infinity`/`-Infinity`.
-    NonFinite,
-}
-
-impl EmbeddingObject {
-    /// PB01 (a)(b)(c)(d)(e): declared length vs actual, and every element
-    /// finite. Digest (f)/(g) is verified by the caller against the CAS
-    /// storage key, not here (this object has no self-referential hash
-    /// field).
-    pub fn validate_vector(&self) -> std::result::Result<(), EmbeddingValidationError> {
-        if usize::try_from(self.dimensions).ok() != Some(self.vector.len()) {
-            return Err(EmbeddingValidationError::LengthMismatch);
-        }
-        if self.vector.iter().any(|value| !value.is_finite()) {
-            return Err(EmbeddingValidationError::NonFinite);
-        }
-        Ok(())
-    }
-
-    /// The content-addressed storage key: `hash_json` of the canonical JSON
-    /// body (RFC 8785 JCS, matching Tree/Commit's own hashing convention).
-    pub fn content_hash(&self) -> Result<String> {
-        hash_json(&serde_json::to_value(self).map_err(|err| KioError::schema(err.to_string()))?)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContentObjectMetadata {
     pub kind: ContentObjectKind,
@@ -132,6 +94,226 @@ pub struct ChunkObject {
     pub byte_end: u64,
     pub text_hash: String,
     pub text: String,
+}
+
+/// One embedding vector as CAS truth (03 §8.1, 04 §4.3).
+///
+/// The `embeddings` SQLite table and `chunk_vec` are an acceleration layer over
+/// this — "真実は `objects/` にある", and `kio repair rebuild-db` rebuilds in the
+/// order `objects/` → `embeddings` → `chunk_vec`. Until R25-6 the object did not
+/// exist: `rebuild-db` snapshotted vectors out of the very database it was about
+/// to replace, so losing `sqlite.db` meant buying every vector again from the
+/// API. The user's knowledge was never at risk (that lives in
+/// `objects/normalized`), but the money and the wall-clock were.
+///
+/// The stored bytes are fixed by 03 §8.1 as
+/// `JCS(identity fields) + LF + base64(vector) + LF + lower_hex64(sha256(vector bytes))`
+/// — a text header a human can read next to a compact body, plus a digest of the
+/// body alone. The trailing digest is not redundant with the storage key: the key
+/// is the hash of the IDENTITY (what this vector is OF), so nothing else would
+/// notice a bit flip inside the vector itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingObject {
+    pub spec_version: u64,
+    pub target_type: String,
+    pub target_hash: String,
+    pub profile_hash: String,
+    pub modality: String,
+    pub dimensions: u64,
+    pub distance: String,
+    /// 07 §5.3's contextual-embedding addendum (2026-07-24): the humanized
+    /// filename prefix folded into the adapter INPUT, and therefore into the
+    /// identity. `None` omits the key entirely rather than writing a JSON null,
+    /// so a non-chunk target hashes byte-for-byte as it did before the addendum.
+    pub context: Option<String>,
+    pub vector: Vec<f32>,
+}
+
+impl EmbeddingObject {
+    /// The identity fields alone, as the JSON whose JCS hash is the storage key.
+    ///
+    /// Split out from [`Self::identity_hash`] so a caller that has no vector yet
+    /// — the embedding lane deciding whether it already owns this vector — can
+    /// address the object without inventing one.
+    #[must_use]
+    pub fn identity_value(
+        target_type: &str,
+        target_hash: &str,
+        profile_hash: &str,
+        modality: &str,
+        dimensions: u64,
+        distance: &str,
+        context: Option<&str>,
+    ) -> Value {
+        let mut value = Map::new();
+        value.insert("dimensions".to_owned(), Value::from(dimensions));
+        value.insert("distance".to_owned(), Value::from(distance));
+        value.insert("modality".to_owned(), Value::from(modality));
+        value.insert("profile_hash".to_owned(), Value::from(profile_hash));
+        value.insert("spec_version".to_owned(), Value::from(1));
+        value.insert("target_hash".to_owned(), Value::from(target_hash));
+        value.insert("target_type".to_owned(), Value::from(target_type));
+        if let Some(context) = context {
+            value.insert("context".to_owned(), Value::from(context));
+        }
+        Value::Object(value)
+    }
+
+    /// The storage key: `"sha256:" + base16(sha256(JCS(identity fields)))`.
+    pub fn identity_hash(&self) -> Result<String> {
+        self.validate()?;
+        hash_json(&Self::identity_value(
+            &self.target_type,
+            &self.target_hash,
+            &self.profile_hash,
+            &self.modality,
+            self.dimensions,
+            &self.distance,
+            self.context.as_deref(),
+        ))
+    }
+
+    /// The canonical stored bytes (03 §8.1).
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let header = canonical_json_bytes(&Self::identity_value(
+            &self.target_type,
+            &self.target_hash,
+            &self.profile_hash,
+            &self.modality,
+            self.dimensions,
+            &self.distance,
+            self.context.as_deref(),
+        ))?;
+        let vector_bytes = vector_to_le_bytes(&self.vector);
+        let mut out = header;
+        out.push(b'\n');
+        out.extend_from_slice(base64_encode(&vector_bytes).as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(lower_hex(&Sha256::digest(&vector_bytes)).as_bytes());
+        Ok(out)
+    }
+
+    /// Parse and fully verify stored bytes.
+    ///
+    /// Every check 10 §7.5.1 asks `fsck` for lives here rather than in the
+    /// caller, so a read through any path gets all of them: the vector's length
+    /// matches the declared `dimensions`, no component is NaN or infinite, and
+    /// the trailing digest matches the body.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| embedding_corrupt_error("embedding object is not UTF-8", None))?;
+        let mut lines = text.split('\n');
+        let (Some(header), Some(body), Some(digest)) =
+            (lines.next(), lines.next(), lines.next())
+        else {
+            return Err(embedding_corrupt_error(
+                "embedding object must be header, vector and digest on three lines",
+                None,
+            ));
+        };
+        if lines.next().is_some() {
+            return Err(embedding_corrupt_error(
+                "embedding object has trailing content after the digest",
+                None,
+            ));
+        }
+        let value: Value = serde_json::from_str(header)
+            .map_err(|error| embedding_corrupt_error(&error.to_string(), None))?;
+        let object = value.as_object().ok_or_else(|| {
+            embedding_corrupt_error("embedding object header must be a JSON object", None)
+        })?;
+        let string = |key: &str| -> Result<String> {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    embedding_corrupt_error(&format!("embedding header lacks {key}"), None)
+                })
+        };
+        let dimensions = object
+            .get("dimensions")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                embedding_corrupt_error("embedding header lacks dimensions", None)
+            })?;
+        let vector_bytes = base64_decode(body)?;
+        if lower_hex(&Sha256::digest(&vector_bytes)) != digest {
+            return Err(embedding_corrupt_error(
+                "embedding vector digest does not match its bytes",
+                None,
+            ));
+        }
+        if vector_bytes.len() as u64 != dimensions.saturating_mul(4) {
+            return Err(embedding_corrupt_error(
+                "embedding vector length does not match declared dimensions",
+                None,
+            ));
+        }
+        let vector = vector_from_le_bytes(&vector_bytes);
+        if vector.iter().any(|component| !component.is_finite()) {
+            return Err(embedding_corrupt_error(
+                "embedding vector holds a NaN or infinite component",
+                None,
+            ));
+        }
+        let parsed = Self {
+            spec_version: object
+                .get("spec_version")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            target_type: string("target_type")?,
+            target_hash: string("target_hash")?,
+            profile_hash: string("profile_hash")?,
+            modality: string("modality")?,
+            dimensions,
+            distance: string("distance")?,
+            context: object
+                .get("context")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            vector,
+        };
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.spec_version != 1 {
+            return Err(embedding_corrupt_error(
+                "embedding spec_version must be exactly 1",
+                None,
+            ));
+        }
+        for (name, value) in [
+            ("target_type", &self.target_type),
+            ("target_hash", &self.target_hash),
+            ("profile_hash", &self.profile_hash),
+            ("modality", &self.modality),
+            ("distance", &self.distance),
+        ] {
+            if value.is_empty() {
+                return Err(embedding_corrupt_error(
+                    &format!("embedding {name} must not be empty"),
+                    None,
+                ));
+            }
+        }
+        if self.dimensions == 0 || self.vector.len() as u64 != self.dimensions {
+            return Err(embedding_corrupt_error(
+                "embedding vector length must equal its declared dimensions",
+                None,
+            ));
+        }
+        if self.vector.iter().any(|component| !component.is_finite()) {
+            return Err(embedding_corrupt_error(
+                "embedding vector holds a NaN or infinite component",
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ChunkObject {
@@ -293,19 +475,11 @@ impl ObjectStore {
             ));
         }
         self.ensure_object_parent(ObjectKind::Raw, expected_hash)?;
-        let paths = self.existing_object_paths(ObjectKind::Raw, expected_hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_object_path(ObjectKind::Raw, expected_hash)? else {
             self.write_object_bytes(ObjectKind::Raw, expected_hash, bytes)?;
             return Ok(true);
-        }
-        if paths.len() != 1 {
-            // Never choose a winner when canonical and legacy physical state
-            // coexist. Healthy duplicates are already complete; any disagreement
-            // is corruption that requires operator intervention.
-            verify_object_path_variants(&paths, ObjectKind::Raw, expected_hash, false)?;
-            return Ok(false);
-        }
-        let path = &paths[0];
+        };
+        let path = path.as_path();
         if read_verified_object(path, ObjectKind::Raw, expected_hash, false).is_ok() {
             return Ok(false);
         }
@@ -394,12 +568,9 @@ impl ObjectStore {
             return Err(chunk_size_error(bytes.len() as u64));
         }
         self.ensure_chunk_parent(&hash)?;
-        let existing = self.existing_chunk_paths(&hash)?;
-        if !existing.is_empty() {
-            for path in existing {
-                verify_existing_bytes(&path, &hash, &bytes)?;
-                read_chunk_path(&path, &hash)?;
-            }
+        if let Some(existing) = self.existing_chunk_path(&hash)? {
+            verify_existing_bytes(&existing, &hash, &bytes)?;
+            read_chunk_path(&existing, &hash)?;
             return Ok(hash);
         }
 
@@ -413,29 +584,15 @@ impl ObjectStore {
             temp.sync_all().kio_io(&temp_path)?;
             drop(temp);
             publish_temp_object(&temp_path, &path, &hash, bytes.len() as u64, Some(&bytes))?;
-            let published = self.existing_chunk_paths(&hash)?;
-            if published.is_empty() {
+            let Some(published_path) = self.existing_chunk_path(&hash)? else {
                 return Err(KioError::not_found(&hash));
-            }
-            let mut first = None;
-            for published_path in published {
-                let (object, published_bytes) = read_chunk_path(&published_path, &hash)?;
-                if let Some(expected) = &first {
-                    if expected != &published_bytes {
-                        return Err(chunk_corrupt_error(
-                            "portable and legacy chunk objects disagree",
-                            Some(&published_path),
-                        ));
-                    }
-                } else {
-                    first = Some(published_bytes);
-                }
-                if &object != chunk {
-                    return Err(chunk_corrupt_error(
-                        "published chunk object changed identity or text",
-                        Some(&published_path),
-                    ));
-                }
+            };
+            let (object, _) = read_chunk_path(&published_path, &hash)?;
+            if &object != chunk {
+                return Err(chunk_corrupt_error(
+                    "published chunk object changed identity or text",
+                    Some(&published_path),
+                ));
             }
             Ok(())
         })();
@@ -459,81 +616,37 @@ impl ObjectStore {
         if !self.validate_chunk_parent(hash)? {
             return Err(KioError::not_found(hash));
         }
-        let paths = self.existing_chunk_paths(hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_chunk_path(hash)? else {
             return Err(KioError::not_found(hash));
-        }
-        let mut resolved = None::<(ChunkObject, Vec<u8>)>;
-        let mut verified_bytes = 0_u64;
-        for path in paths {
-            let current = read_chunk_path(&path, hash)?;
-            verified_bytes = verified_bytes.saturating_add(current.1.len() as u64);
-            if let Some((expected_object, expected_bytes)) = &resolved {
-                if expected_object != &current.0 || expected_bytes != &current.1 {
-                    return Err(chunk_corrupt_error(
-                        "portable and legacy chunk objects disagree",
-                        Some(&path),
-                    ));
-                }
-            } else {
-                resolved = Some(current);
-            }
-        }
-        resolved
-            .map(|(object, _)| (object, verified_bytes))
-            .ok_or_else(|| KioError::not_found(hash))
+        };
+        let (object, bytes) = read_chunk_path(&path, hash)?;
+        Ok((object, bytes.len() as u64))
     }
 
     pub fn read_chunk_accounted(
         &self,
         hash: &str,
     ) -> std::result::Result<(ChunkObject, u64), AccountedReadError> {
-        let paths = (|| -> Result<Vec<PathBuf>> {
+        let path = (|| -> Result<PathBuf> {
             if !is_hash(hash) {
                 return Err(KioError::invalid_usage("invalid chunk hash"));
             }
             if !self.validate_chunk_parent(hash)? {
                 return Err(KioError::not_found(hash));
             }
-            let paths = self.existing_chunk_paths(hash)?;
-            if paths.is_empty() {
-                return Err(KioError::not_found(hash));
-            }
-            Ok(paths)
+            self.existing_chunk_path(hash)?
+                .ok_or_else(|| KioError::not_found(hash))
         })()
         .map_err(|error| AccountedReadError {
             error,
             consumed_bytes: 0,
         })?;
-        let mut resolved = None::<(ChunkObject, Vec<u8>)>;
-        let mut consumed_bytes = 0_u64;
-        for path in paths {
-            let (result, consumed) = read_chunk_path_accounted(&path, hash);
-            consumed_bytes = consumed_bytes.saturating_add(consumed);
-            let current = result.map_err(|error| AccountedReadError {
-                error,
-                consumed_bytes,
-            })?;
-            if let Some((expected_object, expected_bytes)) = &resolved {
-                if expected_object != &current.0 || expected_bytes != &current.1 {
-                    return Err(AccountedReadError {
-                        error: chunk_corrupt_error(
-                            "portable and legacy chunk objects disagree",
-                            Some(&path),
-                        ),
-                        consumed_bytes,
-                    });
-                }
-            } else {
-                resolved = Some(current);
-            }
-        }
-        resolved
-            .map(|(object, _)| (object, consumed_bytes))
-            .ok_or_else(|| AccountedReadError {
-                error: KioError::not_found(hash),
-                consumed_bytes,
-            })
+        let (result, consumed_bytes) = read_chunk_path_accounted(&path, hash);
+        let (object, _) = result.map_err(|error| AccountedReadError {
+            error,
+            consumed_bytes,
+        })?;
+        Ok((object, consumed_bytes))
     }
 
     /// Stream-verify a referenced prepared/image content object without
@@ -549,29 +662,14 @@ impl ObjectStore {
         if !self.validate_content_parent(kind, hash)? {
             return Err(KioError::not_found(hash));
         }
-        let paths = self.existing_content_paths(kind, hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_content_path(kind, hash)? else {
             return Err(KioError::not_found(hash));
-        }
-        let primary = paths.first().expect("checked non-empty");
-        let size_bytes = verify_content_object_path(primary, kind, hash)?;
-        let mut verified_bytes = size_bytes;
-        for duplicate in &paths[1..] {
-            let duplicate_size = verify_content_object_path(duplicate, kind, hash)?;
-            if duplicate_size != size_bytes {
-                return Err(corrupt_object_error(
-                    duplicate,
-                    "portable and legacy content objects disagree",
-                    hash,
-                    None,
-                ));
-            }
-            verified_bytes = verified_bytes.saturating_add(duplicate_size);
-        }
+        };
+        let size_bytes = verify_content_object_path(&path, kind, hash)?;
         Ok(StoredContentObjectMetadata {
             kind,
             hash: hash.to_owned(),
-            size_bytes: verified_bytes,
+            size_bytes,
         })
     }
 
@@ -580,45 +678,25 @@ impl ObjectStore {
         kind: ContentObjectKind,
         hash: &str,
     ) -> std::result::Result<StoredContentObjectMetadata, AccountedReadError> {
-        let paths = (|| -> Result<Vec<PathBuf>> {
+        let path = (|| -> Result<PathBuf> {
             if !is_hash(hash) {
                 return Err(KioError::invalid_usage("invalid content object hash"));
             }
             if !self.validate_content_parent(kind, hash)? {
                 return Err(KioError::not_found(hash));
             }
-            let paths = self.existing_content_paths(kind, hash)?;
-            if paths.is_empty() {
-                return Err(KioError::not_found(hash));
-            }
-            Ok(paths)
+            self.existing_content_path(kind, hash)?
+                .ok_or_else(|| KioError::not_found(hash))
         })()
         .map_err(|error| AccountedReadError {
             error,
             consumed_bytes: 0,
         })?;
-        let mut consumed_bytes = 0_u64;
-        let mut primary_size = None;
-        for path in paths {
-            let (result, consumed) = verify_content_object_path_accounted(&path, kind, hash);
-            consumed_bytes = consumed_bytes.saturating_add(consumed);
-            let size = result.map_err(|error| AccountedReadError {
-                error,
-                consumed_bytes,
-            })?;
-            if primary_size.is_some_and(|expected| expected != size) {
-                return Err(AccountedReadError {
-                    error: corrupt_object_error(
-                        &path,
-                        "portable and legacy content objects disagree",
-                        hash,
-                        None,
-                    ),
-                    consumed_bytes,
-                });
-            }
-            primary_size = Some(size);
-        }
+        let (result, consumed_bytes) = verify_content_object_path_accounted(&path, kind, hash);
+        result.map_err(|error| AccountedReadError {
+            error,
+            consumed_bytes,
+        })?;
         Ok(StoredContentObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -626,37 +704,154 @@ impl ObjectStore {
         })
     }
 
+    pub fn embedding_path(&self, hash: &str) -> Result<PathBuf> {
+        fanout_path(self.kio_dir.join("objects/embeddings"), hash)
+    }
+
+    /// Publish one embedding vector under its identity hash (03 §8.1).
+    ///
+    /// Idempotent by content: the same vector for the same identity re-verifies
+    /// and returns. A DIFFERENT vector under the same identity is corruption,
+    /// not an update — the identity names the profile, the target text and the
+    /// context, so a deterministic adapter cannot legitimately produce two.
+    pub fn write_embedding(&self, embedding: &EmbeddingObject) -> Result<String> {
+        let hash = embedding.identity_hash()?;
+        let bytes = embedding.to_bytes()?;
+        if bytes.len() as u64 > MAX_EMBEDDING_OBJECT_BYTES {
+            return Err(KioError::new(
+                "KIO-E-STORE-OBJECT-OVERSIZED-001",
+                "embedding object exceeds its byte limit",
+                serde_json::json!({
+                    "object_type": "embedding",
+                    "max_bytes": MAX_EMBEDDING_OBJECT_BYTES,
+                    "actual_bytes": bytes.len() as u64,
+                }),
+                crate::ExitCode::PermanentFailure,
+            ));
+        }
+        self.ensure_embedding_parent(&hash)?;
+        let path = self.embedding_path(&hash)?;
+        if fs::symlink_metadata(&path).is_ok() {
+            verify_existing_bytes(&path, &hash, &bytes)?;
+            return Ok(hash);
+        }
+        let (temp_path, mut temp) = create_private_temp(
+            path.parent()
+                .ok_or_else(|| KioError::io("path has no parent", path.display().to_string()))?,
+        )?;
+        let result = (|| -> Result<()> {
+            temp.write_all(&bytes).kio_io(&temp_path)?;
+            temp.sync_all().kio_io(&temp_path)?;
+            drop(temp);
+            publish_temp_object(&temp_path, &path, &hash, bytes.len() as u64, Some(&bytes))?;
+            // Read back through the same parser a rebuild will use, so a
+            // publish that somehow lands unreadable fails HERE rather than in
+            // the `repair rebuild-db` that was counting on it.
+            let published = self.read_embedding(&hash)?;
+            if &published != embedding {
+                return Err(embedding_corrupt_error(
+                    "published embedding object changed identity or vector",
+                    Some(&path),
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result.map(|()| hash)
+    }
+
+    /// Read and fully verify one embedding object, including that its identity
+    /// hashes back to the name it is stored under.
+    pub fn read_embedding(&self, hash: &str) -> Result<EmbeddingObject> {
+        let path = self.embedding_path(hash)?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| KioError::not_found(hash))
+            .and_then(|metadata| {
+                if metadata.file_type().is_file() {
+                    Ok(metadata)
+                } else {
+                    Err(non_regular_object_error(&path))
+                }
+            })?;
+        if metadata.len() > MAX_EMBEDDING_OBJECT_BYTES {
+            return Err(embedding_corrupt_error(
+                "embedding object exceeds its byte limit",
+                Some(&path),
+            ));
+        }
+        let bytes = fs::read(&path).kio_io(&path)?;
+        let object = EmbeddingObject::from_bytes(&bytes)
+            .map_err(|error| embedding_corrupt_error(error.message(), Some(&path)))?;
+        if object.identity_hash()? != hash {
+            return Err(embedding_corrupt_error(
+                "embedding object identity does not match its storage key",
+                Some(&path),
+            ));
+        }
+        Ok(object)
+    }
+
+    /// Every embedding object this scope holds, by storage key.
+    ///
+    /// The rebuild source: `kio repair rebuild-db` replays these into
+    /// `embeddings` and derives `chunk_vec` from that (04 §4.3). Returns an
+    /// empty list when the namespace does not exist, which is the ordinary
+    /// state of a scope nothing has embedded yet.
+    pub fn embedding_hashes(&self) -> Result<Vec<String>> {
+        let base = self.kio_dir.join("objects/embeddings");
+        let mut hashes = Vec::new();
+        let Ok(first_level) = fs::read_dir(&base) else {
+            return Ok(hashes);
+        };
+        for first in first_level {
+            let first = first.kio_io(&base)?;
+            let Ok(second_level) = fs::read_dir(first.path()) else {
+                continue;
+            };
+            for second in second_level {
+                let second = second.kio_io(&first.path())?;
+                let Ok(leaves) = fs::read_dir(second.path()) else {
+                    continue;
+                };
+                for leaf in leaves {
+                    let leaf = leaf.kio_io(&second.path())?;
+                    if !leaf.file_type().is_ok_and(|kind| kind.is_file()) {
+                        continue;
+                    }
+                    // The fanout dirs are a PREFIX of the digest, which the
+                    // leaf then repeats in full (`fanout_path`), so the leaf
+                    // name alone is the digest.
+                    let Some(digest) = leaf.file_name().to_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    hashes.push(format!("sha256:{digest}"));
+                }
+            }
+        }
+        hashes.sort();
+        Ok(hashes)
+    }
+
+    fn ensure_embedding_parent(&self, hash: &str) -> Result<()> {
+        ensure_real_directory(&self.kio_dir, false)?;
+        ensure_real_directory(&self.kio_dir.join("objects"), true)?;
+        let base = self.kio_dir.join("objects/embeddings");
+        ensure_real_directory(&base, true)?;
+        let digest = hash_path_component(hash)?;
+        let first = base.join(&digest[0..2]);
+        let second = first.join(&digest[2..4]);
+        ensure_real_directory(&first, true)?;
+        ensure_real_directory(&second, true)
+    }
+
     pub fn chunk_path(&self, hash: &str) -> Result<PathBuf> {
         fanout_path(self.kio_dir.join("objects/chunks"), hash)
     }
 
-    fn chunk_path_candidates(&self, hash: &str) -> Result<Vec<PathBuf>> {
-        let canonical = self.chunk_path(hash)?;
-        #[cfg(windows)]
-        {
-            Ok(vec![canonical])
-        }
-        #[cfg(not(windows))]
-        {
-            Ok(vec![
-                canonical,
-                legacy_fanout_path(self.kio_dir.join("objects/chunks"), hash)?,
-            ])
-        }
-    }
-
-    fn existing_chunk_paths(&self, hash: &str) -> Result<Vec<PathBuf>> {
-        let mut existing = Vec::new();
-        for path in self.chunk_path_candidates(hash)? {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => existing.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(KioError::io(error.to_string(), path.display().to_string()))
-                }
-            }
-        }
-        Ok(existing)
+    fn existing_chunk_path(&self, hash: &str) -> Result<Option<PathBuf>> {
+        occupied_slot(self.chunk_path(hash)?)
     }
 
     /// Canonical fan-out path for a content object. `pub` (widened from the
@@ -668,31 +863,12 @@ impl ObjectStore {
         fanout_path(self.kio_dir.join("objects").join(kind.directory()), hash)
     }
 
-    fn content_path_candidates(&self, kind: ContentObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
-        let canonical = self.content_path(kind, hash)?;
-        #[cfg(windows)]
-        {
-            Ok(vec![canonical])
-        }
-        #[cfg(not(windows))]
-        {
-            let base = self.kio_dir.join("objects").join(kind.directory());
-            Ok(vec![canonical, legacy_fanout_path(base, hash)?])
-        }
-    }
-
-    fn existing_content_paths(&self, kind: ContentObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
-        let mut existing = Vec::new();
-        for path in self.content_path_candidates(kind, hash)? {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => existing.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(KioError::io(error.to_string(), path.display().to_string()))
-                }
-            }
-        }
-        Ok(existing)
+    fn existing_content_path(
+        &self,
+        kind: ContentObjectKind,
+        hash: &str,
+    ) -> Result<Option<PathBuf>> {
+        occupied_slot(self.content_path(kind, hash)?)
     }
 
     fn validate_content_parent(&self, kind: ContentObjectKind, hash: &str) -> Result<bool> {
@@ -767,12 +943,8 @@ impl ObjectStore {
             ));
         }
         self.ensure_object_parent(kind, hash)?;
-        let existing = self.existing_object_paths(kind, hash)?;
-        if !existing.is_empty() {
-            for path in existing {
-                verify_existing_bytes(&path, hash, bytes)?;
-            }
-            return Ok(());
+        if let Some(existing) = self.existing_object_path(kind, hash)? {
+            return verify_existing_bytes(&existing, hash, bytes);
         }
 
         let path = self.object_path(kind, hash)?;
@@ -786,17 +958,10 @@ impl ObjectStore {
             drop(temp);
             publish_temp_object(&temp_path, &path, hash, bytes.len() as u64, Some(bytes))?;
 
-            // A legacy writer can race the portable publication. Verify every
-            // representation that exists before reporting success so a conflicting
-            // prefixed leaf never becomes an ignored shadow object.
-            let published = self.existing_object_paths(kind, hash)?;
-            if published.is_empty() {
+            let Some(published) = self.existing_object_path(kind, hash)? else {
                 return Err(KioError::not_found(hash));
-            }
-            for published_path in published {
-                verify_existing_bytes(&published_path, hash, bytes)?;
-            }
-            Ok(())
+            };
+            verify_existing_bytes(&published, hash, bytes)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temp_path);
@@ -847,21 +1012,17 @@ impl ObjectStore {
             let hash = format!("sha256:{}", lower_hex(&hasher.finalize()));
             let path = self.object_path(ObjectKind::Raw, &hash)?;
             self.ensure_object_parent(ObjectKind::Raw, &hash)?;
-            let existing = self.existing_object_paths(ObjectKind::Raw, &hash)?;
-            if !existing.is_empty() {
-                for existing_path in existing {
-                    verify_existing_matches_file(&existing_path, &temp_path, &hash, total)?;
-                }
+            if let Some(existing) = self.existing_object_path(ObjectKind::Raw, &hash)? {
+                verify_existing_matches_file(&existing, &temp_path, &hash, total)?;
                 fs::remove_file(&temp_path).kio_io(&temp_path)?;
                 return Ok((hash, total));
             }
 
             publish_temp_object(&temp_path, &path, &hash, total, None)?;
-            let published = self.existing_object_paths(ObjectKind::Raw, &hash)?;
-            if published.is_empty() {
+            let Some(published) = self.existing_object_path(ObjectKind::Raw, &hash)? else {
                 return Err(KioError::not_found(&hash));
-            }
-            verify_object_path_variants(&published, ObjectKind::Raw, &hash, false)?;
+            };
+            read_verified_object(&published, ObjectKind::Raw, &hash, false)?;
             Ok((hash, total))
         })();
         if result.is_err() {
@@ -871,8 +1032,8 @@ impl ObjectStore {
     }
 
     pub fn read_by_hash(&self, hash: &str) -> Result<StoredObject> {
-        let (kind, paths) = self.locate_object(hash)?;
-        let (_, bytes) = verify_object_path_variants(&paths, kind, hash, true)?;
+        let (kind, path) = self.locate_object(hash)?;
+        let (_, bytes) = read_verified_object(&path, kind, hash, true)?;
         Ok(StoredObject {
             kind,
             hash: hash.to_owned(),
@@ -892,16 +1053,13 @@ impl ObjectStore {
         if !self.validate_object_parent(ObjectKind::Raw, hash)? {
             return Ok(false);
         }
-        let paths = self.existing_object_paths(ObjectKind::Raw, hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_object_path(ObjectKind::Raw, hash)? else {
             return Ok(false);
-        }
-        verify_object_path_variants(&paths, ObjectKind::Raw, hash, false)?;
-        for path in paths {
-            remove_verified_cas_path(&path, |candidate| {
-                read_verified_object(candidate, ObjectKind::Raw, hash, false).map(|_| ())
-            })?;
-        }
+        };
+        read_verified_object(&path, ObjectKind::Raw, hash, false)?;
+        remove_verified_cas_path(&path, |candidate| {
+            read_verified_object(candidate, ObjectKind::Raw, hash, false).map(|_| ())
+        })?;
         Ok(true)
     }
 
@@ -913,17 +1071,14 @@ impl ObjectStore {
         if !self.validate_chunk_parent(hash)? {
             return Ok(false);
         }
-        let paths = self.existing_chunk_paths(hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_chunk_path(hash)? else {
             return Ok(false);
-        }
-        // Verify all variants before the first destructive step.
+        };
+        // Verify before the first destructive step.
         self.read_chunk(hash)?;
-        for path in paths {
-            remove_verified_cas_path(&path, |candidate| {
-                read_chunk_path(candidate, hash).map(|_| ())
-            })?;
-        }
+        remove_verified_cas_path(&path, |candidate| {
+            read_chunk_path(candidate, hash).map(|_| ())
+        })?;
         Ok(true)
     }
 
@@ -939,18 +1094,13 @@ impl ObjectStore {
         if !self.validate_content_parent(kind, hash)? {
             return Ok(false);
         }
-        let paths = self.existing_content_paths(kind, hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_content_path(kind, hash)? else {
             return Ok(false);
-        }
-        for path in &paths {
-            verify_content_object_path(path, kind, hash)?;
-        }
-        for path in paths {
-            remove_verified_cas_path(&path, |candidate| {
-                verify_content_object_path(candidate, kind, hash).map(|_| ())
-            })?;
-        }
+        };
+        verify_content_object_path(&path, kind, hash)?;
+        remove_verified_cas_path(&path, |candidate| {
+            verify_content_object_path(candidate, kind, hash).map(|_| ())
+        })?;
         Ok(true)
     }
 
@@ -978,11 +1128,8 @@ impl ObjectStore {
     pub fn write_content_object(&self, kind: ContentObjectKind, bytes: &[u8]) -> Result<String> {
         let hash = hash_bytes(bytes);
         self.ensure_content_parent(kind, &hash)?;
-        let existing = self.existing_content_paths(kind, &hash)?;
-        if !existing.is_empty() {
-            for path in existing {
-                verify_existing_bytes(&path, &hash, bytes)?;
-            }
+        if let Some(existing) = self.existing_content_path(kind, &hash)? {
+            verify_existing_bytes(&existing, &hash, bytes)?;
             return Ok(hash);
         }
         let path = self.content_path(kind, &hash)?;
@@ -995,14 +1142,10 @@ impl ObjectStore {
             temp.sync_all().kio_io(&temp_path)?;
             drop(temp);
             publish_temp_object(&temp_path, &path, &hash, bytes.len() as u64, Some(bytes))?;
-            let published = self.existing_content_paths(kind, &hash)?;
-            if published.is_empty() {
+            let Some(published) = self.existing_content_path(kind, &hash)? else {
                 return Err(KioError::not_found(&hash));
-            }
-            for published_path in published {
-                verify_existing_bytes(&published_path, &hash, bytes)?;
-            }
-            Ok(())
+            };
+            verify_existing_bytes(&published, &hash, bytes)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temp_path);
@@ -1052,32 +1195,25 @@ impl ObjectStore {
         if !self.validate_object_parent(kind, hash)? {
             return Err(KioError::not_found(hash));
         }
-        let paths = self.existing_object_paths(kind, hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_object_path(kind, hash)? else {
             return Err(KioError::not_found(hash));
-        }
-        let primary = paths.first().expect("checked non-empty");
-        let (primary_size, bytes) = read_verified_object(primary, kind, hash, true)?;
-        let mut verified_bytes = primary_size;
-        for duplicate in &paths[1..] {
-            let (duplicate_size, _) = read_verified_object(duplicate, kind, hash, false)?;
-            verified_bytes = verified_bytes.saturating_add(duplicate_size);
-        }
+        };
+        let (size_bytes, bytes) = read_verified_object(&path, kind, hash, true)?;
         Ok((
             StoredObject {
                 kind,
                 hash: hash.to_owned(),
                 bytes,
             },
-            verified_bytes,
+            size_bytes,
         ))
     }
 
     /// Verify and count an object through a fixed-size buffer. This is the
     /// metadata-only path used by raw `inspect`; it does not retain the body.
     pub fn inspect_by_hash(&self, hash: &str) -> Result<StoredObjectMetadata> {
-        let (kind, paths) = self.locate_object(hash)?;
-        let (size_bytes, _) = verify_object_path_variants(&paths, kind, hash, false)?;
+        let (kind, path) = self.locate_object(hash)?;
+        let (size_bytes, _) = read_verified_object(&path, kind, hash, false)?;
         Ok(StoredObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -1094,40 +1230,10 @@ impl ObjectStore {
         if !self.validate_object_parent(kind, hash)? {
             return Err(KioError::not_found(hash));
         }
-        let paths = self.existing_object_paths(kind, hash)?;
-        if paths.is_empty() {
+        let Some(path) = self.existing_object_path(kind, hash)? else {
             return Err(KioError::not_found(hash));
-        }
-        let (size_bytes, _) = verify_object_path_variants(&paths, kind, hash, false)?;
-        Ok(StoredObjectMetadata {
-            kind,
-            hash: hash.to_owned(),
-            size_bytes,
-        })
-    }
-
-    /// Metadata-only exact-kind verification that reports total physical bytes
-    /// across matching canonical and legacy representations.
-    pub fn inspect_object_physical(
-        &self,
-        kind: ObjectKind,
-        hash: &str,
-    ) -> Result<StoredObjectMetadata> {
-        if !is_hash(hash) {
-            return Err(KioError::invalid_usage("invalid hash"));
-        }
-        if !self.validate_object_parent(kind, hash)? {
-            return Err(KioError::not_found(hash));
-        }
-        let paths = self.existing_object_paths(kind, hash)?;
-        if paths.is_empty() {
-            return Err(KioError::not_found(hash));
-        }
-        let mut size_bytes = 0_u64;
-        for path in paths {
-            let (verified, _) = read_verified_object(&path, kind, hash, false)?;
-            size_bytes = size_bytes.saturating_add(verified);
-        }
+        };
+        let (size_bytes, _) = read_verified_object(&path, kind, hash, false)?;
         Ok(StoredObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -1143,34 +1249,25 @@ impl ObjectStore {
         kind: ObjectKind,
         hash: &str,
     ) -> std::result::Result<StoredObjectMetadata, AccountedReadError> {
-        let result = (|| -> Result<Vec<PathBuf>> {
+        let path = (|| -> Result<PathBuf> {
             if !is_hash(hash) {
                 return Err(KioError::invalid_usage("invalid hash"));
             }
             if !self.validate_object_parent(kind, hash)? {
                 return Err(KioError::not_found(hash));
             }
-            let paths = self.existing_object_paths(kind, hash)?;
-            if paths.is_empty() {
-                return Err(KioError::not_found(hash));
-            }
-            Ok(paths)
-        })();
-        let paths = result.map_err(|error| AccountedReadError {
+            self.existing_object_path(kind, hash)?
+                .ok_or_else(|| KioError::not_found(hash))
+        })()
+        .map_err(|error| AccountedReadError {
             error,
             consumed_bytes: 0,
         })?;
-        let mut consumed_bytes = 0_u64;
-        for path in paths {
-            let (result, consumed) = read_verified_object_accounted(&path, kind, hash, false);
-            consumed_bytes = consumed_bytes.saturating_add(consumed);
-            if let Err(error) = result {
-                return Err(AccountedReadError {
-                    error,
-                    consumed_bytes,
-                });
-            }
-        }
+        let (result, consumed_bytes) = read_verified_object_accounted(&path, kind, hash, false);
+        result.map_err(|error| AccountedReadError {
+            error,
+            consumed_bytes,
+        })?;
         Ok(StoredObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -1184,39 +1281,25 @@ impl ObjectStore {
         kind: ObjectKind,
         hash: &str,
     ) -> std::result::Result<(StoredObject, u64), AccountedReadError> {
-        let paths = (|| -> Result<Vec<PathBuf>> {
+        let path = (|| -> Result<PathBuf> {
             if !is_hash(hash) {
                 return Err(KioError::invalid_usage("invalid hash"));
             }
             if !self.validate_object_parent(kind, hash)? {
                 return Err(KioError::not_found(hash));
             }
-            let paths = self.existing_object_paths(kind, hash)?;
-            if paths.is_empty() {
-                return Err(KioError::not_found(hash));
-            }
-            Ok(paths)
+            self.existing_object_path(kind, hash)?
+                .ok_or_else(|| KioError::not_found(hash))
         })()
         .map_err(|error| AccountedReadError {
             error,
             consumed_bytes: 0,
         })?;
-        let mut consumed_bytes = 0_u64;
-        let mut bytes = Vec::new();
-        for (index, path) in paths.iter().enumerate() {
-            let (result, consumed) = read_verified_object_accounted(path, kind, hash, index == 0);
-            consumed_bytes = consumed_bytes.saturating_add(consumed);
-            match result {
-                Ok((_, value)) if index == 0 => bytes = value,
-                Ok(_) => {}
-                Err(error) => {
-                    return Err(AccountedReadError {
-                        error,
-                        consumed_bytes,
-                    })
-                }
-            }
-        }
+        let (result, consumed_bytes) = read_verified_object_accounted(&path, kind, hash, true);
+        let (_, bytes) = result.map_err(|error| AccountedReadError {
+            error,
+            consumed_bytes,
+        })?;
         Ok((
             StoredObject {
                 kind,
@@ -1244,12 +1327,10 @@ impl ObjectStore {
         if !self.validate_object_parent(kind, hash)? {
             return Err(KioError::not_found(hash));
         }
-        let paths = self.existing_object_paths(kind, hash)?;
-        let primary = paths.first().ok_or_else(|| KioError::not_found(hash))?;
-        let size_bytes = copy_verified_object(primary, kind, hash, writer)?;
-        for duplicate in &paths[1..] {
-            read_verified_object(duplicate, kind, hash, false)?;
-        }
+        let path = self
+            .existing_object_path(kind, hash)?
+            .ok_or_else(|| KioError::not_found(hash))?;
+        let size_bytes = copy_verified_object(&path, kind, hash, writer)?;
         Ok(StoredObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -1262,7 +1343,7 @@ impl ObjectStore {
         fanout_path(base, hash)
     }
 
-    fn locate_object(&self, hash: &str) -> Result<(ObjectKind, Vec<PathBuf>)> {
+    fn locate_object(&self, hash: &str) -> Result<(ObjectKind, PathBuf)> {
         if !is_hash(hash) {
             return Err(KioError::invalid_usage("invalid hash"));
         }
@@ -1270,39 +1351,15 @@ impl ObjectStore {
             if !self.validate_object_parent(kind, hash)? {
                 continue;
             }
-            let paths = self.existing_object_paths(kind, hash)?;
-            if !paths.is_empty() {
-                return Ok((kind, paths));
+            if let Some(path) = self.existing_object_path(kind, hash)? {
+                return Ok((kind, path));
             }
         }
         Err(KioError::not_found(hash))
     }
 
-    fn object_path_candidates(&self, kind: ObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
-        let canonical = self.object_path(kind, hash)?;
-        #[cfg(windows)]
-        {
-            Ok(vec![canonical])
-        }
-        #[cfg(not(windows))]
-        {
-            let base = self.kio_dir.join("objects").join(kind.directory());
-            Ok(vec![canonical, legacy_fanout_path(base, hash)?])
-        }
-    }
-
-    fn existing_object_paths(&self, kind: ObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
-        let mut existing = Vec::new();
-        for path in self.object_path_candidates(kind, hash)? {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => existing.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(KioError::io(error.to_string(), path.display().to_string()))
-                }
-            }
-        }
-        Ok(existing)
+    fn existing_object_path(&self, kind: ObjectKind, hash: &str) -> Result<Option<PathBuf>> {
+        occupied_slot(self.object_path(kind, hash)?)
     }
 
     fn ensure_kind_base(&self, kind: ObjectKind) -> Result<()> {
@@ -1522,22 +1579,6 @@ fn copy_verified_object<W: Write>(
         ));
     }
     Ok(total)
-}
-
-fn verify_object_path_variants(
-    paths: &[PathBuf],
-    kind: ObjectKind,
-    expected_hash: &str,
-    materialize: bool,
-) -> Result<(u64, Vec<u8>)> {
-    let primary = paths
-        .first()
-        .ok_or_else(|| KioError::not_found(expected_hash))?;
-    let (size_bytes, bytes) = read_verified_object(primary, kind, expected_hash, materialize)?;
-    for duplicate in &paths[1..] {
-        read_verified_object(duplicate, kind, expected_hash, false)?;
-    }
-    Ok((size_bytes, bytes))
 }
 
 fn verify_existing_bytes(path: &Path, expected_hash: &str, expected: &[u8]) -> Result<()> {
@@ -2258,6 +2299,109 @@ fn chunk_corrupt_error(message: &str, path: Option<&Path>) -> KioError {
     )
 }
 
+fn embedding_corrupt_error(message: &str, path: Option<&Path>) -> KioError {
+    KioError::new(
+        "KIO-E-STORE-CORRUPT-001",
+        message,
+        serde_json::json!({ "path": path }),
+        crate::ExitCode::PermanentFailure,
+    )
+}
+
+/// f32 little-endian, the same representation the `embeddings` BLOB and the
+/// replica use — so a vector round-trips between object, table and cache
+/// without a conversion step anyone could get wrong.
+fn vector_to_le_bytes(vector: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(vector.len() * 4);
+    for component in vector {
+        out.extend_from_slice(&component.to_le_bytes());
+    }
+    out
+}
+
+fn vector_from_le_bytes(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect()
+}
+
+/// Standard base64 with padding. Hand-rolled rather than pulled in as a
+/// dependency: this is the only base64 in `kio-core`, and the alphabet is part
+/// of a frozen on-disk format (03 §8.1) that should not move with a crate.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let bits = (u32::from(group[0]) << 16)
+            | (u32::from(group.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(group.get(2).copied().unwrap_or(0));
+        out.push(ALPHABET[(bits >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(bits >> 12) as usize & 0x3f] as char);
+        out.push(if group.len() > 1 {
+            ALPHABET[(bits >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if group.len() > 2 {
+            ALPHABET[bits as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn base64_decode(text: &str) -> Result<Vec<u8>> {
+    let decode = |byte: u8| -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+            b'a'..=b'z' => Some(u32::from(byte - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(byte - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err(embedding_corrupt_error(
+            "embedding vector is not padded base64",
+            None,
+        ));
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for group in bytes.chunks(4) {
+        let padding = group.iter().rev().take_while(|byte| **byte == b'=').count();
+        if padding > 2 || (padding > 0 && !std::ptr::eq(group, &bytes[bytes.len() - 4..])) {
+            return Err(embedding_corrupt_error(
+                "embedding vector has base64 padding before its final group",
+                None,
+            ));
+        }
+        let mut bits = 0u32;
+        for (index, byte) in group.iter().enumerate() {
+            let sextet = if *byte == b'=' {
+                0
+            } else {
+                decode(*byte).ok_or_else(|| {
+                    embedding_corrupt_error("embedding vector holds a non-base64 byte", None)
+                })?
+            };
+            bits |= sextet << (18 - 6 * index);
+        }
+        out.push((bits >> 16) as u8);
+        if padding < 2 {
+            out.push((bits >> 8) as u8);
+        }
+        if padding < 1 {
+            out.push(bits as u8);
+        }
+    }
+    Ok(out)
+}
+
 fn chunk_size_error(actual: u64) -> KioError {
     KioError::new(
         "KIO-E-STORE-OBJECT-OVERSIZED-001",
@@ -2371,14 +2515,15 @@ pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>>
     Ok(bytes)
 }
 
-#[cfg(not(windows))]
-fn legacy_fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {
-    let digest = hash_path_component(hash)?;
-    Ok(base
-        .as_ref()
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(hash))
+/// `Some(path)` when the CAS slot is occupied by anything at all — a symlink or
+/// a directory counts, so the per-kind verification below is what rejects it,
+/// not a silent "not found".
+fn occupied_slot(path: PathBuf) -> Result<Option<PathBuf>> {
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(KioError::io(error.to_string(), path.display().to_string())),
+    }
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -2481,6 +2626,111 @@ mod tests {
         fs::create_dir(&kio_dir).unwrap();
         let store = ObjectStore::new(kio_dir);
         (dir, store)
+    }
+
+    fn embedding_object(vector: Vec<f32>) -> EmbeddingObject {
+        EmbeddingObject {
+            spec_version: 1,
+            target_type: "chunk".to_owned(),
+            target_hash: "sha256:text".to_owned(),
+            profile_hash: "sha256:profile".to_owned(),
+            modality: "multimodal".to_owned(),
+            dimensions: vector.len() as u64,
+            distance: "cosine".to_owned(),
+            context: Some("recovery window".to_owned()),
+            vector,
+        }
+    }
+
+    #[test]
+    fn an_embedding_object_round_trips_through_its_stored_bytes() {
+        let object = embedding_object(vec![0.5, -0.25, 0.125]);
+        let bytes = object.to_bytes().unwrap();
+        assert_eq!(EmbeddingObject::from_bytes(&bytes).unwrap(), object);
+        // 03 §8.1's shape: header, vector, digest — three lines, no more.
+        let text = String::from_utf8(bytes).unwrap();
+        let lines = text.split('\n').collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].starts_with('{') && lines[0].ends_with('}'));
+    }
+
+    #[test]
+    fn an_embedding_identity_ignores_the_vector_and_follows_the_context() {
+        // The storage key names what the vector is OF. Two different vectors
+        // for the same target collide by design (that is how a re-send is
+        // idempotent); two different contexts must not (07 §5.3's addendum —
+        // else two chunks with identical bodies in differently named files
+        // share one wrong vector).
+        let base = embedding_object(vec![1.0, 0.0]);
+        let mut other_vector = base.clone();
+        other_vector.vector = vec![0.0, 1.0];
+        assert_eq!(
+            base.identity_hash().unwrap(),
+            other_vector.identity_hash().unwrap()
+        );
+
+        let mut other_context = base.clone();
+        other_context.context = Some("control coverage".to_owned());
+        assert_ne!(
+            base.identity_hash().unwrap(),
+            other_context.identity_hash().unwrap()
+        );
+
+        let mut no_context = base.clone();
+        no_context.context = None;
+        assert_ne!(
+            base.identity_hash().unwrap(),
+            no_context.identity_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_bit_flip_inside_the_vector_is_caught_by_the_trailing_digest() {
+        // The storage key cannot catch this: it hashes the identity, not the
+        // body. Without the digest a corrupted vector would rebuild silently
+        // and quietly degrade every search that touched it.
+        let object = embedding_object(vec![0.5, -0.25]);
+        let mut bytes = object.to_bytes().unwrap();
+        let body_start = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        bytes[body_start] = if bytes[body_start] == b'A' { b'B' } else { b'A' };
+        let error = EmbeddingObject::from_bytes(&bytes).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn an_embedding_object_rejects_a_length_or_finiteness_violation() {
+        let mut short = embedding_object(vec![0.5, 0.5]);
+        short.dimensions = 3;
+        assert!(short.to_bytes().is_err());
+
+        let nan = embedding_object(vec![f32::NAN, 0.5]);
+        assert!(nan.to_bytes().is_err());
+    }
+
+    #[test]
+    fn writing_an_embedding_publishes_it_under_its_identity_and_reads_back() {
+        let (_dir, store) = object_store();
+        let object = embedding_object(vec![0.5, -0.25, 0.125]);
+        let hash = store.write_embedding(&object).unwrap();
+        assert_eq!(hash, object.identity_hash().unwrap());
+        assert_eq!(store.read_embedding(&hash).unwrap(), object);
+        assert_eq!(store.embedding_hashes().unwrap(), vec![hash.clone()]);
+        // Idempotent: the same vector re-published verifies rather than errors.
+        assert_eq!(store.write_embedding(&object).unwrap(), hash);
+    }
+
+    #[test]
+    fn reading_an_embedding_rejects_bytes_filed_under_the_wrong_identity() {
+        let (_dir, store) = object_store();
+        let object = embedding_object(vec![1.0, 0.0]);
+        let hash = store.write_embedding(&object).unwrap();
+
+        let mut impostor = object.clone();
+        impostor.target_hash = "sha256:someone-else".to_owned();
+        fs::write(store.embedding_path(&hash).unwrap(), impostor.to_bytes().unwrap()).unwrap();
+
+        let error = store.read_embedding(&hash).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
     fn stray_temp_files(dir: &Path) -> Vec<String> {
@@ -2764,108 +3014,6 @@ mod tests {
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
-    #[cfg(not(windows))]
-    #[test]
-    fn legacy_prefixed_leaf_remains_readable_and_idempotent() {
-        let (_dir, store) = object_store();
-        let expected = b"legacy payload";
-        let hash = hash_bytes(expected);
-        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
-        let candidates = store
-            .object_path_candidates(ObjectKind::Raw, &hash)
-            .unwrap();
-        let canonical = &candidates[0];
-        let legacy = &candidates[1];
-        fs::write(legacy, expected).unwrap();
-
-        let read = store.read_by_hash(&hash).unwrap();
-        assert_eq!(read.bytes, expected);
-        let inspected = store.inspect_by_hash(&hash).unwrap();
-        assert_eq!(inspected.size_bytes, expected.len() as u64);
-
-        assert_eq!(store.write_raw(expected).unwrap(), hash);
-        let (streamed_hash, streamed_size) = store
-            .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
-            .unwrap();
-        assert_eq!(streamed_hash, hash);
-        assert_eq!(streamed_size, expected.len() as u64);
-        assert!(!canonical.exists());
-        assert_eq!(fs::read(legacy).unwrap(), expected);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn legacy_prefixed_leaves_resolve_for_every_object_kind() {
-        let (_dir, store) = object_store();
-        let cases: [(ObjectKind, &[u8]); 3] = [
-            (ObjectKind::Raw, b"legacy raw"),
-            (ObjectKind::Tree, b"legacy tree"),
-            (ObjectKind::Commit, b"legacy commit"),
-        ];
-
-        for (kind, expected) in cases {
-            let hash = hash_bytes(expected);
-            store.ensure_object_parent(kind, &hash).unwrap();
-            let candidates = store.object_path_candidates(kind, &hash).unwrap();
-            fs::write(&candidates[1], expected).unwrap();
-
-            let read = store.read_by_hash(&hash).unwrap();
-            assert_eq!(read.kind, kind);
-            assert_eq!(read.bytes, expected);
-            store.write_object_bytes(kind, &hash, expected).unwrap();
-            assert!(!candidates[0].exists());
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn matching_portable_and_legacy_leaves_are_accepted() {
-        let (_dir, store) = object_store();
-        let expected = b"duplicate payload";
-        let hash = hash_bytes(expected);
-        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
-        let candidates = store
-            .object_path_candidates(ObjectKind::Raw, &hash)
-            .unwrap();
-        fs::write(&candidates[0], expected).unwrap();
-        fs::write(&candidates[1], expected).unwrap();
-
-        assert_eq!(store.read_by_hash(&hash).unwrap().bytes, expected);
-        assert_eq!(
-            store.inspect_by_hash(&hash).unwrap().size_bytes,
-            expected.len() as u64
-        );
-        store.write_raw(expected).unwrap();
-        store
-            .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
-            .unwrap();
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn conflicting_portable_and_legacy_leaves_fail_closed() {
-        let (_dir, store) = object_store();
-        let expected = b"expected";
-        let hash = hash_bytes(expected);
-        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
-        let candidates = store
-            .object_path_candidates(ObjectKind::Raw, &hash)
-            .unwrap();
-        fs::write(&candidates[0], expected).unwrap();
-        fs::write(&candidates[1], b"poisoned").unwrap();
-
-        for error in [
-            store.read_by_hash(&hash).unwrap_err(),
-            store.inspect_by_hash(&hash).unwrap_err(),
-            store.write_raw(expected).unwrap_err(),
-            store
-                .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
-                .unwrap_err(),
-        ] {
-            assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
-        }
-    }
-
     #[test]
     fn purge_remove_raw_is_verified_and_idempotent() {
         let (_dir, store) = object_store();
@@ -2874,20 +3022,6 @@ mod tests {
         assert!(store.remove_raw(&hash).unwrap());
         assert!(!store.object_path(ObjectKind::Raw, &hash).unwrap().exists());
         assert!(!store.remove_raw(&hash).unwrap());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn purge_remove_raw_deletes_matching_portable_and_legacy_variants() {
-        let (_dir, store) = object_store();
-        let bytes = b"matching raw variants";
-        let hash = store.write_raw(bytes).unwrap();
-        let candidates = store
-            .object_path_candidates(ObjectKind::Raw, &hash)
-            .unwrap();
-        fs::write(&candidates[1], bytes).unwrap();
-        assert!(store.remove_raw(&hash).unwrap());
-        assert!(candidates.iter().all(|path| !path.exists()));
     }
 
     #[cfg(unix)]
@@ -2936,43 +3070,40 @@ mod tests {
             .any(|window| window == b"chunk_hash"));
     }
 
-    #[cfg(not(windows))]
+    /// A corrupt content object is charged for every byte it made fsck read,
+    /// so one aggregate budget still bounds an adversarial store.
     #[test]
-    fn ct4_fsck_byte_counts_include_dual_chunk_and_content_representations() {
+    fn ct4_fsck_content_read_reports_consumed_bytes_even_when_it_fails() {
         let (_dir, store) = object_store();
-        let chunk = chunk_object("dual representation");
+        let chunk = chunk_object("single representation");
         let chunk_hash = store.write_chunk(&chunk).unwrap();
-        let chunk_paths = store.chunk_path_candidates(&chunk_hash).unwrap();
-        let chunk_bytes = fs::read(&chunk_paths[0]).unwrap();
-        fs::write(&chunk_paths[1], &chunk_bytes).unwrap();
+        let chunk_bytes = fs::read(store.chunk_path(&chunk_hash).unwrap()).unwrap();
         assert_eq!(
             store.read_chunk_with_size(&chunk_hash).unwrap().1,
-            (chunk_bytes.len() * 2) as u64
+            chunk_bytes.len() as u64
         );
 
         let image_bytes = b"image-object";
         let image_hash = hash_bytes(image_bytes);
-        let image_paths = store
-            .content_path_candidates(ContentObjectKind::Image, &image_hash)
+        let image_path = store
+            .content_path(ContentObjectKind::Image, &image_hash)
             .unwrap();
-        fs::create_dir_all(image_paths[0].parent().unwrap()).unwrap();
-        fs::write(&image_paths[0], image_bytes).unwrap();
-        fs::write(&image_paths[1], image_bytes).unwrap();
+        fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+        fs::write(&image_path, image_bytes).unwrap();
         assert_eq!(
             store
                 .inspect_content_object(ContentObjectKind::Image, &image_hash)
                 .unwrap()
                 .size_bytes,
-            (image_bytes.len() * 2) as u64
+            image_bytes.len() as u64
         );
-        fs::write(&image_paths[1], b"poisoned-img").unwrap();
+
+        let poisoned = b"poisoned-img";
+        fs::write(&image_path, poisoned).unwrap();
         let accounted = store
             .inspect_content_accounted(ContentObjectKind::Image, &image_hash)
             .unwrap_err();
-        assert_eq!(
-            accounted.consumed_bytes,
-            (image_bytes.len() + b"poisoned-img".len()) as u64
-        );
+        assert_eq!(accounted.consumed_bytes, poisoned.len() as u64);
         assert_eq!(
             store
                 .inspect_content_object(ContentObjectKind::Image, &image_hash)
@@ -3019,26 +3150,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.error.error_code(), "KIO-E-STORE-CORRUPT-001");
         assert_eq!(failure.consumed_bytes, poisoned.len() as u64);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn ct4_fsck_repair_raw_keeps_dual_disagreement_fail_closed() {
-        let (_dir, store) = object_store();
-        let expected = b"dual repair bytes";
-        let hash = store.write_raw(expected).unwrap();
-        let paths = store
-            .object_path_candidates(ObjectKind::Raw, &hash)
-            .unwrap();
-        fs::write(&paths[1], expected).unwrap();
-        fs::write(&paths[0], b"corrupt canonical").unwrap();
-
-        assert_eq!(
-            store.repair_raw(&hash, expected).unwrap_err().error_code(),
-            "KIO-E-STORE-CORRUPT-001"
-        );
-        assert_eq!(fs::read(&paths[0]).unwrap(), b"corrupt canonical");
-        assert_eq!(fs::read(&paths[1]).unwrap(), expected);
     }
 
     #[cfg(any(unix, windows))]

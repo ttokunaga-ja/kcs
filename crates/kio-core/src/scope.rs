@@ -35,7 +35,6 @@ const FORMAT_VERSION: &str = "0.1.0";
 pub const DEFAULT_MAX_ARCHIVE_FILE_BYTES: u64 = MAX_RAW_OBJECT_BYTES;
 pub const DEFAULT_MAX_ARCHIVE_SCOPE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub use crate::dag::{MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES};
-const MAX_TAG_REFS: usize = 100_000;
 const MAX_TAG_REF_BYTES: u64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +223,6 @@ impl Repository {
             kio_dir.join("objects/trees"),
             kio_dir.join("objects/commits"),
             kio_dir.join("refs/heads"),
-            kio_dir.join("refs/tags"),
             kio_dir.join("refs").join(PORTABLE_TAGS_DIRECTORY),
             kio_dir.join("logs"),
         ] {
@@ -805,25 +803,7 @@ impl Repository {
         )
     }
 
-    pub fn auto_snapshot(
-        &self,
-        message: Option<&str>,
-        fixed_now: Option<&str>,
-        excluded_paths: &BTreeSet<String>,
-    ) -> Result<SnapshotOutcome> {
-        self.snapshot_with_type(
-            message,
-            fixed_now,
-            CommitType::Auto,
-            excluded_paths,
-            &BTreeMap::new(),
-            &BTreeSet::new(),
-            false,
-            &[],
-            true,
-        )
-    }
-
+ 
     pub fn auto_snapshot_with_normalize(
         &self,
         message: Option<&str>,
@@ -1544,9 +1524,8 @@ impl Repository {
             }
             Err(error) => return Err(error),
         }
-        let legacy_tags_dir = self.kio_dir.join("refs/tags");
         let canonical_tags_dir = ensure_portable_tags_directory(&self.kio_dir)?;
-        if !matching_tag_ref_paths(&legacy_tags_dir, &canonical_tags_dir, name)?.is_empty() {
+        if matching_tag_ref_path(&canonical_tags_dir, name)?.is_some() {
             return Err(KioError::new(
                 "KIO-E-COMMIT-TAG-001",
                 "tag already exists (tag names collide case-insensitively)",
@@ -1609,18 +1588,9 @@ impl Repository {
                 "commit reference collides with a reserved operand",
             ));
         }
-        let legacy_tags_dir = self.kio_dir.join("refs/tags");
         let canonical_tags_dir = self.kio_dir.join("refs").join(PORTABLE_TAGS_DIRECTORY);
-        let tag_paths = matching_tag_ref_paths(&legacy_tags_dir, &canonical_tags_dir, value)?;
-        if !tag_paths.is_empty() {
-            let mut hashes = BTreeSet::new();
-            for tag in tag_paths {
-                hashes.insert(read_tag_ref(&tag)?);
-            }
-            if hashes.len() != 1 {
-                return Err(tag_ref_conflict(value));
-            }
-            let hash = hashes.into_iter().next().expect("one tag hash");
+        if let Some(tag) = matching_tag_ref_path(&canonical_tags_dir, value)? {
+            let hash = read_tag_ref(&tag)?;
             // R17-5: a tag whose target commit object is shallow (discarded / corrupt)
             // folds into COMMIT-SHALLOW too, for the same reason as the hash-literal
             // branch above.
@@ -2618,62 +2588,23 @@ fn validate_ref_operand(value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Canonical hashed refs and legacy raw-name refs are both accepted on read.
-/// They live in disjoint directories so a legacy raw name can never alias a
-/// canonical physical leaf. New names collide by NFC + Unicode lowercase on
-/// every host. Legacy enumeration is bounded so a hostile refs directory cannot
-/// amplify work.
-fn matching_tag_ref_paths(
-    legacy_tags_dir: &Path,
-    canonical_tags_dir: &Path,
-    logical_name: &str,
-) -> Result<Vec<PathBuf>> {
-    let canonical = portable_tag_leaf(logical_name);
-    let collision_key = portable_collision_key(logical_name);
-    let mut matches = Vec::new();
-
-    if validate_tag_refs_directory(canonical_tags_dir, true)? {
-        let canonical_path = canonical_tags_dir.join(&canonical);
-        match fs::symlink_metadata(&canonical_path) {
-            Ok(_) => matches.push(canonical_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(KioError::io(
-                    error.to_string(),
-                    canonical_path.display().to_string(),
-                ))
-            }
-        }
+/// The canonical hashed ref is the only physical representation of a tag. The
+/// leaf is `sha256` over the NFC + simple-case-folded logical name, so
+/// case-insensitive collision is decided by the leaf itself — there is nothing
+/// to enumerate and no second namespace that could alias it.
+fn matching_tag_ref_path(canonical_tags_dir: &Path, logical_name: &str) -> Result<Option<PathBuf>> {
+    if !validate_tag_refs_directory(canonical_tags_dir, true)? {
+        return Ok(None);
     }
-
-    validate_tag_refs_directory(legacy_tags_dir, false)?;
-    let entries = fs::read_dir(legacy_tags_dir).kio_io(legacy_tags_dir)?;
-    for (index, entry) in entries.enumerate() {
-        if index >= MAX_TAG_REFS {
-            return Err(KioError::new(
-                "KIO-E-STORE-CORRUPT-001",
-                "tag ref count exceeds the bounded store limit",
-                json!({ "path": legacy_tags_dir }),
-                ExitCode::PermanentFailure,
-            ));
-        }
-        let entry = entry.kio_io(legacy_tags_dir)?;
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            return Err(KioError::new(
-                "KIO-E-STORE-CORRUPT-001",
-                "tag ref has a non-UTF-8 physical name",
-                json!({ "path": entry.path() }),
-                ExitCode::PermanentFailure,
-            ));
-        };
-        if portable_collision_key(file_name) == collision_key {
-            matches.push(entry.path());
-        }
+    let path = canonical_tags_dir.join(portable_tag_leaf(logical_name));
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(KioError::io(
+            error.to_string(),
+            path.display().to_string(),
+        )),
     }
-    matches.sort();
-    matches.dedup();
-    Ok(matches)
 }
 
 /// `.kio/refs/tags-v1/names.jsonl` (03-data-model.md §2 L80/141): the
@@ -2691,8 +2622,6 @@ pub fn names_jsonl_path(kio_dir: &Path) -> PathBuf {
 fn ensure_portable_tags_directory(kio_dir: &Path) -> Result<PathBuf> {
     let refs_dir = kio_dir.join("refs");
     validate_tag_refs_directory(&refs_dir, false)?;
-    let legacy_tags_dir = refs_dir.join("tags");
-    validate_tag_refs_directory(&legacy_tags_dir, false)?;
     let canonical_tags_dir = refs_dir.join(PORTABLE_TAGS_DIRECTORY);
     if !validate_tag_refs_directory(&canonical_tags_dir, true)? {
         match fs::create_dir(&canonical_tags_dir) {
@@ -2800,15 +2729,6 @@ fn tag_ref_corrupt(path: &Path, message: &str) -> KioError {
         "KIO-E-STORE-CORRUPT-001",
         message,
         json!({ "path": path }),
-        ExitCode::PermanentFailure,
-    )
-}
-
-fn tag_ref_conflict(logical_name: &str) -> KioError {
-    KioError::new(
-        "KIO-E-STORE-CORRUPT-001",
-        "canonical and legacy tag refs disagree",
-        json!({ "tag": logical_name }),
         ExitCode::PermanentFailure,
     )
 }
@@ -3930,8 +3850,7 @@ fn overwrite_scope_json_value(kio_dir: &Path, value: &Value) -> Result<()> {
 }
 
 /// Current `.kio/scope.json` `approvals[]` rows. Empty when the key is
-/// absent (no adapter has ever been approved for this scope) — migration
-/// -free backward compatibility (10 §12.3).
+/// absent — no adapter has ever been approved for this scope (10 §12.3).
 pub fn read_network_approvals(kio_dir: &Path) -> Result<Vec<Value>> {
     Ok(read_scope_json_value(kio_dir)?
         .get("approvals")
@@ -3977,11 +3896,7 @@ pub fn network_approval_active(
             && row.get("tool_id").and_then(Value::as_str) == Some(tool_id)
             && row.get("execution_mode").and_then(Value::as_str) == Some(execution_mode)
             && row.get("tool_profile_hash").and_then(Value::as_str) == Some(tool_profile_hash)
-            && row
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("active")
-                == "active"
+            && row.get("status").and_then(Value::as_str) == Some("active")
     }))
 }
 
@@ -4001,11 +3916,7 @@ pub fn network_approval_row_present(kio_dir: &Path, tool_id: &str) -> Result<boo
     Ok(approvals.iter().any(|row| {
         row.get("scope_id").and_then(Value::as_str) == Some(scope_id)
             && row.get("tool_id").and_then(Value::as_str) == Some(tool_id)
-            && row
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("active")
-                == "active"
+            && row.get("status").and_then(Value::as_str) == Some("active")
     }))
 }
 
@@ -4226,11 +4137,10 @@ pub fn revoke_network_approval(
     Ok(outcome)
 }
 
-/// 07 §3 L199-205 / 10 §12.3: locked-mutation cleanup for a LEGACY
-/// `approval_pending` — one missing `approved_at`/`approval_method` (10
-/// §12.3's element-level backward compat keeps this from being a schema
-/// error on write/read, but it can never exact-match self-heal's 4-tuple
-/// -plus-audit-values condition). Removes `approval_pending` and, in the SAME
+/// 07 §3 L199-205 / 10 §12.3: locked-mutation cleanup for a MALFORMED
+/// `approval_pending` — one missing `approved_at`/`approval_method`, which can
+/// never exact-match self-heal's 4-tuple-plus-audit-values condition and so
+/// must not sit there indefinitely. Removes `approval_pending` and, in the SAME
 /// atomic write, sets `approvals_initialized: true` if it is not already —
 /// mirroring [`revoke_network_approval`]'s pending-removal tail (07 §3:
 /// "この除去も approvals_initialized marker が無ければ同一 atomic write で
@@ -4313,9 +4223,9 @@ mod tests {
         );
     }
 
-    /// A legacy pending (missing `approved_at`/`approval_method`, 10 §12.3
-    /// element-level backward compat) removes cleanly and, since no marker
-    /// existed yet, sets `approvals_initialized: true` in the same write (07
+    /// A malformed pending (missing `approved_at`/`approval_method`) removes
+    /// cleanly and, since no marker existed yet, sets
+    /// `approvals_initialized: true` in the same write (07
     /// §3 L202-205 — the removal-consumes-the-initial-materialize-exception
     /// rule shared with `revoke_network_approval`'s pending-removal tail).
     #[test]
@@ -4920,7 +4830,7 @@ mod tests {
         let normalize = NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
             gen: 0,
-            manifest_hash: None,
+            manifest_hash: hash_bytes(b"manifest"),
         };
         let pending = BTreeMap::from([(
             "doc.txt".to_owned(),

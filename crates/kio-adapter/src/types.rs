@@ -93,12 +93,7 @@ pub struct AdapterProfile {
     /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): sync-call
     /// provider idempotency declaration — see [`ProviderIdempotency`].
     /// Output-inert (not part of `tool_profile_hash`, `identity::PROFILE_FIELDS`),
-    /// same posture as `billable_kinds`/`reject_billing` above. `#[serde(default)]`
-    /// so existing JSON fixtures (built before this field existed) keep
-    /// parsing — they degrade to `NotProvided`, the correct legacy reading (no
-    /// adapter declared a provider idempotency key before this contract
-    /// existed).
-    #[serde(default)]
+    /// same posture as `billable_kinds`/`reject_billing` above.
     pub provider_idempotency: ProviderIdempotency,
 }
 
@@ -161,7 +156,6 @@ pub struct AdapterRun {
     pub input_hashes: Vec<String>,
     pub output_hashes: Vec<String>,
     pub status: AdapterRunStatus,
-    pub error_kind: Option<String>,
     /// QA16: machine-judgeable error code (06 §8), independent of the coarse
     /// `error_category` bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,28 +170,6 @@ pub struct AdapterRun {
     /// QA17: request-scoped billing report — see [`AdapterUsage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AdapterUsage>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "adapter_kind", content = "payload", rename_all = "snake_case")]
-pub enum AdapterRequest {
-    Prepare(Box<PrepareRequest>),
-    Markdownize(Box<MarkdownizeRequest>),
-    Embedding(Box<EmbeddingRequest>),
-    Summary(Box<SummaryRequest>),
-    Classification(Box<ClassificationRequest>),
-    Rerank(Box<RerankRequest>),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "adapter_kind", content = "payload", rename_all = "snake_case")]
-pub enum AdapterResponse {
-    Prepare(Box<PrepareResponse>),
-    Markdownize(Box<MarkdownizeResponse>),
-    Embedding(Box<EmbeddingResponse>),
-    Summary(Box<SummaryResponse>),
-    Classification(Box<ClassificationResponse>),
-    Rerank(Box<RerankResponse>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,9 +274,7 @@ pub struct MarkdownizeRequest {
     /// leaves this `false` (whole document, no `pages`); the retry sets it `true`.
     #[serde(default)]
     pub restrict_to_hint_pages: bool,
-    /// Step 4 Mistral bbox annotation policy. Legacy serialized requests predate
-    /// the default-on contract, so deserialization supplies `true` when absent.
-    #[serde(default = "default_bbox_annotation_enabled")]
+    /// Step 4 Mistral bbox annotation policy.
     pub bbox_annotation_enabled: bool,
     pub tool_profile_hash: String,
     pub spec_version: u64,
@@ -319,10 +289,6 @@ pub struct MarkdownizeRequest {
     /// charge (e.g. the offline/free-local Markdownize path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_token: Option<String>,
-}
-
-const fn default_bbox_annotation_enabled() -> bool {
-    true
 }
 
 /// QA36 (step4b-contract-tests-p3a.md §K): one partially-failed unit (04 §3
@@ -454,51 +420,6 @@ pub fn validate_cosine_vector(vector: &[f32], dimensions: u32) -> crate::Result<
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummaryRequest {
-    pub normalized_refs: Vec<String>,
-    pub chunk_hashes: Vec<String>,
-    pub search_result_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SummaryResponse {
-    pub summary_hash: String,
-    pub source_hashes: Vec<String>,
-    pub summary_kind: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClassificationRequest {
-    pub raw_hashes: Vec<String>,
-    pub normalized_refs: Vec<String>,
-    pub chunk_hashes: Vec<String>,
-    pub image_object_hashes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClassificationResponse {
-    pub labels: Vec<String>,
-    pub categories: Vec<String>,
-    pub confidence: f64,
-    pub routing_metadata: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RerankRequest {
-    pub query: String,
-    pub candidate_result_ids: Vec<String>,
-    pub candidate_features: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RerankResponse {
-    pub reranked_result_ids: Vec<String>,
-    pub scores: BTreeMap<String, f64>,
-    pub searched_scopes: Vec<String>,
-    pub fallback_reason: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,28 +445,7 @@ mod tests {
 
         let value = serde_json::to_value(request).expect("serialize markdownize request");
         assert_eq!(value["mode"], "incremental");
-
-        let mut legacy = value;
-        legacy
-            .as_object_mut()
-            .expect("markdownize request serializes as an object")
-            .remove("bbox_annotation_enabled");
-        assert!(
-            serde_json::from_value::<MarkdownizeRequest>(legacy)
-                .expect("deserialize legacy markdownize request")
-                .bbox_annotation_enabled
-        );
-    }
-
-    #[test]
-    fn placeholder_adapter_request_is_tagged() {
-        let request = AdapterRequest::Prepare(Box::new(PrepareRequest {
-            raw_hash: "sha256:abc".to_owned(),
-            media_type: "text/plain".to_owned(),
-        }));
-
-        let value = serde_json::to_value(request).expect("serialize adapter request");
-        assert_eq!(value["adapter_kind"], "prepare");
+        assert_eq!(value["bbox_annotation_enabled"], true);
     }
 
     #[test]

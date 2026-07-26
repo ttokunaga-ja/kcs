@@ -24,6 +24,34 @@ pub(super) struct ParsedReindex {
 // B (2026-07-24): the hand-rolled `parse_args` was replaced by the clap
 // declaration on `ReindexArgs` in main.rs — see `run_reindex`.
 
+/// The unit keys this tree entry's PINNED manifest reports as `Done` — the
+/// state of the normalized instance at the commit being reindexed (03 §2.1).
+///
+/// A pinned hash whose object is GONE is an error rather than a silent fall
+/// back to the working copy. Purge deletes manifest objects, and the working
+/// copy is precisely the thing that may have moved on — answering from it is
+/// the defect, not the recovery. The caller records the instance in
+/// `skipped_units`, which is how every other unreadable-unit case already
+/// surfaces.
+fn pinned_done_unit_keys(repo: &Repository, normalize: &NormalizeRef) -> Result<BTreeSet<String>> {
+    let manifest_hash = &normalize.manifest_hash;
+    let store = ObjectStore::new(repo.kio_dir());
+    let bytes = store.read_content_object_bytes(
+        ContentObjectKind::Manifest,
+        manifest_hash,
+        MAX_MANIFEST_OBJECT_READ_BYTES,
+    )?;
+    let manifest_path = store.content_path(ContentObjectKind::Manifest, manifest_hash)?;
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| crate::store_corrupt_error(&manifest_path, error.to_string()))?;
+    Ok(manifest
+        .units
+        .iter()
+        .filter(|unit| unit.status == UnitStatus::Done)
+        .map(|unit| unit.unit_key.clone())
+        .collect())
+}
+
 pub(super) fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Value>) {
     let seen: BTreeSet<String> = report
         .skipped_units
@@ -211,7 +239,12 @@ pub(super) fn retained_history_instances(
                 manifest_hash: binding
                     .normalize
                     .as_ref()
-                    .and_then(|normalize| normalize.manifest_hash.clone()),
+                    .map(|normalize| normalize.manifest_hash.clone())
+                    .ok_or_else(|| {
+                        KioError::schema(
+                            "retained normalized instance winner has no normalize ref",
+                        )
+                    })?,
             },
             raw_path: binding.path,
             embedding_path,
@@ -335,13 +368,39 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     let mut reindexed_instances = 0_u64;
 
     for instance in selected.values() {
+        // R25-10: which units were DONE at `selected_commit`, per the manifest
+        // object that commit's tree pinned — not per the working copy.
+        //
+        // `load_normalized_units` reads `manifest.json`, which 03 §2.1 defines
+        // as "最新版の作業コピー": a same-gen partial retry rewrites it in place,
+        // so a unit that only completed AFTER this commit reads as Done. Without
+        // this filter `reindex --at C1` chunks that unit and records its
+        // publication as C1, and `search --at C1` then returns text that did not
+        // exist at C1 — the exact failure `--at` exists to prevent. The pinned
+        // hash is already in hand (`normalize.manifest_hash`, tree schema v2);
+        // nothing was consulting it.
+        let pinned = match pinned_done_unit_keys(repo, &instance.normalize) {
+            Ok(pinned) => pinned,
+            Err(error) => {
+                skipped_units.push(json!({
+                    "raw_hash": instance.raw_hash,
+                    "path": instance.raw_path,
+                    "gen": instance.normalize.gen,
+                    "reason": error.error_code(),
+                }));
+                continue;
+            }
+        };
         let units = match load_normalized_units(
             repo.kio_dir(),
             &instance.raw_hash,
             &instance.normalize.tool_profile_hash,
             instance.normalize.gen,
         ) {
-            Ok(units) => units,
+            Ok(units) => units
+                .into_iter()
+                .filter(|unit| pinned.contains(&unit.unit_key))
+                .collect(),
             Err(error) if is_rebuild_skippable_unit_error(&error) => {
                 skipped_units.push(json!({
                     "raw_hash": instance.raw_hash,
@@ -551,10 +610,31 @@ fn project_selected_snapshot(
         Ok(())
     })();
     match publish {
-        Ok(()) => fts
-            .connection()
-            .execute_batch("COMMIT")
-            .map_err(|error| KioError::schema(error.to_string())),
+        Ok(()) => {
+            fts.connection()
+                .execute_batch("COMMIT")
+                .map_err(|error| KioError::schema(error.to_string()))?;
+            // 05 §1.8 write-through. This path publishes chunk TEXT into the
+            // live `sqlite.db` in place — no temp+rename — so it is the one
+            // in-place writer that changes the text corpus itself.
+            //
+            // The rotation is what makes the write-through recoverable rather
+            // than a single point of failure (R25-4): until R25 this command
+            // rotated nowhere, so a failed projection left the stamp naming a
+            // state the index had already left, the lazy refresh that is meant
+            // to be the safety net never fired, and the replica stayed wrong
+            // for good. It is also what LC25 requires on its own terms — a
+            // command that republishes the text corpus can certainly make a
+            // cursor replay rank differently.
+            //
+            // A full projection because the published set is a snapshot, not an
+            // increment: `index_chunk_with_rowids` re-affirms existing rows as
+            // readily as it adds new ones.
+            drop(fts);
+            crate::rotate_index_generation_unconditionally(repo.kio_dir())?;
+            crate::write_through_projection_or_log(repo.kio_dir());
+            Ok(())
+        }
         Err(error) => {
             let _ = fts.connection().execute_batch("ROLLBACK");
             Err(error)

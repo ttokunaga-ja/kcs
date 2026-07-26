@@ -363,18 +363,18 @@ fn parse_workbook_sheets(xml: &[u8]) -> Result<Vec<SheetRef>> {
     let mut sheets = Vec::new();
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_error)? {
-            Event::Empty(event) | Event::Start(event) => {
-                if local_name(event.name().as_ref()) == b"sheet" {
-                    let Some(name) = attribute(&event, "name") else {
-                        return Err(AdapterError::ContractViolation(
-                            "XLSX workbook declares a sheet with no name".to_owned(),
-                        ));
-                    };
-                    sheets.push(SheetRef {
-                        name,
-                        rel_id: attribute(&event, "id"),
-                    });
-                }
+            Event::Empty(event) | Event::Start(event)
+                if local_name(event.name().as_ref()) == b"sheet" =>
+            {
+                let Some(name) = attribute(&event, "name") else {
+                    return Err(AdapterError::ContractViolation(
+                        "XLSX workbook declares a sheet with no name".to_owned(),
+                    ));
+                };
+                sheets.push(SheetRef {
+                    name,
+                    rel_id: attribute(&event, "id"),
+                });
             }
             Event::Eof => break,
             _ => {}
@@ -395,13 +395,13 @@ fn parse_relationships(xml: &[u8]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_error)? {
-            Event::Empty(event) | Event::Start(event) => {
-                if local_name(event.name().as_ref()) == b"Relationship" {
-                    if let (Some(id), Some(target)) =
-                        (attribute(&event, "Id"), attribute(&event, "Target"))
-                    {
-                        map.insert(id, target);
-                    }
+            Event::Empty(event) | Event::Start(event)
+                if local_name(event.name().as_ref()) == b"Relationship" =>
+            {
+                if let (Some(id), Some(target)) =
+                    (attribute(&event, "Id"), attribute(&event, "Target"))
+                {
+                    map.insert(id, target);
                 }
             }
             Event::Eof => break,

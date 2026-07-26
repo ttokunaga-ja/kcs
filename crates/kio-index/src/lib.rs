@@ -3,10 +3,10 @@
 //! This crate intentionally contains only types and trait skeletons for the
 //! chunking, FTS, embedding, tree projection, and rebuild layers.
 
+pub mod aggregator;
 pub mod chunking;
 pub mod embedding_store;
 pub mod fts;
-pub mod global_text;
 pub mod registry;
 pub mod rows;
 pub mod vec;

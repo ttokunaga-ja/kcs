@@ -9,7 +9,8 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use kio_core::cas::{hash_bytes, ContentObjectKind, ObjectKind, ObjectStore};
+use base64::Engine;
+use kio_core::cas::{hash_bytes, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore};
 use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
@@ -128,34 +129,86 @@ fn write_content_bytes(kio_dir: &Path, kind_dir: &str, bytes: &[u8]) -> String {
 // §A/§B — fsck verification-target expansion (U39/U40).
 // ===========================================================================
 
+/// An embedding object in the canonical 03 §8.1 form, filed under its own
+/// identity hash. `spec_version`/`target_type`/… are the identity fields the
+/// storage key is computed from; the vector rides in the body.
+fn write_embedding_fixture(kio_dir: &Path, vector: &[f32], declared_dimensions: u64) -> String {
+    let object = EmbeddingObject {
+        spec_version: 1,
+        target_type: "chunk".to_owned(),
+        target_hash: "sha256:fixture-text".to_owned(),
+        profile_hash: "sha256:fixture-profile".to_owned(),
+        modality: "multimodal".to_owned(),
+        dimensions: declared_dimensions,
+        distance: "cosine".to_owned(),
+        context: None,
+        vector: vector.to_vec(),
+    };
+    // Written by hand rather than through `write_embedding`, because several of
+    // these fixtures are deliberately invalid and the store would refuse them.
+    // Several of these fixtures are invalid on purpose (wrong length, NaN) and
+    // cannot compute their own identity, so the key comes from a sanitized
+    // sibling. The identity fields are unaffected by the vector either way —
+    // the key names what the vector is OF — so this is the same key the fixture
+    // would have had if it were well-formed, which is what lets fsck find it.
+    let mut keyed = object.clone();
+    keyed.vector = vec![0.0; keyed.dimensions as usize];
+    let hash = keyed.identity_hash().unwrap();
+    let bytes = embedding_fixture_bytes(&object);
+    let path = content_path(kio_dir, ContentObjectKind::Embedding.directory(), &hash);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+    hash
+}
+
+/// The 03 §8.1 byte layout, assembled without the validation `to_bytes` does,
+/// so a fixture can be invalid on purpose.
+fn embedding_fixture_bytes(object: &EmbeddingObject) -> Vec<u8> {
+    let header = serde_jcs::to_vec(&serde_json::json!({
+        "dimensions": object.dimensions,
+        "distance": object.distance,
+        "modality": object.modality,
+        "profile_hash": object.profile_hash,
+        "spec_version": object.spec_version,
+        "target_hash": object.target_hash,
+        "target_type": object.target_type,
+    }))
+    .unwrap();
+    let mut vector_bytes = Vec::new();
+    for component in &object.vector {
+        vector_bytes.extend_from_slice(&component.to_le_bytes());
+    }
+    let mut out = header;
+    out.push(b'\n');
+    out.extend_from_slice(
+        base64::engine::general_purpose::STANDARD
+            .encode(&vector_bytes)
+            .as_bytes(),
+    );
+    out.push(b'\n');
+    out.extend_from_slice(
+        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&vector_bytes)).as_bytes(),
+    );
+    out
+}
+
 /// PB01 (a)(c)(f): a well-formed embedding object (declared dimensions ==
-/// vector length, all finite, digest matches) passes verification cleanly.
+/// vector length, all finite, digest matches, identity matches its key) passes
+/// verification cleanly.
 #[test]
 fn pb01_embedding_valid_vector_passes_verification() {
     let (dir, ..) = fixture();
-    write_content_bytes(
-        &kio_dir(&dir),
-        ContentObjectKind::Embedding.directory(),
-        serde_json::to_string(&serde_json::json!({"dimensions": 3, "vector": [0.1, 0.2, 0.3]}))
-            .unwrap()
-            .as_bytes(),
-    );
+    write_embedding_fixture(&kio_dir(&dir), &[0.1, 0.2, 0.3], 3);
     let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["checked"]["embeddings"], 1, "{output}");
 }
 
-/// PB01 (b): declared `dimensions` does not match `vector.len()` — a finding.
+/// PB01 (b): declared `dimensions` does not match the vector length — a finding.
 #[test]
 fn pb01_embedding_length_mismatch_is_a_finding() {
     let (dir, ..) = fixture();
-    write_content_bytes(
-        &kio_dir(&dir),
-        ContentObjectKind::Embedding.directory(),
-        serde_json::to_string(&serde_json::json!({"dimensions": 3, "vector": [0.1, 0.2]}))
-            .unwrap()
-            .as_bytes(),
-    );
+    write_embedding_fixture(&kio_dir(&dir), &[0.1, 0.2], 3);
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
@@ -165,18 +218,15 @@ fn pb01_embedding_length_mismatch_is_a_finding() {
         .any(|finding| finding["kind"] == "embedding_corrupt"));
 }
 
-/// PB01 (d)/(e): a non-finite (`NaN`/`Infinity`) vector element is a finding
-/// — standard JSON forbids these literals, so a byte-level-corrupt embedding
-/// object fails to parse at all (still `embedding_corrupt`, PB01 only
-/// requires the finding, not a specific internal code path).
+/// PB01 (d)/(e): a non-finite (`NaN`/`Infinity`) vector element is a finding.
+///
+/// Unlike the old JSON body, the binary layout can CARRY a NaN — it is just a
+/// bit pattern — so this now exercises the explicit finiteness check rather
+/// than a JSON parse error.
 #[test]
 fn pb01_embedding_non_finite_vector_element_is_a_finding() {
     let (dir, ..) = fixture();
-    write_content_bytes(
-        &kio_dir(&dir),
-        ContentObjectKind::Embedding.directory(),
-        br#"{"dimensions": 1, "vector": [NaN]}"#,
-    );
+    write_embedding_fixture(&kio_dir(&dir), &[f32::NAN], 1);
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
@@ -186,22 +236,61 @@ fn pb01_embedding_non_finite_vector_element_is_a_finding() {
         .any(|finding| finding["kind"] == "embedding_corrupt"));
 }
 
-/// PB01 (g): stored bytes do not hash to the object's own leaf name — a
-/// finding (digest mismatch).
+/// PB01 (g): the vector's bytes do not match the digest recorded beside them —
+/// a finding.
+///
+/// This is the check that has no substitute. An embedding's storage key hashes
+/// its IDENTITY (03 §8.1), so unlike every other content-addressed kind, the
+/// key says nothing about the body: a bit flip inside the vector is invisible
+/// to it and visible only to the trailing digest.
 #[test]
 fn pb01_embedding_digest_mismatch_is_a_finding() {
     let (dir, ..) = fixture();
-    let hash = write_content_bytes(
-        &kio_dir(&dir),
-        ContentObjectKind::Embedding.directory(),
-        br#"{"dimensions": 1, "vector": [0.5]}"#,
-    );
+    let hash = write_embedding_fixture(&kio_dir(&dir), &[0.5], 1);
     let path = content_path(
         &kio_dir(&dir),
         ContentObjectKind::Embedding.directory(),
         &hash,
     );
-    fs::write(&path, br#"{"dimensions": 1, "vector": [0.9]}"#).unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    let flipped = if lines[1].starts_with('A') {
+        format!("B{}", &lines[1][1..])
+    } else {
+        format!("A{}", &lines[1][1..])
+    };
+    lines[1] = &flipped;
+    fs::write(&path, lines.join("\n")).unwrap();
+    let (code, output) = run(&dir, &["repair", "verify-objects"]);
+    assert_eq!(code, 3, "{output}");
+    assert!(output["remaining_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["kind"] == "embedding_corrupt"));
+}
+
+/// PB01 (2026-07-26, R25-6): an object filed under someone else's identity is a
+/// finding — the check that replaces the generic content-hash comparison every
+/// other CAS kind gets.
+#[test]
+fn pb01_embedding_under_a_foreign_identity_is_a_finding() {
+    let (dir, ..) = fixture();
+    let hash = write_embedding_fixture(&kio_dir(&dir), &[0.5], 1);
+    let bytes = fs::read(content_path(
+        &kio_dir(&dir),
+        ContentObjectKind::Embedding.directory(),
+        &hash,
+    ))
+    .unwrap();
+    let foreign = "sha256:0000000000000000000000000000000000000000000000000000000000000001";
+    let path = content_path(
+        &kio_dir(&dir),
+        ContentObjectKind::Embedding.directory(),
+        foreign,
+    );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
     assert!(output["remaining_findings"]
@@ -813,44 +902,79 @@ fn pb45_chunk_backed_by_non_done_unit_resolves_not_found() {
     // directly (fsck-style fixture — `read_content_object_bytes` does not
     // itself re-verify the digest) so this test exercises the actual
     // same-gen-retry scenario 6a guards against, not a stale read path.
-    if let Some(manifest_hash) = &normalize.manifest_hash {
-        let manifest_path = content_path(
-            &kio_dir(&dir),
-            ContentObjectKind::Manifest.directory(),
-            manifest_hash,
-        );
-        let mut manifest: Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        for unit in manifest["units"].as_array_mut().unwrap() {
-            unit["status"] = serde_json::json!("failed");
-        }
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    } else {
-        // v1 legacy fallback (no `manifest_hash`): mutate the live
-        // working-copy manifest.json directly — the only source 6a's
-        // lenient legacy resolution ever reads.
-        // `objects/normalized_units/<raw[0:2]>/<raw[2:4]>/<raw_digest>.<tool_profile_digest>.g<gen>/manifest.json`
-        // — bare (no `sha256:` prefix) digests in the instance leaf name.
-        let raw_digest = entry.raw_hash.trim_start_matches("sha256:");
-        let tool_digest = normalize.tool_profile_hash.trim_start_matches("sha256:");
-        let instance_leaf = format!("{raw_digest}.{tool_digest}.g{}", normalize.gen);
-        let manifest_path = kio_dir(&dir)
-            .join("objects/normalized_units")
-            .join(&raw_digest[0..2])
-            .join(&raw_digest[2..4])
-            .join(instance_leaf)
-            .join("manifest.json");
-        let mut manifest: Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        for unit in manifest["units"].as_array_mut().unwrap() {
-            unit["status"] = serde_json::json!("failed");
-        }
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let manifest_path = content_path(
+        &kio_dir(&dir),
+        ContentObjectKind::Manifest.directory(),
+        &normalize.manifest_hash,
+    );
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for unit in manifest["units"].as_array_mut().unwrap() {
+        unit["status"] = serde_json::json!("failed");
     }
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
     let pointer_json = serde_json::to_string(&pointer).unwrap();
     let output = success(&dir, &["evidence", "verify", &pointer_json]);
     assert_eq!(output["status"], "not_found", "{output}");
+}
+
+/// R25-10: `reindex --at` reads the PINNED manifest, not the working copy.
+///
+/// `manifest.json` is defined as the latest working copy (03 §2.1) — a same-gen
+/// partial retry rewrites it in place. Historical reindex loaded it and chunked
+/// every unit it called `done`, then recorded those chunks' publication under
+/// the commit being reindexed. So a unit that only completed AFTER commit `C`
+/// became, retroactively, text that existed at `C`, and `search --at C` would
+/// return it. The tree entry pinned the right manifest object all along
+/// (`normalize.manifest_hash`, tree schema v2); nothing consulted it.
+///
+/// This is PB45's fixture applied to the enrichment path: freeze a manifest
+/// object whose units are NOT done, and require the reindex to believe it.
+#[test]
+fn pb45_historical_reindex_reads_the_pinned_manifest_not_the_working_copy() {
+    let (dir, pointer, _) = fixture();
+    let commit = pointer["commit"].as_str().unwrap().to_owned();
+    let repo = Repository::open(dir.path()).unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&commit).unwrap().tree)
+        .unwrap();
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .unwrap();
+    let manifest_hash = entry.normalize.as_ref().unwrap().manifest_hash.clone();
+
+    // The pinned object says this unit was never finished at `commit`. The
+    // working copy — untouched — still says it was, exactly as a same-gen
+    // retry would leave it.
+    let manifest_path = content_path(
+        &kio_dir(&dir),
+        ContentObjectKind::Manifest.directory(),
+        &manifest_hash,
+    );
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for unit in manifest["units"].as_array_mut().unwrap() {
+        unit["status"] = serde_json::json!("failed");
+    }
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    // A changed chunking config is what gives `reindex --at` real work: it
+    // appends the missing current-config associations. Without the pinned
+    // manifest the units all read `done` from the working copy and chunks would
+    // be appended under `commit`.
+    fs::write(
+        kio_dir(&dir).join("config.toml"),
+        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
+    )
+    .unwrap();
+
+    let reindex = success(&dir, &["reindex", "--at", &commit]);
+    assert_eq!(
+        reindex["rebuilt_chunks"], 0,
+        "a unit the pinned manifest calls unfinished must not be chunked into \
+         this commit: {reindex}"
+    );
 }
 
 // ===========================================================================
@@ -1287,7 +1411,7 @@ fn pb42_open_view_side_binds_to_pointer_tool_profile_hash_not_first_raw_hash_mat
     let alias_normalize = NormalizeRef {
         tool_profile_hash: hash_bytes(b"a different tool profile entirely"),
         gen: real_normalize.gen + 7,
-        manifest_hash: None,
+        manifest_hash: hash_bytes(b"an unrelated manifest"),
     };
     let mut alias_entry = TreeEntry::raw_file("a-alias.md", real_entry.raw_hash.clone()).unwrap();
     alias_entry.normalize = Some(alias_normalize);

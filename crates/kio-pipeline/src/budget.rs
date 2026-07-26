@@ -77,15 +77,6 @@ pub struct BudgetCaps {
     pub warn_at_percent: u8,
 }
 
-pub fn evaluate_budget(estimate: BudgetEstimate) -> Result<BudgetDecision> {
-    Ok(evaluate_budget_with_caps(
-        &estimate,
-        f64::INFINITY,
-        None,
-        false,
-    ))
-}
-
 #[must_use]
 pub fn evaluate_budget_with_caps(
     estimate: &BudgetEstimate,
@@ -126,17 +117,6 @@ pub fn estimate_local_baseline_cost(size_bytes: u64) -> f64 {
     } else {
         size_bytes as f64 / 1_000_000.0 * 0.01
     }
-}
-
-pub fn read_budget_caps(
-    device_config_path: impl AsRef<Path>,
-    folder_config_path: impl AsRef<Path>,
-) -> Result<(Option<f64>, Option<f64>)> {
-    let policy = read_budget_policy(device_config_path, folder_config_path)?;
-    Ok((
-        Some(policy.device_monthly_usd_cap),
-        policy.folder_monthly_usd_cap,
-    ))
 }
 
 pub fn read_budget_policy(
@@ -311,41 +291,6 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
     })
 }
 
-pub fn read_budget_caps_legacy(
-    device_config_path: impl AsRef<Path>,
-    folder_config_path: impl AsRef<Path>,
-) -> Result<(Option<f64>, Option<f64>)> {
-    Ok((
-        read_monthly_cap(device_config_path)?,
-        read_monthly_cap(folder_config_path)?,
-    ))
-}
-
-fn read_monthly_cap(config_path: impl AsRef<Path>) -> Result<Option<f64>> {
-    let path = config_path.as_ref();
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(PipelineError::Io {
-                path: path.display().to_string(),
-                message: err.to_string(),
-            });
-        }
-    };
-    let value: toml::Value =
-        toml::from_str(&text).map_err(|err| PipelineError::Schema(err.to_string()))?;
-    let budget = value.get("budget");
-    Ok(budget
-        .and_then(|value| value.get("monthly_usd_cap"))
-        .and_then(toml::Value::as_float)
-        .or_else(|| {
-            budget
-                .and_then(|value| value.get("monthly_usd_cap"))
-                .and_then(toml::Value::as_integer)
-                .map(|value| value as f64)
-        }))
-}
 
 #[cfg(test)]
 mod tests {

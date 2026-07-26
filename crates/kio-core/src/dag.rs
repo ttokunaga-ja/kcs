@@ -20,13 +20,10 @@ pub struct NormalizeRef {
     /// PB04 (step4b-contract-tests-p2b.md §B; 03-data-model.md §8, tree
     /// schema v2): content hash of this (raw_hash, tool_profile_hash,
     /// gen)'s normalized-instance manifest.json canonical JCS bytes
-    /// (`objects/manifests/` — 03-data-model.md §2.1). `None` = a v1 tree
-    /// entry (legacy, predates this field — 10 §7.5.1 L501-504 "v1 tree
-    /// (両フィールド欠落) は legacy として読取可"), omitted from
-    /// serialization rather than written `null` (03 §5.1's
-    /// omission-vs-null rule preserved for forward compatibility).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manifest_hash: Option<String>,
+    /// (`objects/manifests/` — 03-data-model.md §2.1). Required: an entry
+    /// that cannot name its manifest cannot be resolved point-in-time, so
+    /// writing one is a failure, not a degraded record to read later.
+    pub manifest_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,19 +73,15 @@ impl TreeEntry {
                     "tool_profile_hash must be sha256 lowercase hex",
                 ));
             }
-            // PB04: manifest_hash is optional (v1 legacy omission), but when
-            // present must be a well-formed content hash — the same
-            // format-only check `tool_profile_hash` gets above. The
-            // cross-reference (does this hash resolve to a real manifest
-            // object whose identity fields agree with this entry?) is a
-            // `kio repair --verify-objects` corpus-shaped check (PB04's CAS
+            // PB04: format-only check, the same one `tool_profile_hash` gets
+            // above. The cross-reference (does this hash resolve to a real
+            // manifest object whose identity fields agree with this entry?) is
+            // a `kio repair --verify-objects` corpus-shaped check (PB04's CAS
             // re-hash comparison), not a per-entry schema invariant.
-            if let Some(manifest_hash) = &normalize.manifest_hash {
-                if !is_hash(manifest_hash) {
-                    return Err(KioError::schema(
-                        "manifest_hash must be sha256 lowercase hex",
-                    ));
-                }
+            if !is_hash(&normalize.manifest_hash) {
+                return Err(KioError::schema(
+                    "manifest_hash must be sha256 lowercase hex",
+                ));
             }
         }
         Ok(())
@@ -486,6 +479,8 @@ mod tests {
         "sha256:9a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffa";
     const TOOL_HASH: &str =
         "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb";
+    const MANIFEST_HASH: &str =
+        "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f";
 
     fn commit_with_created_at(created_at: &str) -> Result<CommitObject> {
         CommitObject::new(
@@ -546,20 +541,21 @@ mod tests {
     }
 
     #[test]
-    fn semantic_tree_validation_accepts_legacy_controls() {
-        let legacy: TreeObject = serde_json::from_value(json!({
+    fn semantic_tree_validation_accepts_portable_controls() {
+        // `gen` defaults to 0 when omitted; `manifest_hash` does not default.
+        let tree: TreeObject = serde_json::from_value(json!({
             "object_type": "tree",
             "entries": [{
                 "path": "notes.md",
                 "type": "file",
                 "raw_hash": RAW_HASH,
-                "normalize": { "tool_profile_hash": TOOL_HASH }
+                "normalize": { "tool_profile_hash": TOOL_HASH, "manifest_hash": MANIFEST_HASH }
             }]
         }))
         .unwrap();
 
-        assert_eq!(legacy.entries[0].normalize.as_ref().unwrap().gen, 0);
-        assert!(legacy.validate().is_ok());
+        assert_eq!(tree.entries[0].normalize.as_ref().unwrap().gen, 0);
+        assert!(tree.validate().is_ok());
         assert!(build_tree(Vec::new()).unwrap().validate().is_ok());
         assert!(build_tree(vec![valid_entry("raw.txt", RAW_HASH)])
             .unwrap()
@@ -617,7 +613,7 @@ mod tests {
                     "path":"notes.md",
                     "type":"file",
                     "raw_hash":RAW_HASH,
-                    "normalize":{"tool_profile_hash":"../../outside","gen":0}
+                    "normalize":{"tool_profile_hash":"../../outside","gen":0,"manifest_hash":MANIFEST_HASH}
                 }]
             }),
         ];
