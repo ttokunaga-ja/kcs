@@ -91,9 +91,8 @@ pub fn extract_xlsx(bytes: &[u8]) -> Result<XlsxDocument> {
     let entries = read_zip_entries(bytes)?;
     let get = |name: &str| -> Option<&ZipEntry> { entries.iter().find(|entry| entry.name == name) };
 
-    let workbook = get("xl/workbook.xml").ok_or_else(|| {
-        AdapterError::ContractViolation("XLSX has no xl/workbook.xml".to_owned())
-    })?;
+    let workbook = get("xl/workbook.xml")
+        .ok_or_else(|| AdapterError::ContractViolation("XLSX has no xl/workbook.xml".to_owned()))?;
     let workbook_xml = inflate_entry(bytes, workbook)?;
     let sheet_refs = parse_workbook_sheets(&workbook_xml)?;
     if sheet_refs.len() > MAX_XLSX_SHEETS {
@@ -768,10 +767,8 @@ fn classify_format(code: &str) -> FormatKind {
     if date || time {
         // `h:mm` alone sets both `date` (via m) and `time`; require an explicit
         // y/d to call it a date.
-        let real_date = code
-            .chars()
-            .any(|ch| matches!(ch, 'y' | 'Y' | 'd' | 'D'))
-            || (date && !time);
+        let real_date =
+            code.chars().any(|ch| matches!(ch, 'y' | 'Y' | 'd' | 'D')) || (date && !time);
         return FormatKind::DateTime {
             date: real_date,
             time,
@@ -1066,10 +1063,7 @@ mod tests {
 
     #[test]
     fn a_pipe_in_a_cell_cannot_break_the_table() {
-        let grid = vec![
-            vec!["a|b".into(), "c".into()],
-            vec!["d".into(), "e".into()],
-        ];
+        let grid = vec![vec!["a|b".into(), "c".into()], vec!["d".into(), "e".into()]];
         assert!(grid_to_markdown(&grid).contains("a\\|b"));
     }
 

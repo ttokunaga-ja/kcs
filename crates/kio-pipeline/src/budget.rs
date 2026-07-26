@@ -291,7 +291,6 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

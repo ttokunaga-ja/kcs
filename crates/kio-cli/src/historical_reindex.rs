@@ -241,9 +241,7 @@ pub(super) fn retained_history_instances(
                     .as_ref()
                     .map(|normalize| normalize.manifest_hash.clone())
                     .ok_or_else(|| {
-                        KioError::schema(
-                            "retained normalized instance winner has no normalize ref",
-                        )
+                        KioError::schema("retained normalized instance winner has no normalize ref")
                     })?,
             },
             raw_path: binding.path,

@@ -338,8 +338,8 @@ impl Aggregator {
         }
         let tx = self.conn.transaction()?;
         {
-            let mut rowid_of = tx
-                .prepare("SELECT rowid FROM agg_chunks WHERE scope_id = ?1 AND chunk_id = ?2")?;
+            let mut rowid_of =
+                tx.prepare("SELECT rowid FROM agg_chunks WHERE scope_id = ?1 AND chunk_id = ?2")?;
             let mut vecs = tx.prepare(
                 "INSERT INTO agg_embeddings(chunk_rowid, scope_id, vector, dimensions)
                  VALUES (?1, ?2, ?3, ?4)
@@ -563,16 +563,20 @@ impl Aggregator {
         let chunks: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM agg_chunks", [], |row| row.get(0))?;
-        let vectors: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM agg_embeddings", [], |row| row.get(0))?;
+        let vectors: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM agg_embeddings", [], |row| row.get(0))?;
         Ok((scopes as u64, chunks as u64, vectors as u64))
     }
 }
 
 /// Drop every row of one scope (the scope itself is leaving).
 fn delete_scope_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<()> {
-    let doomed = stored_rows(tx, "SELECT rowid, text, heading_path FROM agg_chunks WHERE scope_id = ?1", params![scope_id])?;
+    let doomed = stored_rows(
+        tx,
+        "SELECT rowid, text, heading_path FROM agg_chunks WHERE scope_id = ?1",
+        params![scope_id],
+    )?;
     unindex(tx, &doomed)?;
     tx.execute(
         "DELETE FROM agg_embeddings WHERE scope_id = ?1",
@@ -735,7 +739,9 @@ mod tests {
         big.extend((0..40).map(|i| chunk(&format!("f{i}"), "unrelated filler about invoices")));
         index.refresh_scope("big", "gen1", &big, 1).unwrap();
 
-        let scores = index.text_scores("rollback", &only(&["tiny", "big"]), 100).unwrap();
+        let scores = index
+            .text_scores("rollback", &only(&["tiny", "big"]), 100)
+            .unwrap();
         let a = scores.iter().find(|s| s.chunk_id == "a").unwrap();
         let b = scores.iter().find(|s| s.chunk_id == "b").unwrap();
         assert!(
@@ -822,7 +828,10 @@ mod tests {
             .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
             .unwrap()
             .is_empty());
-        assert_eq!(index.scope_generation("s").unwrap().as_deref(), Some("gen2"));
+        assert_eq!(
+            index.scope_generation("s").unwrap().as_deref(),
+            Some("gen2")
+        );
     }
 
     #[test]
@@ -831,7 +840,9 @@ mod tests {
         // the projection that first picks the chunk up carries its vector. An
         // orphan vector row would just be unreachable by every join.
         let (_dir, mut index) = store();
-        index.refresh_scope("s", "gen1", &[chunk("a", "alpha")], 1).unwrap();
+        index
+            .refresh_scope("s", "gen1", &[chunk("a", "alpha")], 1)
+            .unwrap();
         let delta = ScopeDelta {
             vectors_added: vec![("not-yet-projected".to_owned(), vec![1.0, 0.0])],
         };
@@ -853,10 +864,16 @@ mod tests {
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(
-            index.text_scores("beta", &only(&["s"]), 10).unwrap().is_empty(),
+            index
+                .text_scores("beta", &only(&["s"]), 10)
+                .unwrap()
+                .is_empty(),
             "the dropped chunk must leave the FTS too, not just the content table"
         );
-        assert_eq!(index.scope_generation("s").unwrap().as_deref(), Some("gen2"));
+        assert_eq!(
+            index.scope_generation("s").unwrap().as_deref(),
+            Some("gen2")
+        );
     }
 
     #[test]
@@ -979,7 +996,10 @@ mod tests {
             .refresh_scope(
                 "small",
                 "g",
-                &[chunk("s0", "rollback happened once in a much longer document")],
+                &[chunk(
+                    "s0",
+                    "rollback happened once in a much longer document",
+                )],
                 1,
             )
             .unwrap();
@@ -994,7 +1014,10 @@ mod tests {
 
         let narrowed = index.text_scores("rollback", &only(&["small"]), 2).unwrap();
         assert_eq!(
-            narrowed.iter().map(|s| s.chunk_id.as_str()).collect::<Vec<_>>(),
+            narrowed
+                .iter()
+                .map(|s| s.chunk_id.as_str())
+                .collect::<Vec<_>>(),
             ["s0"],
             "a narrowed search must be ranked among the scopes it searched"
         );
@@ -1023,7 +1046,9 @@ mod tests {
             .find(|score| score.chunk_id == "s0")
             .unwrap()
             .bm25;
-        let narrowed = index.text_scores("rollback", &only(&["small"]), 100).unwrap();
+        let narrowed = index
+            .text_scores("rollback", &only(&["small"]), 100)
+            .unwrap();
         assert_eq!(narrowed[0].bm25, in_whole);
     }
 
@@ -1051,7 +1076,10 @@ mod tests {
             .refresh_scope("unsearched", "gen1", &[chunk("y", "beta")], 3)
             .unwrap();
         let after_new_scope = index.collection_generation().unwrap();
-        assert_ne!(after_new_scope, before, "a new scope changes the collection");
+        assert_ne!(
+            after_new_scope, before,
+            "a new scope changes the collection"
+        );
 
         index
             .refresh_scope("a", "gen2", &[chunk("x", "alpha")], 4)
@@ -1080,9 +1108,21 @@ mod tests {
     #[test]
     fn ranks_are_dense_and_ordered_by_global_score() {
         let scores = vec![
-            TextScore { scope_id: "s2".into(), chunk_id: "y".into(), bm25: -5.0 },
-            TextScore { scope_id: "s1".into(), chunk_id: "x".into(), bm25: -9.0 },
-            TextScore { scope_id: "s3".into(), chunk_id: "z".into(), bm25: -1.0 },
+            TextScore {
+                scope_id: "s2".into(),
+                chunk_id: "y".into(),
+                bm25: -5.0,
+            },
+            TextScore {
+                scope_id: "s1".into(),
+                chunk_id: "x".into(),
+                bm25: -9.0,
+            },
+            TextScore {
+                scope_id: "s3".into(),
+                chunk_id: "z".into(),
+                bm25: -1.0,
+            },
         ];
         let ranks = text_ranks(&scores);
         // bm25 is negative-is-better, so -9 outranks -5 outranks -1.

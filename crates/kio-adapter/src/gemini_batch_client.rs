@@ -41,9 +41,7 @@ use std::io::Write as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy,
-};
+use crate::http_policy::{authenticated_agent, read_json_bounded, HttpPolicy};
 use crate::{AdapterError, Result};
 
 /// Hermetic test seam: an inline JSON [`MockGeminiBatchScript`]. When set, the
@@ -645,7 +643,6 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
         }
         Ok(records)
     }
-
 }
 
 fn http_error(error: ureq::Error) -> AdapterError {
@@ -872,7 +869,6 @@ impl GeminiBatchClient for MockGeminiBatchClient {
         // on `fetch_inlined_results` below.
         parse_job_listing(&json!({ "operations": self.script.jobs_listing }))
     }
-
 }
 
 /// The active embedding Batch client: the mock seam when
@@ -1237,7 +1233,10 @@ mod tests {
         let records = parse_job_listing(&value)
             .expect("the live listing shape must resolve, or recovery never finds a job");
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].name, "batches/o828in12yctmkpzraz93m0a2p6nqerf2fpre");
+        assert_eq!(
+            records[0].name,
+            "batches/o828in12yctmkpzraz93m0a2p6nqerf2fpre"
+        );
         assert_eq!(records[0].state, GeminiBatchState::Succeeded);
         assert_eq!(
             display_name_intent_token(&records[0].display_name),

@@ -446,7 +446,6 @@ impl TaskStore {
         Ok(changed)
     }
 
- 
     pub fn done_output_for(
         &self,
         input_hash: &str,

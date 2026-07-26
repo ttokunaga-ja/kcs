@@ -654,9 +654,18 @@ fn realtime_uses_the_synchronous_lane_and_never_creates_a_batch_row() {
 fn every_row_of_a_realtime_pass_settles_on_its_own_reported_tokens() {
     let dir = tempfile::tempdir().unwrap();
     for (name, body) in [
-        ("alpha.md", "# Rollback drill\n\nThe checkout gateway retries twice.\n"),
-        ("beta.md", "# Capacity plan\n\nQueue depth stays under four hundred.\n"),
-        ("gamma.md", "# Handoff notes\n\nThe operator owns the bridge decision.\n"),
+        (
+            "alpha.md",
+            "# Rollback drill\n\nThe checkout gateway retries twice.\n",
+        ),
+        (
+            "beta.md",
+            "# Capacity plan\n\nQueue depth stays under four hundred.\n",
+        ),
+        (
+            "gamma.md",
+            "# Handoff notes\n\nThe operator owns the bridge decision.\n",
+        ),
     ] {
         std::fs::write(dir.path().join(name), body).unwrap();
     }

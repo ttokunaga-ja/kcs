@@ -187,7 +187,11 @@ fn embedding_fixture_bytes(object: &EmbeddingObject) -> Vec<u8> {
     );
     out.push(b'\n');
     out.extend_from_slice(
-        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&vector_bytes)).as_bytes(),
+        format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(&vector_bytes)
+        )
+        .as_bytes(),
     );
     out
 }

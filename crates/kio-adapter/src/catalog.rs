@@ -1090,12 +1090,14 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
             // count is derived from the input so it is deterministic and moves
             // when the input does; `AdoptedEmbeddingExecution::NoUsageReport`
             // still exercises the degrade path deliberately.
-            prompt_tokens: (self.execution != AdoptedEmbeddingExecution::NoUsageReport).then(|| {
-                items
-                    .iter()
-                    .map(|item| item.text.as_deref().unwrap_or("").chars().count() as u64)
-                    .sum()
-            }),
+            prompt_tokens: (self.execution != AdoptedEmbeddingExecution::NoUsageReport).then(
+                || {
+                    items
+                        .iter()
+                        .map(|item| item.text.as_deref().unwrap_or("").chars().count() as u64)
+                        .sum()
+                },
+            ),
         })
     }
 }

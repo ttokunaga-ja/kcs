@@ -244,7 +244,6 @@ impl SqliteFtsIndex {
         })
     }
 
- 
     /// Transactionally remove every derived-index row owned by `raw_hash`.
     ///
     /// Embeddings are keyed by normalized text rather than raw objects, so an
@@ -948,7 +947,8 @@ mod tests {
         .unwrap();
         fts.index_chunk(&row("c1", "認証仕様の更新")).unwrap();
         assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
-        fts.purge_raw(&row("c1", "認証仕様の更新").raw_hash).unwrap();
+        fts.purge_raw(&row("c1", "認証仕様の更新").raw_hash)
+            .unwrap();
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
     }
 

@@ -1430,9 +1430,16 @@ fn ct3_multi_012_a_narrowed_search_does_not_prune_the_replica() {
     }
     let replica_path = data_home.join("cache/kio/aggregator.sqlite");
 
-    let all = json_success_path(&other, &data_home, &["search", "--mode", "text", "zephyrterm"]);
+    let all = json_success_path(
+        &other,
+        &data_home,
+        &["search", "--mode", "text", "zephyrterm"],
+    );
     assert_eq!(all["searched_scopes"].as_array().unwrap().len(), 3);
-    let full = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    let full = Aggregator::open(&replica_path)
+        .unwrap()
+        .corpus_size()
+        .unwrap();
     assert_eq!(full.0, 3, "the default search projects every scope");
 
     // Narrow to `nest` + its descendant — two scopes, so the merge path that
@@ -1452,7 +1459,10 @@ fn ct3_multi_012_a_narrowed_search_does_not_prune_the_replica() {
     );
     assert_eq!(narrowed["searched_scopes"].as_array().unwrap().len(), 2);
 
-    let after = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    let after = Aggregator::open(&replica_path)
+        .unwrap()
+        .corpus_size()
+        .unwrap();
     assert_eq!(
         after, full,
         "a narrowed search must leave the collection intact, not evict the \
@@ -1478,7 +1488,11 @@ fn ct3_multi_013_indexing_replicates_without_waiting_for_a_search() {
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
     fs::write(a.join("a.md"), "# A\n\n## Sec\nquillvane appears here\n").unwrap();
-    fs::write(b.join("b.md"), "# B\n\n## Sec\nquillvane appears here too\n").unwrap();
+    fs::write(
+        b.join("b.md"),
+        "# B\n\n## Sec\nquillvane appears here too\n",
+    )
+    .unwrap();
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&b, &data_home, &["init"]);
     json_success_path(&a, &data_home, &["index", "--approve"]);
@@ -1488,7 +1502,10 @@ fn ct3_multi_013_indexing_replicates_without_waiting_for_a_search() {
     let replica_path = data_home.join("cache/kio/aggregator.sqlite");
     let replica = Aggregator::open(&replica_path).unwrap();
     let (scopes, chunks, _) = replica.corpus_size().unwrap();
-    assert_eq!(scopes, 2, "both indexed scopes replicated before any search");
+    assert_eq!(
+        scopes, 2,
+        "both indexed scopes replicated before any search"
+    );
     assert!(chunks >= 2, "with their chunks: {chunks}");
     let scored = replica
         .text_scores("quillvane", &replica.scope_ids().unwrap(), 100)
@@ -1532,7 +1549,11 @@ fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
     fs::write(a.join("keep.md"), "# A\n\n## Sec\nvellichor stays put\n").unwrap();
-    fs::write(a.join("gone.md"), "# G\n\n## Sec\nvellichor will be deleted\n").unwrap();
+    fs::write(
+        a.join("gone.md"),
+        "# G\n\n## Sec\nvellichor will be deleted\n",
+    )
+    .unwrap();
     fs::write(b.join("b.md"), "# B\n\n## Sec\nvellichor over here\n").unwrap();
     for dir in [&a, &b] {
         json_success_path(dir, &data_home, &["init"]);
@@ -1689,7 +1710,11 @@ fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
         "premise: the narrowed search must reach the replica at all: {narrowed:#?}"
     );
     let results = narrowed["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2, "both narrowed scopes answer: {narrowed:#?}");
+    assert_eq!(
+        results.len(),
+        2,
+        "both narrowed scopes answer: {narrowed:#?}"
+    );
     assert!(
         results
             .iter()
@@ -1917,7 +1942,10 @@ fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
         replica_path.exists(),
         "indexing a scope must replicate it, whether or not anything searches"
     );
-    let projected = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    let projected = Aggregator::open(&replica_path)
+        .unwrap()
+        .corpus_size()
+        .unwrap();
     assert_eq!(projected.0, 1, "one scope replicated: {projected:?}");
     assert!(projected.1 > 0, "its chunks came with it: {projected:?}");
 
@@ -1927,7 +1955,10 @@ fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
         (search["results"][0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12,
         "unchanged per-scope rank-1 score: {search:#?}"
     );
-    let after = Aggregator::open(&replica_path).unwrap().corpus_size().unwrap();
+    let after = Aggregator::open(&replica_path)
+        .unwrap()
+        .corpus_size()
+        .unwrap();
     assert_eq!(
         after, projected,
         "a single-scope search reads nothing and writes nothing here"

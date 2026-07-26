@@ -2369,7 +2369,8 @@ fn publish_in_place_delta(
     // Rotate FIRST, so the stamp the replica is about to receive is the one the
     // index now carries rather than one this function is about to invalidate.
     rotate_index_generation_unconditionally(kio_dir)?;
-    let (Some((scope_id, generation)), Some(before)) = (replica_scope_stamp(kio_dir), before) else {
+    let (Some((scope_id, generation)), Some(before)) = (replica_scope_stamp(kio_dir), before)
+    else {
         return Ok(());
     };
     let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
@@ -2408,11 +2409,7 @@ fn publish_in_place_delta(
 /// A lane the replica did not score (text-only mode has no query vector; a
 /// pure-short query has no MATCH expression) keeps whatever rank it already
 /// carried — that lane was never re-based, so there are no two scales to mix.
-fn apply_global_ranks(
-    candidates: &mut [ScoredCandidate],
-    ranks: &GlobalRanks,
-    config: RrfConfig,
-) {
+fn apply_global_ranks(candidates: &mut [ScoredCandidate], ranks: &GlobalRanks, config: RrfConfig) {
     for candidate in candidates.iter_mut() {
         let key = (candidate.scope_id.clone(), candidate.chunk_hash.clone());
         if ranks.scored_text && candidate.text_rank.is_some() {
@@ -3500,7 +3497,9 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // same remedy: the state this page is replaying against moved, so the page
     // cannot be served and the caller re-runs without a cursor.
     if let Some(Some(frozen)) = &cursor_collection_generation {
-        let current = global_ranks.as_ref().map(|ranks| &ranks.collection_generation);
+        let current = global_ranks
+            .as_ref()
+            .map(|ranks| &ranks.collection_generation);
         if current != Ok(frozen) {
             return Err(KioError::new(
                 "KIO-E-SEARCH-CURSOR-001",
@@ -7018,8 +7017,7 @@ fn latest_normalize_ref(kio_dir: &Path, raw_hash: &str) -> Result<Option<Normali
             // PB04: the pin is what makes this ref resolvable point-in-time.
             // A hashing fault here means the recovered instance cannot be
             // pinned, which is a failure to report, not a ref to write.
-            let manifest_hash =
-                compute_manifest_hash(kio_dir, raw_hash, &tool_profile_hash, gen)?;
+            let manifest_hash = compute_manifest_hash(kio_dir, raw_hash, &tool_profile_hash, gen)?;
             best = Some(NormalizeRef {
                 tool_profile_hash,
                 gen,
@@ -15573,16 +15571,12 @@ fn link_reused_chunks(
     replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> std::result::Result<(), TaskExecutionFailure> {
     for (chunk, bytes) in reuse {
-        let linked = embedding_store::link_chunk_vec(
-            conn,
-            &chunk.chunk_id,
-            bytes,
-            profile.dimensions,
-        )
-        .map_err(|_| TaskExecutionFailure {
-            retry_kind: RetryErrorKind::ContractViolation,
-            retry_after_ms: None,
-        })?;
+        let linked =
+            embedding_store::link_chunk_vec(conn, &chunk.chunk_id, bytes, profile.dimensions)
+                .map_err(|_| TaskExecutionFailure {
+                    retry_kind: RetryErrorKind::ContractViolation,
+                    retry_after_ms: None,
+                })?;
         // A content-addressed reuse hit writes `chunk_vec` with no adapter call
         // and no rebuild, so it moves the vector corpus as surely as a send
         // does — and just as invisibly to a reader-driven refresh (05 §1.8).
@@ -15732,9 +15726,11 @@ fn persist_group_vector(
     // is dropped as incompatible. Mirroring either rule here would put it in
     // two places, and the day they drifted the replica would expose a held
     // chunk (03 §4 invariant 8).
-    replica
-        .vectors_added
-        .extend(linked.into_iter().map(|chunk_id| (chunk_id, vector.to_vec())));
+    replica.vectors_added.extend(
+        linked
+            .into_iter()
+            .map(|chunk_id| (chunk_id, vector.to_vec())),
+    );
     Ok(())
 }
 
@@ -15818,7 +15814,9 @@ fn record_batch_submit_failure(
 /// charge, and the ledger's own rule (CL28) is that an incomplete usage report
 /// degrades to the conservative reservation rather than being trusted in part.
 /// Returning `None` is what routes it there.
-fn reported_prompt_tokens(results: &[kio_adapter::gemini_batch_client::GeminiBatchEmbedOutput]) -> Option<u64> {
+fn reported_prompt_tokens(
+    results: &[kio_adapter::gemini_batch_client::GeminiBatchEmbedOutput],
+) -> Option<u64> {
     if results.is_empty() {
         return None;
     }
@@ -16285,14 +16283,12 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
                 &held,
                 &mut replica,
             )
-            .map_err(
-                |failure| {
-                    KioError::schema(format!(
-                        "embedding batch collect failed to persist: {:?}",
-                        failure.retry_kind
-                    ))
-                },
-            )?;
+            .map_err(|failure| {
+                KioError::schema(format!(
+                    "embedding batch collect failed to persist: {:?}",
+                    failure.retry_kind
+                ))
+            })?;
             persisted += group.members.len();
         }
         // Everything that resolved has been persisted, so a shortfall costs no
@@ -22810,9 +22806,9 @@ mod tests {
     use kio_adapter::catalog::deterministic_embedding_vector;
 
     use super::{
-        effective_invocation_lane, embedding_usd_per_token, lane_rate,
-        estimate_embedding_cost, estimate_embedding_tokens, markdownize_send_lane, parsed_repair,
-        parsed_search, query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
+        effective_invocation_lane, embedding_usd_per_token, estimate_embedding_cost,
+        estimate_embedding_tokens, lane_rate, markdownize_send_lane, parsed_repair, parsed_search,
+        query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
         RepairMode, SearchMode,
     };
@@ -25177,15 +25173,15 @@ mod tests {
     fn normalized_instance_leaf_parses_only_the_digest_only_form() {
         use super::{hash_bytes, parse_normalized_instance_leaf};
 
-        let raw_digest = hash_bytes(b"raw").strip_prefix("sha256:").unwrap().to_owned();
+        let raw_digest = hash_bytes(b"raw")
+            .strip_prefix("sha256:")
+            .unwrap()
+            .to_owned();
         let tool_hash = hash_bytes(b"tool");
         let tool_digest = tool_hash.strip_prefix("sha256:").unwrap();
 
         assert_eq!(
-            parse_normalized_instance_leaf(
-                &format!("{raw_digest}.{tool_digest}.g2"),
-                &raw_digest
-            ),
+            parse_normalized_instance_leaf(&format!("{raw_digest}.{tool_digest}.g2"), &raw_digest),
             Some((tool_hash.clone(), 2))
         );
         // A `sha256:`-prefixed leaf is not a form this store writes or reads.

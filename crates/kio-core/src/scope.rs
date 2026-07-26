@@ -803,7 +803,6 @@ impl Repository {
         )
     }
 
- 
     pub fn auto_snapshot_with_normalize(
         &self,
         message: Option<&str>,
@@ -2600,10 +2599,7 @@ fn matching_tag_ref_path(canonical_tags_dir: &Path, logical_name: &str) -> Resul
     match fs::symlink_metadata(&path) {
         Ok(_) => Ok(Some(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(KioError::io(
-            error.to_string(),
-            path.display().to_string(),
-        )),
+        Err(error) => Err(KioError::io(error.to_string(), path.display().to_string())),
     }
 }
 

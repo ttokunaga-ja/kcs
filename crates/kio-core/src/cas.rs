@@ -204,8 +204,7 @@ impl EmbeddingObject {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| embedding_corrupt_error("embedding object is not UTF-8", None))?;
         let mut lines = text.split('\n');
-        let (Some(header), Some(body), Some(digest)) =
-            (lines.next(), lines.next(), lines.next())
+        let (Some(header), Some(body), Some(digest)) = (lines.next(), lines.next(), lines.next())
         else {
             return Err(embedding_corrupt_error(
                 "embedding object must be header, vector and digest on three lines",
@@ -235,9 +234,7 @@ impl EmbeddingObject {
         let dimensions = object
             .get("dimensions")
             .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                embedding_corrupt_error("embedding header lacks dimensions", None)
-            })?;
+            .ok_or_else(|| embedding_corrupt_error("embedding header lacks dimensions", None))?;
         let vector_bytes = base64_decode(body)?;
         if lower_hex(&Sha256::digest(&vector_bytes)) != digest {
             return Err(embedding_corrupt_error(
@@ -2330,8 +2327,7 @@ fn vector_from_le_bytes(bytes: &[u8]) -> Vec<f32> {
 /// dependency: this is the only base64 in `kio-core`, and the alphabet is part
 /// of a frozen on-disk format (03 §8.1) that should not move with a crate.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for group in bytes.chunks(3) {
         let bits = (u32::from(group[0]) << 16)
@@ -2692,7 +2688,11 @@ mod tests {
         let object = embedding_object(vec![0.5, -0.25]);
         let mut bytes = object.to_bytes().unwrap();
         let body_start = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
-        bytes[body_start] = if bytes[body_start] == b'A' { b'B' } else { b'A' };
+        bytes[body_start] = if bytes[body_start] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
         let error = EmbeddingObject::from_bytes(&bytes).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
@@ -2727,7 +2727,11 @@ mod tests {
 
         let mut impostor = object.clone();
         impostor.target_hash = "sha256:someone-else".to_owned();
-        fs::write(store.embedding_path(&hash).unwrap(), impostor.to_bytes().unwrap()).unwrap();
+        fs::write(
+            store.embedding_path(&hash).unwrap(),
+            impostor.to_bytes().unwrap(),
+        )
+        .unwrap();
 
         let error = store.read_embedding(&hash).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");

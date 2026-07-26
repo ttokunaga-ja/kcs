@@ -130,7 +130,11 @@ pub fn prepare_units_from_bytes(
     // row in different units with nothing to rejoin them by. It is extracted
     // directly instead, below.
     let is_xlsx = kio_adapter::xlsx_extract::is_xlsx_media(media_type);
-    if !is_text_native && !is_pdf && !is_office && !is_xlsx && media_type != "application/octet-stream"
+    if !is_text_native
+        && !is_pdf
+        && !is_office
+        && !is_xlsx
+        && media_type != "application/octet-stream"
     {
         return Ok(empty_prepare_output());
     }
@@ -1026,9 +1030,7 @@ mod tests {
             bytes: raw_xlsx,
         })
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("KIO-E-PREPARE-XLSX-EXTRACT-001"));
+        assert!(error.to_string().contains("KIO-E-PREPARE-XLSX-EXTRACT-001"));
     }
 
     #[test]

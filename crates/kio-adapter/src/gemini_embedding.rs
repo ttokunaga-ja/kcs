@@ -482,12 +482,14 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             // synchronous embedding settle at the caller's reservation
             // estimate rather than at cost. `None` remains the honest answer
             // when the field is missing, and still degrades that way.
-            usage: batch.prompt_tokens.map(|count| AdapterUsage::BillableUnits {
-                billable_units: vec![BillableUnit {
-                    kind: BillableUnitKind::TokensIn,
-                    count,
-                }],
-            }),
+            usage: batch
+                .prompt_tokens
+                .map(|count| AdapterUsage::BillableUnits {
+                    billable_units: vec![BillableUnit {
+                        kind: BillableUnitKind::TokensIn,
+                        count,
+                    }],
+                }),
         })
     }
 }

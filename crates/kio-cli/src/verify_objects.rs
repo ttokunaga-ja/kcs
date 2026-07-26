@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 
 use kio_core::cas::{
     hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError, ChunkObject,
-    ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore,
-    MAX_RAW_OBJECT_BYTES,
+    ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitObject, TreeObject};
 use kio_core::portable::portable_tag_digest64;
