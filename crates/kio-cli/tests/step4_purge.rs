@@ -17,9 +17,10 @@ const CHILD_ENV_DENYLIST: &[&str] = &[
     "MISTRAL_API_KEY",
     "KIO_FIXED_NOW",
     "KIO_TEST_PURGE_FAIL_AFTER_PHASE",
-    // Set per-command by `embedded_image_fixture` only, so an ambient value
-    // cannot silently turn the `--offline` fixtures into online ones.
+    // Set per-command by the embedded fixtures only, so an ambient value cannot
+    // silently turn the `--offline` fixtures into embedding ones.
     "KIO_TEST_GEMINI_EMBED",
+    "KIO_TEST_LOCAL_EMBED",
     "KIO_TEST_MISTRAL_OCR",
 ];
 
@@ -658,6 +659,80 @@ fn ct4_purge_deletes_image_and_embedding_objects_of_an_embedded_document() {
     assert!(cas_leaf_hashes(&kio_dir, "embeddings").is_empty());
     assert!(tombstone_path(&kio_dir, &fixture.raw_hash).exists());
     assert!(!kio_dir.join("purge/in-progress.json").exists());
+}
+
+/// The OFFLINE lane's counterpart to the test above, and the only one that can
+/// reach an image *embedding* object.
+///
+/// `embedded_image_fixture` uses the adopted ONLINE adapter, which declares no
+/// `image_object` capability and therefore writes no `image_vec` rows and no
+/// `target_type='image'` object — it covers image OBJECTS and CHUNK vectors and
+/// stops there. The offline adapter is the one that declares the capability, so
+/// only this fixture owns the full set 04 §4.3 creates: an image object, chunk
+/// vectors, AND a vector OF the image.
+///
+/// The number that regressed silently is `sqlite_vectors`. Nothing in the suite
+/// had ever read it — every other purge fixture indexes `--offline`, which buys
+/// no vectors at all, so it was 0 everywhere and an undercount was invisible by
+/// construction.
+#[test]
+fn ct4_purge_deletes_the_image_vector_of_a_locally_embedded_document() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("figures.pdf"), "%PDF-1.4\ntest\n").unwrap();
+    json_success(&dir, &["init"]);
+    let local = [("KIO_TEST_LOCAL_EMBED", "mock")];
+    let both = [
+        ("KIO_TEST_LOCAL_EMBED", "mock"),
+        ("KIO_TEST_MISTRAL_OCR", "mock_link_image"),
+    ];
+    json_success_with_env(&dir, &["index", "--approve"], &local);
+    json_success_with_env(&dir, &["batch", "resume"], &both);
+    // The image-embedding pass runs on the next index, once the normalized body
+    // (and therefore the image reference it cites) exists.
+    json_success_with_env(&dir, &["index"], &local);
+
+    let kio_dir = dir.path().join(".kio");
+    assert_eq!(cas_leaf_hashes(&kio_dir, "image").len(), 1);
+    let embeddings_before = cas_leaf_hashes(&kio_dir, "embeddings");
+    assert!(
+        embeddings_before.len() >= 2,
+        "fixture must own chunk vectors AND an image vector: {embeddings_before:?}"
+    );
+
+    let raw_hash = current_raw_for(&dir, "figures.pdf");
+    fs::remove_file(dir.path().join("figures.pdf")).unwrap();
+    let output = json_success_with_env(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &raw_hash,
+            "--reason",
+            "legal",
+            "--yes",
+        ],
+        &local,
+    );
+
+    assert_eq!(output["status"], "purged", "{output}");
+    assert_eq!(output["deleted_counts"]["image_objects"], 1, "{output}");
+    // Both vec0 tables in one counter: two chunk vectors plus the one image
+    // vector. Folding only `deleted_chunk_vectors` here reported 2.
+    assert_eq!(
+        output["deleted_counts"]["sqlite_vectors"],
+        embeddings_before.len(),
+        "sqlite_vectors must count image_vec rows too: {output}"
+    );
+
+    // R25-6: the vector must stop existing in `objects/embeddings/` as well, or
+    // `repair rebuild-db` replays the purged figure's vector straight back into
+    // `image_vec`.
+    assert!(
+        cas_leaf_hashes(&kio_dir, "embeddings").is_empty(),
+        "{output}"
+    );
+    assert!(cas_leaf_hashes(&kio_dir, "image").is_empty(), "{output}");
+    assert!(tombstone_path(&kio_dir, &raw_hash).exists());
 }
 
 #[test]
