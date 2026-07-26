@@ -765,32 +765,35 @@ impl ObjectStore {
     /// Read and fully verify one embedding object, including that its identity
     /// hashes back to the name it is stored under.
     pub fn read_embedding(&self, hash: &str) -> Result<EmbeddingObject> {
-        let path = self.embedding_path(hash)?;
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|_| KioError::not_found(hash))
-            .and_then(|metadata| {
-                if metadata.file_type().is_file() {
-                    Ok(metadata)
-                } else {
-                    Err(non_regular_object_error(&path))
-                }
-            })?;
-        if metadata.len() > MAX_EMBEDDING_OBJECT_BYTES {
-            return Err(embedding_corrupt_error(
-                "embedding object exceeds its byte limit",
-                Some(&path),
-            ));
+        read_embedding_path(&self.embedding_path(hash)?, hash)
+    }
+
+    /// Remove one embedding object after identity verification.
+    ///
+    /// The embeddings namespace is keyed by [`EmbeddingObject::identity_hash`]
+    /// — what the vector is OF — and NOT by the hash of the stored bytes, which
+    /// also carry the vector body. [`Self::remove_content`] re-hashes the file
+    /// and compares that against the key, so it can never verify an embedding
+    /// (every call reports `KIO-E-STORE-CORRUPT-001` on a perfectly healthy
+    /// object); this is the correct primitive for the `Embedding` kind, exactly
+    /// as [`Self::remove_chunk`] is for the identity-keyed chunk namespace.
+    /// Missing is an idempotent `false`.
+    pub fn remove_embedding(&self, hash: &str) -> Result<bool> {
+        if !is_hash(hash) {
+            return Err(KioError::invalid_usage("invalid embedding hash"));
         }
-        let bytes = fs::read(&path).kio_io(&path)?;
-        let object = EmbeddingObject::from_bytes(&bytes)
-            .map_err(|error| embedding_corrupt_error(error.message(), Some(&path)))?;
-        if object.identity_hash()? != hash {
-            return Err(embedding_corrupt_error(
-                "embedding object identity does not match its storage key",
-                Some(&path),
-            ));
+        if !self.validate_content_parent(ContentObjectKind::Embedding, hash)? {
+            return Ok(false);
         }
-        Ok(object)
+        let Some(path) = occupied_slot(self.embedding_path(hash)?)? else {
+            return Ok(false);
+        };
+        // Verify before the first destructive step.
+        read_embedding_path(&path, hash)?;
+        remove_verified_cas_path(&path, |candidate| {
+            read_embedding_path(candidate, hash).map(|_| ())
+        })?;
+        Ok(true)
     }
 
     /// Every embedding object this scope holds, by storage key.
@@ -1847,6 +1850,38 @@ fn verify_existing_matches_file(
             return Ok(());
         }
     }
+}
+
+/// Read and fully verify the embedding object at one exact path. Path-scoped
+/// (rather than hash-scoped) so removal can re-verify the hard-linked
+/// quarantine copy `remove_verified_cas_path` makes, which lives beside the
+/// canonical leaf rather than at it.
+fn read_embedding_path(path: &Path, expected_hash: &str) -> Result<EmbeddingObject> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| KioError::not_found(expected_hash))
+        .and_then(|metadata| {
+            if metadata.file_type().is_file() {
+                Ok(metadata)
+            } else {
+                Err(non_regular_object_error(path))
+            }
+        })?;
+    if metadata.len() > MAX_EMBEDDING_OBJECT_BYTES {
+        return Err(embedding_corrupt_error(
+            "embedding object exceeds its byte limit",
+            Some(path),
+        ));
+    }
+    let bytes = fs::read(path).kio_io(path)?;
+    let object = EmbeddingObject::from_bytes(&bytes)
+        .map_err(|error| embedding_corrupt_error(error.message(), Some(path)))?;
+    if object.identity_hash()? != expected_hash {
+        return Err(embedding_corrupt_error(
+            "embedding object identity does not match its storage key",
+            Some(path),
+        ));
+    }
+    Ok(object)
 }
 
 fn read_chunk_path(path: &Path, expected_hash: &str) -> Result<(ChunkObject, Vec<u8>)> {
@@ -3203,6 +3238,32 @@ mod tests {
         assert!(store.remove_chunk(&hash).unwrap());
         assert!(!store.chunk_path(&hash).unwrap().exists());
         assert!(!store.remove_chunk(&hash).unwrap());
+    }
+
+    /// The embeddings namespace is keyed by identity, not by the bytes, so it
+    /// needs its own removal primitive: `remove_content` re-hashes the leaf and
+    /// so calls a healthy embedding object corrupt (the purge defect this
+    /// method fixes — purge deleted the orphan SQLite row, then aborted the
+    /// whole phase on the CAS object it was supposed to delete alongside it).
+    #[test]
+    fn purge_remove_embedding_verifies_identity_and_is_idempotent() {
+        let (_dir, store) = object_store();
+        let hash = store
+            .write_embedding(&embedding_object(vec![0.5, -0.25, 0.125]))
+            .unwrap();
+        let path = store.embedding_path(&hash).unwrap();
+        assert_eq!(
+            store
+                .remove_content(ContentObjectKind::Embedding, &hash)
+                .unwrap_err()
+                .error_code(),
+            "KIO-E-STORE-CORRUPT-001"
+        );
+        assert!(path.exists());
+
+        assert!(store.remove_embedding(&hash).unwrap());
+        assert!(!path.exists());
+        assert!(!store.remove_embedding(&hash).unwrap());
     }
 
     #[test]

@@ -17,6 +17,10 @@ const CHILD_ENV_DENYLIST: &[&str] = &[
     "MISTRAL_API_KEY",
     "KIO_FIXED_NOW",
     "KIO_TEST_PURGE_FAIL_AFTER_PHASE",
+    // Set per-command by `embedded_image_fixture` only, so an ambient value
+    // cannot silently turn the `--offline` fixtures into online ones.
+    "KIO_TEST_GEMINI_EMBED",
+    "KIO_TEST_MISTRAL_OCR",
 ];
 
 fn kio(dir: &TempDir, args: &[&str]) -> Command {
@@ -35,6 +39,21 @@ fn kio(dir: &TempDir, args: &[&str]) -> Command {
 
 fn json_success(dir: &TempDir, args: &[&str]) -> Value {
     let stdout = kio(dir, args)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&stdout).unwrap()
+}
+
+fn json_success_with_env(dir: &TempDir, args: &[&str], env: &[(&str, &str)]) -> Value {
+    let mut command = kio(dir, args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let stdout = command
         .arg("--json")
         .assert()
         .success()
@@ -150,6 +169,78 @@ fn add_image_reference(dir: &TempDir, raw_hash: &str, image_bytes: &[u8]) -> Str
         .insert("images".to_owned(), json!([{ "hash": image_hash }]));
     persist_normalized_instance(repo.kio_dir(), &instance.manifest, &instance.units).unwrap();
     image_hash
+}
+
+/// Every published leaf of one `objects/<namespace>/` CAS fan-out, as
+/// `sha256:`-prefixed hashes. The fan-out dirs are a prefix of the digest that
+/// the leaf then repeats in full, so the leaf name alone is the digest.
+fn cas_leaf_hashes(kio_dir: &Path, namespace: &str) -> Vec<String> {
+    let base = kio_dir.join("objects").join(namespace);
+    let Ok(first_level) = fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut hashes = first_level
+        .filter_map(Result::ok)
+        .filter_map(|first| fs::read_dir(first.path()).ok())
+        .flat_map(|second_level| second_level.filter_map(Result::ok))
+        .filter_map(|second| fs::read_dir(second.path()).ok())
+        .flat_map(|leaves| leaves.filter_map(Result::ok))
+        .filter(|leaf| leaf.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|leaf| leaf.file_name().into_string().ok())
+        .map(|digest| format!("sha256:{digest}"))
+        .collect::<Vec<_>>();
+    hashes.sort();
+    hashes
+}
+
+/// A scanned PDF taken all the way through the ONLINE lane: `index` defers the
+/// page to a markdownize task, and `batch resume` runs the OCR + embedding
+/// adapters against their mock seams. Unlike [`indexed_fixture`] and
+/// [`add_image_reference`] — `--offline`, with a hand-written image object —
+/// this produces the real derived surfaces an embedded document owns: an
+/// `objects/image/` object the OCR adapter persisted and linked from the unit
+/// Markdown as a `kio://<scope>/object/image/<hash>` URI, AND an
+/// `objects/embeddings/` object for the chunk vector.
+struct EmbeddedImageFixture {
+    dir: TempDir,
+    raw_hash: String,
+    image_hash: String,
+    embedding_hashes: Vec<String>,
+}
+
+fn embedded_image_fixture() -> EmbeddedImageFixture {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("figures.pdf"), "%PDF-1.4\ntest\n").unwrap();
+    json_success(&dir, &["init"]);
+    json_success_with_env(
+        &dir,
+        &["index", "--approve"],
+        &[("KIO_TEST_GEMINI_EMBED", "mock")],
+    );
+    json_success_with_env(
+        &dir,
+        &["batch", "resume"],
+        &[
+            ("KIO_TEST_GEMINI_EMBED", "mock"),
+            // The seam that makes the OCR mock emit a Markdown image whose
+            // target is rewritten to an image-object URI.
+            ("KIO_TEST_MISTRAL_OCR", "mock_link_image"),
+        ],
+    );
+    let kio_dir = dir.path().join(".kio");
+    let images = cas_leaf_hashes(&kio_dir, "image");
+    assert_eq!(images.len(), 1, "fixture must own exactly one image object");
+    let embedding_hashes = cas_leaf_hashes(&kio_dir, "embeddings");
+    assert!(
+        !embedding_hashes.is_empty(),
+        "fixture must own at least one embedding object"
+    );
+    EmbeddedImageFixture {
+        raw_hash: current_raw_for(&dir, "figures.pdf"),
+        image_hash: images.into_iter().next().unwrap(),
+        embedding_hashes,
+        dir,
+    }
 }
 
 fn read_json_lines(path: &Path) -> Vec<Value> {
@@ -503,6 +594,70 @@ fn ct4_purge_preserves_shared_image_until_last_reference_is_removed() {
     ObjectStore::new(dir.path().join(".kio"))
         .inspect_content_object(ContentObjectKind::Image, &image_a)
         .unwrap();
+}
+
+/// Purge one document that went through the online lane end to end, so the
+/// image-object and embedding-object surfaces are the ones the adapters
+/// actually wrote rather than test-authored stand-ins.
+///
+/// This is the fixture shape no purge test had: every other one indexes
+/// `--offline`, which never buys a vector, so `objects/embeddings/` was always
+/// empty and the orphan-embedding deletion at the top of
+/// `delete_derived_surfaces` never ran against a real object. It could not
+/// succeed when it did — that namespace is keyed by the vector's IDENTITY hash
+/// (what the vector is OF), and `ObjectStore::remove_content` verifies a leaf
+/// by re-hashing its BYTES against the key, and an embedding's bytes also carry
+/// the vector body. So a perfectly healthy object was reported as
+/// `KIO-E-STORE-CORRUPT-001`, aborting the phase and leaving every purge of an
+/// embedded document permanently `purge_incomplete` — with the image object
+/// neither deleted nor deliberately preserved, because the abort happened
+/// before that phase was reached at all.
+#[test]
+fn ct4_purge_deletes_image_and_embedding_objects_of_an_embedded_document() {
+    let fixture = embedded_image_fixture();
+    let kio_dir = fixture.dir.path().join(".kio");
+    let image_path = fanout_path(kio_dir.join("objects/image"), &fixture.image_hash).unwrap();
+    assert!(image_path.exists());
+    fs::remove_file(fixture.dir.path().join("figures.pdf")).unwrap();
+
+    let output = json_success(
+        &fixture.dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &fixture.raw_hash,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+    );
+    assert_eq!(output["status"], "purged");
+    assert!(output.get("error_code").is_none());
+    assert_eq!(output["deleted_counts"]["image_objects"], 1);
+    // The image is this document's alone, so it is deleted rather than kept as
+    // a shared artifact — both counters were 0 while the bug was live.
+    assert_eq!(output["shared_artifacts_preserved"]["image_objects"], 0);
+    assert!(
+        output["deleted_counts"]["sqlite_orphan_embeddings"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+
+    // R25-6: the vector must stop existing in `objects/embeddings/` too, or the
+    // next `repair rebuild-db` replays the purged vector back into the index.
+    let store = ObjectStore::new(&kio_dir);
+    assert!(store
+        .inspect_content_object(ContentObjectKind::Image, &fixture.image_hash)
+        .is_err());
+    assert!(!image_path.exists());
+    for hash in &fixture.embedding_hashes {
+        assert!(store.read_embedding(hash).is_err(), "embedding={hash}");
+    }
+    assert!(cas_leaf_hashes(&kio_dir, "image").is_empty());
+    assert!(cas_leaf_hashes(&kio_dir, "embeddings").is_empty());
+    assert!(tombstone_path(&kio_dir, &fixture.raw_hash).exists());
+    assert!(!kio_dir.join("purge/in-progress.json").exists());
 }
 
 #[test]
