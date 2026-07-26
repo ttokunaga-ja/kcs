@@ -594,6 +594,185 @@ pub fn read_chunk_vector(conn: &Connection, chunk_id: &str) -> Result<Option<Vec
     }
 }
 
+// ---------------------------------------------------------------------------
+// Image object embeddings (04 §4.3's `image_vec`).
+//
+// The chunk path has to rediscover which chunk row currently carries a given
+// body, which is why it joins through `chunks.text_hash` and disambiguates on
+// `context_key`. None of that applies here: an image IS the content-addressed
+// object, so `embeddings.target_id` is already the `image_vec` key and there is
+// no owner to look up. `chunk_filename_context_v1` is likewise a rule about
+// chunk bodies and does not touch images, so no context key is stored.
+// ---------------------------------------------------------------------------
+
+/// Persist one image object's vector and link it into `image_vec`.
+// Same shape as `write_chunk_embedding` above, and allowed for the same
+// reason: every parameter is a distinct column of the row being written.
+#[allow(clippy::too_many_arguments)]
+pub fn write_image_embedding(
+    conn: &Connection,
+    embedding_hash: &str,
+    image_hash: &str,
+    vector: &[u8],
+    dimensions: u64,
+    distance: &str,
+    modality: &str,
+    profile_hash: &str,
+) -> Result<()> {
+    validate_embedding_vector(vector, dimensions)?;
+    with_savepoint(conn, "kio_write_image_embedding", || {
+        // Same eviction rule as the chunk path: a vector from a retired profile
+        // is not stale data but invalid data, since it would go on being
+        // cosine-ranked against queries embedded in a different space (03 §7).
+        let evicted = conn.execute(
+            "DELETE FROM embeddings
+             WHERE target_type = 'image' AND target_id = ?1 AND profile_hash <> ?2",
+            params![image_hash, profile_hash],
+        )?;
+        if evicted > 0 {
+            conn.execute(
+                "DELETE FROM image_vec WHERE image_id = ?1",
+                params![image_hash],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
+             VALUES (?1, 'image', ?2, ?3, ?4, ?5, ?6, ?7, NULL)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                embedding_hash,
+                image_hash,
+                modality,
+                vector,
+                dimensions as i64,
+                distance,
+                profile_hash
+            ],
+        )?;
+        link_image_vec(conn, image_hash, vector, dimensions)?;
+        Ok(())
+    })
+}
+
+/// Map an `image_hash` to a vector in `image_vec` (idempotent). No-op when the
+/// width is not the adopted one — an incompatible-width vector never enters the
+/// KNN table, exactly as on the chunk side.
+pub fn link_image_vec(
+    conn: &Connection,
+    image_hash: &str,
+    vector: &[u8],
+    dimensions: u64,
+) -> Result<bool> {
+    if usize::try_from(dimensions).ok() != Some(CHUNK_VEC_DIMENSIONS) {
+        return Ok(false);
+    }
+    validate_embedding_vector(vector, dimensions)?;
+    // vec0 virtual tables do not support UPSERT; delete-then-insert is idempotent.
+    conn.execute(
+        "DELETE FROM image_vec WHERE image_id = ?1",
+        params![image_hash],
+    )?;
+    conn.execute(
+        "INSERT INTO image_vec(image_id, embedding) VALUES (?1, ?2)",
+        params![image_hash, vector],
+    )?;
+    Ok(true)
+}
+
+/// Which image objects already carry a vector under `profile_hash`, so a
+/// re-index embeds only what is missing (the image counterpart of the chunk
+/// path's content-addressed reuse).
+pub fn embedded_image_hashes(
+    conn: &Connection,
+    profile_hash: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT target_id FROM embeddings
+         WHERE target_type = 'image' AND profile_hash = ?1",
+    )?;
+    let rows = stmt.query_map(params![profile_hash], |row| row.get::<_, String>(0))?;
+    let mut out = std::collections::BTreeSet::new();
+    for row in rows {
+        out.insert(row?);
+    }
+    Ok(out)
+}
+
+/// KNN over `image_vec`, returning `(image_hash, distance)` nearest first.
+pub fn knn_image_distances(
+    conn: &Connection,
+    query_vector: &[u8],
+    k: u64,
+) -> Result<Vec<(String, f64)>> {
+    if query_vector.len() != CHUNK_VEC_DIMENSIONS * 4 {
+        return Err(IndexError::Contract(
+            "KIO-E-SEARCH-VEC-INCOMPAT-001: query vector width mismatch".to_owned(),
+        ));
+    }
+    validate_embedding_vector(query_vector, CHUNK_VEC_DIMENSIONS as u64)?;
+    let mut stmt = conn.prepare(
+        "SELECT image_id, distance FROM image_vec
+         WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![query_vector, k as i64], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Read one image's stored vector as f32 (MMR cosine similarity, 05 §1.4).
+pub fn read_image_vector(conn: &Connection, image_hash: &str) -> Result<Option<Vec<f32>>> {
+    let mut stmt = conn.prepare("SELECT embedding FROM image_vec WHERE image_id = ?1")?;
+    let mut rows = stmt.query(params![image_hash])?;
+    match rows.next()? {
+        Some(row) => {
+            let bytes: Vec<u8> = row.get(0)?;
+            validate_embedding_vector(&bytes, CHUNK_VEC_DIMENSIONS as u64)?;
+            Ok(Some(f32_from_le_bytes(&bytes)))
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn image_vec_count(conn: &Connection) -> Result<u64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM image_vec", [], |row| {
+        row.get::<_, i64>(0)
+    })? as u64)
+}
+
+/// Rebuild `image_vec` from the `embeddings` rows that back it (04 §4.3's
+/// `objects/` → `embeddings` → `chunk_vec` → `image_vec` order).
+///
+/// Restricted to `profile_hash` for the same reason the chunk rebuild is:
+/// several profiles' rows can legitimately coexist, and linking all of them
+/// would put two vector spaces in one KNN table.
+pub fn rebuild_image_vec(conn: &Connection, profile_hash: &str) -> Result<()> {
+    with_savepoint(conn, "kio_rebuild_image_vec", || {
+        conn.execute("DELETE FROM image_vec", [])?;
+        let mut stmt = conn.prepare(
+            "SELECT target_id, vector, dimensions FROM embeddings
+             WHERE target_type = 'image' AND profile_hash = ?1
+             ORDER BY target_id",
+        )?;
+        let rows = stmt.query_map(params![profile_hash], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        for row in rows {
+            let (image_hash, vector, dimensions) = row?;
+            link_image_vec(conn, &image_hash, &vector, dimensions)?;
+        }
+        Ok(())
+    })
+}
+
 /// Decode a raw little-endian f32 BLOB into a vector.
 pub fn f32_from_le_bytes(bytes: &[u8]) -> Vec<f32> {
     bytes

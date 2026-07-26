@@ -6283,6 +6283,135 @@ fn the_online_adapter_still_records_online_provenance() {
     assert_eq!(lock["embedding"]["tool_id"], "gemini_embedding_2", "{lock}");
 }
 
+/// A scope whose OCR path produced image objects, indexed through the offline
+/// embedding adapter (the only one that declares `image_object`).
+fn indexed_scope_local_embed_with_images() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // R9-2: image extraction only happens on the online OCR path, which
+    // non-text-native files reach → PDF fixture.
+    fs::write(
+        dir.path().join("figures.pdf"),
+        fake_pdf(&["figure page one"]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success_local_embed(&dir, &["index", "--approve"]);
+    kio(&dir, &["batch", "resume"])
+        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
+        .arg("--json")
+        .assert()
+        .success();
+    // The chunk pass runs on the next index, once normalized bodies exist.
+    json_success_local_embed(&dir, &["index"]);
+    dir
+}
+
+fn index_db(dir: &TempDir) -> rusqlite::Connection {
+    kio_index::vec::ensure_registered();
+    rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap()
+}
+
+fn count(conn: &rusqlite::Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+/// 04 §4.3: `embeddings.target_type` has admitted `'image'` since it was
+/// written, but with no vec0 table there was nowhere to search one. The images
+/// a chunk body references get embedded into `image_vec`.
+#[test]
+fn image_objects_referenced_by_chunks_are_embedded_into_image_vec() {
+    let dir = indexed_scope_local_embed_with_images();
+    let conn = index_db(&dir);
+    let images = count(&conn, "SELECT COUNT(*) FROM image_vec");
+    assert!(
+        images > 0,
+        "an OCR'd corpus with image references must populate image_vec"
+    );
+    // U11: one vector space, so image rows are `multimodal` like every other
+    // row — `EmbeddingModality::Image` would name a second space 03 §7 has not.
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM embeddings WHERE target_type = 'image' AND modality <> 'multimodal'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM embeddings WHERE target_type = 'image'"
+        ),
+        images,
+        "every image_vec row must have its backing embeddings row (04 §4.3)"
+    );
+}
+
+/// U9: images deduplicate by `image_hash`, not by the chunk `text_hash` the
+/// chunk path groups on. Re-indexing must not re-embed what is already stored.
+#[test]
+fn image_embedding_is_idempotent_across_reindex() {
+    let dir = indexed_scope_local_embed_with_images();
+    let before = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
+    json_success_local_embed(&dir, &["index"]);
+    let after = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
+    assert_eq!(
+        before, after,
+        "a second index must not duplicate image rows"
+    );
+}
+
+/// The gate: the adopted online adapter reads only `EmbeddingItem::text`, so
+/// handing it an image item would embed the empty string. It does not declare
+/// `image_object`, and must therefore write no image vectors at all.
+#[test]
+fn the_online_adapter_embeds_no_images_because_it_declares_no_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("figures.pdf"),
+        fake_pdf(&["figure page one"]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+    kio(&dir, &["batch", "resume"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
+        .arg("--json")
+        .assert()
+        .success();
+    json_success_embed(&dir, "mock", &["index"]);
+    let conn = index_db(&dir);
+    // Chunks did embed — this proves the corpus reached the embedding path at
+    // all, so the zero below is the gate and not an empty run.
+    assert!(count(&conn, "SELECT COUNT(*) FROM chunk_vec") > 0);
+    assert_eq!(
+        count(&conn, "SELECT COUNT(*) FROM image_vec"),
+        0,
+        "an adapter that reads only `text` must not be handed image items"
+    );
+}
+
+/// 04 §4.3: `image_vec` is a derivation of the CAS, so `rebuild-db` must
+/// reconstruct it — otherwise a rebuild silently costs the corpus image search.
+#[test]
+fn rebuild_db_restores_image_vectors_from_objects() {
+    let dir = indexed_scope_local_embed_with_images();
+    let before = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
+    assert!(before > 0);
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    kio(&dir, &["repair", "rebuild-db"])
+        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .arg("--json")
+        .assert()
+        .success();
+    assert_eq!(
+        count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec"),
+        before,
+        "rebuild-db must restore image_vec from objects/embeddings/"
+    );
+}
+
 /// R13-2: write a user tools.toml under the test's XDG_CONFIG_HOME.
 fn write_tools_toml(dir: &TempDir, body: &str) {
     let cfg = dir.path().join(".test-config/kio");

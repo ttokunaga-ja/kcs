@@ -34,6 +34,10 @@ pub const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
 /// implementation appeared.
 pub const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
 
+/// Re-exported so the index path can gate image enrichment without naming the
+/// concrete local adapter module (which stays private, like `gemini_embedding`).
+pub use crate::local_embedding::IMAGE_OBJECT_CAPABILITY;
+
 #[must_use]
 pub fn builtin_prepare_profile() -> AdapterProfile {
     let mut profile = PrepareAdapter::profile(&DeterministicAdapter);

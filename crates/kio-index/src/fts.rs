@@ -37,6 +37,11 @@ pub struct PurgeRawIndexReport {
     pub deleted_chunks: u64,
     pub deleted_associations: u64,
     pub deleted_chunk_vectors: u64,
+    /// `image_vec` rows removed (05 §3.5). Separate from
+    /// `deleted_chunk_vectors` because the two are decided by different rules:
+    /// a chunk vector goes with its chunk, an image vector only when no
+    /// surviving chunk still references the image.
+    pub deleted_image_vectors: u64,
     pub deleted_orphan_embeddings: u64,
     /// The `embeddings.id` of every orphan row just deleted — the CAS objects
     /// purge must remove alongside them (05 §3.5). A count cannot name a file,
@@ -250,7 +255,11 @@ impl SqliteFtsIndex {
     /// embedding is removed only when no surviving chunk references its text
     /// hash. `tree_entries` is intentionally untouched: immutable commit/tree
     /// history is governed by the purge tombstone/barrier rather than rewritten.
-    pub fn purge_raw(&mut self, raw_hash: &str) -> Result<PurgeRawIndexReport> {
+    pub fn purge_raw(
+        &mut self,
+        raw_hash: &str,
+        orphaned_image_hashes: &BTreeSet<String>,
+    ) -> Result<PurgeRawIndexReport> {
         with_savepoint(&self.conn, "kio_purge_raw", || {
             let targets = {
                 let mut statement = self.conn.prepare(
@@ -311,6 +320,33 @@ impl SqliteFtsIndex {
                      RETURNING id",
                 )?;
                 let ids = orphans.query_map(params![text_hash], |row| row.get::<_, String>(0))?;
+                for id in ids {
+                    report.deleted_embedding_ids.push(id?);
+                    report.deleted_orphan_embeddings += 1;
+                }
+            }
+
+            // 05 §3.5: image vectors go the same way, on the same
+            // live-reference-0 rule. Which images are orphaned is decided by
+            // the CALLER, because the answer lives in the Markdown image
+            // grammar (`kio://…/object/image/…`) and that parser belongs to
+            // kio-search — a second copy of it here is the kind of duplicate
+            // liveness rule that drifts. The caller computes
+            // "referenced by the purge target, and by nothing that survives"
+            // before any row is deleted, and this deletes them inside the same
+            // savepoint so the two halves cannot land apart.
+            for image_hash in orphaned_image_hashes {
+                report.deleted_image_vectors += u64::try_from(self.conn.execute(
+                    "DELETE FROM image_vec WHERE image_id = ?1",
+                    params![image_hash],
+                )?)
+                .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+                let mut orphans = self.conn.prepare(
+                    "DELETE FROM embeddings
+                     WHERE target_type = 'image' AND target_id = ?1
+                     RETURNING id",
+                )?;
+                let ids = orphans.query_map(params![image_hash], |row| row.get::<_, String>(0))?;
                 for id in ids {
                     report.deleted_embedding_ids.push(id?);
                     report.deleted_orphan_embeddings += 1;
@@ -690,6 +726,20 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine
         );"
     ))?;
+    // `image_vec` is `chunk_vec`'s counterpart for image objects (04 §4.3).
+    // `embeddings.target_type` has admitted `'image'` since it was written, but
+    // with no vec0 table to hold them there was no way to search one.
+    //
+    // Same width and metric on purpose: 03 §7 fixes ONE multimodal vector
+    // space, so image and chunk vectors are directly comparable and the split
+    // is only sqlite-vec's one-primary-key-type-per-table constraint, not a
+    // semantic boundary. `image_id` is the `objects/image/` content hash.
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS image_vec USING vec0(
+            image_id TEXT PRIMARY KEY,
+            embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine
+        );"
+    ))?;
     Ok(())
 }
 
@@ -947,7 +997,7 @@ mod tests {
         .unwrap();
         fts.index_chunk(&row("c1", "認証仕様の更新")).unwrap();
         assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
-        fts.purge_raw(&row("c1", "認証仕様の更新").raw_hash)
+        fts.purge_raw(&row("c1", "認証仕様の更新").raw_hash, &BTreeSet::new())
             .unwrap();
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
     }
@@ -1049,7 +1099,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = fts.purge_raw(RAW_TARGET).unwrap();
+        let report = fts.purge_raw(RAW_TARGET, &BTreeSet::new()).unwrap();
         assert_eq!(
             report,
             PurgeRawIndexReport {
@@ -1057,6 +1107,7 @@ mod tests {
                 deleted_chunks: 2,
                 deleted_associations: 2,
                 deleted_chunk_vectors: 2,
+                deleted_image_vectors: 0,
                 deleted_orphan_embeddings: 1,
                 // The unique chunk's own embedding; the shared one survives
                 // because another chunk still carries its `text_hash`.
@@ -1111,9 +1162,61 @@ mod tests {
         );
 
         assert_eq!(
-            fts.purge_raw(RAW_TARGET).unwrap(),
+            fts.purge_raw(RAW_TARGET, &BTreeSet::new()).unwrap(),
             PurgeRawIndexReport::default(),
             "replay after a completed purge is idempotent"
+        );
+    }
+
+    /// 05 §3.5: an image vector left behind is the purged figure still
+    /// rankable by vector search. Which images are orphaned is the caller's
+    /// judgement (the rule needs the Markdown image grammar); this pins that
+    /// what it names is deleted, and that an image it does NOT name — one a
+    /// surviving document still shows — is preserved.
+    #[test]
+    fn purge_raw_deletes_the_image_vectors_the_caller_named_and_no_others() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        const ORPHANED: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const SHARED: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let target = row("c-target", "target body");
+        fts.index_chunk(&target).unwrap();
+        for (index, image_hash) in [ORPHANED, SHARED].iter().enumerate() {
+            crate::embedding_store::write_image_embedding(
+                fts.connection(),
+                &format!("sha256:embedding-image-{index}"),
+                image_hash,
+                &basis_vector_bytes(index),
+                CHUNK_VEC_DIMENSIONS as u64,
+                "cosine",
+                "multimodal",
+                "sha256:profile",
+            )
+            .unwrap();
+        }
+
+        let orphaned = BTreeSet::from([ORPHANED.to_owned()]);
+        let report = fts.purge_raw(&target.raw_hash, &orphaned).unwrap();
+        assert_eq!(report.deleted_image_vectors, 1);
+        assert!(report
+            .deleted_embedding_ids
+            .contains(&"sha256:embedding-image-0".to_owned()));
+
+        assert!(
+            crate::embedding_store::read_image_vector(fts.connection(), ORPHANED)
+                .unwrap()
+                .is_none(),
+            "an image only the purged document referenced must lose its vector"
+        );
+        assert!(
+            crate::embedding_store::read_image_vector(fts.connection(), SHARED)
+                .unwrap()
+                .is_some(),
+            "an image a surviving document still shows has not stopped existing"
         );
     }
 
@@ -1146,7 +1249,9 @@ mod tests {
             )
             .unwrap();
 
-        let error = fts.purge_raw(&target.raw_hash).unwrap_err();
+        let error = fts
+            .purge_raw(&target.raw_hash, &BTreeSet::new())
+            .unwrap_err();
         assert!(error.to_string().contains("synthetic purge failure"));
         assert_eq!(fts.search("rollback searchable", 10).unwrap().len(), 1);
         assert!(

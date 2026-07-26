@@ -7626,6 +7626,58 @@ fn rebuild_sqlite_index(
 /// not be crossed. Objects whose profile is not the live one are skipped rather
 /// than replayed — 04 §4.3 requires the rebuild to bind exactly one candidate
 /// per chunk, and several profiles can legitimately coexist in the store.
+/// Replay image vectors from `objects/embeddings/` into `embeddings` +
+/// `image_vec` (04 §4.3's rebuild order, last step).
+///
+/// Reads from the CAS rather than from the `embeddings` table because
+/// `rebuild-db`'s hard case is a LOST database — the table it would read is the
+/// thing being rebuilt. `objects/` is the truth; the tables are the cache.
+///
+/// Simpler than the chunk replay in one way: an image object's `target_hash` IS
+/// the `image_vec` key, so there is no owner to rediscover and no `context_key`
+/// to disambiguate on (that rule is about chunk bodies).
+fn replay_image_embeddings_from_objects(kio_dir: &Path, conn: &Connection) -> Result<()> {
+    let store = ObjectStore::new(kio_dir);
+    let hashes = store.embedding_hashes()?;
+    if hashes.is_empty() {
+        return Ok(());
+    }
+    let live_profile =
+        embedding_execution().map(|execution| declared_embedding_profile(execution).profile_hash);
+    for hash in hashes {
+        let object = match store.read_embedding(&hash) {
+            Ok(object) => object,
+            Err(error) => {
+                // Same posture as the chunk replay: a cache layer may not
+                // refuse to rebuild over one bad file.
+                eprintln!("kio: skipping unreadable embedding object {hash}: {error}");
+                continue;
+            }
+        };
+        if object.target_type != "image" {
+            continue;
+        }
+        if live_profile
+            .as_deref()
+            .is_some_and(|live| live != object.profile_hash)
+        {
+            continue;
+        }
+        embedding_store::write_image_embedding(
+            conn,
+            &hash,
+            &object.target_hash,
+            &embedding_store::f32_to_le_bytes(&object.vector),
+            object.dimensions,
+            &object.distance,
+            &object.modality,
+            &object.profile_hash,
+        )
+        .map_err(index_to_kio)?;
+    }
+    Ok(())
+}
+
 fn embeddings_from_objects(
     kio_dir: &Path,
     conn: &Connection,
@@ -7998,6 +8050,8 @@ fn build_sqlite_index_at(
         );
     }
     embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kio)?;
+    // 04 §4.3's rebuild order ends `… → chunk_vec → image_vec`.
+    replay_image_embeddings_from_objects(kio_dir, fts.connection())?;
     // PB28 (step4b-contract-tests-p2b.md §J, §Z ruling 4; 04-pipeline.md §5.7
     // L913 / 05-runtime.md §3.5 L760-761): mint a fresh `index_generation` and
     // initialize `last_lifecycle_epoch` to the CURRENT counter value, in the
@@ -14887,6 +14941,12 @@ fn run_embedding_enrichment_for_instances(
             },
         )?;
     }
+    // Image objects are embedded on their own schedule, before the chunk
+    // early-return below: a corpus can have every chunk embedded and still have
+    // images outstanding — the first index after an image-capable adapter is
+    // configured is exactly that case. Counted separately from `executed`,
+    // which is a chunk-member count the task accounting is keyed to.
+    run_image_embedding_enrichment(repo, &conn, execution, &profile)?;
     if pending.is_empty() {
         return Ok(ExecOutcome::default());
     }
@@ -16498,6 +16558,44 @@ fn publish_embedding_object(
     }
 }
 
+/// [`publish_embedding_object`]'s image counterpart. Same failure posture: a
+/// publish failure is logged, not fatal — the vector is already usable and what
+/// is lost is the rebuild guarantee.
+fn publish_image_embedding_object(
+    kio_dir: &Path,
+    embedding_hash: &str,
+    image_hash: &str,
+    vector: &[f32],
+    profile: &DeclaredEmbeddingProfile,
+) {
+    let object = kio_core::cas::EmbeddingObject {
+        spec_version: 1,
+        target_type: "image".to_owned(),
+        target_hash: image_hash.to_owned(),
+        profile_hash: profile.profile_hash.clone(),
+        modality: "multimodal".to_owned(),
+        dimensions: profile.dimensions,
+        distance: "cosine".to_owned(),
+        // `chunk_filename_context_v1` is a rule about chunk bodies; an image
+        // object has no filename context folded into its identity.
+        context: None,
+        vector: vector.to_vec(),
+    };
+    let store = ObjectStore::new(kio_dir);
+    match store.write_embedding(&object) {
+        Ok(hash) if hash == embedding_hash => {}
+        Ok(hash) => {
+            eprintln!(
+                "kio: image embedding object identity {hash} does not match the row key \
+                 {embedding_hash}; rebuild-db will not restore this vector"
+            );
+        }
+        Err(error) => {
+            eprintln!("kio: could not publish image embedding object {embedding_hash}: {error}");
+        }
+    }
+}
+
 fn chunk_embedding_hash(
     chunk: &EmbeddableChunk,
     profile: &DeclaredEmbeddingProfile,
@@ -16802,6 +16900,168 @@ fn retained_chunks_without_embedding(
         pending.push(chunk);
     }
     Ok(pending)
+}
+
+/// Embed the image objects the live chunks reference, into `image_vec`
+/// (04 §4.3).
+///
+/// # Where the work list comes from
+///
+/// Not `PrepareResponse::image_object_hashes` — that field has no writer and
+/// would need one built. The chunk bodies already carry every reference, as
+/// `![alt](kio://…/object/image/…)` written by the OCR path (07 §5.2), so this
+/// reuses the same extractor `related_images[]` does. One definition of "which
+/// images does this corpus contain", derived from the artifact rather than
+/// carried alongside it.
+///
+/// # Why it is gated
+///
+/// An adapter that declares `modality: "multimodal"` has said something about
+/// the vector SPACE, not about what it can be handed. The adopted online
+/// adapter declares multimodal and reads only `EmbeddingItem::text`, so giving
+/// it an image item embeds the empty string and stores a vector that is wrong
+/// without being detectably wrong. `image_object` is the flag that means "this
+/// implementation reads `path`/`mime`".
+///
+/// # Cost
+///
+/// None to gate on. The only adapter that declares the capability is the
+/// offline one, which reserves nothing (04 §5.4), so there is no budget check
+/// and no ledger row here. When an online adapter grows real image support,
+/// that changes and this needs the reserve/settle the chunk path has.
+fn run_image_embedding_enrichment(
+    repo: &Repository,
+    conn: &Connection,
+    execution: EmbeddingExecution,
+    profile: &DeclaredEmbeddingProfile,
+) -> Result<usize> {
+    let adapter_profile = embedding_adapter_profile(execution).map_err(adapter_to_kio)?;
+    if !adapter_profile
+        .capability_flags
+        .iter()
+        .any(|flag| flag == kio_adapter::catalog::IMAGE_OBJECT_CAPABILITY)
+    {
+        return Ok(0);
+    }
+    let referenced = referenced_image_hashes(conn)?;
+    if referenced.is_empty() {
+        return Ok(0);
+    }
+    let already = embedding_store::embedded_image_hashes(conn, &profile.profile_hash)
+        .map_err(index_to_kio)?;
+    // BTreeSet iteration is ordered, so the send order is a function of the
+    // corpus and not of hash-map seed — two runs over one corpus embed in the
+    // same order.
+    let pending = referenced
+        .into_iter()
+        .filter(|hash| !already.contains(hash))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    let image_root = repo.kio_dir().join("objects").join("image");
+    let mut items = Vec::with_capacity(pending.len());
+    for image_hash in &pending {
+        let Ok(path) = kio_core::cas::fanout_path(&image_root, image_hash) else {
+            continue;
+        };
+        // A chunk body can name an image that purge has since removed
+        // (05 §1.7: `related_images[]` enumerates references, not existence).
+        // Skip it rather than fail the pass — the reference is not corrupt,
+        // the object is simply gone.
+        if !path.is_file() {
+            continue;
+        }
+        items.push(EmbeddingItem {
+            id: image_hash.clone(),
+            text: None,
+            path: Some(path.display().to_string()),
+            mime: None,
+        });
+    }
+    if items.is_empty() {
+        return Ok(0);
+    }
+
+    let embedded = items.len();
+    let Ok(outcome) = run_embedding_adapter(
+        execution,
+        items,
+        EmbeddingInputType::ImageObject,
+        // No reservation was made, so there is no intent token to carry.
+        None,
+    ) else {
+        // A failed image embed must not fail the index pass. Chunk enrichment
+        // is the load-bearing half; images retry on the next run because the
+        // work list is derived from the corpus, not from a task ledger.
+        return Ok(0);
+    };
+    for vector in &outcome.vectors {
+        let embedding_hash = embedding_store::embedding_hash(
+            EmbeddingTargetType::Image,
+            &vector.id,
+            profile.dimensions,
+            EmbeddingDistance::Cosine,
+            // 04 §4.3 / U11: image rows are `multimodal` like every other row.
+            // `EmbeddingModality::Image` would name a second vector space,
+            // which 03 §7 does not have.
+            EmbeddingModality::Multimodal,
+            &profile.profile_hash,
+            None,
+        )
+        .map_err(index_to_kio)?;
+        // 04 §4.3 (R25-6): the CAS object is written BEFORE the SQLite row.
+        // `objects/` is the truth and the tables are a rebuildable cache, so a
+        // crash between the two must leave the recoverable order — object
+        // without row rebuilds, row without object is a vector `rebuild-db`
+        // cannot restore. Purge also removes the object alongside the row, and
+        // would report the store corrupt if the object it was told about did
+        // not exist.
+        publish_image_embedding_object(
+            repo.kio_dir(),
+            &embedding_hash,
+            &vector.id,
+            &vector.vector,
+            profile,
+        );
+        embedding_store::write_image_embedding(
+            conn,
+            &embedding_hash,
+            &vector.id,
+            &embedding_store::f32_to_le_bytes(&vector.vector),
+            profile.dimensions,
+            &profile.distance,
+            &profile.modality,
+            &profile.profile_hash,
+        )
+        .map_err(index_to_kio)?;
+    }
+    Ok(embedded)
+}
+
+/// Every image object hash referenced by a live chunk body, deduplicated
+/// (U9: images group by `image_hash`, not by the chunk `text_hash` the chunk
+/// path groups on — one image referenced from twenty chunks is one embedding).
+fn referenced_image_hashes(conn: &Connection) -> Result<BTreeSet<String>> {
+    let mut stmt = conn
+        .prepare("SELECT text FROM chunks")
+        .map_err(|err| KioError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| KioError::schema(err.to_string()))?;
+    let mut hashes = BTreeSet::new();
+    for row in rows {
+        let text = row.map_err(|err| KioError::schema(err.to_string()))?;
+        for image in extract_related_images(&text) {
+            if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) {
+                if object.is_image() {
+                    hashes.insert(object.hash().to_owned());
+                }
+            }
+        }
+    }
+    Ok(hashes)
 }
 
 fn embedding_task_output_ref(chunk_id: &str) -> String {

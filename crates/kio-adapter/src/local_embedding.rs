@@ -42,6 +42,16 @@ pub const LOCAL_EMBEDDING_MODEL_FAMILY: &str = "qwen3-vl-embedding";
 /// cannot read.
 pub const LOCAL_EMBEDDING_DIMENSIONS: u32 = 768;
 
+/// Declared by an embedding adapter that genuinely embeds image OBJECTS — i.e.
+/// one that reads `EmbeddingItem::path`/`mime` rather than only `text`.
+///
+/// `modality: "multimodal"` does not answer this. It describes the vector
+/// space (03 §7 fixes one space for every modality), not what a given
+/// implementation can be handed. The adopted online adapter declares multimodal
+/// and reads only `text`, so it must not be given image items until that
+/// changes — at which point adding this flag is the whole of turning it on.
+pub const IMAGE_OBJECT_CAPABILITY: &str = "image_object";
+
 /// Selects which local implementation runs. `Mock` is the only one that exists;
 /// see the module docs for why the real one waits on a measured chat template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +113,19 @@ impl EmbeddingAdapter for LocalEmbeddingAdapter {
             tool_profile_hash: tool_profile_hash(&profile)
                 .expect("built-in local embedding profile is valid"),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            capability_flags: vec!["text".to_owned(), "multimodal".to_owned()],
+            // `image_object` is the flag the index path gates image enrichment
+            // on. It says this implementation actually reads an item's
+            // `path`/`mime`, which is not something `modality: "multimodal"`
+            // implies — the adopted online adapter declares multimodal and then
+            // reads only `text`, so handing it an image item would embed the
+            // empty string and store a confidently wrong vector. Capability
+            // flags are outside `PROFILE_FIELDS`, so this does not perturb the
+            // profile hash (qa35 pins that `capabilities` are not hashed).
+            capability_flags: vec![
+                "text".to_owned(),
+                "multimodal".to_owned(),
+                IMAGE_OBJECT_CAPABILITY.to_owned(),
+            ],
             // 07 §3: an offline_api adapter reaches loopback only, which is why
             // it is exempt from the §3 consent gate. This flag is what the
             // exemption keys off, so it must stay false.
@@ -124,8 +146,13 @@ impl EmbeddingAdapter for LocalEmbeddingAdapter {
             .iter()
             .map(|item| EmbeddingVector {
                 id: item.id.clone(),
+                // An image item carries no `text`; seeding on the empty string
+                // would give every image in a corpus the same vector, and
+                // vector search would rank them all identically. The id of an
+                // image item is its content hash, so it distinguishes images
+                // exactly as far as their bytes do.
                 vector: deterministic_embedding_vector(
-                    item.text.as_deref().unwrap_or(""),
+                    item.text.as_deref().unwrap_or(item.id.as_str()),
                     self.dimensions as usize,
                 ),
             })
@@ -194,6 +221,55 @@ mod tests {
             "a local model has nothing to bill"
         );
         assert!(profile.reject_billing.is_none());
+    }
+
+    /// The flag that gates image enrichment. The local adapter reads an item's
+    /// `path`/`mime`; the adopted online one does not, and declaring
+    /// `multimodal` is not the same claim.
+    #[test]
+    fn declares_the_image_object_capability_that_the_online_adapter_does_not() {
+        let local = LocalEmbeddingAdapter::new(LocalEmbeddingExecution::Mock).profile();
+        assert!(local
+            .capability_flags
+            .iter()
+            .any(|flag| flag == IMAGE_OBJECT_CAPABILITY));
+        let online = crate::catalog::adopted_embedding_profile();
+        assert!(
+            !online
+                .capability_flags
+                .iter()
+                .any(|flag| flag == IMAGE_OBJECT_CAPABILITY),
+            "the online adapter reads only `text`; claiming this flag would have \
+             it embed the empty string for every image"
+        );
+    }
+
+    /// An image item has no `text`. Seeding on the empty string would collapse
+    /// every image in a corpus onto one vector.
+    #[test]
+    fn image_items_embed_distinctly_without_text() {
+        let adapter = LocalEmbeddingAdapter::new(LocalEmbeddingExecution::Mock);
+        let items = ["sha256:aaa", "sha256:bbb"]
+            .iter()
+            .map(|hash| EmbeddingItem {
+                id: (*hash).to_owned(),
+                text: None,
+                path: Some(format!("/cache/{hash}")),
+                mime: Some("image/png".to_owned()),
+            })
+            .collect::<Vec<_>>();
+        let response = adapter
+            .embed(EmbeddingRequest {
+                input_type: EmbeddingInputType::ImageObject,
+                items,
+                idempotency_token: None,
+            })
+            .unwrap();
+        assert_eq!(response.vectors.len(), 2);
+        assert_ne!(response.vectors[0].vector, response.vectors[1].vector);
+        for vector in &response.vectors {
+            validate_cosine_vector(&vector.vector, LOCAL_EMBEDDING_DIMENSIONS).unwrap();
+        }
     }
 
     /// 07 §5.3: the serving backend must not appear anywhere in the hashed

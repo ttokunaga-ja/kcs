@@ -749,6 +749,51 @@ fn phase_chunk_ids_path(kio_dir: &Path) -> PathBuf {
     kio_dir.join("purge/chunk-ids.json")
 }
 
+/// Image objects that only the purge target references, and that therefore lose
+/// their vectors with it (05 §3.5).
+///
+/// Computed BEFORE any row is deleted, and by the caller rather than inside
+/// `purge_raw`, for two reasons. The rule needs the Markdown image grammar,
+/// whose parser lives in kio-search — a second copy of it in the index crate is
+/// exactly the kind of duplicated liveness rule that drifts apart. And "does
+/// anything else reference this" is answerable up front as "referenced by a
+/// chunk of some other raw_hash", with no dependence on deletion order.
+///
+/// A shared image survives, on the same rule its object does: purge removes
+/// what stops existing, and an image a surviving document still shows has not
+/// stopped existing.
+fn orphaned_image_hashes_for_raw(
+    conn: &rusqlite::Connection,
+    raw_hash: &str,
+) -> Result<BTreeSet<String>> {
+    let collect = |sql: &str| -> Result<BTreeSet<String>> {
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        let rows = stmt
+            .query_map([raw_hash], |row| row.get::<_, String>(0))
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        let mut hashes = BTreeSet::new();
+        for row in rows {
+            let text = row.map_err(|error| KioError::schema(error.to_string()))?;
+            for image in kio_search::object_uri::extract_related_images(&text) {
+                if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) {
+                    if object.is_image() {
+                        hashes.insert(object.hash().to_owned());
+                    }
+                }
+            }
+        }
+        Ok(hashes)
+    };
+    let targeted = collect("SELECT text FROM chunks WHERE raw_hash = ?1")?;
+    if targeted.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let surviving = collect("SELECT text FROM chunks WHERE raw_hash <> ?1")?;
+    Ok(targeted.difference(&surviving).cloned().collect())
+}
+
 fn store_phase_chunk_ids(kio_dir: &Path, chunk_ids: &[String]) -> Result<()> {
     let bytes =
         serde_json::to_vec(chunk_ids).map_err(|error| KioError::schema(error.to_string()))?;
@@ -844,7 +889,10 @@ fn delete_derived_surfaces(
         )
         .map_err(crate::index_to_kio)?;
         for raw_hash in &plan.target_raw_hashes {
-            let deleted = index.purge_raw(raw_hash).map_err(crate::index_to_kio)?;
+            let orphaned_images = orphaned_image_hashes_for_raw(index.connection(), raw_hash)?;
+            let deleted = index
+                .purge_raw(raw_hash, &orphaned_images)
+                .map_err(crate::index_to_kio)?;
             chunk_ids.extend(deleted.chunk_ids);
             report.deleted.sqlite_chunks = report
                 .deleted
