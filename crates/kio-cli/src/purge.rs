@@ -902,10 +902,17 @@ fn delete_derived_surfaces(
                 .deleted
                 .sqlite_associations
                 .saturating_add(deleted.deleted_associations);
+            // Both vec0 tables, in one counter. `PurgeRawIndexReport` keeps them
+            // apart because the two are DECIDED by different rules (a chunk
+            // vector goes with its chunk; an image vector only when no surviving
+            // chunk still cites the image), but an operator reading this report
+            // wants "how many vector rows stopped existing", and both are that.
+            // Counting only the chunk half understated the purge.
             report.deleted.sqlite_vectors = report
                 .deleted
                 .sqlite_vectors
-                .saturating_add(deleted.deleted_chunk_vectors);
+                .saturating_add(deleted.deleted_chunk_vectors)
+                .saturating_add(deleted.deleted_image_vectors);
             report.deleted.sqlite_orphan_embeddings = report
                 .deleted
                 .sqlite_orphan_embeddings
