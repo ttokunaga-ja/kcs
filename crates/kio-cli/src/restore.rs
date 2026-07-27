@@ -832,8 +832,9 @@ fn effective_destination(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// `expected_identity`: PA18 (§D, U25) — when set, the dev/inode of the
-/// directory this call actually opens must match the value
+/// `expected_identity`: PA18 (§D, U25) — when set, the identity of the
+/// directory this call actually opens (dev/inode on Unix, volume serial plus
+/// file index on Windows) must match the value
 /// [`destination_lstat_identity`] captured at `validate_destination`'s
 /// containment-check moment (never re-fetched here — re-fetching would defeat
 /// the point, since it would just re-observe whatever a TOCTOU swap left
@@ -927,7 +928,7 @@ fn open_destination_dir(
         ));
     }
     if let Some(expected) = expected_identity {
-        if !expected.matches_opened(&metadata) {
+        if !expected.matches_opened(&current) {
             return Err(KioError::new(
                 "KIO-E-CONFIG-USAGE-001",
                 "restore destination identity changed between validation and open",
@@ -1107,9 +1108,15 @@ fn unsafe_restore_error(path: &Path, message: &str) -> KioError {
     )
 }
 
-/// PA18 (§D, U25): the dev/inode identity captured by `lstat` at
+/// PA18 (§D, U25): the identity captured by `lstat` at
 /// `validate_destination`'s containment-check moment. Compared, never
 /// re-derived, against the directory `open_destination_dir` actually opens.
+///
+/// On Windows the same (volume serial, file index) pair `lstat` would expose is
+/// taken through `GetFileInformationByHandle` instead: `std::os::windows::fs::
+/// MetadataExt::{volume_serial_number, file_index}` are still unstable behind
+/// `windows_by_handle` (rust-lang/rust#63010), so they cannot be used on stable
+/// Rust. `kio_core::cas` already wraps that call for the purge/CAS paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DestinationIdentity {
     #[cfg(unix)]
@@ -1117,65 +1124,74 @@ struct DestinationIdentity {
     #[cfg(unix)]
     ino: u64,
     #[cfg(windows)]
-    volume_serial_number: u32,
-    #[cfg(windows)]
-    file_index: u64,
+    identity: kio_core::cas::WindowsDirectoryIdentity,
     #[cfg(not(any(unix, windows)))]
     len: u64,
 }
 
 impl DestinationIdentity {
+    /// Compare against the directory handle `open_destination_dir` actually
+    /// opened — the handle, never its path, so this stays the `fstat` half of
+    /// PA18's binding. A handle that cannot be interrogated fails closed
+    /// (reported as a mismatch), since an unverifiable destination is exactly
+    /// the case the guard exists to refuse.
     #[cfg(unix)]
-    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
+    fn matches_opened(&self, opened: &File) -> bool {
         use std::os::unix::fs::MetadataExt;
-        self.dev == opened.dev() && self.ino == opened.ino()
+        opened
+            .metadata()
+            .is_ok_and(|opened| self.dev == opened.dev() && self.ino == opened.ino())
     }
 
     #[cfg(windows)]
-    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        Some(self.volume_serial_number) == opened.volume_serial_number()
-            && Some(self.file_index) == opened.file_index()
+    fn matches_opened(&self, opened: &File) -> bool {
+        kio_core::cas::windows_directory_handle_identity(opened) == Some(self.identity)
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
-        self.len == opened.len()
+    fn matches_opened(&self, opened: &File) -> bool {
+        opened
+            .metadata()
+            .is_ok_and(|opened| self.len == opened.len())
     }
 }
 
 fn destination_lstat_identity(path: &Path) -> Result<DestinationIdentity> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(DestinationIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })
-    }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let (Some(volume_serial_number), Some(file_index)) =
-            (metadata.volume_serial_number(), metadata.file_index())
+        // Opens the leaf without following a final reparse point (the `lstat`
+        // half of PA18) and reads the identity off that handle. `None` means
+        // the leaf is not a real directory — a reparse point or a non-directory
+        // that `verify_existing_directory_chain` rejected moments ago, so its
+        // appearance here is itself a mid-check swap. Fail closed.
+        let Some(identity) = kio_core::cas::windows_real_directory_identity(path)
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
         else {
             return Err(unsafe_restore_error(
                 path,
                 "destination identity is unavailable for this filesystem",
             ));
         };
-        Ok(DestinationIdentity {
-            volume_serial_number,
-            file_index,
-        })
+        Ok(DestinationIdentity { identity })
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(windows))]
     {
-        Ok(DestinationIdentity {
-            len: metadata.len(),
-        })
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(DestinationIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(DestinationIdentity {
+                len: metadata.len(),
+            })
+        }
     }
 }
 

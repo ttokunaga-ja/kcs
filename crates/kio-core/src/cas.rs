@@ -2283,6 +2283,18 @@ pub fn windows_real_regular_file_identity(
     Ok(windows_file_information(&file).and_then(WindowsFileInformation::regular_file_identity))
 }
 
+/// Return the stable identity of an already-opened Windows directory.
+///
+/// This is the by-handle counterpart of [`windows_real_directory_identity`]:
+/// callers that already hold the handle they intend to use must compare against
+/// the handle itself, never re-open the path, or a component swapped between
+/// the two opens would simply be re-observed and accepted.
+#[cfg(windows)]
+#[must_use]
+pub fn windows_directory_handle_identity(file: &File) -> Option<WindowsDirectoryIdentity> {
+    windows_file_information(file).and_then(WindowsFileInformation::directory_identity)
+}
+
 /// Return the stable identity of an already-opened Windows regular file.
 #[cfg(windows)]
 #[must_use]
@@ -2894,6 +2906,60 @@ mod tests {
         assert!(same_windows_regular_file(&first_handle, &same_handle));
         assert!(!same_windows_regular_file(&first_handle, &second_handle));
         assert!(open_regular_nofollow(&first).is_ok());
+    }
+
+    /// The property restore's PA18 destination binding rests on: an identity
+    /// captured from a path must still match a handle later opened on that same
+    /// directory, and must NOT match once a different real directory has taken
+    /// over the name.
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_handle_identity_matches_its_path_and_detects_a_swap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        fn open_directory(path: &Path) -> File {
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+            options.open(path).unwrap()
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("destination");
+        let decoy = root.path().join("decoy");
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(&decoy).unwrap();
+
+        let captured = windows_real_directory_identity(&destination)
+            .unwrap()
+            .unwrap();
+        {
+            let opened = open_directory(&destination);
+            assert_eq!(windows_directory_handle_identity(&opened), Some(captured));
+        }
+
+        // The swap PA18 exists to catch: the validated name now resolves to a
+        // different real directory.
+        fs::rename(&destination, root.path().join("moved")).unwrap();
+        fs::rename(&decoy, &destination).unwrap();
+        let swapped = open_directory(&destination);
+        assert_ne!(windows_directory_handle_identity(&swapped), Some(captured));
+
+        // A non-directory carries no directory identity, so callers comparing
+        // against `Some(expected)` fail closed rather than matching.
+        let regular = root.path().join("regular.bin");
+        fs::write(&regular, b"payload").unwrap();
+        assert_eq!(
+            windows_directory_handle_identity(&File::open(&regular).unwrap()),
+            None
+        );
     }
 
     #[test]
