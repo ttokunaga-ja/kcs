@@ -502,9 +502,10 @@ purge 済み画像の URI が chunk 本文に残る場合がある。`related_im
 > **U1 と配線は 2026-07-26 完了。** `crates/kio-adapter/src/local_embedding.rs` が
 > `ExecutionMode::OfflineApi` / `allow_network: false` / `billable_kinds: []` /
 > `preferred_request_kind: Sync` を宣言し、mock 実装で end-to-end に動作する。
-> **実 HTTP wire (U2) は V4 (chat template の実物) 待ち** — D3 が template を
-> identity へ畳み込むため、暫定値で出荷すると placeholder profile でベクトルを
-> 作り、後から全再埋め込みになる。seam 無しの offline 宣言は当面 mock に落ちる。
+> **実 HTTP wire (U2) は 2026-07-27 の V4 確定で unblock された** (§11 参照)。
+> template・instruction・重み pin が実測で決まったので placeholder は要らない。
+> ただし **`dimensions` だけは V3 決着まで暫定**なので、`tool_profile_hash` を凍結扱いに
+> せず、恒久コーパスを埋め込まないこと。
 >
 > 実装した dispatch:
 >
@@ -747,9 +748,91 @@ Stage 2 完了後に、段階 A/B の実測をもって着手可否を判断す�
 | V1 | Sarashina2.2-OCR の vLLM 対応 (モデルカードは transformers + `trust_remote_code` のみ) | 不可なら Stage 3 の第二 profile は `cmd` dispatcher が必要になりコストが跳ねる (裁定 5 により変更は許容) |
 | V2 | PaddleOCR-VL の bbox 出力形式の詳細 (Markdown 内タグか別 JSON か) | Stage 3 の bbox 写像の実装形 |
 | V3 | Qwen3-VL-Embedding の MRL 768 次元での劣化幅 | 768 維持か native 2048 へ移行かの判断。2048 にすると `chunk_vec` の DDL 改訂 + 全再埋め込み |
-| V4 | vLLM の `--chat-template` 既定値と Qwen3-VL-Embedding 推奨 instruction の実物 | D3 の `prompt_template_hash` の中身 |
+| V4 | ✅ **2026-07-27 確定** — vLLM の chat template 既定値と推奨 instruction の実物 | D3 の `prompt_template_hash` の中身。下記 |
 | V5 | llama.cpp #18665 / #19516 の進捗 | マージされれば Mac が D5 により再埋め込みなしで合流できる |
 | V7 | chunk 境界による URI 分断の発生頻度 | W3。dogfood corpus で計測 |
+| V8 | asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**疑い。下記 |
+| V9 | tokenizer / vision preprocessor config が `model_version_pin` の対象外 | 同一 profile を名乗ったまま空間が割れうる。下記 |
+
+### V4 は 2026-07-27 に確定 (GPU 実機)
+
+測定の全文と成果物は [eval/v4/results/](../eval/v4/results/README.md)。
+RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
+
+| 測定 | 値 | 影響 |
+|---|---:|---|
+| `cos(input[] 経由, messages 経由)` | 0.4740 | **D4 は正しい。** 参考: `cos(無関係な 2 文)` = 0.5966 — **wire 形式を変えるほうが内容を丸ごと差し替えるより遠い** |
+| `cos(instruction 有, 無)` 非既定文面 | 0.7989 | **D3 の instruction 側も正しい**。probe 既定での 1.0 は下記のトートロジー |
+| `cos(同一入力 2 回)` | 1.0000 | first-instance-wins が成立する |
+| 観測次元 | 2048 (native) | **V3 の入口**。profile の 768 は MRL 切り詰め側 |
+
+**確定した identity** (07 §5.3 へ反映済み):
+
+```
+model_version_pin    sha256:c73fa9ca…09c1   (単一 model.safetensors)
+prompt_template_hash sha256:7b7f4722…9e8b   (instruction = "")
+tool_profile_hash    sha256:f9f610bb…439a   ← dimensions が 768 のままの前提
+```
+
+**`instruction` は `""` を採った。** probe 既定の `cos = 1.0` は、モデルの chat template が
+system message 不在時に注入する `default_system_message` と probe の
+`DEFAULT_INSTRUCTION` が同一文字列だったことによる artifact であって、モデルの性質ではない。
+その文字列は既に `chat_template` (T) の一部として hash 入力に入っており、Kio は
+system message を送らないので、供給する instruction は無い。
+
+**`tool_profile_hash` は V3 決着まで暫定。** `dimensions` は hash 入力であり、
+実測 native は 2048。定数は `fts.rs::CHUNK_VEC_DIMENSIONS` (vec0 の DDL 幅) と
+`local_embedding.rs::LOCAL_EMBEDDING_DIMENSIONS` の 2 本に閉じている。
+**V3 決着前に恒久コーパスを埋め込まないこと。**
+
+**手順上の罠を 1 つ潰した。** `/tokenize` は既定で `add_generation_prompt=True` を
+適用するため、`v4-probe.json` の `rendered_prompt` (40 token) は embedding 経路が
+実際に使った描画 (37 token) ではない。これを正にすると**存在しない assistant turn を
+含む template を恒久凍結する**。今回は token id 一致まで取って確定した。
+
+**これで U2 (実 vLLM の `messages` 配線) が unblock された。**
+
+### V8 — asymmetric instruction は構造的に採れない疑い [新規・2026-07-27]
+
+V4 の 0.7989 は instruction の文面がベクトルを大きく動かすことを示している。
+Qwen3-Embedding 系は **query 側にのみ instruct prefix を付ける非対称運用**が標準だが、
+Kio ではこれが**仕様の帰結として採れない**:
+
+機構は互換ゲートではなく、**identity に置き場所が無い**ことである。Kio は embedding
+adapter を 1 つしか持たず、query も `EmbeddingInputType::Query` として
+**chunk / image と同じ `run_embedding_adapter`** を通る
+([main.rs](../crates/kio-cli/src/main.rs) の 15167 / 16211 / 17508 が同一関数)。
+したがって query は index と同じ template・同じ instruction で描画される。別文面にするには adapter が 2 通りの描画を持つ必要があるが、
+`prompt_template_hash` は **(T, I) を 1 組だけ畳む単一フィールド**であり、2 つ目の描画を
+記録する欄が無い。[03 §7](../docs/03-data-model.md) の横断ゲートが比較するのもその
+単一の `profile_hash` なので、2 描画を導入するなら identity の形そのものを変えることになる。
+
+バグではなく D3 の設計帰結だが、**検索品質を落としている可能性**があり、凍結前に
+書き留める価値がある。着手順は (a) まず対称運用のコストを測る — V3 と同じ 24 問計器が使える。
+(b) 実際に効くと分かってから、query 用 profile を分ける仕様改訂を検討する。
+(b) はゲートの意味そのものを変える大改訂なので、(a) の実測なしに入らないこと。
+
+### V9 — pin されていない決定要因がある [新規・2026-07-27]
+
+ローカル multimodal embedding のトークン列 / パッチ列を決めるものは 4 つあるが、
+**pin されているのは 2 つだけ**である:
+
+| 決定要因 | pin | 経路 |
+|---|---|---|
+| 重み | ✅ | `model_version_pin` |
+| chat template | ✅ | `prompt_template_hash` |
+| tokenizer の vocab / merges | ❌ | どこにも入らない |
+| vision preprocessor の設定 (`min_pixels` / `max_pixels` / patch / 正規化) | ❌ | 同上 |
+
+後者 2 つは同じ HF snapshot に同居するので実務上は重みと一緒に動くが、
+03 §5.1 が pin するのは **snapshot revision ではなく重みファイル**なので、
+snapshot の局所改変を検知できない。特に vision preprocessor は画像ベクトルを実質的に
+変えるため、[07 §5.3](../docs/07-adapter-spec.md) 冒頭が塞ごうとしている
+「同じ profile_hash を名乗る 2 空間」そのものになる。
+
+解法候補は (a) 集約に該当 config を含める、(b) snapshot revision を併記する、の 2 つ。
+どのファイルが実際に効くかはモデル族ごとに違うので、Stage 3 の第二 profile を選ぶ前に
+調べる。**優先度は低い** — 発生には snapshot の手動改変が要る。
 
 **V6 は 2026-07-26 に確定** ([05 §1.7](../docs/05-runtime.md) へ反映済み) —
 1 画像を複数 chunk が参照する場合、`evidence_pointer` は **`chunk_hash` の
@@ -833,8 +916,8 @@ Stage 2 (段階 B・U1-U11)  local_embedding.rs + 画像埋め込み + ランキ
    ├ U4/V6 ✅ result_type / payload_uri / 参照元 chunk の逆引き (C2)
    ├ U5  ✅ 問題 A — 参照元 chunk の text rank 継承 (C2)
    ├ U6  ✅ 問題 B — 同枠 quota / 型非依存 MMR (C2、既存コード無改修)
-   ├ U2  ⏳ 実 vLLM の messages 配線 — V4 (chat template 実測) 待ち
-   ├ U7  ⏳ image/text 同一空間の数値一致検査 — 実モデル待ち
+   ├ U2  ▶  実 vLLM の messages 配線 — V4 確定 (2026-07-27) により着手可
+   ├ U7  ⏳ image/text 同一空間の数値一致検査 — U2 の後
    └ U8  — image_object_hashes の writer — C1 が chunk 本文の逆引きで代替。
           埋め込み対象の列挙としては不要になった (writer なき宣言は残る)
                  ↓

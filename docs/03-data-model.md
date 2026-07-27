@@ -363,6 +363,13 @@ model_version_pin     ベンダー側 immutable tag (latest 等の可変 alias �
                       ローカルモデル) では、重みファイル (GGUF / safetensors) の sha256 を
                       pin とする** — `gemma-3-4b-it-q4_k_m` 等のタグ名は量子化違いで同名に
                       なり得て、ベンダー側 immutable tag と同じ強さを持たないため。
+                      **重みが複数ファイルに shard されている場合は、モデルディレクトリからの
+                      相対パスをキーとした sha256(JCS({relative_path: sha256, ...})) を pin と
+                      する。単一ファイルのモデルではそのファイルの sha256 をそのまま採る**
+                      (集約式を通さない — pin が配布元の blob hash と一致し、ダウンロード
+                      健全性の確認をそのまま兼ねるため)。対象は拡張子 `.safetensors` /
+                      `.gguf` / `.bin` / `.pt` のファイルで、相対パスにするのは pin を保管
+                      場所から独立させるため。
                       **deterministic_library の同梱 Adapter は semver 規約のまま**
                       ([07-adapter-spec.md §2.1](07-adapter-spec.md) の PDF text layer 抽出が
                       1.0.0 → 1.1.0 として運用中 — 重みを持たないため sha256 が定義できない)

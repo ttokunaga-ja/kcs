@@ -807,6 +807,31 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 > instruction を使わない構成では `"instruction": ""` を明示する (key の省略と空文字を
 > 識別しない — 同節の null 規約と同じ姿勢)。
 >
+> > **実測による裁定 (2026-07-27・V4)** — Qwen3-VL-Embedding-2B は
+> > **`instruction: ""` を採る**。`prompt_template_hash` は
+> > `sha256:7b7f4722…9e8b`、`tool_profile_hash` は `sha256:f9f610bb…439a`
+> > (`dimensions` は V3 決着まで暫定 — [eval/v4/results/](../eval/v4/results/README.md))。
+> >
+> > 本節が instruction の例に挙げた `"Represent the user's input."` は、実測の結果
+> > **モデルの chat template が system message 不在時に注入する
+> > `default_system_message`** だと判明した。つまりこの文字列は **T の一部であり、
+> > 既に hash 入力に入っている**。Kio は system message を送らない (テキスト・画像とも
+> > `messages: [{"role": "user", ...}]` の 1 通) ので、Kio が供給する instruction は
+> > 無く、上段が「`""` を明示する」と規定している当のケースに該当する。
+> >
+> > 非空を採っても**ベクトルは完全に同一**である (template が同じ文字列を注入するため)。
+> > 違うのは identity だけで、非空は 1 つの事実を T と instruction の 2 か所に記録し、
+> > かつ後から読む者に「Kio がこの instruction を選んだ」と誤読させる。実際には
+> > モデル側の既定を観測しただけである。
+> >
+> > **本項 (1) の規範自体は反証されていない。** 同じ probe で instruction の文面だけを
+> > 非既定に変えると cos は 0.7989 まで落ちる — instruction は実際にベクトルを動かす。
+> >
+> > **したがって「system message を送らない」は実装への拘束である。** 送るようにするなら
+> > その文面が `instruction` であり、`prompt_template_hash` を計算し直さねばならない。
+> > 送りながら `""` を記録すると、profile が実際のトークン列を偽ることになる —
+> > 本節冒頭が塞ごうとしている失敗そのもの。
+>
 > **(2) wire 形式を `messages` に一本化する。**
 > ローカル embedding server の OpenAI 互換エンドポイントは、テキストを
 > `input: ["text"]` で受ける一方、**マルチモーダル入力には chat 形式の `messages` を
@@ -818,6 +843,17 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 > **テキストのみのチャンクでも常に `messages` 形式を使う。** 代償は 1 リクエスト
 > 1 アイテム (バッチ不可) だが、Kio の送信は既に重複排除 group ごとに 1 コールであり、
 > ローカルサーバ側の continuous batching が吸収する。
+>
+> > **実測による確認 (2026-07-27・V4)** — Qwen3-VL-Embedding-2B / vLLM 0.26.0 で
+> > `cos(input[] 経由, messages 経由)` = **0.4740**。同じ probe の
+> > `cos(無関係な 2 文, ともに messages 経由)` = **0.5966** なので、
+> > **同一文字列を 2 つの wire 形式で通すほうが、文章の内容を丸ごと差し替えるより
+> > 遠い**。本項が払うバッチ不可のコストは実際に空間の分裂を防いでいる。
+> > (両者は `messages` 経由の同一ベクトルを共通項に持つので比較は成立する。)
+> >
+> > エンドポイント形状も確定した — vLLM 0.26.0 では `/v1/embeddings` が
+> > `messages` をそのまま受け、`/pooling` への fallback は要らなかった。
+> > 測定の全文は [eval/v4/results/](../eval/v4/results/README.md)。
 >
 > **(3) serving backend は identity に含めない。**
 > [03-data-model.md §5.1](03-data-model.md) が「実装バイナリのバージョン・OS・ハードウェアは
