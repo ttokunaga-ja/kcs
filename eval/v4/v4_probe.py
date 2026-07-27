@@ -203,7 +203,13 @@ class Probe:
                 for key in ("prompt", "prompt_token_ids", "tokens", "token_strs", "count"):
                     if key in body:
                         value = body[key]
-                        entry[key] = value if key in ("prompt", "count") else len(value)
+                        # vLLM 0.26 は return_token_strs を渡さないとき token_strs を
+                        # null で返す。key の有無だけ見て len() すると落ちるので、
+                        # null は null のまま記録する (記録内容の意味は変えない)。
+                        if key in ("prompt", "count") or value is None:
+                            entry[key] = value
+                        else:
+                            entry[key] = len(value)
                 if "prompt" in body and isinstance(body["prompt"], str):
                     entry["prompt_sha256"] = sha256_hex(body["prompt"].encode("utf-8"))
                 if "error" in body:

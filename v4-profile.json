@@ -1,0 +1,21 @@
+{
+  "chat_template_raw_sha256": "sha256:a47e6afb389f86f45be7810f17d2686fd42b2bec7ba6e6958abf85845af258c5",
+  "chat_template_normalized_sha256": "sha256:26afcd6ea76e0283e700f2037c2216ddb693e7595f62e9aa367ef06903fd4627",
+  "instruction": "Represent the user's input.",
+  "prompt_template_hash": "sha256:868cc1a935ab184f13059f3f767eaf0a6796318066973c6546d7b8b3c4bc7045",
+  "profile": {
+    "adapter_kind": "embedding",
+    "adapter_role": "multimodal",
+    "dimensions": 768,
+    "distance": "cosine",
+    "input_construction": "chunk_filename_context_v1",
+    "modality": "multimodal",
+    "model_or_tool_family": "qwen3-vl-embedding",
+    "model_version_pin": "sha256:c73fa9caeddeb3ff831d46c085a7a5708343248ca777e90f2d486964464509c1",
+    "prompt_template_hash": "sha256:868cc1a935ab184f13059f3f767eaf0a6796318066973c6546d7b8b3c4bc7045",
+    "prompt_template_id": "kio-local-embedding-v1",
+    "runtime_kind": "local",
+    "spec_version": 1
+  },
+  "tool_profile_hash": "sha256:4787f5d2830e5cd58993c8a42bbbe7e97174ea31babde972e0ee92444afd3eb6"
+}

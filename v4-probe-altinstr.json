@@ -1,0 +1,190 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "model": "Qwen/Qwen3-VL-Embedding-2B",
+  "models_endpoint": {
+    "object": "list",
+    "data": [
+      {
+        "id": "Qwen/Qwen3-VL-Embedding-2B",
+        "object": "model",
+        "created": 1785113863,
+        "owned_by": "vllm",
+        "root": "Qwen/Qwen3-VL-Embedding-2B",
+        "parent": null,
+        "max_model_len": 16384,
+        "permission": [
+          {
+            "id": "modelperm-a0e043a3927e17b2",
+            "object": "model_permission",
+            "created": 1785113863,
+            "allow_create_engine": false,
+            "allow_sampling": true,
+            "allow_logprobs": true,
+            "allow_search_indices": false,
+            "allow_view": true,
+            "allow_fine_tuning": false,
+            "organization": "*",
+            "group": null,
+            "is_blocking": false
+          }
+        ]
+      }
+    ]
+  },
+  "instruction_under_test": "Represent this passage for retrieval in a search index.",
+  "attempts": [
+    {
+      "label": "A: text via input[]",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "input",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:795d491443245cfd",
+      "l2_norm": 1.000000010569888
+    },
+    {
+      "label": "B: text via messages",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "messages",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:984e72e56b23ab75",
+      "l2_norm": 1.0000000111646472
+    },
+    {
+      "label": "B': text via messages (repeat)",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "messages",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:984e72e56b23ab75",
+      "l2_norm": 1.0000000111646472
+    },
+    {
+      "label": "C: text via messages + instruction",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "messages",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:06d1ab652e1ed86e",
+      "l2_norm": 1.0000000346758062
+    },
+    {
+      "label": "D: image via messages",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "messages",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:bd69574a53b28cd7",
+      "l2_norm": 0.9999999284076041
+    },
+    {
+      "label": "E: unrelated text via messages",
+      "path": "/v1/embeddings",
+      "request_keys": [
+        "messages",
+        "model"
+      ],
+      "status": 200,
+      "ok": true,
+      "dimensions": 2048,
+      "fingerprint": "sha256:0f90abab0e204e27",
+      "l2_norm": 1.0000000199419086
+    }
+  ],
+  "findings": {
+    "d4_input_vs_messages": {
+      "cosine": 0.47399373000836936,
+      "conclusion": "DIFFERENT — D4 の前提が成立。messages 一本化は必要。"
+    },
+    "d3_instruction_effect": {
+      "cosine": 0.7988977087427905,
+      "conclusion": "DIFFERENT — D3 の前提が成立。instruction は identity に含めるべき。"
+    },
+    "determinism": {
+      "cosine": 1.0,
+      "conclusion": "OK — 同一入力は同一ベクトル。content-addressed identity の前提が立つ。"
+    },
+    "sanity_unrelated_text": {
+      "cosine": 0.5966080280954354,
+      "conclusion": "OK — 別の入力は別のベクトル。"
+    }
+  },
+  "rendered_prompt": {
+    "without_instruction": {
+      "attempts": [
+        {
+          "status": 200,
+          "request_keys": [
+            "messages",
+            "model",
+            "return_token_strs"
+          ],
+          "tokens": 40,
+          "token_strs": 40,
+          "count": 40
+        },
+        {
+          "status": 200,
+          "request_keys": [
+            "messages",
+            "model"
+          ],
+          "tokens": 40,
+          "token_strs": null,
+          "count": 40
+        }
+      ]
+    },
+    "with_instruction": {
+      "attempts": [
+        {
+          "status": 200,
+          "request_keys": [
+            "messages",
+            "model",
+            "return_token_strs"
+          ],
+          "tokens": 44,
+          "token_strs": 44,
+          "count": 44
+        },
+        {
+          "status": 200,
+          "request_keys": [
+            "messages",
+            "model"
+          ],
+          "tokens": 44,
+          "token_strs": null,
+          "count": 44
+        }
+      ]
+    }
+  },
+  "dimensions_observed": [
+    2048
+  ],
+  "image_lane": "ok",
+  "next_step": "v4_capture.json の template 候補と rendered_prompt を突き合わせ、確定した template 本文と instruction を v4_finalize.py へ渡す"
+}
