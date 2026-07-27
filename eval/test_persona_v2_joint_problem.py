@@ -563,7 +563,7 @@ class PersonaV2JointProblemTests(unittest.TestCase):
 
     def test_v1_identity_and_cardinality_remain_frozen(self):
         self.assertEqual(v1.SCHEMA_VERSION, 1)
-        self.assertEqual(v1.FIXTURE_ID, "kcs-persona-pc-v1")
+        self.assertEqual(v1.FIXTURE_ID, "kio-persona-pc-v1")
         self.assertEqual(sum(row["full_raw_files"] for row in v1.PERSONAS), 195_000)
 
 

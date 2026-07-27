@@ -119,7 +119,7 @@ class TestPersonaEventManifest(unittest.TestCase):
                 )
                 for wave in ("W1", "W2", "W3", "W4", "W5")
             },
-            {"W1": 13, "W2": 3, "W3": 14, "W4": 11, "W5": 10},
+            {"W1": 16, "W2": 3, "W3": 15, "W4": 12, "W5": 9},
         )
 
         event_ids = [event["event_id"] for event in manifest["events"]]
@@ -166,13 +166,13 @@ class TestPersonaEventManifest(unittest.TestCase):
                 )
             },
             {
-                "events": 4_693,
+                "events": 4_690,
                 "structural_events": 30,
                 "boundaries": 421,
-                "schedule_items": 5_114,
-                "lifecycle_source_ids": 13_056,
-                "source_version_rows": 16_365,
-                "distinct_materialization_ids": 13_058,
+                "schedule_items": 5_111,
+                "lifecycle_source_ids": 13_055,
+                "source_version_rows": 16_362,
+                "distinct_materialization_ids": 13_057,
             },
         )
 

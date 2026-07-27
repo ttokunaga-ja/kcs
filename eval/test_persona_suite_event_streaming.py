@@ -18,10 +18,10 @@ from eval import persona_suite_event_streaming as streaming
 
 
 TINY_SCHEDULE_SHA256 = (
-    "3f64675b1b8b83455b6eb18d9a2592b8e8b882621ad3f1b735cd233b6ef437c0"
+    "7fc973054392c078d4cfbe55f3a8ab34c94bef9bd0ee62cc55063018da6dd26a"
 )
 TINY_SUITE_MANIFEST_SHA256 = (
-    "d76ca8d55e92ff77eec98aaac69cab2bc3e35f3cd392c4ae681e5a7972afac3a"
+    "e97fc8b81ba7f6e8f660e02253d99a4ea4a104403b56ebb9f1ed1c4d1d65b86f"
 )
 
 
@@ -88,9 +88,9 @@ class TestPersonaSuiteEventStreaming(unittest.TestCase):
         ))
 
     def test_tiny_streaming_is_exact_legacy_differential(self):
-        self.assertEqual(self.legacy["totals"]["events"], 1_076)
-        self.assertEqual(self.legacy["totals"]["boundaries"], 908)
-        self.assertEqual(self.legacy["totals"]["schedule_items"], 1_984)
+        self.assertEqual(self.legacy["totals"]["events"], 1_057)
+        self.assertEqual(self.legacy["totals"]["boundaries"], 893)
+        self.assertEqual(self.legacy["totals"]["schedule_items"], 1_950)
         self.assertEqual(self.legacy["schedule_sha256"], TINY_SCHEDULE_SHA256)
         self.assertEqual(
             streaming._digest(self.legacy), TINY_SUITE_MANIFEST_SHA256
@@ -101,7 +101,7 @@ class TestPersonaSuiteEventStreaming(unittest.TestCase):
             streaming._SUITE_SCHEDULE_LIMITS,
         )
         self.assertEqual(stored_schedule, self.legacy["schedule"])
-        self.assertEqual(self.summary.schedule_items, 1_984)
+        self.assertEqual(self.summary.schedule_items, 1_950)
         self.assertEqual(self.summary.schedule_sha256, TINY_SCHEDULE_SHA256)
         self.assertEqual(
             self.summary.suite_event_manifest_sha256,

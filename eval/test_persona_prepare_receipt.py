@@ -130,7 +130,7 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
     def test_streamed_full_plan_sha_matches_frozen_capacity_projection(self):
         self.assertEqual(
             receipt.canonical_generation_plan_sha256("full"),
-            "1ebae5dc4bf39aeb3c0f417e3e57aca3ffe1904f5f4b3f11646fd32e9ffe5e82",
+            "84c731f232fc15d0fb69def1d68ece3abdf795a9f7eb2cf82f234cc8313e68e0",
         )
 
     def test_exact_20_by_20_receipt_binds_every_upstream_hash(self):

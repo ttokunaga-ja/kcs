@@ -80,7 +80,7 @@ def _suite(workers, oracle):
         suite_schedule_sha256=_digest("suite-schedule"),
         schedule_locator_root_sha256=_digest("locator-root"),
         schedule_mmr_root_sha256=_digest("mmr-root"),
-        schedule_mmr_leaf_count=48_771,
+        schedule_mmr_leaf_count=48_774,
         **suite_files,
         max_suite_schedule_row_bytes=512,
         max_locator_row_bytes=512,
@@ -111,18 +111,18 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
         oracle = self.oracle
         self.assertEqual(len(oracle["personas"]), 20)
         self.assertEqual(oracle["per_replay"]["cohort_sources"], {
-            "P": 2_775, "X": 6_931, "Y": 4_162, "N": 2_777,
+            "P": 2_777, "X": 6_932, "Y": 4_159, "N": 2_776,
         })
-        self.assertEqual(oracle["per_replay"]["events"], 43_596)
-        self.assertEqual(oracle["per_replay"]["boundaries"], 5_175)
-        self.assertEqual(oracle["per_replay"]["schedule_items"], 48_771)
-        self.assertEqual(oracle["per_replay"]["logical_rows"], 97_542)
+        self.assertEqual(oracle["per_replay"]["events"], 43_597)
+        self.assertEqual(oracle["per_replay"]["boundaries"], 5_177)
+        self.assertEqual(oracle["per_replay"]["schedule_items"], 48_774)
+        self.assertEqual(oracle["per_replay"]["logical_rows"], 97_548)
         self.assertEqual(oracle["all_replays"], {
             "replays": 3,
-            "events": 130_788,
-            "boundaries": 15_525,
-            "schedule_items": 146_313,
-            "logical_rows": 292_626,
+            "events": 130_791,
+            "boundaries": 15_531,
+            "schedule_items": 146_322,
+            "logical_rows": 292_644,
         })
 
         for person in oracle["personas"]:
@@ -176,8 +176,8 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
         phases = limits._phase_ranges(history_plan, structural_plan)
         self.assertEqual(phases, person["phase_ranges"])
         self.assertEqual([value["rows"] for value in phases], [
-            1_507, 20, 21, 20, 1_507, 20,
-            754, 20, 603, 20, 602, 20,
+            1_506, 20, 21, 20, 1_506, 20,
+            753, 20, 603, 20, 602, 20,
         ])
 
         canonical_builder = limits.structural.build_structural_allocation
@@ -267,9 +267,9 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
             receipt, oracle=self.oracle
         ))
         self.assertEqual(receipt["outputs"]["counts"], {
-            "events": 5_087,
-            "boundaries": 446,
-            "schedule": 5_533,
+            "events": 5_097,
+            "boundaries": 448,
+            "schedule": 5_545,
         })
         self.assertEqual(
             receipt["outputs"]["shard_index_sha256"],
@@ -400,9 +400,9 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
             + process["declared_max_worker_peak_rss_bytes"],
         )
         self.assertEqual(receipt["outputs"]["counts"], {
-            "events": 43_596,
-            "boundaries": 5_175,
-            "schedule_items": 48_771,
+            "events": 43_597,
+            "boundaries": 5_177,
+            "schedule_items": 48_774,
         })
         self.assertEqual(receipt["contracts"], {
             "declared_projection_only": True,

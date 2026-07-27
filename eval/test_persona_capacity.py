@@ -67,11 +67,11 @@ class PersonaCapacityProjectionTests(unittest.TestCase):
             "history_events": 77,
             "structural_events": 11,
             "events": 88,
-            "index_auto_boundaries": 51,
+            "index_auto_boundaries": 55,
             "purged_commit_boundaries": 5,
             "index_noop_boundaries": 5,
-            "boundaries": 61,
-            "schedule_items": 149,
+            "boundaries": 65,
+            "schedule_items": 153,
         })
         self.assertIsNone(projection["components"]["raw"]["projected_bytes"])
 

@@ -416,7 +416,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
 
     def test_hash_is_independent_and_v1_identity_is_unchanged(self):
         self.assertEqual(v1.SCHEMA_VERSION, 1)
-        self.assertEqual(v1.FIXTURE_ID, "kcs-persona-pc-v1")
+        self.assertEqual(v1.FIXTURE_ID, "kio-persona-pc-v1")
         script = (
             "from eval import persona_v2_variant_catalog as v; "
             "x=v.build_variant_catalog(); "

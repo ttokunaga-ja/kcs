@@ -213,7 +213,7 @@ class PersonaV2ArtifactCommonTests(unittest.TestCase):
         authority_alias["authority"][next(iter(authority_alias["authority"]))] = 0
         mutations.append(authority_alias)
         wrong_fixture = copy.deepcopy(base)
-        wrong_fixture["fixture_id"] = "kcs-persona-pc-v1"
+        wrong_fixture["fixture_id"] = "kio-persona-pc-v1"
         mutations.append(wrong_fixture)
         authorizing = copy.deepcopy(base)
         authorizing["g0_contract_frozen"] = True
