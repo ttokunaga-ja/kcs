@@ -2260,10 +2260,19 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        check_purge_state, create_private_temp, missing_live_raw_error, no_replace_move,
-        normalize_absolute, open_destination_dir, sync_directory_handle, validate_source_names,
-        RestoreItem, ScopeTarget,
+        check_purge_state, create_private_temp, destination_lstat_identity, missing_live_raw_error,
+        no_replace_move, normalize_absolute, open_destination_dir, sync_directory_handle,
+        validate_source_names, RestoreItem, ScopeTarget,
     };
+
+    fn entry_names(path: &std::path::Path) -> Vec<String> {
+        let mut names = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
 
     #[test]
     fn source_name_collision_is_case_and_normalization_insensitive() {
@@ -2339,6 +2348,79 @@ mod tests {
         assert_eq!(error.error_code(), "KIO-E-PURGE-NOT-FOUND-001");
         assert_eq!(error.exit_code(), kio_core::ExitCode::PermanentFailure);
         assert!(!error.context().to_string().contains("receipt"));
+    }
+
+    // PA18 (§D, U25), `tasks/step4b-contract-tests-p2a.md` "PA18 dirfd
+    // containment": when a `--to` whose identity was bound at
+    // `validate_destination`'s containment check is swapped for a different
+    // real directory before the open, the mismatch is rejected with
+    // `KIO-E-CONFIG-USAGE-001` (exit 2) and nothing is written first.
+    //
+    // Deliberately not `#[cfg(unix)]`: `matches_opened`/
+    // `destination_lstat_identity` have separate Windows bodies comparing a
+    // different field pair (volume serial + file index) sourced from two
+    // distinct OS queries, and `windows-security-r23` runs the workspace
+    // suite. Swapping by rename rather than by symlink is what keeps the case
+    // expressible on both — Windows symlink creation needs privileges.
+    #[test]
+    fn swapped_destination_identity_is_rejected_before_the_open_mutates_anything() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let destination_path = root.join("destination");
+        let moved_path = root.join("moved-destination");
+        let decoy_path = root.join("decoy");
+        fs::create_dir(&destination_path).unwrap();
+        fs::write(destination_path.join("original.md"), b"original").unwrap();
+        fs::create_dir(&decoy_path).unwrap();
+        fs::write(decoy_path.join("decoy.md"), b"decoy sentinel").unwrap();
+
+        // Exactly the value `validate_destination` captures at its
+        // containment-check moment and hands to the open below. Reaching it
+        // (and `DestinationIdentity`) is why this lives in the module's own
+        // `mod tests` rather than in `tests/` — both are private.
+        let identity = destination_lstat_identity(&destination_path).unwrap();
+
+        // Positive control: an unswapped destination must still open. Without
+        // it, an identity that never compares equal — the lstat here and the
+        // opened handle's fstat there are two different OS queries — would
+        // satisfy the rejection assertion below for the wrong reason, while
+        // rejecting every legitimate restore.
+        open_destination_dir(&destination_path, false, Some(&identity)).unwrap();
+
+        // The swap PA18 exists for: a different REAL directory now answers to
+        // the bound name. Two renames rather than one because Windows will
+        // not rename onto an existing directory.
+        fs::rename(&destination_path, &moved_path).unwrap();
+        fs::rename(&decoy_path, &destination_path).unwrap();
+
+        // The swap really did change the identity behind the name, so the
+        // rejection below cannot be an artifact of the setup (a vanished
+        // path, an unreadable one) landing on the same assertion by accident.
+        assert_ne!(
+            destination_lstat_identity(&destination_path).unwrap(),
+            identity
+        );
+
+        // `create_missing: true` gives the call every opportunity to create
+        // before it compares — the rejection must still come first.
+        let error = open_destination_dir(&destination_path, true, Some(&identity)).unwrap_err();
+
+        // Not the generic `unsafe_restore_error` family (exit 1) every other
+        // structural rejection in this module uses: PA18 wants the usage
+        // error specifically, so automation can tell "this destination is not
+        // the one that was validated" from a transient OS-level problem. The
+        // message is pinned too, so a future unrelated usage error raised
+        // from this same function cannot quietly satisfy this test.
+        assert_eq!(error.error_code(), "KIO-E-CONFIG-USAGE-001");
+        assert_eq!(error.exit_code(), kio_core::ExitCode::InvalidUsage);
+        assert_eq!(
+            error.message(),
+            "restore destination identity changed between validation and open"
+        );
+
+        // No mutation before the rejection, on either side of the swap.
+        assert_eq!(entry_names(&destination_path), vec!["decoy.md".to_owned()]);
+        assert_eq!(entry_names(&moved_path), vec!["original.md".to_owned()]);
     }
 
     #[cfg(unix)]
