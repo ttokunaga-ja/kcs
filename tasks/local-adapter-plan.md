@@ -502,8 +502,8 @@ purge 済み画像の URI が chunk 本文に残る場合がある。`related_im
 > **U1 と配線は 2026-07-26 完了。** `crates/kio-adapter/src/local_embedding.rs` が
 > `ExecutionMode::OfflineApi` / `allow_network: false` / `billable_kinds: []` /
 > `preferred_request_kind: Sync` を宣言し、mock 実装で end-to-end に動作する。
-> **実 HTTP wire (U2) は 2026-07-27 の V4 確定で unblock された** (§11 参照)。
-> template・instruction・重み pin が実測で決まったので placeholder は要らない。
+> **実 HTTP wire (U2) は 2026-07-28 に実装済み** (下記 U2 節)。V4 で template・
+> instruction・重み pin が実測で決まったので placeholder は要らなかった。
 > ただし **`dimensions` だけは V3 決着まで暫定**なので、`tool_profile_hash` を凍結扱いに
 > せず、恒久コーパスを埋め込まないこと。
 >
@@ -576,7 +576,7 @@ profile 値:
 [`active_adopted_embedding_execution`](../crates/kio-adapter/src/catalog.rs) が Gemini 形状
 (`AdoptedEmbeddingExecution` enum + `GEMINI_API_KEY`) に固まっている。**Stage 2 の最大の作業量**。
 
-#### U2 vLLM `messages` wire の実装 [P0]
+#### U2 vLLM `messages` wire の実装 [P0] ✅ 2026-07-28 実装
 ```http
 POST http://127.0.0.1:8000/v1/embeddings
 {
@@ -588,10 +588,37 @@ POST http://127.0.0.1:8000/v1/embeddings
   ]}]
 }
 ```
-起動: `vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling --chat-template <path>`。
+起動: `vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling`
+(V4 の実測どおり `--chat-template` は不要 — モデル同梱の `chat_template.jinja` が使われる)。
 D4 によりテキストのみでも同形式を使う。
 (この base64 は **Adapter → ローカルサーバ間の wire** であり、§4.4 が禁じる
 「検索レスポンスに base64 を埋める」こととは別物である。)
+
+> **実装時の裁定と所見 (2026-07-28)**
+>
+> - **`system` メッセージは送らない。** V4 の裁定どおり。`user` 1 通のみ。
+>   これは実装への拘束であり、07 §5.3 に明記した上でテストで固定してある
+>   (送る実装に変えるなら `prompt_template_hash` の再計算を伴う)
+> - **テキストも画像も `content` は配列形式**にした。モデルの template は
+>   単一 text について文字列形と配列形を同一に描画するのでトークンは変わらず、
+>   **V4 が実測した描画の経路が 1 本になる**。2 本あって「一致するはず」と
+>   言うより強い
+> - **MRL は切り詰め後に再正規化する。** V4 が native 2048 で L2 ≈ 1.0 を
+>   実測しているので、先頭 768 の prefix は**短い** — しかも短さの度合いは
+>   ベクトルごとに違う。正規化せずに保存すると cosine が「その文の質量が
+>   768 より先にどれだけ乗っていたか」に依存し、それは文の性質ではない
+> - **切り詰めは 2048 と等値比較しない。** 同族のより広いモデルを切り詰めるのも
+>   MRL である。禁じるべきは*広げる*ことなので、768 未満の応答だけを拒否する
+> - **宣言は `Real` を選ぶ。** `KIO_TEST_LOCAL_EMBED=mock` を経由しない限り
+>   mock は選ばれない。宣言が黙って mock ベクトルを実コーパスへ書く経路は無い
+> - **mock と real は別 profile hash**。同一空間を名乗らせない (03 §7)
+> - `tool_profile_hash` = `sha256:f9f610bb…` が V4 の `v4-profile.json` と
+>   **一致することをテストで凍結した**。Python 移植と Rust 実装が独立に同じ値を
+>   出しており、どちらかがずれたら落ちる
+>
+> **未実装**: D7 の `[adapter.policy.offline_api]` timeout 上書きは config 形の
+> 確定のみで、実装は入っていない。現状は共通の既定 (実効 30 秒) で、
+> chunk 1 件の embedding には十分。Stage 3 のローカル OCR では効いてくる。
 
 #### U3 🔴 `chunk_vec` は chunk 専用 — 画像用 vec0 テーブルが無い [P0・spec 改訂]
 [04 §4.3](../docs/04-pipeline.md) の DDL:
@@ -916,7 +943,7 @@ Stage 2 (段階 B・U1-U11)  local_embedding.rs + 画像埋め込み + ランキ
    ├ U4/V6 ✅ result_type / payload_uri / 参照元 chunk の逆引き (C2)
    ├ U5  ✅ 問題 A — 参照元 chunk の text rank 継承 (C2)
    ├ U6  ✅ 問題 B — 同枠 quota / 型非依存 MMR (C2、既存コード無改修)
-   ├ U2  ▶  実 vLLM の messages 配線 — V4 確定 (2026-07-27) により着手可
+   ├ U2  ✅ 実 vLLM の messages 配線 + MRL 再正規化 (2026-07-28)
    ├ U7  ⏳ image/text 同一空間の数値一致検査 — U2 の後
    └ U8  — image_object_hashes の writer — C1 が chunk 本文の逆引きで代替。
           埋め込み対象の列挙としては不要になった (writer なき宣言は残る)

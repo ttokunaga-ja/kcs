@@ -11,7 +11,9 @@ use crate::deterministic::DeterministicAdapter;
 use crate::gemini_embedding::{
     GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
 };
-use crate::local_embedding::{LocalEmbeddingAdapter, LocalEmbeddingExecution};
+use crate::local_embedding::{
+    LocalEmbeddingAdapter, LocalEmbeddingExecution, LOCAL_EMBEDDING_DEFAULT_MODEL,
+};
 use crate::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
     OcrResponse,
@@ -742,8 +744,10 @@ fn active_local_embedding_execution() -> Option<LocalEmbeddingExecution> {
         // A declared `offline_api` adapter activates with no auth of its own:
         // there is nothing to authenticate to. `real_embedding_activation`'s
         // `auth.is_some()` signal is meaningless here, so the declaration
-        // itself is the signal.
-        None => declared_offline_embedding().then_some(LocalEmbeddingExecution::Mock),
+        // itself is the signal — and what it selects is the real backend. The
+        // mock is reachable only through the env seam above, so a declaration
+        // can never silently mint mock vectors into a real corpus.
+        None => declared_offline_embedding().then_some(LocalEmbeddingExecution::Real),
     }
 }
 
@@ -765,7 +769,36 @@ fn declared_offline_embedding() -> bool {
 /// model catalog and `outputDimensionality` and describe no other provider.
 pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn EmbeddingAdapter>> {
     match execution {
-        EmbeddingExecution::Offline(local) => Ok(Box::new(LocalEmbeddingAdapter::new(local))),
+        EmbeddingExecution::Offline(LocalEmbeddingExecution::Mock) => {
+            Ok(Box::new(LocalEmbeddingAdapter::mock()))
+        }
+        // Same shape as the online `Real` arm below: the declaration is
+        // revalidated here rather than trusted from load time, and the parts
+        // only the real backend needs (url, model) are read at the point of
+        // construction so the execution enum can stay a `Copy` unit.
+        EmbeddingExecution::Offline(LocalEmbeddingExecution::Real) => {
+            let declared =
+                crate::tool_lock::registered_declared_adapter("embedding").ok_or_else(|| {
+                    AdapterError::ConfigSchema(
+                        "the offline embedding adapter resolved without a declaration".to_owned(),
+                    )
+                })?;
+            // Re-runs D1's literal-loopback check. An `offline_api` entry that
+            // passed at load time and points somewhere else now must not send.
+            crate::tool_lock::validate_declared_runtime_target("embedding", &declared)?;
+            let base_url = declared.url.clone().ok_or_else(|| {
+                AdapterError::ConfigSchema(
+                    "an offline_api embedding adapter must declare `url`".to_owned(),
+                )
+            })?;
+            let model = declared
+                .model
+                .clone()
+                .unwrap_or_else(|| LOCAL_EMBEDDING_DEFAULT_MODEL.to_owned());
+            Ok(Box::new(LocalEmbeddingAdapter::with_client(
+                crate::local_embedding::EnvLocalEmbeddingClient::new(base_url, model),
+            )))
+        }
         EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real) => {
             let declared = crate::tool_lock::registered_declared_adapter("embedding");
             if let Some(declared) = declared.as_ref() {
@@ -859,7 +892,7 @@ pub fn declared_embedding_profile_for(execution: EmbeddingExecution) -> Declared
     match execution {
         EmbeddingExecution::Online(seam) => declared_adopted_embedding_profile(seam),
         EmbeddingExecution::Offline(local) => {
-            let profile = LocalEmbeddingAdapter::new(local).profile();
+            let profile = crate::local_embedding::profile_for(local);
             DeclaredEmbeddingProfile {
                 tool_id: profile.adapter_id,
                 dimensions: u64::from(crate::local_embedding::LOCAL_EMBEDDING_DIMENSIONS),

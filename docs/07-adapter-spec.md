@@ -305,11 +305,21 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 > (適用形は [05-runtime.md §1.1](05-runtime.md) の consent gate)。逆に `--online` が
 > offline_api Adapter に対して何かを開くこともない (開くべき閉鎖が存在しない)。
 >
-> **現行実装との関係**: §1 / §7 のとおり、R23 の同梱 runtime は Markdownize / Embedding の
-> `cmd` / `args` / `url` を**一律 schema error として拒否する**。本 addendum は
-> その拒否を今すぐ緩めるものではなく、offline_api 対応を実装する際に `url` を受理する
-> **条件**を先に確定させたものである (`cmd` / `args` は将来の外部 dispatcher の領分として
-> 引き続き拒否 — §7)。
+> **現行実装 (2026-07-28)**: Embedding の `url` は上記の条件下で**受理される**。
+> Markdownize の `url`、および両者の `cmd` / `args` は引き続き一律 schema error
+> (`cmd` / `args` は将来の外部 dispatcher の領分 — §7)。
+>
+> ```toml
+> [embedding]
+> tool_id = "qwen3_vl_embedding_local"
+> kind    = "offline_api"
+> url     = "http://127.0.0.1:8000"      # loopback リテラルのみ。末尾の /v1 は不要
+> model   = "Qwen/Qwen3-VL-Embedding-2B" # 省略時はこの値
+> ```
+>
+> `auth` は書かない — 認証先が無い。この宣言があること自体が有効化の signal であり、
+> 承認行も `allow_network` も要らない ((2) のとおり)。Adapter は
+> `POST {url}/v1/embeddings` に §5.3 (2) の `messages` 形式で 1 item ずつ送る。
 
 ---
 
