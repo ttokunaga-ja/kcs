@@ -49,7 +49,7 @@ EXPECTED_VARIANT_COUNT = 71
 # full/two-seed cold gate.  This freezes a content-only candidate descriptor;
 # it does not issue a namespace entry or grant execution authority.
 EXPECTED_CANONICAL_BYTES = 5_357
-EXPECTED_SHA256 = "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"
+EXPECTED_SHA256 = "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 FAMILY_ORDER = (

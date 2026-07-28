@@ -4,12 +4,46 @@
 (`ARTIFACT_SCHEMA` / `FIXTURE_ID` / `kcs_path_media_type` などのフィールド名) が
 動いたため、それを覆う凍結 digest を採り直している。
 
+## 改名は identity だけを動かすわけではない
+
+`persona_v2_source_matched_lifecycle_inventory.py` の `_domain_key` は
+
+```python
+raw = b"kio-lifecycle-v1/" + _ascii(domain) + b"/" + _ascii(intent_key)
+```
+
+という前置詞で sha256 を取り、それを
+`domain-separated-sha256-order-dfs-augmenting-path` 照合の**順序キー**に使う。
+前置詞が変われば全ての sha256 が変わり、DFS の探索順が変わり、**どのソースが
+どれと照合されるかが変わる**。
+
+その結果、digest だけでなく中身が動く:
+
+```
+canonical_bytes         8312760 → 8313318
+baseline_aligned_count       13 → 10
+language_equal               57 → 54
+```
+
+`13` は `persona_v2_query_history_semantic_resolution_feasibility.py` が
+`!= 13` で fail させる値、つまり**人が選んで凍結した性質**であって digest の
+ような機械的な副産物ではない。
+
+salt だけを `kcs-lifecycle-v1/` に戻し他の改名を全て残すと `13` が復帰するので、
+**意味の変化はこの salt 1 つだけが原因**であることが確かめてある。
+2026-07-28 の判断で、salt も改名し、動いた性質値を採り直す方針を採った。
+
 ## 不変条件 — これが破れたら止める
 
-**`canonical_bytes` は 1 つも動かない。** `kcs` と `kio` は同じ 3 文字なので
-canonical JSON の長さは変わらず、digest だけが動く。artifact 43 件・契約 16 件の
-全ラウンドで検査しており、**破れたら改名以外の変化が混じった証拠**なので、
-そのときは digest を差し替えずに止めること。
+**salt 下流を除き、`canonical_bytes` は 1 つも動かない。** `kcs` と `kio` は
+同じ 3 文字なので canonical JSON の長さは変わらず、digest だけが動く。
+**破れたら改名以外の変化が混じった証拠**なので、そのときは digest を差し替えずに
+止めること。
+
+この番人は実際に仕事をした — 43 artifact しか測っていなかったときは静かだったが、
+81 builder に広げた最初のラウンドで上記の salt を捕まえた。だから salt 下流でも
+番人を外さず、**説明のついた artifact だけを名指しで例外にする**。例外が一覧として
+見える形でなければ、次に本当の混入が起きたときに気づけない。
 
 もう 1 つの検査: `eval/repin/` 以外で**変更された行はすべて 64 桁 digest を含む**。
 含まない行が出たら、それは改名の範囲外の変更である。

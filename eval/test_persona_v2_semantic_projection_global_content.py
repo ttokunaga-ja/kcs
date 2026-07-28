@@ -23,15 +23,15 @@ from eval import persona_v2_topology as topology
 EXPECTED_PROJECTION_PINS = {
     "topology-path-load": (
         133_187,
-        "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
+        "36c27d36ba074b884090a094541b33e34f719c2ed6c817309d26c9d9e2395db6",
     ),
     "realism-locale-security": (
         32_762,
-        "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
+        "6aec6942e00305334d90e0094c1a1903af2f6dd941ccc8e2e08d6f91980086ed",
     ),
     "route-scores": (
         88_085,
-        "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
+        "a555ef18181f525ca713e5f3655969dbd8d8b0ba3a205a5ae700f9ba2234ff03",
     ),
 }
 EXPECTED_DIRECT_FRAGMENT_PINS = {

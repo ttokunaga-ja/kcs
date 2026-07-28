@@ -15,7 +15,7 @@ chunk.  It also does not select an allocation/source-plan successor.
 | --- | --- |
 | descriptor schema | `kio.persona.pc-formal-leaf-placement-binding/v1` |
 | descriptor canonical bytes | 27,117 |
-| descriptor SHA-256 | `de518d1fef7a6955462774ace7321943ff5ca918be7f6210380890fca78857f8` |
+| descriptor SHA-256 | `d67b54fd1851358902842f464611d07008a06750a3165e58d47bd22954e92dc8` |
 | external body ID | `persona-pc-v2-formal-leaf-placement-rows-v1` |
 | external body framing | canonical UTF-8 NFC LF-JSONL |
 | external LF-JSONL bytes | 889,056 |

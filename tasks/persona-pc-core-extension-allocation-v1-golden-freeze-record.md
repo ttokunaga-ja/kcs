@@ -17,7 +17,7 @@ Kio, evaluation, or actual chunk claims.
 | --- | --- |
 | descriptor schema | `kio.persona.core-extension-allocation-manifest/v1` |
 | descriptor canonical bytes | 5,357 |
-| descriptor SHA-256 | `ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f` |
+| descriptor SHA-256 | `351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333` |
 | external body ID | `persona-core-v1-extension-allocation-rows-v1` |
 | external LF-JSONL bytes | 426,889 |
 | external LF-JSONL SHA-256 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |

@@ -177,7 +177,7 @@ SUBJECT_PIN_SPECS = {
         "kio.persona.pc-overlay-reservation-suite/v2",
         2,
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
     "chunk-accounting": (
         "persona-pc-v2-chunk-accounting",
@@ -191,7 +191,7 @@ SUBJECT_PIN_SPECS = {
         "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         2,
         697_466,
-        "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+        "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
     ),
 }
 
@@ -269,7 +269,7 @@ SINGLETON_PROJECTION_SPECS = {
         "kio.persona.pc-topology-path-load-content-projection/v1",
         "canonical-json",
         133_187,
-        "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
+        "36c27d36ba074b884090a094541b33e34f719c2ed6c817309d26c9d9e2395db6",
         "projection-derivation-topology-path-load",
     ),
     "realism-locale-security": (
@@ -277,7 +277,7 @@ SINGLETON_PROJECTION_SPECS = {
         "kio.persona.pc-realism-locale-security-content-projection/v1",
         "canonical-json",
         32_762,
-        "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
+        "6aec6942e00305334d90e0094c1a1903af2f6dd941ccc8e2e08d6f91980086ed",
         "projection-derivation-realism-locale-security",
     ),
     "recipe-content-filename-policy": (
@@ -285,7 +285,7 @@ SINGLETON_PROJECTION_SPECS = {
         "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
         "canonical-json",
         250_388,
-        "81a9fd5a44ac1cdda977ee4ed36fffdd6c0f9944bc41efb2cb4ef07d30819e7b",
+        "c7570d0f0436e5321929f84e13e59a130fba2f9976764493d04e1ad9aaf7e4ba",
         "projection-derivation-recipe-content-filename-policy",
     ),
     "route-scores": (
@@ -293,7 +293,7 @@ SINGLETON_PROJECTION_SPECS = {
         "kio.persona.pc-route-scores-content-projection/v1",
         "canonical-json",
         88_085,
-        "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
+        "a555ef18181f525ca713e5f3655969dbd8d8b0ba3a205a5ae700f9ba2234ff03",
         "projection-derivation-route-scores",
     ),
     "payload-equivalence-rules": (
@@ -301,7 +301,7 @@ SINGLETON_PROJECTION_SPECS = {
         "kio.persona.pc-payload-equivalence-rules-projection/v1",
         "canonical-json",
         4_288,
-        "05f8124cd1bd09652701d38ffd702824f3cff8d40a161815969071cd678e14e1",
+        "a23ca9032d9779d9ebdde1d490354f70e5f1c0a09db9e8e3eaea26098e477649",
         "payload-equivalence-rules-global",
     ),
 }
@@ -390,7 +390,7 @@ RUBRIC_SPECS = {
 # PYTHONHASHSEED=0/1 build+validation measurements agreed exactly.
 EXPECTED_CATALOG_BYTES = 42_931
 EXPECTED_CATALOG_SHA256 = (
-    "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd"
+    "3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3"
 )
 
 

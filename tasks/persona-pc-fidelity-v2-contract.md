@@ -91,7 +91,7 @@ JSONL 73、effective source membership 20、query-independent lifecycle fact/ren
 effective membership 20、concrete overlay 40、source-instance parameters 74、lifecycle fact/rendition 20、
 payload equivalence 1である。framingはcanonical JSON 67 bodies / LF終端canonical JSONL 186 bodiesで、
 missing projection class ledgerは空である。descriptorは697,466 canonical bytes / SHA-256
-`6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external 253 bodiesは
+`820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、ordered projection-pin digestは
 `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。v1 projection bytes/pinsは
 再生成して継承し、再解釈・再pinしない。
@@ -103,7 +103,7 @@ replayと独立した2 hash-seed cold buildが上記literalを再現して成立
 `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`で局所golden固定した。
+`66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -112,12 +112,12 @@ positive review receipt、production blocker ledger、topic/language/fact/revisi
 このgapのin-memory projection feasibility auditは、contributor target 2,000件中baseline全predicate一致327、不一致1,673、
 distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000、all-condition exact 0を示す。
 同auditは40,947 canonical bytes / SHA-256
-`890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`で局所golden固定したが、
+`1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`で局所golden固定したが、
 不足を認証するactive blocker evidenceに限り、resolution v2やcompletion evidenceではない。
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
 dependenciesを束縛し、16,735 canonical bytes / SHA-256
-`bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`で局所golden固定した。
+`3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`で局所golden固定した。
 同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
 4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
 evaluation execution authorityを与えない。
@@ -1197,7 +1197,7 @@ Decision 150のv1 artifactでは`semantic_payload_projection_bound=false`、
 この歴史的値を現在のv2 coverageとして読まず、v1 bodyとpinも変更しない。
 
 partial inventoryのcanonical bodyは293,285 bytes / SHA-256
-`5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`、receipt順の
+`e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`、receipt順の
 `{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
 `a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`で固定する。
 external 113 body合計は128,144,915 bytes、base 73 bodyは203,000 rows / 121,020,941 bytes、
@@ -1216,7 +1216,7 @@ source intentsを覆うassignment shard 73 bodiesからなる。framingはcanoni
 canonical JSONL 186 bodiesである。
 
 v2 descriptorは697,466 canonical bytes / SHA-256
-`6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external 253 bodiesは
+`820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、receipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
 `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。descriptor 2 MiB、
 cumulative external 256 MiB、cold build RSS 1 GiBのhard cap内に保つ。v1の113 projection bytes/pinsは

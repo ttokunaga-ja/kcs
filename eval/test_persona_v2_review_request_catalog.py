@@ -15,7 +15,7 @@ from eval import persona_v2_review_request_catalog_validator as independent
 
 EXPECTED_GOLDEN = (
     42_931,
-    "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd",
+    "3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3",
 )
 EXPECTED_CLASS_ORDER = (
     "topology-activity",

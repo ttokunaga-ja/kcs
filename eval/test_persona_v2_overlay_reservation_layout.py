@@ -9,7 +9,7 @@ from eval import persona_v2_overlay_reservation_validator as independent_validat
 
 EXPECTED_SUITE_BYTES = 21_680
 EXPECTED_SUITE_SHA256 = (
-    "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d"
+    "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4"
 )
 EXPECTED_P01_PILOT = (
     206_597,

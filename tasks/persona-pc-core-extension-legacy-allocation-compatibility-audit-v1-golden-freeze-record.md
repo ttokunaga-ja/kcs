@@ -27,7 +27,7 @@ order, then ASCII variant ID.  Its maximum LF-inclusive row size is 529 bytes.
 
 | input | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| core extension allocation descriptor | 5,357 | `ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f` |
+| core extension allocation descriptor | 5,357 | `351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333` |
 | core extension allocation external rows | 426,889 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
 | legacy v2 variant catalog | 211,733 | `807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9` |
 

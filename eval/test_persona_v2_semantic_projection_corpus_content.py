@@ -21,11 +21,11 @@ from eval import persona_v2_semantic_projection_corpus_content_validator as inde
 
 EXPECTED_PRIMARY_PIN = (
     6_790,
-    "31481eb3e11bd3038abc034b639ca064ba5942f1bb278d311af2fc62f3d35117",
+    "5a106cb58f91b9e47195c728bf229c2d7d4b15da1c067480178ecc8a514050bd",
 )
 EXPECTED_RECIPE_PIN = (
     250_388,
-    "81a9fd5a44ac1cdda977ee4ed36fffdd6c0f9944bc41efb2cb4ef07d30819e7b",
+    "c7570d0f0436e5321929f84e13e59a130fba2f9976764493d04e1ad9aaf7e4ba",
 )
 EXPECTED_FACT_PINS = (
     ("p01", 22_997, "11890827739a1fb21ef77655df3d89bc6f12b13f94e6204d6cca9c979e20ebb1"),

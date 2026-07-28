@@ -27,7 +27,7 @@ The frozen source candidate pinned by this proposal is exactly:
 
 | source item | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f` |
+| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333` |
 | external rows `persona-core-v1-extension-allocation-rows-v1` | 426,889 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
 
 Those pins attest an authored, frozen **candidate** only.  They do not record a
@@ -202,7 +202,7 @@ including an explicit empty coordinate map:
   "artifact_schema_version": 1,
   "body_framing": "canonical-json",
   "canonical_bytes": 5357,
-  "sha256": "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f",
+  "sha256": "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333",
   "coordinates": {},
   "owner_id": "persona-core-v1-extension-allocation-manifest-v1",
   "owner_role": "frozen-content-candidate-descriptor"

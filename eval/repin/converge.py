@@ -27,6 +27,20 @@ HERE = Path(__file__).parent
 ROOT = Path(".")
 BEFORE = json.loads((HERE / "before.json").read_text())
 
+# bytes が動くことに**説明がついた** artifact だけ、バイト一致の検査を外す。
+# 番人ごと外さないのは、これが実際に仕事をしたからである — 43 artifact しか
+# 測っていなかったときは静かだったが、81 builder に広げた最初のラウンドで
+# 下記の salt を捕まえた。理由を書かずにここへ足さないこと。
+BYTES_MAY_MOVE = {
+    "persona_v2_query_history_semantic_resolution_feasibility"
+    "::build_query_history_semantic_resolution_feasibility_audit": (
+        "改名で `_domain_key` の前置詞が変わり domain-separated-sha256-order の "
+        "DFS 探索順が動いた。この artifact は上流の canonical_bytes をデータとして"
+        "記録しているので、その差が自身のバイト数に出る "
+        "(8312760 -> 8313318 を記録して 40947 -> 40949)。"
+    ),
+}
+
 
 def in_repo(digest: str) -> bool:
     return bool(subprocess.run(["git", "grep", "-Il", digest],
@@ -47,6 +61,7 @@ def main() -> int:
     record = HERE / "applied.json"
     history: dict[str, str] = json.loads(record.read_text()) if record.exists() else {}
     applied: dict[str, str] = {}
+    held: dict[str, str] = {}
     for round_number in range(1, 25):
         after = snapshot(HERE / f"after-{round_number}.json")
         built = sum(1 for v in after.values() if "sha256" in v)
@@ -56,10 +71,14 @@ def main() -> int:
             if "sha256" not in before or "sha256" not in after.get(name, {}):
                 continue
             now = after[name]
-            if before["bytes"] != now["bytes"]:
-                print(f"[stop] {name}: bytes moved {before['bytes']} -> {now['bytes']}. "
-                      "改名以外の変化が混じっている。", file=sys.stderr)
-                return 1
+            if before["bytes"] != now["bytes"] and name not in BYTES_MAY_MOVE:
+                # その対応を採らない。全体を止めるのではない — 番人の役割は
+                # 「この対応は信用しない」であって「他も測るな」ではない。
+                # 引数を取らない builder を全部測るようにしてから、凍結 artifact
+                # ではない診断的な builder も混ざるようになった。1 件で止めると
+                # 前進しないので、外して最後にまとめて報告する。
+                held[name] = f"bytes moved {before['bytes']} -> {now['bytes']}"
+                continue
             old, new = before["sha256"], now["sha256"]
             if old == new or old in applied:
                 continue
@@ -77,6 +96,11 @@ def main() -> int:
                        cwd=ROOT, check=True)
 
     record.write_text(json.dumps({**history, **applied}, indent=2, sort_keys=True) + "\n")
+    for name, why in sorted(held.items()):
+        print(f"[held] {name}: {why}", file=sys.stderr)
+    if held:
+        print(f"\n{len(held)} 件は採用していない。改名以外で動いているので、"
+              "凍結 artifact なのか診断なのかを確かめること。", file=sys.stderr)
     return 0
 
 

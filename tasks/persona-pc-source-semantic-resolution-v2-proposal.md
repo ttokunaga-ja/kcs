@@ -685,7 +685,7 @@ binding 名、artifact schema/version、canonical bytes、full SHA-256 の組で
 | --- | --- | ---: | ---: | --- |
 | `persona-v2-source-inventory-layout` | `kio.persona.pc-source-inventory-layout/v2` | 2 | 274,566 | `81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a` |
 | `persona-v2-source-inventory-suite` | `kio.persona.pc-source-inventory-suite/v2` | 2 | 45,887 | `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3` |
-| `persona-v2-overlay-reservation-suite` | `kio.persona.pc-overlay-reservation-suite/v2` | 2 | 21,680 | `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d` |
+| `persona-v2-overlay-reservation-suite` | `kio.persona.pc-overlay-reservation-suite/v2` | 2 | 21,680 | `0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4` |
 | `persona-v2-source-instance-parameter-assignment-suite` | `kio.persona.pc-source-instance-parameter-assignment-suite/v2` | 2 | 72,535 | `42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3` |
 | `persona-v2-format-implementation-registry` | `kio.persona.pc-format-implementation-registry/v2` | 2 | 333,881 | `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d` |
 | `persona-v2-formal-source-recipe-profile-catalog` | `kio.persona.pc-formal-source-recipe-profile-catalog/v2` | 2 | 386,152 | `0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df` |
@@ -696,8 +696,8 @@ binding 名、artifact schema/version、canonical bytes、full SHA-256 の組で
 | `persona-v2-source-matched-lifecycle-suite` | `kio.persona.pc-source-matched-lifecycle-suite/v1` | 1 | 14,605 | `b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b` |
 | `lifecycle-effective-membership-reconciliation-v1` | `kio.persona.pc-lifecycle-effective-membership-reconciliation/v1` | 1 | 69,195 | `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29` |
 | `query-history-target-resolution-v1` | `kio.persona.pc-query-history-target-resolution/v1` | 1 | 4,478,576 | `8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff` |
-| `query-history-semantic-resolution-feasibility-audit` | `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136` |
-| `complete-semantic-projection-inventory-v2` | `kio.persona.pc-semantic-projection-derivation-inventory/v2` | 2 | 697,466 | `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69` |
+| `query-history-semantic-resolution-feasibility-audit` | `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584` |
+| `complete-semantic-projection-inventory-v2` | `kio.persona.pc-semantic-projection-derivation-inventory/v2` | 2 | 697,466 | `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91` |
 | `corpus-semantic-namespace-v3` | `kio.persona.pc-corpus-semantic-namespace/v3` | 3 | 161,665 | `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509` |
 
 `query-history-target-resolution-v1` は frozen baseline input にすぎない。feasibility audit 自身が

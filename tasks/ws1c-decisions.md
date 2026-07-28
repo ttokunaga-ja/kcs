@@ -998,7 +998,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     completion wording.  The current `kio.persona.pc-overlay-contract/v2` is 71,179 canonical bytes,
     SHA-256 `e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23`.
     The compact reservation suite is 21,680 canonical bytes, SHA-256
-    `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`, and binds forty exact
+    `0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4`, and binds forty exact
     persona/origin artifacts: pilot and full-residual for each of twenty personas.  Together they reserve
     25,560 rows, 46,840 distinct overlay source-intent references, and 2,100 pilot contributor-only
     semantic-anchor slots.  The largest origin body is 2,639,467 bytes and the largest canonical JSONL
@@ -1657,7 +1657,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The canonical inventory cap is 1 MiB and the cumulative external-projection hard cap is 144 MiB.  Each base JSONL
     body is capped at 4 MiB, 4,096 rows, and 768 bytes per LF-inclusive row.  Each effective and lifecycle projection
     has a 384 KiB hard cap and 256 KiB target.  The frozen inventory is exactly 293,285 canonical bytes with SHA-256
-    `5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`; the canonical JSON array of ordered
+    `e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`; the canonical JSON array of ordered
     `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
     `a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`.  Its 113 external bodies total exactly
     128,144,915 bytes.  The 73 base bodies contain exactly 203,000 rows and 121,020,941 bytes, with a 633-byte maximum
@@ -1736,7 +1736,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     projection bodies and pins, completion claims, and negative authority are neither amended nor superseded.
 
     The frozen v2 descriptor is exactly 697,466 canonical bytes with SHA-256
-    `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`.  Its 253 external bodies total exactly
+    `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`.  Its 253 external bodies total exactly
     155,741,469 bytes.  The canonical JSON array of ordered `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
     `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`.  The three large JSONL domains contain
     exactly 203,000 base rows, 25,560 concrete-overlay rows, and 203,000 source-parameter assignment rows.  Their
@@ -1815,7 +1815,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     decision, approval, waiver, or positive receipt, and `positive_receipt_bound` is false for every request.
 
     The frozen request catalog is 42,931 canonical bytes with SHA-256
-    `2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd`; two isolated hash seeds agree and the
+    `3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3`; two isolated hash seeds agree and the
     focused eight-test gate passes.  A review request is not review evidence and cannot satisfy the corpus input
     closure or G0.
 156. Persona-PC v2 records the current unresolved production boundary in the bootstrap-only
@@ -1825,7 +1825,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     eligibility false.  The historical source universe and source registry are deliberately incomplete.
 
     The frozen bootstrap is 21,645 canonical bytes with SHA-256
-    `e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2`; two seeds agree and 24 focused tests pass.
+    `48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97`; two seeds agree and 24 focused tests pass.
     This artifact is not the production blocker-resolution ledger and cannot resolve or waive any claim.
 157. Persona-PC v2 binds the query/oracle/lifecycle cardinality bridge as
     `kio.persona.pc-query-history-target-resolution/v1`.  It contains exactly twenty personas by 105 mappings,
@@ -1875,7 +1875,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     zero, four-domain disjointness is unproved, and query-history target resolution v2 is not issued.
 
     The current audit candidate is 40,947 canonical bytes with SHA-256
-    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`, but its golden constants deliberately remain
+    `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`, but its golden constants deliberately remain
     unset pending isolated full/cold acceptance.  The in-memory all-persona projection build completes in 465.03 seconds; fourteen
     focused tests, byte compilation, diff checks, and the final independent audit pass.  These measurements are
     active blocker evidence, not a frozen production closure.  A v2 source-semantic resolution must add sufficient
@@ -1889,7 +1889,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`.  The pre-freeze independent full gate
+    `66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
@@ -1913,7 +1913,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     issued.
 
     The frozen body is exactly 40,947 canonical bytes with SHA-256
-    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`.  The pre-freeze all-persona build plus
+    `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`.  The pre-freeze all-persona build plus
     producer-independent validation passes in 458.502 seconds with 301,400,064-byte maximum RSS.  Two isolated cold
     processes under hash seeds zero and one reproduce the same bytes and digest in 452.817 and 451.303 seconds,
     respectively, with 303,005,696-byte maximum RSS.  After both producer and independent-validator golden pairs
@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`.  The pre-freeze full dependency gate
+    `3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
@@ -2083,7 +2083,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     lifecycle source references, 600 inverted consumer references, and 300 purge witnesses.
 
     The frozen body is 8,455 canonical bytes with SHA-256
-    `34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8`.  The corrected pre-freeze full gate
+    `2c94ae39e60af5970053ddcd205670791d6cdee6bd5bffc8cad1270c221d3ea0`.  The corrected pre-freeze full gate
     passes in 2,595.206 seconds with 800,702,464-byte maximum RSS.  Isolated seed-zero and seed-one cold processes
     reproduce the same bytes and digest in 2,604.108 and 2,588.437 seconds respectively, 5,193.170 seconds total,
     with 804,306,944-byte maximum RSS.  Each full replay opens the namespace validator once, effective-membership

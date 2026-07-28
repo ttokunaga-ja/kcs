@@ -61,7 +61,7 @@ TARGET_ARTIFACT_BYTES = 512 * 2**10
 # reconstructions under distinct hash seeds agreed byte-for-byte.
 EXPECTED_CANONICAL_BYTES = 40_947
 EXPECTED_SHA256 = (
-    "890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136"
+    "1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584"
 )
 
 DEPENDENCY_ORDER = (
@@ -108,7 +108,7 @@ DEPENDENCY_PINS = {
         "artifact_schema": "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 697_466,
-        "sha256": "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+        "sha256": "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
     },
 }
 
@@ -774,12 +774,19 @@ def _build_from_snapshot(snapshot):
         "graph-normal": 360,
     } or total_maximum != 1_060:
         _fail("suite distractor feasibility totals drifted")
+    # 2026-07-28 に 13/87 から 10/90 へ動かした。原因は改名で、
+    # `persona_v2_source_matched_lifecycle_inventory._domain_key` の
+    # 前置詞が `kcs-lifecycle-v1/` から `kio-lifecycle-v1/` になったため
+    # domain-separated-sha256-order の DFS 探索順が変わり、cross-format の
+    # 照合結果が変わった。salt だけを戻すと 13 が復帰することを確かめてある。
+    # distractor 分類の内訳 (720/3720/600/360) と上界 1060 は動いていないので、
+    # 変わったのは照合の選び方であって fixture の構造ではない。
     p01_baseline = persona_rows[0]["baseline_target_feasibility"]
     if (
-        p01_baseline["baseline_aligned_count"] != 13
-        or p01_baseline["baseline_mismatch_count"] != 87
+        p01_baseline["baseline_aligned_count"] != 10
+        or p01_baseline["baseline_mismatch_count"] != 90
     ):
-        _fail("p01 baseline 13-aligned/87-mismatch sentinel drifted")
+        _fail("p01 baseline 10-aligned/90-mismatch sentinel drifted")
 
     value = {
         "artifact_kind": ARTIFACT_KIND,

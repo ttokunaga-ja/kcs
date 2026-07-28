@@ -52,7 +52,7 @@ EXPECTED_PINS = {
     ),
     "persona-v2-overlay-reservation-suite": (
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
 }
 

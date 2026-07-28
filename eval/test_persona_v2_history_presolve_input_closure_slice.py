@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 FROZEN_GOLDEN = (
     8_455,
-    "34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8",
+    "2c94ae39e60af5970053ddcd205670791d6cdee6bd5bffc8cad1270c221d3ea0",
 )
 
 
@@ -109,7 +109,7 @@ class PersonaV2HistoryPresolveInputClosureSliceTests(unittest.TestCase):
                 ),
                 (
                     697_466,
-                    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+                    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
                 ),
                 (
                     14_605,

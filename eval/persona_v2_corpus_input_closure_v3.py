@@ -51,7 +51,7 @@ TARGET_MANIFEST_BYTES = 64 * 2**10
 # Frozen after two isolated full build+validation measurements agreed.
 EXPECTED_CLOSURE_CANONICAL_BYTES = 7_590
 EXPECTED_CLOSURE_SHA256 = (
-    "47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126"
+    "66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245"
 )
 
 DEPENDENCY_ORDER = (
@@ -92,7 +92,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 697_466,
             "sha256": (
-                "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+                "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
             ),
         },
     },
@@ -108,7 +108,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 42_931,
             "sha256": (
-                "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd"
+                "3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3"
             ),
         },
     },
@@ -126,7 +126,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 21_645,
             "sha256": (
-                "e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2"
+                "48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97"
             ),
         },
     },

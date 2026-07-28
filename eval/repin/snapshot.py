@@ -30,25 +30,40 @@ sys.path.insert(0, str(ROOT))
 
 
 def artifacts() -> list[tuple[str, str]]:
-    """(module, zero-arg builder) を宣言順に集める。"""
+    """(module, zero-arg builder) を宣言順に集める。**正本を選ばない。**
+
+    「どれが正本の builder か」を当てにいく版は 3 回続けて外した — 最初の builder
+    だと仮定して per-persona の 3 モジュールを落とし、`ARTIFACT_KIND = "` を条件に
+    して複数行で書いているモジュールを落とし、`overlay_reservation_layout` では
+    origin suite を掴んで byte cap で落ちた。そのたびに「解けない残件」に見えて
+    いたが、実際は測っていないだけだった。
+
+    当てる必要が無い。**引数を取らない builder を全部測ればよい。** 対応の採用条件
+    (bytes が前後で一致し、`old` が repo に実在する) が正本でないものを自動的に
+    弾く — どこにも pin されていない出力は `old` が repo に無いので採られない。
+    選別を推測から検査へ移すのが要点で、余分に組む時間は誤りを見逃す代償より安い。
+    """
     found = []
     for path in sorted((ROOT / "eval").glob("persona_v2_*.py")):
-        if path.stem.endswith("_validator"):
-            continue
         source = path.read_text(encoding="utf-8")
-        builders = re.findall(r"^def (build_[a-z0-9_]+)\(\s*\)\s*:", source, re.M)
-        if not builders:
-            continue
-        # 正本は suite descriptor があればそれ。無ければ ARTIFACT_KIND を宣言して
-        # いるモジュールの最初の builder。`ARTIFACT_KIND` だけを条件にしていた版は、
-        # per-persona 構成の 3 モジュール (suite descriptor は持つが ARTIFACT_KIND は
-        # 持たない) を丸ごと取りこぼしていた。
-        suite = [b for b in builders if b.endswith("_suite_descriptor")]
-        if suite:
-            found.append((path.stem, suite[0]))
-        elif 'ARTIFACT_KIND = "' in source:
-            found.append((path.stem, builders[0]))
+        for builder in re.findall(r"^def (build_[a-z0-9_]+)\(\s*\)\s*:", source, re.M):
+            found.append((path.stem, builder))
     return found
+
+
+def canonical_bytes(module, value) -> bytes:
+    """モジュール自身のハッシャで測る。無ければ共通の正準化に落とす。
+
+    `canonical_json_bytes` を公開していないモジュールがある (`corpus_input_closure_v3`
+    は `corpus_input_closure_v3_candidate_bytes` という名前で持つ)。名前を当てにいく
+    より、共通の正準化に落として**採用条件に判定させる**ほうが安全である — 正準化を
+    取り違えていれば digest はどこにも pin されておらず、`old` が repo に無いので
+    その対応は採られない。byte cap は測るだけなので効かせない。
+    """
+    if hasattr(module, "canonical_json_bytes"):
+        return module.canonical_json_bytes(value)
+    common = importlib.import_module("eval.persona_v2_artifact_common")
+    return common.canonical_json_bytes(value, label="snapshot", max_bytes=1 << 30)
 
 
 def silence_all() -> None:
@@ -73,21 +88,21 @@ def main() -> int:
 
     result: dict[str, dict] = {}
     for module_name, builder in artifacts():
+        key = f"{module_name}::{builder}"
         try:
             module = importlib.import_module(f"eval.{module_name}")
             if args.allow_fail and hasattr(module, "_fail"):
                 module._fail = lambda *a, **k: None
-            raw = module.canonical_json_bytes(getattr(module, builder)())
+            raw = canonical_bytes(module, getattr(module, builder)())
         except Exception as error:
-            result[module_name] = {"error": f"{type(error).__name__}: {error}"[:200]}
-            print(f"  [skip] {module_name}: {type(error).__name__}", file=sys.stderr, flush=True)
+            result[key] = {"error": f"{type(error).__name__}: {error}"[:200]}
+            print(f"  [skip] {key}: {type(error).__name__}", file=sys.stderr, flush=True)
             continue
-        result[module_name] = {
-            "builder": builder,
+        result[key] = {
             "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
         }
-        print(f"  {module_name}: {len(raw)} bytes", file=sys.stderr, flush=True)
+        print(f"  {key}: {len(raw)} bytes", file=sys.stderr, flush=True)
 
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     ok = sum(1 for v in result.values() if "sha256" in v)

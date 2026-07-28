@@ -66,7 +66,7 @@ Decision 150の`kio.persona.pc-semantic-projection-derivation-inventory/v1`は�
 `kio.persona.pc-semantic-projection-derivation-inventory/v2`と
 `kio.persona.pc-semantic-projection-derivation-receipt/v2`を使い、最小12分類を12/12、exact 253 bodiesで覆う。
 framingはcanonical JSON 67 bodies / LF終端canonical JSONL 186 bodiesで、descriptorは697,466 canonical
-bytes / SHA-256 `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external bodiesは
+bytes / SHA-256 `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external bodiesは
 合計155,741,469 bytes、ordered projection-pin digestは
 `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。最終local acceptanceは、
 all-253 independent full replayと独立した2 hash-seed cold buildがこれらのliteralを再現して成立した。
@@ -96,12 +96,12 @@ scope/quota/cohort allocation、canonical solution/proof、正式G0 rootは未�
 in-memory projection feasibility auditでも、2,000 contributor targetsのbaseline一致は327、distractor候補上限は
 1,060 / 5,400、revision join unknownは2,000、all-condition exact resolutionは0であり、このblockerを確認した。
 同auditは40,947 canonical bytes / SHA-256
-`890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`で局所golden固定済みだが、
+`1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`で局所golden固定済みだが、
 active blocker evidenceに限りresolution v2を発行しない。
 さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
 16,735 canonical bytes / SHA-256
-`bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`で局所golden固定した。
+`3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`で局所golden固定した。
 これは327 aligned / 1,673 mismatch、concrete distractor 0 / shortfall 4,340を保持するnon-authorizing sliceであり、
 authoritative corpus/evaluation closureやresolution v2ではない。
 一方、non-authorizing device-lane compositorは20 logical personasを3 fresh replayの60 distinct roots、60 isolated
@@ -610,7 +610,7 @@ pre-source reservationとしては、20人 x `pilot`/`full-residual`の40 origin
 25,560 reservation rows、46,840 distinct overlay source-intent references、pilotで2,100 contributor-only
 semantic anchor slotsをexactに予約した。最大origin bodyは2,639,467 bytes、最大canonical JSONL rowは
 1,960 / 2,048 bytesである。compact suite descriptorは21,680 canonical bytes、SHA-256
-`11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`で、builderから独立したvalidatorと
+`0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4`で、builderから独立したvalidatorと
 red-team検査を通過した。ただしformal independent approval receiptはまだ束縛していない。
 
 このreservationはexact/near/conflict endpoint、relation-kind x placement-class joint marginal、
@@ -1441,7 +1441,7 @@ v2で実装済み（planning only、non-authorizing）:
   40 origin artifactsはfull 25,560 rows、46,840 distinct overlay source-intent references、pilot 2,100
   contributor-only semantic anchorsを予約する。最大originは2,639,467 bytes、最大rowは1,960 / 2,048 bytes。
   suiteは21,680 canonical bytes、SHA-256
-  `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`で、builder-independent validatorと
+  `0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4`で、builder-independent validatorと
   red-team検査を通過した。reservation自体は下流source row body/manifestを逆参照せず、
   concrete fact/overlay membership、scope/final ID、renderer/Kio/history/write authorityはなく、
   formal independent approval receiptも未束縛である
@@ -1632,7 +1632,7 @@ base JSONLは1 body 4 MiB / 4,096 rows / LF込み768 bytes per row、他の2種�
 384 KiB hard / 256 KiB targetで二重provider replayを行い、callbackごとと最終postflightでcaller opening
 image、full owner、direct owner bodyを再認証する。
 凍結したinventoryは293,285 canonical bytes / SHA-256
-`5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`、ordered projection-pin digestは
+`e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`、ordered projection-pin digestは
 `a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`である。external 113 bodyは
 合計128,144,915 bytes、base 73 bodyは203,000 rows / 121,020,941 bytes（最大body 2,484,590 bytes、
 LF込み最大row 633 bytes）、effective最大bodyは103,864 bytes、lifecycle最大bodyは256,790 bytesである。
@@ -1650,7 +1650,7 @@ recipe 1、fact graph 20、base content-context 73、effective membership 20、c
 source-instance parameters 74、lifecycle fact/rendition 20、payload equivalence 1である。framingはcanonical JSON
 67 bodies / LF終端canonical JSONL 186 bodiesで、missing projection class ledgerは空である。descriptorは
 697,466 canonical bytes / SHA-256
-`6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external 253 bodiesは
+`820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、receipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
 `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。v1 projection bytes/pinsは
 再解釈・再pinしない。

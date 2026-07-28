@@ -78,7 +78,7 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(package._expected_golden(), independent._expected_golden())
         self.assertEqual(
             package._expected_golden(),
-            (5_357, "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"),
+            (5_357, "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333"),
         )
         self.assertEqual(len(self.body), 426_889)
         self.assertEqual(
@@ -450,7 +450,7 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(provider.call_count, 2)
         self.assertEqual(
             (len(self.raw), hashlib.sha256(self.raw).hexdigest()),
-            (5357, "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"),
+            (5357, "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333"),
         )
         self.assertLess(time.monotonic() - started, 120)
 

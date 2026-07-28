@@ -46,7 +46,7 @@ MAX_ARTIFACT_BYTES = 2 * 2**20
 TARGET_ARTIFACT_BYTES = 512 * 2**10
 EXPECTED_CANONICAL_BYTES = 40_947
 EXPECTED_SHA256 = (
-    "890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136"
+    "1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584"
 )
 
 DEPENDENCY_ORDER = (
@@ -92,7 +92,7 @@ DEPENDENCY_PINS = {
         "artifact_schema": "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 697_466,
-        "sha256": "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+        "sha256": "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
     },
 }
 DEPENDENCY_ROLES = {
@@ -665,10 +665,10 @@ def preflight_query_history_semantic_resolution_feasibility_audit(value):
         )
     p01_baseline = rows[0]["baseline_target_feasibility"]
     if (
-        p01_baseline["baseline_aligned_count"] != 13
-        or p01_baseline["baseline_mismatch_count"] != 87
+        p01_baseline["baseline_aligned_count"] != 10
+        or p01_baseline["baseline_mismatch_count"] != 90
     ):
-        _fail("p01 baseline 13-aligned/87-mismatch sentinel differs")
+        _fail("p01 baseline 10-aligned/90-mismatch sentinel differs")
     summary = value["summary"]
     baseline_total = sum(
         row["baseline_target_feasibility"]["baseline_aligned_count"]
@@ -1034,10 +1034,10 @@ def _expected_persona_rows(snapshot):
     ]
     p01_baseline = rows[0]["baseline_target_feasibility"]
     if (
-        p01_baseline["baseline_aligned_count"] != 13
-        or p01_baseline["baseline_mismatch_count"] != 87
+        p01_baseline["baseline_aligned_count"] != 10
+        or p01_baseline["baseline_mismatch_count"] != 90
     ):
-        _fail("p01 baseline 13-aligned/87-mismatch sentinel drifted")
+        _fail("p01 baseline 10-aligned/90-mismatch sentinel drifted")
     return rows
 
 
