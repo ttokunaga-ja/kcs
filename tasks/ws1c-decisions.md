@@ -6,18 +6,18 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
 ## Decisions
 
-1. Lock contention: writing commands acquire `.kcs/.lock` with `create_new` and fail fast when it is held by a live process. The loser returns `KCS-E-STORE-LOCKED-001` with exit 3. Lock files include `{pid, token, created_at}`; stale recovery is allowed only when the recorded pid is not alive (liveness via `ps -p`, chosen over `kill -0` whose EPERM/ESRCH exit codes are indistinguishable; spawn failure counts as alive = no reclaim), and unlock removes the file only if its token still matches the owner. Known limitation (2026-07-03 audit N2): unlink-based reclaim retains a microscopic TOCTOU window between re-validation and `remove_file`; acceptable for Step 1 (single-user, human CLI frequency) — revisit before any multi-writer usage.
+1. Lock contention: writing commands acquire `.kio/.lock` with `create_new` and fail fast when it is held by a live process. The loser returns `Kio-E-STORE-LOCKED-001` with exit 3. Lock files include `{pid, token, created_at}`; stale recovery is allowed only when the recorded pid is not alive (liveness via `ps -p`, chosen over `kill -0` whose EPERM/ESRCH exit codes are indistinguishable; spawn failure counts as alive = no reclaim), and unlock removes the file only if its token still matches the owner. Known limitation (2026-07-03 audit N2): unlink-based reclaim retains a microscopic TOCTOU window between re-validation and `remove_file`; acceptable for Step 1 (single-user, human CLI frequency) — revisit before any multi-writer usage.
 2. Step 1 raw-only tree entries omit `normalize`. This follows `docs/03-data-model.md` §8 optional `normalize`; Step 1 generates only `{path,type,raw_hash}` entries.
 3. Manual snapshot with unchanged tree is a no-op: no commit is created, HEAD remains unchanged, exit 0.
 4. Step 1 status vocabulary is `new`, `modified`, `deleted`, `unchanged`. `up_to_date` is reserved for the normalized-instance meaning in `docs/03-data-model.md` §6.
-5. `kcs init` on an existing `.kcs` is a no-op with exit 0 and keeps `scope_id`. `kcs init <path>` for a nonexistent path returns exit 2.
-6. `kcs tag <name> [<commit>]`: same-name retag returns exit 2. If `<commit>` is omitted, HEAD is used.
-7. `kcs diff <a> <b>` reports `added`, `modified`, `deleted` and exits 0 regardless of whether differences exist.
-8. `kcs inspect <hash>` for a missing object returns `KCS-E-STORE-NOT-FOUND-001` with exit 4.
-9. `kcs log` walks first-parent history from HEAD, newest first. `--at` and `--since` are parsed but return "not implemented" with exit 1.
+5. `kio init` on an existing `.kio` is a no-op with exit 0 and keeps `scope_id`. `kio init <path>` for a nonexistent path returns exit 2.
+6. `kio tag <name> [<commit>]`: same-name retag returns exit 2. If `<commit>` is omitted, HEAD is used.
+7. `kio diff <a> <b>` reports `added`, `modified`, `deleted` and exits 0 regardless of whether differences exist.
+8. `kio inspect <hash>` for a missing object returns `Kio-E-STORE-NOT-FOUND-001` with exit 4.
+9. `kio log` walks first-parent history from HEAD, newest first. `--at` and `--since` are parsed but return "not implemented" with exit 1.
 10. Generated `created_at` timestamps use second precision UTC ISO8601 with `Z`.
 11. Step 1 tree entry `type` is `"file"` only. Other values are schema violations.
-12. `status` and `diff` are read-only and do not acquire `.kcs/.lock`. `tag` is treated as a writing command and does acquire the lock.
+12. `status` and `diff` are read-only and do not acquire `.kio/.lock`. `tag` is treated as a writing command and does acquire the lock.
 13. `manifest.json` file rows are generated/updated by `snapshot`. `status` is read-only and computes states from the working tree and HEAD tree.
 14. Step 1 implements only the seven commands in scope. Out-of-scope commands are parse-only placeholders and return "not implemented" with exit 1; no pipeline/search/GC/purge behavior is implemented.
 
@@ -25,9 +25,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
 15. Non-UTF-8 file names (S6): a scope-directory entry whose name is not valid UTF-8 is **skipped with a stderr warning** (`warning: skipping non-UTF-8 file name: <path>`), not treated as a whole-snapshot failure. It cannot be a tree-entry `path` anyway (paths are UTF-8), and one un-nameable file must not block indexing the rest of the folder. Same warning channel as the symlink skip (S5).
 16. HEAD / refs/heads/main two-stage advance (S6): `snapshot` advances `refs/heads/main` then `HEAD` with two separate atomic renames. Each rename is individually crash-safe, but a power loss *between* them can leave `refs/heads/main` ahead of `HEAD`. The commit object is already durable in the CAS, so recovery only re-points HEAD and no data is lost. A single atomic multi-ref transaction is out of scope for single-user Step 1; documented as a known limitation in code (`scope.rs` snapshot ref-update site). No code change.
-17. `KCS_FIXED_NOW` (S4): the environment override for the current time is gated behind `#[cfg(debug_assertions)]` (helper `fixed_now_override`), covering both `now_utc_seconds` and the `snapshot` `created_at` path. Release binaries ignore it, so a production `created_at` cannot be forged via the environment. Contract tests build in debug and are unaffected.
-18. `created_at` acceptance (S6): validated strictly as `YYYY-MM-DDTHH:MM:SSZ` (digit positions, separators, and month/day/hour/minute/second ranges). An optional fractional-second suffix `.NNN…Z` is also accepted to honor `06 §12`'s microsecond allowance; KCS itself always generates second precision (decision #10).
-19. Error-code overload split (S3): usage/operand errors use `KCS-E-CONFIG-USAGE-001` (distinct from schema-violation `KCS-E-CONFIG-SCHEMA-001`); duplicate tree paths use `KCS-E-STORE-DUP-001` (distinct from the `/`-in-path `KCS-E-STORE-PATH-001`). Both keep their prior exit codes (2). JCS is now provided by the `serde_jcs` crate rather than a hand-rolled canonicalizer (S1), with byte-identical hash vectors.
+17. `Kio_FIXED_NOW` (S4): the environment override for the current time is gated behind `#[cfg(debug_assertions)]` (helper `fixed_now_override`), covering both `now_utc_seconds` and the `snapshot` `created_at` path. Release binaries ignore it, so a production `created_at` cannot be forged via the environment. Contract tests build in debug and are unaffected.
+18. `created_at` acceptance (S6): validated strictly as `YYYY-MM-DDTHH:MM:SSZ` (digit positions, separators, and month/day/hour/minute/second ranges). An optional fractional-second suffix `.NNN…Z` is also accepted to honor `06 §12`'s microsecond allowance; Kio itself always generates second precision (decision #10).
+19. Error-code overload split (S3): usage/operand errors use `Kio-E-CONFIG-USAGE-001` (distinct from schema-violation `Kio-E-CONFIG-SCHEMA-001`); duplicate tree paths use `Kio-E-STORE-DUP-001` (distinct from the `/`-in-path `Kio-E-STORE-PATH-001`). Both keep their prior exit codes (2). JCS is now provided by the `serde_jcs` crate rather than a hand-rolled canonicalizer (S1), with byte-identical hash vectors.
 
 ## Step 2 implementation decisions (2026-07-03)
 
@@ -36,52 +36,52 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 22. Cost ledger schema (Step2a C-8): the minimum monthly ledger row is `{ month TEXT UTC, scope_id TEXT, adapter_kind TEXT, usd REAL }`. Month boundaries use UTC.
 23. Quarantine release record (Step2a C-9): append one approval-record-shaped JSONL row with `approval_method` to the same approval log used for initial scan approval.
 24. Scanned PDF without text layer (Step2a C-10): deterministic baseline prepare emits no unit and leaves the file pending for AI enhancement.
-25. Image placeholder replacement (Step2a C-11): replace Mistral OCR `images[]` placeholders by occurrence order with `![...](kcs://<scope_id>/object/image/<image_hash>)`.
-26. Step2c G2 test adapter hook: production `kcs index` uses the deterministic markdownize adapter by default. Contract/integration tests may set `KCS_TEST_MARKDOWNIZE_ADAPTER=incremental` or `reject_incremental` to inject a local deterministic adapter that advertises `incremental_update`, allowing CLI-level incremental/fallback validation without external network or mutable production adapter identity.
+25. Image placeholder replacement (Step2a C-11): replace Mistral OCR `images[]` placeholders by occurrence order with `![...](kio://<scope_id>/object/image/<image_hash>)`.
+26. Step2c G2 test adapter hook: production `kio index` uses the deterministic markdownize adapter by default. Contract/integration tests may set `Kio_TEST_MARKDOWNIZE_ADAPTER=incremental` or `reject_incremental` to inject a local deterministic adapter that advertises `incremental_update`, allowing CLI-level incremental/fallback validation without external network or mutable production adapter identity.
 
 ## Step2c final round (I1-I5) additions (2026-07-03)
 
-27. Cost ledger storage is JSONL, not SQLite (Step2c I5). `docs/10-operations.md` / `04-pipeline.md` describe the cost ledger as a SQLite table, but the MVP persists it as append-only JSONL at `$XDG_DATA_HOME/kcs/cost-ledger.jsonl` (rows `{month, scope_id, adapter_kind, usd}`, decision #22). Rationale: Step 2 has no other SQLite dependency, and append-only JSONL is crash-safe and trivially inspectable for a single-writer CLI. The SQLite migration is deferred to Step 3, where it is introduced together with the search `index/sqlite.db`, so both live databases land in one change rather than two.
-28. Hermetic HTTP tests are Step 3 backlog (Step2c I5). The online adapter's HTTP layer (`EnvMistralOcrClient` model-pin resolution + OCR POST) is exercised for real against the live API under `experiments/ocr-verification`, which is where correctness of the wire format is guaranteed. In-process contract/integration tests inject failures and successes through the `KCS_TEST_MISTRAL_OCR` hook (`mock`/`partial`/`mock_link_image`/`auth_error`/`rate_limit`) and never open a socket. A hermetic local HTTP server test (spinning a fake Mistral endpoint) is deferred to Step 3 backlog; it adds a test-server dependency for coverage that the live-API experiment already provides.
-29. Retry backoff jitter is omitted (Step2c I2). `RetryPolicy.backoff` descriptors advertise `full_jitter`, but `retry_backoff_seconds` computes the deterministic schedule only — exponential `min(base * 2^(attempts-1), cap)` for `exp(...)`, the parsed fixed duration for `fixed(...)`, and (absent a server `Retry-After` header locally) the same exponential schedule for `retry_after`. Jitter is intentionally dropped so `next_retry_at` is reproducible under `KCS_FIXED_NOW` and testable without flakiness. Real jitter (to avoid thundering-herd on shared endpoints) is a Step 3 concern once concurrent batch execution exists; single-user serial CLI retries do not need it.
+27. Cost ledger storage is JSONL, not SQLite (Step2c I5). `docs/10-operations.md` / `04-pipeline.md` describe the cost ledger as a SQLite table, but the MVP persists it as append-only JSONL at `$XDG_DATA_HOME/kio/cost-ledger.jsonl` (rows `{month, scope_id, adapter_kind, usd}`, decision #22). Rationale: Step 2 has no other SQLite dependency, and append-only JSONL is crash-safe and trivially inspectable for a single-writer CLI. The SQLite migration is deferred to Step 3, where it is introduced together with the search `index/sqlite.db`, so both live databases land in one change rather than two.
+28. Hermetic HTTP tests are Step 3 backlog (Step2c I5). The online adapter's HTTP layer (`EnvMistralOcrClient` model-pin resolution + OCR POST) is exercised for real against the live API under `experiments/ocr-verification`, which is where correctness of the wire format is guaranteed. In-process contract/integration tests inject failures and successes through the `Kio_TEST_MISTRAL_OCR` hook (`mock`/`partial`/`mock_link_image`/`auth_error`/`rate_limit`) and never open a socket. A hermetic local HTTP server test (spinning a fake Mistral endpoint) is deferred to Step 3 backlog; it adds a test-server dependency for coverage that the live-API experiment already provides.
+29. Retry backoff jitter is omitted (Step2c I2). `RetryPolicy.backoff` descriptors advertise `full_jitter`, but `retry_backoff_seconds` computes the deterministic schedule only — exponential `min(base * 2^(attempts-1), cap)` for `exp(...)`, the parsed fixed duration for `fixed(...)`, and (absent a server `Retry-After` header locally) the same exponential schedule for `retry_after`. Jitter is intentionally dropped so `next_retry_at` is reproducible under `Kio_FIXED_NOW` and testable without flakiness. Real jitter (to avoid thundering-herd on shared endpoints) is a Step 3 concern once concurrent batch execution exists; single-user serial CLI retries do not need it.
 30. `MistralOcrMarkdownizeAdapter::profile()` is network-free (Step2c I5). `profile()` no longer calls `resolve_model_pin` (which issues `GET /v1/models` for `*-latest` aliases); the pin is resolved exactly once at execution time in `run_mistral_adapter` and passed in as `configured_model`, so the profile reflects the resolved pin without a second GET. When the adapter still holds an unresolved `*-latest` alias (only the `Default`/unit-test construction), `profile()` derives a deterministic immutable placeholder (`<family>-unresolved`) instead of contacting the network — identical to the prior no-API-key fallback and accepted by the identity layer (a mutable alias is rejected as a `model_version_pin`). tool_profile_hash impact: for the production and mock paths the pin is resolved before construction, so their `tool_profile_hash` is unchanged; only the network-free `Default` adapter (used solely by `placeholder_mistral_profile_declares_ocr`, which asserts capability flags/id, not the hash) sees the same `mistral-ocr-unresolved` pin it already produced when no API key was present. Chosen because it keeps identity stable for real runs while removing the only networked path out of `profile()`.
 
 ## Step3c K round additions (2026-07-03)
 
-31. `kcs open` returns resolution JSON instead of launching an OS opener (Step3c 裁定 (c) の記録).
+31. `kio open` returns resolution JSON instead of launching an OS opener (Step3c 裁定 (c) の記録).
     `docs/06-cli-spec.md` §1 describes `open` as "原本をアプリで開く"; the Step 3 implementation
     resolves the pointer and returns `{path, ...}` JSON (working tree path, or a CAS temporary
-    expansion under `$XDG_DATA_HOME/kcs/open/`), leaving the actual OS launch (`open`/`xdg-open`)
+    expansion under `$XDG_DATA_HOME/kio/open/`), leaving the actual OS launch (`open`/`xdg-open`)
     to the caller. Rationale: the OS launch is a final thin layer that is untestable in CI and
     irrelevant to the resolution contract (08 §3); agents consume `--json` anyway. The audit round
     (tasks/step3c-fixes.md) accepted this within Step 3 scope on condition it is recorded here.
     The OS-launch layer is Step 4+.
-32. New error codes for the K6 evidence resolver (Step3c). `KCS-E-PURGE-TOMBSTONED-001` (exit 4)
-    carries the 08 §4.1 tombstone response (`status="purged"` body in `context`) when `kcs open` /
-    `kcs view` hit a tombstoned raw_hash — 08 §4.1 fixes the response shape but names no code, and
+32. New error codes for the K6 evidence resolver (Step3c). `Kio-E-PURGE-TOMBSTONED-001` (exit 4)
+    carries the 08 §4.1 tombstone response (`status="purged"` body in `context`) when `kio open` /
+    `kio view` hit a tombstoned raw_hash — 08 §4.1 fixes the response shape but names no code, and
     06 §8's code list is explicitly examples ("例:"), so a PURGE-domain code is minted here.
-    `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (exit 4) covers 08 §3.1 step 1b "曖昧なら候補一覧 error"
+    `Kio-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (exit 4) covers 08 §3.1 step 1b "曖昧なら候補一覧 error"
     (multiple registry entries for one scope_id sharing the newest `last_seen_at`); the candidate
     list is returned in `context.candidates`. Both codes follow the 06 §8 DOMAIN namespace; adding
     them to the docs' example list is deferred to the next docs edit window.
 33. New error code for the 08 §3.2 retarget contract (Step3c re-audit fix).
-    `KCS-E-EVIDENCE-RETARGET-REQUIRED-001` (exit 8, per 06 §7 "tool_profile_hash 不一致で chunk
-    解決不能 (retarget 要) は 8") is returned by `kcs open` / `kcs view` when the pointer's scope,
+    `Kio-E-EVIDENCE-RETARGET-REQUIRED-001` (exit 8, per 06 §7 "tool_profile_hash 不一致で chunk
+    解決不能 (retarget 要) は 8") is returned by `kio open` / `kio view` when the pointer's scope,
     commit, and raw_hash all resolve (and no tombstone applies) but no chunk row exists for the
     pointer's `chunk_hash` — 08 §3.2: "tool_profile_hash 不一致: chunk が存在しない場合は retarget
     が必要 (§5)". `context` carries `{chunk_hash, tool_profile_hash, raw_hash}`. The check does not
     require tree-entry profile equality (Step-1 raw-only trees carry no `normalize` ref; an
     existing chunk row is self-certifying because `chunk_hash` commits to its `tool_profile_hash`).
     08 §5 names no code and 06 §8's list is examples ("例:"), so an EVIDENCE-domain code is minted
-    here; docs sync is deferred to the next docs edit window. `kcs evidence retarget` itself
+    here; docs sync is deferred to the next docs edit window. `kio evidence retarget` itself
     remains Step 4.
 
 ## Step 4 checkpoint fixes (L1-L8) additions (2026-07-04)
 
-34. Per-adapter network opt-in (L4). `kcs index --approve` / `--yes` records **one approval row
+34. Per-adapter network opt-in (L4). `kio index --approve` / `--yes` records **one approval row
     per configured online adapter**: the markdownize marker `mistral_ocr_markdownize` always, plus
     the embedding adapter `gemini_embedding_2` when an embedding adapter is configured
-    (`KCS_TEST_GEMINI_EMBED` / `GEMINI_API_KEY`). Each row's `network_opt_in` mirrors the method
+    (`Kio_TEST_GEMINI_EMBED` / `GEMINI_API_KEY`). Each row's `network_opt_in` mirrors the method
     (`--approve` → true, `--yes` → false), unchanged from before. The embedding network gate reads
     its **own** `tool_id` row (`persistent_network_allowed_for` / `embedding_online_allowed`), not
     the markdownize approval it used to ride on (07 §3: opt-in unit is scope × adapter). The
@@ -91,14 +91,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     carries only the `mistral_ocr_markdownize` row, so a later run with an embedding adapter finds
     no embedding opt-in row → embedding stays **enqueue-only** (tasks Pending, surfaced by
     `index_status`), never silently calling the embedding API. Revocation stays **global**:
-    `kcs index --revoke-network` writes `allow_network = false` in config.toml, and the per-adapter
+    `kio index --revoke-network` writes `allow_network = false` in config.toml, and the per-adapter
     gate checks `network_revoked` first, so a revoke gates *every* online adapter (embedding
     included). Selective per-adapter revoke is intentionally not exposed (no CLI surface for it) and
     deferred; a global network revoke stopping the embedding adapter is the desired conservative
     default.
-36. reindex / repair enrichment (L1). `kcs reindex --force` and `kcs repair --rebuild-db` run the
+36. reindex / repair enrichment (L1). `kio reindex --force` and `kio repair --rebuild-db` run the
     embedding enrichment pass after the SQLite rebuild (docs/06 "再 normalize / 再 embedding"),
-    symmetric with `kcs index`. Online only under the embedding opt-in (#34); offline it enqueues
+    symmetric with `kio index`. Online only under the embedding opt-in (#34); offline it enqueues
     Embedding tasks so `index_status` reports them pending instead of the prior false
     enriched_ratio = 1.0 / pending = 0 (the tasks were never created). Note: `rebuild_chunk_vec`
     already re-derives `chunk_vec` from `embeddings` by `text_hash`, so an unchanged-content
@@ -110,8 +110,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `ensure_snapshot_tree_entries` (the same lazy HEAD projection search uses), and the JSON
     `index/tree_entries.json` projection is **removed entirely** (`write_tree_entries` /
     `read_tree_entries` / `tree_entries_path` deleted). The JSON went stale right after a bare
-    `kcs snapshot` (which advances HEAD without refreshing it), so short-hash `view`/`open` failed
-    with KCS-E-CONFIG-USAGE-001 while search succeeded — the asymmetry L3 fixes. SQLite
+    `kio snapshot` (which advances HEAD without refreshing it), so short-hash `view`/`open` failed
+    with Kio-E-CONFIG-USAGE-001 while search succeeded — the asymmetry L3 fixes. SQLite
     tree_entries is now the single projection source.
 38. Embedding billing/failure on the sent portion only (L5/L6). `run_embedding_enrichment` splits
     each batch into content-addressed reuse (free, no adapter call) and to-send chunks. Budget
@@ -129,17 +129,17 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
 ## Exploratory-audit fixes (M1-M8) additions (2026-07-04)
 
-40. New error code `KCS-E-EVIDENCE-POINTER-INVALID-001` (M6). The Evidence Pointer resolver now
+40. New error code `Kio-E-EVIDENCE-POINTER-INVALID-001` (M6). The Evidence Pointer resolver now
     binds identity: the tree entry for `pointer.raw_hash` must carry the same
     `normalize.tool_profile_hash` as the pointer, and the chunk row selected by `chunk_hash` must
     match the pointer's `(raw_hash, tool_profile_hash)`. A pointer that pairs raw_hash B with a
     chunk_hash materialized under raw_hash A ("raw is B, body is A") is a tampered/internally
     inconsistent pointer and is rejected with this code (exit 4, a dead-pointer failure like the
     purge family). The code is **not** in the 06 §8 / 10 §7.5 catalog yet (docs frozen this round);
-    it slots beside `KCS-E-EVIDENCE-RETARGET-REQUIRED-001` (also code-only). Distinct from
+    it slots beside `Kio-E-EVIDENCE-RETARGET-REQUIRED-001` (also code-only). Distinct from
     RETARGET-REQUIRED, which means "chunk not materialized under this tool_profile_hash" (a
     legitimate retarget), whereas POINTER-INVALID means the pointer's own fields don't mutually bind.
-41. `object` URI CAS dispatch by type (M7). `kcs open/view kcs://<scope>/object/<type>/<hash>` now
+41. `object` URI CAS dispatch by type (M7). `kio open/view kio://<scope>/object/<type>/<hash>` now
     routes to the correct CAS directory (03 §2): `raw` → `objects/raw` (working-tree-first, rename
     tolerant), `image` → `objects/images`, `prepared` → `objects/prepared`. Previously every type
     fell through to `objects/raw`, so an image object (which only lives under `objects/images`) was
@@ -148,22 +148,22 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     not adopted), so one `sha256:` segment cannot address it — it returns invalid usage (exit 2)
     rather than silently mis-routing.
 42. Store lock is now reentrant and wraps whole mutating commands (M1a). `StoreLock` (05 §6) is made
-    reentrant within a process/thread via a thread-local depth counter, and `kcs index` / `repair` /
+    reentrant within a process/thread via a thread-local depth counter, and `kio index` / `repair` /
     `reindex` acquire it end-to-end (`Repository::lock_store`) instead of only across the snapshot
     sub-step. The reentrancy is required because the internal auto-snapshot re-acquires the same
     lock; without it the whole-command lock would self-deadlock. Losers of a concurrent acquisition
-    still fail fast with `KCS-E-STORE-LOCKED-001` (exit 3), unchanged. search/status/view/open stay
+    still fail fast with `Kio-E-STORE-LOCKED-001` (exit 3), unchanged. search/status/view/open stay
     lock-free (read-only, 05 §6).
 43. JSONL append atomicity + corrupt classification (M1b/M1c). Every O_APPEND JSONL writer now frames
     one record (`serde_json::to_string` + `\n`) into a single `write_all`, so concurrent appends
-    (notably the device-global `cost-ledger.jsonl` written cross-scope, which no per-`.kcs` lock
+    (notably the device-global `cost-ledger.jsonl` written cross-scope, which no per-`.kio` lock
     covers) cannot interleave byte-wise. Parse failures reading `tasks.jsonl` /
-    `cost-ledger.jsonl` are now `KCS-E-STORE-CORRUPT-001` (exit 4, carrying the file path) via a new
-    `PipelineError::Corrupt` variant, instead of being misreported as `KCS-E-CONFIG-SCHEMA-001`
+    `cost-ledger.jsonl` are now `Kio-E-STORE-CORRUPT-001` (exit 4, carrying the file path) via a new
+    `PipelineError::Corrupt` variant, instead of being misreported as `Kio-E-CONFIG-SCHEMA-001`
     (exit 2).
 44. User config schema validation + budget non-negative guard (M8). The device `config.toml`
-    (`$XDG_CONFIG_HOME/kcs/config.toml`) is now validated against `config.schema.json` before
-    dispatch (`validate_user_config`), closing the gap where only the folder `.kcs/config.toml`
+    (`$XDG_CONFIG_HOME/kio/config.toml`) is now validated against `config.schema.json` before
+    dispatch (`validate_user_config`), closing the gap where only the folder `.kio/config.toml`
     (validated on `Repository::open`) and `tools.toml` were checked — a negative user budget cap now
     fails with exit 2. `read_budget_config` also rejects negative `monthly_usd_cap` / per-adapter
     caps as defense-in-depth behind the schema's `minimum: 0`.
@@ -176,39 +176,39 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     file (the leak: `ignored=false` produced ordinary online markdownize/embedding tasks that
     `index --online`/`batch resume` shipped). Hold mechanics: the online markdownize placeholder and
     each Tier B embedding task are written `Paused` with `fallback_reason = "secrets_tier_b_hold"`
-    (visible in `kcs status`); `batch resume` does not un-hold them and
+    (visible in `kio status`); `batch resume` does not un-hold them and
     `execute_pending_markdownize_tasks` / the embedding send-partition skip them (defense in depth).
     Release is an explicit, persistent, per-scope approval recorded by the new `index --send-secrets`
-    flag (marker `.kcs/secrets-approved.jsonl`, checked by `secrets_send_approved`), distinct from
+    flag (marker `.kio/secrets-approved.jsonl`, checked by `secrets_send_approved`), distinct from
     `--approve` (scan/network opt-in) because shipping a probable secret needs its own consent. This
     build implements **hold + explicit-flag approval only**; the 10 §1.1 interactive confirmation
     prompt is not implemented. `record_quarantine_candidates` now also records Tier B (reason
     `secrets_tier_b`, `approval_method` `hold`/`send_approved`); the append-only dedup by path means
     a file first recorded as `hold` keeps that first record even after later approval (audit trail,
     not current-state — the live disposition is the task state).
-46. Manual snapshot honors the Tier A exclusion set (N2). `kcs snapshot` was `repo.snapshot(msg,
+46. Manual snapshot honors the Tier A exclusion set (N2). `kio snapshot` was `repo.snapshot(msg,
     None)` with no filter, baking `.env`/`*.pem` plaintext into `objects/raw` + the latest tree
     (irreversible, 10 §1.1). The CLI now computes the excluded Tier A set from `build_scan_preview`
-    (the same classifier `kcs index` uses) and passes it through a new
-    `Repository::snapshot_filtered`; kcs-core still has no notion of secrets (the CLI owns the
+    (the same classifier `kio index` uses) and passes it through a new
+    `Repository::snapshot_filtered`; kio-core still has no notion of secrets (the CLI owns the
     exclusion set), preserving the layer boundary.
 47. Observation-log redaction (N3). `append_observation` (events/errors.jsonl) now masks the
     `path`/`query`/`prompt` fields of `context` recursively to `[redacted]` when `redact_logs` is in
     effect (06 §8 default true; read from the device `[adapter.policy]` config, secure-default when
-    absent). This fixes `KcsError` contexts writing paths verbatim into `errors.jsonl` and the purge
+    absent). This fixes `KioError` contexts writing paths verbatim into `errors.jsonl` and the purge
     scrubber's "path is never recorded" assumption. Only the log files are redacted; the stdout error
     JSON (`to_error_json`) is unchanged.
 48. Commit-ref path-traversal guard (N4). `resolve_commit` (and `tag`) validate the operand up front
     via a shared `validate_ref_operand`: a ref is only ever `HEAD`, a hash, or a tag name, so `/`,
     `\`, `.`, `..`, an absolute path, or any `ParentDir`/`RootDir`/`Prefix` component is rejected
-    (`KCS-E-CONFIG-USAGE-001`, exit 2) before any `refs/tags`.join. Closes the `kcs diff`/`kcs tag
+    (`Kio-E-CONFIG-USAGE-001`, exit 2) before any `refs/tags`.join. Closes the `kio diff`/`kio tag
     <commit>` existence-oracle for out-of-scope files (03 §3).
 49. Evidence Pointer generation binding (N5). `resolve_pointer_for_cli` now binds the resolved
     chunk's `gen` to the tree entry's `normalize.gen` on a **non-shallow** commit, rejecting a
     pointer that keeps an old commit but splices in a newer-generation chunk_hash produced by
     `reindex --force`. Scope decision: the gen binding applies **only when the tree entry carries an
     explicit `normalize`** (the reindex-tampering target — the index commit — always does). A tree
-    entry with `normalize = None` (e.g. a bare `kcs snapshot` that advanced HEAD without re-recording
+    entry with `normalize = None` (e.g. a bare `kio snapshot` that advanced HEAD without re-recording
     normalize refs, L3) has no gen to bind and keeps the pre-existing chunk (raw, tool) identity
     check; requiring `normalize` there would break `ct3_l3_short_hash_resolves_after_bare_snapshot`.
     This is "the commit's tree-entry gen == chunk gen", never "always the latest gen"
@@ -239,11 +239,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     scope, so this is a no-op. Previously the cursor branch trusted `resolve_cursor_exec_scopes`
     alone, so `--scope . --cursor <other-scope's cursor>` read straight out of the other scope
     (Agent-API sandbox break, 05 §1.7 / 06 §9). (b) Cursors are now HMAC-SHA256-signed with a
-    device-local key at `$XDG_DATA_HOME/kcs/cursor-key` (0600, generated from `/dev/urandom` on
+    device-local key at `$XDG_DATA_HOME/kio/cursor-key` (0600, generated from `/dev/urandom` on
     first use). The wire form is `base64url(JCS(token)).base64url(HMAC)` — the inner payload is the
     exact prior encoding, so it stays URL-safe/pad-free. `encode_cursor_token`/`decode_cursor_token`
-    took a `key: &[u8]` parameter (kcs-search stays filesystem-free; the CLI owns the key); decode
-    verifies the signature (constant-time) and a forged/tampered token is `KCS-E-SEARCH-CURSOR-001`
+    took a `key: &[u8]` parameter (kio-search stays filesystem-free; the CLI owns the key); decode
+    verifies the signature (constant-time) and a forged/tampered token is `Kio-E-SEARCH-CURSOR-001`
     (exit 2) before its scope set is ever trusted. `query_hash` (public inputs only) is no longer the
     sole integrity check. HMAC is implemented over the existing `sha2` dep (no new crate).
 54. Query embedding is sent only for a vector-resolving, opted-in search (O2). `compute_query_embedding`
@@ -256,34 +256,34 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     a compatible index without the opt-in reports `embedding_opt_in_required`. A live adapter failure
     after the (now-gated) send still degrades vector→text (`--vector` errors, auto/hybrid falls back),
     preserving the pre-O2 fallback. Precedence keeps `embedding_index_missing` ahead of the opt-in
-    reason so an unembedded scope's message is unchanged. Test seam: `KCS_TEST_QUERY_EMBED_TRACE`
+    reason so an unembedded scope's message is unchanged. Test seam: `Kio_TEST_QUERY_EMBED_TRACE`
     marks the send point so `--text` can be proven to never reach it.
 55. `batch resume`/`batch retry` hold the store lock; `replace_all` uses a unique temp (O3). `run_batch`
     now acquires `repo.lock_store()` end-to-end (the same M1 lock on index/repair/reindex; reentrant
-    with the inner auto-snapshot; losers get `KCS-E-STORE-LOCKED-001` exit 3), so two concurrent
+    with the inner auto-snapshot; losers get `Kio-E-STORE-LOCKED-001` exit 3), so two concurrent
     resumes can no longer interleave `tasks.jsonl` + the device cost-ledger into a double send.
     `TaskStore::replace_all` also stopped using the fixed `tasks.jsonl.tmp`; it now writes through a
     pid+nanos+seq unique temp created `O_CREAT|O_EXCL` (defense in depth for any other caller).
 56. PDF page-count lookahead is char-boundary safe and unified (O4). `pdf_page_count`'s
     `&text[index..index+N]` windows around `/Type`/`/Page` panicked (`char boundary`, exit 101, body
     dumped to stderr) when a multibyte char straddled the window. The four sites (prepare.rs +
-    deterministic.rs) collapse onto one shared `kcs_adapter::deterministic::pdf_page_count_in_text`,
+    deterministic.rs) collapse onto one shared `kio_adapter::deterministic::pdf_page_count_in_text`,
     which clamps each window back to the nearest char boundary (`bounded_str_window`). prepare.rs now
     delegates to the adapter copy (pipeline already depends on adapter), removing the duplication.
 57. `rebuild_sqlite_index` creates the index dir unconditionally (O5). A 0-chunk scope (empty folder /
-    secrets-only / text-less PDF) skipped `append_stored_chunks` and never created `.kcs/index/`, but
+    secrets-only / text-less PDF) skipped `append_stored_chunks` and never created `.kio/index/`, but
     the auto-snapshot advanced HEAD; the rebuild then failed opening a missing `sqlite.db` (exit 2)
     and re-index stayed stuck at "commit but no index". The rebuild now `create_dir_all`s the index
     dir first, so an empty scope indexes cleanly (exit 0).
 58. Short `sha256:` operand is validated (O6). `open`/`view` sent a `sha256:` operand straight into
     `cas_object_path`'s `digest[0..2]`/`[2..4]` slices, so `sha256:a` panicked out of range. A new
     `validate_short_hash_operand` at the entry of `classify_short_hash` requires a lowercase-hex
-    digest ≥ 4 chars, rejecting malformed operands with `KCS-E-CONFIG-USAGE-001` (exit 2).
+    digest ≥ 4 chars, rejecting malformed operands with `Kio-E-CONFIG-USAGE-001` (exit 2).
 59. Cursor scope resolution detects scope_id collisions like Evidence (O7). `resolve_cursor_exec_scopes`
-    took `lookup_scope_id().next()` unconditionally, silently pinning a `.kcs`-copy collision to one
+    took `lookup_scope_id().next()` unconditionally, silently pinning a `.kio`-copy collision to one
     winner. It now shares `resolve_scope_id_in_registry` with the Evidence path (`resolve_scope_target`),
-    so two distinct `.kcs` at the newest `last_seen_at` are ambiguous
-    (`KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001`, exit 4); an unresolvable scope stays `unreachable`
+    so two distinct `.kio` at the newest `last_seen_at` are ambiguous
+    (`Kio-E-EVIDENCE-SCOPE-AMBIGUOUS-001`, exit 4); an unresolvable scope stays `unreachable`
     (partial failure), unchanged.
 
 ## Windows portability closure (2026-07-13)
@@ -315,12 +315,12 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 ## Step 4 contract freeze (2026-07-13)
 
 64. Canonical phase boundaries win over stale kickoff prose. Step 4 implements single-pointer
-    `evidence verify`; verify batch, retarget, export/import, `kcs move`, `kcs gc`, retention, and full
+    `evidence verify`; verify batch, retarget, export/import, `kio move`, `kio gc`, retention, and full
     purge DAG rewriting remain Phase 4+/v2. `docs/11-requirements.md` is not a current source.
 65. Time-travel has one effective selector. `--since` implies all-history and freezes its page-1 UTC
     cutoff inside the signed cursor; duration grammar is positive `s/m/h/d/w`. `--at` resolves per
     selected scope and uses existing partial/all-failed multi-scope behavior. Explicit-at shallow is
-    always `KCS-E-COMMIT-SHALLOW-001`, even if cached tree rows survive. The cursor carries canonical
+    always `Kio-E-COMMIT-SHALLOW-001`, even if cached tree rows survive. The cursor carries canonical
     `time_travel`; selector-less replay inherits it and repeated selector flags must match exactly.
 66. Historical path reporting preserves the frozen M3-2 alias criterion without changing chunk
     identity. All-history/since expands one chunk to each distinct historical path binding, collapsing
@@ -346,20 +346,20 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     before logical direct-child path. Path selects the newest matching entry on HEAD's first-parent
     ancestry (merge side parents require evidence/commit) and fails on incomplete shallow ancestry.
     Every restore source rejects shallow/purged content, all source bytes
-    come from verified CAS, and `.kcs` remains lock-free/read-only. Destination publication is private,
+    come from verified CAS, and `.kio` remains lock-free/read-only. Destination publication is private,
     no-clobber by default, force-confirmed, per-file atomic, and reparse/symlink safe.
 71. Purge-by-path means every raw ever bound to that logical path; incomplete shallow history fails.
-    Raw-hash purge remains available. KCS never deletes user originals and refuses purge while target
+    Raw-hash purge remains available. Kio never deletes user originals and refuses purge while target
     bytes remain in the working tree. Default tombstones gate all read/ingest paths; erase mode leaves
     no resurrection barrier and reports that limitation.
 72. Purge is a resumable monotonic transaction under the store lock. An owner-only journal is written
     before a tombstone/in-progress visibility barrier; after it, all reads are dead even if physical
-    cleanup is incomplete. Post-barrier failure returns `KCS-E-PURGE-INCOMPLETE-001` exit 3 and rerun
+    cleanup is incomplete. Post-barrier failure returns `Kio-E-PURGE-INCOMPLETE-001` exit 3 and rerun
     resumes. Identical default repeat is idempotent; converting an existing tombstone to erase is
     deferred/rejected. Shared derived objects survive only while referenced by non-target raws; images
     are purgeable content. Logs are serialized and scrubbed before a sanitized reason/actor/count event.
 73. Bbox annotation is default-on at `markdownize.bbox_annotation.enabled`. Enabled identity uses
-    `kcs-markdown+bbox-annotation-v1` plus fixed prompt id/hash; disabled identity stays the existing
+    `kio-markdown+bbox-annotation-v1` plus fixed prompt id/hash; disabled identity stays the existing
     profile. Bounded `short_description`/`transcribed_text` metadata is bound to image order/bbox and
     projected beside the image URI for chunk search without changing required Evidence fields.
 74. Online Markdownize promotion occurs only for current, fully accepted Done outputs under the store
@@ -375,7 +375,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     span; it does not content-hash the JSON bytes.
 76. Fsck treats validated tombstones and internal non-content erase receipts as healthy dead terminals.
     `--erase-tombstone` leaves no public tombstone and verify stays `not_found`, but atomically retains
-    `.kcs/purge/erase-receipts/ab/cd/<raw64>` with exact `{schema_version,raw_hash,purged_in_commit,
+    `.kio/purge/erase-receipts/ab/cd/<raw64>` with exact `{schema_version,raw_hash,purged_in_commit,
     erased_at}` for fsck only. It never blocks re-ingest; verified raw wins and retires a stale receipt.
     A valid receipt binds to a verified ref-reachable purged commit and its exact non-future UTC
     `created_at`; malformed, forged, future, or unreachable bindings are corruption.
@@ -383,8 +383,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     missing references remain store corruption. Reports list bounded affected commit hashes and state
     that external self-contained pointers may be affected, never fabricate a pointer registry.
 77. Purge log scrub is serialized beyond the scope lock. Device events/errors/metrics appenders and
-    scrubbers share `$XDG_DATA_HOME/kcs/logs/scrub.lock`; scope access appenders/scrubbers share
-    `.kcs/logs/access.scrub.lock`. Lock order is scope store → reservation ledger → device observability
+    scrubbers share `$XDG_DATA_HOME/kio/logs/scrub.lock`; scope access appenders/scrubbers share
+    `.kio/logs/access.scrub.lock`. Lock order is scope store → reservation ledger → device observability
     → scope access. A final scrub runs before the purge journal/barrier is removed.
 78. Bbox annotation follows the Mistral wire format: one `bbox_annotation_format`, instructions inside
     one exact strict JSON Schema whose JCS hash is `sha256:9404f8ff...9ca8`, and one
@@ -409,7 +409,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 81. History traversal has explicit aggregate caps in addition to per-object limits. All-parent and
     first-parent walks each have independent maxima of 100,000 commits, 10,000,000 tree entries, and
     4 GiB verified commit+tree bytes. Search fails a scope without partial aliases; purge/restore fail
-    before mutation/publication with `KCS-E-COMMIT-HISTORY-LIMIT-001`.
+    before mutation/publication with `Kio-E-COMMIT-HISTORY-LIMIT-001`.
 82. Include-deleted is snapshot-derived, not mutable-manifest-derived: for each path absent at page-1
     snapshot, use the newest exact binding on snapshot HEAD's first-parent ancestry. Its pointer commit
     is that binding commit, so `path_at_commit` exists and cursor replay ignores later manifest changes.
@@ -433,14 +433,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 86. Historical eligibility never fills an omitted tree-entry `normalize` from later instances or cached
     projections. CAS tree omission means zero chunks at that commit for `--at`, all-history, and
     include-deleted; this closes future-normalization leakage into old snapshots.
-87. Restore remains read-only with respect to `.kcs` truth and does not acquire `.kcs/.lock`, but purge
-    source authorization is linearized by `.kcs/purge-publication.lock`. Purge acquires scope store →
+87. Restore remains read-only with respect to `.kio` truth and does not acquire `.kio/.lock`, but purge
+    source authorization is linearized by `.kio/purge-publication.lock`. Purge acquires scope store →
     purge-publication before publishing its visibility barrier and holds both through physical cleanup
     and final journal removal. Restore acquires purge-publication only after interactive confirmation and
     destination-handle opening, then holds it across the final purge-state/raw recheck, private staging,
     and every atomic destination publication. This closes the check-to-publication race without a reverse
     lock order or changing docs/05 §6 read-command store-lock semantics.
-88. Raw archive `.ingest-*` files are private transactions, never durable objects. With `.kcs/.lock`
+88. Raw archive `.ingest-*` files are private transactions, never durable objects. With `.kio/.lock`
     held, archive and purge entry remove every stale bounded/no-follow regular ingest temp before new
     staging or purge working-copy refusal; unsafe, over-limit, or linked entries fail closed as store
     corruption. This makes a crash before the raw-identity purge gate recover without retaining bytes.
@@ -479,7 +479,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Event scope effects therefore declare `index_auto`, `purged_commit`, `index_noop`, or `none` rather than
     assuming every operation is an index boundary. Reproducibility is tested by replaying the same immutable
     event manifests from W0 into three fresh roots with separately isolated registries, never by copying a
-    `.kcs` store or placing checkpoint copies inside the indexed PC. Generation performs only fail-fast
+    `.kio` store or placing checkpoint copies inside the indexed PC. Generation performs only fail-fast
     structural guards; delete and purge waves add planned replacements so current scale remains net-zero,
     and formal Recall, history, and latency evaluation starts after all replay roots exist.
     The suite uses deterministic synthetic data and offline/mock format artifacts only: no personal data,
@@ -528,7 +528,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     deterministic hash-spread order, and every full cohort covers all scopes while no one scope may carry
     more than 20% of a cohort plus one 72-chunk source.  It still does not authorize W1-W5 mutation:
     quota-zero structural sentinels, immutable event
-    manifests, replay/preflight/resume, and actual KCS chunk attestation remain required.
+    manifests, replay/preflight/resume, and actual Kio chunk attestation remain required.
 96. Persona history structural allocation and the root-independent planned event manifest are now
     independently executable, but replay remains fail-closed.  Tiny/pilot use eleven structural
     events/person; full uses thirty, including one safe U same-scope W2 rename in every scope plus
@@ -545,7 +545,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     managed-state/event hash chains, dependencies, and leaf-derived chunk/file arithmetic are regenerated
     for validation.  These are planned, not observed, facts.  `HISTORY_ASSIGNMENT_EXECUTABLE` stays false
     until W0 history-ready receipts, a root-wide lock, expected-state safe mutation, immutable progress
-    journal, crash resume, and actual KCS attestation are implemented.
+    journal, crash resume, and actual Kio attestation are implemented.
 97. Persona history planning now has two additional non-authorizing boundaries.  First, exactly twenty
     individually validated persona event manifests are hash-bound into one root-independent suite
     schedule held under one future replay-root lock.  In W1--W4 every person's regular events precede
@@ -553,13 +553,13 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     ordered unlink/path-purge plus purged-commit pairs, then all post-purge noop indexes.  This prevents
     twenty unrelated per-person dependency chains from being resumed concurrently or in a different
     purge order.  Second, strict W0 exact-tree verification remains unchanged while a separate read-only
-    prepare-envelope verifier allows only the canonical 400 `.kcs` directories, 20 isolated
-    `.kcs-eval-device` directories, and hash-bound files below
-    `.kcs-persona-history/{control,receipts}` after re-verifying all W0 bytes.  Opaque runtime interiors
+    prepare-envelope verifier allows only the canonical 400 `.kio` directories, 20 isolated
+    `.kio-eval-device` directories, and hash-bound files below
+    `.kio-persona-history/{control,receipts}` after re-verifying all W0 bytes.  Opaque runtime interiors
     require typed directory-identity/content-root callback receipts; without them they are explicitly
     unattested, and even with them this verifier always leaves `history_ready_attested=false`.  Neither
     the suite schedule nor the envelope authorizes mutation.  W0 init/index receipts, the owner-marker
-    root lock, handle-relative safe mutation, replay journal/resume, and actual KCS attestation remain
+    root lock, handle-relative safe mutation, replay journal/resume, and actual Kio attestation remain
     required before `HISTORY_ASSIGNMENT_EXECUTABLE` can become true.
     The in-memory twenty-manifest composition is tested only with tiny; full additionally requires a
     bounded one-person-at-a-time input/validation path and an RSS gate.
@@ -574,7 +574,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     replacement is a release failure and the
     foreign replacement is never rewritten.  This is an advisory cooperative-writer boundary, not a
     defense against an actor replacing the entire path with a different inode, and it is unavailable
-    on Windows.  The lease does not attest KCS internals or make history executable: prepare-runner
+    on Windows.  The lease does not attest Kio internals or make history executable: prepare-runner
     integration, a complete 400-scope semantic receipt, handle-relative expected-state mutation,
     durable journal/resume, and the replay executor remain required, so
     `HISTORY_ASSIGNMENT_EXECUTABLE` stays false.
@@ -596,12 +596,12 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 101. Persona capacity and generic streaming storage are implemented as non-authorizing boundaries.
     Capacity derives exact cardinalities but remains blocked until canonical pilot measurement readback;
     a root-bound check additionally requires read-back filesystem identity, allocation unit, availability,
-    caps, and reserves.  No capacity receipt authorizes a write or attests KCS.  Streaming JSONL storage
+    caps, and reserves.  No capacity receipt authorizes a write or attests Kio.  Streaming JSONL storage
     enforces bounded canonical shards, no-replace publication, and exact readback, but portable rename
     cannot atomically require that the verified source directory inode remains the rename source.  Every
     result therefore reports `formal_publication_attested=false` with blocker
     `source_directory_inode_not_bound_by_rename` and cannot serve as a formal full-publication receipt.
-102. The KCS runner boundary and partial semantic attestor are fail-closed scaffolding, not W0 prepare.
+102. The Kio runner boundary and partial semantic attestor are fail-closed scaffolding, not W0 prepare.
     Strict result validation, isolated environment construction, read-only binary identity, content-root
     walking, canonical persona/scope/quota binding, and typed runtime callback receipts are implemented.
     A validated scope path can still be swapped before `Popen(cwd=...)` resolves it, so
@@ -628,7 +628,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     coherent substitution by an arbitrary digest is rejected.  The root/person/device/scope projection is
     exactly 20×20 and binds the root binding plus declared binary, environment, init, and index receipt
     hashes in canonical order, but does not parse or type-check those artifact bodies.  Its only positive
-    claim is `canonical_fixture_projection_complete`; every KCS semantic, actual-chunk, opaque-runtime,
+    claim is `canonical_fixture_projection_complete`; every Kio semantic, actual-chunk, opaque-runtime,
     external-API-absence, history-ready, execution, and mutation claim is fixed false.  Root `/`, more than
     4 KiB/64 components/255 bytes per component, duplicate environment/init/index receipt hashes,
     and a person scope list other
@@ -641,11 +641,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     check/open seam for cooperating readers.  This remains explicitly non-authoritative: an in-process
     checker can duplicate or transiently rebind a descriptor, and a same-UID writer can perform content
     ABA between equal before/after Merkle roots.  Quiesced immutable snapshots and checker process
-    isolation are still required, so the handle transport, trusted binary execution, actual KCS semantics,
+    isolation are still required, so the handle transport, trusted binary execution, actual Kio semantics,
     history readiness, and history assignment all remain false.  Checker-local semantic evidence may assert
     success, but its typed receipt fixes `formal_transport_attested=false` and cannot enter the provenance-free
     legacy nine-field history-envelope callback protocol.
-106. Complete W0 KCS semantics require separate physical-tree and normalized-index ledgers.  In the
+106. Complete W0 Kio semantics require separate physical-tree and normalized-index ledgers.  In the
     observed offline store, the HEAD tree and raw CAS contain every physical source, while SQLite
     `tree_entries`, chunk ledger/CAS, and current eligibility contain only normalized sources; raw-only
     DOCX remains in the tree with `normalize=null`, has no SQLite tree row or chunks, and has a pending
@@ -669,7 +669,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     are still the same twenty logical people, but physically contain sixty roots, 1,200 scopes, and
     609,000 W0 source files (203,000 per replay).  Generation order is frozen plan, W0 folder/file build,
     W0 offline index/attestation, W1--W5 edits and lifecycle operations, fresh-root replay from W0 without
-    copying a completed root or `.kcs`, then validation after all replays.  These counts are not a measured
+    copying a completed root or `.kio`, then validation after all replays.  These counts are not a measured
     capacity-feasibility claim.
     Tiny remains a
     separate topology/routing smoke without the formal density distribution.  Variant dictionaries, not
@@ -681,7 +681,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     lexicographic tie-break; local repair is never the authority.
     The fact/answer oracle must be frozen before rendering, while query templates/text and query seed remain in a
     separately hashed artifact unavailable to the corpus renderer.  G0 grants no renderer, filesystem,
-    KCS execution, history mutation, actual-chunk, capacity, or write authority; all such flags stay false
+    Kio execution, history mutation, actual-chunk, capacity, or write authority; all such flags stay false
     until their later observed gates.  Until all 400 paths, authored physical/chunk load vectors, their
     explicit rubric and review receipt, the joint solver, source recipes, oracle membership, and bounded canonical hashes exist,
     `g0_contract_frozen=false` is mandatory.
@@ -805,7 +805,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     schema `kcs.persona.pc-variant-catalog/v2`, canonical body 211,733 bytes, SHA-256
     `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`.
     It exactly projects all 71 variant identities and all 566 persona/family/variant tiny/pilot/full
-    marginals, separates content MIME from current KCS path MIME, and assigns format-specific
+    marginals, separates content MIME from current Kio path MIME, and assigns format-specific
     complexity units rather than collapsing EML, notebooks, tabular rows, HTML sections, and
     structured records.  Formal complexity lanes bind text PDF 1--72 pages, scan PDF 1--50 pages,
     EML 0--5 attachments, XLSX 1--20 sheets, PPTX 1--40 slides, and image/media/domain ordinary and
@@ -878,7 +878,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     logical document, and restored-but-unindexed files do not satisfy that requirement.
 117. Persona-PC v2 capacity has two non-interchangeable boundaries.  The source-tree envelope contains
     only managed source files and the authored directories leading to 400 leaf scopes; it excludes every
-    `.kcs` object/index/history store, device registry, plan/ledger/receipt, workspace, staging, and
+    `.kio` object/index/history store, device registry, plan/ledger/receipt, workspace, staging, and
     transient artifact.  The 512 MiB/person and 10 GiB/W0-replay, 25 GiB/W5-final-replay, and
     27 GiB/pre-purge-replay values remain uncalibrated source-tree renderer candidates only.  The former
     88 GiB sum is therefore not a root-bound hard cap or Go result.  Root-bound capacity includes all
@@ -911,7 +911,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The candidate `kcs.persona.pc-overlay-contract/v2`, ID-free text renderer/validator, and source-profile
     catalog are deliberately outside this pinned planning core.  They bind no overlay instances or exact
     placement, have `source_recipe_profile_id=not-bound`, do not complete a source-profile vertical slice,
-    and grant no renderer, filesystem, KCS, history, capacity, or write authority.  Overlay membership,
+    and grant no renderer, filesystem, Kio, history, capacity, or write authority.  Overlay membership,
     formal profile/upstream binding, source-intent and source-level exact allocation, production MIME
     goldens, semantic oracle/query closure, and the G0 root remain explicit blockers.
     Scenario-specific blockers also remain: searchable cross-scope rename/move for M3-2; text/scan-PDF
@@ -940,7 +940,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     excluded from positive Recall; positive PDF coverage requires a deterministic text-layer renderer, or
     a separately versioned deterministic local-OCR variant and provenance contract.  Bounded canonical
     JSON and JSONL readers, a negative route-review receipt, and the new CI jobs enforce these denials but
-    grant no G0, solver, renderer, filesystem, write, KCS, or history authority.
+    grant no G0, solver, renderer, filesystem, write, Kio, or history authority.
     Known-schema field completeness and cross-field validity remain the responsibility of each injected
     exact provider validator; the closure scanner is defense-in-depth for canonical fields and explicitly
     declared aliases, not an unbounded synonym interpreter.  Validators must return exact true, and the
@@ -960,7 +960,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `conflict_fact_realizability_proved=false` remain blockers.  The non-authorizing overlay candidate is
     now 69,119 canonical bytes, SHA-256
     `60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8`.  No G0, solver,
-    renderer, filesystem, KCS, history, capacity, or write authority follows from the fact-pair prerequisite.
+    renderer, filesystem, Kio, history, capacity, or write authority follows from the fact-pair prerequisite.
 121. Full source cardinality and contributor-format feasibility are separate non-authorizing slices.  The
     new `kcs.persona.pc-source-inventory-layout/v2` is 274,566 canonical bytes, SHA-256
     `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`.  It reserves exactly
@@ -980,7 +980,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`.  This supersedes the
     earlier 9-ready/62-outstanding count with ten contributor feasibility variants covering all 69,236
     contributor sources and 61 incidental/raw variants still unimplemented.  It does not prove distinct
-    semantic PDF contents, multilingual extraction, query anchors, actual KCS chunks, source recipes, or
+    semantic PDF contents, multilingual extraction, query anchors, actual Kio chunks, source recipes, or
     M3-1 Recall.  The p01 representative source-intent is now 9,886 bytes / SHA-256
     `e292df1136841f1b246515374e29b9a6926c5b12c15e9d3c39eea5a375bbe3c3`; all twenty source-intent
     digests change because their source-profile binding changes, and fourteen representatives select
@@ -991,7 +991,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `af4b50c742473189b274d724791b3b6fad73bedb06b6b1c2165d162ef1c665f2`, and suite 2,609 /
     `762ee9ffb8d29756b85bc483c46e66fa798ae04a37b9aafb56c5b1e6478b6479`.  These roots remain
     full-body compatibility candidates, not a semantic-payload namespace or G0 root; every solver,
-    renderer execution, filesystem, KCS, history, capacity, and write authority remains false.
+    renderer execution, filesystem, Kio, history, capacity, and write authority remains false.
 122. Persona-PC v2 now has an exact pre-source overlay-reservation boundary, without converting that
     reservation into concrete overlay membership.  This decision preserves decisions 120 and 121 as
     historical records while superseding decision 120's current overlay-contract pin and dependency/
@@ -1021,14 +1021,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     membership, solved scope placement, logical-document scoring, search behavior, format rendition,
     query/history target mapping, or formal distinct `(raw_hash, section)` relevance.
     Every reservation and suite authority flag is exact false, including G0 freeze, source inventory/plan,
-    concrete membership, solver, renderer, filesystem/write, KCS, and history authority.  Remaining
+    concrete membership, solver, renderer, filesystem/write, Kio, and history authority.  Remaining
     blockers are the complete 203,000 source rows/manifests and source-profile/content recipes; source-owned
     fact membership; concrete overlay membership; semantic-payload namespace and query/history mappings;
     format rendition and evaluation-target binding; joint scope solution/proof; renderer/writer, history,
-    and KCS observation; capacity attestation; and formal independent approval.  The required implementation
+    and Kio observation; capacity attestation; and formal independent approval.  The required implementation
     order is therefore reservation -> full 203,000 source rows/manifests -> source-owned fact membership ->
     concrete overlay membership -> semantic namespace and query/history mappings -> joint solver -> folder/
-    file writer -> edits/history -> fresh-storage replays -> evaluation.  No completed root or `.kcs` store
+    file writer -> edits/history -> fresh-storage replays -> evaluation.  No completed root or `.kio` store
     may be copied to satisfy a fresh replay.
 123. Persona-PC v2 now materializes the complete structural source-slot package without claiming semantic
     or executable source-intent completion.  The all-variant
@@ -1037,7 +1037,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196`.  All 71 formal source-recipe
     slots remain `reserved-unbound` with `profile_id=not-bound`; ten profiles have only local feasibility
     implementations and sixty-one remain implementation-missing.  Inventory-profile identity therefore
-    grants no formal recipe, renderer/validator execution, source-level feasibility, G0, filesystem, KCS,
+    grants no formal recipe, renderer/validator execution, source-level feasibility, G0, filesystem, Kio,
     history, capacity, or write authority.
     The downstream `kcs.persona.pc-source-inventory-origin-manifest/v2`,
     `kcs.persona.pc-source-inventory-profile-manifest/v2`, and
@@ -1059,7 +1059,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     semantic content catalogs, present fact sets and source-owned fact membership, concrete overlay
     membership, framing/header, and every other future persona-package component.  Consequently
     `source_intent_inventory_complete=false` and `formal_complete_persona_package_cap_proved=false`; no
-    semantic catalog, fact membership, concrete overlay, rendering, writing, history, KCS execution, or
+    semantic catalog, fact membership, concrete overlay, rendering, writing, history, Kio execution, or
     G0 authority follows.  A dedicated `persona-v2-source-inventory-full` CI gate is defined for this
     package, but this decision does not claim a green remote CI result.
     The next required order is semantic content contexts plus source-owned fact membership, then concrete
@@ -1107,7 +1107,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     This narrow completion does not flip the existing
     `source_intent_inventory_complete=false` claim and does not prove concrete overlay membership, seventy-
     one formal recipes, the sixty-one missing renderer/validator implementations, the allowlisted
-    `semantic_payload` namespace or input closures, joint allocation, rendering/writing/history/KCS, G0,
+    `semantic_payload` namespace or input closures, joint allocation, rendering/writing/history/Kio, G0,
     or the complete 16 MiB persona-package cap.  The dedicated
     `persona-v2-source-semantic-membership-full` CI gate is defined, but no remote green result is claimed.
     The next required order is concrete overlay manifests, formal recipes and the sixty-one missing
@@ -1145,7 +1145,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     origin, profile, and suite authority flag is exact false.  The package does not prove the seventy-one
     formal recipes or sixty-one missing renderer/validator implementations; corpus semantic namespace and
     query/history target mappings; joint scope allocation, solution, or proof; actual payload, raw identity,
-    chunks, or search observation; rendering, filesystem writes, history, or KCS execution; the complete
+    chunks, or search observation; rendering, filesystem writes, history, or Kio execution; the complete
     persona cap; formal capacity; or G0 freeze.
     The measured producer shape test took 172.190 seconds with maximum RSS 237,158,400 bytes, and the measured
     full build took 155.45 seconds with maximum RSS 192,757,760 bytes.  Full independent acceptance passed in
@@ -1180,7 +1180,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     hostile integer/depth inputs, environment determinism, and validator import independence.  The suite is
     included in `persona-v2-nonauthorizing-core`; no remote green result is claimed.  Renderer, validator, and
     receipts grant no formal recipe, source identity, semantic content, materialization, actual chunk,
-    filesystem/write, KCS, history, capacity, solver, or G0 authority.  The next implementation order is formal
+    filesystem/write, Kio, history, capacity, solver, or G0 authority.  The next implementation order is formal
     binding of all seventy-one recipes and these eleven contracts, the fifty raw-only pairs, semantic/query/history
     closures, joint solution/proof, streaming folder/file writing, edits/history, fresh-storage replays, and
     observed chunk/search/capacity/latency evaluation.
@@ -1226,7 +1226,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     unchanged.  That catalog is a historical snapshot; the new registry is the sole current seventy-one-of-
     seventy-one implementation-availability authority.  All seventy-one formal source-recipe slots still remain
     unbound in the upstream inventory catalog.  No source instance, selected complexity/bytes, semantic content,
-    scope placement, actual filesystem payload, chunk, KCS, history, capacity, solver, write, or G0 authority is
+    scope placement, actual filesystem payload, chunk, Kio, history, capacity, solver, write, or G0 authority is
     granted.  The next order is downstream formal recipe-profile binding, persona/family byte and source-level
     parameters plus exact event inventory and semantic closure, joint solution/proof, streaming writing, edits/
     history, fresh-storage replays, and observed structural/chunk/search/capacity/latency evaluation.
@@ -1244,7 +1244,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     re-authenticates the catalog and dependencies afterward, so provider-side mutation cannot change the object
     being approved.  The focused suite passes eighteen tests locally.  No source-instance value, selected
     complexity/bytes, semantic payload materialization, scope placement, solver result/proof, filesystem payload,
-    write/history/KCS execution, capacity result, or G0 authority is granted, and no remote CI green result is
+    write/history/Kio execution, capacity result, or G0 authority is granted, and no remote CI green result is
     claimed.  The next order is persona/family byte distribution, 203,000 source-instance parameters, exact
     lifecycle-event inventory and semantic/query/history closure, joint solution/proof, rendering and streaming
     folder/file writing, edits/history, three fresh-storage replays, and observed evaluation.
@@ -1267,7 +1267,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     and closed an earlier gap that accepted self-consistent affine under-selection and off-lattice/aspect raster
     anchors.  Fifteen focused tests pass in 34.305 seconds, all 362 bins pass actual renderer/validator probes,
     and two hash seeds reproduce the same pin.  Authority remains all false; no source-instance parameter,
-    actual allocation, source/materialization identity, write/history/KCS execution, capacity result, or G0
+    actual allocation, source/materialization identity, write/history/Kio execution, capacity result, or G0
     authority follows.
 130. Persona-PC v2 now makes the required one-person/one-primary-use-case relationship explicit rather than
     inferring use-case coverage from twenty role labels.  The non-authorizing
@@ -1309,7 +1309,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The body is 19,801 canonical bytes with SHA-256
     `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`.  Thirteen focused tests, four hash seeds,
     independent reconstruction, mutation probes, and final read-only review pass with no blocker.  All execution,
-    source-instance, observed receipt, write, KCS, history, capacity, and G0 authority remains false.
+    source-instance, observed receipt, write, Kio, history, capacity, and G0 authority remains false.
 133. Persona-PC v2 now adds the exact pre-solve `kcs.persona.pc-lifecycle-demand/v2` artifact downstream of the
     authenticated chunk-accounting sidecar.  Each of twenty personas owns one byte-stable anonymous payload with
     105 capabilities: one hundred contributor capabilities and five unreserved incidental cross-scope moves.
@@ -1328,7 +1328,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `kcs.persona.pc-recursive-robustness-lane-catalog/v1`.  It fixes twenty distinct representative ambient paths,
     256 file candidates and 128 authored directories per persona, the exact category vector
     `102/38/38/26/26/13/13`, suite file-depth counts D6/D7/D8=`2,855/1,901/364`, and planned-Dmax persona counts
-    `8/9/3`.  Formal scope overlap, `.kcs`, absolute paths, traversal, and formal gate eligibility are forbidden.
+    `8/9/3`.  Formal scope overlap, `.kio`, absolute paths, traversal, and formal gate eligibility are forbidden.
     Target OS and case mode are metadata only; native execution case mode is unbound.  Each persona therefore has
     a pre-execution native range of 253--256: a case-insensitive run records three portable ASCII case-collision
     mates as manifest-only failures, whereas a case-sensitive run may realize all 256.  Candidate, realized, and
@@ -1336,7 +1336,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The body is 76,099 canonical bytes with SHA-256
     `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`; thirteen focused tests, hash-seed
     determinism, independent reconstruction, hostile-type/path/TOCTOU probes, and final review pass.  No folder,
-    file, KCS, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
+    file, Kio, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
     nonauthorizing core CI job, and lifecycle-demand plus recursive-robustness tests are included in the inputs job;
     no remote green result is claimed.
 135. Persona-PC v2 planning now distinguishes three lifecycle stages instead of treating a source-matched event
@@ -1362,7 +1362,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     telemetry, W0 `qIM` receipt/patch, and observed lifecycle receipts are excluded from those planning packages.
     The current p12 13,275,672-byte ledger remains only a partial proof, so
     `pre_solve_persona_input_package_cap_proved=false`; G0, solution, compiled-runtime history, qIM patch, actual
-    chunks, root capacity, render/write/history/KCS execution, and all other authorities remain false.
+    chunks, root capacity, render/write/history/Kio execution, and all other authorities remain false.
 136. Persona-PC v2 now inserts a non-authorizing
     `kcs.persona.pc-overlay-compatible-byte-distribution/v2` sidecar between the immutable aggregate-byte base and
     source-instance parameter assignment.  The base remains pinned at 1,576,125 bytes /
@@ -1382,7 +1382,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     direct native-payload validation, forged-receipt rejection, provider-alias and metadata-TOCTOU probes, strict
     bool/integer rejection, and read-only P0/P1 review pass.  The artifact grants no source assignment,
     decoded-attachment equivalence, payload, materialization, capacity,
-    write, execution, KCS, G0, or other authority.
+    write, execution, Kio, G0, or other authority.
 137. Persona-PC v2 source-instance parameter assignment is a pre-solve content-parameter owner, not a partial
     placement solution.  It may bind only an explicit `{variant_id}/{bin_id}` parameter-cell key, recipe profile,
     renderer parameters, target complexity, target bytes, and size lane for each intent.  Scope, bucket, cohort,
@@ -1457,7 +1457,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     pass thirteen focused tests, two hash seeds, strict-type and re-pin tamper tests, dependency tamper, detached-build,
     and target/dependency TOCTOU tests.  The catalog supersedes the historical `U35/Y30/I5` snapshot only for
     coverage classification.  It selects no concrete source, imports no query/oracle, owns no effective membership,
-    and grants no solution, final-ID, observation, mutation, KCS, capacity, write, or G0 authority.
+    and grants no solution, final-ID, observation, mutation, Kio, capacity, write, or G0 authority.
 142. One synthetic person is presented as one physical persona-device container, not as unrelated lane roots.
     `pXX-role/` contains non-overlapping `home/` (formal retrieval/history), `ambient-home/` (recursive robustness),
     and `byte-stress/` child roots with separate manifests and receipts.  Only the twenty `home/` leaves are registered
@@ -1493,7 +1493,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     779.006 seconds (779.25 seconds wall) with outer maximum RSS 361,381,888 bytes; its two hash-seed subprocesses
     include producer-plus-independent and producer-plus-expanded-view cold paths, each capped at fifteen minutes and
     512 MiB.  Scope, bucket, cohort,
-    chunk quota, cell-local ordinal, semantic payload, final identifiers, render/write/history/KCS execution,
+    chunk quota, cell-local ordinal, semantic payload, final identifiers, render/write/history/Kio execution,
     capacity completion, and G0 authority remain absent and false.
 144. The frozen recursive-robustness catalog's `robustness-root/devices/{persona_id}/ambient-home` and
     `formal-root/devices/{persona_id}/home` strings are logical lane-plan coordinates, not physical path authority.
@@ -1549,7 +1549,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     cross-format matching, 100/5 semantic-anchor split, I5 target-byte bound, family witnesses, event expansion,
     receipts, suite aggregation, and content-only projection from authenticated upstream owners.  The accepted
     artifact contains no query/oracle body, solved scope/path/quota, final source/materialization/event identity,
-    observed qIM, raw/chunk hash, rank, latency, physical write, KCS execution, capacity completion, or G0 authority.
+    observed qIM, raw/chunk hash, rank, latency, physical write, Kio execution, capacity completion, or G0 authority.
     Effective lifecycle membership, joint solver/solution/proof, final W0 source plan, compiled W0--W5 history plan,
     runtime move-delta patch, physical materialization, and observed evaluation remain downstream blockers.
 
@@ -1589,7 +1589,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     format-selection roles, solution/scope/path/quota/final identifiers, and observed raw/chunk/rank/latency data.
     Corpus input closure retains the authenticated base full membership and derivation receipts; the semantic
     namespace may contain only membership-free base content context plus the single effective owner.  All execution,
-    write, solver, capacity, history, KCS, G0, and namespace-completion authority remains false.
+    write, solver, capacity, history, Kio, G0, and namespace-completion authority remains false.
 148. The source-matched lifecycle independent validator now validates detached opening snapshots for persona, suite,
     and content-projection targets.  Previously, a caller-owned target could be changed from an invalid opening value
     to the canonical value by an assignment callback and restored by a later event/persona callback; opening and
@@ -1630,7 +1630,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     clean gate passes 13 tests in 1,740.166 seconds, including two cold hash seeds each bounded at fifteen minutes and
     512 MiB RSS, the full 203,000-row scan, independent suite reconstruction, and adversarial provider/TOCTOU tests.
     CI runs this module in its own 120-minute job.  Solver, complete post-W0 membership, compiled history, physical
-    materialization, capacity/KCS observation, namespace completion, G0, and every write/execution authority remain
+    materialization, capacity/Kio observation, namespace completion, G0, and every write/execution authority remain
     false and downstream.
 150. Persona-PC v2 freezes a partial semantic-projection derivation inventory before issuing any production semantic
     namespace.  `kcs.persona.pc-semantic-projection-derivation-inventory/v1` contains exactly 113 external projection
@@ -1664,7 +1664,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     LF-inclusive row and 2,484,590-byte maximum body; effective and lifecycle maximum bodies are 103,864 and 256,790
     bytes.  These literal pins are independently enforced by the producer, validator, and cold two-hash-seed gate.
     The 203,000 base rows are planned W0 source projections for one suite replay; they are not evidence that files
-    were physically written, indexed, or that any persona attained 120,000 actual KCS chunks.
+    were physically written, indexed, or that any persona attained 120,000 actual Kio chunks.
     The final local gates pass three contract tests in 0.010 seconds, thirteen full all-113/tamper/TOCTOU tests in
     2,093.924 seconds, and the isolated two-hash-seed cold-build test in 2,251.624 seconds.  The measured seed-zero
     cold build takes 1,191.600 seconds with 304,218,112-byte maximum RSS; both cold builds remain below the 120-minute
@@ -1672,7 +1672,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     This artifact is deliberately incomplete and non-authorizing:
     `semantic_payload_projection_bound=false`, `query_semantics_absence_proved=false`,
     `future_source_id_namespace_eligible=false`, and `g0_contract_frozen=false`; no semantic namespace is issued and
-    every namespace-completion, solver, solution/proof, final-ID, render, filesystem/write, KCS, history, capacity,
+    every namespace-completion, solver, solution/proof, final-ID, render, filesystem/write, Kio, history, capacity,
     or G0 authority remains false.  The next required sequence is to implement and independently validate all nine
     missing projections, then complete the corpus semantic/query/history closures and blocker-resolution ledger,
     and only then proceed to the joint solver.
@@ -1723,7 +1723,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     fact projections, and the existing lifecycle caps.  No v2 golden bytes/SHA, completion flag, namespace eligibility,
     or source-identity authority is asserted until all 253 bodies pass independent full replay, leakage, alias,
     tamper, TOCTOU, resource, and two-hash-seed gates.  Even after that acceptance, semantic namespace issuance,
-    positive review receipts, blocker resolution, solver, G0, render/write/history/KCS, and physical 120,000-chunk
+    positive review receipts, blocker resolution, solver, G0, render/write/history/Kio, and physical 120,000-chunk
     attestation remain separate downstream gates.
 152. Persona-PC v2 accepts the complete twelve-class semantic-projection derivation inventory as the additive
     `kcs.persona.pc-semantic-projection-derivation-inventory/v2` artifact.  It contains exactly 253 independently
@@ -1778,7 +1778,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Eligibility is not issuance or authority.  The corpus semantic namespace remains unissued; positive independent
     route/profile reviews, corpus/query/history closures, and the blocker-resolution ledger remain incomplete.  No
     source-identity authority, solver solution/proof, final source plan or IDs, compiled history, G0, render/write,
-    filesystem/history/KCS execution, physical materialization, capacity/evaluation result, or per-persona 120,000
+    filesystem/history/Kio execution, physical materialization, capacity/evaluation result, or per-persona 120,000
     actual-chunk attestation is granted.  The next required sequence is to close and independently validate the
     corpus semantic, query, and history closures plus blocker-resolution ledger, and only then invoke the joint
     solver.
@@ -1794,7 +1794,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  The final focused module passes fifteen
     tests in 1,748.406 seconds, including cache-poisoning, detached-candidate, authority, coordinate, pin, event-domain,
     provider, and TOCTOU regressions.  Independent final review found no remaining P0/P1/P2 issue.  Solver, post-W0
-    complete membership, compiled history, write/KCS execution, physical receipts, and G0 remain false.
+    complete membership, compiled history, write/Kio execution, physical receipts, and G0 remain false.
 154. Persona-PC v2 freezes a projection-pin-only corpus semantic namespace as the additive
     `kcs.persona.pc-corpus-semantic-namespace/v3` artifact.  It contains exactly 253 entries and twelve class IDs in
     the complete-inventory order.  Every entry contains only its class, logical coordinates, ordinal, and exact
@@ -1855,7 +1855,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`.  Pre- and post-freeze isolated hash seeds
     reproduce the same body, the focused twelve-test gate and independent audit are clean, and producer/validator
     golden drift is fail-closed.  No physical root, registry, file, chunk, inode, or receipt is claimed observed;
-    filesystem writer, capacity, lane-isolation readback, KCS/history execution, production composition, and G0 all
+    filesystem writer, capacity, lane-isolation readback, Kio/history execution, production composition, and G0 all
     remain false.
 
     Remote GitHub Actions for Decisions 153--160 remain unverified because the repository/account billing or spending
@@ -1886,7 +1886,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     locally frozen corpus semantic namespace v3, complete semantic-projection inventory v2, seven-class review
     request catalog, and bootstrap blocker-resolution ledger.  It carries seven review requests, zero positive
     review receipts, and all 36 bootstrap G0 claims as active.  Every production, completion, G0, solver, solution,
-    render, filesystem/write, history, KCS, capacity, and evaluation authority remains exactly false.
+    render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
     `47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`.  The pre-freeze independent full gate
@@ -1922,7 +1922,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
     This working-tree-local freeze authenticates the measured insufficiency; it does not repair it.  It grants no
     authoritative corpus or evaluation closure, source-semantic resolution, revision/checkpoint ownership,
-    compiled relevance, solver or G0 eligibility, render/write/history/KCS execution, physical materialization, or
+    compiled relevance, solver or G0 eligibility, render/write/history/Kio execution, physical materialization, or
     actual chunk attestation.  The frozen evidence must be consumed by a still-non-authorizing evaluation closure
     slice, while the later resolution-v2 owner must add exact topic/language/fact/revision/checkpoint mappings,
     sufficient persona-local distractor capacity, all 5,400 concrete mappings, and four-domain disjointness.
@@ -1952,7 +1952,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
     This working-tree-local freeze grants no authoritative corpus or evaluation closure, source-semantic resolution,
     revision/checkpoint ownership, concrete distractor mapping, compiled relevance, solver/G0 eligibility,
-    query rendering, evaluation execution, folder/file creation, render/write/history/KCS execution, physical
+    query rendering, evaluation execution, folder/file creation, render/write/history/Kio execution, physical
     materialization, or actual chunk attestation.  It is exact blocker-state evidence for the additive source-semantic
     resolution v2 work.  Remote GitHub Actions remains unverified because the repository/account billing or spending
     gate previously stopped jobs; local acceptance does not imply remote green.
@@ -1987,7 +1987,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     with SHA-256 `eda5b08704753c0ff70cc537de76e503c4018a944fe8eb3b551e17ba93cc27dd` or the core-mix proposal at 31,559
     file bytes with SHA-256 `8515c7bc76796ff296e81579096d8e0c99307b49bd062aaaf818607392bb0c18`.
     Any pre-Decision working-tree candidate build is exploratory evidence only.  Golden freeze, full/cold acceptance,
-    authoritative closures, solver execution, G0, folder/file creation, history replay, KCS execution, and actual
+    authoritative closures, solver execution, G0, folder/file creation, history replay, Kio execution, and actual
     chunk attestation remain false.  Remote GitHub Actions remains unverified because the repository/account billing
     or spending gate previously stopped jobs; local evidence does not imply remote green.
 164. Persona-PC v2 freezes the non-authorizing
@@ -2011,7 +2011,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Full/cold receipts remain external to the canonical body and cannot grant it authority.  Source-slot membership,
     exact W5-final current-source eligibility, source-to-cell assignment, headroom and fit, semantic transformation,
     final source identity authority, namespace v4, compiled history, evaluation mapping, G0, folder/file creation,
-    KCS execution, and actual chunk attestation remain false.  Remote GitHub Actions remains unverified because the
+    Kio execution, and actual chunk attestation remain false.  Remote GitHub Actions remains unverified because the
     repository/account billing or spending gate previously stopped jobs; local freeze evidence does not imply remote
     green.
 165. Persona-PC v2 freezes the non-authorizing
@@ -2034,7 +2034,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     golden-freeze, full-replay, and cold-replay receipts remain external and are not embedded in the canonical body;
     they cannot grant downstream authority.  Source-slot assignment, physical source membership, exact W5 fit,
     rendering, compiled history, relevance and selector visibility, evaluation mapping, namespace v4, G0,
-    folder/file creation, KCS execution, and actual chunk attestation remain false.  Remote GitHub Actions remains
+    folder/file creation, Kio execution, and actual chunk attestation remain false.  Remote GitHub Actions remains
     unverified because the repository/account billing or spending gate previously stopped jobs; local freeze evidence
     does not imply remote green.
 166. Persona-PC v2 adopts the `persona-core-v1` extension-allocation design, but does not yet freeze or issue its
@@ -2067,7 +2067,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     content-only namespace before pre-solve closures; the query-independent solver imports only that namespace, and
     the final source plan is issued only after the solution/proof and directly binds both.  Query/evaluation data,
     history, receipts, blocker ledgers, solutions, paths, source instances, and observed chunks are absent from the
-    manifest.  G0, solver execution, source recipes/instances, rendering, physical writes, KCS/history execution, and
+    manifest.  G0, solver execution, source recipes/instances, rendering, physical writes, Kio/history execution, and
     evaluation remain unauthorized.
 
     The independently reviewed proposal is 32,084 file bytes with SHA-256
@@ -2100,6 +2100,6 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     This slice is not the solution-compiled or authoritative history closure.  It imports no corpus-input,
     evaluation, query/oracle, review, or blocker-ledger dependency and grants no post-W0 complete membership,
     source/scope/bucket/cohort/path/quota assignment, solver solution/proof, planned or final identifier, render/write,
-    filesystem/history mutation, KCS execution, G0, or actual chunk authority.  Remote GitHub Actions remains
+    filesystem/history mutation, Kio execution, G0, or actual chunk authority.  Remote GitHub Actions remains
     unverified because the repository/account billing or spending gate previously stopped jobs; local freeze evidence
     does not imply remote green.

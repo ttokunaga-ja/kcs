@@ -16,7 +16,7 @@ create-edit-replay-validate順序の改訂案は
 物理ファイル形式比率を持つ。formal fullでは各人が単独で120,000 current
 contract-contributor chunksを持ち、20人を合算して条件を満たすことは禁止する。
 
-W0で生成したplanned chunksは実KCS chunkの証拠ではない。`prepare/index`後のattestorが
+W0で生成したplanned chunksは実Kio chunkの証拠ではない。`prepare/index`後のattestorが
 各人120,000を実測して初めてformal gateを通過する。Office、scan PDF、画像、音声、
 domain binaryは作成しただけでは検索可能chunkへ数えない。
 
@@ -32,7 +32,7 @@ domain binaryは作成しただけでは検索可能chunkへ数えない。
           <project/year/phase/etc>/
             <leaf-scope>/
               pNN-src-000001.<ext>  # managed filesはleaf直下だけ
-      .kcs-eval-device/             # prepare段階で作成、W0には置かない
+      .kio-eval-device/             # prepare段階で作成、W0には置かない
       oracle/                       # history/query段階で作成、W0には置かない
   ledgers/<persona>/<scope>/
     w0-physical-raw.jsonl
@@ -45,7 +45,7 @@ domain binaryは作成しただけでは検索可能chunkへ数えない。
   w0-root-binding.json
 ```
 
-KCSはleaf scopeを20個別々に初期化する。PC umbrellaや中間親をscopeにしない。
+Kioはleaf scopeを20個別々に初期化する。PC umbrellaや中間親をscopeにしない。
 これにより深いPC階層を再現しつつ、scope内のmanaged fileは必ずdirect childになる。
 
 現在の複雑性floorは、全400 scope中63 scopeが深さ4以上、10人が深さ5以上、
@@ -246,7 +246,7 @@ p95が上限72へ張り付かないようにする。最小valid Office/PNG/WAV/
 5. **W1-W5 edit in place**: edit/rename/move/duplicate/derive/archive/delete/restore/purgeを適用し、
    各waveの通常変更はscopeごとに1回だけindexする。
 6. **fresh replay x3**: 同じimmutable plan/eventをW0から3 rootへ独立再実行し、hard linkや
-   `.kcs`コピーを禁止する。完成rootの複製は履歴再現とは認めない。
+   `.kio`コピーを禁止する。完成rootの複製は履歴再現とは認めない。
 7. **attest**: 60独立registries、1,200 scopesについて、各人120,000 current、W5
    current+history 180,000以上、raw-only 0、3 replayのcanonical state一致を実測。
 8. **evaluate**: 全root完成後だけRecall、履歴検索、latency、disk/inode/RSSを測定。
@@ -345,7 +345,7 @@ W5後は10,800,000 current+history contract chunksを計画する。W5 pre-purge
 - no-replace canonical JSONL shard storage（source inode rename blockerにより常にnon-formal）
 - root directory/owner markerをinode固定し、W0 bytesを変えず保持するread-only
   replay-root lease primitiveとlease-held root FD貸出し（POSIXのみ。executor未接続）
-- strict KCS result/environment/binary-receipt boundary（TOCTOU対策完了前は全execution/mutation gate false）
+- strict Kio result/environment/binary-receipt boundary（TOCTOU対策完了前は全execution/mutation gate false）
 - canonical all-person plan SHAを1人ずつ再構成し、root/person/device/scopeのexact 20×20と
   宣言artifact SHAを束縛するnon-executing prepare-receipt composer（全semantic claim false）
 - profile、canonical scope quota、file bytes/content rootを束縛するpartial semantic attestor
@@ -358,11 +358,11 @@ W5後は10,800,000 current+history contract chunksを計画する。W5 pre-purge
 
 - metadataを実bytesへ反映するpersona別rich size distribution、role別extension/domain-binary renderer、
   native/emulated OS behavior（現行render behaviorは未変更）
-- W0 init/index prepare executor・native FD-bound SQLite/WAL snapshotを含むcomplete KCS semantic
+- W0 init/index prepare executor・native FD-bound SQLite/WAL snapshotを含むcomplete Kio semantic
   history-ready attestor、W1-W5 safe mutation/journal/replay、query generator
 - pilot/fullのW0 writer・suite streamのformal publication/RSS/readback/`wait4` gate・実測byte cap
 - Windows directory-handle durability（planは可、物理publishは現状blocked）
-- full 120,000 actual KCS chunks/personの証明
+- full 120,000 actual Kio chunks/personの証明
 
 履歴blockerの原因は確定した。現行の「raw filesの1%をpurged」と「4%=4,800 chunksをpurge」は
 別々に割り当てられ、full 20人中16人で両立しない。上記P/X/Y/Nのjoint modelは現行W0 plan上の
@@ -372,7 +372,7 @@ rebuild validatorまで実装した。full 1 replayではP path 2,775件、X rep
 replacement 9,706件となる。root-wide leaseとlease-held root FD貸出しは実装したが、W0
 history-ready receipt、prepare executor、safe mutation、append-only journal、replay executorは
 未実装なので、W1-W5 mutationは引き続きfail closedとする。
-planned quota/manifestは実KCS chunk attestationの代用ではない。
+planned quota/manifestは実Kio chunk attestationの代用ではない。
 
 full count/resource oracleの3 replay値は130,788 events、15,525 boundaries、146,313 schedule itemsである。
 上限はpersona plan 8 MiB、sources 16,000、scopes 20、worker RSS 384 MiB、composer RSS
@@ -383,11 +383,11 @@ full count/resource oracleの3 replay値は130,788 events、15,525 boundaries、
 capacity projectionはcanonical pilot measurement receiptの読み戻し前は
 `blocked_missing_pilot_evidence`、root-bound checkはfilesystem identity/allocation unit/availability/cap/reserve
 の読み戻し前は`blocked_measurement_receipt_readback_required`である。どちらもphysical
-writeまたはactual KCS attestationを許可しない。streaming storageはcanonical shardを
+writeまたはactual Kio attestationを許可しない。streaming storageはcanonical shardを
 no-replace publish/readbackするが、verified source directory inodeをrenameのatomic preconditionにできないため、
 `formal_publication_attested=false` / `source_directory_inode_not_bound_by_rename`である。
 
-KCS runnerはvalidatorとisolated environment recipeを持つが、scope path検証後の
+Kio runnerはvalidatorとisolated environment recipeを持つが、scope path検証後の
 `Popen(cwd=...)`にsame-user TOCTOUが残る。そのため`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
 `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`はすべてfalseであり、
 init/index/version subprocessもpersona mutationも実行しない。partial semantic attestorはprofile、
@@ -406,8 +406,8 @@ main/WAL/SHMをcross-platformに同一epochで検査できない。native read-o
 immutable snapshotが入るまで、actual chunk/history-readyを主張しない。
 
 post-W0 verifierはstrict W0 exact-tree verifierを緩めない。別APIでW0のowner/root binding、
-ledger、source bytesを再検証し、canonical intentが宣言する400個の`.kcs`と20個の
-`.kcs-eval-device`、固定`.kcs-persona-history/{control,receipts}`だけを外側envelopeとして許す。
+ledger、source bytesを再検証し、canonical intentが宣言する400個の`.kio`と20個の
+`.kio-eval-device`、固定`.kio-persona-history/{control,receipts}`だけを外側envelopeとして許す。
 opaque内部はtyped semantic attestorがdirectory identity/content-rootを証明しない限り
 `opaque_unattested`であり、常に`history_ready_attested=false`を返す。これはprepare/replayの
 安全な前提であって、init/index実行やhistory-ready receiptそのものではない。
@@ -429,7 +429,7 @@ receiptも未証明である。このlayerはformal fullまたはW1-W5 mutation�
 全員中event数最大のp02/fullは25,389,043 bytes、5,087 events、446 boundaries、5,533 items、
 最大RSS 185,860,096 bytes、92.37秒だった。全20人のplanだけを1人ずつ生成した場合は合計
 58,300,452 bytes、最大person plan 4,697,330 bytes、最大RSS 66,109,440 bytesだった。
-これらはplanner実装可能性の参考値で、20人full物理生成・KCS index・正式性能gateの達成値ではない。
+これらはplanner実装可能性の参考値で、20人full物理生成・Kio index・正式性能gateの達成値ではない。
 
 full 1 replayの正確なplanned件数は43,596 events、5,175 boundaries、48,771 schedule itemsで、
 3 fresh replayでは各130,788、15,525、146,313 executionになる。full suiteはperson shardを
@@ -442,7 +442,7 @@ formal full承認前に実測する。
 同日の別のread-only開発probeでは、fresh tiny W0のp01だけを20独立scopeとして
 `init -> index --offline --yes`し、planned contributor 375に対してactual contributor 375、
 incidental 47、raw-only 0を確認した。各scopeの初回commitはparentなしのauto commit 1本で、
-再indexはHEAD不変のstrict noopだった。raw payload約0.80 MiBに対して20個の`.kcs`は
+再indexはHEAD不変のstrict noopだった。raw payload約0.80 MiBに対して20個の`.kio`は
 allocated約14.8 MiBであり、小さなscopeを多数持つ構成ではSQLite/CAS固定費が支配的になる。
 これはp01/tinyの実装可能性probeであって、400 scope history-ready barrier、pilot/full容量、
 または120,000 actual chunks/personの証拠ではない。
@@ -476,17 +476,17 @@ permission/unreadable、sync-stateも持たせる。
 ```bash
 python3 eval/generate_persona_corpus.py plan \
   --profile tiny \
-  --plan-out /private/tmp/kcs-persona-tiny-plan.json
+  --plan-out /private/tmp/kio-persona-tiny-plan.json
 
-mkdir -p /private/tmp/kcs-persona-runs
+mkdir -p /private/tmp/kio-persona-runs
 python3 eval/generate_persona_corpus.py generate \
-  --plan /private/tmp/kcs-persona-tiny-plan.json \
-  --out /private/tmp/kcs-persona-runs/replay-01 \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --out /private/tmp/kio-persona-runs/replay-01 \
   --replay-id replay-01
 
 python3 eval/generate_persona_corpus.py verify \
-  --plan /private/tmp/kcs-persona-tiny-plan.json \
-  --root /private/tmp/kcs-persona-runs/replay-01 \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --root /private/tmp/kio-persona-runs/replay-01 \
   --replay-id replay-01
 ```
 

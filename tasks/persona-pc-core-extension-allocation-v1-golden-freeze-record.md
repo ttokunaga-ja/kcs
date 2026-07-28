@@ -9,7 +9,7 @@ Golden-Freeze Gate described by
 `tasks/persona-pc-core-extension-allocation-v1-proposal.md`.  It does not
 amend the decision log, issue a content-only namespace entry, authorize a
 solver, or authorize source instances, rendering, filesystem writes, history,
-KCS, evaluation, or actual chunk claims.
+Kio, evaluation, or actual chunk claims.
 
 ## Frozen descriptor and external body
 
@@ -89,4 +89,4 @@ The next required work is content-only namespace admission and the separate
 pre-solve closures, then the query-independent joint solution/proof.  A final
 source plan must bind both that solution/proof and this frozen manifest.  Only
 later, separately authorized stages may render/write sources, produce history,
-run KCS, or execute M3 evaluation.
+run Kio, or execute M3 evaluation.

@@ -3,7 +3,7 @@
 あなたは Kio (local-first knowledge archive、Rust 実装) の**実装監査**を単独で行う。
 他の監査系統の報告・途中経過は一切与えられていない。自分の読解だけで判断せよ。
 
-対象リポジトリのルート: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs`
+対象リポジトリのルート: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio`
 
 **read のみを使うこと。** 書き込み、実行、ネットワークアクセスはすべて禁止。
 

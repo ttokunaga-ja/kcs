@@ -909,13 +909,30 @@ UTF-8 byte order 最小**の chunk を指す。逆引きの探索範囲は検索
 | `eval/run_eval.py` (合成・CI 常時) | M3-1/2/3 = 1.0 / 1.0 / 1.0 (目標 0.8) | ❌ 天井。劣化を検出できない |
 | `eval/run_baseline.py` (fixture-b 24 問) | kio 0.9167、hard3 は 6/8 | ✅ 余地がある |
 
-その fixture は失われていなかった。改名前の名前 `kcs` で残っている:
+その fixture は失われていなかった。当時は改名前の `kcs-` 名で残っていた
+(**2026-07-28 に `kio-` へ改名済み**)。所在は 2026-07-28 に実測し直した:
 
-- `~/kcs-baseline-corpus` (14 MB) — **原本**。1,015 ファイル、golden query の正解を全て含み `.kcs` なし
-- `/private/tmp/kcs-fixture-run` (1.4 GB) — index 済み store。**`/tmp` なので再起動で消える**が、
-  中身は再 index で再生成できる派生物
-- qhard の 24 ファイルは `/tmp` にしか無かったため `~/kcs-baseline-corpus-qhard` へ保全済み
-  (バイト一致確認済み)
+| 場所 | golden 24 問 | `.kio` | 中身 |
+|---|---:|---:|---|
+| `~/kio-baseline-corpus` (14 MB) | **24/24** | 0 | **原本**。1,015 ファイル |
+| `~/kio-dogfood/corpus-v1/corpus` (1.9 GB) | **24/24** | **428** | **index 済み**。下記 |
+| `/private/tmp/kio-fixture-run-stale-20260724` (1.3 GB) | 0/24 | **0** | 2026-07-24 の残骸。使えない |
+
+qhard の 24 ファイルは `/tmp` にしか無かったため `~/kio-baseline-corpus-qhard` へ
+保全済み (バイト一致確認済み)。
+
+> **訂正 (2026-07-28)**: 本節は以前 `/private/tmp/kcs-fixture-run` を
+> 「index 済み store」と書いていたが**誤り**だった。実際には `.kio` が 1 つも無く
+> golden query の正解も 0/24 で、index 済みの実体は `~/kio-dogfood/corpus-v1/corpus`
+> にある (`scope-registry.sqlite` の 433 scope もそちらを指している)。
+>
+> **したがって OCR の実費は再度払う必要がない。** 支払い済みの成果物は生きている:
+>
+> - `objects/normalized/*.md` (markdownize 出力) **1,223 ファイル / 5.0 MB**
+> - chunks **3,711** / embeddings **3,537**
+>
+> V3b はこの正規化済み Markdown を `--corpus` に渡せば成立する。5.0 MB のテキストなので
+> **commit して恒久化できる規模**であり、そうすれば以後の再測定は無料になる。
 
 `register_fixture.py` は**削除されたのではなく、一度も commit されていなかった**
 (`git log --all --diff-filter=D` が何も返さない)。生き残った fixture から仕様を採取して

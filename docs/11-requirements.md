@@ -21,19 +21,19 @@
 
 ## (以下、古いドラフト本文)
 
-> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**
+> **Kioは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。Kio core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**
 
-> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
+> **Kio is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The Kio core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
 
 ---
 
-## 1. KCS の再定義
+## 1. Kio の再定義
 
-KCS の作成意図は、AI を契機として **ローカルの知識空間そのものを再定義すること** である。長年、PDF / PowerPoint / Word / 画像のような検索に向かないファイル形式がローカルファイル空間のデフォルトだった。一方で Web では、Google が文書空間に共通の検索体験を与え、ブラウザ上で同じ指標・同じフォーマット・同じ操作感で情報へアクセスできるようにした。
+Kio の作成意図は、AI を契機として **ローカルの知識空間そのものを再定義すること** である。長年、PDF / PowerPoint / Word / 画像のような検索に向かないファイル形式がローカルファイル空間のデフォルトだった。一方で Web では、Google が文書空間に共通の検索体験を与え、ブラウザ上で同じ指標・同じフォーマット・同じ操作感で情報へアクセスできるようにした。
 
-KCS はこれをローカルファイル空間で実現する。原本ファイルを保存しつつ、Markdown を主とする統一テキスト表現へ正規化し、全文検索・意味検索・履歴検索・出典追跡を同じ体験として扱えるようにする。副目的として、開発者が Git で享受してきた **履歴付き知識アーカイブ** の恩恵を、開発者以外のユーザーにも広げる。
+Kio はこれをローカルファイル空間で実現する。原本ファイルを保存しつつ、Markdown を主とする統一テキスト表現へ正規化し、全文検索・意味検索・履歴検索・出典追跡を同じ体験として扱えるようにする。副目的として、開発者が Git で享受してきた **履歴付き知識アーカイブ** の恩恵を、開発者以外のユーザーにも広げる。
 
-これまでの KCS は次のものでした。
+これまでの Kio は次のものでした。
 
 ```text
 ローカルファイルを検索・ナビゲーションするシステム
@@ -47,7 +47,7 @@ KCS はこれをローカルファイル空間で実現する。原本ファイ�
 AI Agent が履歴込みで知識にアクセスできる
 ```
 
-つまり、KCS は次の 3 つの合成です。
+つまり、Kio は次の 3 つの合成です。
 
 ```text
 Finder / Explorer
@@ -61,21 +61,21 @@ AI Agent Knowledge Index
 
 ```text
 Git: ソースコード中心の履歴管理
-KCS: ローカルファイル全体の知識アーカイブ
+Kio: ローカルファイル全体の知識アーカイブ
 ```
 
 ---
 
 ## 2. プロダクト基本: オフラインで動作可能であること
 
-KCS は **core が完全オフラインで動作する** ことを基本要件とする。ネットワーク接続は前提としない。
+Kio は **core が完全オフラインで動作する** ことを基本要件とする。ネットワーク接続は前提としない。
 
-ここでいうオフライン保証の対象は、KCS 本体の object store / snapshot / restore / search / index 管理である。Prepare、Markdownize（OCRを含む）、マルチモーダル Embedding、optional Summary / Classification / Rerank などの処理は Adapter に委譲し、ユーザーが LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ実装を自由に選べるようにする。
+ここでいうオフライン保証の対象は、Kio 本体の object store / snapshot / restore / search / index 管理である。Prepare、Markdownize（OCRを含む）、マルチモーダル Embedding、optional Summary / Classification / Rerank などの処理は Adapter に委譲し、ユーザーが LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ実装を自由に選べるようにする。
 
 ### オフライン動作が必須となる機能
 
 ```text
-KCS object store
+Kio object store
 Snapshot / Restore / GC / Pack
 履歴完全削除 / 法務・秘匿向け purge
 既存 BM25 / Vector / Graph index の保持・参照
@@ -93,13 +93,13 @@ optional Summary / Classification / Rerank
 BM25 / Vector / Graph 検索
 ```
 
-これらは Adapter が提供する能力であり、KCS core のオフライン保証対象ではない。KCS core が保証するのは、実行時 Adapter が利用できない状態でも、すでに生成済みの snapshot / normalized object / chunk / embedding object / index を使って探索・復元できることである。
+これらは Adapter が提供する能力であり、Kio core のオフライン保証対象ではない。Kio core が保証するのは、実行時 Adapter が利用できない状態でも、すでに生成済みの snapshot / normalized object / chunk / embedding object / index を使って探索・復元できることである。
 
-Adapter の実行設定、コマンドパス、URL、認証情報は共有対象ではない。各デバイスの `~/.config/kcs/` や OS keychain などに保存し、`.kcs/` は Adapter を管理しない。`.kcs/` に残すのは、生成済み artifact の provenance と互換性判定に必要な profile hash などの非実行情報に限る。
+Adapter の実行設定、コマンドパス、URL、認証情報は共有対象ではない。各デバイスの `~/.config/kio/` や OS keychain などに保存し、`.kio/` は Adapter を管理しない。`.kio/` に残すのは、生成済み artifact の provenance と互換性判定に必要な profile hash などの非実行情報に限る。
 
 ### Adapter 設計への含意
 
-LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ、ローカルコマンドは **差し替え可能な Adapter** として位置付ける。KCS は特定の Prepare / Markdownize / Embedding / Summary / Classification / Rerank 実装を中核に含めず、Adapter 契約と実行記録を管理する。OCR は単独 Adapter として Markdownize と並列に置かず、画像・スキャン PDF などを Markdown 化する Markdownize Adapter の内部能力として扱う。
+LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ、ローカルコマンドは **差し替え可能な Adapter** として位置付ける。Kio は特定の Prepare / Markdownize / Embedding / Summary / Classification / Rerank 実装を中核に含めず、Adapter 契約と実行記録を管理する。OCR は単独 Adapter として Markdownize と並列に置かず、画像・スキャン PDF などを Markdown 化する Markdownize Adapter の内部能力として扱う。
 
 Adapter は提供主体ではなく、実行形態と決定性で分類する。
 
@@ -132,21 +132,21 @@ Image Embedding Adapter
 Text Embedding Adapter
 ```
 
-Adapter は共通の KCS API を通じて KCS core と接続する。オンライン API、オフライン API、決定論的ライブラリのいずれを使う場合も、KCS core は同じ API 境界で task、input hash、output hash、profile hash、ネットワーク送信許可、実行状態を管理する。
+Adapter は共通の Kio API を通じて Kio core と接続する。オンライン API、オフライン API、決定論的ライブラリのいずれを使う場合も、Kio core は同じ API 境界で task、input hash、output hash、profile hash、ネットワーク送信許可、実行状態を管理する。
 
 ```text
-KCS core:  offline-capable
+Kio core:  offline-capable
 Adapter:   user-selected
 Optional:  online_api adapter (explicit network opt-in)
 ```
 
-`--online` 等の明示オプトインなしにネットワーク越しの API へファイル内容を送信しない。Adapter はオンライン API を使えるが、KCS core はオンライン API が停止しても既存 snapshot と既存 artifact を探索・復元できなければならない。
+`--online` 等の明示オプトインなしにネットワーク越しの API へファイル内容を送信しない。Adapter はオンライン API を使えるが、Kio core はオンライン API が停止しても既存 snapshot と既存 artifact を探索・復元できなければならない。
 
 ### `tool_profile_hash` による再現性
 
 Prepare / Markdownize / Embedding / Summary / Classification / Rerank のバージョン・量子化・パラメータは、実行設定そのものではなく、`tool-lock.json` と `tool_profile_hash` に非実行の profile 情報として記録する。
 
-ただし、Markdownize（OCR / 画像認識を含む）、Embedding、Summary、Classification、Rerank など非決定的な処理を挟む場合、KCS の再現性は「同じ入力から必ず同じ出力を再生成できる」ことではなく、**一度生成された artifact を原本 hash と tool profile に紐付けて固定し、同じ原本 hash では既存 artifact を尊重する**ことを意味する。
+ただし、Markdownize（OCR / 画像認識を含む）、Embedding、Summary、Classification、Rerank など非決定的な処理を挟む場合、Kio の再現性は「同じ入力から必ず同じ出力を再生成できる」ことではなく、**一度生成された artifact を原本 hash と tool profile に紐付けて固定し、同じ原本 hash では既存 artifact を尊重する**ことを意味する。
 
 ```text
 raw_hash unchanged
@@ -166,7 +166,7 @@ explicit re-normalize requested
 
 MVP は **単一端末限定** とする。同期、共有版、Web 上の修正提案、複数端末間の競合解決は MVP 外である。
 
-ただし、MVP は検索体験を削った薄いデモではない。初期ユーザーは CLI に慣れた開発者を想定しつつ、将来の一般ユーザー向け UX を損なわない設計にする。横断検索、履歴検索、出典追跡、復元、安全な削除境界など、KCS の基本体験に直結する機能は時間をかけてでも実装する。
+ただし、MVP は検索体験を削った薄いデモではない。初期ユーザーは CLI に慣れた開発者を想定しつつ、将来の一般ユーザー向け UX を損なわない設計にする。横断検索、履歴検索、出典追跡、復元、安全な削除境界など、Kio の基本体験に直結する機能は時間をかけてでも実装する。
 
 そのうえで、MVP でもプロダクトの中核思想を検証できるよう、次は最小要件に含める。
 
@@ -182,7 +182,7 @@ resume / retry / repair
 purge
 ```
 
-MVP は短期デモではなく、KCS の基本機能を実装する最初の完成形として扱う。実装順序は段階化してよいが、MVP の受入範囲から横断検索、履歴検索、出典追跡、復元、purge、安全な再実行を外さない。
+MVP は短期デモではなく、Kio の基本機能を実装する最初の完成形として扱う。実装順序は段階化してよいが、MVP の受入範囲から横断検索、履歴検索、出典追跡、復元、purge、安全な再実行を外さない。
 
 ### 理由
 
@@ -209,40 +209,40 @@ Git の本質は「差分保存」ではなく次の 7 つです。
 7. Garbage collection
 ```
 
-KCS では以下のように再解釈します。
+Kio では以下のように再解釈します。
 
-| Git        | KCS                                          |
+| Git        | Kio                                          |
 | ---------- | -------------------------------------------- |
 | blob       | raw file object / normalized markdown object |
 | tree       | folder snapshot                              |
-| commit     | KCS commit / snapshot                        |
+| commit     | Kio commit / snapshot                        |
 | branch     | snapshot lineage                             |
 | tag        | named archive point                          |
 | index      | pending indexing state                       |
-| .gitignore | .kcsignore                                   |
+| .gitignore | .kioignore                                   |
 | gc         | unreferenced object cleanup                  |
 | checkout   | snapshot materialization / view              |
 | blame      | evidence provenance                          |
 
-`index` / pending task / retry state は、KCS の正本ではない。これらは処理効率と再開性のための運用状態であり、失われても raw object / normalized object / tree / commit object から再検出・再生成できることを優先する。KCS が失ってはならないのは原本ファイル由来の raw object と、その raw object に紐づく履歴・証拠・snapshot である。
+`index` / pending task / retry state は、Kio の正本ではない。これらは処理効率と再開性のための運用状態であり、失われても raw object / normalized object / tree / commit object から再検出・再生成できることを優先する。Kio が失ってはならないのは原本ファイル由来の raw object と、その raw object に紐づく履歴・証拠・snapshot である。
 
 ---
 
-## 4. KCS の基本構造
+## 4. Kio の基本構造
 
-KCS の `.kcs` は、知識スコープのルートに1つだけ置くものではない。基本的には `.DS_Store` のように各フォルダに隠しディレクトリとして生成され、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する。
+Kio の `.kio` は、知識スコープのルートに1つだけ置くものではない。基本的には `.DS_Store` のように各フォルダに隠しディレクトリとして生成され、子フォルダや孫フォルダにもそれぞれ `.kio` が存在する。
 
-各 `.kcs` は、自分が配置されたフォルダ直下のファイルと子フォルダリンクを管理する。子フォルダの中身は、その子フォルダ自身の `.kcs` が管理する。
+各 `.kio` は、自分が配置されたフォルダ直下のファイルと子フォルダリンクを管理する。子フォルダの中身は、その子フォルダ自身の `.kio` が管理する。
 
 ファイル名は `scope.json` を正とする。過去の研究メモに出てくる `folder.json` は同じ概念の旧称であり、実装・契約ドキュメントでは採用しない。
 
-`kcs init` は実行フォルダの `.kcs` を作成する。子フォルダの `.kcs` は、`kcs index` や探索処理が ignore されていない対象を発見した時点で必要に応じて生成する。つまり、各フォルダに `.kcs` が存在する設計を前提にしつつ、空フォルダや未到達フォルダへ先回りして大量生成する必要はない。
+`kio init` は実行フォルダの `.kio` を作成する。子フォルダの `.kio` は、`kio index` や探索処理が ignore されていない対象を発見した時点で必要に応じて生成する。つまり、各フォルダに `.kio` が存在する設計を前提にしつつ、空フォルダや未到達フォルダへ先回りして大量生成する必要はない。
 
-Git 風の内部構造としては、各フォルダの `.kcs` はこうなります。
+Git 風の内部構造としては、各フォルダの `.kio` はこうなります。
 
 ```text
 folder/
-  .kcs/
+  .kio/
     HEAD
     config.toml
     scope.json
@@ -262,7 +262,7 @@ folder/
     cache/
     tmp/
   child-folder/
-    .kcs/
+    .kio/
 ```
 
 ここで重要なのは、**原文ファイルを content-addressed object として保存する**ことです。
@@ -280,9 +280,9 @@ blob = ファイル内容
 blob_id = hash(content)
 ```
 
-### KCS
+### Kio
 
-KCS では最低 2 種類の blob を持ちます。
+Kio では最低 2 種類の blob を持ちます。
 
 ```text
 raw object
@@ -324,11 +324,11 @@ README.md
 
 ---
 
-## 6. 同じファイルは同一 `.kcs` 内で一度だけ保存する
+## 6. 同じファイルは同一 `.kio` 内で一度だけ保存する
 
-Git 由来の重要な容量対策。ただし、KCS は `.kcs` を各フォルダに分散配置するため、dedup の保証範囲は同一 `.kcs/objects` 内に限定する。
+Git 由来の重要な容量対策。ただし、Kio は `.kio` を各フォルダに分散配置するため、dedup の保証範囲は同一 `.kio/objects` 内に限定する。
 
-同じ `.kcs` 内で同じ内容なら保存は 1 回。
+同じ `.kio` 内で同じ内容なら保存は 1 回。
 
 ```text
 report.pdf            → sha256:abc
@@ -336,24 +336,24 @@ report-copy.pdf       → sha256:abc
 report-final.pdf      → sha256:abc
 ```
 
-同じ `.kcs/objects/raw/` 内では保存は 1 回。コミット側では次のみを持ちます。
+同じ `.kio/objects/raw/` 内では保存は 1 回。コミット側では次のみを持ちます。
 
 ```text
 path → object_hash
 ```
 
-別フォルダの別 `.kcs` に同一内容のファイルがある場合は、物理的な重複保存を許容する。これは、フォルダローカルな所有権、`.kcs` 単位の export / purge / restore / partial sync を壊さないためである。
+別フォルダの別 `.kio` に同一内容のファイルがある場合は、物理的な重複保存を許容する。これは、フォルダローカルな所有権、`.kio` 単位の export / purge / restore / partial sync を壊さないためである。
 
 ```text
-dedup scope = one .kcs object store
-cross-.kcs dedup = not guaranteed
+dedup scope = one .kio object store
+cross-.kio dedup = not guaranteed
 ```
 
 ---
 
-## 7. KCS の tree
+## 7. Kio の tree
 
-Git の tree は **ディレクトリ構造** を表します。KCS でも同様に、ある時点のフォルダ構造を保存します。
+Git の tree は **ディレクトリ構造** を表します。Kio でも同様に、ある時点のフォルダ構造を保存します。
 
 ```json
 {
@@ -379,15 +379,15 @@ Git の tree は **ディレクトリ構造** を表します。KCS でも同様
 
 ---
 
-## 8. KCS commit
+## 8. Kio commit
 
-Git の commit は `tree + parent + metadata`。KCS でも同じです。
+Git の commit は `tree + parent + metadata`。Kio でも同じです。
 
 ```json
 {
-  "commit_id": "kcs_01H...",
+  "commit_id": "kio_01H...",
   "tree": "tree_abc",
-  "parents": ["kcs_01G..."],
+  "parents": ["kio_01G..."],
   "created_at": "2026-04-29T12:00:00Z",
   "message": "snapshot after indexing docs",
   "stats": {
@@ -401,13 +401,13 @@ Git の commit は `tree + parent + metadata`。KCS でも同じです。
 }
 ```
 
-KCS commit は原文を直接持つのではなく **tree へのポインタ** を持ちます。
+Kio commit は原文を直接持つのではなく **tree へのポインタ** を持ちます。
 
 ---
 
-## 9. KCS の価値は「復元」だけではない
+## 9. Kio の価値は「復元」だけではない
 
-Git 的に原文を保存すれば過去復元はできます。しかし KCS の本当の価値はそこだけではありません。
+Git 的に原文を保存すれば過去復元はできます。しかし Kio の本当の価値はそこだけではありません。
 
 ```text
 過去の知識も検索できる
@@ -426,7 +426,7 @@ Time-travel knowledge navigation
 
 ## 10. Normalized Markdown も履歴保存する
 
-原文だけでは AI Agent は検索しづらい。KCS では各 raw object に対して Markdown 化結果も保存します。
+原文だけでは AI Agent は検索しづらい。Kio では各 raw object に対して Markdown 化結果も保存します。
 
 ```text
 raw_hash + markdown_tool_profile_hash
@@ -444,7 +444,7 @@ raw_hash + markdown_tool_profile_hash
 }
 ```
 
-これにより「この原文をこの Markdownize Adapter / tool profile で処理した結果」を固定できる。Markdown 化処理の実体は KCS core ではなく Adapter が担う。OCR はこの Markdownize Adapter の内部能力として扱う。KCS は Adapter の実装種別に依存せず、生成済み normalized object を原本 hash と tool profile に紐付けて保持する。
+これにより「この原文をこの Markdownize Adapter / tool profile で処理した結果」を固定できる。Markdown 化処理の実体は Kio core ではなく Adapter が担う。OCR はこの Markdownize Adapter の内部能力として扱う。Kio は Adapter の実装種別に依存せず、生成済み normalized object を原本 hash と tool profile に紐付けて保持する。
 
 Normalized Markdown は、原本ファイルから生成された **読み取り専用の派生 artifact** である。ユーザーや AI Agent は normalized object を直接編集しない。追記・補足・誤抽出の指摘は annotation / note / extraction issue として別 object に保存する。
 
@@ -479,9 +479,9 @@ image
 objects/embeddings/ab/cd/<hash>
 ```
 
-Embedding は commit に直接埋め込まず、commit からは「どの embedding object を使ったか」を参照するだけにする。Embedding 生成の実体は単一の Embedding Adapter が担う。KCS core は embedding object と `embedding_profile_hash`、`dimensions`、`distance`、`modality` の対応、互換性、検索時の fallback を管理する。
+Embedding は commit に直接埋め込まず、commit からは「どの embedding object を使ったか」を参照するだけにする。Embedding 生成の実体は単一の Embedding Adapter が担う。Kio core は embedding object と `embedding_profile_hash`、`dimensions`、`distance`、`modality` の対応、互換性、検索時の fallback を管理する。
 
-Embedding object は正本ではなく、`target_hash + embedding_profile_hash` から再構築可能な派生 artifact として扱う。欠損・破損・profile 不一致がある場合、KCS は再生成タスクを作るか、全文検索へ fallback する。秘匿・法務・誤取り込みの purge では、embedding も本文情報を含み得る派生物として削除対象に含める。
+Embedding object は正本ではなく、`target_hash + embedding_profile_hash` から再構築可能な派生 artifact として扱う。欠損・破損・profile 不一致がある場合、Kio は再生成タスクを作るか、全文検索へ fallback する。秘匿・法務・誤取り込みの purge では、embedding も本文情報を含み得る派生物として削除対象に含める。
 
 画像説明文を経由した二段階 Embedding や、Image 専用 Embedding Adapter は採用しない。インデックスは物理的には `chunk_vec` / `image_vec` のように分けてもよいが、概念上は同じ Embedding Adapter、同じ `profile_hash`、同じ vector space で扱う。
 
@@ -519,14 +519,14 @@ CREATE TABLE embeddings (
 }
 ```
 
-`.kcs/config.toml` でも Embedding tool は単一指定にする。
+`.kio/config.toml` でも Embedding tool は単一指定にする。
 
 ```toml
 [tools]
 embedding = "gemini_multimodal_embedding"
 ```
 
-> KCSでは、Embedding処理をText/Imageで分離せず、Gemini等のマルチモーダルEmbeddingを前提とした単一のEmbedding Adapterに統合する。Embedding Adapterは、Markdown chunk、Image Object、検索クエリを同一のベクトル空間へ写像し、KCSはそのprofile_hash・dimensions・distance・modalityを記録する。画像説明文を経由した二段階Embeddingや、Image専用Embedding Adapterは採用しない。
+> Kioでは、Embedding処理をText/Imageで分離せず、Gemini等のマルチモーダルEmbeddingを前提とした単一のEmbedding Adapterに統合する。Embedding Adapterは、Markdown chunk、Image Object、検索クエリを同一のベクトル空間へ写像し、Kioはそのprofile_hash・dimensions・distance・modalityを記録する。画像説明文を経由した二段階Embeddingや、Image専用Embedding Adapterは採用しない。
 
 ---
 
@@ -556,14 +556,14 @@ chunk object:
 
 ## 13. Knowledge Node も履歴化する
 
-KCS では知識ノードは検索やアクセス履歴から育つので、これも履歴化できます。
+Kio では知識ノードは検索やアクセス履歴から育つので、これも履歴化できます。
 
 ```json
 {
   "node_id": "node_001",
   "label": "API認証仕様",
   "evidence_chunks": ["chunk_a", "chunk_b"],
-  "created_at_commit": "kcs_123",
+  "created_at_commit": "kio_123",
   "status": "stable"
 }
 ```
@@ -572,15 +572,15 @@ KCS では知識ノードは検索やアクセス履歴から育つので、こ�
 
 ---
 
-## 14. KCS index と Git index の違い
+## 14. Kio index と Git index の違い
 
-Git の index は staging area。KCS にも似たものを作りますが意味は違います。
+Git の index は staging area。Kio にも似たものを作りますが意味は違います。
 
 ```text
-.kcs/index
+.kio/index
 ```
 
-KCS index は次の作業領域です。
+Kio index は次の作業領域です。
 
 ```text
 現在のファイル状態
@@ -597,18 +597,18 @@ working tree → normalized → chunks → index
 
 ---
 
-## 15. KCS status
+## 15. Kio status
 
 Git と同様に状態を出します。
 
 ```bash
-kcs status
+kio status
 ```
 
 出力:
 
 ```text
-KCS status
+Kio status
 
 Scope: /Users/takumi/Documents
 
@@ -633,15 +633,15 @@ Ready to snapshot:
 
 ---
 
-## 16. KCS commit / snapshot
+## 16. Kio commit / snapshot
 
-KCS では `commit` と `snapshot` を内部的に別 object として分けない。どちらも `tree + parent + metadata` を持つ同一の履歴 object とし、`message`、`actor`、`reason`、`protected` などのメタデータによって、手動保存・自動保存・import・repair・重要保存点を区別する。
+Kio では `commit` と `snapshot` を内部的に別 object として分けない。どちらも `tree + parent + metadata` を持つ同一の履歴 object とし、`message`、`actor`、`reason`、`protected` などのメタデータによって、手動保存・自動保存・import・repair・重要保存点を区別する。
 
 ユーザー向けの公式語彙は `snapshot` とし、CLI では開発者向け alias として `commit` を許可する。実装上の object type は単一であり、`commit` と `snapshot` の二重管理を作らない。
 
 ```bash
-kcs commit -m "before refactor"
-kcs snapshot create -m "before refactor"
+kio commit -m "before refactor"
+kio snapshot create -m "before refactor"
 ```
 
 これで次が固定されます。
@@ -662,11 +662,11 @@ commit object
 CLI は Git に慣れたユーザーと自動化を重視し、Git 風のコマンドを維持する。
 
 ```bash
-kcs commit -m "before cleanup"
-kcs checkout <commit>
-kcs status
-kcs log
-kcs diff
+kio commit -m "before cleanup"
+kio checkout <commit>
+kio status
+kio log
+kio diff
 ```
 
 GUI では Git 用語をそのまま見せず、一般ユーザーが理解しやすい表現に言い換える。
@@ -681,65 +681,65 @@ log                → 変更履歴
 
 ---
 
-## 18. KCS checkout
+## 18. Kio checkout
 
 過去状態の復元は慎重に設計します。現在の実ファイルを上書きするのは危険なので、デフォルトでは直接上書きしません。
 
 ```bash
-kcs checkout <snapshot>     # デフォルトでは実ファイルを上書きしない
+kio checkout <snapshot>     # デフォルトでは実ファイルを上書きしない
 ```
 
 推奨は次です。
 
 ```bash
-kcs restore <snapshot> --to ./restore-dir
+kio restore <snapshot> --to ./restore-dir
 ```
 
 例:
 
 ```bash
-kcs restore kcs_123 --to ~/Recovered/kcs_123
+kio restore kio_123 --to ~/Recovered/kio_123
 ```
 
 これで安全に過去ファイルを復元できます。
 
 ---
 
-## 19. KCS time-travel search
+## 19. Kio time-travel search
 
-KCS 最大の価値です。
+Kio 最大の価値です。
 
 ```bash
-kcs search "認証仕様"
+kio search "認証仕様"
 ```
 
 デフォルトは最新。
 
 ```bash
-kcs search "認証仕様" --at kcs_123
+kio search "認証仕様" --at kio_123
 ```
 
 特定 snapshot 時点で検索。
 
 ```bash
-kcs search "認証仕様" --all-history
+kio search "認証仕様" --all-history
 ```
 
 削除済み・旧版を含めて検索。
 
 ```bash
-kcs search "認証仕様" --since 2026-04-01
+kio search "認証仕様" --since 2026-04-01
 ```
 
 期間指定。
 
 ### 検索スコープ
 
-デフォルト検索は **KCS が認識しているすべてのフォルダ・ファイル** を対象にする。ここでいう「すべて」は、KCS に登録済みまたは検出済みの indexed scope 全体であり、検索結果には実際に検索した scope を必ず含める。
+デフォルト検索は **Kio が認識しているすべてのフォルダ・ファイル** を対象にする。ここでいう「すべて」は、Kio に登録済みまたは検出済みの indexed scope 全体であり、検索結果には実際に検索した scope を必ず含める。
 
-初回登録時の indexed scope は、ユーザーが `.kcsignore` や設定で明示的に除外していないすべての対象範囲とする。デフォルト全体検索は、明示 ignore されていないローカル知識空間を横断するための既定動作である。
+初回登録時の indexed scope は、ユーザーが `.kioignore` や設定で明示的に除外していないすべての対象範囲とする。デフォルト全体検索は、明示 ignore されていないローカル知識空間を横断するための既定動作である。
 
-ただし、初回スキャンでは対象範囲 preview、除外提案、明示承認を必須とする。これはデフォルト全管理を弱めるものではなく、KCS が単なる検索インデックスではなく原本複製を伴う content-addressed archive であることを、ユーザーが理解したうえで開始するためである。
+ただし、初回スキャンでは対象範囲 preview、除外提案、明示承認を必須とする。これはデフォルト全管理を弱めるものではなく、Kio が単なる検索インデックスではなく原本複製を伴う content-addressed archive であることを、ユーザーが理解したうえで開始するためである。
 
 初回スキャン前に表示する情報:
 
@@ -753,10 +753,10 @@ hidden / system / build / cache 系候補
 network transmission policy
 ```
 
-除外候補は提案に留め、ユーザーの明示なしに自動除外しない。未承認 scope に対する `kcs index` は preview と確認を要求し、非対話環境では承認情報または `--yes` / `--approve` がない限り失敗させる。
+除外候補は提案に留め、ユーザーの明示なしに自動除外しない。未承認 scope に対する `kio index` は preview と確認を要求し、非対話環境では承認情報または `--yes` / `--approve` がない限り失敗させる。
 
 ```bash
-kcs search "認証仕様"
+kio search "認証仕様"
 ```
 
 意味:
@@ -768,11 +768,11 @@ all indexed scopes / all tracked folders and files
 現在フォルダだけ、または現在フォルダとその配下だけを検索したい場合は、明示的に scope を絞る。
 
 ```bash
-kcs search "認証仕様" --scope .
-kcs search "認証仕様" --scope . --descendants
-kcs search "認証仕様" --scope ./Research
-kcs search "認証仕様" --scope ./Research --descendants
-kcs search "認証仕様" --all-scopes
+kio search "認証仕様" --scope .
+kio search "認証仕様" --scope . --descendants
+kio search "認証仕様" --scope ./Research
+kio search "認証仕様" --scope ./Research --descendants
+kio search "認証仕様" --all-scopes
 ```
 
 `--scope .` は現在フォルダのみ、`--scope . --descendants` は現在フォルダとその配下 scope、`--scope <path>` は指定フォルダのみ、`--scope <path> --descendants` は指定フォルダとその配下 scope、`--all-scopes` はデフォルトと同じく全 indexed scope を対象にする。
@@ -783,11 +783,11 @@ AI Agent API でも同じルールを適用する。レスポンスには、実�
 
 ## 20. Git の branch に相当するもの
 
-KCS でも branch は使えますが意味はやや違います。
+Kio でも branch は使えますが意味はやや違います。
 
 ```text
 Git branch = 開発系列
-KCS branch = 知識空間の系列
+Kio branch = 知識空間の系列
 ```
 
 用途:
@@ -808,21 +808,21 @@ MVP では branch は後回しで良い。
 早めに入れる価値があります。
 
 ```bash
-kcs tag thesis-submission
-kcs tag before-cleanup
-kcs tag contract-review-v1
+kio tag thesis-submission
+kio tag before-cleanup
+kio tag contract-review-v1
 ```
 
 タグは特定 snapshot に名前を付けます。
 
 ---
 
-## 22. KCS ignore
+## 22. Kio ignore
 
-Git の `.gitignore` と同じ思想ですが、KCS では **デフォルト全管理、明示除外** です。
+Git の `.gitignore` と同じ思想ですが、Kio では **デフォルト全管理、明示除外** です。
 
 ```text
-.kcsignore
+.kioignore
 ```
 
 例:
@@ -841,11 +841,11 @@ target/
 *.mov
 ```
 
-KCS はデフォルト全管理を維持し、除外は `.kcsignore` または設定で明示する。実装は便利な ignore テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
+Kio はデフォルト全管理を維持し、除外は `.kioignore` または設定で明示する。実装は便利な ignore テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
 
 容量効率よりも、知識を失わず、あとから検索・履歴探索・復元できる利便性を優先する。したがって、動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に除外しない限り管理対象に含める。
 
-ただし、UI / CLI では、KCS が検索インデックスだけでなく原本ファイルを content-addressed archive に保存すること、初回 index で追加ディスク容量を使うこと、同一 `.kcs` 内 dedup 後の保存見込み、別 `.kcs` 間で重複保存される可能性を明示する。
+ただし、UI / CLI では、Kio が検索インデックスだけでなく原本ファイルを content-addressed archive に保存すること、初回 index で追加ディスク容量を使うこと、同一 `.kio` 内 dedup 後の保存見込み、別 `.kio` 間で重複保存される可能性を明示する。
 
 ---
 
@@ -855,8 +855,8 @@ KCS はデフォルト全管理を維持し、除外は `.kcsignore` または�
 
 ```text
 Large file detected: video.mp4 (8.2GB)
-KCS will archive it by default.
-Add pattern to .kcsignore to exclude.
+Kio will archive it by default.
+Add pattern to .kioignore to exclude.
 ```
 
 設定:
@@ -867,7 +867,7 @@ archive_all_files = true
 large_file_warning = "1GB"
 ```
 
-ディスク枯渇が予測される場合でも、KCS が勝手に対象範囲を狭めてはならない。必要容量、空き容量、除外候補を表示し、続行・除外・延期・中断をユーザーに選ばせる。
+ディスク枯渇が予測される場合でも、Kio が勝手に対象範囲を狭めてはならない。必要容量、空き容量、除外候補を表示し、続行・除外・延期・中断をユーザーに選ばせる。
 
 ---
 
@@ -884,7 +884,7 @@ garbage collection
 delta compression
 ```
 
-KCS でも段階的に採用します。
+Kio でも段階的に採用します。
 
 ### v0
 
@@ -910,7 +910,7 @@ delta compression for text/markdown
 
 ## 25. Pack file 構想
 
-Git は小さい object が大量にあると効率が悪いため pack します。KCS でも同じ。
+Git は小さい object が大量にあると効率が悪いため pack します。Kio でも同じ。
 
 ```text
 objects/raw/...
@@ -920,23 +920,23 @@ objects/normalized/...
 が増えたら次へまとめる。
 
 ```text
-packs/raw-0001.kcspack
-packs/normalized-0001.kcspack
+packs/raw-0001.kiopack
+packs/normalized-0001.kiopack
 ```
 
 MVP では不要だが将来必要。
 
 ---
 
-## 26. KCS GC
+## 26. Kio GC
 
-Git と同じく到達不能 object を削除可能。ただし KCS ではデフォルトでは削除しない方が思想に合います。
+Git と同じく到達不能 object を削除可能。ただし Kio ではデフォルトでは削除しない方が思想に合います。
 
-通常の削除は、最新の tree / manifest から対象 path を消す操作であり、過去の commit / snapshot から復元可能な履歴は維持する。これは KCS の根幹であり、通常の `delete` や `archive` で過去版を破壊してはならない。
+通常の削除は、最新の tree / manifest から対象 path を消す操作であり、過去の commit / snapshot から復元可能な履歴は維持する。これは Kio の根幹であり、通常の `delete` や `archive` で過去版を破壊してはならない。
 
 ```bash
-kcs gc --dry-run
-kcs gc --prune-unreachable
+kio gc --dry-run
+kio gc --prune-unreachable
 ```
 
 デフォルト:
@@ -951,16 +951,16 @@ kcs gc --prune-unreachable
 
 ### 履歴完全削除 / 法務・秘匿向け purge
 
-GC だけでは、削除・秘匿・法務要件には足りない。特定ファイルを「過去の履歴からも完全に消す」必要がある場合、KCS は Git の履歴書き換えに相当する **明示的な purge 機能** を持つ。
+GC だけでは、削除・秘匿・法務要件には足りない。特定ファイルを「過去の履歴からも完全に消す」必要がある場合、Kio は Git の履歴書き換えに相当する **明示的な purge 機能** を持つ。
 
 ```bash
-kcs purge docs/secret.pdf --all-history --reason "legal erasure request"
-kcs purge --raw-hash sha256:abc... --all-history
+kio purge docs/secret.pdf --all-history --reason "legal erasure request"
+kio purge --raw-hash sha256:abc... --all-history
 ```
 
 GUI では、検索結果・履歴ビュー・ファイル詳細画面から **このファイルの履歴を完全削除** を実行できるようにする。この操作は通常削除や archive とは別物であり、確認 UI と影響範囲の preview を必須にする。
 
-`purge` の保証範囲は KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone である。OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。UI 文言では「KCS 管理下の履歴から完全削除」という意味で扱う。
+`purge` の保証範囲は Kio 管理下の object store、snapshot DAG、index、pack、cache、tombstone である。OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、Kio 外のログまでは Kio 単体では保証しない。UI 文言では「Kio 管理下の履歴から完全削除」という意味で扱う。
 
 purge は次を行う。
 
@@ -983,17 +983,17 @@ object_count_removed
 redacted_target_label
 ```
 
-purge は破壊的操作なので、デフォルトの知識保存性とは分けて扱う。KCS の通常思想は「消さない」だが、ユーザーが明示した法務・秘匿・誤取り込みの要件では、履歴を含めて完全削除できなければならない。
+purge は破壊的操作なので、デフォルトの知識保存性とは分けて扱う。Kio の通常思想は「消さない」だが、ユーザーが明示した法務・秘匿・誤取り込みの要件では、履歴を含めて完全削除できなければならない。
 
 ---
 
-## 27. `.kcs` の新しい構造
+## 27. `.kio` の新しい構造
 
-この思想なら、各フォルダに生成される `.kcs` はこうなります。
+この思想なら、各フォルダに生成される `.kio` はこうなります。
 
 ```text
 folder/
-  .kcs/
+  .kio/
     VERSION
     HEAD
     config.toml
@@ -1029,12 +1029,12 @@ folder/
     cache/
     tmp/
   child-folder/
-    .kcs/
+    .kio/
 ```
 
 ---
 
-## 28. KCS object model
+## 28. Kio object model
 
 Git 風に整理するとこうです。
 
@@ -1051,9 +1051,9 @@ commit_object    snapshot
 
 ---
 
-## 29. KCS commit / snapshot は何を保証するか
+## 29. Kio commit / snapshot は何を保証するか
 
-KCS commit / snapshot は以下を保証します。
+Kio commit / snapshot は以下を保証します。
 
 ```text
 その時点で存在したファイルの一覧
@@ -1072,45 +1072,45 @@ tool_profile_hash (再現性のため)
 
 ## 30. 検索体験の変化
 
-この設計で KCS は強い検索体験を提供できます。
+この設計で Kio は強い検索体験を提供できます。
 
 ```bash
-kcs search "卒論テーマ"
+kio search "卒論テーマ"
 ```
 
 最新検索。
 
 ```bash
-kcs search "卒論テーマ" --all-history
+kio search "卒論テーマ" --all-history
 ```
 
 過去も含める。
 
 ```bash
-kcs search "卒論テーマ" --deleted
+kio search "卒論テーマ" --deleted
 ```
 
 削除済みも含める。
 
 ```bash
-kcs restore "昔の研究計画書"
+kio restore "昔の研究計画書"
 ```
 
 検索から復元。
 
 ---
 
-## 31. KCS の価値の再定義
+## 31. Kio の価値の再定義
 
 最も強い定義はこれです。
 
-> **KCSは、ローカルファイルシステムを content-addressed な知識アーカイブへ変換し、現在・過去・削除済みのファイルを含む知識空間を、人間と AI Agent が共通の操作で探索できるようにするシステムである。KCS core はオフラインで既存 snapshot / artifact を探索・復元できる。**
+> **Kioは、ローカルファイルシステムを content-addressed な知識アーカイブへ変換し、現在・過去・削除済みのファイルを含む知識空間を、人間と AI Agent が共通の操作で探索できるようにするシステムである。Kio core はオフラインで既存 snapshot / artifact を探索・復元できる。**
 
 ---
 
 ## 32. Git との比較
 
-| 項目         | Git      | KCS                        |
+| 項目         | Git      | Kio                        |
 | ---------- | -------- | -------------------------- |
 | 対象         | リポジトリ    | ローカルフォルダ全体                 |
 | 主対象        | テキスト/コード | 全ファイル                      |
@@ -1152,21 +1152,21 @@ blame/provenance
 
 ---
 
-## 35. KCS が Git より優先する価値
+## 35. Kio が Git より優先する価値
 
-Git は容量効率と開発履歴を重視する。KCS は次を重視する。
+Git は容量効率と開発履歴を重視する。Kio は次を重視する。
 
 ```text
 知識を失わないこと
 AIが探索できること
 原文へ戻れること
-KCS core がオフラインで自立すること
+Kio core がオフラインで自立すること
 ```
 
 つまり次を明言する。
 
-> **KCSは容量効率より知識保存性を優先する。**
-> **KCSはネットワーク利便性よりオフライン自立性を優先する。**
+> **Kioは容量効率より知識保存性を優先する。**
+> **Kioはネットワーク利便性よりオフライン自立性を優先する。**
 
 ---
 
@@ -1179,10 +1179,10 @@ Default:
   Markdown 化結果も保存
   最新も過去も検索可能
   デフォルト検索は全 indexed scope を対象にする
-  KCS core はオフラインで動作
+  Kio core はオフラインで動作
 
 Optional:
-  .kcsignore で除外
+  .kioignore で除外
   gc で削除
   purge で特定ファイルの全履歴を完全削除
   large file warning
@@ -1196,6 +1196,6 @@ Optional:
 
 README や設計書の最初に置くべき一文。
 
-> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
+> **Kio is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The Kio core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
 
-> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**
+> **Kioは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。Kio core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**

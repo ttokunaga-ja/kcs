@@ -42,7 +42,7 @@ full 203,000をorigin unionだけで閉じ、full Hamiltonを再実行しない�
 SHA-256 `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`である。
 expanded view 17,527,680 bytesは保存せずreceiptだけをinline課金する。現最大p12の既知pre-solve componentsは
 15,573,860 bytes、frame/header前の名目余裕は1,203,356 bytesだが、formal complete 16 MiB証明、scope、
-final ID、render/write、KCS、G0 authorityはすべてfalseである。
+final ID、render/write、Kio、G0 authorityはすべてfalseである。
 20 persona/20 primary use-case catalogもexact 1対1とrole/family/representative primary scope/lifecycle/query
 joinを束縛し、30,008 canonical bytes、SHA-256
 `024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624`である。
@@ -56,7 +56,7 @@ qIM、compiled history plan、observed receiptsはfalseである。これをsour
 下流の`kcs.persona.pc-lifecycle-coverage-catalog/v1`が人物ごとのcorrected coverage domain、cross-format
 companion、purge-only witness、move receipt/algebraをquery非依存で束縛する。bodyは1,385,596 canonical bytes、
 SHA-256 `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`で、source matching、
-final ID、mutation、KCS、G0 authorityはすべてfalseである。その下流の
+final ID、mutation、Kio、G0 authorityはすべてfalseである。その下流の
 `kcs.persona.pc-source-matched-lifecycle-suite/v1`は20人 x (105 primary + 10 companion) = 2,300 exact
 pilot source refs、93 family witnesses (52/33/8)、7,630 pre-solve source/scope event intentsを束縛する。
 event-created pre-solve source intentはsuite 3,630、dependency groupは各人48 source coupling + 6 scope barrier =
@@ -65,7 +65,7 @@ canonical suiteは14,605 bytes、SHA-256
 `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`で、producer-independentな全20人
 再構成を通過した。最大persona body 103,981 bytes、非永続event body 318,664 bytes、LF込みrow 973 bytes、
 content-only projection 256,790 bytesである。このsource-matched suite単体はeffective membership、solver、
-compiled history、physical materialization、observed evaluation、KCS、G0 authorityを持たない。その下流の
+compiled history、physical materialization、observed evaluation、Kio、G0 authorityを持たない。その下流の
 `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、203,000 W0 sourcesを
 base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / companion mirror 200へ
 exactly once合成し、1,033,680 present-fact referencesを持つ。さらに3,630 event-created intentsを
@@ -77,7 +77,7 @@ namespace projectionへ束縛する。禁止対象のupstream pinやderivation r
 semantic relationは含める一方、family/variant/gate/use-case/format-selection roleは除外する。
 producer-independent validatorは全203,000 W0 + 3,630 event-created universeを再構成し、独立validator欠落時は
 fail closedとする。solver、complete post-W0 membership、compiled history、physical materialization、
-observed evaluation、KCS、G0 authorityは引き続きfalseである。別laneの
+observed evaluation、Kio、G0 authorityは引き続きfalseである。別laneの
 `kcs.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual host case modeと
 materializationは未束縛である。
@@ -161,7 +161,7 @@ online/local変換を採用する場合だけ、別のrenderer/ingestion/provena
 v2はv1をin-place migrationしない。すべてのv2 artifactは次のidentityを持つ。
 
 ```text
-fixture_id             = kcs-persona-pc-v2
+fixture_id             = kio-persona-pc-v2
 fixture_schema_version = 2
 ```
 
@@ -177,7 +177,7 @@ event、query、receiptはそれぞれ別`artifact_schema`と`artifact_kind`を�
 validatorがv1を、または別artifact kindのbodyを受理してはならない。既存v1 rootはv1 verifierで読み、
 v2はv2 contractからfresh rootへ再生成する。
 
-G0はpure planningだけを扱う。renderer、filesystem writer、KCS subprocess、W1-W5 mutation、Recall、
+G0はpure planningだけを扱う。renderer、filesystem writer、Kio subprocess、W1-W5 mutation、Recall、
 performanceは呼び出さない。
 
 正式な実行順は、plan freeze後、**初回を含む合計3つ**のfresh storageそれぞれで、20人を1人ずつW0
@@ -368,7 +368,7 @@ metaとdatasetのSOP Class/Instance UID一致、必須Patient/Study/Series/SC/Mu
 Instance UID、native 8-bit MONOCHROME2 pixel長を独立validatorで検査する。
 
 現envelopeに加え、`kcs.persona.pc-variant-catalog/v2` sidecarは71 identity、566 persona marginal、
-content MIMEとKCS path MIME、形式別complexity unit、formal/byte-stress lane境界を機械化した。
+content MIMEとKio path MIME、形式別complexity unit、formal/byte-stress lane境界を機械化した。
 canonical bodyは211,733 bytes、SHA-256
 `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`である。ID-free text renderer/
 validatorとsource-profile catalogは候補実装されたが、全variantのtarget bytes/quota feasibility、
@@ -700,7 +700,7 @@ hashだけのexecution receiptを最適性証明として扱わない。G7 obser
 ### 7.1 history cohort model
 
 checkpointの`current C`と`history-only H`は、各personaの20 scopesを横断するdistinct contract semantic endpoint
-`(scope_key, chunk_id)`集合である。`chunk_id`はKCSの`chunk_hash`と同値だが、scopeを落として
+`(scope_key, chunk_id)`集合である。`chunk_id`はKioの`chunk_hash`と同値だが、scopeを落として
 persona-globalにdedupしない。`C`はそのscopeで1件以上のlive path bindingを持つendpoint、`H`はそのscopeで
 live bindingがなくreachableかつnon-purgedなhistorical/deleted path bindingを持つendpointとする。C/Hは
 disjointで、path alias、DB row、materialization数を重複加算しない。same-scope renameは`(0,0)`、deleted rawの
@@ -918,7 +918,7 @@ registryが現在の71件の実装可用性を束縛する。
 semantic content/filename slot、renderer/validator contractとruntime receiptをvariant-level profile policyへ
 1対1に束縛し、full/pilot別のeligible/base incidental capとW0--W5 exact integer checkpoint tableを持つ。
 これは上流snapshotを改変せず、203,000 source-instanceのparameter、selected complexity/bytes、semantic payload、
-overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行を束縛しない。
+overlay instance、fact membership、final source allocation、production MIME golden、filesystem/Kio実行を束縛しない。
 すべてのauthority flagはfalseである。overlay contract候補単体もschemaを記述するだけでinstance/placementを
 束縛せず、G0 rootの入力としては未採用である。instance membershipは後述のnon-authorizing downstream package
 だけが束縛する。
@@ -1008,7 +1008,7 @@ full profileはmatching pilot origin/shardのexact bytes/SHAを再利用し、sh
 
 このpackageはpre-solve membershipだけを完成させる。`placement_class_requirement`はjoint solverへの要件であり
 scope assignmentではない。formal recipes、semantic namespace/query/history target mapping、scope joint
-allocation/solution/proof、actual payload/raw/chunk/search observation、render/write/history/KCS、pre-solve
+allocation/solution/proof、actual payload/raw/chunk/search observation、render/write/history/Kio、pre-solve
 corpus-input persona package cap、G0は証明しない。origin/profile/suiteのauthority mapはすべてexact falseである。suite descriptorは
 51,133 canonical bytes、SHA-256
 `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`に固定する。
@@ -1193,7 +1193,7 @@ authenticated source-matched suite、persona owner、event-view receiptからそ
 embedded SHA aliasだけは信頼せず、projection自身にfull owner/suite pinやderivation receiptを逆流させない。
 Decision 150のv1 artifactでは`semantic_payload_projection_bound=false`、
 `query_semantics_absence_proved=false`、`future_source_id_namespace_eligible=false`、
-`g0_contract_frozen=false`を維持し、solver入力、solution/proof、final ID、render/write/KCSを承認しない。
+`g0_contract_frozen=false`を維持し、solver入力、solution/proof、final ID、render/write/Kioを承認しない。
 この歴史的値を現在のv2 coverageとして読まず、v1 bodyとpinも変更しない。
 
 partial inventoryのcanonical bodyは293,285 bytes / SHA-256
@@ -1205,7 +1205,7 @@ external 113 body合計は128,144,915 bytes、base 73 bodyは203,000 rows / 121,
 lifecycle最大bodyは256,790 bytesとし、producer、独立validator、2 hash-seed cold gateが同じliteralを検証する。
 provider callbackごとと最終postflightでcaller opening image、full owner、direct owner bodyを再認証する。
 203,000 base rowsは1 suite replayのW0 source計画projectionであり、物理file作成、index、人物別120,000
-actual KCS chunksの達成証拠ではない。
+actual Kio chunksの達成証拠ではない。
 
 現在のv2候補は歴史的missing 9分類を追加して12/12分類を覆うexact 253 bodiesである。class順の内訳は
 topology path/load 1、realism/locale/security 1、route scores 1、primary-use-case corpus half 1、
@@ -1393,7 +1393,7 @@ PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立valida
 2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`、source-profile catalogは
 72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。これにより
 10 contributor feasibility variantsがfull 69,236 contributor sourcesを局所的に覆うが、多言語content、
-sourceごとのsemantic recipe、positive query anchor、production KCS chunks、G0を証明しない。
+sourceごとのsemantic recipe、positive query anchor、production Kio chunks、G0を証明しない。
 
 incidental-textの局所feasibilityは`csv`、`eml`、`html`、`ipynb`、`json`、`jsonl`、`log`、`sql`、
 `tsv`、`xml`、`yaml`をstdlib-onlyの決定論的rendererとbuilder非依存validatorで検査する。renderer contractは
@@ -1401,7 +1401,7 @@ incidental-textの局所feasibilityは`csv`、`eml`、`html`、`ipynb`、`json`�
 10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。各出力は
 512 KiB以下、EMLはCRLFかつwire line 78 bytes以下とする。この11 variantはinventory marginal上full 60,414
 incidental sourcesを覆うが、formal source recipe、source別semantic content、materialization、actual incidental
-chunks、KCS、G0、filesystem/write authorityを証明しない。
+chunks、Kio、G0、filesystem/write authorityを証明しない。
 
 suite buildは1 personaずつ行い、20 full plansを同時保持しない。p12の16,000 W0 sourcesと
 event-created replacement recipesは別inventory/別上限であり、W0 capを暗黙超過させない。
@@ -1445,11 +1445,11 @@ G0へ入れず、G2 pilot readback後のG4 full Go/No-Goでだけ閉じる。し
 capacityは次の2境界を混ぜない。
 
 - **source-tree envelope**: personaのmanaged source filesと、その400 leaf scopeへ至るauthored directoryだけ。
-  `.kcs`、raw/prepared/normalized/chunk/tree/commit CAS、SQLite/FTS/WAL/SHM、registry、plan/ledger/
+  `.kio`、raw/prepared/normalized/chunk/tree/commit CAS、SQLite/FTS/WAL/SHM、registry、plan/ledger/
   receipt、temp/staging、history、recursive/byte-stress laneは含めない。W0の512 MiB/personかつ
   10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、W5 pre-purgeの
   `floor(27 GiB / 20)`/personかつ27 GiB/replayは、この境界だけの未較正なrenderer設計候補である。
-- **root-bound capacity**: retained replay roots、進行中root、`.kcs`の全object/index/history、device state、
+- **root-bound capacity**: retained replay roots、進行中root、`.kio`の全object/index/history、device state、
   plan/ledger/receipt、staging/transient、共有workspaceを含む実行先filesystem全体。この境界に固定の
   full byte/inode capはまだない。旧88 GiBはsource-tree候補25+25+27 GiBとworkspace仮置き11 GiBの
   算術にすぎず、root-bound cap、hard cap、Go証拠のいずれにも使わない。
@@ -1471,7 +1471,7 @@ full_W0_success_floor/replay  = 2,604,097 inodes
 ```
 
 `pilot_current_chunk_cas`/`full_current_chunk_cas`はplanned quotaではなく、actual chunk gateを満たすrunに
-条件付けた下限である。261,397はraw/prepared/normalized/tree/commit CAS、SQLite/FTS/WAL、各`.kcs`の
+条件付けた下限である。261,397はraw/prepared/normalized/tree/commit CAS、SQLite/FTS/WAL、各`.kio`の
 fanout directory、registry、ledger/receipt、staging/transient/historyをすべて除外しているので上限ではない。
 runtime再検証で上記storage modelが不成立なら、このinode下限をGo/No-Go根拠へ流用せずcapacity gateを
 fail closedにし、観測した実storage modelで再契約する。
@@ -1587,7 +1587,7 @@ formal flagを変更してはならない。
    materialization/chunk/`raw_hash`/section bindingはG0へ逆流させず、render・index後のcompiled observed
    relevance/receiptで検証する
 10. M3-2用searchable cross-scope rename/moveのsource matching/operation rule、M3-1用text-layer PDFの
-    多言語content recipe、planned contributor eligibility、positive anchor最低数。actual KCS chunk attestationは
+    多言語content recipe、planned contributor eligibility、positive anchor最低数。actual Kio chunk attestationは
     G2/G7の実行receiptでありG0条件にしない。局所ASCII PDF feasibilityだけでM3-1を合格扱いしない。
     scan PDFは現v2ではoffline raw-only/`awaiting_ocr`のstructural/negative対象で、positive Recall relevanceへ
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を

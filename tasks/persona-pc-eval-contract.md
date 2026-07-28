@@ -13,7 +13,7 @@ suite is additive to the frozen Recall corpus and Decision 90's balanced
 ## 1. Objective
 
 Reproduce twenty independent synthetic people rather than twenty use-case
-folders.  Each person owns one nested PC tree, one isolated KCS device
+folders.  Each person owns one nested PC tree, one isolated Kio device
 registry, twenty active direct-file scopes, mixed raw formats, and W0-W5
 history.  The full profile must attest more than 100,000 current searchable
 chunks for **every** person; pooling twenty smaller people is invalid.
@@ -66,20 +66,20 @@ those marginals.
   home/
     <nested portable parents>/
       <direct-file leaf scope>/
-  .kcs-eval-device/{config,data,cache}/    # prepare phase; absent at W0 create
+  .kio-eval-device/{config,data,cache}/    # prepare phase; absent at W0 create
   oracle/{events,expected-states,queries}/ # history/query phase; absent at W0
 ```
 
-The immutable fixture identity is `scope_key`, never KCS `scope_id`.  A prepare
+The immutable fixture identity is `scope_key`, never Kio `scope_id`.  A prepare
 receipt binds `scope_key` to the observed root-specific `scope_id`.  Specs store
 POSIX relative paths; generation converts individual validated components to
 native paths.  Parent collection directories are not scopes.  Only the listed
 leaf directories contain managed direct files.
 
-The generator never runs `kcs init` or `kcs index` at the PC umbrella or any
+The generator never runs `kio init` or `kio index` at the PC umbrella or any
 intermediate parent.  Each listed leaf is initialized independently, contains
 managed files only as direct children, and contains no managed nested
-directory.  This is required by KCS's direct-file scope semantics and prevents
+directory.  This is required by Kio's direct-file scope semantics and prevents
 one persona from silently becoming more or fewer than twenty active scopes.
 
 Every person has twelve role-specific primary scopes and the same eight
@@ -99,7 +99,7 @@ make the twenty role-specific trees identical.
 Limits:
 
 - exactly 20 people and 20 active scopes/person;
-- fewer than 9,000 direct files/scope (below KCS's 10,000 soft limit);
+- fewer than 9,000 direct files/scope (below Kio's 10,000 soft limit);
 - portable ASCII scope components, at most 80 characters/component and 240
   characters/root-relative scope path;
 - no `.`/`..`, separator, control, Windows-forbidden character, trailing
@@ -114,7 +114,7 @@ paths: at least 60 of the 400 scope paths have depth four or greater, at least
 six.  Managed files remain direct children of the leaf despite deeper parents.
 
 Before writing, generation emits a plan containing projected physical files,
-logical members, current/history chunks, raw bytes, KCS CAS/index bytes, inode
+logical members, current/history chunks, raw bytes, Kio CAS/index bytes, inode
 count, staging peak, and the multiplier for every requested replay.  Full
 generation requires explicit byte/inode caps and reserve headroom.  The writer
 uses an owned-root marker, refuses `/`, a home directory, the repository, any
@@ -146,11 +146,11 @@ W0 generation records three immutable, pre-index ledgers:
 1. **physical raw** — path, bytes, raw SHA-256, format family;
 2. **logical item** — message/attachment/page/sheet/slide membership;
 3. **search plan** — planned contract chunks and the post-index policy that the
-   later KCS attestor must prove.
+   later Kio attestor must prove.
 
 Actual HEAD/current-config chunk identities are a separate root-specific
 prepare/attestation receipt.  The W0 search-plan ledger is never evidence that
-KCS produced the planned count.
+Kio produced the planned count.
 
 Required source fields include stable `source_id`, `persona_id`, `scope_key`,
 direct-child `file_name`, `format_family`, `raw_sha256`, `bytes`,
@@ -293,7 +293,7 @@ destination scope participates in the following `index_auto`.
 
 Every event in a wave is preflighted before the first mutation.  Writes are
 atomic; rename/move require matching source hash and absent destination;
-symlink, reparse point, special file, and all fixture/KCS metadata paths are
+symlink, reparse point, special file, and all fixture/Kio metadata paths are
 rejected.
 
 Ordinary working-tree changes use the affected scope's normal offline `index`
@@ -429,7 +429,7 @@ evidence and replay lock/preflight/journal/resume exist.
 ## 8. Three fresh replays
 
 After event manifests are frozen, the entire W0-W5 sequence is generated into
-three fresh roots.  KCS stores are never copied.  Each replay has twenty
+three fresh roots.  Kio stores are never copied.  Each replay has twenty
 independent device registries, for sixty registries total.
 
 Immutable source/spec/event manifests are byte-identical across replays.
@@ -438,7 +438,7 @@ canonical projections compare event/state roots, logical paths, raw hashes,
 normalized scope-key history shape, commit type/message/statistics, and
 current/history/deleted/purged counts.  They exclude absolute roots,
 root-derived scope IDs, commit hashes, process IDs, durations, mtimes, and real
-timestamps.  Receipts pin repository HEAD, KCS binary hash/version, renderer
+timestamps.  Receipts pin repository HEAD, Kio binary hash/version, renderer
 and fixture schema versions, chunking-config hash, and tool-profile hash.
 Re-running a completed root must be a strict no-op; interruption and resume
 must converge without applying an event twice.
@@ -508,7 +508,7 @@ tampering, including a fresh reopen of the same inode, without closing a reused
 foreign FD.  The open-description probe is covered on Darwin and Linux.  It closes the root check/open
 seam only for cooperating readers; same-UID ABA, transient rebinding, leaked
 duplicates, immutable snapshots, and process isolation remain unresolved.  It
-neither attests KCS nor authorizes mutation.
+neither attests Kio nor authorizes mutation.
 
 The full oracle processes one canonical persona at a time and derives, without
 building full event manifests, exactly 43,596 events, 5,175 boundaries, and
@@ -533,14 +533,14 @@ and `wait4` receipts have not been demonstrated.
 The capacity layer derives exact file/chunk/event cardinalities but remains
 blocked until canonical pilot measurement and destination-root availability
 receipts are read back.  It binds filesystem allocation unit, caps, reserves,
-and root identity without granting physical-write authority or KCS attestation.
+and root identity without granting physical-write authority or Kio attestation.
 Bounded streaming storage can no-replace publish and read back canonical JSONL,
 but portable rename cannot atomically require that the already-verified source
 directory inode remains the rename source.  Its receipts therefore retain
 `formal_publication_attested=false` and blocker
 `source_directory_inode_not_bound_by_rename`.
 
-The KCS boundary implements strict result validators, isolated-environment
+The Kio boundary implements strict result validators, isolated-environment
 recipes, read-only binary snapshots, and unbound command-receipt types.  After
 the scope-path-to-`Popen(cwd=...)` same-user TOCTOU finding,
 `HANDLE_RELATIVE_EXECUTION_AVAILABLE`, `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`,
@@ -570,11 +570,11 @@ binary variants, OS behavior, and searchability claims are unchanged.
 
 Not implemented or not approved: formal publication plus supervised
 RSS/artifact-readback/`wait4` evidence for the full suite stream, W0 init/index
-prepare executor and complete KCS semantic history-ready
+prepare executor and complete Kio semantic history-ready
 receipt, W1-W5 lease integration/safe mutation/journal/executor,
 attestation/query generation, rendered rich size/domain-binary distributions,
 pilot/full physical publication and measured byte cap, Windows physical
-publication, and any actual 120,000-KCS-chunk/person result.  The existing path
+publication, and any actual 120,000-Kio-chunk/person result.  The existing path
 boundary retains a same-user TOCTOU residual until handle-relative traversal is
 implemented.  `HISTORY_ASSIGNMENT_EXECUTABLE` remains false.
 See `tasks/persona-pc-eval-proposal.md` for the readable matrix and rollout order.

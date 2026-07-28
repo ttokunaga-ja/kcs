@@ -2,7 +2,7 @@
 
 Status: **candidate contract; not issued**.  This is the missing bridge between
 the static 20-persona artifacts and a future writer.  It neither selects the
-core allocation, creates a source plan, grants write/KCS/history authority, nor
+core allocation, creates a source plan, grants write/Kio/history authority, nor
 claims an actual chunk or capacity observation.
 
 ## 1. Purpose
@@ -20,7 +20,7 @@ The contract deliberately distinguishes:
 pre-solve source intent / semantic content
   -> solver solution and proof
   -> final planned source plan
-  -> writer + KCS index
+  -> writer + Kio index
   -> observed materialization/chunk/history receipts
 ```
 
@@ -37,7 +37,7 @@ exact, independently validated pins:
 - version-compatible source inventory/layout, topology, realism profile,
   format/recipe/route metadata, semantic membership, overlay, parameter,
   lifecycle, and namespace/input closure artifacts;
-- a fixed KCS build identity and chunking configuration; and
+- a fixed Kio build identity and chunking configuration; and
 - a solver input, canonical solution, and independent proof that use only
   pre-solve content inputs.
 
@@ -122,7 +122,7 @@ After a successful W0 or W5 checkpoint, each `(persona_id, replay_id)` emits a
 receipt containing at minimum:
 
 ```text
-plan / writer / KCS / chunking pins
+plan / writer / Kio / chunking pins
 root nonce and scope-registry digest
 file-manifest and path-tree digests
 family / variant / route / page-slide-image / MIME / validator aggregates
@@ -145,7 +145,7 @@ allocation decision + compatible source closure
   -> semantic/query/history input closure and independent review
   -> solver solution/proof
   -> final planned source plan and validation
-  -> all-20-person pilot W0 materialization + KCS readback
+  -> all-20-person pilot W0 materialization + Kio readback
   -> root-bound full capacity go/no-go
   -> three fresh W0--W5 replays + receipts
   -> M3 / Q_hard / baseline evaluation

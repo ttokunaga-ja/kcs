@@ -1,7 +1,7 @@
 # Persona-PC source-semantic resolution v2 提案
 
 Status: **proposal-only / non-authorizing**。本書は契約候補の設計記録であり、G0、artifact
-発行、最終 ID、namespace、folder/file 作成、render、write、history、KCS、evaluation 実行を
+発行、最終 ID、namespace、folder/file 作成、render、write、history、Kio、evaluation 実行を
 一切許可しない。
 
 Date: 2026-07-17
@@ -200,7 +200,7 @@ ordered checkpoint IDはexact
 | `canonical_truth_state` | corpus側。fact graphの`current / history-only / absent`をexact投影する |
 | `source_assertion_occurrence_state` | corpus側。現在の物理source payloadがそのfactを主張するかを表す |
 | `query_relevance_state` | evaluation側。oracleのanswerまたはexcluded distractorを表す |
-| `selector_visibility_capabilities` | corpus history/KCS planとevaluation join。default / `--all-history` / `--include-deleted`で検索対象かを表す |
+| `selector_visibility_capabilities` | corpus history/Kio planとevaluation join。default / `--all-history` / `--include-deleted`で検索対象かを表す |
 
 9-fact axisのquery-independent branchとexact countは次で固定する。
 
@@ -334,10 +334,10 @@ digest は full 64 lowercase hex で保持し、truncation、base64、locale-awa
 
 | record | domain label |
 | --- | --- |
-| capacity cell | `kcs/persona-pc-v2/source-semantic-capacity-cell/v1` |
-| source-slot deterministic order | `kcs/persona-pc-v2/source-semantic-capacity-slot-order/v1` |
-| I5 mirror relation | `kcs/persona-pc-v2/i5-contributor-mirror/v1` |
-| evaluation row only | `kcs/persona-pc-v2/query-history-source-semantic-resolution-row/v2` |
+| capacity cell | `kio/persona-pc-v2/source-semantic-capacity-cell/v1` |
+| source-slot deterministic order | `kio/persona-pc-v2/source-semantic-capacity-slot-order/v1` |
+| I5 mirror relation | `kio/persona-pc-v2/i5-contributor-mirror/v1` |
+| evaluation row only | `kio/persona-pc-v2/query-history-source-semantic-resolution-row/v2` |
 
 各 domain の exact tuple preimage は次とする。
 

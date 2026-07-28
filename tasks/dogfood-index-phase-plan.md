@@ -110,7 +110,7 @@ monthly_usd_cap = 5.0   # 既定は 50.0。実績見込み $1.4 に対し 3.5x �
 - `MISTRAL_API_KEY` (OCR)
 - `GEMINI_API_KEY` (Embedding)
 
-いずれも未設定。`.env` の `#KCS_MISTRAL_WORKSPACE_ID` / `#KCS_OFFICE_CONVERTER` は
+いずれも未設定。`.env` の `#Kio_MISTRAL_WORKSPACE_ID` / `#Kio_OFFICE_CONVERTER` は
 使うなら `KIO_` 接頭辞へ改名が必要 (`KIO_MISTRAL_WORKSPACE_ID` / `KIO_OFFICE_CONVERTER`)。
 
 ---

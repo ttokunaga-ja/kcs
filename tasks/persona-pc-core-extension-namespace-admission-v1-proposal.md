@@ -4,7 +4,7 @@ Status: **proposal only; admission blocked**.  This is neither a `Manifest
 Golden-Freeze Decision/Gate` nor a namespace issuance.  It does not amend the
 user-owned decision log, change complete inventory v2 or namespace v3,
 authorize a solver, or authorize source rendering, filesystem writes, history,
-KCS, evaluation, capacity completion, or G0.
+Kio, evaluation, capacity completion, or G0.
 
 ## 1. Decision requested
 

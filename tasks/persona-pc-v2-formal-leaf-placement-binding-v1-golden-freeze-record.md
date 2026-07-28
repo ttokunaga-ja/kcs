@@ -6,7 +6,7 @@ Date: 2026-07-23
 
 This record freezes the deterministic join of the current v2 topology and the
 non-authorizing device-lane compositor.  It does not create a device root,
-directory, registry, file, history entry, KCS index, query result, or actual
+directory, registry, file, history entry, Kio index, query result, or actual
 chunk.  It also does not select an allocation/source-plan successor.
 
 ## Frozen descriptor and external body
@@ -28,7 +28,7 @@ chunk.  It also does not select an allocation/source-plan successor.
 | maximum LF-inclusive row bytes | 835 |
 
 The `body_descriptor_golden_frozen` flag is true only for these content
-receipts.  `g0_contract_frozen`, all materialization/KCS/history authority
+receipts.  `g0_contract_frozen`, all materialization/Kio/history authority
 flags, and all observed-completion claims remain false.
 
 ## Input boundary
@@ -75,14 +75,14 @@ a claim that a direct child was written or indexed.
 | cold replay | `PYTHONHASHSEED=101` and `907` reproduced all four frozen receipts |
 
 This is local evidence only.  No remote CI, filesystem, external API, OCR,
-KCS, history, M3, or baseline evaluation was run.
+Kio, history, M3, or baseline evaluation was run.
 
 ## Still blocked
 
-The next P0 items are a direct-child writer guard and a KCS direct-child
+The next P0 items are a direct-child writer guard and a Kio direct-child
 regression; both must reject a nested managed file rather than let it silently
 fall outside the present scope scanner.  A later source-plan binding must join
 this frozen placement body with the chosen allocation truth, exact source
 instances, path quotas, format/index-route ledger, and root-bound capacity
 gate.  Only after separate authorization may any physical materialization,
-readback receipt, history execution, KCS run, or evaluation begin.
+readback receipt, history execution, Kio run, or evaluation begin.

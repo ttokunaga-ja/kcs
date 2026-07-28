@@ -173,7 +173,7 @@ F4 の再投入上限を最初 **`attempts`** で実装したが、**`attempts` 
 `kio batch reset-violations` (CL62-CL68) という既存の脱出路を持つ
 **`contract_violation_count`** に付け替えた。
 
-> 「fix が開ける穴」の定番脈 ([[project_kcs_audit_process]]) が**自分の fix にも出た**。
+> 「fix が開ける穴」の定番脈 ([[project_kio_audit_process]]) が**自分の fix にも出た**。
 > 上限・ゲートを足すときは「**この上限を戻す経路は存在するか**」を必ず対にして確認する。
 
 ---

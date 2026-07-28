@@ -7,8 +7,8 @@ files, scopes, indexes, receipts, or performance result.
 ## 1. Problem boundary
 
 The active objective needs both a realistic nested PC shape and a defensible
-retrieval/latency denominator.  Those are not identical under the current KCS
-scope model: a formal KCS scope owns its direct-child managed files, while a
+retrieval/latency denominator.  Those are not identical under the current Kio
+scope model: a formal Kio scope owns its direct-child managed files, while a
 real PC also contains nested imports, cache, conflict copies, partial files,
 and system-specific path phenomena.
 
@@ -54,7 +54,7 @@ For every persona, the robustness lane uses a separate `ambient-home/` child:
 - exact categories: 102 benign nested documents, 38 exact/near/conflict
   copies, 38 cache/temp files, 26 partial downloads, 26 hidden/lock files,
   13 empty files, and 13 Unicode/case-collision candidates;
-- no registered KCS scope, `.kcs` metadata, formal source ID, formal query
+- no registered Kio scope, `.kio` metadata, formal source ID, formal query
   answer, or formal chunk contribution; and
 - native-realized and expected-failure candidate counts recorded separately for
   the target filesystem case mode.
@@ -77,7 +77,7 @@ Each persona/replay needs a nested-tree receipt with these independent sections:
 | formal topology | 20 scope paths, primary/secondary count, depth histogram, prefix count, max fan-out, per-scope file counts, direct-child-only check |
 | formal isolation | scope registry digest, no ancestor/descendant scope pair, no cross-person path/inode/hard-link/symlink reuse |
 | ambient topology | candidate and native-realized counts by category/depth, authored-directory count, intended case-mode result |
-| ambient isolation | `registered_scope=false`, no `.kcs`, no formal source/query ID, no path intersection with `home/` |
+| ambient isolation | `registered_scope=false`, no `.kio`, no formal source/query ID, no path intersection with `home/` |
 | traversal behavior | declared walker operation, observed visited/excluded/failed paths, reason codes, and bounded error output |
 | capacity | bytes/inodes reported independently for formal and ambient trees, then combined only for whole-device storage planning |
 
@@ -95,9 +95,9 @@ exist:
 
 | priority | artifact / validator | required result |
 | --- | --- | --- |
-| P0 | formal-leaf placement binding | **static binding frozen**: exact join of 20 personas × 3 replays × 20 topology rows to `<device>/home/<relative_path>`, with a canonical scope registry and path digest; no writer/readback/KCS authority ([freeze record](persona-pc-v2-formal-leaf-placement-binding-v1-golden-freeze-record.md)) |
+| P0 | formal-leaf placement binding | **static binding frozen**: exact join of 20 personas × 3 replays × 20 topology rows to `<device>/home/<relative_path>`, with a canonical scope registry and path digest; no writer/readback/Kio authority ([freeze record](persona-pc-v2-formal-leaf-placement-binding-v1-golden-freeze-record.md)) |
 | P0 | direct-child writer guard | reject an unknown child directory, nested managed file, symlink/reparse point, hard link, or cross-person/replay reuse before a formal write |
-| P0 | KCS direct-child regression | prove a direct child is indexable and make a nested managed file a writer error rather than allowing it to be silently omitted by the current non-recursive scanner |
+| P0 | Kio direct-child regression | prove a direct child is indexable and make a nested managed file a writer error rather than allowing it to be silently omitted by the current non-recursive scanner |
 | P1 | ambient-tree manifest | enumerate all 5,120 candidate files and 2,560 directories with exact relative path, parent, depth, category, basename, format, bytes, locale, collision relation, and expected disposition |
 | P1 | ambient graph validator | recalculate category/depth/fan-out/Dmax, NFC/case requirements, formal/ambient disjointness, and zero undeclared entries |
 | P1 | native traversal receipt | record host/target case semantics, realized versus candidate count, expected-failure reason, link/reparse/inode state, and traversal visit/exclusion result |
@@ -138,7 +138,7 @@ The static topology sidecar already contains 20 × 20 persona-specific formal
 scope rows.  The frozen formal-leaf binding now joins them to the 60 planned
 device `home/` roots for all three replays.  The recursive catalog still
 defines only 20 × 256 ambient candidates and target depths, rather than an
-exact tree.  All artifacts remain pre-materialization: write, KCS, and
+exact tree.  All artifacts remain pre-materialization: write, Kio, and
 observed-receipt authority are false.  The outstanding work is the remaining
 P0/P1 guard and manifest work, then a writer, readback verifier, root-bound
 capacity measurement, and three fresh replay executions—not a claim that

@@ -2,7 +2,7 @@
 
 Status: **approval proposal only**.  This is the requirements lock for the
 user-requested Phase 1.  It creates no `eval-gen/` tree, manifests, fixtures,
-source files, binary Office documents, images, KCS roots, or external API
+source files, binary Office documents, images, Kio roots, or external API
 calls.  Phase 2 is prohibited until this proposal is explicitly approved.
 
 ## 1. Boundary and input inventory
@@ -51,7 +51,7 @@ illustrative file-row enum abbreviated that category.
 `kcs.persona.pc-topology/v2` coordinate set (134,195 bytes,
 `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`).
 This pin supplies the 20 persona-specific leaf *coordinates* for a fixture
-mirror; it does not create a KCS registry, claim a formal replay, or grant
+mirror; it does not create a Kio registry, claim a formal replay, or grant
 materialization/G0 authority.  The B mirror has two non-interchangeable lanes:
 
 ```text
@@ -71,18 +71,18 @@ replace the `corpus/<persona>` prefix with `qhard-a/<persona>` for A.
 | `ambient_home` | `path` is exactly `corpus/<persona>/ambient-home/<ambient_relative_path>`; `scope_key=null`, `scope_relative_path=null` | `index_enrollment="excluded"`; answer, distractor, fact, and expected-target roles are forbidden |
 
 `index_path` says which extractor route a carrier would use; it is not a claim
-that the file is enrolled in the formal 20-person KCS campaign.  The fixture
+that the file is enrolled in the formal 20-person Kio campaign.  The fixture
 may later be indexed for its own baseline comparison, but that is represented
 by `index_enrollment="fixture"`, never by formal-scale authority.  This
 distinction prevents a realistic recursive ambient file from being mistaken
-for a nested managed file below a non-recursive KCS scope.
+for a nested managed file below a non-recursive Kio scope.
 
 ### Fixture-versus-formal-scale boundary (normative)
 
 A (`qhard-a`) and B (`baseline-fixture-b`) are `payload_tier="fixture"`
 artifacts.  They are source/recipe and small-corpus evaluation fixtures only.
 Neither may be used as evidence of a formal persona-PC device root, a persona
-with 100,000+ chunks, source-to-scope allocation, KCS chunk attestation,
+with 100,000+ chunks, source-to-scope allocation, Kio chunk attestation,
 capacity readiness, history/replay completion, an MVP latency denominator, or
 the formal Recall denominator.  In this document, “persona mirror” means a
 persona-local **fixture** slice, not a formal persona-PC root.
@@ -90,7 +90,7 @@ persona-local **fixture** slice, not a formal persona-PC root.
 Approval of Phase 2 fixture generation does not issue G0 or authorize formal
 scale materialization.  The `20 × 120,000` campaign is a separately approved
 `payload_tier="formal-scale"` artifact with a different root, manifest,
-source-plan, writer, KCS, history, and receipt chain.  It may not reuse,
+source-plan, writer, Kio, history, and receipt chain.  It may not reuse,
 extend, replace, or be aggregated with `eval-gen/corpus/pNN`.
 
 Every Phase 2 manifest line therefore carries at least these additional
@@ -109,7 +109,7 @@ File lines additionally carry stable `logical_document_id`, `source_recipe_id`,
 `owner_persona_id`, `planned_final_path`,
 `materialization_state="spec_only"`, and
 `count_basis="final_corpus_document"`.  Build inputs, Office specs,
-intermediate raster PNGs, image prompts, manifest files, and KCS internals are
+intermediate raster PNGs, image prompts, manifest files, and Kio internals are
 never counted as final corpus documents.  A separate
 `sources/ledgers/fixture-boundary-v1.json` self-check ledger records the
 fixture hash, counts, tier, and all-negative formal-scale authority; it is not
@@ -376,7 +376,7 @@ their intersection must be empty.  Each manifest query row has
 `"lexical_overlap_expected": []`, and the Phase 2 self-check supplies one
 normalization/equality rationale per hard2 query.
 
-The pinned profile is `kcs.qhard.content-token/v1`.  It records the Unicode
+The pinned profile is `kio.qhard.content-token/v1`.  It records the Unicode
 and tokenizer/dictionary versions, kana-to-hiragana range, Latin-token rule
 (including accented Spanish), noun/verb lemmatization rule, and compound split
 rule (`read/write/admin` supplies all searchable components).  It removes group
@@ -508,11 +508,11 @@ both A and B separately:
   admission status; and
 - the fixture-boundary ledger hash plus `payload_tier="fixture"`, all-negative
   formal-scale authority, and the explicit statement that B has no observed
-  KCS chunks, capacity receipt, history/replay receipt, or formal-scale result.
+  Kio chunks, capacity receipt, history/replay receipt, or formal-scale result.
 
 The self-check must fail if a `fixture_home` file is not an exact direct child
 of its pinned topology leaf, or if an `ambient_home` file has a scope
-registration, `.kcs` component, fact/answer/distractor role, or formal/Recall
+registration, `.kio` component, fact/answer/distractor role, or formal/Recall
 accounting membership.  The 80-file ambient slice is reported as
 `recursive_catalog_coverage="partial"`; it may not claim to realize the
 separate 5,120-file formal robustness catalog.

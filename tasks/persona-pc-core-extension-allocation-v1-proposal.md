@@ -1,7 +1,7 @@
 # Persona-PC core extension allocation v1 proposal
 
 Status: proposal only。G0、source recipe、source instance、solver、renderer実行、filesystem write、
-KCS、history、replay、evaluationの権限を与えない。
+Kio、history、replay、evaluationの権限を与えない。
 
 Date: 2026-07-18
 
@@ -171,7 +171,7 @@ all-71 registryが所有するphysical suffixはexact 39種類である。
 - `.zip`: 19個のpersona-domain ZIP variant
 
 manifestとfilenameだけでvariantを再推論しない。各source rowは`variant_id`を保持し、extension、compound
-suffix parts、magic、content MIME、expected KCS path MIME、container structure、independent validator
+suffix parts、magic、content MIME、expected Kio path MIME、container structure、independent validator
 receiptをinput 3の同一implementation rowへ束縛する。`.csv.gz`と`.jsonl.gz`は`.gz`ではなくcompound
 suffix全体を比較する。PDFはtext layer/scan structure、OOXMLとarchiveはcontainer member、mail/CADは
 対応registryが追加された場合にそのmagic/MIMEを検証する。

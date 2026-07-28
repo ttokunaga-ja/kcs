@@ -2,7 +2,7 @@
 
 Status: **pre-materialization audit**.  This records the evidence boundary for
 the active 20-persona objective.  It does not issue G0, select an allocation
-truth, create a corpus root, run KCS, attest chunks, mutate history, or
+truth, create a corpus root, run Kio, attest chunks, mutate history, or
 authorize Phase 2 `eval-gen/` generation.
 
 ## 1. Exact target being audited
@@ -20,7 +20,7 @@ The formal retrieval/history lane must eventually provide all of the following:
 - persona-specific directory topology, language/locale assumptions, primary
   use case, format-family/variant mix, source size/complexity mix, and
   lifecycle behavior; and
-- physical-file, KCS, history, query, capacity, and cross-replay receipts that
+- physical-file, Kio, history, query, capacity, and cross-replay receipts that
   prove those facts after materialization rather than inferring them from a
   plan.
 
@@ -36,14 +36,14 @@ The human-readable folder/format proposal is
 | 20 distinct personas and 20 primary use cases | `persona_v2_contract` and the v2 proposal define `p01..p20`; the contract tests assert 20 distinct roles and 20 per-person profiles | static contract verified | bind each persona to a solved source/path/quota plan and physical root |
 | Per-person folder topology and nested PC structure | v2 proposal specifies separate `devices/pXX-.../home/` roots, 12 primary + 8 secondary scopes, formal D2--D6 and a separate recursive ambient lane | planned topology | emit and read back all 20 × 20 scope paths in every replay |
 | Persona-specific 15-family format ratios | `persona_v2_contract` defines 20 × 15 integer family marginals; the suite total is 203,000 W0 planned source-intent slots | static allocation verified | choose the upstream allocation truth, then bind source IDs, variants, recipes, MIME/magic, and rendered files |
-| 120,000 current chunks per person | density intervals in `persona_v2_contract` cover 120,000 for every full persona; W0/W5 checkpoint literals are tested | integer feasibility only | exact solved per-source quotas, materialize/index, then person-scoped KCS attestation |
+| 120,000 current chunks per person | density intervals in `persona_v2_contract` cover 120,000 for every full persona; W0/W5 checkpoint literals are tested | integer feasibility only | exact solved per-source quotas, materialize/index, then person-scoped Kio attestation |
 | W5 current + history at least 180,000 per person | formal checkpoint contract defines 120,000 current + 60,000 history-only | planned history arithmetic | immutable event plan, W1--W5 execution, and DB/CAS/history readback |
 | No pooling across persons or replays | v2 contract requires 3 fresh roots and forbids clone/link/completed-root reuse | planned invariant | inode/registry/path/CAS evidence for every root and cross-replay comparison |
 | Capacity sufficiency | formal workload lower bounds define 203,000 planned source slots and 2,400,000 contract chunk objects per replay; measurement gate remains false | unmeasured | pilot destination measurements, projected full capacity with >=25% headroom, then full preflight |
 | M3 / Q_hard quality and baseline comparison | v2 query/semantic candidates exist, but target resolution remains a blocker; requested Q_hard package is Phase 1 approval pending | incomplete | approved separate `eval-gen/` artifacts, concrete source mapping, and observed evaluation |
 
 Passing the existing static tests demonstrates cardinality and consistency only.
-It is not evidence that any actual KCS chunk, history object, search result,
+It is not evidence that any actual Kio chunk, history object, search result,
 filesystem object, capacity allocation, or latency measurement exists.
 
 ## 3. Non-substitution rules
@@ -91,7 +91,7 @@ actual destination.
    [`persona-pc-core-extension-supersession-dependency-closure-v1-proposal.md`](persona-pc-core-extension-supersession-dependency-closure-v1-proposal.md).
 3. Complete the source/path/quota/query/history closure and its independent
    validators before authorizing any formal writer.
-4. Run a pilot W0 materialization and KCS attestation for all 20 personas;
+4. Run a pilot W0 materialization and Kio attestation for all 20 personas;
    use its destination readback for the full capacity decision.
 5. Only after the full preflight passes, execute three fresh W0--W5 replays,
    collect all receipts, then run M3 and Q_hard/baseline evaluation.

@@ -83,7 +83,7 @@ all-71 format implementation registryが71 unique rows、8 implementation pairs�
 pilot 20,300 / full 203,000のexact coverageを束縛した。下流のformal source-recipe profile catalogは
 71 profileすべてを一意に束縛し、full/pilot別のincidental capと全checkpoint整数表も固定した。
 したがって現在の下流形式実装可用性とvariant-level recipe policyは71 / 71であり、source-instance別
-parameter/recipeも下流assignmentで完成した。materialization、chunk、KCS、G0、filesystem/write authorityは
+parameter/recipeも下流assignmentで完成した。materialization、chunk、Kio、G0、filesystem/write authorityは
 増えていない。
 overlayの8軸ledgerはaxis draftであり、assigned target bytes/host metadataと実際のrendered/decoded payloadの
 equivalence、scope placement、raw/rendered identityと検索参加の実測は未完成である。
@@ -135,7 +135,7 @@ formal-replay-01/
       home/<20 active leaf scopes>       # formal retrieval/history lane
       ambient-home/<D6--D8 tree>         # robustness lane、未登録
       byte-stress/<raw-only fixtures>    # designated replayだけ、未登録
-      .kcs-eval-device/          # この人だけのregistry
+      .kio-eval-device/          # この人だけのregistry
       receipts/
     p02-site-reliability-engineer/
       ...
@@ -164,13 +164,13 @@ hard link、clone、symlink、完成rootコピーは使わず、別manifest/rece
 fullでは各人が単独で次を満たす。20人の合算値で代替しない。
 
 - 20 active leaf scopesと1 isolated registry
-- W0/W5の実KCS contract-contributor chunksが正確に120,000
+- W0/W5の実Kio contract-contributor chunksが正確に120,000
 - W5のcurrent+history contract chunksが180,000
 - raw-only sourceの実chunkが0
 - W0/W5 finalの全current eligible chunksが120,000以上135,000以下
 - W5 finalの全current+history eligible chunksが180,000以上210,000以下
 
-`planned chunks`は容量計画にだけ使い、合格証拠はinit/index後にKCSから読み戻した
+`planned chunks`は容量計画にだけ使い、合格証拠はinit/index後にKioから読み戻した
 distinct `(scope_key, chunk_id)`とする。
 
 G0では各人のincidental-searchable sourceにもsource別上限を割り当てる。wave `w`のcheckpoint表を
@@ -201,7 +201,7 @@ formalでは「深い親pathまで含む検索scope」を、robustnessでは「�
 recursive tree」を試す。後者を10万chunks超の正式コーパスの成績に混ぜない一方、両方の
 actual path shapeを別々読み戻さなければネスト要件を満たしたと判定しない。
 
-正式scopeまでの親階層は深くしてよい。ただしKCSのdirect-file契約に合わせ、managed fileは
+正式scopeまでの親階層は深くしてよい。ただしKioのdirect-file契約に合わせ、managed fileは
 各leaf scopeの直下だけに置く。`pXX-role/`を1人の共通device rootとし、その直下の`home/`、
 `ambient-home/`、`byte-stress/`を非交差lane rootとして扱う。recursive ambientやbyte stressをformal分母へ
 混ぜると厳密なfile比、chunk母数、verifierの意味が崩れるため、laneごとに別manifest・別receiptを持ち、
@@ -412,7 +412,7 @@ depthと混同しない。百分率を整数へ黙って丸めず、1人あた�
 exact/near/conflict copy 38、cache/temp 38、partial download 26、hidden/lockfile 26、empty file 13、
 Unicode/case-collision candidate 13のexact 256件とする。20人のpath/depth vectorは複製せず、少なくとも
 D6/D7/D8の各depthにfileを持つsuite-wide coverageと、人物ごとのplanned/realized Dmax一致を要求する。
-各entryは`registered_scope=false`、`formal_gate_eligible=false`、formal leafとの交差なし、`.kcs`なしを
+各entryは`registered_scope=false`、`formal_gate_eligible=false`、formal leafとの交差なし、`.kio`なしを
 持つ。candidate数とnative realized数を別々に記録し、宣言外entryをverifierが拒否する。
 
 このprofileのmachine-readable正本候補は`kcs.persona.pc-recursive-robustness-lane-catalog/v1`である。
@@ -654,7 +654,7 @@ text PDFとscan PDFは同じ`.pdf`を内部構造で区別する。
 - Markdown: `.md/.markdown`を人物別に60/40から90/10
 - txt/log: `.txt/.log/.jsonl`を物語中心75/10/15、業務中心70/15/15、
   operations中心25/55/20などへ分ける
-- code: KCSがlocal textとして認識する`.py/.rs/.ts/.go/.js/.java/.c/.cpp`から
+- code: Kioがlocal textとして認識する`.py/.rs/.ts/.go/.js/.java/.c/.cpp`から
   職種別に3種類以内を選ぶ
 - structured: `.json/.yaml/.xml/.sql`をengineering、data/finance、documentの3 profileで変える
 - delimited: `.csv/.tsv`を人物別60/40から85/15
@@ -904,7 +904,7 @@ chunk quota、cell-local ordinal、final IDは後続joint solverだけが所有�
 
 formal W0の512 MiB/personかつ10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、
 pre-purgeの`floor(27 GiB / 20)`/personかつ27 GiB/replayは、managed source filesとauthored scope
-directoriesだけを数える**source-tree envelope候補**とする。`.kcs`、CAS、SQLite/FTS/WAL、registry、
+directoriesだけを数える**source-tree envelope候補**とする。`.kio`、CAS、SQLite/FTS/WAL、registry、
 plan/ledger/receipt、staging/transient/history、共有workspaceを含む**root-bound capacity**とは別境界である。
 旧88 GiBはsource-tree候補25+25+27 GiBとworkspace仮置き11 GiBを足しただけなので、root-bound hard capや
 Go証拠としては廃止する。fullの固定byte/inode capはなく、pilotのcomponent別allocated-block/inode実測と
@@ -995,7 +995,7 @@ conflictとanchorのfixed topicを先に差し引き、残りをcomponent size�
 全sourceはW0/currentで、exact duplicate、attachment、conflict、通常sourceはsemantic version 1、
 near-revisionのderivativeだけversion 2とする。fullはversion 1が189,770、version 2が13,230、
 pilotは18,977 / 1,323、full-residualは170,793 / 11,907である。nearのversion 2はW0-visibleな
-surface revisionであり、W1 KCS history transitionではない。conflict A/Bはともにversion 1で、
+surface revisionであり、W1 Kio history transitionではない。conflict A/Bはともにversion 1で、
 version差ではなくunordered branch差である。
 
 依存は`fact graph / realism / inventory profile -> semantic catalog`、
@@ -1091,7 +1091,7 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 実行順は、(1) 不変planをfreeze、(2) 20人を1人ずつW0のfolder/fileまで作成、(3) W0を全scopeで
 offline indexしてbaselineをattest、(4) W1--W5のedit/rename/move/duplicate/derive/archive/delete/
-restore/purgeをjournal順に適用、(5) 完成rootや`.kcs`をcopyせず同じ不変planから別storageへW0から
+restore/purgeをjournal順に適用、(5) 完成rootや`.kio`をcopyせず同じ不変planから別storageへW0から
 fresh buildし直す、を3 replayで行い、(6) 3 replay完成後に構造・比率・chunk/history・query・容量を
 検証する。W0をindexする前にeditを開始せず、最初のrootをtemplateとして複製しない。
 各W0/W1--W5 checkpointでは安全性とplan逸脱をfail-fast attestationし、(6)は3 replay間の決定性、
@@ -1108,7 +1108,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 
 - family/variant/gate-roleのphysical file数、archive member数、logical-document数を別集計
 - scope別file数、file/directory depth histogram、unique prefix数、max fan-out、casefold/path collision 0
-- extension、magic、content MIME、KCS path MIME、offline disposition、独立validator passのexact一致
+- extension、magic、content MIME、Kio path MIME、offline disposition、独立validator passのexact一致
 - raw-byte sum、allocated blocks、inode数、人物・family別nearest-rank p50/p95/max、formal tail count
 - plan外regular file/directory、hard link、clone、sparse、symlink、別persona/replayとのshared inodeが0
 - W1--W5でpathが動く場合は各checkpointでbefore/after構造deltaをevent journalへ結合
@@ -1120,7 +1120,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化。stable move 4 sourcesのpositive W0 receiptを作る | streaming writer、完全attestor、qIM patcherが未実装 |
 | G3 pilot W1-W5 | W1 typed edit/index後にI-edit 1 sourceをattestし、stable 4件のW0 receiptと合わせたpre-W2 qIM patchをmove前に検証して、以後rename/move/duplicate/derive/archive/delete/restore/purgeを実行 | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop。I-edit current mismatch、missing/range外qIM patchはfail closed | v1相当のみ済。v2 allocator/manifest未実装 |
 | G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationとactual destination free bytes/inodes/allocation unitを読み戻す | 3 suite replay containers=60 persona-PC roots、staging、explicit caps/reserveを含むroot-bound capacity内。不足ならwrite前に停止 | evidence待ち。G0 planning capからは推論しない |
-| G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
+| G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kio`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
 | G6 reproducibility/resume | root依存値を除くcanonical stateとquery rankを比較、failure injection後resume | event exactly-once、同一seedのstate/count/history/query projection一致 | 未実装 |
 | G7 actual attestation | filesystemとDB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0。W0/W5の人物別family/variant、path shape、magic/MIME、validator、size p50/p95/tailがplanとexact一致 | 未実装 |
 | G8 evaluation | 各人・各scenario最低30問、合計1,800 unique positive queries。300 negativeは別判定 | 各persona×scenarioでRecall@10 >=0.8。各persona×scenarioの3 replay観測をnearest-rank集計し、M3-1 p95<5s、M3-2/M3-3 p95<7s。pooled/per-person summaryは参考併記し、同一seed再現性に限定して報告 | 未実施 |
@@ -1152,7 +1152,7 @@ fullのaggregate cell/source-ID/materialization/rendered-byte subsetとして別
 full contract checkpointは各人・各replayで次とする。
 
 ここで`current C`と`history-only H`は、persona内20 scopesを横断するdistinct contract semantic endpoint
-`(scope_key, chunk_id)`集合である。`chunk_id`はKCSの`chunk_hash`と同値だが、scopeを落としてpersona-globalに
+`(scope_key, chunk_id)`集合である。`chunk_id`はKioの`chunk_hash`と同値だが、scopeを落としてpersona-globalに
 dedupしない。`C`はそのscopeで1件以上のlive path bindingを持つendpoint、`H`はそのscopeでlive bindingがなく、
 reachableかつnon-purgedなhistorical/deleted path bindingを持つendpointとする。C/Hはdisjointで、path alias、
 DB row、materialization数を重複加算しない。same-scope renameはcontract `(0,0)`、deleted rawの同scope
@@ -1330,7 +1330,7 @@ formal-success-conditioned下限である。
 | full W0、3 retained replays | 609,000 | 3,291 | 7,200,000 | **7,812,291** |
 
 この下限はraw/prepared/normalized/tree/commit CAS、chunk CAS fanout directories、SQLite/FTS/WAL、
-400 `.kcs` stores/replay、20 device registries/replay、plan/ledger/receipt、staging、transient、historyを
+400 `.kio` stores/replay、20 device registries/replay、plan/ledger/receipt、staging、transient、historyを
 一切数えない。したがって旧`inode_cap=250,000`はpilot formal成功より小さく、`free=1,000,000`から
 `reserve=750,000`を引く同値条件も成立しないので廃止する。新しい数値inode cap/reserveは実測前に置かない。
 runtime再検証でstorage model仮定が不成立なら、261,397/2,604,097/7,812,291をGo/No-Go根拠に使わず
@@ -1375,7 +1375,7 @@ actual destination reserveから決める。byte-stress 15 GiBは別laneのsourc
 
 planner/renderer/writerは全person/bytesを同時保持せず、1 persona・1 sourceずつ処理する。
 既存のplanning上限はworker RSS 384 MiB、composer 128 MiB、process tree 512 MiB、worker同時1である。
-KCS index用RSS上限はpilotで別に実測・凍結する。
+Kio index用RSS上限はpilotで別に実測・凍結する。
 
 ## 10. 現在の進捗とv2実装境界
 
@@ -1414,7 +1414,7 @@ v2で実装済み（planning only、non-authorizing）:
   overlay marginal targetだけがcompleteで、membership/scoring/placement整数割当/8軸台帳/G0はfalse
 - `kcs.persona.pc-variant-catalog/v2` canonical 211,733 bytes、SHA-256
   `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`。71 identityと566 marginal、
-  content MIME/KCS path MIME、形式別complexity/byte lane候補を束縛するが、catalog全variantの
+  content MIME/Kio path MIME、形式別complexity/byte lane候補を束縛するが、catalog全variantの
   renderer/validator/profile bindingとsource-level feasibility/G0はfalse
 - `kcs.persona.pc-route-affinity/v2` candidate canonical 70,626 bytes、SHA-256
   `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`。541 active rows/
@@ -1443,7 +1443,7 @@ v2で実装済み（planning only、non-authorizing）:
   suiteは21,680 canonical bytes、SHA-256
   `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`で、builder-independent validatorと
   red-team検査を通過した。reservation自体は下流source row body/manifestを逆参照せず、
-  concrete fact/overlay membership、scope/final ID、renderer/KCS/history/write authorityはなく、
+  concrete fact/overlay membership、scope/final ID、renderer/Kio/history/write authorityはなく、
   formal independent approval receiptも未束縛である
 - `kcs.persona.pc-source-inventory-layout/v2`は274,566 canonical bytes、SHA-256
   `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`。20,300 pilot +
@@ -1507,7 +1507,7 @@ v2で実装済み（planning only、non-authorizing）:
   271,368,192 bytesでPASSし、384 MiB RSS gateもPASSした。dedicated CI timeoutは90分とする。
   remote greenは主張しない。`placement_class_requirement`はscope assignment
   ではなく、formal recipes、semantic namespace/query/history mapping、joint solution/proof、actual payload/raw/
-  chunk/search observation、render/write/history/KCS、pre-solve corpus-input persona cap、G0は未証明である。全authority flagsはfalse
+  chunk/search observation、render/write/history/Kio、pre-solve corpus-input persona cap、G0は未証明である。全authority flagsはfalse
 - `kcs.persona.pc-source-instance-parameter-assignment-suite/v2`とproducer-independent validatorを実装。
   shared 363 cells、20 persona projections / 2,643 active cells、40 origin manifestsへinlineした4,759 compact
   owner rows、40 pilot/full profiles、73 non-persisted expanded-view receiptsから203,000 intentsをexactly once
@@ -1519,13 +1519,13 @@ v2で実装済み（planning only、non-authorizing）:
   779.006秒（wall 779.25秒）/ 外側最大RSS 361,381,888 bytesでPASSし、2 hashseedのproducer + independent / expanded
   cold pathは各15分/512 MiB capを通過した。最大p12既知合計は15,573,860 bytes、名目余裕
   1,203,356 bytesである。専用CI job `persona-v2-source-parameter-assignment-full`のtimeoutは60分とするが、
-  remote greenは主張しない。frame/header、formal 16 MiB cap、semantic payload、scope/final ID、render/write/KCS/G0はfalse
+  remote greenは主張しない。frame/header、formal 16 MiB cap、semantic payload、scope/final ID、render/write/Kio/G0はfalse
 - `pdf-text`のnarrow feasibility sliceは1--72 ASCII text-layer pages、4,096--149,504 bytes、PDF 1.4の
   non-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
   2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validatorは
   2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`である。
   これにより局所feasibilityは10 contributor variants、full 69,236 contributor sourcesを覆うが、
-  同slice単体は、多言語PDF、個別semantic content、positive query anchor、KCS actual chunks、
+  同slice単体は、多言語PDF、個別semantic content、positive query anchor、Kio actual chunks、
   source-instance recipe/G0を証明しない。source-instance値は下流assignment packageが別に束縛する。
   source-profile catalogは72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。
 - 後続のincidental-text narrow feasibility sliceは11 variantsをstdlib-onlyで局所実装する。renderer contractは
@@ -1533,7 +1533,7 @@ v2で実装済み（planning only、non-authorizing）:
   10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。全出力は
   512 KiB以下、EMLはCRLFかつwire line 78 bytes以下である。凍結catalogを変更せず、そのinventory marginalが
   full 60,414 sourcesを占める11 incidental variantsをformat-levelで覆うが、source別recipe、semantic payload、
-  materialization、actual incidental chunk上限、KCS/G0/writeを証明しない
+  materialization、actual incidental chunk上限、Kio/G0/writeを証明しない
 - 残る50 raw-only variantsを5 renderer/independent-validator pairで実装し、all-71 implementation
   registryへ統合した。registryは333,881 canonical bytes / SHA-256
   `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`で、71 unique ownership rows、
@@ -1638,9 +1638,9 @@ image、full owner、direct owner bodyを再認証する。
 LF込み最大row 633 bytes）、effective最大bodyは103,864 bytes、lifecycle最大bodyは256,790 bytesである。
 ordered digestのpreimageはreceipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON arrayである。
 この203,000 rowsは1 suite replayのW0 source計画projectionであり、物理file/indexや人物別120,000 actual
-KCS chunksの達成証拠ではない。
+Kio chunksの達成証拠ではない。
 Decision 150のv1 artifactでは`semantic_payload_projection_bound`、`query_semantics_absence_proved`、
-`future_source_id_namespace_eligible`、G0/solver/solution/write/KCS authorityはすべてfalseであり、その値とpinを
+`future_source_id_namespace_eligible`、G0/solver/solution/write/Kio authorityはすべてfalseであり、その値とpinを
 変更しない。
 
 現在の下流v2候補は`kcs.persona.pc-semantic-projection-derivation-inventory/v2`と
@@ -1688,7 +1688,7 @@ review、corpus semantic/query/history closure、blocker resolution ledgerを閉
   検索評価にならない。actual qIMはstable 4件のW0 receiptとI-edit 1件のW1 receiptからpre-W2 patchし、
   W2 move前にfail-closed検証する
 - M3-1用text-layer PDFの多言語content recipe、planned contributor eligibility、positive最低anchor数。actual
-  KCS chunk attestationはG2/G7 receiptでありG0 completionへ混ぜない。局所ASCII PDF
+  Kio chunk attestationはG2/G7 receiptでありG0 completionへ混ぜない。局所ASCII PDF
   renderer・独立validatorは実装済みだが、それだけでは検索評価を成立させない。scan PDFは現v2ではraw-only
   `awaiting_ocr`のstructural/negative対象でpositive relevanceに含めない。local deterministic OCRを導入する
   場合だけ別variant/provenance/contributor契約を追加する。10 contributor feasibility variantsだけでは「根拠PDF」の性能・
@@ -1722,7 +1722,7 @@ move-delta patch、(8) W2--W5 edits/history、(9) observed structural/lifecycle 
 初回を含む合計3 replay実行する。全3 replayのinline検証完了後に、(10) actual chunk/history/query/capacity/
 latencyのcross-replay evaluationを行う。最初に1回完走してから追加で3回作る、という4 replay構成ではない。
 solutionをsource-instance recipe/semantic namespaceより先行させず、
-完成rootや`.kcs`のcopyでfresh replayを代替しない。
+完成rootや`.kio`のcopyでfresh replayを代替しない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、
 このsynthetic persona suiteで代替しない。

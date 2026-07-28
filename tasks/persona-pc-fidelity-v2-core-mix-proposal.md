@@ -1,6 +1,6 @@
 # Persona-PC v2 core mix補足提案
 
-Status: proposal only。G0、writer、filesystem、KCS、history、evaluation authorityを与えない。
+Status: proposal only。G0、writer、filesystem、Kio、history、evaluation authorityを与えない。
 
 Date: 2026-07-17
 
@@ -34,7 +34,7 @@ contract chunks、W5 finalで120,000 current + 60,000 history-only contract chun
       home/                 # formal D2--D6、20 registered leaf scopes
       ambient-home/         # D6--D8、未登録recursive robustness
       byte-stress/          # designated replayだけ、raw-only
-      .kcs-eval-device/     # persona/replay固有registry
+      .kio-eval-device/     # persona/replay固有registry
       receipts/
     ...
     p20-investigative-journalist/
@@ -194,7 +194,7 @@ canonical variant順をtie-breakにしたlargest-remainderで配賦する。200-
 | 3 fresh replays / 60 physical roots | 609,000 | 7,200,000 | 10,800,000 |
 
 これはlogical cardinalityであり、完成rootのcopyで達成しない。formal source-tree envelope候補はW0
-512 MiB/person、W5 final 1.25 GiB/personであるが、`.kcs`、CAS、SQLite/FTS/WAL、history、staging、
+512 MiB/person、W5 final 1.25 GiB/personであるが、`.kio`、CAS、SQLite/FTS/WAL、history、staging、
 allocated blocksを含むroot-bound capではない。full書込み前にexact 10% pilotをW5まで実行し、destinationの
 allocated blocks/inodesとtransient peakをcomponent別に読み戻す。10%観測の線形projectionと25% headroomだけを
 fullの安全証明にせず、G4 root-bound Go/No-Go、full replay-01後の再較正、各waveのreserve guardを必須にする。
@@ -262,7 +262,7 @@ campaign readinessを発行しない。formal full campaign内の部分resumeや
 
 各persona receiptは単なるcountではなく、current集合とhistory-only集合を
 `(scope_key, chunk_hash)`のordered set rootとして持ち、両集合の交差0、直前checkpoint receipt、
-compiled schedule prefix、root birth nonce、writer provenance/read-set、KCS HEAD/tree/config、capacity guardを
+compiled schedule prefix、root birth nonce、writer provenance/read-set、Kio HEAD/tree/config、capacity guardを
 chainする。実filesystem固有のinodeやnonceを含む動的receiptにはglobal golden SHAを設定せず、canonical body
 SHAとexternal set rootを認証し、同じsealed receipt setをhash seed 0/1の独立processで再検証した
 validation projection digestの一致を要求する。
@@ -277,7 +277,7 @@ preflightする。通常copyはshared inode検査だけでは判別できない�
 provenance journalを出し、atomic checkpoint sealでcreated path、raw hash、writer inputを束縛する。各W0--W5の
 開始前にはactual free bytes/inodesとreserveを再読し、見積超過、別device、stale measurementをfail closedにする。
 read-setはjournalの自己申告だけにせず、OS sandbox/capability allowlistとproducer非依存validatorで強制・照合する。
-`HOME`、XDG config/data/cache/runtime、KCS registry/CAS/index/cache/temp、process tempもpersona/replay rootへ
+`HOME`、XDG config/data/cache/runtime、Kio registry/CAS/index/cache/temp、process tempもpersona/replay rootへ
 隔離し、共有できるread setはimmutable plan/recipeだけに限定する。
 
 pilotにもfullとは別のwrite-safety gateを置く。campaign直前に

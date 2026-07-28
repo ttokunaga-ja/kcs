@@ -45,10 +45,10 @@ golden query の正解 passage が上位 k に入るかを両幅で測り、差�
 
     vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling --host 127.0.0.1 --port 8000
 
-    python3 eval/v3/v3_mrl.py --corpus ~/kcs-baseline-corpus --out v3-mrl.json
+    python3 eval/v3/v3_mrl.py --corpus ~/kio-baseline-corpus --out v3-mrl.json
 
 `--corpus` には Kio が扱うような文章のディレクトリを渡す。24 問 fixture の
-原本 (`~/kcs-baseline-corpus`) がそのまま使えるが、無ければ `docs/` でもよい —
+原本 (`~/kio-baseline-corpus`) がそのまま使えるが、無ければ `docs/` でもよい —
 測っているのは幅の効果であってコーパスの絶対性能ではない。
 """
 
