@@ -310,12 +310,17 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 > (`cmd` / `args` は将来の外部 dispatcher の領分 — §7)。
 >
 > ```toml
-> [embedding]
-> tool_id = "qwen3_vl_embedding_local"
-> kind    = "offline_api"
-> url     = "http://127.0.0.1:8000"      # loopback リテラルのみ。末尾の /v1 は不要
-> model   = "Qwen/Qwen3-VL-Embedding-2B" # 省略時はこの値
+> [embedding.qwen3_vl_embedding_local]
+> kind  = "offline_api"
+> url   = "http://127.0.0.1:8000"      # loopback リテラルのみ。末尾の /v1 は不要
+> model = "Qwen/Qwen3-VL-Embedding-2B" # 省略時はこの値
 > ```
+>
+> **`tool_id` はテーブル名で表す。`[embedding]` の直下に `tool_id` は書けない**
+> (2026-07-28 訂正: 以前の例はそう書いていたが `KIO-E-CONFIG-SCHEMA-001` で
+> 弾かれる)。flat な `[embedding]` 形も使えるが、その形は tool_id を持てないため
+> **`kind` で target を解決する** — offline embedding 実装が 2 つ目になるまでは
+> 一意に定まる。
 >
 > `auth` は書かない — 認証先が無い。この宣言があること自体が有効化の signal であり、
 > 承認行も `allow_network` も要らない ((2) のとおり)。Adapter は

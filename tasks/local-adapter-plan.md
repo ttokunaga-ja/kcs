@@ -620,6 +620,33 @@ D4 によりテキストのみでも同形式を使う。
 > 確定のみで、実装は入っていない。現状は共通の既定 (実効 30 秒) で、
 > chunk 1 件の embedding には十分。Stage 3 のローカル OCR では効いてくる。
 
+> **実 vLLM との smoke test 済み (2026-07-28・GPU 実機・commit `2e7a2ba`)**
+>
+> U2 の Rust クライアントはそれまで fake client とスタブソケットしか相手に
+> していなかった。実サーバ (vLLM 0.26.0 / RTX 4070 / WSL2) に対して
+> `kio init` → `index --approve` → `search --mode vector` を通し、**wire の変更は
+> 不要だった**。
+>
+> - `--mode vector` が **4 件**返し、`fallback: false` / `resolved_mode: "vector"`。
+>   embedding 失敗時の静かな text 縮退 (`Err(_) => Ok(None)`) には入っていない
+> - **保存されたベクトルを参照計算と数値比較した** — 同じ入力を生 HTTP で投げ、
+>   768 へ切り詰めて再正規化した結果との cosine が **0.999999994** (最大絶対差
+>   7e-9 = f32 の丸め)。`messages` 形・`chunk_filename_context_v1` の入力構築・
+>   MRL 切り詰めの 3 つが揃って正しいことの実測であって、
+>   「エラーが出なかった」ではない
+> - `tool-lock.json` の embedding entry は `kind: "offline_api"` /
+>   `profile_hash: sha256:f9f610bb…439a` で V4 と一致
+> - **D9 の実証**: `approvals[]` に embedding の行は無い (在るのは markdownize の
+>   `mistral_ocr_markdownize` = `online_api` 1 行のみ)。`--offline --mode vector`
+>   も同じ 4 件を返す
+> - cost ledger に embedding の行は増えない (在る 2 行は `deterministic_baseline`
+>   = markdownize 側、いずれも `usd 0.0`)
+>
+> **併せて 07 §3 の設定例の誤りを修正した** — `[embedding]` 直下に `tool_id` を
+> 書く形が例示されていたが、flat 形は `tool_id` を受け付けず
+> `KIO-E-CONFIG-SCHEMA-001` で弾かれる (§6 の「flat 形は `kind` で解決する」と
+> 矛盾していた)。テーブル形 `[embedding.qwen3_vl_embedding_local]` へ直した。
+
 #### U3 🔴 `chunk_vec` は chunk 専用 — 画像用 vec0 テーブルが無い [P0・spec 改訂]
 [04 §4.3](../docs/04-pipeline.md) の DDL:
 ```sql
