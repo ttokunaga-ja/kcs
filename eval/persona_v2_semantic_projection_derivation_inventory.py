@@ -31,15 +31,15 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_membership_package as base_semantic
 
 
-SUITE_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+SUITE_SCHEMA = "kio.persona.pc-semantic-projection-derivation-inventory/v1"
 SUITE_KIND = "persona-pc-v2-semantic-projection-derivation-inventory"
-RECEIPT_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-receipt/v1"
+RECEIPT_SCHEMA = "kio.persona.pc-semantic-projection-derivation-receipt/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_SCHEMA = SUITE_SCHEMA
 ARTIFACT_KIND = SUITE_KIND
 
 BASE_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-base-source-content-context-shard-projection/v1"
+    "kio.persona.pc-base-source-content-context-shard-projection/v1"
 )
 BASE_PROJECTION_KIND = "persona-pc-v2-base-source-content-context-shard-projection"
 
@@ -96,7 +96,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -109,7 +109,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -217,7 +217,7 @@ def _negative_authority():
         "authorizes_final_identifiers": False,
         "authorizes_g0_freeze": False,
         "authorizes_history_mutation": False,
-        "authorizes_kcs_execution": False,
+        "authorizes_kio_execution": False,
         "authorizes_namespace_completion": False,
         "authorizes_physical_write": False,
         "authorizes_query_rendering": False,
@@ -230,7 +230,7 @@ def _negative_authority():
         "filesystem_writer_available": False,
         "formal_capacity_gate_satisfied": False,
         "history_executor_available": False,
-        "kcs_execution_available": False,
+        "kio_execution_available": False,
         "physical_materialization_observed": False,
         "solver_solution_available": False,
         "source_identity_namespace_authoritative": False,
@@ -890,7 +890,7 @@ def _canonical_inventory():
             "corpus-semantic-namespace-not-issued",
             "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
             "joint-solver-solution-proof-and-final-source-plan-not-built",
-            "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+            "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
         ],
         "summary": {
             "covered_projection_class_count": len(COVERED_CLASS_ORDER),

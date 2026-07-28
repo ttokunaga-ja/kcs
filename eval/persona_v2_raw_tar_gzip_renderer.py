@@ -8,7 +8,7 @@ manual byte-aligned stored DEFLATE blocks, so every output length follows an
 exact affine formula.
 
 The rendered bytes establish only local container syntax.  They do not
-authorize a source plan, fixture writes, KCS execution, history mutation, or
+authorize a source plan, fixture writes, KIO execution, history mutation, or
 any chunk claim.
 """
 
@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-tar-gzip-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-tar-gzip-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-tar-gzip-renderer"
 RENDERER_ID = "persona-v2-id-free-raw-tar-gzip-feasibility-renderer"
@@ -113,14 +113,14 @@ AUTHORITY_FIELDS = (
     "authorizes_final_source_identifiers",
     "authorizes_g0_freeze",
     "authorizes_history_mutation",
-    "authorizes_kcs_execution",
+    "authorizes_kio_execution",
     "authorizes_physical_write",
     "authorizes_renderer_execution",
     "authorizes_source_intents",
     "authorizes_source_plan",
     "filesystem_writer_available",
     "formal_capacity_gate_satisfied",
-    "kcs_execution_attested",
+    "kio_execution_attested",
 )
 
 _PROFILE_COUNTS = {
@@ -172,7 +172,7 @@ def _variant_row(variant):
             "complexity_measure": "members",
             "complexity_minimum": USTAR_MIN_MEMBERS,
             "content_media_type": "application/x-tar",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": "tar",
@@ -194,7 +194,7 @@ def _variant_row(variant):
             "complexity_measure": "records",
             "complexity_minimum": GZIP_MIN_RECORDS,
             "content_media_type": "application/gzip",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": (
@@ -236,7 +236,7 @@ class RenderedRawTarGzip:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     archive_format: str
     complexity_measure: str
@@ -465,7 +465,7 @@ def render_raw_tar_gzip(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         archive_format=profile["archive_format"],
         complexity_measure=profile["complexity_measure"],
@@ -509,8 +509,8 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": profile[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": profile[
             "expected_offline_disposition"

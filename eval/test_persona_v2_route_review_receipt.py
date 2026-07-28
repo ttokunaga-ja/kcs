@@ -24,7 +24,7 @@ class PersonaV2RouteReviewReceiptTests(unittest.TestCase):
                 self.value["artifact_kind"],
             ),
             (
-                "kcs.persona.pc-route-review-receipt/v2",
+                "kio.persona.pc-route-review-receipt/v2",
                 2,
                 "persona-pc-v2-route-review-receipt",
             ),
@@ -46,7 +46,7 @@ class PersonaV2RouteReviewReceiptTests(unittest.TestCase):
         self.assertEqual(binding["canonical_body_bytes"], 70_626)
         self.assertEqual(
             binding["canonical_body_sha256"],
-            "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+            "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
         )
         self.assertEqual(set(self.value["authority"]), receipt.AUTHORITY_FIELDS)
         self.assertTrue(

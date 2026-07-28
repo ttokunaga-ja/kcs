@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_realism_profile as realism
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-fact-graph/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-fact-graph/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-fact-graph"
 MAX_FACT_GRAPH_BYTES = 1 * 2**20
@@ -39,7 +39,7 @@ EDGE_COUNT_PER_GRAPH = 1
 CONFLICT_SET_COUNT_PER_GRAPH = 1
 EXPECTED_REALISM_BYTES = 36_811
 EXPECTED_REALISM_SHA256 = (
-    "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05"
+    "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb"
 )
 
 _SYNTHETIC_ID_RE = re.compile(r"^[a-z][a-z0-9-]*-syn-[0-9]{3}$")
@@ -798,7 +798,7 @@ def _canonical_fact_graph(persona_id, *, shared_inputs=None):
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

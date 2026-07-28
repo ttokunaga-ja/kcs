@@ -2,7 +2,7 @@
 
 This module implements only bounded format encoding.  Requests contain no
 persona, path, source, query, digest, solution, or fixture identity.  Returned
-bytes do not authorize source planning, physical writes, KCS execution, chunk
+bytes do not authorize source planning, physical writes, KIO execution, chunk
 claims, history mutation, or G0.  The encoders use only the Python standard
 library and emit deliberately narrow, canonical subsets of seven formats.
 """
@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-image-media-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-image-media-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-image-media-renderer"
 RENDERER_ID = "persona-v2-id-free-raw-image-media-feasibility-renderer"
@@ -78,7 +78,7 @@ _VARIANT_ROWS = {
         "family": "media",
         "filename_extension": "aiff",
         "content_media_type": "audio/aiff",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "complexity_measure": "frames-or-events",
         "counting_rule": "mono-pcm-sample-frames",
@@ -89,7 +89,7 @@ _VARIANT_ROWS = {
         "family": "image",
         "filename_extension": "bmp",
         "content_media_type": "image/bmp",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "complexity_measure": "pixels",
         "counting_rule": "decoded-width-times-height",
@@ -100,7 +100,7 @@ _VARIANT_ROWS = {
         "family": "image",
         "filename_extension": "jpg",
         "content_media_type": "image/jpeg",
-        "expected_kcs_path_media_type": "image/jpeg",
+        "expected_kio_path_media_type": "image/jpeg",
         "expected_offline_disposition": "awaiting_ocr",
         "complexity_measure": "pixels",
         "counting_rule": "decoded-width-times-height",
@@ -111,7 +111,7 @@ _VARIANT_ROWS = {
         "family": "media",
         "filename_extension": "mid",
         "content_media_type": "audio/midi",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "complexity_measure": "frames-or-events",
         "counting_rule": "note-on-channel-events-excluding-end-of-track",
@@ -122,7 +122,7 @@ _VARIANT_ROWS = {
         "family": "image",
         "filename_extension": "png",
         "content_media_type": "image/png",
-        "expected_kcs_path_media_type": "image/png",
+        "expected_kio_path_media_type": "image/png",
         "expected_offline_disposition": "awaiting_ocr",
         "complexity_measure": "pixels",
         "counting_rule": "decoded-width-times-height",
@@ -136,7 +136,7 @@ _VARIANT_ROWS = {
         "family": "image",
         "filename_extension": "tif",
         "content_media_type": "image/tiff",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "complexity_measure": "pixels",
         "counting_rule": "decoded-width-times-height",
@@ -147,7 +147,7 @@ _VARIANT_ROWS = {
         "family": "media",
         "filename_extension": "wav",
         "content_media_type": "audio/wav",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "complexity_measure": "frames-or-events",
         "counting_rule": "mono-pcm-sample-frames",
@@ -179,7 +179,7 @@ class RenderedRawImageMedia:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     width: int
     height: int
@@ -526,7 +526,7 @@ def render_raw_image_media(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         width=request.width,
         height=request.height,
@@ -552,7 +552,7 @@ def _contract_variant_row(variant):
             ),
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -590,7 +590,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -610,7 +610,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "seven-id-free-raw-only-image-media-format-feasibility-variants-"
-            "not-source-materialization-or-kcs-attestation"
+            "not-source-materialization-or-kio-attestation"
         ),
         "payload_identity_policy": {
             "content_digest_embedded": False,

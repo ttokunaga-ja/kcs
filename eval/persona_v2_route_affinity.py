@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     from persona_v2_route_affinity_data import CANDIDATE_ROUTE_SCORE_ROWS
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-route-affinity/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-route-affinity/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-route-affinity-matrix"
 COMPLETION_SCOPE = (

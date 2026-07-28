@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-aggregate-byte-distribution-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-aggregate-byte-distribution-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-aggregate-byte-distribution-catalog"
 MAX_CATALOG_BYTES = 4 * 2**20
@@ -110,19 +110,19 @@ TAIL_CAPABLE_VARIANTS = frozenset(
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-variant-catalog": (
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     "persona-v2-format-implementation-registry": (
         333_881,
-        "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+        "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
     ),
     "persona-v2-formal-source-recipe-profile-catalog": (
         386_152,
-        "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8",
+        "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df",
     ),
     "persona-v2-realism-profile": (
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
 }
 
@@ -134,7 +134,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -145,7 +145,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "renderer_execution_environment_available",
     }
 )
@@ -1001,7 +1001,7 @@ def _canonical_catalog():
         },
         "completion_scope": (
             "exact-aggregate-persona-variant-byte-histograms-only-no-source-"
-            "instances-no-scope-allocation-no-render-write-history-kcs-or-g0"
+            "instances-no-scope-allocation-no-render-write-history-kio-or-g0"
         ),
         "distribution_policy": {
             "anchor_selection_rules": {
@@ -1087,7 +1087,7 @@ def _canonical_catalog():
             "scope-bucket-cohort-quota-solution-and-proof-unbound",
             "w1-w5-history-byte-amplification-and-transient-peak-unbound",
             "actual-filesystem-allocation-cas-index-and-root-capacity-unbound",
-            "physical-render-write-history-kcs-and-g0-authority-absent",
+            "physical-render-write-history-kio-and-g0-authority-absent",
         ],
         "parameter_bin_probe_receipts": probe_receipts,
         "suite_summary": suite,

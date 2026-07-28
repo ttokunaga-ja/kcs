@@ -87,7 +87,7 @@ class PersonaV2FactGraphTests(unittest.TestCase):
                 "filesystem_writer_available",
                 "formal_capacity_gate_satisfied",
                 "history_executor_available",
-                "kcs_execution_available",
+                "kio_execution_available",
                 "query_instances_rendered",
                 "query_spec_hashed",
                 "renderer_available",

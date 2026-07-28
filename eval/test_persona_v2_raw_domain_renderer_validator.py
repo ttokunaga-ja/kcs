@@ -169,7 +169,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
             rendered.data if data is None else data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -260,7 +260,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -311,7 +311,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                 self.assertEqual(row["render_template"], template)
                 self.assertEqual(row["gate_role"], "raw_only")
                 self.assertEqual(
-                    row["expected_kcs_path_media_type"], "application/octet-stream"
+                    row["expected_kio_path_media_type"], "application/octet-stream"
                 )
                 self.assertEqual(
                     row["expected_offline_disposition"], "unsupported_binary"
@@ -325,7 +325,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                 "family",
                 "filename_extension",
                 "content_media_type",
-                "expected_kcs_path_media_type",
+                "expected_kio_path_media_type",
                 "expected_offline_disposition",
                 "gate_role",
             ):
@@ -429,7 +429,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                         receipt["observed_complexity_measure"], exact[6]
                     )
                     self.assertIs(receipt["actual_chunks_attested"], False)
-                    self.assertIs(receipt["kcs_execution_attested"], False)
+                    self.assertIs(receipt["kio_execution_attested"], False)
                     self.assertIs(receipt["structure_validated"], True)
                     self.assertIs(receipt["identity_tokens_absent"], True)
                     if variant == "pcap":
@@ -626,7 +626,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
             replace(valid, data=BytesSubclass(valid.data)),
             replace(valid, extension="PCAP"),
             replace(valid, content_media_type="application/octet-stream"),
-            replace(valid, expected_kcs_path_media_type="application/vnd.tcpdump.pcap"),
+            replace(valid, expected_kio_path_media_type="application/vnd.tcpdump.pcap"),
             replace(valid, expected_offline_disposition="incidental_sniff"),
         ):
             with self.assertRaises(validator.PersonaV2RawDomainValidatorError):

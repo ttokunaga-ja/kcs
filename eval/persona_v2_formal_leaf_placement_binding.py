@@ -6,7 +6,7 @@ per persona.  This candidate joins those two *already frozen* inputs into a
 bounded external canonical LF-JSONL body of 1,200 planned leaf roots.
 
 It deliberately does not make directories, register scopes, write files,
-execute KCS, attach history, or issue a G0 decision.  In particular,
+execute KIO, attach history, or issue a G0 decision.  In particular,
 ``direct_child_only`` is a writer-side placement rule, not a claim that any
 filesystem entry has been observed.
 """
@@ -30,12 +30,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-formal-leaf-placement-binding/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-formal-leaf-placement-binding/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-non-authorizing-formal-leaf-placement-binding-candidate"
 ARTIFACT_ID = "persona-pc-v2-formal-leaf-placement-binding-v1"
 BODY_ID = "persona-pc-v2-formal-leaf-placement-rows-v1"
-ROW_SCHEMA = "kcs.persona.pc-formal-leaf-placement-row/v1"
+ROW_SCHEMA = "kio.persona.pc-formal-leaf-placement-row/v1"
 BODY_FRAMING = "canonical-lf-jsonl/v1"
 BODY_ENCODING = "canonical-json-per-row-utf8-nfc-lf"
 
@@ -57,13 +57,13 @@ REPLAY_IDS = (
 # These exact dependency pins are a binding to static contracts, not a new
 # selection of topology or physical-device policy.
 TOPOLOGY_PIN = (
-    "kcs.persona.pc-topology/v2",
+    "kio.persona.pc-topology/v2",
     2,
     134_195,
-    "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+    "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
 )
 COMPOSITOR_PIN = (
-    "kcs.persona.pc-device-lane-compositor/v1",
+    "kio.persona.pc-device-lane-compositor/v1",
     1,
     41_099,
     "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf",
@@ -71,7 +71,7 @@ COMPOSITOR_PIN = (
 
 # Frozen content-only receipts for the independently regenerated body.  The
 # descriptor pin below is computed after its freeze-status claim is set true;
-# neither pin grants filesystem, KCS, history, or G0 authority.
+# neither pin grants filesystem, KIO, history, or G0 authority.
 EXPECTED_BODY_BYTES = 889_056
 EXPECTED_BODY_SHA256 = "98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e"
 EXPECTED_CANONICAL_BYTES = 27_117
@@ -106,7 +106,7 @@ AUTHORITY_FIELDS = (
     "authorizes_filesystem_materialization",
     "authorizes_g0_freeze",
     "authorizes_history_execution",
-    "authorizes_kcs_execution",
+    "authorizes_kio_execution",
     "authorizes_physical_write",
     "authorizes_registry_creation",
     "authorizes_scope_registration",
@@ -737,7 +737,7 @@ def require_authorized_formal_leaf_placement_binding():
 
     _fail(
         "formal-leaf placement is non-authorizing: source plan, writer, capacity, "
-        "scope registration, filesystem readback, KCS, history, and G0 issuance "
+        "scope registration, filesystem readback, KIO, history, and G0 issuance "
         "remain absent"
     )
 

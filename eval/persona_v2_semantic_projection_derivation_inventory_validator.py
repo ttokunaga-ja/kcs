@@ -38,12 +38,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_membership_package_validator as source_semantic_validator
 
 
-SUITE_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+SUITE_SCHEMA = "kio.persona.pc-semantic-projection-derivation-inventory/v1"
 SUITE_KIND = "persona-pc-v2-semantic-projection-derivation-inventory"
 ARTIFACT_SCHEMA_VERSION = 1
 
 BASE_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-base-source-content-context-shard-projection/v1"
+    "kio.persona.pc-base-source-content-context-shard-projection/v1"
 )
 BASE_PROJECTION_KIND = (
     "persona-pc-v2-base-source-content-context-shard-projection"
@@ -109,7 +109,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -122,7 +122,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -1132,7 +1132,7 @@ def _receipt(
         },
         "receipt_id": receipt_id,
         "row_kind": "semantic-projection-derivation-receipt",
-        "row_schema": "kcs.persona.pc-semantic-projection-derivation-receipt/v1",
+        "row_schema": "kio.persona.pc-semantic-projection-derivation-receipt/v1",
         "validation": {
             "independent_derivation_validation_required": True,
             "projection_pin_matches_external_body": True,
@@ -1576,7 +1576,7 @@ EXPECTED_REMAINING_BLOCKERS = [
     "corpus-semantic-namespace-not-issued",
     "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
     "joint-solver-solution-proof-and-final-source-plan-not-built",
-    "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+    "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
 ]
 
 
@@ -1627,7 +1627,7 @@ def _prevalidate_receipts(receipts):
             _fail("projection derivation receipt class/order drifted")
         if receipt.get("row_kind") != "semantic-projection-derivation-receipt" or receipt.get(
             "row_schema"
-        ) != "kcs.persona.pc-semantic-projection-derivation-receipt/v1":
+        ) != "kio.persona.pc-semantic-projection-derivation-receipt/v1":
             _fail("projection derivation receipt row identity drifted")
         receipt_id = receipt.get("receipt_id")
         if type(receipt_id) is not str or not receipt_id:

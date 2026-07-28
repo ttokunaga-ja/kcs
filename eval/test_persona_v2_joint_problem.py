@@ -11,9 +11,9 @@ from eval import persona_v2_joint_problem as problem
 from eval import persona_v2_topology as topology
 
 
-EXPECTED_ENVELOPE_SHA256 = "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
-EXPECTED_TOPOLOGY_SHA256 = "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
-EXPECTED_PROBLEM_SHA256 = "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074"
+EXPECTED_ENVELOPE_SHA256 = "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7"
+EXPECTED_TOPOLOGY_SHA256 = "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a"
+EXPECTED_PROBLEM_SHA256 = "f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207"
 EXPECTED_PROBLEM_BYTES = 744_137
 
 
@@ -32,13 +32,13 @@ class PersonaV2JointProblemTests(unittest.TestCase):
 
     def test_identity_bindings_and_negative_authority_are_exact(self):
         value = self.value
-        self.assertEqual(value["artifact_schema"], "kcs.persona.pc-joint-problem/v2")
+        self.assertEqual(value["artifact_schema"], "kio.persona.pc-joint-problem/v2")
         self.assertEqual(value["artifact_schema_version"], 2)
         self.assertEqual(
             value["artifact_kind"],
             "persona-pc-v2-joint-allocation-problem",
         )
-        self.assertEqual(value["fixture_id"], "kcs-persona-pc-v2")
+        self.assertEqual(value["fixture_id"], "kio-persona-pc-v2")
         self.assertEqual(value["fixture_schema_version"], 2)
         self.assertEqual(value["envelope_contract_sha256"], EXPECTED_ENVELOPE_SHA256)
         self.assertEqual(value["topology_contract_sha256"], EXPECTED_TOPOLOGY_SHA256)

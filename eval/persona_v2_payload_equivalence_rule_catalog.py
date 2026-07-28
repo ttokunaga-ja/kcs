@@ -9,7 +9,7 @@ instance rows, query material, execution state, or observations.
 
 This is still a planning artifact.  It does not attest rendered bytes, issue a
 semantic namespace, authorize identifiers, solve placement, write files, run
-KCS, compile history, or freeze G0.
+KIO, compile history, or freeze G0.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA_VERSION = 1
-ARTIFACT_SCHEMA = "kcs.persona.pc-payload-equivalence-rule-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-payload-equivalence-rule-catalog/v1"
 ARTIFACT_KIND = "persona-pc-v2-payload-equivalence-rule-catalog"
-PROJECTION_SCHEMA = "kcs.persona.pc-payload-equivalence-rules-projection/v1"
+PROJECTION_SCHEMA = "kio.persona.pc-payload-equivalence-rules-projection/v1"
 PROJECTION_KIND = "persona-pc-v2-payload-equivalence-rules-projection"
 PROJECTION_CLASS_ID = "payload-equivalence-rules"
 BODY_FRAMING = "canonical-json"
@@ -67,7 +67,7 @@ OWNER_ORDER = (
 
 OVERLAY_OWNER_BYTES = 71_179
 OVERLAY_OWNER_SHA256 = (
-    "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c"
+    "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23"
 )
 SEMANTIC_OWNER_BYTES = 49_837
 SEMANTIC_OWNER_SHA256 = (
@@ -75,7 +75,7 @@ SEMANTIC_OWNER_SHA256 = (
 )
 CONCRETE_OWNER_BYTES = 51_133
 CONCRETE_OWNER_SHA256 = (
-    "4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a"
+    "129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737"
 )
 PARAMETER_OWNER_BYTES = 72_535
 PARAMETER_OWNER_SHA256 = (
@@ -91,7 +91,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -104,7 +104,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -711,7 +711,7 @@ def _build_catalog_value(records):
         "remaining_blockers": [
             "rendered-raw-and-decoded-payload-byte-attestation",
             "semantic-namespace-and-final-identifier-issuance",
-            "placement-render-write-history-kcs-capacity-and-g0",
+            "placement-render-write-history-kio-capacity-and-g0",
         ],
         "rule_catalog": _rule_catalog(),
         "summary": {

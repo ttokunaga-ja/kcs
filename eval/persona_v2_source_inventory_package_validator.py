@@ -5,7 +5,7 @@ It reconstructs the admissible 203,000-row domain from the frozen layout,
 variant/profile catalogs, and independently checked overlay reservations.  Shard
 bodies are consumed through the bounded canonical-JSONL reader one shard at a
 time; a successful result is evidence about this non-authorizing metadata
-package only and grants no renderer, writer, solver, KCS, history, or G0
+package only and grants no renderer, writer, solver, KIO, history, or G0
 authority.
 """
 
@@ -38,11 +38,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ORIGIN_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-origin-manifest/v2"
+ORIGIN_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-origin-manifest/v2"
 ORIGIN_ARTIFACT_KIND = "persona-pc-v2-source-inventory-origin-manifest"
-PROFILE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-profile-manifest/v2"
+PROFILE_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-profile-manifest/v2"
 PROFILE_ARTIFACT_KIND = "persona-pc-v2-source-inventory-profile-manifest"
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-source-inventory-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -82,7 +82,7 @@ AUTHORITY_FIELDS = frozenset(
         "actual_chunks_attested",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -92,7 +92,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "history_executor_available",
         "joint_allocation_proved",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_intent_refinement_policy_bound",
     }
 )
@@ -409,7 +409,7 @@ SUITE_REMAINING_BLOCKERS = [
     "concrete-overlay-membership-shards-and-manifests-not-present",
     "source-level-scope-placement-allocation-not-solved",
     "future-complete-persona-package-cap-not-proved",
-    "render-write-chunk-observation-history-and-kcs-execution-not-present",
+    "render-write-chunk-observation-history-and-kio-execution-not-present",
 ]
 SUITE_ORDERS = {
     "origin": list(ORIGIN_ORDER),

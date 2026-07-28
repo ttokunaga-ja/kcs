@@ -440,8 +440,8 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_CORE_EXTENSION_ALLOCATION_FULL") == "1",
-        "set KCS_RUN_CORE_EXTENSION_ALLOCATION_FULL=1 to run the pre-freeze full gate",
+        os.environ.get("KIO_RUN_CORE_EXTENSION_ALLOCATION_FULL") == "1",
+        "set KIO_RUN_CORE_EXTENSION_ALLOCATION_FULL=1 to run the pre-freeze full gate",
     )
     def test_opt_in_descriptor_full_gate(self):
         started = time.monotonic()
@@ -455,8 +455,8 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 120)
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_CORE_EXTENSION_ALLOCATION_COLD") == "1",
-        "set KCS_RUN_CORE_EXTENSION_ALLOCATION_COLD=1 to run two hash-seed cold replays",
+        os.environ.get("KIO_RUN_CORE_EXTENSION_ALLOCATION_COLD") == "1",
+        "set KIO_RUN_CORE_EXTENSION_ALLOCATION_COLD=1 to run two hash-seed cold replays",
     )
     def test_opt_in_two_seed_cold_replay(self):
         root = Path(__file__).resolve().parents[1]

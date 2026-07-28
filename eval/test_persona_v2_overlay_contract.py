@@ -10,43 +10,43 @@ from eval import persona_v2_realism_profile as realism
 
 
 EXPECTED_CANONICAL_BYTES = 71_179
-EXPECTED_SHA256 = "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c"
+EXPECTED_SHA256 = "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23"
 EXPECTED_INPUT_BINDINGS = [
     (
         "envelope",
         "core",
         71_979,
-        "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+        "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
     ),
     (
         "topology",
         "topology",
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     (
         "joint-problem",
         "joint",
         744_137,
-        "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074",
+        "f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207",
     ),
     (
         "joint-solver-policy",
         "solver",
         83_004,
-        "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857",
+        "47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712",
     ),
     (
         "realism-profile",
         "realism",
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
     (
         "variant-catalog",
         "variant",
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
 ]
 
@@ -387,7 +387,7 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
         membership = value["membership_shard_schema"]
         self.assertEqual(
             membership["artifact_schema"],
-            "kcs.persona.pc-overlay-membership-shard/v2",
+            "kio.persona.pc-overlay-membership-shard/v2",
         )
         self.assertEqual(membership["max_rows_per_shard"], 4_096)
         self.assertEqual(membership["max_shard_body_bytes"], 4 * 2**20)
@@ -551,7 +551,7 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
                 "canonical-allocation-solution",
                 "final-source-plan",
                 "planned-eight-axis-ledger",
-                "filesystem-and-KCS-history-execution",
+                "filesystem-and-KIO-history-execution",
                 "root-attestation-and-history-execution-receipt",
                 "observed-eight-axis-ledger",
             ],

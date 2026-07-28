@@ -300,7 +300,7 @@ class PersonaV2FormalLeafPlacementBindingTests(unittest.TestCase):
         planning_digest["planning_digests"]["scope_registry_sha256"] = "0" * 64
         mutations.append(planning_digest)
         registry = self.fresh()
-        registry["registry_summaries"][0]["registry_root"] = "formal-replay-01/devices/p02-forged/.kcs-eval-device"
+        registry["registry_summaries"][0]["registry_root"] = "formal-replay-01/devices/p02-forged/.kio-eval-device"
         mutations.append(registry)
         extra = self.fresh()
         extra["writer_receipt"] = {}

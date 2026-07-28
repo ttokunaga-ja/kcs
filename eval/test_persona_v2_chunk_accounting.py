@@ -397,7 +397,7 @@ class PersonaV2ChunkAccountingTests(unittest.TestCase):
         )
         self._assert_rehashed_semantic_rejection(
             lambda value: value["authority"].__setitem__(
-                "authorizes_kcs_execution", True
+                "authorizes_kio_execution", True
             )
         )
 

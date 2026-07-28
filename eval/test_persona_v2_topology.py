@@ -7,7 +7,7 @@ from eval import persona_v2_contract as envelope
 from eval import persona_v2_topology as topology
 
 
-EXPECTED_TOPOLOGY_SHA256 = "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
+EXPECTED_TOPOLOGY_SHA256 = "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a"
 
 
 def _independent_hamilton(total, weights):
@@ -30,10 +30,10 @@ class PersonaV2TopologyTests(unittest.TestCase):
 
     def test_identity_counts_and_negative_authority_are_exact(self):
         value = self.contract
-        self.assertEqual(value["artifact_schema"], "kcs.persona.pc-topology/v2")
+        self.assertEqual(value["artifact_schema"], "kio.persona.pc-topology/v2")
         self.assertEqual(value["artifact_schema_version"], 2)
         self.assertEqual(value["artifact_kind"], "persona-pc-v2-topology")
-        self.assertEqual(value["fixture_id"], "kcs-persona-pc-v2")
+        self.assertEqual(value["fixture_id"], "kio-persona-pc-v2")
         self.assertEqual(value["fixture_schema_version"], 2)
         self.assertEqual(value["envelope_contract_sha256"], envelope.envelope_contract_sha256())
         self.assertTrue(value["topology_complete"])

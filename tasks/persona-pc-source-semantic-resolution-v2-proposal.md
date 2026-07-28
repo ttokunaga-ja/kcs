@@ -62,7 +62,7 @@ successor が必須であり、現行 namespace v3 や complete inventory v2 を
 | `authorizes_physical_write` | `false` |
 | `authorizes_render_or_materialization` | `false` |
 | `authorizes_history_mutation` | `false` |
-| `authorizes_kcs_execution` | `false` |
+| `authorizes_kio_execution` | `false` |
 | `authorizes_query_rendering` | `false` |
 | `authorizes_evaluation_execution` | `false` |
 
@@ -683,22 +683,22 @@ binding 名、artifact schema/version、canonical bytes、full SHA-256 の組で
 
 | binding | artifact schema | ver | bytes | SHA-256 |
 | --- | --- | ---: | ---: | --- |
-| `persona-v2-source-inventory-layout` | `kcs.persona.pc-source-inventory-layout/v2` | 2 | 274,566 | `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba` |
-| `persona-v2-source-inventory-suite` | `kcs.persona.pc-source-inventory-suite/v2` | 2 | 45,887 | `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706` |
-| `persona-v2-overlay-reservation-suite` | `kcs.persona.pc-overlay-reservation-suite/v2` | 2 | 21,680 | `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d` |
-| `persona-v2-source-instance-parameter-assignment-suite` | `kcs.persona.pc-source-instance-parameter-assignment-suite/v2` | 2 | 72,535 | `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a` |
-| `persona-v2-format-implementation-registry` | `kcs.persona.pc-format-implementation-registry/v2` | 2 | 333,881 | `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683` |
-| `persona-v2-formal-source-recipe-profile-catalog` | `kcs.persona.pc-formal-source-recipe-profile-catalog/v2` | 2 | 386,152 | `973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8` |
-| `persona-v2-source-semantic-membership-catalog` | `kcs.persona.pc-source-semantic-membership-catalog/v2` | 2 | 436,495 | `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62` |
-| `persona-v2-source-semantic-membership-suite` | `kcs.persona.pc-source-semantic-membership-suite/v2` | 2 | 49,837 | `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28` |
-| `persona-v2-lifecycle-demand` | `kcs.persona.pc-lifecycle-demand/v2` | 2 | 463,571 | `32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080` |
-| `persona-v2-lifecycle-coverage-catalog` | `kcs.persona.pc-lifecycle-coverage-catalog/v1` | 1 | 1,385,596 | `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236` |
-| `persona-v2-source-matched-lifecycle-suite` | `kcs.persona.pc-source-matched-lifecycle-suite/v1` | 1 | 14,605 | `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8` |
-| `lifecycle-effective-membership-reconciliation-v1` | `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1` | 1 | 69,195 | `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c` |
-| `query-history-target-resolution-v1` | `kcs.persona.pc-query-history-target-resolution/v1` | 1 | 4,478,576 | `4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc` |
-| `query-history-semantic-resolution-feasibility-audit` | `kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136` |
-| `complete-semantic-projection-inventory-v2` | `kcs.persona.pc-semantic-projection-derivation-inventory/v2` | 2 | 697,466 | `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69` |
-| `corpus-semantic-namespace-v3` | `kcs.persona.pc-corpus-semantic-namespace/v3` | 3 | 161,665 | `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509` |
+| `persona-v2-source-inventory-layout` | `kio.persona.pc-source-inventory-layout/v2` | 2 | 274,566 | `81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a` |
+| `persona-v2-source-inventory-suite` | `kio.persona.pc-source-inventory-suite/v2` | 2 | 45,887 | `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3` |
+| `persona-v2-overlay-reservation-suite` | `kio.persona.pc-overlay-reservation-suite/v2` | 2 | 21,680 | `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d` |
+| `persona-v2-source-instance-parameter-assignment-suite` | `kio.persona.pc-source-instance-parameter-assignment-suite/v2` | 2 | 72,535 | `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a` |
+| `persona-v2-format-implementation-registry` | `kio.persona.pc-format-implementation-registry/v2` | 2 | 333,881 | `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d` |
+| `persona-v2-formal-source-recipe-profile-catalog` | `kio.persona.pc-formal-source-recipe-profile-catalog/v2` | 2 | 386,152 | `0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df` |
+| `persona-v2-source-semantic-membership-catalog` | `kio.persona.pc-source-semantic-membership-catalog/v2` | 2 | 436,495 | `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b` |
+| `persona-v2-source-semantic-membership-suite` | `kio.persona.pc-source-semantic-membership-suite/v2` | 2 | 49,837 | `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28` |
+| `persona-v2-lifecycle-demand` | `kio.persona.pc-lifecycle-demand/v2` | 2 | 463,571 | `372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005` |
+| `persona-v2-lifecycle-coverage-catalog` | `kio.persona.pc-lifecycle-coverage-catalog/v1` | 1 | 1,385,596 | `1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4` |
+| `persona-v2-source-matched-lifecycle-suite` | `kio.persona.pc-source-matched-lifecycle-suite/v1` | 1 | 14,605 | `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8` |
+| `lifecycle-effective-membership-reconciliation-v1` | `kio.persona.pc-lifecycle-effective-membership-reconciliation/v1` | 1 | 69,195 | `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c` |
+| `query-history-target-resolution-v1` | `kio.persona.pc-query-history-target-resolution/v1` | 1 | 4,478,576 | `fbb0fd1a78d034fcd1777a6aaf0e7ee9bc21d07255f2ce9c7d5fc9761dc11593` |
+| `query-history-semantic-resolution-feasibility-audit` | `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136` |
+| `complete-semantic-projection-inventory-v2` | `kio.persona.pc-semantic-projection-derivation-inventory/v2` | 2 | 697,466 | `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69` |
+| `corpus-semantic-namespace-v3` | `kio.persona.pc-corpus-semantic-namespace/v3` | 3 | 161,665 | `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509` |
 
 `query-history-target-resolution-v1` は frozen baseline input にすぎない。feasibility audit 自身が
 `query-history-target-resolution-v2-not-issued` を記録しているため、v1 pin を v2 artifact として

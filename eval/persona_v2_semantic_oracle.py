@@ -5,7 +5,7 @@ intent key, exact typed fact/revision target, and required evidence state.  It
 contains no solved source, materialization, chunk, raw, normalized-section,
 path, rank, score, or latency identity.  History references are abstract event
 *template* keys only.  A later compiler must join fact membership, history
-intent, the solved source plan, rendered outputs, and KCS receipts before this
+intent, the solved source plan, rendered outputs, and KIO receipts before this
 can become formal relevance.
 
 Consequently this artifact is root-independent and non-authorizing.  It is an
@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_query_intent as query_intent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-semantic-oracle/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-semantic-oracle/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-semantic-oracle"
 MAX_SEMANTIC_ORACLE_BYTES = 1536 * 1024
@@ -376,7 +376,7 @@ def _negative_oracle_row(query_row, graph):
         "abstract_answer_membership": [],
         "evidence_contract": {
             "evaluation_checkpoint": query_row["evaluation_checkpoint"],
-            "evidence_kind": "purged-absent-from-all-kcs-managed-history",
+            "evidence_kind": "purged-absent-from-all-kio-managed-history",
             "former_semantic_fact_ids": [former_fact["fact_id"]],
             "post_purge_noop_indexes_required": True,
             "purge_event_template_key": _event_template_key(query_row, "purge"),

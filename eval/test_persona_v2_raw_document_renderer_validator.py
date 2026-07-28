@@ -150,7 +150,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -163,7 +163,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         return rendered, validator.validate_raw_document_payload(request)
@@ -269,7 +269,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -315,7 +315,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 self.assertEqual(row["raw_byte_formula"], expected_formula)
                 self.assertEqual(row["filename_extension"], extension)
                 self.assertEqual(row["content_media_type"], content_mime)
-                self.assertEqual(row["expected_kcs_path_media_type"], path_mime)
+                self.assertEqual(row["expected_kio_path_media_type"], path_mime)
                 self.assertEqual(row["expected_offline_disposition"], disposition)
                 self.assertEqual(row["family"], family)
                 self.assertEqual(row["render_template"], template)
@@ -329,7 +329,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 "family",
                 "filename_extension",
                 "content_media_type",
-                "expected_kcs_path_media_type",
+                "expected_kio_path_media_type",
                 "expected_offline_disposition",
                 "gate_role",
             ):
@@ -439,7 +439,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                             "byte_length": expected_bytes,
                             "container_member_count": expected_members,
                             "identity_tokens_absent": True,
-                            "kcs_execution_attested": False,
+                            "kio_execution_attested": False,
                             "observed_complexity_measure": measure,
                             "observed_local_complexity": complexity,
                             "pdf_text_layer_absent": variant == "pdf-scan",
@@ -634,7 +634,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 valid.data,
                 valid.extension,
                 valid.content_media_type,
-                valid.expected_kcs_path_media_type,
+                valid.expected_kio_path_media_type,
                 valid.expected_offline_disposition,
             ),
             replace(valid, schema_version=True),
@@ -642,7 +642,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             replace(valid, data=BytesSubclass(valid.data)),
             replace(valid, extension="DOCX"),
             replace(valid, content_media_type="application/zip"),
-            replace(valid, expected_kcs_path_media_type="application/octet-stream"),
+            replace(valid, expected_kio_path_media_type="application/octet-stream"),
             replace(valid, expected_offline_disposition="unsupported_binary"),
             replace(valid, target_complexity=2),
         ):
@@ -869,7 +869,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(historical_catalog.canonical_json_bytes(historical)), 72_559)
         self.assertEqual(
             historical_catalog.source_profile_catalog_sha256(historical),
-            "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac",
+            "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d",
         )
         self.assertEqual(historical["coverage"]["ready_variant_count"], 10)
         self.assertEqual(historical["coverage"]["not_ready_variant_count"], 61)

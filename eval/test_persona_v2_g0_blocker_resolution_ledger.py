@@ -447,7 +447,7 @@ class PersonaV2G0BlockerResolutionLedgerTests(unittest.TestCase):
         shared_path = [token] * validator.MAX_FIELD_PATH_DEPTH
         resolver_pin = {
             "artifact_kind": "bounded-test-resolver",
-            "artifact_schema": "kcs.persona.test-resolver/v1",
+            "artifact_schema": "kio.persona.test-resolver/v1",
             "artifact_schema_version": 1,
             "body_framing": validator.BODY_FRAMING,
             "canonical_bytes": 1,

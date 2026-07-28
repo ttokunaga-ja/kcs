@@ -55,28 +55,28 @@ EXPECTED_DIRECT_FRAGMENT_PINS = {
 EXPECTED_OWNER_PINS = {
     "full-topology-owner-pin": (
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     "full-realism-owner-pin": (
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
     "full-route-owner-pin": (
         70_626,
-        "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+        "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
     ),
 }
 EXPECTED_SCHEMAS = {
     "topology-path-load": (
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
         "persona-pc-v2-topology-path-load-content-projection",
     ),
     "realism-locale-security": (
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
         "persona-pc-v2-realism-locale-security-content-projection",
     ),
     "route-scores": (
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
         "persona-pc-v2-route-scores-content-projection",
     ),
 }
@@ -135,7 +135,7 @@ class PersonaV2SemanticProjectionGlobalContentTests(unittest.TestCase):
                 self.assertEqual(value["artifact_schema"], schema)
                 self.assertEqual(value["artifact_kind"], kind)
                 self.assertEqual(value["artifact_schema_version"], 1)
-                self.assertEqual(value["fixture_id"], "kcs-persona-pc-v2")
+                self.assertEqual(value["fixture_id"], "kio-persona-pc-v2")
                 self.assertEqual(value["fixture_schema_version"], 2)
                 self.assertEqual(set(value), package.TOP_LEVEL_FIELDS)
                 raw = package.canonical_json_bytes(value)

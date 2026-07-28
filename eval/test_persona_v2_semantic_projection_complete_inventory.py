@@ -57,7 +57,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -70,7 +70,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -249,11 +249,11 @@ class SemanticProjectionCompleteInventoryContractTest(unittest.TestCase):
     def test_exact_public_contract_and_independent_module_boundary(self):
         self.assertEqual(
             package.SUITE_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-inventory/v2",
+            "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         )
         self.assertEqual(
             package.RECEIPT_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-receipt/v2",
+            "kio.persona.pc-semantic-projection-derivation-receipt/v2",
         )
         self.assertEqual(tuple(package.PROJECTION_CLASS_ORDER), EXPECTED_CLASS_ORDER)
         self.assertEqual(tuple(independent.PROJECTION_CLASS_ORDER), EXPECTED_CLASS_ORDER)
@@ -311,7 +311,7 @@ class SemanticProjectionCompleteInventoryContractTest(unittest.TestCase):
             independent._partial_v1_receipt(v2_receipt),
             {
                 "row_schema": (
-                    "kcs.persona.pc-semantic-projection-derivation-receipt/v1"
+                    "kio.persona.pc-semantic-projection-derivation-receipt/v1"
                 )
             },
         )

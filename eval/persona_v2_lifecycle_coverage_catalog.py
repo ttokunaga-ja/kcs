@@ -10,7 +10,7 @@ It owns exactly 105 primary logical-document capabilities per persona, ten
 cross-format companion requirements, fifteen purge-only witness requirements,
 the five-source pre-W2 move receipt policy, and symbolic lifecycle algebra.
 Concrete intent keys, scope, path, quota, source/materialization/event IDs,
-observations, rendering, mutation, KCS execution, and G0 authority remain
+observations, rendering, mutation, KIO execution, and G0 authority remain
 strictly downstream and absent.
 """
 
@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_membership_package as source_semantic
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-lifecycle-coverage-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-lifecycle-coverage-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-lifecycle-coverage-catalog"
 MAX_CATALOG_BYTES = 4 * 2**20
@@ -50,23 +50,23 @@ WAVE_ORDER = ("W1", "W2", "W3", "W4", "W5-pre-purge", "W5-final")
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-envelope": (
         71_979,
-        "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+        "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
     ),
     "persona-v2-chunk-accounting": (
         19_801,
-        "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2",
+        "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52",
     ),
     "persona-v2-lifecycle-demand": (
         463_571,
-        "32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080",
+        "372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005",
     ),
     "persona-v2-overlay-contract": (
         71_179,
-        "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c",
+        "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23",
     ),
     "persona-v2-source-semantic-membership-catalog": (
         436_495,
-        "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62",
+        "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b",
     ),
 }
 
@@ -79,7 +79,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_rendering",
         "authorizes_renderer_execution",
@@ -91,7 +91,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_instance_matching_complete",
     }
 )
@@ -960,7 +960,7 @@ def _canonical_catalog(*, dependency_observer=None):
                 "scope-bucket-cohort-quota-solution-and-proof-not-built",
                 "solution-compiled-history-plan-and-pre-w2-patch-not-built",
                 "evaluation-target-resolution-query-render-and-compiled-relevance-not-built",
-                "filesystem-render-index-history-kcs-receipts-and-g0-not-built",
+                "filesystem-render-index-history-kio-receipts-and-g0-not-built",
             ],
             "scope_relation_rules": _scope_relation_rules(),
             "source_matching_domain": {

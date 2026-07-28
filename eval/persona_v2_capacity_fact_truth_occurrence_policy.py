@@ -30,10 +30,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_capacity_fact_truth_occurrence_policy_validator as independent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-capacity-fact-truth-occurrence-policy/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-capacity-fact-truth-occurrence-policy/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-capacity-fact-truth-occurrence-policy-candidate"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -47,7 +47,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Frozen after corrected full and two-seed cold gates; this pin grants no authority.
 EXPECTED_CANONICAL_BYTES = 29_868
-EXPECTED_SHA256 = "9f9653c1bb7a794bea33fe208b1de3c63f8dc011b8ac13f2d9a6955333681cd4"
+EXPECTED_SHA256 = "d0affa86583286cbf2eb466f807b3998c6be0d77dff7e541f91dca2c46271b11"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 CHECKPOINT_ORDER = (
@@ -91,15 +91,15 @@ EXPECTED_INTENTIONAL_DIVERGENCE_COUNT = 10_032
 EXPECTED_NEUTRAL_REQUIRED_COUNT = 1_672
 EXPECTED_FUTURE_BEFORE_INTRODUCTION_COUNT = 0
 
-POLICY_ROW_DOMAIN_LABEL = "kcs/persona-pc-v2/capacity-fact-truth-occurrence-policy-row/v1"
+POLICY_ROW_DOMAIN_LABEL = "kio/persona-pc-v2/capacity-fact-truth-occurrence-policy-row/v1"
 POLICY_ROW_LOGICAL_KEY_FIELDS = ("persona_id", "topic_id", "fact_id")
 
 CAPACITY_AXIS_PIN = (
     "persona-pc-v2-source-semantic-capacity-axis-catalog-candidate",
-    "kcs.persona.pc-source-semantic-capacity-axis-catalog/v1",
+    "kio.persona.pc-source-semantic-capacity-axis-catalog/v1",
     1,
     50_473,
-    "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29",
+    "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85",
 )
 
 FACT_GRAPH_PINS = (
@@ -130,7 +130,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_artifact_issuance",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_issuance",
         "authorizes_physical_write",
         "authorizes_policy_acceptance",
@@ -325,7 +325,7 @@ def _authenticated_fact_graph_raws():
         raw = fact_graph.canonical_json_bytes(value)
         if (
             value.get("artifact_kind") != "persona-pc-v2-fact-graph"
-            or value.get("artifact_schema") != "kcs.persona.pc-fact-graph/v2"
+            or value.get("artifact_schema") != "kio.persona.pc-fact-graph/v2"
             or value.get("persona_id") != persona_id
             or len(raw) != expected_bytes
             or _sha256(raw) != expected_sha
@@ -665,7 +665,7 @@ def _canonical_state_raw():
         input_bindings.append(
             {
                 "artifact_kind": "persona-pc-v2-fact-graph",
-                "artifact_schema": "kcs.persona.pc-fact-graph/v2",
+                "artifact_schema": "kio.persona.pc-fact-graph/v2",
                 "artifact_schema_version": 2,
                 "body_opened_for_policy_derivation": True,
                 "canonical_bytes": graph_bytes,

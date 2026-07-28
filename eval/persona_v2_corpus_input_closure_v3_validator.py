@@ -9,7 +9,7 @@ machine without performing the long all-253 replay.
 
 The accepted body remains non-authorizing: a review request is not a positive
 review receipt, the bound blocker ledger is an incomplete three-source
-bootstrap, and no solver, identifier, renderer, filesystem, history, KCS, or
+bootstrap, and no solver, identifier, renderer, filesystem, history, KIO, or
 G0 capability is granted.
 """
 
@@ -33,12 +33,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_review_request_catalog_validator as review_validator
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-corpus-input-closure-manifest/v3"
+ARTIFACT_SCHEMA = "kio.persona.pc-corpus-input-closure-manifest/v3"
 ARTIFACT_KIND = (
     "persona-pc-v2-corpus-input-closure-manifest-request-only-candidate"
 )
 ARTIFACT_SCHEMA_VERSION = 3
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 HYPOTHESIS_STATUS = (
     "authored-benchmark-request-only-corpus-input-closure-candidate-"
@@ -82,7 +82,7 @@ DEPENDENCY_SPECS = {
             "artifact_kind": (
                 "persona-pc-v2-projection-pin-corpus-semantic-namespace"
             ),
-            "artifact_schema": "kcs.persona.pc-corpus-semantic-namespace/v3",
+            "artifact_schema": "kio.persona.pc-corpus-semantic-namespace/v3",
             "artifact_schema_version": 3,
             "body_framing": "canonical-json",
             "canonical_bytes": 161_665,
@@ -100,7 +100,7 @@ DEPENDENCY_SPECS = {
                 "persona-pc-v2-complete-semantic-projection-derivation-inventory"
             ),
             "artifact_schema": (
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v2"
             ),
             "artifact_schema_version": 2,
             "body_framing": "canonical-json",
@@ -118,12 +118,12 @@ DEPENDENCY_SPECS = {
             "artifact_kind": (
                 "persona-pc-v2-non-authorizing-review-request-catalog"
             ),
-            "artifact_schema": "kcs.persona.pc-review-request-catalog/v1",
+            "artifact_schema": "kio.persona.pc-review-request-catalog/v1",
             "artifact_schema_version": 1,
             "body_framing": "canonical-json",
             "canonical_bytes": 42_931,
             "sha256": (
-                "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab"
+                "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd"
             ),
         },
     },
@@ -136,7 +136,7 @@ DEPENDENCY_SPECS = {
                 "persona-pc-v2-g0-blocker-resolution-ledger-candidate"
             ),
             "artifact_schema": (
-                "kcs.persona.pc-g0-blocker-resolution-ledger/v2"
+                "kio.persona.pc-g0-blocker-resolution-ledger/v2"
             ),
             "artifact_schema_version": 2,
             "body_framing": "canonical-json",
@@ -158,7 +158,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_positive_review_receipt",
@@ -173,7 +173,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",

@@ -103,7 +103,7 @@ class PersonaV2EvaluationTargetResolutionClosureSliceTests(unittest.TestCase):
             (pins[2]["canonical_bytes"], pins[2]["sha256"]),
             (
                 4_478_576,
-                "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+                "fbb0fd1a78d034fcd1777a6aaf0e7ee9bc21d07255f2ce9c7d5fc9761dc11593",
             ),
         )
         self.assertEqual(
@@ -1000,8 +1000,8 @@ class PersonaV2EvaluationTargetResolutionClosureSliceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_EVALUATION_CLOSURE_SLICE_FULL") == "1",
-    "set KCS_RUN_EVALUATION_CLOSURE_SLICE_FULL=1 for all-dependency validation",
+    os.environ.get("KIO_RUN_EVALUATION_CLOSURE_SLICE_FULL") == "1",
+    "set KIO_RUN_EVALUATION_CLOSURE_SLICE_FULL=1 for all-dependency validation",
 )
 class PersonaV2EvaluationTargetResolutionClosureSliceFullTest(unittest.TestCase):
     def test_full_dependency_acceptance(self):
@@ -1119,8 +1119,8 @@ class PersonaV2EvaluationTargetResolutionClosureSliceFullTest(unittest.TestCase)
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_EVALUATION_CLOSURE_SLICE_COLD") == "1",
-    "set KCS_RUN_EVALUATION_CLOSURE_SLICE_COLD=1 for two isolated full builds",
+    os.environ.get("KIO_RUN_EVALUATION_CLOSURE_SLICE_COLD") == "1",
+    "set KIO_RUN_EVALUATION_CLOSURE_SLICE_COLD=1 for two isolated full builds",
 )
 class PersonaV2EvaluationTargetResolutionClosureSliceColdTest(unittest.TestCase):
     def test_two_hashseed_full_builds_are_byte_identical(self):
@@ -1243,7 +1243,7 @@ print(json.dumps({
                     "TZ": "UTC",
                 }
             )
-            environment.pop("KCS_RUN_EVALUATION_CLOSURE_SLICE_COLD", None)
+            environment.pop("KIO_RUN_EVALUATION_CLOSURE_SLICE_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

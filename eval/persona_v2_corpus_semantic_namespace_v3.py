@@ -8,7 +8,7 @@ blocker ledger, or an inventory descriptor pin.
 
 The module is non-authorizing.  In particular, producing or validating this
 candidate does not issue an authoritative source namespace and does not permit
-solver, identifier, rendering, filesystem, history, KCS, capacity, or G0 work.
+solver, identifier, rendering, filesystem, history, KIO, capacity, or G0 work.
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA_VERSION = 3
-NAMESPACE_SCHEMA = "kcs.persona.pc-corpus-semantic-namespace/v3"
+NAMESPACE_SCHEMA = "kio.persona.pc-corpus-semantic-namespace/v3"
 NAMESPACE_KIND = "persona-pc-v2-projection-pin-corpus-semantic-namespace"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 PROJECTION_CLASS_ORDER = (
@@ -79,56 +79,56 @@ EXPECTED_JSONL_PROJECTION_COUNT = 186
 EXPECTED_PROJECTION_IDENTITIES = {
     "topology-path-load": (
         "persona-pc-v2-topology-path-load-content-projection",
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
     ),
     "realism-locale-security": (
         "persona-pc-v2-realism-locale-security-content-projection",
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
     ),
     "route-scores": (
         "persona-pc-v2-route-scores-content-projection",
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
     ),
     "primary-use-case-corpus-half": (
         "persona-pc-v2-primary-use-case-corpus-content-projection",
-        "kcs.persona.pc-primary-use-case-corpus-content-projection/v1",
+        "kio.persona.pc-primary-use-case-corpus-content-projection/v1",
     ),
     "recipe-content-filename-policy": (
         "persona-pc-v2-recipe-content-filename-policy-content-projection",
-        "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1",
+        "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
     ),
     "fact-graph": (
         "persona-pc-v2-fact-graph-content-projection",
-        "kcs.persona.pc-fact-graph-content-projection/v1",
+        "kio.persona.pc-fact-graph-content-projection/v1",
     ),
     "base-source-content-context": (
         "persona-pc-v2-base-source-content-context-shard-projection",
-        "kcs.persona.pc-base-source-content-context-shard-projection/v1",
+        "kio.persona.pc-base-source-content-context-shard-projection/v1",
     ),
     "effective-source-membership": (
         "persona-pc-v2-lifecycle-effective-membership-content-projection",
-        "kcs.persona.pc-lifecycle-effective-membership-content-projection/v1",
+        "kio.persona.pc-lifecycle-effective-membership-content-projection/v1",
     ),
     "concrete-overlay-relations": (
         "persona-pc-v2-concrete-overlay-relations-origin-projection",
-        "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1",
+        "kio.persona.pc-concrete-overlay-relations-origin-projection/v1",
     ),
     "query-independent-lifecycle-fact-rendition-rules": (
         "persona-pc-v2-source-matched-lifecycle-content-projection",
-        "kcs.persona.pc-source-matched-lifecycle-content-projection/v1",
+        "kio.persona.pc-source-matched-lifecycle-content-projection/v1",
     ),
     "payload-equivalence-rules": (
         "persona-pc-v2-payload-equivalence-rules-projection",
-        "kcs.persona.pc-payload-equivalence-rules-projection/v1",
+        "kio.persona.pc-payload-equivalence-rules-projection/v1",
     ),
 }
 PARAMETER_CELL_IDENTITY = (
     "persona-pc-v2-source-parameter-cell-content-projection",
-    "kcs.persona.pc-source-parameter-cell-content-projection/v1",
+    "kio.persona.pc-source-parameter-cell-content-projection/v1",
 )
 PARAMETER_ASSIGNMENT_IDENTITY = (
     "persona-pc-v2-source-instance-parameter-assignment-shard-projection",
-    "kcs.persona.pc-source-instance-parameter-assignment-shard-projection/v1",
+    "kio.persona.pc-source-instance-parameter-assignment-shard-projection/v1",
 )
 
 # Frozen only after the final body shape, including its golden-frozen claim,
@@ -153,7 +153,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -166,7 +166,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",

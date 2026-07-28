@@ -18,7 +18,7 @@ from eval import persona_v2_topology as topology
 
 EXPECTED_CANONICAL_BYTES = 30_008
 EXPECTED_SHA256 = (
-    "024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624"
+    "73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed"
 )
 
 

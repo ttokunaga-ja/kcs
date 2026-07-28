@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-tar-gzip-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-tar-gzip-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-tar-gzip-validator"
 VALIDATOR_ID = "persona-v2-id-free-raw-tar-gzip-independent-validator"
@@ -86,7 +86,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -110,14 +110,14 @@ AUTHORITY_FIELDS = (
     "authorizes_final_source_identifiers",
     "authorizes_g0_freeze",
     "authorizes_history_mutation",
-    "authorizes_kcs_execution",
+    "authorizes_kio_execution",
     "authorizes_physical_write",
     "authorizes_renderer_execution",
     "authorizes_source_intents",
     "authorizes_source_plan",
     "filesystem_writer_available",
     "formal_capacity_gate_satisfied",
-    "kcs_execution_attested",
+    "kio_execution_attested",
 )
 
 _PROFILE_COUNTS = {
@@ -163,7 +163,7 @@ class RawTarGzipValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -188,7 +188,7 @@ def _profile(variant):
             "complexity_measure": "members",
             "complexity_minimum": USTAR_MIN_MEMBERS,
             "content_media_type": "application/x-tar",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": "tar",
@@ -211,7 +211,7 @@ def _profile(variant):
             "complexity_measure": "records",
             "complexity_minimum": GZIP_MIN_RECORDS,
             "content_media_type": "application/gzip",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": (
@@ -290,7 +290,7 @@ def validate_request(request):
     exact_metadata = (
         ("extension", "filename_extension"),
         ("content_media_type", "content_media_type"),
-        ("expected_kcs_path_media_type", "expected_kcs_path_media_type"),
+        ("expected_kio_path_media_type", "expected_kio_path_media_type"),
         ("expected_offline_disposition", "expected_offline_disposition"),
     )
     for request_name, profile_name in exact_metadata:
@@ -594,8 +594,8 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": profile[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": profile[
             "expected_offline_disposition"

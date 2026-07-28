@@ -35,10 +35,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_capacity_axis_catalog_validator as independent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-capacity-axis-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-capacity-axis-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-source-semantic-capacity-axis-catalog-candidate"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -52,7 +52,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Frozen after corrected full and two-seed cold gates; this pin grants no authority.
 EXPECTED_CANONICAL_BYTES = 50_473
-EXPECTED_SHA256 = "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29"
+EXPECTED_SHA256 = "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 TOPIC_SLOT_ORDER = ("g01", "g02", "g03", "g04")
@@ -62,7 +62,7 @@ REPLICA_COUNT_PER_FACT_CELL = 11
 EXPECTED_PERSONA_LANGUAGE_PAIR_COUNT = 38
 EXPECTED_CAPACITY_CELL_COUNT = 15_048
 
-CELL_DOMAIN_LABEL = "kcs/persona-pc-v2/source-semantic-capacity-cell/v1"
+CELL_DOMAIN_LABEL = "kio/persona-pc-v2/source-semantic-capacity-cell/v1"
 CELL_LOGICAL_KEY_FIELDS = (
     "persona_id",
     "topic_id",
@@ -74,10 +74,10 @@ CELL_ROW_FIELDS = frozenset(("capacity_cell_id", *CELL_LOGICAL_KEY_FIELDS))
 
 SEMANTIC_CATALOG_PIN = (
     "persona-pc-v2-source-semantic-membership-catalog",
-    "kcs.persona.pc-source-semantic-membership-catalog/v2",
+    "kio.persona.pc-source-semantic-membership-catalog/v2",
     2,
     436_495,
-    "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62",
+    "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b",
 )
 
 # These exact leaf pins are already committed by the frozen semantic catalog.
@@ -112,7 +112,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifier_assignment",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_issuance",
         "authorizes_physical_write",
         "authorizes_query_rendering",

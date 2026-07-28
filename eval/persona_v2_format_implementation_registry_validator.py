@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_text_validator as contributor_validator
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-format-implementation-registry/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-format-implementation-registry/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-format-implementation-registry"
 MAX_REGISTRY_BYTES = 512 * 1024
@@ -47,7 +47,7 @@ MAX_CONTRACT_BYTES = 64 * 1024
 # passed the complete test suite.  These pins cover the body, not a self hash.
 EXPECTED_REGISTRY_CANONICAL_BYTES = 333_881
 EXPECTED_REGISTRY_SHA256 = (
-    "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683"
+    "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d"
 )
 
 AUTHORITY_FIELDS = frozenset(
@@ -57,7 +57,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -69,7 +69,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "renderer_execution_environment_available",
     }
 )
@@ -108,28 +108,28 @@ EXPECTED_INPUT_BINDINGS = (
         "persona-v2-variant-catalog",
         "frozen-71-variant-metadata-and-marginals",
         "persona-pc-v2-variant-catalog",
-        "kcs.persona.pc-variant-catalog/v2",
+        "kio.persona.pc-variant-catalog/v2",
         2,
         211733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     (
         "persona-v2-historical-source-profile-catalog",
         "historical-10-ready-61-missing-status-unchanged",
         "persona-pc-v2-source-profile-catalog",
-        "kcs.persona.pc-source-profile-catalog/v2",
+        "kio.persona.pc-source-profile-catalog/v2",
         2,
         72559,
-        "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac",
+        "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d",
     ),
     (
         "persona-v2-source-inventory-profile-catalog",
         "71-profile-and-reserved-recipe-slot-identity",
         "persona-pc-v2-source-inventory-profile-catalog",
-        "kcs.persona.pc-source-inventory-profile-catalog/v2",
+        "kio.persona.pc-source-inventory-profile-catalog/v2",
         2,
         87391,
-        "be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196",
+        "9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0",
     ),
 )
 
@@ -423,7 +423,7 @@ def _validate_binding_metadata_before_providers(value):
         value["artifact_kind"] != ARTIFACT_KIND
         or value["artifact_schema"] != ARTIFACT_SCHEMA
         or value["artifact_schema_version"] != ARTIFACT_SCHEMA_VERSION
-        or value["fixture_id"] != "kcs-persona-pc-v2"
+        or value["fixture_id"] != "kio-persona-pc-v2"
         or value["fixture_schema_version"] != 2
         or value["g0_contract_frozen"] is not False
     ):
@@ -524,7 +524,7 @@ def _validate_upstream_binding(value, expected, *, label):
         or value.get("artifact_kind") != kind
         or value.get("artifact_schema") != schema
         or value.get("artifact_schema_version") != version
-        or value.get("fixture_id") != "kcs-persona-pc-v2"
+        or value.get("fixture_id") != "kio-persona-pc-v2"
         or value.get("fixture_schema_version") != 2
         or value.get("g0_contract_frozen") is not False
     ):
@@ -743,7 +743,7 @@ def _format_specific_metadata(renderer_row):
     normalized_keys = {
         "complexity",
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -909,7 +909,7 @@ def _direct_bound_runtime_receipt(
         "data": rendered["data"],
         "extension": rendered["extension"],
         "content_media_type": rendered["content_media_type"],
-        "expected_kcs_path_media_type": rendered["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": rendered["expected_kio_path_media_type"],
         "expected_offline_disposition": rendered[
             "expected_offline_disposition"
         ],
@@ -941,7 +941,7 @@ def _recompute_conformance_receipt(
     expected_rendered_keys = {
         "content_media_type",
         "data",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "extension",
         "target_bytes",
@@ -967,8 +967,8 @@ def _recompute_conformance_receipt(
             or rendered["target_complexity"] != expected_complexity
             or rendered["extension"] != renderer_row["filename_extension"]
             or rendered["content_media_type"] != renderer_row["content_media_type"]
-            or rendered["expected_kcs_path_media_type"]
-            != renderer_row["expected_kcs_path_media_type"]
+            or rendered["expected_kio_path_media_type"]
+            != renderer_row["expected_kio_path_media_type"]
             or rendered["expected_offline_disposition"]
             != renderer_row["expected_offline_disposition"]
         ):
@@ -1125,7 +1125,7 @@ def _validate_rows(
 
     exact_metadata = (
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -1135,7 +1135,7 @@ def _validate_rows(
         "compound_suffix_parts",
         "conformance_receipt",
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",

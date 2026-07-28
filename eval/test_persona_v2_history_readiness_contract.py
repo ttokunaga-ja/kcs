@@ -50,7 +50,7 @@ class PersonaV2HistoryReadinessContractTests(unittest.TestCase):
     def test_candidate_identity_pin_and_optional_golden_parity(self):
         self.assertEqual(
             self.value["artifact_schema"],
-            "kcs.persona.pc-history-readiness-contract/v1",
+            "kio.persona.pc-history-readiness-contract/v1",
         )
         self.assertEqual(self.value["artifact_schema_version"], 1)
         self.assertEqual(
@@ -590,7 +590,7 @@ class PersonaV2HistoryReadinessContractTests(unittest.TestCase):
     def test_tampering_fails_before_dependency_provider(self):
         mutations = []
         authority = copy.deepcopy(self.value)
-        authority["authority"]["authorizes_kcs_execution"] = True
+        authority["authority"]["authorizes_kio_execution"] = True
         mutations.append(authority)
         coordinate = copy.deepcopy(self.value)
         coordinate["persona_checkpoint_receipt_coordinates"][0][
@@ -983,8 +983,8 @@ class PersonaV2HistoryReadinessContractTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_READINESS_CONTRACT_FULL") == "1",
-    "set KCS_RUN_HISTORY_READINESS_CONTRACT_FULL=1 for live dependency replay",
+    os.environ.get("KIO_RUN_HISTORY_READINESS_CONTRACT_FULL") == "1",
+    "set KIO_RUN_HISTORY_READINESS_CONTRACT_FULL=1 for live dependency replay",
 )
 class PersonaV2HistoryReadinessContractFullTest(unittest.TestCase):
     def test_full_dependency_acceptance(self):
@@ -1029,8 +1029,8 @@ class PersonaV2HistoryReadinessContractFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_READINESS_CONTRACT_COLD") == "1",
-    "set KCS_RUN_HISTORY_READINESS_CONTRACT_COLD=1 for two isolated full replays",
+    os.environ.get("KIO_RUN_HISTORY_READINESS_CONTRACT_COLD") == "1",
+    "set KIO_RUN_HISTORY_READINESS_CONTRACT_COLD=1 for two isolated full replays",
 )
 class PersonaV2HistoryReadinessContractColdTest(unittest.TestCase):
     def test_two_hashseed_full_builds_are_byte_identical(self):
@@ -1063,8 +1063,8 @@ print(json.dumps({
         for seed in ("0", "1"):
             environment = os.environ.copy()
             environment["PYTHONHASHSEED"] = seed
-            environment.pop("KCS_RUN_HISTORY_READINESS_CONTRACT_FULL", None)
-            environment.pop("KCS_RUN_HISTORY_READINESS_CONTRACT_COLD", None)
+            environment.pop("KIO_RUN_HISTORY_READINESS_CONTRACT_FULL", None)
+            environment.pop("KIO_RUN_HISTORY_READINESS_CONTRACT_COLD", None)
             completed = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=project_root,

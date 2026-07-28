@@ -69,15 +69,15 @@ EXPECTED_CELL_CATALOG_BYTES = 106_162
 EXPECTED_DIRECT_PARAMETER_INPUTS = {
     "persona-v2-aggregate-byte-distribution-catalog": (
         1_576_125,
-        "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343",
+        "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2",
     ),
     "persona-v2-overlay-compatible-byte-distribution": (
         91_039,
-        "e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89",
+        "a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc",
     ),
     "persona-v2-formal-source-recipe-profile-catalog": (
         386_152,
-        "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8",
+        "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df",
     ),
 }
 EXPECTED_DIRECT_PARAMETER_INPUT_BYTES = 2_053_316
@@ -1421,7 +1421,7 @@ body = package.source_parameter_assignment_expanded_view_body_bytes(
 )
 validated = (
     independent.validate_source_parameter_assignment_suite_descriptor(suite)
-    if os.environ["KCS_ASSIGNMENT_VALIDATE"] == "1"
+    if os.environ["KIO_ASSIGNMENT_VALIDATE"] == "1"
     else None
 )
 maximum_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1439,7 +1439,7 @@ print(json.dumps({
             environment = dict(os.environ)
             environment.update(
                 {
-                    "KCS_ASSIGNMENT_VALIDATE": "1" if validate else "0",
+                    "KIO_ASSIGNMENT_VALIDATE": "1" if validate else "0",
                     "LANG": "C",
                     "LC_ALL": "C",
                     "PYTHONHASHSEED": seed,

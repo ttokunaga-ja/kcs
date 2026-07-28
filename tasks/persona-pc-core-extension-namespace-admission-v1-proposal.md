@@ -93,11 +93,11 @@ These names are candidates, not issued identifiers.
 
 | field | candidate value |
 | --- | --- |
-| artifact schema | `kcs.persona.pc-core-extension-allocation-content-projection/v1` |
+| artifact schema | `kio.persona.pc-core-extension-allocation-content-projection/v1` |
 | artifact kind | `persona-pc-v2-core-extension-allocation-content-projection` |
 | projection class ID | `core-extension-allocation` |
 | body ID | `persona-core-v1-extension-allocation-content-projection-rows-v1` |
-| row schema | `kcs.persona.pc-core-extension-allocation-content-projection-row/v1` |
+| row schema | `kio.persona.pc-core-extension-allocation-content-projection-row/v1` |
 | body framing | canonical JSON per row, UTF-8 NFC, exactly one LF per row |
 | namespace coordinates, when admitted | `{ "profile_id": "persona-core-v1" }` |
 | expected projection entries, when admitted | exactly 1 |
@@ -114,7 +114,7 @@ key set contains the following 13 fields; there are no optional fields.
 
 ```text
 schema_version = 1
-row_schema = kcs.persona.pc-core-extension-allocation-content-projection-row/v1
+row_schema = kio.persona.pc-core-extension-allocation-content-projection-row/v1
 profile_id
 persona_id
 family_id
@@ -198,7 +198,7 @@ including an explicit empty coordinate map:
 ```json
 {
   "artifact_kind": "persona-core-v1-extension-allocation-manifest-candidate",
-  "artifact_schema": "kcs.persona.core-extension-allocation-manifest/v1",
+  "artifact_schema": "kio.persona.core-extension-allocation-manifest/v1",
   "artifact_schema_version": 1,
   "body_framing": "canonical-json",
   "canonical_bytes": 5357,

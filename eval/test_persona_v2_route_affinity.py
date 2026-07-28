@@ -41,7 +41,7 @@ class PersonaV2RouteAffinityTests(unittest.TestCase):
                 self.value["artifact_kind"],
             ),
             (
-                "kcs.persona.pc-route-affinity/v2",
+                "kio.persona.pc-route-affinity/v2",
                 2,
                 "persona-pc-v2-route-affinity-matrix",
             ),
@@ -67,26 +67,26 @@ class PersonaV2RouteAffinityTests(unittest.TestCase):
             self.assertIs(flag, False, name)
         self.assertEqual(
             self.value["envelope_contract_sha256"],
-            "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+            "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
         )
         self.assertEqual(
             self.value["topology_contract_sha256"],
-            "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+            "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
         )
         self.assertEqual(
             self.value["joint_problem_sha256"],
-            "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074",
+            "f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207",
         )
         self.assertEqual(
             self.value["joint_solver_policy_sha256"],
-            "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857",
+            "47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712",
         )
         raw = route.canonical_json_bytes(self.value)
         self.assertEqual(len(raw), 70_626)
         self.assertLess(len(raw), route.MAX_ROUTE_AFFINITY_BYTES)
         self.assertEqual(
             route.route_affinity_sha256(self.value),
-            "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+            "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
         )
         self.assertTrue(route.validate_route_affinity(self.value))
 

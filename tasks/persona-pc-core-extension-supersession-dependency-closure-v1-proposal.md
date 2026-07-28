@@ -13,7 +13,7 @@ The local count-only incompatibility audit has these frozen candidate pins:
 
 | item | bytes | SHA-256 |
 | --- | ---: | --- |
-| audit descriptor | 3,500 | `1c52c83f8bd98407212e4014e7b006f38a93b0f82ff59a922a858d7e5663bfe2` |
+| audit descriptor | 3,500 | `cceb525f9e3b4912b6ea582f9fe0596056ad257b6ef8a875365d79ebc40883f1` |
 | audit delta JSONL | 236,068 | `a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44` |
 
 The 566 common `(persona_id, family_id, variant_id)` coordinates have equal

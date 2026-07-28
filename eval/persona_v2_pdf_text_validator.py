@@ -3,7 +3,7 @@
 Independence is intentional: this module does not import the renderer and
 duplicates the frozen PDF object layout, affine byte formula, and deterministic
 padding algorithm it checks.  Validation proves local PDF bytes, text-layer
-pages, xref/trailer integrity, and metadata only; it never attests KCS chunks.
+pages, xref/trailer integrity, and metadata only; it never attests KIO chunks.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-pdf-text-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-pdf-text-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-pdf-text-validator"
 VALIDATOR_ID = "persona-v2-id-free-pdf-text-standalone-validator"
@@ -30,7 +30,7 @@ MAX_TARGET_COMPLEXITY = 72
 VARIANT_ID = "pdf-text"
 FILENAME_EXTENSION = "pdf"
 CONTENT_MEDIA_TYPE = "application/pdf"
-EXPECTED_KCS_PATH_MEDIA_TYPE = "application/pdf"
+EXPECTED_KIO_PATH_MEDIA_TYPE = "application/pdf"
 EXPECTED_OFFLINE_DISPOSITION = "local_pdf_text"
 COMPLEXITY_MEASURE = "text-pages"
 FORMULA_BASE_BYTES_AT_COMPLEXITY_ONE = 4_096
@@ -46,7 +46,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -110,7 +110,7 @@ class PdfTextValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -272,13 +272,13 @@ def _validate_request_shape(request):
     expected_metadata = (
         FILENAME_EXTENSION,
         CONTENT_MEDIA_TYPE,
-        EXPECTED_KCS_PATH_MEDIA_TYPE,
+        EXPECTED_KIO_PATH_MEDIA_TYPE,
         EXPECTED_OFFLINE_DISPOSITION,
     )
     actual_metadata = (
         request.extension,
         request.content_media_type,
-        request.expected_kcs_path_media_type,
+        request.expected_kio_path_media_type,
         request.expected_offline_disposition,
     )
     if any(type(value) is not str for value in actual_metadata):
@@ -475,7 +475,7 @@ def validate_pdf_text_payload(request):
         "actual_chunks_attested": False,
         "byte_length": len(request.data),
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "object_count": object_count,
         "observed_complexity_measure": COMPLEXITY_MEASURE,
         "observed_local_complexity": request.target_complexity,
@@ -498,7 +498,7 @@ def _variant_row():
             "measure": COMPLEXITY_MEASURE,
         },
         "content_media_type": CONTENT_MEDIA_TYPE,
-        "expected_kcs_path_media_type": EXPECTED_KCS_PATH_MEDIA_TYPE,
+        "expected_kio_path_media_type": EXPECTED_KIO_PATH_MEDIA_TYPE,
         "expected_offline_disposition": EXPECTED_OFFLINE_DISPOSITION,
         "family": "pdf_text",
         "filename_extension": FILENAME_EXTENSION,
@@ -531,7 +531,7 @@ def _canonical_contract_value():
             "authorizes_query_plan": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "canonical_limits": {
             "framed_byte_cap_before_body_required": True,
@@ -543,7 +543,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "one-id-free-ascii-uncompressed-pdf-text-feasibility-variant-only-"
-            "not-kcs-attestation-not-multilingual"
+            "not-kio-attestation-not-multilingual"
         ),
         "independence_contract": {
             "imports_renderer_module": False,

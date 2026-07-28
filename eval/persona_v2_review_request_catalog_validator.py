@@ -47,10 +47,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_matched_lifecycle_inventory_validator as lifecycle_validator
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-review-request-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-review-request-catalog/v1"
 ARTIFACT_KIND = "persona-pc-v2-non-authorizing-review-request-catalog"
 ARTIFACT_SCHEMA_VERSION = 1
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CATALOG_BYTES = 256 * 1024
@@ -65,7 +65,7 @@ MAX_DICT_FIELDS = 32
 # PYTHONHASHSEED=0/1 build+validation measurements agreed exactly.
 EXPECTED_CATALOG_BYTES = 42_931
 EXPECTED_CATALOG_SHA256 = (
-    "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab"
+    "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd"
 )
 
 REVIEW_CLASS_ORDER = (
@@ -80,7 +80,7 @@ REVIEW_CLASS_ORDER = (
 AUTHORITY_FIELDS = (
     "authorizes_approval",
     "authorizes_g0_freeze",
-    "authorizes_history_or_kcs",
+    "authorizes_history_or_kio",
     "authorizes_positive_review_receipt",
     "authorizes_render_or_write",
     "authorizes_reviewer_identity",
@@ -136,37 +136,37 @@ AGGREGATE_FIELDS = frozenset(
 
 SUBJECT_PIN_SPECS = {
     "topology": (
-        "persona-pc-v2-topology", "kcs.persona.pc-topology/v2", 2, 134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "persona-pc-v2-topology", "kio.persona.pc-topology/v2", 2, 134_195,
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     "realism-profile": (
-        "persona-pc-v2-realism-profile", "kcs.persona.pc-realism-profile/v2", 2,
-        36_811, "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "persona-pc-v2-realism-profile", "kio.persona.pc-realism-profile/v2", 2,
+        36_811, "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
     "variant-catalog": (
-        "persona-pc-v2-variant-catalog", "kcs.persona.pc-variant-catalog/v2", 2,
-        211_733, "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "persona-pc-v2-variant-catalog", "kio.persona.pc-variant-catalog/v2", 2,
+        211_733, "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     "route-affinity": (
-        "persona-pc-v2-route-affinity-matrix", "kcs.persona.pc-route-affinity/v2", 2,
-        70_626, "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+        "persona-pc-v2-route-affinity-matrix", "kio.persona.pc-route-affinity/v2", 2,
+        70_626, "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
     ),
     "overlay-contract": (
-        "persona-pc-v2-overlay-contract", "kcs.persona.pc-overlay-contract/v2", 2,
-        71_179, "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c",
+        "persona-pc-v2-overlay-contract", "kio.persona.pc-overlay-contract/v2", 2,
+        71_179, "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23",
     ),
     "overlay-reservation-suite": (
         "persona-pc-v2-overlay-reservation-suite",
-        "kcs.persona.pc-overlay-reservation-suite/v2", 2, 21_680,
+        "kio.persona.pc-overlay-reservation-suite/v2", 2, 21_680,
         "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
     ),
     "chunk-accounting": (
-        "persona-pc-v2-chunk-accounting", "kcs.persona.pc-chunk-accounting/v1", 1,
-        19_801, "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2",
+        "persona-pc-v2-chunk-accounting", "kio.persona.pc-chunk-accounting/v1", 1,
+        19_801, "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52",
     ),
     "complete-semantic-projection-inventory": (
         "persona-pc-v2-complete-semantic-projection-derivation-inventory",
-        "kcs.persona.pc-semantic-projection-derivation-inventory/v2", 2, 697_466,
+        "kio.persona.pc-semantic-projection-derivation-inventory/v2", 2, 697_466,
         "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
     ),
 }
@@ -174,35 +174,35 @@ SUBJECT_PIN_SPECS = {
 SINGLETON_PROJECTION_SPECS = {
     "topology-path-load": (
         "persona-pc-v2-topology-path-load-content-projection",
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
         "canonical-json", 133_187,
         "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
         "projection-derivation-topology-path-load", {},
     ),
     "realism-locale-security": (
         "persona-pc-v2-realism-locale-security-content-projection",
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
         "canonical-json", 32_762,
         "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
         "projection-derivation-realism-locale-security", {},
     ),
     "recipe-content-filename-policy": (
         "persona-pc-v2-recipe-content-filename-policy-content-projection",
-        "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1",
+        "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
         "canonical-json", 250_388,
         "81a9fd5a44ac1cdda977ee4ed36fffdd6c0f9944bc41efb2cb4ef07d30819e7b",
         "projection-derivation-recipe-content-filename-policy", {"scope": "suite"},
     ),
     "route-scores": (
         "persona-pc-v2-route-scores-content-projection",
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
         "canonical-json", 88_085,
         "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
         "projection-derivation-route-scores", {},
     ),
     "payload-equivalence-rules": (
         "persona-pc-v2-payload-equivalence-rules-projection",
-        "kcs.persona.pc-payload-equivalence-rules-projection/v1",
+        "kio.persona.pc-payload-equivalence-rules-projection/v1",
         "canonical-json", 4_288,
         "05f8124cd1bd09652701d38ffd702824f3cff8d40a161815969071cd678e14e1",
         "payload-equivalence-rules-global", {},
@@ -459,43 +459,43 @@ LOCAL_COMPLETE_CLASS_COUNTS = (
 LOCAL_RELEVANT_CLASS_IDENTITIES = {
     "topology-path-load": (
         "persona-pc-v2-topology-path-load-content-projection",
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
         1,
         "canonical-json",
     ),
     "realism-locale-security": (
         "persona-pc-v2-realism-locale-security-content-projection",
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
         1,
         "canonical-json",
     ),
     "recipe-content-filename-policy": (
         "persona-pc-v2-recipe-content-filename-policy-content-projection",
-        "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1",
+        "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
         1,
         "canonical-json",
     ),
     "route-scores": (
         "persona-pc-v2-route-scores-content-projection",
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
         1,
         "canonical-json",
     ),
     "concrete-overlay-relations": (
         "persona-pc-v2-concrete-overlay-relations-origin-projection",
-        "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1",
+        "kio.persona.pc-concrete-overlay-relations-origin-projection/v1",
         1,
         "canonical-jsonl-lf",
     ),
     "query-independent-lifecycle-fact-rendition-rules": (
         "persona-pc-v2-source-matched-lifecycle-content-projection",
-        "kcs.persona.pc-source-matched-lifecycle-content-projection/v1",
+        "kio.persona.pc-source-matched-lifecycle-content-projection/v1",
         1,
         "canonical-json",
     ),
     "payload-equivalence-rules": (
         "persona-pc-v2-payload-equivalence-rules-projection",
-        "kcs.persona.pc-payload-equivalence-rules-projection/v1",
+        "kio.persona.pc-payload-equivalence-rules-projection/v1",
         1,
         "canonical-json",
     ),
@@ -819,7 +819,7 @@ def _authenticate_projection_contracts():
         relation_validator.RELATION_KIND
         != "persona-pc-v2-concrete-overlay-relations-origin-projection"
         or relation_validator.RELATION_SCHEMA
-        != "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1"
+        != "kio.persona.pc-concrete-overlay-relations-origin-projection/v1"
         or relation_validator.EXPECTED_RELATION_BODY_COUNT != 40
     ):
         _fail("relation projection class contract drifted")
@@ -827,7 +827,7 @@ def _authenticate_projection_contracts():
         lifecycle_validator.PROJECTION_KIND
         != "persona-pc-v2-source-matched-lifecycle-content-projection"
         or lifecycle_validator.PROJECTION_SCHEMA
-        != "kcs.persona.pc-source-matched-lifecycle-content-projection/v1"
+        != "kio.persona.pc-source-matched-lifecycle-content-projection/v1"
     ):
         _fail("lifecycle projection class contract drifted")
 
@@ -917,7 +917,7 @@ def _relation_projection_pins():
     return [
         _projection_pin(
             kind="persona-pc-v2-concrete-overlay-relations-origin-projection",
-            schema="kcs.persona.pc-concrete-overlay-relations-origin-projection/v1",
+            schema="kio.persona.pc-concrete-overlay-relations-origin-projection/v1",
             framing="canonical-jsonl-lf",
             size=size,
             digest=digest,
@@ -938,7 +938,7 @@ def _lifecycle_projection_pins():
     return [
         _projection_pin(
             kind="persona-pc-v2-source-matched-lifecycle-content-projection",
-            schema="kcs.persona.pc-source-matched-lifecycle-content-projection/v1",
+            schema="kio.persona.pc-source-matched-lifecycle-content-projection/v1",
             framing="canonical-json",
             size=size,
             digest=digest,

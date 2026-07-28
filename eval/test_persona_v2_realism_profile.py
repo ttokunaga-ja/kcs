@@ -36,7 +36,7 @@ class PersonaV2RealismProfileTests(unittest.TestCase):
                 "filesystem_writer_available",
                 "formal_capacity_gate_satisfied",
                 "history_executor_available",
-                "kcs_execution_available",
+                "kio_execution_available",
                 "query_instances_rendered",
                 "query_spec_hashed",
                 "renderer_available",
@@ -49,7 +49,7 @@ class PersonaV2RealismProfileTests(unittest.TestCase):
         self.assertEqual(len(raw), 36_811)
         self.assertEqual(
             realism.realism_profile_sha256(value),
-            "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+            "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
         )
         self.assertTrue(realism.validate_realism_profile(value))
         self.assertEqual(

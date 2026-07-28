@@ -46,20 +46,20 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CORPUS_SEMANTIC_SCHEMA = "kcs.persona.pc-corpus-semantic-namespace/v2"
+CORPUS_SEMANTIC_SCHEMA = "kio.persona.pc-corpus-semantic-namespace/v2"
 CORPUS_SEMANTIC_KIND = "persona-pc-v2-corpus-semantic-namespace"
 CORPUS_INPUT_CLOSURE_SCHEMA = (
-    "kcs.persona.pc-corpus-input-closure-manifest/v2"
+    "kio.persona.pc-corpus-input-closure-manifest/v2"
 )
 CORPUS_INPUT_CLOSURE_KIND = "persona-pc-v2-corpus-input-closure-manifest"
 EVALUATION_INPUT_CLOSURE_SCHEMA = (
-    "kcs.persona.pc-evaluation-input-closure-manifest/v2"
+    "kio.persona.pc-evaluation-input-closure-manifest/v2"
 )
 EVALUATION_INPUT_CLOSURE_KIND = (
     "persona-pc-v2-evaluation-input-closure-manifest"
 )
 SUITE_INPUT_DESCRIPTOR_SCHEMA = (
-    "kcs.persona.pc-suite-input-closure-descriptor/v2"
+    "kio.persona.pc-suite-input-closure-descriptor/v2"
 )
 SUITE_INPUT_DESCRIPTOR_KIND = "persona-pc-v2-suite-input-closure-descriptor"
 
@@ -131,7 +131,7 @@ AUTHORITY_FIELDS = (
 )
 _STANDARD_NEGATIVE_AUTHORITY_FIELDS = frozenset(AUTHORITY_FIELDS)
 _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
-    "kcs.persona.pc-envelope/v2": frozenset(
+    "kio.persona.pc-envelope/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_history_mutation",
@@ -139,29 +139,13 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
         }
     ),
-    "kcs.persona.pc-topology/v2": frozenset(
-        {
-            "activity_unit_review_receipt_bound",
-            "actual_chunks_attested",
-            "authorizes_history_mutation",
-            "authorizes_physical_write",
-            "filesystem_writer_available",
-            "formal_capacity_gate_satisfied",
-            "history_executor_available",
-            "joint_allocation_proved",
-            "kcs_execution_available",
-            "query_instances_rendered",
-            "query_spec_hashed",
-            "renderer_available",
-        }
-    ),
-    "kcs.persona.pc-joint-problem/v2": frozenset(
+    "kio.persona.pc-topology/v2": frozenset(
         {
             "activity_unit_review_receipt_bound",
             "actual_chunks_attested",
@@ -171,13 +155,29 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "formal_capacity_gate_satisfied",
             "history_executor_available",
             "joint_allocation_proved",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
         }
     ),
-    "kcs.persona.pc-joint-solver-policy/v2": frozenset(
+    "kio.persona.pc-joint-problem/v2": frozenset(
+        {
+            "activity_unit_review_receipt_bound",
+            "actual_chunks_attested",
+            "authorizes_history_mutation",
+            "authorizes_physical_write",
+            "filesystem_writer_available",
+            "formal_capacity_gate_satisfied",
+            "history_executor_available",
+            "joint_allocation_proved",
+            "kio_execution_available",
+            "query_instances_rendered",
+            "query_spec_hashed",
+            "renderer_available",
+        }
+    ),
+    "kio.persona.pc-joint-solver-policy/v2": frozenset(
         {
             "activity_unit_review_receipt_bound",
             "actual_chunks_attested",
@@ -189,7 +189,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "formal_capacity_gate_satisfied",
             "history_executor_available",
             "joint_allocation_proved",
-            "kcs_execution_available",
+            "kio_execution_available",
             "policy_authorizes_solver_execution",
             "policy_authorizes_source_plan",
             "query_instances_rendered",
@@ -198,7 +198,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "route_affinity_matrix_bound",
         }
     ),
-    "kcs.persona.pc-realism-profile/v2": frozenset(
+    "kio.persona.pc-realism-profile/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -209,13 +209,13 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
         }
     ),
-    "kcs.persona.pc-variant-catalog/v2": frozenset(
+    "kio.persona.pc-variant-catalog/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -226,14 +226,14 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
             "validator_available",
         }
     ),
-    "kcs.persona.pc-route-affinity/v2": frozenset(
+    "kio.persona.pc-route-affinity/v2": frozenset(
         {
             "authorizes_g0_freeze",
             "authorizes_solver_execution",
@@ -241,7 +241,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "authorizes_write_or_history",
         }
     ),
-    "kcs.persona.pc-id-free-text-renderer/v2": frozenset(
+    "kio.persona.pc-id-free-text-renderer/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_final_source_identifiers",
@@ -250,10 +250,10 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "authorizes_physical_write",
             "authorizes_source_intents",
             "authorizes_source_plan",
-            "kcs_execution_attested",
+            "kio_execution_attested",
         }
     ),
-    "kcs.persona.pc-id-free-text-validator/v2": frozenset(
+    "kio.persona.pc-id-free-text-validator/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_final_source_identifiers",
@@ -262,23 +262,10 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "authorizes_physical_write",
             "authorizes_source_intents",
             "authorizes_source_plan",
-            "kcs_execution_attested",
+            "kio_execution_attested",
         }
     ),
-    "kcs.persona.pc-id-free-pdf-text-renderer/v2": frozenset(
-        {
-            "actual_chunks_attested",
-            "authorizes_final_source_identifiers",
-            "authorizes_g0_freeze",
-            "authorizes_history_mutation",
-            "authorizes_physical_write",
-            "authorizes_query_plan",
-            "authorizes_source_intents",
-            "authorizes_source_plan",
-            "kcs_execution_attested",
-        }
-    ),
-    "kcs.persona.pc-id-free-pdf-text-validator/v2": frozenset(
+    "kio.persona.pc-id-free-pdf-text-renderer/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_final_source_identifiers",
@@ -288,10 +275,23 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "authorizes_query_plan",
             "authorizes_source_intents",
             "authorizes_source_plan",
-            "kcs_execution_attested",
+            "kio_execution_attested",
         }
     ),
-    "kcs.persona.pc-source-profile-catalog/v2": frozenset(
+    "kio.persona.pc-id-free-pdf-text-validator/v2": frozenset(
+        {
+            "actual_chunks_attested",
+            "authorizes_final_source_identifiers",
+            "authorizes_g0_freeze",
+            "authorizes_history_mutation",
+            "authorizes_physical_write",
+            "authorizes_query_plan",
+            "authorizes_source_intents",
+            "authorizes_source_plan",
+            "kio_execution_attested",
+        }
+    ),
+    "kio.persona.pc-source-profile-catalog/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_final_source_identifiers",
@@ -302,10 +302,10 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "authorizes_source_intents",
             "authorizes_source_plan",
             "formal_capacity_gate_satisfied",
-            "kcs_execution_attested",
+            "kio_execution_attested",
         }
     ),
-    "kcs.persona.pc-overlay-contract/v2": frozenset(
+    "kio.persona.pc-overlay-contract/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -317,7 +317,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
@@ -325,7 +325,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "validator_available",
         }
     ),
-    "kcs.persona.pc-fact-graph/v2": frozenset(
+    "kio.persona.pc-fact-graph/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -336,18 +336,18 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
         }
     ),
-    "kcs.persona.pc-source-intent-origin-shard/v2": frozenset(
+    "kio.persona.pc-source-intent-origin-shard/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
             "authorizes_history_mutation",
-            "authorizes_kcs_execution",
+            "authorizes_kio_execution",
             "authorizes_physical_write",
             "authorizes_renderer_execution",
             "authorizes_solver_execution",
@@ -357,11 +357,11 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "formal_capacity_gate_satisfied",
             "history_executor_available",
             "joint_allocation_proved",
-            "kcs_execution_available",
+            "kio_execution_available",
             "source_intent_refinement_policy_bound",
         }
     ),
-    "kcs.persona.pc-fact-membership/v2": frozenset(
+    "kio.persona.pc-fact-membership/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -372,13 +372,13 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
             "query_instances_rendered",
             "query_spec_hashed",
             "renderer_available",
         }
     ),
-    "kcs.persona.pc-history-intent/v2": frozenset(
+    "kio.persona.pc-history-intent/v2": frozenset(
         {
             "actual_chunks_attested",
             "authorizes_g0_freeze",
@@ -389,10 +389,10 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "filesystem_writer_available",
             "formal_capacity_gate_satisfied",
             "history_executor_available",
-            "kcs_execution_available",
+            "kio_execution_available",
         }
     ),
-    "kcs.persona.pc-route-review-receipt/v2": frozenset(
+    "kio.persona.pc-route-review-receipt/v2": frozenset(
         {
             "authorizes_g0_freeze",
             "authorizes_solver_execution",
@@ -401,7 +401,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "review_authoritative",
         }
     ),
-    "kcs.persona.pc-query-intent/v2": frozenset(
+    "kio.persona.pc-query-intent/v2": frozenset(
         {
             "authorizes_compiled_relevance",
             "authorizes_corpus_rendering",
@@ -417,7 +417,7 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "query_spec_hashed_by_g0",
         }
     ),
-    "kcs.persona.pc-semantic-oracle/v2": frozenset(
+    "kio.persona.pc-semantic-oracle/v2": frozenset(
         {
             "authorizes_compiled_relevance",
             "authorizes_corpus_rendering",
@@ -528,11 +528,11 @@ _CORPUS_QUERY_SEMANTIC_KEY_FRAGMENTS = (
 )
 _ALLOWED_CORPUS_QUERY_SEMANTIC_METADATA = {
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         "pilot_and_extension_oracle_share_all_pair_counters",
     ): True,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         "pilot_extension_oracle",
     ): (
         "admissible only on exact extension witness; exhausted oracle makes the "
@@ -567,18 +567,18 @@ _FINAL_ID_KEY_FRAGMENTS = (
 _ALLOWED_TRUE_COMPILED_RELEVANCE_KEYS = frozenset(
     {
         (
-            "kcs.persona.pc-overlay-contract/v2",
+            "kio.persona.pc-overlay-contract/v2",
             "logical_document_assignment_occurs_before_compiled-relevance",
         ),
         (
-            "kcs.persona.pc-semantic-oracle/v2",
+            "kio.persona.pc-semantic-oracle/v2",
             "unresolved_target_keys_are_not_compiled_relevance",
         ),
     }
 )
 _ALLOWED_FINAL_ID_METADATA = {
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         "final_identity_derivation",
     ): (
         "source_id and materialization_id are derived only after exact "
@@ -601,11 +601,11 @@ _COMPACT_FINAL_ID_KEY_FRAGMENTS = tuple(
 _ALLOWED_TRUE_CLOSURE_SEPARATION_KEYS = frozenset(
     {
         (
-            "kcs.persona.pc-query-intent/v2",
+            "kio.persona.pc-query-intent/v2",
             "separate_corpus_and_evaluation_closure_roots_required",
         ),
         (
-            "kcs.persona.pc-semantic-oracle/v2",
+            "kio.persona.pc-semantic-oracle/v2",
             "evaluation_closure_root_is_separate_from_corpus_closure_root",
         ),
     }
@@ -621,69 +621,69 @@ _SEMANTIC_ORACLE_COMPILED_RELEVANCE_CONTRACT = {
 }
 _EXPLICIT_DEPENDENCY_OWNER_BY_SCHEMA_PATH = {
     (
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         ("envelope_contract_sha256",),
     ): "envelope",
     (
-        "kcs.persona.pc-joint-problem/v2",
+        "kio.persona.pc-joint-problem/v2",
         ("envelope_contract_sha256",),
     ): "envelope",
     (
-        "kcs.persona.pc-joint-problem/v2",
+        "kio.persona.pc-joint-problem/v2",
         ("topology_contract_sha256",),
     ): "topology",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("envelope_contract_sha256",),
     ): "envelope",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("joint_problem_sha256",),
     ): "joint-problem",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("topology_contract_sha256",),
     ): "topology",
     (
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         ("envelope_contract_sha256",),
     ): "envelope",
     (
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         ("joint_problem_sha256",),
     ): "joint-problem",
     (
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         ("joint_solver_policy_sha256",),
     ): "joint-solver-policy",
     (
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         ("topology_contract_sha256",),
     ): "topology",
     (
-        "kcs.persona.pc-route-review-receipt/v2",
+        "kio.persona.pc-route-review-receipt/v2",
         ("reviewed_route_artifact", "canonical_body_sha256"),
     ): "route-affinity-body",
 }
 _EXPLICIT_DEPENDENCY_IDENTITY_BY_ENTRY_ID = {
     "envelope": (
-        "kcs.persona.pc-envelope/v2",
+        "kio.persona.pc-envelope/v2",
         "persona-pc-v2-envelope",
     ),
     "joint-problem": (
-        "kcs.persona.pc-joint-problem/v2",
+        "kio.persona.pc-joint-problem/v2",
         "persona-pc-v2-joint-allocation-problem",
     ),
     "joint-solver-policy": (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         "persona-pc-v2-joint-solver-policy",
     ),
     "route-affinity-body": (
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         "persona-pc-v2-route-affinity-matrix",
     ),
     "topology": (
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         "persona-pc-v2-topology",
     ),
 }
@@ -701,10 +701,10 @@ _FALSE_STATUS_TOKENS = (
 )
 _GENERIC_IMPLEMENTATION_SCHEMAS = frozenset(
     {
-        "kcs.persona.pc-id-free-pdf-text-renderer/v2",
-        "kcs.persona.pc-id-free-pdf-text-validator/v2",
-        "kcs.persona.pc-id-free-text-renderer/v2",
-        "kcs.persona.pc-id-free-text-validator/v2",
+        "kio.persona.pc-id-free-pdf-text-renderer/v2",
+        "kio.persona.pc-id-free-pdf-text-validator/v2",
+        "kio.persona.pc-id-free-text-renderer/v2",
+        "kio.persona.pc-id-free-text-validator/v2",
     }
 )
 # Current pre-solve bodies have no free-standing content digest fields.  A
@@ -714,7 +714,7 @@ _GENERIC_IMPLEMENTATION_SCHEMAS = frozenset(
 _NON_DEPENDENCY_SHA256_PATHS_BY_SCHEMA = {}
 _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -724,7 +724,7 @@ _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
         ),
     ): "equals-bound-policy-envelope-contract-sha256",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -734,7 +734,7 @@ _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
         ),
     ): "equals-bound-policy-joint-problem-sha256",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -744,7 +744,7 @@ _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
         ),
     ): "equals-canonical-sha256-of-this-generic-policy-sidecar",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -754,7 +754,7 @@ _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
         ),
     ): "equals-bound-policy-topology-contract-sha256",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -766,11 +766,11 @@ _NON_DIGEST_SHA256_METADATA_BY_SCHEMA_PATH = {
 
 _EXACT_AUTHORITY_METADATA_BY_SCHEMA_PATH = {
     (
-        "kcs.persona.pc-envelope/v2",
+        "kio.persona.pc-envelope/v2",
         ("capacity", "superseded_unmeasured_absolute_candidates_authoritative"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -784,11 +784,11 @@ _EXACT_AUTHORITY_METADATA_BY_SCHEMA_PATH = {
         "authorizes_write_or_history",
     ],
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("policy", "search_semantics", "warm_start_authority"),
     ): "advisory-only-never-acceptance-evidence",
     (
-        "kcs.persona.pc-route-review-receipt/v2",
+        "kio.persona.pc-route-review-receipt/v2",
         ("authoritative_review_blockers",),
     ): [
         "independent-reviewer-identity-evidence-absent",
@@ -796,7 +796,7 @@ _EXACT_AUTHORITY_METADATA_BY_SCHEMA_PATH = {
         "independent-review-statement-not-bound",
     ],
     (
-        "kcs.persona.pc-route-review-receipt/v2",
+        "kio.persona.pc-route-review-receipt/v2",
         ("review_summary", "review_authoritative"),
     ): False,
     (
@@ -838,7 +838,7 @@ _ROOT_NEGATIVE_AUTHORITY_COUNT_PATHS = frozenset(
 
 _EXACT_INPUT_BINDING_METADATA = {
     (
-        "kcs.persona.pc-source-profile-catalog/v2",
+        "kio.persona.pc-source-profile-catalog/v2",
         ("input_bindings", "binding_order"),
     ): [
         "envelope",
@@ -855,23 +855,23 @@ _EXACT_INPUT_BINDING_METADATA = {
 
 _EXACT_CAPABILITY_METADATA = {
     (
-        "kcs.persona.pc-realism-profile/v2",
+        "kio.persona.pc-realism-profile/v2",
         ("personas", "[]", "os_execution_mode"),
     ): "declared-target-metadata-only-not-native-or-emulated",
     (
-        "kcs.persona.pc-envelope/v2",
+        "kio.persona.pc-envelope/v2",
         ("incidental_cap_contract", "rules", "current_plus_history"),
     ): "min(base_total,total_eligible-current_contract_chunks-history_only_contract_chunks)",
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("policy", "intent_and_identity_boundary", "pre_solve_prohibited_fields"),
     ): ["source_id", "materialization_id"],
     (
-        "kcs.persona.pc-source-intent-origin-shard/v2",
+        "kio.persona.pc-source-intent-origin-shard/v2",
         ("catalogs", "quota_contexts", "[]", "allowed_history_cohort_ids"),
     ): ["P", "X", "Y"],
     (
-        "kcs.persona.pc-source-intent-origin-shard/v2",
+        "kio.persona.pc-source-intent-origin-shard/v2",
         (
             "catalogs",
             "quota_contexts",
@@ -880,11 +880,11 @@ _EXACT_CAPABILITY_METADATA = {
         ),
     ): "solver-unassigned",
     (
-        "kcs.persona.pc-fact-membership/v2",
+        "kio.persona.pc-fact-membership/v2",
         ("memberships", "[]", "allowed_history_cohort_ids"),
     ): ["P", "X", "Y"],
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("representative_transition_constraint", "allowed_history_cohort_ids"),
     ): ["P", "X", "Y"],
 }
@@ -901,14 +901,14 @@ _SHARED_FOUNDATIONAL_G0_BLOCKERS = [
     "activity_unit_rubric_review_receipt_not_bound",
 ]
 for _foundational_schema in (
-    "kcs.persona.pc-topology/v2",
-    "kcs.persona.pc-joint-problem/v2",
+    "kio.persona.pc-topology/v2",
+    "kio.persona.pc-joint-problem/v2",
 ):
     _EXACT_CAPABILITY_METADATA[
         (_foundational_schema, ("remaining_g0_blockers",))
     ] = list(_SHARED_FOUNDATIONAL_G0_BLOCKERS)
 _EXACT_CAPABILITY_METADATA[
-    ("kcs.persona.pc-joint-solver-policy/v2", ("remaining_g0_blockers",))
+    ("kio.persona.pc-joint-solver-policy/v2", ("remaining_g0_blockers",))
 ] = [
     *_SHARED_FOUNDATIONAL_G0_BLOCKERS,
     "route_affinity_matrix_and_review_receipt_missing",
@@ -925,7 +925,7 @@ _EXACT_CAPABILITY_METADATA[
 ]
 _EXACT_CAPABILITY_METADATA[
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("required_solver_outputs_and_optimality_evidence_intentionally_absent",),
     )
 ] = [
@@ -938,12 +938,12 @@ _EXACT_CAPABILITY_METADATA[
 ]
 _EXACT_CAPABILITY_METADATA_VALUE_SETS = {
     (
-        "kcs.persona.pc-overlay-contract/v2",
+        "kio.persona.pc-overlay-contract/v2",
         ("content_relation_semantics", "[]", "checkpoint_history_relation"),
     ): frozenset(
         {
-            "orthogonal-visible-W0-copy-not-a-KCS-history-version",
-            "orthogonal-both-W0-visible-not-a-KCS-history-transition",
+            "orthogonal-visible-W0-copy-not-a-KIO-history-version",
+            "orthogonal-both-W0-visible-not-a-KIO-history-transition",
         }
     ),
 }
@@ -954,7 +954,7 @@ _SEMANTIC_ORACLE_HISTORY_EVENT_CONTRACTS = {
 }
 _EXACT_CAPABILITY_SUBTREE_PINS = {
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("history_cohort_templates",),
     ): (
         2_245,
@@ -964,27 +964,27 @@ _EXACT_CAPABILITY_SUBTREE_PINS = {
 
 _EXACT_CAPABILITY_BOOL_METADATA_BY_SCHEMA_PATH = {
     (
-        "kcs.persona.pc-envelope/v2",
+        "kio.persona.pc-envelope/v2",
         ("lanes", "formal-retrieval-history-v2", "formal_chunk_eligible"),
     ): True,
     (
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         ("policy", "activity_unit_review", "required_for_g0_freeze"),
     ): True,
     (
-        "kcs.persona.pc-joint-problem/v2",
+        "kio.persona.pc-joint-problem/v2",
         ("proof_status", "joint_allocation_proved_for_g0"),
     ): False,
     (
-        "kcs.persona.pc-joint-problem/v2",
+        "kio.persona.pc-joint-problem/v2",
         ("proof_status", "solver_policy_bound"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("exact_solver_executable",),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         (
             "policy",
             "route_affinity_future_input",
@@ -994,133 +994,133 @@ _EXACT_CAPABILITY_BOOL_METADATA_BY_SCHEMA_PATH = {
         ),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("policy_ready_for_execution",),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("proof_status", "exact_optimality_evidence_or_bounded_canonical_resolve_present"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("proof_status", "joint_allocation_proved_for_g0"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("proof_status", "solver_execution_attested"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("proof_status", "solver_policy_bound"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("proof_status", "solver_policy_bound_by_g0_root"),
     ): False,
     (
-        "kcs.persona.pc-joint-solver-policy/v2",
+        "kio.persona.pc-joint-solver-policy/v2",
         ("solver_policy_complete",),
     ): False,
     (
-        "kcs.persona.pc-overlay-contract/v2",
+        "kio.persona.pc-overlay-contract/v2",
         ("placement_contract", "content_relation_endpoints_must_resolve_to_different_scopes"),
     ): True,
     (
-        "kcs.persona.pc-overlay-contract/v2",
+        "kio.persona.pc-overlay-contract/v2",
         (
             "completion_claims",
             "query_history_target_namespace_mapping_complete",
         ),
     ): False,
     (
-        "kcs.persona.pc-fact-graph/v2",
+        "kio.persona.pc-fact-graph/v2",
         ("history_intent_recipe_bound",),
     ): False,
     (
-        "kcs.persona.pc-source-intent-origin-shard/v2",
+        "kio.persona.pc-source-intent-origin-shard/v2",
         ("completion_claims", "history_event_recipe_bound"),
     ): False,
     (
-        "kcs.persona.pc-source-intent-origin-shard/v2",
+        "kio.persona.pc-source-intent-origin-shard/v2",
         ("origin_contract", "solver_delta_value_allowed_as_intent_origin"),
     ): False,
     (
-        "kcs.persona.pc-fact-membership/v2",
+        "kio.persona.pc-fact-membership/v2",
         ("history_intent_recipe_bound",),
     ): False,
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("compiled_history_plan",),
     ): False,
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("history_executor_available",),
     ): False,
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("history_intent_inventory_complete",),
     ): False,
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         ("history_operation_template_inventory_complete",),
     ): False,
     (
-        "kcs.persona.pc-history-intent/v2",
+        "kio.persona.pc-history-intent/v2",
         (
             "representative_transition_constraint",
             "solver_assigned_history_cohort_id_present",
         ),
     ): False,
     (
-        "kcs.persona.pc-query-intent/v2",
+        "kio.persona.pc-query-intent/v2",
         (
             "target_resolution_contract",
             "all_expected_targets_must_exact_resolve_before_g0",
         ),
     ): True,
     (
-        "kcs.persona.pc-query-intent/v2",
+        "kio.persona.pc-query-intent/v2",
         ("target_resolution_contract", "history_intent_targets_bound"),
     ): False,
     (
-        "kcs.persona.pc-query-intent/v2",
+        "kio.persona.pc-query-intent/v2",
         (
             "target_resolution_contract",
             "unresolved_target_keys_are_not_source_plan_membership",
         ),
     ): True,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         ("compiled_relevance_contract", "compilation_must_follow_solved_source_plan"),
     ): True,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         ("compiled_relevance_contract", "compilation_must_join_history_receipts"),
     ): True,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         ("completion_claims", "full_history_intent_membership_bound"),
     ): False,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         ("completion_claims", "restore_anchor_source_history_bindings_compiled"),
     ): False,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         (
             "target_resolution_contract",
             "all_positive_answer_memberships_must_exact_resolve_before_g0",
         ),
     ): True,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         (
             "target_resolution_contract",
             "all_restore_and_deleted_event_templates_must_exact_resolve_before_g0",
         ),
     ): True,
     (
-        "kcs.persona.pc-semantic-oracle/v2",
+        "kio.persona.pc-semantic-oracle/v2",
         (
             "target_resolution_contract",
             "unresolved_target_keys_are_not_compiled_relevance",
@@ -1271,7 +1271,7 @@ def _is_exact_non_digest_sha256_metadata(schema, path, item):
 
 
 def _is_exact_route_review_digest_evidence_path(body, path):
-    if body.get("artifact_schema") != "kcs.persona.pc-route-review-receipt/v2":
+    if body.get("artifact_schema") != "kio.persona.pc-route-review-receipt/v2":
         return False
     if tuple(path) not in {
         ("checks", 0, "expected"),
@@ -1304,7 +1304,7 @@ def _validate_exact_route_review_digest_evidence(body, path, item, *, entry_id):
 
 
 def _validate_route_review_digest_evidence_contract(body, *, entry_id):
-    if body.get("artifact_schema") != "kcs.persona.pc-route-review-receipt/v2":
+    if body.get("artifact_schema") != "kio.persona.pc-route-review-receipt/v2":
         return
     reviewed = body.get("reviewed_route_artifact")
     checks = body.get("checks")
@@ -1556,7 +1556,7 @@ def _allowed_authority_field_names(body, path, field_names):
 
 def _allowed_semantic_oracle_history_event_template(body, path, value):
     if (
-        body.get("artifact_schema") != "kcs.persona.pc-semantic-oracle/v2"
+        body.get("artifact_schema") != "kio.persona.pc-semantic-oracle/v2"
         or len(path) != 4
         or path[0] != "positive_oracle_rows"
         or type(path[1]) is not int
@@ -2121,7 +2121,7 @@ def _validate_sensitive_key(body, *, entry_id, key, item):
             return
         if (
             key == "compiled_relevance_contract"
-            and schema == "kcs.persona.pc-semantic-oracle/v2"
+            and schema == "kio.persona.pc-semantic-oracle/v2"
             and item == _SEMANTIC_ORACLE_COMPILED_RELEVANCE_CONTRACT
         ):
             return

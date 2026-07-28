@@ -30,41 +30,41 @@ formal tailをexactに閉じた。ただしそのimmutable base EMLはcomplexity
 さらに20 personasと20 distinct primary use casesをexact 1対1で束縛するnon-authorizing catalogを実装し、
 role、positive physical family marginal、代表primary scope、lifecycle capability、query stratumへjoinした。
 canonical bodyは30,008 bytes、SHA-256
-`024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624`である。
+`73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed`である。
 さらにscope-qualified semantic endpoint、persona-global chunk hash、history path binding、physical storageを
-混同しない`kcs.persona.pc-chunk-accounting/v1`を実装した。canonical bodyは19,801 bytes、SHA-256
-`d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`である。そのsidecarをdirect inputとして
-束縛する`kcs.persona.pc-lifecycle-demand/v2`も、20人 x 105 anonymous capabilities、U35/I5、
+混同しない`kio.persona.pc-chunk-accounting/v1`を実装した。canonical bodyは19,801 bytes、SHA-256
+`66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52`である。そのsidecarをdirect inputとして
+束縛する`kio.persona.pc-lifecycle-demand/v2`も、20人 x 105 anonymous capabilities、U35/I5、
 P'/X' replacement、restore/purge/disjoint state、cross-scope moveの4-ledger投影をexact化した。
 canonical bodyは463,571 bytes、SHA-256
-`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。ただしsource-instance matching、
+`372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005`である。ただしsource-instance matching、
 solution-compiled planned history plan、W0/W1 actual qIM/patch、observed receiptsは未束縛である。
 この歴史的snapshotをsource-matchable authorityにせず、下流の
-`kcs.persona.pc-lifecycle-coverage-catalog/v1`が2,100 primary rows、200 cross-format companions、
+`kio.persona.pc-lifecycle-coverage-catalog/v1`が2,100 primary rows、200 cross-format companions、
 300 purge-only witnesses、20 move policiesとsymbolic operation algebraをquery非依存で束縛する。canonical bodyは
-1,385,596 bytes、SHA-256 `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`である。
-その下流の`kcs.persona.pc-source-matched-lifecycle-suite/v1`は、各人105 primary + 10 cross-format companion、
+1,385,596 bytes、SHA-256 `1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4`である。
+その下流の`kio.persona.pc-source-matched-lifecycle-suite/v1`は、各人105 primary + 10 cross-format companion、
 suite 2,300 lifecycle source refsをpilot source/semantic/reservation/parameter assignmentへexactに対応付けた。
 必要形式93件も52 searchable-positive / 33 pending-conversion-negative / 8 raw-only-structural-negativeへ
 分類し、7,630件のW1--W5 source/scope event intentを非永続JSONL receiptとして束縛する。suite全体で
 3,630件のevent-created pre-solve source intentを持ち、各人は48 source coupling + 6 scope barrier = 54
 dependency groupsを持つ。content-only projectionもsource selectionだけでなくsource/scope event意味を含む。canonical suiteは
 14,605 bytes、SHA-256 `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`である。
-その下流の`kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、全203,000 W0 sourcesを
+その下流の`kio.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、全203,000 W0 sourcesを
 base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / companion mirror 200へ閉じ、
 1,033,680 present-fact refsをexact化した。3,630 event-created intentsと300 purge witnessesも全域走査し、
 consumerはmatching W0 PとW1 descendantの600 refsだけである。compact ownerは2,573 rows、canonical suiteは
 69,195 bytes、SHA-256 `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`である。
 producer-independent validatorによる全20人再構成を持つが、scope/quota/cohort solver、complete post-W0
 membership、compiled history、physical materialization、observed evaluation、execution authorityはない。
-recursive ambient laneは`kcs.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
+recursive ambient laneは`kio.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
 128 directories、D6--D8、candidate/native realization分離を固定した。canonical bodyは76,099 bytes、SHA-256
-`49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual filesystem case modeと
+`c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`で、actual filesystem case modeと
 materialization receiptは未束縛である。
-Decision 150の`kcs.persona.pc-semantic-projection-derivation-inventory/v1`は、3/12分類・113 bodiesの
+Decision 150の`kio.persona.pc-semantic-projection-derivation-inventory/v1`は、3/12分類・113 bodiesの
 凍結済み歴史的predecessorとして変更しない。その下流のv2候補は
-`kcs.persona.pc-semantic-projection-derivation-inventory/v2`と
-`kcs.persona.pc-semantic-projection-derivation-receipt/v2`を使い、最小12分類を12/12、exact 253 bodiesで覆う。
+`kio.persona.pc-semantic-projection-derivation-inventory/v2`と
+`kio.persona.pc-semantic-projection-derivation-receipt/v2`を使い、最小12分類を12/12、exact 253 bodiesで覆う。
 framingはcanonical JSON 67 bodies / LF終端canonical JSONL 186 bodiesで、descriptorは697,466 canonical
 bytes / SHA-256 `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external bodiesは
 合計155,741,469 bytes、ordered projection-pin digestは
@@ -98,7 +98,7 @@ in-memory projection feasibility auditでも、2,000 contributor targetsのbasel
 同auditは40,947 canonical bytes / SHA-256
 `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`で局所golden固定済みだが、
 active blocker evidenceに限りresolution v2を発行しない。
-さらに`kcs.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
+さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
 16,735 canonical bytes / SHA-256
 `bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`で局所golden固定した。
@@ -108,7 +108,7 @@ authoritative corpus/evaluation closureやresolution v2ではない。
 registries、1,200 formal scopes、609,000 W0 source filesへexact mappingした。41,099 canonical bytes / SHA-256
 `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`で、ambient/byte-stress designated replayは
 unratified、writer/materialization/readback/G0 authorityはfalseである。
-現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
+現行`kio-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
 [`persona-pc-fidelity-v2-contract.md`](persona-pc-fidelity-v2-contract.md)を参照する。400 exact paths/loadは
@@ -236,7 +236,7 @@ recursive topologyとformat/extension mixはいずれも境界を広く踏むaut
 ### 3.2 人物別の代表構造
 
 `D`は`home/`からleaf scopeまでのcomponent数である。表のpathは代表例で、各人の12 primaryと8 secondaryは
-`kcs.persona.pc-topology/v2` sidecarへ完全列挙済みである。
+`kio.persona.pc-topology/v2` sidecarへ完全列挙済みである。
 
 | id | 1人として再現する属性 | proposed full files | primary / secondary load | formal Dmax | 代表primary scope | 代表secondary scope |
 | --- | --- | ---: | ---: | ---: | --- | --- |
@@ -415,13 +415,13 @@ D6/D7/D8の各depthにfileを持つsuite-wide coverageと、人物ごとのplann
 各entryは`registered_scope=false`、`formal_gate_eligible=false`、formal leafとの交差なし、`.kio`なしを
 持つ。candidate数とnative realized数を別々に記録し、宣言外entryをverifierが拒否する。
 
-このprofileのmachine-readable正本候補は`kcs.persona.pc-recursive-robustness-lane-catalog/v1`である。
+このprofileのmachine-readable正本候補は`kio.persona.pc-recursive-robustness-lane-catalog/v1`である。
 20人 x 256 = 5,120 candidates、20人 x 128 = 2,560 authored directories、file depthは
 D6=2,855 / D7=1,901 / D8=364、planned Dmax人数はD6/D7/D8=8/9/3である。target OS/case modeは
 metadata-onlyであり、実行hostのfilesystem semanticsとは見なさない。native実現数は実行前には各人
 253--256の範囲で、case-insensitiveならportable ASCII case-collision mate 3件をmanifest-only expected
 failure、case-sensitiveなら256件すべてをrealizeする条件表をreceiptで照合する。bodyは76,099 canonical
-bytes、SHA-256 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、
+bytes、SHA-256 `c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`で、
 materialization/write/G0 authorityはすべてfalseである。
 
 ### 3.6 利用者属性の初期v2候補
@@ -599,7 +599,7 @@ role別・variant別に読み戻し、contract exact、incidental cap内、raw-o
 ### 4.2 persona realism overlay
 
 `benchmark_stress_mix_v2`はphysical format構成のstress mixであり、1人の実PCを観測した統計ではない。
-PCらしさは別軸の`kcs.persona.pc-realism-profile/v2`として、既存physical materializationへoverlayする。
+PCらしさは別軸の`kio.persona.pc-realism-profile/v2`として、既存physical materializationへoverlayする。
 人物別のOS/case/device、locale/language、timezone/固定offset、retention、mtime、permission、placement、
 account数と、exact duplicate 1--3%、near/visible revision 3--8%、conflict copy 0.2--1%、
 standalone attachment copy 1--4%のexact rate/count marginalはsidecar化した。suite fullのtargetは
@@ -628,7 +628,7 @@ exactに再利用し、shard indexはorigin-local 0-basedで再開する。
 これはpre-solve membership closureに限る。`placement_class_requirement`は配置要件であって400 scopesへの
 assignmentではなく、logical-document採点・検索参加、raw/rendered identity、actual chunk/history、8軸実測台帳も
 まだ存在しない。suite descriptorは51,133 canonical bytes、SHA-256
-`4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`で、origin/profile/suiteの
+`129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`で、origin/profile/suiteの
 authority flagsはすべてexact falseである。
 overlayを理由にphysical file総数やfamily比へfileを暗黙追加しない。
 overlayはpre-solve source-intent recipeとjoint solverの入力としてallocation前に固定し、解の後へ
@@ -869,12 +869,12 @@ p50/p95は加法量ではないため差し引かず、fullの順序済みhistog
 raw 5,034,302,718 bytes、4 KiB丸め後5,194,530,816 bytes、p50 8,192 bytes、p95 129,024 bytes、
 max 2,621,440 bytes、formal tail 160件を束縛した。最大人物p12も4 KiB丸め後417,591,296 bytesで、
 480 MiB/personの計画上限を満たす。canonical bodyは1,576,125 bytes、SHA-256
-`7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`である。
+`9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2`である。
 これはimmutable parameter-bin base snapshotである。baseのfull EML 9,153 sourcesはcomplexity `0/1/5`しか
 選べない一方、concrete overlayの2,800 attachment hosts / 5,690 membershipsはhost fanout
 `1:1,370 / 2:590 / 3:400 / 4:260 / 5:180`を要求するため、全40 persona-originが非実現可能だった。
 
-下流の`kcs.persona.pc-overlay-compatible-byte-distribution/v2`はbase catalog、all-71 implementation
+下流の`kio.persona.pc-overlay-compatible-byte-distribution/v2`はbase catalog、all-71 implementation
 registry、concrete overlay reservation suiteをexact pinでdirectに束縛する。EML hostは
 `target_complexity = host_member_count`、非hostは0、非EML persona-variant行はbase byte-exact継承とし、
 family/persona/suite投影は全variantから再計算する。補正後のfullは
@@ -882,7 +882,7 @@ raw 5,029,207,294 bytes、4 KiB丸め後5,189,435,392 bytes、p50 8,192、p95 12
 formal tail 160件、最大人物p12は411,774,976 rounded bytesである。pilotはraw 499,432,669 / rounded
 515,411,968 bytes、full-residualはraw 4,529,774,625 / rounded 4,674,023,424 bytesで、fullへexactに閉じる。
 canonical bodyは91,039 bytes、SHA-256
-`e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89`である。
+`a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc`である。
 
 このsidecarもaggregate-onlyかつnon-authorizingであり、それ単体では203,000 source-level assignment、decoded
 attachment-byte equivalence、actual allocated blocks、CAS/index/history増幅、root-bound capacityを証明しない。
@@ -952,7 +952,7 @@ catalog非改変の局所実装として追加したため、現在利用可能�
 semantic content instance・source materialization・execution authorityを授与しない。
 
 immutable historical artifactsに残る`remaining_blockers`やfalse claimは削除・raw unionしない。将来の
-`kcs.persona.pc-g0-blocker-resolution-ledger/v2`が
+`kio.persona.pc-g0-blocker-resolution-ledger/v2`が
 `(artifact schema, canonical bytes/SHA, field path, exact blocker)`ごとに
 `active-g0|resolved-by-downstream-pin|deferred-post-g0|historical-local-negative`を記録し、resolved entryは
 exact downstream schema/bytes/SHA/claim pathを必須にする。71-format registry、formal recipe catalog、semantic
@@ -1179,14 +1179,14 @@ duplicate patchはfail closedとし、patch前にW2 cross-scope moveを実行し
 W1以降のincidental totalは`+qIE`、W2以降はさらに`+qIM`を含む。W5 pre-purge upperはpilot
 `1,020 + 350 + 70 = 1,440 < 2,040`、full `10,200 + 350 + 70 = 10,620 < 20,400`である。
 
-この数え方は`kcs.persona.pc-chunk-accounting/v1`へ機械化した。`chunk_id == chunk_hash`、4 metric、
+この数え方は`kio.persona.pc-chunk-accounting/v1`へ機械化した。`chunk_id == chunk_hash`、4 metric、
 rename/move/duplicateのoperation deltaと成立precondition、全6 physical projections、checkpoint/cap式、
 performance/Recall分母の分離を独立validatorが再構築する。bodyは19,801 canonical bytes、SHA-256
-`d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`である。
-そのexact move rowをdirect inputへ束縛する`kcs.persona.pc-lifecycle-demand/v2`は、各人105 anonymous
+`66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52`である。
+そのexact move rowをdirect inputへ束縛する`kio.persona.pc-lifecycle-demand/v2`は、各人105 anonymous
 capabilities（contract 100 / incidental move 5）、pilot/fullのbyte-identical origin、P'/X'、restore net-zero、
 `qIM <= uIM = 350`、`nIM = 5`を固定する。bodyは463,571 canonical bytes、SHA-256
-`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。これはpre-solve demandであり、
+`372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005`である。これはpre-solve demandであり、
 source matching、solution-compiled history plan、W0/W1 qIM observation/patch、physical receipt、G0 authorityはfalseのままである。
 
 | checkpoint | current C | history-only H |
@@ -1398,46 +1398,46 @@ v2で実装済み（planning only、non-authorizing）:
 - pilot/full/full-minus-pilotのfamily/variant/scope/density/cohort marginalsと必要条件problem。全20人でpass、
   `joint_allocation_proved=false`
 - envelope canonical 71,979 bytes、SHA-256
-  `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`
+  `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7`
 - topology canonical 134,195 bytes、SHA-256
-  `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`
+  `02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a`
 - joint必要条件problem canonical 744,137 bytes、SHA-256
-  `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`
+  `f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207`
 - generic aggregate-core solver-policy sidecar canonical 83,004 bytes、SHA-256
-  `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`。route matrix、
+  `47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712`。route matrix、
   realism/source-intent refinement、solution/proofを含まず、実行・G0・write authorityはすべてfalse
 - strict post-policy canonical helperとone-way upstream binding。fixture identity、pinned body bytes/SHA、
   全authority mapと指定execution/proof denial、downstream/back-binding不在をfail closedで検査するが、
   framed loaderではない
-- `kcs.persona.pc-realism-profile/v2` canonical 36,811 bytes、SHA-256
-  `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`。20人のprofile vectorと
+- `kio.persona.pc-realism-profile/v2` canonical 36,811 bytes、SHA-256
+  `990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb`。20人のprofile vectorと
   overlay marginal targetだけがcompleteで、membership/scoring/placement整数割当/8軸台帳/G0はfalse
-- `kcs.persona.pc-variant-catalog/v2` canonical 211,733 bytes、SHA-256
-  `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`。71 identityと566 marginal、
+- `kio.persona.pc-variant-catalog/v2` canonical 211,733 bytes、SHA-256
+  `807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9`。71 identityと566 marginal、
   content MIME/Kio path MIME、形式別complexity/byte lane候補を束縛するが、catalog全variantの
   renderer/validator/profile bindingとsource-level feasibility/G0はfalse
-- `kcs.persona.pc-route-affinity/v2` candidate canonical 70,626 bytes、SHA-256
-  `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`。541 active rows/
+- `kio.persona.pc-route-affinity/v2` candidate canonical 70,626 bytes、SHA-256
+  `7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957`。541 active rows/
   10,820 scoresを束縛し、25 declared hard-zeroと854 out-of-domainを除外する。clone、secondary-only
   maximum、max/coverage機械違反は0である。9 checksのうち8 machine checksがpassし、独立human reviewが
   未成立であることを記録するnegative receiptは3,944 bytes、SHA-256
   `3c236722b900a26b12a7546b3a073dd71d1c935e1d313cb1261781c75ed4fd98`。承認receiptではなく、
   solver/G0 authorityはfalse
-- 人物別`kcs.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/36 typed facts/
+- 人物別`kio.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/36 typed facts/
   4 unordered W0-current conflict sets/4 revision chains、suite合計80 graph/320 entities/720 facts/
   80 conflict sets/80 revision chains、body 26,353--26,672 bytes、合計530,008 bytes。
   prior factはW0だけcurrent、replacementはW1以降currentで、W1 small-edit境界と一致する。
   intent/query/answer/path/final ID/rank/score/proseは持たず、fact-oracle closureとquery specはfalse
-- `kcs.persona.pc-overlay-contract/v2`、ID-free text/PDF renderer/validator、source-profile catalogの候補実装。
+- `kio.persona.pc-overlay-contract/v2`、ID-free text/PDF renderer/validator、source-profile catalogの候補実装。
   これらは設計・局所検査用で、canonical G0 inputとして未採用である。solved placement、
   `source_recipe_profile_id`、source-level exact allocation、production MIME golden、vertical-slice completion、
   全authorityはfalseのままである。overlay canonicalは71,179 bytes、SHA-256
-  `ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c`である。fact graphには
+  `e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23`である。fact graphには
   同一subject/predicate・値不一致のunordered W0-current fact pairが存在するが、1,560 conflict clustersの
   source-owned distinct A/B branch profilesはsemantic-membership packageで束縛した。下流concrete packageは
   reservation/source/semantic-fact manifestsとのexact joinまで束縛したが、scope placement、raw rendition、
   observed search identityは未束縛なので、`conflict_fact_realizability_proved=false`を維持する
-- 20人 x 2 originの`kcs.persona.pc-overlay-reservation-origin/v2`とcompact suite descriptorを実装。
+- 20人 x 2 originの`kio.persona.pc-overlay-reservation-origin/v2`とcompact suite descriptorを実装。
   40 origin artifactsはfull 25,560 rows、46,840 distinct overlay source-intent references、pilot 2,100
   contributor-only semantic anchorsを予約する。最大originは2,639,467 bytes、最大rowは1,960 / 2,048 bytes。
   suiteは21,680 canonical bytes、SHA-256
@@ -1445,24 +1445,24 @@ v2で実装済み（planning only、non-authorizing）:
   red-team検査を通過した。reservation自体は下流source row body/manifestを逆参照せず、
   concrete fact/overlay membership、scope/final ID、renderer/Kio/history/write authorityはなく、
   formal independent approval receiptも未束縛である
-- `kcs.persona.pc-source-inventory-layout/v2`は274,566 canonical bytes、SHA-256
-  `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`。20,300 pilot +
+- `kio.persona.pc-source-inventory-layout/v2`は274,566 canonical bytes、SHA-256
+  `81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a`。20,300 pilot +
   182,700 residual = 203,000 keys、20 + 53 = 73 shard ranges、566 persona/variant marginals、
   fullのpilot shard reference先頭再利用をexactに予約する。row body、body bytes/SHA、source profile、
   overlay/fact membership、16 MiB package proof、source inventory/G0/write authorityはこのlayout単体にはない。
   下流のstructural source packageがrow bodyとdigestを別artifactで束縛する
-- `kcs.persona.pc-source-inventory-profile-catalog/v2`は71 inventory profile IDを一意に付与し、
+- `kio.persona.pc-source-inventory-profile-catalog/v2`は71 inventory profile IDを一意に付与し、
   87,391 canonical bytes / SHA-256
-  `be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196`である。局所実装済みは
+  `9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0`である。局所実装済みは
   10 profiles、implementation missingは61 profilesで、formal source recipeは71件すべて
   `reserved-unbound`。ID付与はrecipe、renderer/validator、source-level feasibility、execution、G0を意味しない
-- `kcs.persona.pc-source-inventory-suite/v2`とbuilder-independent validatorを実装。203,000構造rows、
+- `kio.persona.pc-source-inventory-suite/v2`とbuilder-independent validatorを実装。203,000構造rows、
   73 canonical JSONL shards、40 origin manifests、40 pilot/full profile manifests、全shard body bytes/SHA、
   71 inventory-profile foreign keys、full manifestからexact pilot origin/shardへの再利用を束縛する。
   pilot/full profile manifestはoverlay reservation suite SHAも直接束縛し、origin経由の間接参照だけにしない。
   shard bodiesは合計108,682,911 bytes、最大rowはLF込み558 bytes、最大shardは2,225,794 bytes。
   suite descriptorは45,887 bytes / SHA-256
-  `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706`。代表pinはp01 pilot origin
+  `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`。代表pinはp01 pilot origin
   13,043 / `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df`、p01 pilot profile
   7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`、p12 residual origin
   15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`、p12 full profile
@@ -1473,7 +1473,7 @@ v2で実装済み（planning only、non-authorizing）:
   frame/headerを含むpre-solve corpus-input persona packageのformal 16 MiB capはfalseのままである。
   専用CI gate `persona-v2-source-inventory-full`は定義したが、
   CI実行結果のgreenはここでは主張しない
-- `kcs.persona.pc-source-semantic-membership-catalog/v2`とorigin/profile/suite manifests、
+- `kio.persona.pc-source-semantic-membership-catalog/v2`とorigin/profile/suite manifests、
   builder-independent validatorを実装。20人を独立domainに保った45 fact profiles/persona = 900、
   80 persona-local topics、71 inventory profileと1対1のsemantic profilesを束縛する。73 source-shard
   total projections + 2,100 anchor overrides + 1,560 conflict-pair overrides = 3,733 compact rowsから、
@@ -1481,7 +1481,7 @@ v2で実装済み（planning only、non-authorizing）:
   streaming展開する。language/topicはpilot/full Hamiltonとconnected-component-preserving allocatorで
   exact closureし、fullのsemantic versionはv1 189,770 / v2 13,230である。既存source、reservation、
   fact-graph pinsは変更せず、query/oracle/final IDを含めない。catalogは436,495 bytes / SHA-256
-  `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62`、suite descriptorは
+  `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b`、suite descriptorは
   49,837 bytes / `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`である。
   compact bodiesは合計1,006,627 bytes / 最大row 734 bytes、expanded context/fact membership receiptsは
   121,020,941 / 135,741,615 bytes、最大row 633 / 743 bytes、最大shard 2,484,590 / 3,030,632 bytesを
@@ -1492,15 +1492,15 @@ v2で実装済み（planning only、non-authorizing）:
   dedicated CI jobは60分とする。ただしこのsemantic package単体ではconcrete overlayを証明せず、remote green、
   formal recipe、pre-solve corpus-input persona package 16 MiB cap、
   正式closure、G0/write authorityは主張しない
-- `kcs.persona.pc-concrete-overlay-membership-origin-manifest/v2`、同profile manifest、
-  `kcs.persona.pc-concrete-overlay-membership-suite/v2`とbuilder-independent validatorを実装。
+- `kio.persona.pc-concrete-overlay-membership-origin-manifest/v2`、同profile manifest、
+  `kio.persona.pc-concrete-overlay-membership-suite/v2`とbuilder-independent validatorを実装。
   40 origins + 40 pilot/full profilesがupstream reservation/source/semantic-fact manifestsとoverlay contractを
   directに束縛する。19,870 content relations + 5,690 attachments + 2,100 disjoint anchors = 27,660
   rich rows、draft projection 25,560 memberships、46,840 unique overlay refs、48,940 unique joined sourcesを
   exactに閉じる。full relation内訳はexact 5,080 / near 13,230 / conflict 1,560、attachment hostsは2,800、
   exact-overlap attachmentsは1,390である。full profileはexact pilot origin/shardを再利用し、origin-local
   shard indexは0から始まる。suiteは51,133 canonical bytes / SHA-256
-  `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`である。
+  `129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`である。
   current-component ledgerの最大p12は13,275,672 bytes、headroom 3,501,544 bytesだが、上記pre-solve
   corpus-input persona package capのpartial proofにすぎない。producer shape testは172.190秒 / 最大RSS 237,158,400 bytes、full buildは
   155.45秒 / 最大RSS 192,757,760 bytesと計測した。full independent acceptanceは354.770秒 / 外側最大RSS
@@ -1508,7 +1508,7 @@ v2で実装済み（planning only、non-authorizing）:
   remote greenは主張しない。`placement_class_requirement`はscope assignment
   ではなく、formal recipes、semantic namespace/query/history mapping、joint solution/proof、actual payload/raw/
   chunk/search observation、render/write/history/Kio、pre-solve corpus-input persona cap、G0は未証明である。全authority flagsはfalse
-- `kcs.persona.pc-source-instance-parameter-assignment-suite/v2`とproducer-independent validatorを実装。
+- `kio.persona.pc-source-instance-parameter-assignment-suite/v2`とproducer-independent validatorを実装。
   shared 363 cells、20 persona projections / 2,643 active cells、40 origin manifestsへinlineした4,759 compact
   owner rows、40 pilot/full profiles、73 non-persisted expanded-view receiptsから203,000 intentsをexactly once
   束縛する。exact duplicate 5,080 pairsはsame cell、EML 9,153 sourcesは2,800 hosts / 5,690 membershipsに
@@ -1527,7 +1527,7 @@ v2で実装済み（planning only、non-authorizing）:
   これにより局所feasibilityは10 contributor variants、full 69,236 contributor sourcesを覆うが、
   同slice単体は、多言語PDF、個別semantic content、positive query anchor、Kio actual chunks、
   source-instance recipe/G0を証明しない。source-instance値は下流assignment packageが別に束縛する。
-  source-profile catalogは72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。
+  source-profile catalogは72,559 bytes / `f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d`である。
 - 後続のincidental-text narrow feasibility sliceは11 variantsをstdlib-onlyで局所実装する。renderer contractは
   9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、独立validator contractは
   10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。全出力は
@@ -1536,12 +1536,12 @@ v2で実装済み（planning only、non-authorizing）:
   materialization、actual incidental chunk上限、Kio/G0/writeを証明しない
 - 残る50 raw-only variantsを5 renderer/independent-validator pairで実装し、all-71 implementation
   registryへ統合した。registryは333,881 canonical bytes / SHA-256
-  `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`で、71 unique ownership rows、
+  `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d`で、71 unique ownership rows、
   8 pairs、16 contract bodies、213 min/mid/max runtime probes、pilot 20,300 / residual 182,700 /
   full 203,000 / 541 active persona-variant rowsを束縛する。provider callback中のbody変更はopening snapshotと
   post-callback re-pinで拒否する。局所format実装でありsource instance、render/write authorityではない
-- `kcs.persona.pc-formal-source-recipe-profile-catalog/v2`は386,152 canonical bytes / SHA-256
-  `973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8`である。71 inventory recipe slots、
+- `kio.persona.pc-formal-source-recipe-profile-catalog/v2`は386,152 canonical bytes / SHA-256
+  `0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df`である。71 inventory recipe slots、
   semantic content/filename slots、renderer/validator contractとruntime receiptをvariant-level profile policyへ
   1対1で束縛し、full/pilot別のeligible/base incidental capとW0--W5 exact integer checkpoint tableを持つ。
   同catalog単体は203,000 source-instance値やselected complexity/bytesを束縛しないが、下流parameter
@@ -1616,8 +1616,8 @@ exactly once束縛し、derivation/review receiptはcorpus closureだけへ入�
 corpus IDs/bytesを変えず、content変更だけがnamespaceを変える。
 
 以下はDecision 150で凍結したv1 predecessorの歴史的記録であり、現在のv2 coverageを表さない。
-Decision 150のpartial inventoryは`kcs.persona.pc-semantic-projection-derivation-inventory/v1`、各receiptは
-`kcs.persona.pc-semantic-projection-derivation-receipt/v1`である。exact 113 bodiesは
+Decision 150のpartial inventoryは`kio.persona.pc-semantic-projection-derivation-inventory/v1`、各receiptは
+`kio.persona.pc-semantic-projection-derivation-receipt/v1`である。exact 113 bodiesは
 membership-free base source content-context JSONL 73、effective source membership 20、
 query-independent lifecycle fact/rendition rules 20で、最小12分類中3分類だけを覆う。
 missing 9分類はtopology path/load、realism/locale/security、route scores、use-case corpus half、
@@ -1643,8 +1643,8 @@ Decision 150のv1 artifactでは`semantic_payload_projection_bound`、`query_sem
 `future_source_id_namespace_eligible`、G0/solver/solution/write/Kio authorityはすべてfalseであり、その値とpinを
 変更しない。
 
-現在の下流v2候補は`kcs.persona.pc-semantic-projection-derivation-inventory/v2`と
-`kcs.persona.pc-semantic-projection-derivation-receipt/v2`で、v1の3分類を再生成して継承し、歴史的missing
+現在の下流v2候補は`kio.persona.pc-semantic-projection-derivation-inventory/v2`と
+`kio.persona.pc-semantic-projection-derivation-receipt/v2`で、v1の3分類を再生成して継承し、歴史的missing
 9分類を追加した12/12分類、exact 253 bodiesである。内訳はtopology 1、realism 1、route 1、primary use-case 1、
 recipe 1、fact graph 20、base content-context 73、effective membership 20、concrete overlay 40、
 source-instance parameters 74、lifecycle fact/rendition 20、payload equivalence 1である。framingはcanonical JSON
@@ -1700,7 +1700,7 @@ review、corpus semantic/query/history closure、blocker resolution ledgerを閉
 - 3 fresh-storage replay、actual chunk/history attestation、2,100 intents / 6,300 observationsの実行
   （Recall対象は1,800 positive）
 
-この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
+この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kio-persona-pc-v1`、
 canonical plan SHAを変更しない。non-authorizing generic solver-semantics sidecar、representative pre-solve
 vertical slice、203,000-key/73-shard layout、overlay reservation、全203,000 structural rows/73 shard bodies、
 40 origin + 40 profile manifests、71 inventory profile IDs、全203,000 sourceのcontent contexts +

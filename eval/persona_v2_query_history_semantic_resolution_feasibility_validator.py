@@ -34,13 +34,13 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1"
+    "kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = (
     "persona-pc-v2-query-history-semantic-resolution-feasibility-audit"
 )
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 MAX_ARTIFACT_BYTES = 2 * 2**20
 TARGET_ARTIFACT_BYTES = 512 * 2**10
@@ -59,37 +59,37 @@ DEPENDENCY_ORDER = (
 )
 DEPENDENCY_PINS = {
     "query-history-target-resolution-v1": {
-        "artifact_schema": "kcs.persona.pc-query-history-target-resolution/v1",
+        "artifact_schema": "kio.persona.pc-query-history-target-resolution/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 4_478_576,
-        "sha256": "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+        "sha256": "fbb0fd1a78d034fcd1777a6aaf0e7ee9bc21d07255f2ce9c7d5fc9761dc11593",
     },
     "source-semantic-membership-suite-v2": {
-        "artifact_schema": "kcs.persona.pc-source-semantic-membership-suite/v2",
+        "artifact_schema": "kio.persona.pc-source-semantic-membership-suite/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 49_837,
         "sha256": "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28",
     },
     "source-matched-lifecycle-suite-v1": {
-        "artifact_schema": "kcs.persona.pc-source-matched-lifecycle-suite/v1",
+        "artifact_schema": "kio.persona.pc-source-matched-lifecycle-suite/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 14_605,
         "sha256": "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8",
     },
     "lifecycle-effective-membership-reconciliation-v1": {
-        "artifact_schema": "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1",
+        "artifact_schema": "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 69_195,
         "sha256": "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c",
     },
     "corpus-semantic-namespace-v3": {
-        "artifact_schema": "kcs.persona.pc-corpus-semantic-namespace/v3",
+        "artifact_schema": "kio.persona.pc-corpus-semantic-namespace/v3",
         "artifact_schema_version": 3,
         "canonical_bytes": 161_665,
         "sha256": "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
     },
     "complete-semantic-projection-inventory-v2": {
-        "artifact_schema": "kcs.persona.pc-semantic-projection-derivation-inventory/v2",
+        "artifact_schema": "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 697_466,
         "sha256": "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
@@ -124,7 +124,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_execution",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_execution",
         "authorizes_query_history_target_resolution_v2",

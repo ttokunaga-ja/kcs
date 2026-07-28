@@ -75,7 +75,7 @@ class PersonaV2CapacityFactTruthOccurrencePolicyTests(unittest.TestCase):
         self.assertLess(len(self.raw), package.TARGET_CATALOG_BYTES)
         exact = (
             29_868,
-            "9f9653c1bb7a794bea33fe208b1de3c63f8dc011b8ac13f2d9a6955333681cd4",
+            "d0affa86583286cbf2eb466f807b3998c6be0d77dff7e541f91dca2c46271b11",
         )
         self.assertEqual(package._require_golden_parity(), exact)
         self.assertEqual(independent._expected_golden(), exact)
@@ -178,7 +178,7 @@ class PersonaV2CapacityFactTruthOccurrencePolicyTests(unittest.TestCase):
         self.assertEqual(axis["canonical_bytes"], 50_473)
         self.assertEqual(
             axis["sha256"],
-            "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29",
+            "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85",
         )
         self.assertIs(axis["accepted"], True)
         self.assertIs(axis["frozen"], True)
@@ -410,8 +410,8 @@ class PersonaV2CapacityFactTruthOccurrencePolicyTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL") == "1",
-    "set KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1 for full replay",
+    os.environ.get("KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL") == "1",
+    "set KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1 for full replay",
 )
 class PersonaV2CapacityFactTruthOccurrencePolicyFullTest(unittest.TestCase):
     def test_full_two_read_replay_with_measurement(self):
@@ -464,8 +464,8 @@ class PersonaV2CapacityFactTruthOccurrencePolicyFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD") == "1",
-    "set KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1 for two cold builds",
+    os.environ.get("KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD") == "1",
+    "set KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1 for two cold builds",
 )
 class PersonaV2CapacityFactTruthOccurrencePolicyColdTest(unittest.TestCase):
     def test_two_hashseed_cold_builds_are_byte_identical(self):
@@ -490,7 +490,7 @@ print(json.dumps({"bytes": len(raw), "elapsed_seconds": time.monotonic() - start
         for seed in ("0", "1"):
             environment = dict(os.environ)
             environment.update({"LANG": "C", "LC_ALL": "C", "PYTHONHASHSEED": seed, "TZ": "UTC"})
-            environment.pop("KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD", None)
+            environment.pop("KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

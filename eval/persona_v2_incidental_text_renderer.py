@@ -3,7 +3,7 @@
 The eleven variants in this module account for every ``incidental_searchable``
 physical source in the persona-PC v2 envelope.  This is deliberately a local
 format/byte feasibility primitive: it accepts no persona, source, query,
-solution, path, or digest identity and grants no write, KCS, solver, or G0
+solution, path, or digest identity and grants no write, KIO, solver, or G0
 authority.  Formal source recipes and solved per-source values remain separate
 downstream artifacts.
 """
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-incidental-text-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-incidental-text-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-incidental-text-renderer"
 RENDERER_ID = "persona-v2-id-free-incidental-text-feasibility-renderer"
@@ -79,7 +79,7 @@ _VARIANT_ROWS = {
         "base_bytes": 512,
         "increment_bytes": 48,
         "content_media_type": "text/csv",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "csv_tsv",
         "filename_extension": "csv",
@@ -92,7 +92,7 @@ _VARIANT_ROWS = {
         "base_bytes": 8_192,
         "increment_bytes": 16_384,
         "content_media_type": "message/rfc822",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "html_eml",
         "filename_extension": "eml",
@@ -105,7 +105,7 @@ _VARIANT_ROWS = {
         "base_bytes": 2_048,
         "increment_bytes": 1_024,
         "content_media_type": "text/html",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "html_eml",
         "filename_extension": "html",
@@ -118,7 +118,7 @@ _VARIANT_ROWS = {
         "base_bytes": 2_048,
         "increment_bytes": 1_024,
         "content_media_type": "application/x-ipynb+json",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "ipynb",
         "filename_extension": "ipynb",
@@ -131,7 +131,7 @@ _VARIANT_ROWS = {
         "base_bytes": 1_024,
         "increment_bytes": 256,
         "content_media_type": "application/json",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "json",
@@ -144,7 +144,7 @@ _VARIANT_ROWS = {
         "base_bytes": 512,
         "increment_bytes": 96,
         "content_media_type": "application/x-ndjson",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "txt_log",
         "filename_extension": "jsonl",
@@ -157,7 +157,7 @@ _VARIANT_ROWS = {
         "base_bytes": 512,
         "increment_bytes": 96,
         "content_media_type": "text/plain",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "txt_log",
         "filename_extension": "log",
@@ -170,7 +170,7 @@ _VARIANT_ROWS = {
         "base_bytes": 2_048,
         "increment_bytes": 1_024,
         "content_media_type": "application/sql",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "sql",
@@ -183,7 +183,7 @@ _VARIANT_ROWS = {
         "base_bytes": 512,
         "increment_bytes": 48,
         "content_media_type": "text/tab-separated-values",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "csv_tsv",
         "filename_extension": "tsv",
@@ -196,7 +196,7 @@ _VARIANT_ROWS = {
         "base_bytes": 1_024,
         "increment_bytes": 256,
         "content_media_type": "application/xml",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "xml",
@@ -209,7 +209,7 @@ _VARIANT_ROWS = {
         "base_bytes": 1_024,
         "increment_bytes": 256,
         "content_media_type": "application/yaml",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "yaml",
@@ -252,7 +252,7 @@ class RenderedIncidentalText:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     target_complexity: int
     target_bytes: int
@@ -635,7 +635,7 @@ def render_incidental_text(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         target_complexity=request.target_complexity,
         target_bytes=target_bytes,
@@ -654,7 +654,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -688,7 +688,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -700,7 +700,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "eleven-id-free-formal-ordinary-incidental-format-feasibility-variants-"
-            "only-not-source-materialization-or-kcs-attestation"
+            "only-not-source-materialization-or-kio-attestation"
         ),
         "payload_identity_policy": {
             "content_digest_embedded": False,

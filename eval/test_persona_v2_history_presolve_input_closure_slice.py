@@ -918,8 +918,8 @@ class PersonaV2HistoryPresolveInputClosureSliceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL") == "1",
-    "set KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1 for all-dependency validation",
+    os.environ.get("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL") == "1",
+    "set KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1 for all-dependency validation",
 )
 class PersonaV2HistoryPresolveInputClosureSliceFullTest(unittest.TestCase):
     def test_full_dependency_acceptance(self):
@@ -1017,8 +1017,8 @@ class PersonaV2HistoryPresolveInputClosureSliceFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD") == "1",
-    "set KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1 for two isolated full builds",
+    os.environ.get("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD") == "1",
+    "set KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1 for two isolated full builds",
 )
 class PersonaV2HistoryPresolveInputClosureSliceColdTest(unittest.TestCase):
     def test_two_hashseed_full_builds_are_byte_identical(self):
@@ -1127,7 +1127,7 @@ print(json.dumps({
                     "TZ": "UTC",
                 }
             )
-            environment.pop("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD", None)
+            environment.pop("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

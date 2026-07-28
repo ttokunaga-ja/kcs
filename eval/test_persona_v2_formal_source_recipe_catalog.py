@@ -18,7 +18,7 @@ from eval import persona_v2_variant_catalog as variants
 
 EXPECTED_CANONICAL_BYTES = 386_152
 EXPECTED_SHA256 = (
-    "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8"
+    "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df"
 )
 
 

@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 CATALOG_GOLDEN = (
     8_649,
-    "118cd0ff8f5fdf92bba40150889f006d5b8a9d7300e78ea426794561e1d2d9f6",
+    "00dc78f6dd54a06e2669ffaeea08afdb56d2fe6bd978d342ca10cc3ed5919128",
 )
 PROJECTION_GOLDEN = (
     4_288,
@@ -37,7 +37,7 @@ UPSTREAM_GOLDENS = (
     (
         "persona-v2-overlay-contract",
         71_179,
-        "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c",
+        "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23",
     ),
     (
         "persona-v2-source-semantic-membership-suite",
@@ -47,7 +47,7 @@ UPSTREAM_GOLDENS = (
     (
         "persona-v2-concrete-overlay-membership-suite",
         51_133,
-        "4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a",
+        "129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737",
     ),
     (
         "persona-v2-source-parameter-assignment-suite",
@@ -393,8 +393,8 @@ class PayloadEquivalenceRuleCatalogTests(unittest.TestCase):
         self.assertNotIn("persona_v2_payload_equivalence_rule_catalog", imported)
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_COLD_HASH_SEED_TESTS") == "1",
-        "set KCS_RUN_COLD_HASH_SEED_TESTS=1 for the two cold golden reproductions",
+        os.environ.get("KIO_RUN_COLD_HASH_SEED_TESTS") == "1",
+        "set KIO_RUN_COLD_HASH_SEED_TESTS=1 for the two cold golden reproductions",
     )
     def test_two_cold_hash_seeds_reproduce_all_goldens(self):
         eval_dir = Path(__file__).resolve().parent

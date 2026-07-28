@@ -29,7 +29,7 @@ from eval import persona_v2_source_semantic_membership_package_validator as inde
 # contract change review-visible.
 EXPECTED_CATALOG_BYTES = 436_495
 EXPECTED_CATALOG_SHA256 = (
-    "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62"
+    "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b"
 )
 EXPECTED_SUITE_BYTES = 49_837
 EXPECTED_SUITE_SHA256 = (
@@ -2209,7 +2209,7 @@ print(json.dumps({"rss_bytes": rss_bytes, "success": success}, sort_keys=True))
             (
                 "changed-artifact-schema",
                 lambda value: value.__setitem__(
-                    "artifact_schema", "kcs.invalid-source-suite/v999"
+                    "artifact_schema", "kio.invalid-source-suite/v999"
                 ),
             ),
         )

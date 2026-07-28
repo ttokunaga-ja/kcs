@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-g0-blocker-resolution-ledger/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-g0-blocker-resolution-ledger/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-g0-blocker-resolution-ledger-candidate"
 REGISTRY_PROFILE_ID = "bootstrap-three-source-v1"
@@ -109,7 +109,7 @@ _SOURCE_DEFINITIONS = (
         "blocker_list_paths": (("remaining_blockers",),),
         "false_completion_paths": (
             ("g0_contract_frozen",),
-            ("kcs_media_policy", "cross_language_production_tables_verified"),
+            ("kio_media_policy", "cross_language_production_tables_verified"),
             ("renderer_validator_implementation_complete",),
             ("source_level_feasibility_complete",),
             ("variant_catalog_complete",),

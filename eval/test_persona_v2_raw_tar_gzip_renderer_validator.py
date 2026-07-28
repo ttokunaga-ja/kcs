@@ -69,8 +69,8 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
                 data=rendered.data,
                 extension=rendered.extension,
                 content_media_type=rendered.content_media_type,
-                expected_kcs_path_media_type=(
-                    rendered.expected_kcs_path_media_type
+                expected_kio_path_media_type=(
+                    rendered.expected_kio_path_media_type
                 ),
                 expected_offline_disposition=(
                     rendered.expected_offline_disposition
@@ -88,7 +88,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -126,7 +126,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             "archive_format",
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -148,7 +148,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             )
             self.assertEqual(renderer_rows[variant]["gate_role"], "raw_only")
             self.assertEqual(
-                renderer_rows[variant]["expected_kcs_path_media_type"],
+                renderer_rows[variant]["expected_kio_path_media_type"],
                 "application/octet-stream",
             )
             self.assertEqual(
@@ -517,7 +517,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             replace(valid, data=bytearray(rendered.data)),
             replace(valid, extension="jsonl"),
             replace(valid, content_media_type="application/octet-stream"),
-            replace(valid, expected_kcs_path_media_type="application/gzip"),
+            replace(valid, expected_kio_path_media_type="application/gzip"),
             replace(valid, expected_offline_disposition="incidental_sniff"),
         )
         for request in invalid:

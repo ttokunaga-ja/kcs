@@ -40,23 +40,23 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_inventory_package as source_package
 
 
-CELL_CATALOG_SCHEMA = "kcs.persona.pc-source-parameter-cell-catalog/v2"
+CELL_CATALOG_SCHEMA = "kio.persona.pc-source-parameter-cell-catalog/v2"
 CELL_CATALOG_KIND = "persona-pc-v2-source-parameter-cell-catalog"
-CELL_PROJECTION_SCHEMA = "kcs.persona.pc-source-parameter-cell-projection/v2"
+CELL_PROJECTION_SCHEMA = "kio.persona.pc-source-parameter-cell-projection/v2"
 CELL_PROJECTION_KIND = "persona-pc-v2-source-parameter-cell-projection"
 ORIGIN_MANIFEST_SCHEMA = (
-    "kcs.persona.pc-source-instance-parameter-assignment-origin-manifest/v2"
+    "kio.persona.pc-source-instance-parameter-assignment-origin-manifest/v2"
 )
 ORIGIN_MANIFEST_KIND = (
     "persona-pc-v2-source-instance-parameter-assignment-origin-manifest"
 )
 PROFILE_MANIFEST_SCHEMA = (
-    "kcs.persona.pc-source-instance-parameter-assignment-profile-manifest/v2"
+    "kio.persona.pc-source-instance-parameter-assignment-profile-manifest/v2"
 )
 PROFILE_MANIFEST_KIND = (
     "persona-pc-v2-source-instance-parameter-assignment-profile-manifest"
 )
-SUITE_SCHEMA = "kcs.persona.pc-source-instance-parameter-assignment-suite/v2"
+SUITE_SCHEMA = "kio.persona.pc-source-instance-parameter-assignment-suite/v2"
 SUITE_KIND = "persona-pc-v2-source-instance-parameter-assignment-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -102,27 +102,27 @@ MAX_EXPANDED_ROW_BYTES_INCLUDING_LF = 256
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-source-inventory-layout": (
         274_566,
-        "ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba",
+        "81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a",
     ),
     "persona-v2-source-inventory-suite": (
         45_887,
-        "b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706",
+        "9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3",
     ),
     "persona-v2-formal-source-recipe-profile-catalog": (
         386_152,
-        "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8",
+        "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df",
     ),
     "persona-v2-aggregate-byte-distribution-catalog": (
         1_576_125,
-        "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343",
+        "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2",
     ),
     "persona-v2-overlay-compatible-byte-distribution": (
         91_039,
-        "e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89",
+        "a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc",
     ),
     "persona-v2-concrete-overlay-membership-suite": (
         51_133,
-        "4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a",
+        "129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737",
     ),
 }
 
@@ -134,7 +134,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -145,7 +145,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "history_executor_available",
         "joint_allocation_proved",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "renderer_available",
         "root_bound_capacity_attested",
@@ -516,7 +516,7 @@ def _canonical_cell_catalog():
             "source-instance-cell-assignment-not-in-this-shared-catalog",
             "frame-and-header-accounting-not-implemented",
             "scope-bucket-cohort-chunk-quota-and-final-id-solution-unbound",
-            "render-write-observation-history-kcs-capacity-and-g0-absent",
+            "render-write-observation-history-kio-capacity-and-g0-absent",
         ],
         "summary": {
             "eml_parameter_cell_count": len(EML_BIN_ORDER),
@@ -1270,7 +1270,7 @@ def _build_origin_manifest(
             "frame-and-header-accounting-not-implemented",
             "formal-complete-persona-package-cap-not-proved",
             "scope-bucket-cohort-chunk-quota-and-final-id-solution-unbound",
-            "semantic-payload-render-write-observation-history-kcs-and-g0-absent",
+            "semantic-payload-render-write-observation-history-kio-and-g0-absent",
         ],
         "selection_policy": {
             "cell_identity": "literal-variant-id-slash-bin-id-no-component-slash",
@@ -1835,7 +1835,7 @@ def _canonical_suite_descriptor():
             "formal-complete-pre-solve-persona-package-cap-not-proved",
             "semantic-payload-and-lifecycle-effective-membership-not-bound",
             "scope-bucket-cohort-chunk-quota-and-final-id-solution-unbound",
-            "render-write-observation-history-kcs-root-capacity-and-g0-absent",
+            "render-write-observation-history-kio-root-capacity-and-g0-absent",
         ],
     }
     _reauth_inputs(inputs, opening, label="suite dependencies")
@@ -1935,7 +1935,7 @@ def require_complete_source_parameter_assignment_package():
         "all 203,000 pre-solve content parameter assignments and 73 expanded-view "
         "receipts are exact, but frame/header and the complete 16-MiB persona-package "
         "proof are absent, and semantic payload, "
-        "placement, rendering, history, KCS, root capacity, and G0 remain blocked"
+        "placement, rendering, history, KIO, root capacity, and G0 remain blocked"
     )
 
 

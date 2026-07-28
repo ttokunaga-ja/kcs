@@ -3,7 +3,7 @@
 The frozen metadata, ZIP grammar, byte formulas, and canonical payload
 templates are intentionally duplicated here.  A successful receipt proves
 only bounded local structure and bytes; it never attests source identity,
-placement, observed chunks, history mutation, or KCS execution.
+placement, observed chunks, history mutation, or KIO execution.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-zip-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-zip-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-zip-validator"
 VALIDATOR_ID = "persona-v2-id-free-raw-zip-standalone-validator"
@@ -70,7 +70,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -98,7 +98,7 @@ def _generic_row():
     return {
         "complexity_measure": "members",
         "content_media_type": "application/zip",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "family": "domain_binary",
         "filename_extension": "zip",
@@ -117,7 +117,7 @@ _VARIANT_ROWS.update(
         "ifczip": {
             "complexity_measure": "spf-members",
             "content_media_type": "application/zip",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": "ifczip",
@@ -131,7 +131,7 @@ _VARIANT_ROWS.update(
         "npz": {
             "complexity_measure": "array-elements",
             "content_media_type": "application/zip",
-            "expected_kcs_path_media_type": "application/octet-stream",
+            "expected_kio_path_media_type": "application/octet-stream",
             "expected_offline_disposition": "unsupported_binary",
             "family": "domain_binary",
             "filename_extension": "npz",
@@ -190,7 +190,7 @@ class RawZipValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -285,8 +285,8 @@ def validate_request(request):
     expected_metadata = {
         "extension": profile["filename_extension"],
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": profile[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": profile[
             "expected_offline_disposition"
@@ -612,7 +612,7 @@ def _ifc_payload(padding_bytes):
         "HEADER;\n"
         "FILE_DESCRIPTION(('Bounded IFC feasibility model'),'2;1');\n"
         "FILE_NAME('model.ifc','2026-07-15T00:00:00',"
-        "('Synthetic'),('KCS'),'KCS','KCS','');\n"
+        "('Synthetic'),('KIO'),'KIO','KIO','');\n"
         "FILE_SCHEMA(('IFC4'));\n"
         "ENDSEC;\n"
         "DATA;\n"
@@ -725,7 +725,7 @@ def validate_raw_zip_payload(request):
         "byte_length": len(request.data),
         "expanded_bytes": expanded_bytes,
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "member_count": len(members),
         "observed_complexity_measure": _profile(request.variant)[
             "complexity_measure"
@@ -785,8 +785,8 @@ def _contract_variant_row(variant):
         },
         "compound_suffix_parts": [profile["filename_extension"]],
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": profile[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": profile[
             "expected_offline_disposition"
@@ -818,7 +818,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -832,7 +832,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "twenty-one-id-free-formal-ordinary-raw-zip-format-validation-"
-            "variants-only-excluding-ooxml-not-source-materialization-or-kcs-attestation"
+            "variants-only-excluding-ooxml-not-source-materialization-or-kio-attestation"
         ),
         "independence_contract": {
             "imports_planning_modules": False,

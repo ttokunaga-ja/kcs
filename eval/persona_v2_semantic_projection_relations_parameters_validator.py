@@ -35,13 +35,13 @@ PARAMETER_CLASS_ID = "source-instance-parameters"
 CLASS_ORDER = (RELATION_CLASS_ID, PARAMETER_CLASS_ID)
 
 RELATION_SCHEMA = (
-    "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1"
+    "kio.persona.pc-concrete-overlay-relations-origin-projection/v1"
 )
 RELATION_KIND = "persona-pc-v2-concrete-overlay-relations-origin-projection"
-CELL_SCHEMA = "kcs.persona.pc-source-parameter-cell-content-projection/v1"
+CELL_SCHEMA = "kio.persona.pc-source-parameter-cell-content-projection/v1"
 CELL_KIND = "persona-pc-v2-source-parameter-cell-content-projection"
 ASSIGNMENT_SCHEMA = (
-    "kcs.persona.pc-source-instance-parameter-assignment-shard-projection/v1"
+    "kio.persona.pc-source-instance-parameter-assignment-shard-projection/v1"
 )
 ASSIGNMENT_KIND = (
     "persona-pc-v2-source-instance-parameter-assignment-shard-projection"

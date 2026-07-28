@@ -4,7 +4,7 @@ The expected values in this module are intentionally duplicated literals.  The
 tests compare those literals with the production planning catalogs instead of
 recomputing expectations from the same production constants.  Passing this
 suite proves cardinality consistency only; it grants no G0, solver, writer,
-history-execution, KCS-execution, or observed-evidence authority.
+history-execution, KIO-execution, or observed-evidence authority.
 """
 
 import unittest

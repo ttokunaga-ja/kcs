@@ -1236,7 +1236,7 @@ class PersonaV2SourceMatchedLifecycleInventoryTests(unittest.TestCase):
                 duplicate.sort(
                     key=lambda row: (
                         hashlib.sha256(
-                            b"kcs-lifecycle-v1/diagnostic-source/"
+                            b"kio-lifecycle-v1/diagnostic-source/"
                             + row["source_intent_key"].encode("ascii")
                         ).digest(),
                         row["source_intent_key"].encode("ascii"),

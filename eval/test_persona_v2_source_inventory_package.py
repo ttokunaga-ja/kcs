@@ -20,7 +20,7 @@ from eval import persona_v2_source_inventory_profile as inventory_profiles
 
 EXPECTED_SUITE_BYTES = 45_887
 EXPECTED_SUITE_SHA256 = (
-    "b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706"
+    "9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3"
 )
 EXPECTED_P01_PILOT_ORIGIN = (
     13_043,

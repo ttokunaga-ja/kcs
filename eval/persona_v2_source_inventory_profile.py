@@ -12,7 +12,7 @@ Inventory identity and execution readiness are intentionally separate:
 * all formal source-recipe slots remain reserved but unbound;
 * ten variants expose only local bounded-feasibility evidence;
 * sixty-one variants remain implementation-missing;
-* every G0, solver, renderer-execution, filesystem, write, KCS, and history
+* every G0, solver, renderer-execution, filesystem, write, KIO, and history
   authority remains false.
 """
 
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-profile-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-profile-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-source-inventory-profile-catalog"
 
@@ -49,7 +49,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -57,7 +57,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_source_plan",
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_recipe_inventory_complete",
     }
 )
@@ -144,7 +144,7 @@ def _profile_row(variant_row, feasibility_row):
         )
     exact_metadata = (
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -185,8 +185,8 @@ def _profile_row(variant_row, feasibility_row):
         ),
         "content_media_type": variant_row["content_media_type"],
         "execution_eligibility_status": "blocked",
-        "expected_kcs_path_media_type": variant_row[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": variant_row[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": variant_row[
             "expected_offline_disposition"
@@ -390,7 +390,7 @@ def _canonical_catalog():
             "sixty-one-renderer-validator-or-formula-implementations-missing",
             "semantic-content-and-fact-membership-catalogs-not-bound",
             "source-level-allocation-solution-and-proof-not-present",
-            "physical-source-render-write-and-kcs-observation-not-present",
+            "physical-source-render-write-and-kio-observation-not-present",
             "formal-persona-package-cap-not-proved",
         ],
         "source_profile_rows": rows,

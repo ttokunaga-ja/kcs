@@ -24,7 +24,7 @@ from eval import persona_v2_joint_problem as joint_problem
 from eval import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-joint-solver-policy/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-joint-solver-policy/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-joint-solver-policy"
 COMPLETION_SCOPE = (
@@ -666,7 +666,7 @@ def _objective():
             "z[phi,b,s,q]": "sum_v,h C_phi[phi,v,s,b,h,q]",
         },
         "component_rule_schema": (
-            "kcs.persona.pc-joint-objective-components/v1"
+            "kio.persona.pc-joint-objective-components/v1"
         ),
         "component_rules": component_rules,
         "component_formulas": formulas,
@@ -954,7 +954,7 @@ def _canonical_policy_value():
                 "aggregate_core_complete": True,
                 "constraints": _hard_constraints(),
                 "declarative_rule_schema": (
-                    "kcs.persona.pc-generic-aggregate-core-rules/v1"
+                    "kio.persona.pc-generic-aggregate-core-rules/v1"
                 ),
                 "derived_redundant_consequences": [
                     {
@@ -1113,7 +1113,7 @@ def _canonical_policy_value():
                 "actual_matrix_present": False,
                 "artifact_contract": {
                     "artifact_kind": "persona-pc-v2-route-affinity-matrix",
-                    "artifact_schema": "kcs.persona.pc-route-affinity/v2",
+                    "artifact_schema": "kio.persona.pc-route-affinity/v2",
                     "artifact_schema_version": 2,
                     "authority_exact_false_fields": [
                         "authorizes_g0_freeze",

@@ -20,11 +20,11 @@ payload may be shared between A and B.  Query IDs are separate namespaces:
 
 **Recommended inventory reference:** Phase 2 B uses the already frozen v2
 benchmark-stress inventory as a *profile reference only*, pinned by
-`kcs.persona.pc-envelope/v2` (`71,979` bytes,
-`1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`).
+`kio.persona.pc-envelope/v2` (`71,979` bytes,
+`12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7`).
 Persona language/locale weights are separately pinned by
-`kcs.persona.pc-realism-profile/v2` (`36,811` bytes,
-`a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`).
+`kio.persona.pc-realism-profile/v2` (`36,811` bytes,
+`990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb`).
 It does not adopt `persona-core-v1`, which remains an unselected candidate with
 cellwise incompatibility against the legacy source allocation.  This prevents a
 small evaluation fixture from silently deciding the broader allocation question.
@@ -48,8 +48,8 @@ uses `offline`, and is not silently collapsed into `txt` merely because the
 illustrative file-row enum abbreviated that category.
 
 **Folder-coordinate reference:** B additionally pins the frozen
-`kcs.persona.pc-topology/v2` coordinate set (134,195 bytes,
-`204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`).
+`kio.persona.pc-topology/v2` coordinate set (134,195 bytes,
+`02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a`).
 This pin supplies the 20 persona-specific leaf *coordinates* for a fixture
 mirror; it does not create a Kio registry, claim a formal replay, or grant
 materialization/G0 authority.  The B mirror has two non-interchangeable lanes:

@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_format_implementation_registry_validator as registry_validator
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-aggregate-byte-distribution-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-aggregate-byte-distribution-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-aggregate-byte-distribution-catalog"
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
@@ -40,7 +40,7 @@ MAX_FRAGMENT_BYTES = 256 * 1024
 # body pins, never an embedded self hash.
 EXPECTED_CATALOG_CANONICAL_BYTES = 1_576_125
 EXPECTED_CATALOG_SHA256 = (
-    "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343"
+    "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2"
 )
 
 EXPECTED_PERSONA_IDS = tuple(f"p{index:02d}" for index in range(1, 21))
@@ -94,34 +94,34 @@ SIZE_SHAPE_PROFILE_IDS = frozenset(
 DEPENDENCY_PINS = {
     "persona-v2-variant-catalog": (
         "persona-pc-v2-variant-catalog",
-        "kcs.persona.pc-variant-catalog/v2",
+        "kio.persona.pc-variant-catalog/v2",
         2,
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
         "persona-variant-source-count-and-formal-lane-owner",
     ),
     "persona-v2-format-implementation-registry": (
         "persona-pc-v2-format-implementation-registry",
-        "kcs.persona.pc-format-implementation-registry/v2",
+        "kio.persona.pc-format-implementation-registry/v2",
         2,
         333_881,
-        "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+        "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
         "all-71-renderer-formula-and-runtime-contract-owner",
     ),
     "persona-v2-formal-source-recipe-profile-catalog": (
         "persona-pc-v2-formal-source-recipe-profile-catalog",
-        "kcs.persona.pc-formal-source-recipe-profile-catalog/v2",
+        "kio.persona.pc-formal-source-recipe-profile-catalog/v2",
         2,
         386_152,
-        "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8",
+        "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df",
         "formal-recipe-profile-and-lane-policy-owner",
     ),
     "persona-v2-realism-profile": (
         "persona-pc-v2-realism-profile",
-        "kcs.persona.pc-realism-profile/v2",
+        "kio.persona.pc-realism-profile/v2",
         2,
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
         "persona-role-and-full-denominator-owner",
     ),
 }
@@ -160,7 +160,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -171,7 +171,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "renderer_execution_environment_available",
     }
 )
@@ -428,7 +428,7 @@ def _authenticate_dependency(name, value):
         value.get("artifact_kind") != kind
         or value.get("artifact_schema") != schema
         or value.get("artifact_schema_version") != version
-        or value.get("fixture_id") != "kcs-persona-pc-v2"
+        or value.get("fixture_id") != "kio-persona-pc-v2"
         or value.get("fixture_schema_version") != 2
         or len(raw) != expected_bytes
         or hashlib.sha256(raw).hexdigest() != expected_sha
@@ -1532,7 +1532,7 @@ def _validate_probe_receipts(
     expected_rendered_keys = {
         "content_media_type",
         "data",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "extension",
         "target_bytes",
@@ -1594,15 +1594,15 @@ def _validate_probe_receipts(
             or type(rendered["target_complexity"]) is not int
             or type(rendered["extension"]) is not str
             or type(rendered["content_media_type"]) is not str
-            or type(rendered["expected_kcs_path_media_type"]) is not str
+            or type(rendered["expected_kio_path_media_type"]) is not str
             or type(rendered["expected_offline_disposition"]) is not str
             or rendered["target_bytes"] != len(data)
             or rendered["target_bytes"] != receipt["target_bytes"]
             or rendered["target_complexity"] != receipt["target_complexity"]
             or rendered["extension"] != implementation_row["filename_extension"]
             or rendered["content_media_type"] != implementation_row["content_media_type"]
-            or rendered["expected_kcs_path_media_type"]
-            != implementation_row["expected_kcs_path_media_type"]
+            or rendered["expected_kio_path_media_type"]
+            != implementation_row["expected_kio_path_media_type"]
             or rendered["expected_offline_disposition"]
             != implementation_row["expected_offline_disposition"]
             or hashlib.sha256(data).hexdigest() != receipt["payload_sha256"]
@@ -1674,7 +1674,7 @@ def _validate_static_contract_fields(value, expected_bindings):
         value["artifact_kind"] != ARTIFACT_KIND
         or value["artifact_schema"] != ARTIFACT_SCHEMA
         or value["artifact_schema_version"] != ARTIFACT_SCHEMA_VERSION
-        or value["fixture_id"] != "kcs-persona-pc-v2"
+        or value["fixture_id"] != "kio-persona-pc-v2"
         or value["fixture_schema_version"] != 2
         or value["g0_contract_frozen"] is not False
     ):

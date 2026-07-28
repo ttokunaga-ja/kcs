@@ -20,10 +20,10 @@ import unicodedata
 from types import MappingProxyType
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-envelope/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-envelope/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-envelope"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_ENVELOPE_BYTES = 2 * 2**20
@@ -677,7 +677,7 @@ def build_envelope_contract():
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

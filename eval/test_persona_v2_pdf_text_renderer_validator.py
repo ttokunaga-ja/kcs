@@ -25,7 +25,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
                 data=rendered.data,
                 extension=rendered.extension,
                 content_media_type=rendered.content_media_type,
-                expected_kcs_path_media_type=rendered.expected_kcs_path_media_type,
+                expected_kio_path_media_type=rendered.expected_kio_path_media_type,
                 expected_offline_disposition=rendered.expected_offline_disposition,
             )
         )
@@ -42,7 +42,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -162,7 +162,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
                 self.assertTrue(receipt["xref_validated"])
                 self.assertTrue(receipt["trailer_validated"])
                 self.assertFalse(receipt["actual_chunks_attested"])
-                self.assertFalse(receipt["kcs_execution_attested"])
+                self.assertFalse(receipt["kio_execution_attested"])
                 self.assertEqual(first.data.count(b"stream\nBT\n"), complexity)
                 self.assertEqual(first.data.count(b"%%EOF\n"), 1)
                 self.assertLessEqual(
@@ -209,7 +209,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             (
                 rendered.extension,
                 rendered.content_media_type,
-                rendered.expected_kcs_path_media_type,
+                rendered.expected_kio_path_media_type,
                 rendered.expected_offline_disposition,
             ),
             ("pdf", "application/pdf", "application/pdf", "local_pdf_text"),
@@ -244,7 +244,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -293,7 +293,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             replace(valid_validation, data=bytearray(valid_validation.data)),
             replace(valid_validation, extension="txt"),
             replace(valid_validation, content_media_type="text/plain"),
-            replace(valid_validation, expected_kcs_path_media_type="text/plain"),
+            replace(valid_validation, expected_kio_path_media_type="text/plain"),
             replace(valid_validation, expected_offline_disposition="local_text"),
         )
         for request in invalid_validation_requests:

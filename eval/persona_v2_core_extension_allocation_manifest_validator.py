@@ -23,12 +23,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_contract as envelope
 
 
-ARTIFACT_SCHEMA = "kcs.persona.core-extension-allocation-manifest/v1"
+ARTIFACT_SCHEMA = "kio.persona.core-extension-allocation-manifest/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-core-v1-extension-allocation-manifest-candidate"
 ARTIFACT_ID = "persona-core-v1-extension-allocation-manifest-v1"
 BODY_ID = "persona-core-v1-extension-allocation-rows-v1"
-ROW_SCHEMA = "kcs.persona.core-extension-allocation-row/v1"
+ROW_SCHEMA = "kio.persona.core-extension-allocation-row/v1"
 PROFILE_ID = "persona-core-v1"
 MAX_MANIFEST_BYTES = 512 * 2**10
 MAX_BODY_BYTES = 512 * 2**10
@@ -50,16 +50,16 @@ FAMILY_ORDER = (
     "media", "domain_binary",
 )
 CORE_MATRIX_PIN = (
-    "kcs.persona.core-family-count-matrix/v1", 2_410,
+    "kio.persona.core-family-count-matrix/v1", 2_410,
     "045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7",
 )
 ENVELOPE_PIN = (
-    "kcs.persona.pc-envelope/v2", 2, 71_979,
-    "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+    "kio.persona.pc-envelope/v2", 2, 71_979,
+    "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
 )
 FORMAT_REGISTRY_PIN = (
-    "kcs.persona.pc-format-implementation-registry/v2", 2, 333_881,
-    "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+    "kio.persona.pc-format-implementation-registry/v2", 2, 333_881,
+    "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
 )
 FORMAT_REGISTRY_PROJECTION_PIN = (
     22_639,
@@ -95,7 +95,7 @@ DESCRIPTOR_FIELDS = frozenset(
 AUTHORITY_FIELDS = (
     "actual_chunks_attested", "actual_payload_bytes_attested", "authorizes_evaluation",
     "authorizes_filesystem_mutation", "authorizes_g0_freeze", "authorizes_history_mutation",
-    "authorizes_kcs_execution", "authorizes_physical_write", "authorizes_query_plan",
+    "authorizes_kio_execution", "authorizes_physical_write", "authorizes_query_plan",
     "authorizes_renderer_execution", "authorizes_replay_execution", "authorizes_solver_execution",
     "authorizes_source_instances", "authorizes_source_plan", "authorizes_source_recipes",
     "formal_capacity_gate_satisfied",

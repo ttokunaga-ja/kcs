@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-layout/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-layout/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-source-inventory-layout"
 
@@ -55,7 +55,7 @@ EXPECTED_TOTAL_SHARD_COUNT = 73
 AUTHORITY_FIELDS = frozenset(
     {
         "authorizes_g0_freeze",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",

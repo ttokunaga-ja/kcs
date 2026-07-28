@@ -10,7 +10,7 @@ authoritative closure itself.
 
 No corpus-input/evaluation/query/review/ledger dependency is imported.  No
 whole-corpus post-W0 plan, solved scope/path/quota, planned/final identifier,
-write, history mutation, KCS execution, or G0 authority is granted.
+write, history mutation, KIO execution, or G0 authority is granted.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_matched_lifecycle_inventory as lifecycle
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-history-presolve-input-closure-slice/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-history-presolve-input-closure-slice/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = (
     "persona-pc-v2-non-authorizing-history-presolve-input-closure-slice"
@@ -88,7 +88,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_g0_freeze",
         "authorizes_history_input_closure",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_planned_event_identifiers",
         "authorizes_renderer_execution",
@@ -203,7 +203,7 @@ def _expected_direct_pins():
             artifact_kind=(
                 "persona-pc-v2-projection-pin-corpus-semantic-namespace"
             ),
-            artifact_schema="kcs.persona.pc-corpus-semantic-namespace/v3",
+            artifact_schema="kio.persona.pc-corpus-semantic-namespace/v3",
             artifact_schema_version=3,
             canonical_bytes=NAMESPACE_CANONICAL_BYTES,
             sha256=NAMESPACE_SHA256,
@@ -215,7 +215,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-complete-semantic-projection-derivation-inventory"
             ),
             artifact_schema=(
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v2"
             ),
             artifact_schema_version=2,
             canonical_bytes=COMPLETE_INVENTORY_CANONICAL_BYTES,
@@ -225,7 +225,7 @@ def _expected_direct_pins():
             dependency_id="source-matched-lifecycle-suite-v1",
             dependency_role="query-independent-presolve-lifecycle-demand",
             artifact_kind="persona-pc-v2-source-matched-lifecycle-suite",
-            artifact_schema="kcs.persona.pc-source-matched-lifecycle-suite/v1",
+            artifact_schema="kio.persona.pc-source-matched-lifecycle-suite/v1",
             artifact_schema_version=1,
             canonical_bytes=SOURCE_MATCHED_LIFECYCLE_CANONICAL_BYTES,
             sha256=SOURCE_MATCHED_LIFECYCLE_SHA256,
@@ -237,7 +237,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-lifecycle-effective-membership-reconciliation"
             ),
             artifact_schema=(
-                "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1"
+                "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1"
             ),
             artifact_schema_version=1,
             canonical_bytes=EFFECTIVE_MEMBERSHIP_CANONICAL_BYTES,
@@ -637,7 +637,7 @@ def _unresolved_solution_compilation():
         "filesystem_write_receipt_count": 0,
         "g0_approval_receipt_count": 0,
         "history_mutation_receipt_count": 0,
-        "kcs_execution_receipt_count": 0,
+        "kio_execution_receipt_count": 0,
         "path_assignment_count": 0,
         "planned_event_id_count": 0,
         "planned_materialization_id_count": 0,
@@ -694,7 +694,7 @@ def _expected_value(snapshot):
         "hypothesis_status": (
             "authored-pinned-query-independent-structural-w0-only-presolve-"
             "history-input-slice-not-authoritative-not-observed-"
-            "filesystem-history-or-kcs-execution"
+            "filesystem-history-or-kio-execution"
         ),
         "orders": {
             "direct_dependencies": "declared-dependency-order",
@@ -706,7 +706,7 @@ def _expected_value(snapshot):
             "scope-bucket-cohort-path-quota-solution-and-proof-not-built",
             "planned-and-final-source-materialization-event-identifiers-not-built",
             "solution-compiled-history-plan-not-built",
-            "render-write-index-history-mutation-and-kcs-receipts-not-built",
+            "render-write-index-history-mutation-and-kio-receipts-not-built",
             "production-input-closures-and-positive-approval-not-bound",
             "formal-g0-contract-not-frozen",
         ],

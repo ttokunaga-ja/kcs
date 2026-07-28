@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_intent as source_intent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-fact-membership/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-fact-membership/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-fact-membership"
 MAX_FACT_MEMBERSHIP_BYTES = 128 * 1024
@@ -349,7 +349,7 @@ def _canonical_fact_membership(persona_id, *, graph_value=None, source_value=Non
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

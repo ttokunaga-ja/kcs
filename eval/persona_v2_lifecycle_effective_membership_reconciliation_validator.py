@@ -36,14 +36,14 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ORIGIN_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-origin-manifest/v1"
+    "kio.persona.pc-lifecycle-effective-membership-origin-manifest/v1"
 )
 PROFILE_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-profile-manifest/v1"
+    "kio.persona.pc-lifecycle-effective-membership-profile-manifest/v1"
 )
-SUITE_SCHEMA = "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1"
+SUITE_SCHEMA = "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1"
 PROJECTION_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-content-projection/v1"
+    "kio.persona.pc-lifecycle-effective-membership-content-projection/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 
@@ -128,7 +128,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
@@ -138,7 +138,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
     }
@@ -1836,7 +1836,7 @@ def _expected_origin_manifest(persona_id, origin):
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "filesystem-materialization-capacity-and-kcs-observation",
+            "filesystem-materialization-capacity-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {
@@ -2078,7 +2078,7 @@ def _expected_profile_manifest(persona_id, profile):
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "physical-capacity-materialization-and-kcs-observation",
+            "physical-capacity-materialization-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {
@@ -2804,7 +2804,7 @@ def _expected_suite_descriptor():
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "physical-capacity-materialization-and-kcs-observation",
+            "physical-capacity-materialization-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {

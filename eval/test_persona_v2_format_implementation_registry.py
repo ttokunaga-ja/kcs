@@ -21,7 +21,7 @@ from eval import persona_v2_variant_catalog as variant_catalog
 
 EXPECTED_REGISTRY_BYTES = 333_881
 EXPECTED_REGISTRY_SHA256 = (
-    "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683"
+    "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d"
 )
 EXPECTED_PAIR_VARIANT_COUNTS = {
     "contributor-text": 9,
@@ -512,7 +512,7 @@ class PersonaV2FormatImplementationRegistryTests(unittest.TestCase):
             "data": b"",
             "extension": "",
             "content_media_type": "",
-            "expected_kcs_path_media_type": "",
+            "expected_kio_path_media_type": "",
             "expected_offline_disposition": "",
         }
         for pair_id, (

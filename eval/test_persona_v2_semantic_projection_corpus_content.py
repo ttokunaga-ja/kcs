@@ -109,7 +109,7 @@ RECIPE_ROW_FIELDS = frozenset(
         "complexity_byte_policy",
         "content_media_type",
         "content_policy",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_policy",

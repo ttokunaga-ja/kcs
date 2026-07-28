@@ -14,16 +14,16 @@ from eval import persona_v2_topology as topology
 
 
 EXPECTED_ENVELOPE_SHA256 = (
-    "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
+    "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7"
 )
 EXPECTED_TOPOLOGY_SHA256 = (
-    "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
+    "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a"
 )
 EXPECTED_PROBLEM_SHA256 = (
-    "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074"
+    "f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207"
 )
 EXPECTED_POLICY_SHA256 = (
-    "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857"
+    "47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712"
 )
 EXPECTED_POLICY_BYTES = 83_004
 
@@ -101,7 +101,7 @@ class PersonaV2JointSolverPolicyTests(unittest.TestCase):
         self.assertEqual(value["artifact_schema"], policy.ARTIFACT_SCHEMA)
         self.assertEqual(value["artifact_schema_version"], 2)
         self.assertEqual(value["artifact_kind"], policy.ARTIFACT_KIND)
-        self.assertEqual(value["fixture_id"], "kcs-persona-pc-v2")
+        self.assertEqual(value["fixture_id"], "kio-persona-pc-v2")
         self.assertEqual(value["fixture_schema_version"], 2)
         self.assertEqual(value["completion_scope"], policy.COMPLETION_SCOPE)
         self.assertEqual(
@@ -436,7 +436,7 @@ class PersonaV2JointSolverPolicyTests(unittest.TestCase):
                 route_contract["artifact_kind"],
             ),
             (
-                "kcs.persona.pc-route-affinity/v2",
+                "kio.persona.pc-route-affinity/v2",
                 2,
                 "persona-pc-v2-route-affinity-matrix",
             ),

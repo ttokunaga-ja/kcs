@@ -5,7 +5,7 @@ producer.  It authenticates the frozen topology and device-lane compositor
 twice, derives every one of the 1,200 planned formal leaf paths itself, and
 then checks an external canonical JSONL body against that derivation.  The
 binding is a planning receipt only: it neither creates a directory nor grants
-writer, registry, history, KCS, capacity, or G0 authority.
+writer, registry, history, KIO, capacity, or G0 authority.
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-formal-leaf-placement-binding/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-formal-leaf-placement-binding/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-non-authorizing-formal-leaf-placement-binding-candidate"
 ARTIFACT_ID = "persona-pc-v2-formal-leaf-placement-binding-v1"
 BODY_ID = "persona-pc-v2-formal-leaf-placement-rows-v1"
 BODY_FRAMING = "canonical-lf-jsonl/v1"
 BODY_ENCODING = "canonical-json-per-row-utf8-nfc-lf"
-ROW_SCHEMA = "kcs.persona.pc-formal-leaf-placement-row/v1"
+ROW_SCHEMA = "kio.persona.pc-formal-leaf-placement-row/v1"
 
 MAX_BINDING_BYTES = 256 * 2**10
 MAX_BODY_BYTES = 2 * 2**20
@@ -55,13 +55,13 @@ SCOPES_PER_PERSONA = 20
 EXPECTED_ROW_COUNT = len(REPLAY_IDS) * len(PERSONA_IDS) * SCOPES_PER_PERSONA
 
 TOPOLOGY_PIN = (
-    "kcs.persona.pc-topology/v2",
+    "kio.persona.pc-topology/v2",
     2,
     134_195,
-    "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+    "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
 )
 COMPOSITOR_PIN = (
-    "kcs.persona.pc-device-lane-compositor/v1",
+    "kio.persona.pc-device-lane-compositor/v1",
     1,
     41_099,
     "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf",
@@ -139,7 +139,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_filesystem_materialization",
         "authorizes_g0_freeze",
         "authorizes_history_execution",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_registry_creation",
         "authorizes_scope_registration",
@@ -1312,7 +1312,7 @@ def require_authorized_formal_leaf_placement_binding(value, **kwargs):
     validate_formal_leaf_placement_binding(value, **kwargs)
     _fail(
         "formal-leaf placement binding is non-authorizing; physical writer, "
-        "scope registry, root-bound capacity, readback, history, KCS, and G0 "
+        "scope registry, root-bound capacity, readback, history, KIO, and G0 "
         "receipts remain unresolved"
     )
 

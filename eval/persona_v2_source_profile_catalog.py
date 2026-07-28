@@ -3,7 +3,7 @@
 All 71 frozen variants are represented.  The nine ID-free local-text variants
 and the separate ID-free text-layer PDF variant are marked ready in this
 vertical slice.  Readiness means bounded local feasibility only: it does not
-create source intents, final identifiers, files, KCS chunks, multilingual PDF
+create source intents, final identifiers, files, KIO chunks, multilingual PDF
 coverage, or G0 authority.
 
 Dependency direction is one-way::
@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-profile-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-profile-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-source-profile-catalog"
 MAX_CATALOG_BYTES = 256 * 1024
@@ -176,7 +176,7 @@ def _require_renderer_validator_agreement(renderer_row, validator_row):
     keys = (
         "complexity",
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -220,8 +220,8 @@ def _source_profile_row(
         },
         "bounded_feasibility_profile_id": "not-bound",
         "content_media_type": upstream_row["content_media_type"],
-        "expected_kcs_path_media_type": upstream_row[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": upstream_row[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": upstream_row[
             "expected_offline_disposition"
@@ -250,7 +250,7 @@ def _source_profile_row(
     exact_metadata = (
         "family",
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "filename_extension",
         "gate_role",
@@ -422,7 +422,7 @@ def _canonical_catalog_value():
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
             "formal_capacity_gate_satisfied": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "canonical_limits": {
             "exact_profile_rows": EXPECTED_VARIANT_COUNT,
@@ -453,10 +453,10 @@ def _canonical_catalog_value():
         },
         "remaining_blockers": [
             "sixty-one-incidental-or-raw-variant-profiles-not-ready",
-            "pdf-text-multilingual-and-kcs-chunk-attestation-not-proved",
+            "pdf-text-multilingual-and-kio-chunk-attestation-not-proved",
             "semantic-content-recipe-inputs-not-bound",
             "source-intent-identities-not-allocated-or-hashed",
-            "production-kcs-chunk-count-not-attested",
+            "production-kio-chunk-count-not-attested",
             "bounded-framed-external-loader-not-implemented",
             "formal-capacity-gate-not-satisfied",
         ],
@@ -513,5 +513,5 @@ def require_complete_source_profile_catalog():
     raise PersonaV2SourceProfileCatalogError(
         "ten contributor feasibility profiles are ready, but 61 incidental/raw "
         "variants, multilingual PDF coverage, semantic recipes, source intents, "
-        "KCS attestation, and capacity gates remain"
+        "KIO attestation, and capacity gates remain"
     )

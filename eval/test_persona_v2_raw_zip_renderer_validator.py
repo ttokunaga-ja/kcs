@@ -152,7 +152,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -165,7 +165,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         return rendered, validator.validate_raw_zip_payload(request)
@@ -283,7 +283,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             "complexity",
             "compound_suffix_parts",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -307,7 +307,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                     self.assertEqual(row["filename_extension"], exact["extension"])
                     self.assertEqual(row["compound_suffix_parts"], [exact["extension"]])
                     self.assertEqual(row["content_media_type"], "application/zip")
-                    self.assertEqual(row["expected_kcs_path_media_type"], "application/octet-stream")
+                    self.assertEqual(row["expected_kio_path_media_type"], "application/octet-stream")
                     self.assertEqual(row["expected_offline_disposition"], "unsupported_binary")
                     self.assertEqual(row["family"], "domain_binary")
                     self.assertEqual(row["gate_role"], "raw_only")
@@ -321,7 +321,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                 for key in (
                     "compound_suffix_parts",
                     "content_media_type",
-                    "expected_kcs_path_media_type",
+                    "expected_kio_path_media_type",
                     "expected_offline_disposition",
                     "family",
                     "filename_extension",
@@ -383,7 +383,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                     self.assertTrue(receipt["structure_validated"])
                     self.assertTrue(receipt["zip_subset_validated"])
                     self.assertFalse(receipt["actual_chunks_attested"])
-                    self.assertFalse(receipt["kcs_execution_attested"])
+                    self.assertFalse(receipt["kio_execution_attested"])
                     if variant in GENERIC_VARIANTS:
                         self.assertEqual(receipt["member_count"], complexity)
                         if previous is not None:
@@ -623,7 +623,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             {"data": BytesSubclass(request.data)},
             {"extension": "npz"},
             {"content_media_type": "application/octet-stream"},
-            {"expected_kcs_path_media_type": "application/zip"},
+            {"expected_kio_path_media_type": "application/zip"},
             {"expected_offline_disposition": "incidental_sniff"},
             {"data": request.data[:-1]},
             {"data": request.data + b"x"},

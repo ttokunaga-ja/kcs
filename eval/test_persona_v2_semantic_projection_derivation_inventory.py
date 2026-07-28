@@ -121,7 +121,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -134,7 +134,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -202,11 +202,11 @@ class SemanticProjectionDerivationInventoryContractTest(unittest.TestCase):
 
         self.assertEqual(
             package.SUITE_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-inventory/v1",
+            "kio.persona.pc-semantic-projection-derivation-inventory/v1",
         )
         self.assertEqual(
             package.RECEIPT_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-receipt/v1",
+            "kio.persona.pc-semantic-projection-derivation-receipt/v1",
         )
         self.assertEqual(
             tuple(package.PROJECTION_CLASS_ORDER), EXPECTED_PROJECTION_CLASS_ORDER
@@ -415,7 +415,7 @@ class SemanticProjectionDerivationInventoryLongAll113Test(unittest.TestCase):
                 "corpus-semantic-namespace-not-issued",
                 "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
                 "joint-solver-solution-proof-and-final-source-plan-not-built",
-                "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+                "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
             ],
         )
 

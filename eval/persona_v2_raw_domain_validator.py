@@ -4,7 +4,7 @@ The module intentionally does not import the renderer, source/variant catalogs,
 the persona contract, or planning modules.  It duplicates the two frozen format
 profiles and validates classic PCAP plus a fixed DICOM Part 10 Explicit VR
 Little Endian subset using bounded standard-library parsing.  A successful
-receipt proves local bytes and structure only and grants no source, write, KCS,
+receipt proves local bytes and structure only and grants no source, write, KIO,
 history, solver, renderer-execution, or G0 authority.
 """
 
@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-domain-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-domain-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-domain-validator"
 VALIDATOR_ID = "persona-v2-id-free-raw-domain-standalone-validator"
@@ -38,7 +38,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 PROHIBITED_IDENTITY_FIELDS = (
@@ -82,8 +82,8 @@ _DICOM_SERIES_INSTANCE_UID = b"2.25.220000000000000000000000000000000000001"
 _DICOM_SOP_INSTANCE_UID_PREFIX = "2.25.2000000000000000000000000000000000000"
 _DICOM_TRANSFER_SYNTAX_UID = b"1.2.840.10008.1.2.1\x00"
 _DICOM_IMPLEMENTATION_CLASS_UID = b"2.25.2"
-_DICOM_IMPLEMENTATION_VERSION = b"KCSRAW_2"
-_DICOM_PRIVATE_CREATOR = b"KCS_BOUNDED "
+_DICOM_IMPLEMENTATION_VERSION = b"KIORAW_2"
+_DICOM_PRIVATE_CREATOR = b"KIO_BOUNDED "
 _DICOM_LONG_VRS = frozenset(
     (b"OB", b"OD", b"OF", b"OL", b"OW", b"SQ", b"UC", b"UN", b"UR", b"UT")
 )
@@ -118,7 +118,7 @@ _VARIANT_ROWS = {
         "base_bytes": 5_208,
         "complexity_measure": "frames",
         "content_media_type": "application/dicom",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "family": "domain_binary",
         "filename_extension": "dcm",
@@ -134,7 +134,7 @@ _VARIANT_ROWS = {
         "base_bytes": 146,
         "complexity_measure": "packets",
         "content_media_type": "application/vnd.tcpdump.pcap",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "family": "domain_binary",
         "filename_extension": "pcap",
@@ -221,7 +221,7 @@ class RawDomainValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -270,8 +270,8 @@ def _validate_request(request):
         (request.extension, profile["filename_extension"]),
         (request.content_media_type, profile["content_media_type"]),
         (
-            request.expected_kcs_path_media_type,
-            profile["expected_kcs_path_media_type"],
+            request.expected_kio_path_media_type,
+            profile["expected_kio_path_media_type"],
         ),
         (
             request.expected_offline_disposition,
@@ -592,7 +592,7 @@ def validate_raw_domain_payload(request):
         "byte_length": len(request.data),
         "frame_count": frame_count,
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "observed_complexity_measure": profile["complexity_measure"],
         "observed_local_complexity": request.target_complexity,
         "packet_count": packet_count,
@@ -643,7 +643,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -677,7 +677,7 @@ def _negative_authority():
         "authorizes_renderer_execution": False,
         "authorizes_source_intents": False,
         "authorizes_source_plan": False,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
     }
 
 
@@ -703,7 +703,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "two-id-free-formal-ordinary-raw-domain-binary-validation-variants-"
-            "only-not-source-materialization-or-kcs-attestation"
+            "only-not-source-materialization-or-kio-attestation"
         ),
         "independence_contract": {
             "imports_planning_modules": False,

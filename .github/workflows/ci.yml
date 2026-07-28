@@ -249,7 +249,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1
+          KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1
           python3 -m unittest -v
           eval.test_persona_v2_source_semantic_capacity_axis_catalog.PersonaV2SourceSemanticCapacityAxisCatalogFullTest
 
@@ -261,7 +261,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1
+          KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1
           python3 -m unittest -v
           eval.test_persona_v2_source_semantic_capacity_axis_catalog.PersonaV2SourceSemanticCapacityAxisCatalogColdTest
 
@@ -273,7 +273,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1
+          KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1
           python3 -m unittest -v
           eval.test_persona_v2_capacity_fact_truth_occurrence_policy.PersonaV2CapacityFactTruthOccurrencePolicyFullTest
 
@@ -285,7 +285,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1
+          KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1
           python3 -m unittest -v
           eval.test_persona_v2_capacity_fact_truth_occurrence_policy.PersonaV2CapacityFactTruthOccurrencePolicyColdTest
 
@@ -297,7 +297,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1
+          KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1
           python3 -m unittest -v
           eval.test_persona_v2_history_presolve_input_closure_slice.PersonaV2HistoryPresolveInputClosureSliceFullTest
 
@@ -309,7 +309,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1
+          KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1
           python3 -m unittest -v
           eval.test_persona_v2_history_presolve_input_closure_slice.PersonaV2HistoryPresolveInputClosureSliceColdTest
 

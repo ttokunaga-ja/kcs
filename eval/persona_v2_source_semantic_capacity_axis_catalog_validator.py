@@ -22,10 +22,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_fact_graph as fact_graph
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-capacity-axis-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-capacity-axis-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-source-semantic-capacity-axis-catalog-candidate"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -39,7 +39,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Must remain byte-identical to the non-authorizing producer golden.
 EXPECTED_CANONICAL_BYTES = 50_473
-EXPECTED_SHA256 = "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29"
+EXPECTED_SHA256 = "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 TOPIC_SLOT_ORDER = ("g01", "g02", "g03", "g04")
@@ -49,7 +49,7 @@ REPLICA_COUNT_PER_FACT_CELL = 11
 EXPECTED_PERSONA_LANGUAGE_PAIR_COUNT = 38
 EXPECTED_CAPACITY_CELL_COUNT = 15_048
 
-CELL_DOMAIN_LABEL = "kcs/persona-pc-v2/source-semantic-capacity-cell/v1"
+CELL_DOMAIN_LABEL = "kio/persona-pc-v2/source-semantic-capacity-cell/v1"
 CELL_LOGICAL_KEY_FIELDS = (
     "persona_id",
     "topic_id",
@@ -61,10 +61,10 @@ CELL_ROW_FIELDS = frozenset(("capacity_cell_id", *CELL_LOGICAL_KEY_FIELDS))
 
 SEMANTIC_CATALOG_PIN = (
     "persona-pc-v2-source-semantic-membership-catalog",
-    "kcs.persona.pc-source-semantic-membership-catalog/v2",
+    "kio.persona.pc-source-semantic-membership-catalog/v2",
     2,
     436_495,
-    "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62",
+    "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b",
 )
 FACT_GRAPH_PINS = (
     ("p01", 26_403, "94ab0655788534db4e784709a044fda2cdbeb69775082354b900068e8cbcd70d"),
@@ -97,7 +97,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifier_assignment",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_issuance",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -371,7 +371,7 @@ def _semantic_catalog_binding():
 def _fact_graph_binding(persona_id, byte_count, digest):
     return {
         "artifact_kind": "persona-pc-v2-fact-graph",
-        "artifact_schema": "kcs.persona.pc-fact-graph/v2",
+        "artifact_schema": "kio.persona.pc-fact-graph/v2",
         "artifact_schema_version": 2,
         "body_opened_for_axis_derivation": True,
         "canonical_bytes": byte_count,
@@ -400,7 +400,7 @@ def _snapshot_fact_graphs(values):
             _fail(f"{persona_id} fact-graph pin drifted")
         if (
             snapshot.get("artifact_kind") != "persona-pc-v2-fact-graph"
-            or snapshot.get("artifact_schema") != "kcs.persona.pc-fact-graph/v2"
+            or snapshot.get("artifact_schema") != "kio.persona.pc-fact-graph/v2"
             or snapshot.get("artifact_schema_version") != 2
             or snapshot.get("fixture_id") != FIXTURE_ID
             or snapshot.get("fixture_schema_version") != FIXTURE_SCHEMA_VERSION

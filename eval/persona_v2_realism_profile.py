@@ -9,7 +9,7 @@ first, and a later overlay shard may then reference those intents without a
 hash cycle.
 
 These values are not observed user statistics and grant no G0, solver,
-renderer, filesystem, KCS, write, or history authority.
+renderer, filesystem, KIO, write, or history authority.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_input_bindings as input_bindings
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-realism-profile/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-realism-profile/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-realism-profile"
 MAX_PROFILE_BYTES = 256 * 1024
@@ -565,7 +565,7 @@ def _canonical_profile_value():
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

@@ -3,7 +3,7 @@
 The validator intentionally does not import the renderer, source/variant
 catalogs, or planning modules.  It duplicates the frozen metadata, affine byte
 formulas, canonical templates, and padding algorithms it validates.  A receipt
-proves only bounded local bytes and structure; it never attests KCS execution,
+proves only bounded local bytes and structure; it never attests KIO execution,
 observed chunks, source identity, placement, or physical publication.
 """
 
@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-incidental-text-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-incidental-text-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-incidental-text-validator"
 VALIDATOR_ID = "persona-v2-id-free-incidental-text-standalone-validator"
@@ -58,7 +58,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -81,7 +81,7 @@ _VARIANT_ROWS = {
     "csv": {
         "complexity_measure": "tabular-rows",
         "content_media_type": "text/csv",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "csv_tsv",
         "filename_extension": "csv",
@@ -94,7 +94,7 @@ _VARIANT_ROWS = {
     "eml": {
         "complexity_measure": "attachments",
         "content_media_type": "message/rfc822",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "html_eml",
         "filename_extension": "eml",
@@ -107,7 +107,7 @@ _VARIANT_ROWS = {
     "html": {
         "complexity_measure": "html-sections",
         "content_media_type": "text/html",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "html_eml",
         "filename_extension": "html",
@@ -120,7 +120,7 @@ _VARIANT_ROWS = {
     "ipynb": {
         "complexity_measure": "notebook-cells",
         "content_media_type": "application/x-ipynb+json",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "ipynb",
         "filename_extension": "ipynb",
@@ -133,7 +133,7 @@ _VARIANT_ROWS = {
     "json": {
         "complexity_measure": "json-nodes",
         "content_media_type": "application/json",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "json",
@@ -146,7 +146,7 @@ _VARIANT_ROWS = {
     "jsonl": {
         "complexity_measure": "jsonl-records",
         "content_media_type": "application/x-ndjson",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "txt_log",
         "filename_extension": "jsonl",
@@ -159,7 +159,7 @@ _VARIANT_ROWS = {
     "log": {
         "complexity_measure": "log-records",
         "content_media_type": "text/plain",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "txt_log",
         "filename_extension": "log",
@@ -172,7 +172,7 @@ _VARIANT_ROWS = {
     "sql": {
         "complexity_measure": "sql-statements",
         "content_media_type": "application/sql",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "sql",
@@ -185,7 +185,7 @@ _VARIANT_ROWS = {
     "tsv": {
         "complexity_measure": "tabular-rows",
         "content_media_type": "text/tab-separated-values",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "csv_tsv",
         "filename_extension": "tsv",
@@ -198,7 +198,7 @@ _VARIANT_ROWS = {
     "xml": {
         "complexity_measure": "xml-elements",
         "content_media_type": "application/xml",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "xml",
@@ -211,7 +211,7 @@ _VARIANT_ROWS = {
     "yaml": {
         "complexity_measure": "yaml-nodes",
         "content_media_type": "application/yaml",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "incidental_sniff",
         "family": "structured_text",
         "filename_extension": "yaml",
@@ -267,7 +267,7 @@ class IncidentalTextValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -656,13 +656,13 @@ def _validate_request_shape(request):
     expected_metadata = (
         profile["filename_extension"],
         profile["content_media_type"],
-        profile["expected_kcs_path_media_type"],
+        profile["expected_kio_path_media_type"],
         profile["expected_offline_disposition"],
     )
     actual_metadata = (
         request.extension,
         request.content_media_type,
-        request.expected_kcs_path_media_type,
+        request.expected_kio_path_media_type,
         request.expected_offline_disposition,
     )
     if any(type(value) is not str for value in actual_metadata):
@@ -1189,7 +1189,7 @@ def validate_incidental_text_payload(request):
         ),
         "byte_length": len(request.data),
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "observed_complexity_measure": profile["complexity_measure"],
         "observed_local_complexity": request.target_complexity,
         "structure_validated": True,
@@ -1210,8 +1210,8 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": profile[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": profile[
             "expected_offline_disposition"
@@ -1255,7 +1255,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -1267,7 +1267,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "eleven-id-free-formal-ordinary-incidental-format-validation-"
-            "variants-only-not-source-materialization-or-kcs-attestation"
+            "variants-only-not-source-materialization-or-kio-attestation"
         ),
         "independence_contract": {
             "imports_planning_modules": False,

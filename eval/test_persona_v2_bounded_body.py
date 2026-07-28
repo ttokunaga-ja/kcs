@@ -50,7 +50,7 @@ class _OneByteReader:
 class PersonaV2BoundedBodyTests(unittest.TestCase):
     def setUp(self):
         self.value = {
-            "artifact_schema": "kcs.persona.test/v2",
+            "artifact_schema": "kio.persona.test/v2",
             "authority": {"g0_contract_frozen": False},
             "count": 3,
         }

@@ -308,13 +308,13 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
             bindings["source-matched-lifecycle-suite-v1"]["dependency_pin"][
                 "artifact_schema"
             ],
-            "kcs.persona.pc-source-matched-lifecycle-suite/v1",
+            "kio.persona.pc-source-matched-lifecycle-suite/v1",
         )
         self.assertEqual(
             bindings["lifecycle-effective-membership-reconciliation-v1"][
                 "dependency_pin"
             ]["artifact_schema"],
-            "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1",
+            "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1",
         )
         self.assertEqual(len(self.value["live_join_bindings"]), 4)
         self.assertTrue(
@@ -663,10 +663,10 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get(
-        "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL"
+        "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL"
     )
     == "1",
-    "set KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL=1 "
+    "set KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL=1 "
     "for the long all-persona build and independent validation gate",
 )
 class SemanticResolutionFeasibilityLongFullTest(unittest.TestCase):
@@ -721,10 +721,10 @@ class SemanticResolutionFeasibilityLongFullTest(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get(
-        "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD"
+        "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD"
     )
     == "1",
-    "set KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD=1 "
+    "set KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD=1 "
     "for two isolated hash-seed gates",
 )
 class SemanticResolutionFeasibilityLongColdHashSeedTest(unittest.TestCase):
@@ -800,11 +800,11 @@ print(json.dumps({
                 }
             )
             environment.pop(
-                "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD",
+                "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD",
                 None,
             )
             environment.pop(
-                "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL",
+                "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL",
                 None,
             )
             result = subprocess.run(

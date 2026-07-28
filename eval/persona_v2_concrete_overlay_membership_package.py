@@ -32,14 +32,14 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ORIGIN_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-concrete-overlay-membership-origin-manifest/v2"
+    "kio.persona.pc-concrete-overlay-membership-origin-manifest/v2"
 )
 ORIGIN_ARTIFACT_KIND = "persona-pc-v2-concrete-overlay-membership-origin-manifest"
 PROFILE_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-concrete-overlay-membership-profile-manifest/v2"
+    "kio.persona.pc-concrete-overlay-membership-profile-manifest/v2"
 )
 PROFILE_ARTIFACT_KIND = "persona-pc-v2-concrete-overlay-membership-profile-manifest"
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-concrete-overlay-membership-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-concrete-overlay-membership-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-concrete-overlay-membership-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -74,7 +74,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -83,7 +83,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "formal_complete_persona_package_cap_proved",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "query_spec_hashed",
         "renderer_available",
@@ -233,7 +233,7 @@ REMAINING_BLOCKERS = [
     "corpus-semantic-namespace-and-query-history-target-mapping",
     "scope-placement-joint-allocation-and-proof",
     "actual-payload-search-and-raw-identity-attestation",
-    "render-write-chunk-observation-history-and-kcs-execution",
+    "render-write-chunk-observation-history-and-kio-execution",
     "future-complete-persona-package-cap-proof",
 ]
 
