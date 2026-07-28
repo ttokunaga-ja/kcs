@@ -67,7 +67,7 @@ MAX_EVENT_BODY_BYTES = 4 * 2**20
 MAX_EVENT_ROW_BYTES_INCLUDING_LF = 1_024
 EXPECTED_SUITE_CANONICAL_BYTES = 14_605
 EXPECTED_SUITE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
 
 EXPECTED_PRIMARY_MATCHES_PER_PERSONA = 105
@@ -375,7 +375,7 @@ EXPECTED_DEPENDENCY_PINS = {
     ),
     "persona-v2-source-semantic-membership-suite": (
         49_837,
-        "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28",
+        "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072",
     ),
     "persona-v2-source-inventory-profile-catalog": (
         87_391,
@@ -383,7 +383,7 @@ EXPECTED_DEPENDENCY_PINS = {
     ),
     "persona-v2-source-instance-parameter-assignment-suite": (
         72_535,
-        "ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a",
+        "42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3",
     ),
 }
 

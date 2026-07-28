@@ -974,8 +974,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     ordinal.  The separate `pdf-text` local-feasibility slice renders 1--72 deterministic ASCII text-layer
     pages at `4,096 + 2,048 * (pages - 1)` bytes, caps PDF 1.4 non-stream lines at 255 bytes, and independently
     validates page tree, stream length, xref, trailer, bounded decimal tokens, and identity absence.  Its
-    renderer is 2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`;
-    validator 2,233 / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`;
+    renderer is 2,075 bytes / `2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d`;
+    validator 2,233 / `9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a`;
     and the ten-ready-row source-profile catalog 72,559 /
     `f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d`.  This supersedes the
     earlier 9-ready/62-outstanding count with ten contributor feasibility variants covering all 69,236
@@ -1115,7 +1115,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     rendering/writing, edits/history, fresh-storage replays, and evaluation.
     The final catalog pin is 436,495 canonical bytes with SHA-256
     `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b`; the suite descriptor pin is
-    49,837 bytes with SHA-256 `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`.
+    49,837 bytes with SHA-256 `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`.
     Compact origin bodies total 1,006,627 bytes, and the expanded context and fact-membership receipts bind
     121,020,941 and 135,741,615 bytes respectively.  The conservative current-component maximum is p12 at
     12,070,092 bytes with 4,707,124 bytes of planning headroom; this remains narrower than the formal
@@ -1164,9 +1164,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     inventory marginals total 60,414 incidental sources, but this is only format-level feasibility, not a
     source-by-source materialization or search-participation proof.
     The renderer contract is 9,139 canonical bytes with SHA-256
-    `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`; the builder-independent validator
+    `ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e`; the builder-independent validator
     contract is 10,090 bytes with SHA-256
-    `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`.  The min/middle/max payload matrix
+    `8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0`.  The min/middle/max payload matrix
     SHA-256 is `c95779f318c0c2d54734e6868b56a0238c0fabd09409735046b505dc37843cdf`.
     Exact byte formulas are `512 + 96 * (n - 1)` for log/jsonl at n=1..4,096;
     `1,024 + 256 * (n - 1)` for json/yaml/xml at n=1..1,024;
@@ -1194,21 +1194,21 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     pilot 20,300, full-residual 182,700, full 203,000, and 541 active persona-variant rows.  This availability
     is format-level feasibility only and does not bind one of those counts to a physical source instance.
     Raw-document renderer/validator contracts are 4,657 / 5,183 bytes with SHA-256
-    `ac43d8e60fe288552e5edf1e11d98123b34766db8387460cb9f7ddf70af3ba2c` /
-    `c664596fce5331268ad69886b3f2d159e090241b4ef2848ac4ce64c52a1a572a`; their min/mid/max payload
+    `6bfdd03e48b261c83d0678fb888a29d946da69174ba37781e2762672d1c312ff` /
+    `e57a3c8a0daa70254d87a8d9b48777e8ce8a83c12ce1bff867bd296d44fa350e`; their min/mid/max payload
     aggregate is `f5b19a7b2201c8e699eef539bf1e124c6d24c0076a71aff018821b8cf4fba171`.
     Raw image/media contracts are 7,504 / 8,223 bytes with SHA-256
-    `25231398ec7002e5ce7fbfe3d3089e14a9ef8547bc9a9f580cc385dd88fcda00` /
-    `b0fdf9e944b0df72b2f8d8601a83f6958654f92272466fd49b897a3b3e168953`.
+    `c64b762b102aa4fbad000fc21ef2c810d1746daab9a11f959226cec45f16f92e` /
+    `a1c544dcc3f68167aefd3bba2cc90cd4fdd124473485e834f8a0e662df52ad9a`.
     Raw ZIP contracts are 18,670 / 20,737 bytes with SHA-256
-    `037897466c19ce476e4d5a7fff00d18905bbe80ad42d326b503c744d4e3dd1bb` /
-    `8c9390fa0667860e17a872b3c16e047d688dcc7919c73a4933eddfa38082aeec`.
+    `ecb621ade5bd81a3f5962a4ee10ea018c14c2ecd6d93a8e565378ba4065a2a4d` /
+    `4dc04c3689bbef7253a76dd7f046af5cf26734386494c4296c56fd080f6fd0d6`.
     Raw USTAR/GZIP contracts are 14,589 / 15,885 bytes with SHA-256
-    `d23a9b29f4e26748f32f07e201c1294ede5cd4534a27533e9ddc9b88a01d8cb8` /
-    `2e98faae761d7ae4aaaeba37a560d4e78dc3cc948551abde1acc399018d31bf6`.
+    `b6568684532d51bdc25d885bcbd18d04006d90a073397db30353f9e982998b70` /
+    `3ac1ce2f3df3820e28ec77029347df151e5c138f398ee068e5942fc769100e57`.
     Raw PCAP/DICOM contracts are 3,680 / 3,970 bytes with SHA-256
-    `d23868cb344a49ee2c2d354cfe0eb6b0ea9abd07163d573f1ba3b99da229f6ce` /
-    `520ced5cc89ca1bc5a0da45e14c7406e9d7e791d07ae27b2997749cf11ed2e9b`.
+    `63e84afe98283aad93427e2b8260b7dfc30e9f0b20af3ee4d9968f7459872303` /
+    `c305e733011f2791237b3ffd6d7e3e044330bf81201794f2e85702edffd88a82`.
     The DICOM variant is a Multi-frame Grayscale Byte Secondary Capture Part 10 object with the matching
     `.7.2` SOP Class, mandatory Patient/Study/Series/SC/Multi-frame attributes, a Page Number Vector target for
     Frame Increment Pointer, and a deterministic complexity-specific SOP Instance UID.
@@ -1291,7 +1291,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     intact.  Provider-side mutations of target and upstream suite metadata are rejected by new regression tests.
     Existing producer bodies and pins remain unchanged: source suite 45,887 bytes /
     `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`, semantic suite 49,837 /
-    `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`, and concrete suite 51,133 /
+    `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`, and concrete suite 51,133 /
     `129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`.  The three mutation regressions and the
     three existing full public-validator paths pass locally, together with `py_compile` and diff checks.  This is
     validator hardening only; it does not implement the 203,000 source-instance parameter package or add authority.
@@ -1468,7 +1468,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     cross-replay evaluation; it is not one initial run plus three additional replays.
 143. Persona-PC v2 source-instance parameter assignment is implemented as
     `kio.persona.pc-source-instance-parameter-assignment-suite/v2`, a 72,535-byte canonical suite with SHA-256
-    `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`.  It binds 363 shared explicit
+    `42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3`.  It binds 363 shared explicit
     `{variant_id}/{bin_id}` cells, 2,643 positive persona-cell projections, forty origin manifests containing
     4,759 compact owner rows, forty pilot/full profiles, and seventy-three authenticated non-persisted expanded-view
     receipts to all 203,000 source intents.  Pilot 20,300 and full-residual 182,700 are allocated independently;
@@ -1540,7 +1540,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     contains normalized source-selection, source-event, and scope-event sections with created-source, dependency,
     predecessor, operation, delta, fact, path/scope, and visibility refs, while excluding receipts and runtime/query/
     solution metadata.  The final suite is 14,605 canonical bytes with SHA-256
-    `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`; observed maxima are 103,981 bytes per
+    `b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b`; observed maxima are 103,981 bytes per
     persona owner, 318,664 bytes per non-persisted event body, 973 bytes per LF-inclusive event row, and 256,790
     bytes per content-only projection.  Hard caps remain 512 KiB/persona, 4 MiB/event body, 1,024 bytes/event row,
     and 384 KiB/projection with a 256 KiB projection target.
@@ -1617,7 +1617,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     these are not upstream pins or derivation receipts.  It retains rendition-group semantic relations while
     excluding family, variant, gate, use-case, format-selection, query/oracle, solution, authority, physical, and
     runtime fields.  The frozen suite is 69,195 canonical bytes with SHA-256
-    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  Observed maxima are 5,592-byte origin,
+    `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`.  Observed maxima are 5,592-byte origin,
     3,301-byte profile, 103,864-byte projection, and LF-inclusive rows of 1,136 compact / 913 expanded / 571 event /
     600 inverted bytes.  The compact hard cap is therefore 2,048 bytes; expanded/event/inverted row caps remain
     1,024 bytes.
@@ -1791,7 +1791,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     oracle-poisoning regressions without changing the authenticated domain or any completion claim.
 
     The suite remains exactly 69,195 canonical bytes with SHA-256
-    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  The final focused module passes fifteen
+    `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`.  The final focused module passes fifteen
     tests in 1,748.406 seconds, including cache-poisoning, detached-candidate, authority, coordinate, pin, event-domain,
     provider, and TOCTOU regressions.  Independent final review found no remaining P0/P1/P2 issue.  Solver, post-W0
     complete membership, compiled history, write/Kio execution, physical receipts, and G0 remain false.
@@ -1836,7 +1836,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     execution authority are absent.
 
     The frozen bridge is 4,478,576 canonical bytes with SHA-256
-    `fbb0fd1a78d034fcd1777a6aaf0e7ee9bc21d07255f2ce9c7d5fc9761dc11593`; two isolated seeds agree and eleven
+    `8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff`; two isolated seeds agree and eleven
     focused tests pass.  Subsequent auditing shows this v1 bridge is not a source-semantic resolution: topic,
     language, fact/revision visibility, 5,400 concrete distractors, and four-domain disjointness remain mandatory
     downstream blockers.

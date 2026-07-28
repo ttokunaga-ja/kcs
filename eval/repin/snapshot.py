@@ -36,10 +36,17 @@ def artifacts() -> list[tuple[str, str]]:
         if path.stem.endswith("_validator"):
             continue
         source = path.read_text(encoding="utf-8")
-        if 'ARTIFACT_KIND = "' not in source:
-            continue
         builders = re.findall(r"^def (build_[a-z0-9_]+)\(\s*\)\s*:", source, re.M)
-        if builders:
+        if not builders:
+            continue
+        # 正本は suite descriptor があればそれ。無ければ ARTIFACT_KIND を宣言して
+        # いるモジュールの最初の builder。`ARTIFACT_KIND` だけを条件にしていた版は、
+        # per-persona 構成の 3 モジュール (suite descriptor は持つが ARTIFACT_KIND は
+        # 持たない) を丸ごと取りこぼしていた。
+        suite = [b for b in builders if b.endswith("_suite_descriptor")]
+        if suite:
+            found.append((path.stem, suite[0]))
+        elif 'ARTIFACT_KIND = "' in source:
             found.append((path.stem, builders[0]))
     return found
 

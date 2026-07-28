@@ -141,7 +141,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         9,
         5976,
-        "c9c5b93f61e2da72e1ddc20867d97c52d0a525f4b273427016c625ca21f04056",
+        "9ccb3969a77660887924573d097e621d055e38d5305b041876a4379f27b965e4",
     ),
     (
         "contributor-text-validator-contract",
@@ -149,7 +149,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         9,
         6557,
-        "a5c2bcbf73f4add58b2b4b7543840f1451dad3c6ec7503106b861be9d21675b3",
+        "23e8bc3b1fe93a1c8348e765dd60b9d10a1bda95c353e138cc8c3adfb2055c5e",
     ),
     (
         "pdf-text-renderer-contract",
@@ -157,7 +157,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         1,
         2075,
-        "ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6",
+        "2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d",
     ),
     (
         "pdf-text-validator-contract",
@@ -165,7 +165,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         1,
         2233,
-        "78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e",
+        "9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a",
     ),
     (
         "incidental-text-renderer-contract",
@@ -173,7 +173,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         11,
         9139,
-        "22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4",
+        "ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e",
     ),
     (
         "incidental-text-validator-contract",
@@ -181,7 +181,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         11,
         10090,
-        "67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75",
+        "8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0",
     ),
     (
         "raw-document-renderer-contract",
@@ -189,7 +189,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         4,
         4657,
-        "ac43d8e60fe288552e5edf1e11d98123b34766db8387460cb9f7ddf70af3ba2c",
+        "6bfdd03e48b261c83d0678fb888a29d946da69174ba37781e2762672d1c312ff",
     ),
     (
         "raw-document-validator-contract",
@@ -197,7 +197,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         4,
         5183,
-        "c664596fce5331268ad69886b3f2d159e090241b4ef2848ac4ce64c52a1a572a",
+        "e57a3c8a0daa70254d87a8d9b48777e8ce8a83c12ce1bff867bd296d44fa350e",
     ),
     (
         "raw-image-media-renderer-contract",
@@ -205,7 +205,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         7,
         7504,
-        "25231398ec7002e5ce7fbfe3d3089e14a9ef8547bc9a9f580cc385dd88fcda00",
+        "c64b762b102aa4fbad000fc21ef2c810d1746daab9a11f959226cec45f16f92e",
     ),
     (
         "raw-image-media-validator-contract",
@@ -213,7 +213,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         7,
         8223,
-        "b0fdf9e944b0df72b2f8d8601a83f6958654f92272466fd49b897a3b3e168953",
+        "a1c544dcc3f68167aefd3bba2cc90cd4fdd124473485e834f8a0e662df52ad9a",
     ),
     (
         "raw-zip-renderer-contract",
@@ -221,7 +221,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         21,
         18670,
-        "037897466c19ce476e4d5a7fff00d18905bbe80ad42d326b503c744d4e3dd1bb",
+        "ecb621ade5bd81a3f5962a4ee10ea018c14c2ecd6d93a8e565378ba4065a2a4d",
     ),
     (
         "raw-zip-validator-contract",
@@ -229,7 +229,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         21,
         20737,
-        "8c9390fa0667860e17a872b3c16e047d688dcc7919c73a4933eddfa38082aeec",
+        "4dc04c3689bbef7253a76dd7f046af5cf26734386494c4296c56fd080f6fd0d6",
     ),
     (
         "raw-tar-gzip-renderer-contract",
@@ -237,7 +237,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         16,
         14589,
-        "d23a9b29f4e26748f32f07e201c1294ede5cd4534a27533e9ddc9b88a01d8cb8",
+        "b6568684532d51bdc25d885bcbd18d04006d90a073397db30353f9e982998b70",
     ),
     (
         "raw-tar-gzip-validator-contract",
@@ -245,7 +245,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         16,
         15885,
-        "2e98faae761d7ae4aaaeba37a560d4e78dc3cc948551abde1acc399018d31bf6",
+        "3ac1ce2f3df3820e28ec77029347df151e5c138f398ee068e5942fc769100e57",
     ),
     (
         "raw-domain-renderer-contract",
@@ -253,7 +253,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "renderer",
         2,
         3680,
-        "d23868cb344a49ee2c2d354cfe0eb6b0ea9abd07163d573f1ba3b99da229f6ce",
+        "63e84afe98283aad93427e2b8260b7dfc30e9f0b20af3ee4d9968f7459872303",
     ),
     (
         "raw-domain-validator-contract",
@@ -261,7 +261,7 @@ EXPECTED_CONTRACT_BINDINGS = (
         "validator",
         2,
         3970,
-        "520ced5cc89ca1bc5a0da45e14c7406e9d7e791d07ae27b2997749cf11ed2e9b",
+        "c305e733011f2791237b3ffd6d7e3e044330bf81201794f2e85702edffd88a82",
     ),
 )
 

@@ -113,11 +113,11 @@ class PersonaV2HistoryPresolveInputClosureSliceTests(unittest.TestCase):
                 ),
                 (
                     14_605,
-                    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8",
+                    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b",
                 ),
                 (
                     69_195,
-                    "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c",
+                    "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29",
                 ),
             ],
         )

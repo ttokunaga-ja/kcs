@@ -49,12 +49,12 @@ suite 2,300 lifecycle source refsをpilot source/semantic/reservation/parameter 
 分類し、7,630件のW1--W5 source/scope event intentを非永続JSONL receiptとして束縛する。suite全体で
 3,630件のevent-created pre-solve source intentを持ち、各人は48 source coupling + 6 scope barrier = 54
 dependency groupsを持つ。content-only projectionもsource selectionだけでなくsource/scope event意味を含む。canonical suiteは
-14,605 bytes、SHA-256 `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`である。
+14,605 bytes、SHA-256 `b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b`である。
 その下流の`kio.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、全203,000 W0 sourcesを
 base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / companion mirror 200へ閉じ、
 1,033,680 present-fact refsをexact化した。3,630 event-created intentsと300 purge witnessesも全域走査し、
 consumerはmatching W0 PとW1 descendantの600 refsだけである。compact ownerは2,573 rows、canonical suiteは
-69,195 bytes、SHA-256 `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`である。
+69,195 bytes、SHA-256 `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`である。
 producer-independent validatorによる全20人再構成を持つが、scope/quota/cohort solver、complete post-W0
 membership、compiled history、physical materialization、observed evaluation、execution authorityはない。
 recursive ambient laneは`kio.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
@@ -899,7 +899,7 @@ streaming再構築し、そのreceiptだけをpersona packageへ課金する。b
 課金する。non-EML exact pairsは5,080、EMLは9,153 sources / 2,800 hosts / 5,690 membershipsである。
 pilot 20,300 + full-residual 182,700 = full 203,000をorigin unionだけで閉じ、fullを再配分しない。
 suite descriptorは72,535 bytes、SHA-256
-`ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`である。scope、bucket、cohort、
+`42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3`である。scope、bucket、cohort、
 chunk quota、cell-local ordinal、final IDは後続joint solverだけが所有し、capacity/write authorityもfail closedとする。
 
 formal W0の512 MiB/personかつ10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、
@@ -1482,7 +1482,7 @@ v2で実装済み（planning only、non-authorizing）:
   exact closureし、fullのsemantic versionはv1 189,770 / v2 13,230である。既存source、reservation、
   fact-graph pinsは変更せず、query/oracle/final IDを含めない。catalogは436,495 bytes / SHA-256
   `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b`、suite descriptorは
-  49,837 bytes / `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`である。
+  49,837 bytes / `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`である。
   compact bodiesは合計1,006,627 bytes / 最大row 734 bytes、expanded context/fact membership receiptsは
   121,020,941 / 135,741,615 bytes、最大row 633 / 743 bytes、最大shard 2,484,590 / 3,030,632 bytesを
   束縛する。source-only component、matching reservation origins、catalog、compact bodies、semantic origin/
@@ -1515,22 +1515,22 @@ v2で実装済み（planning only、non-authorizing）:
   対応する`attachment-0..5`へ固定する。pilot 20,300とfull-residual 182,700を独立配分し、fullはそのunionだけで
   構成する。expanded viewは17,527,680 bytesだが保存せず、保存時だけ別packageで全bytesを課金する。
   suiteは72,535 bytes / SHA-256
-  `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`である。14 focused testsは
+  `42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3`である。14 focused testsは
   779.006秒（wall 779.25秒）/ 外側最大RSS 361,381,888 bytesでPASSし、2 hashseedのproducer + independent / expanded
   cold pathは各15分/512 MiB capを通過した。最大p12既知合計は15,573,860 bytes、名目余裕
   1,203,356 bytesである。専用CI job `persona-v2-source-parameter-assignment-full`のtimeoutは60分とするが、
   remote greenは主張しない。frame/header、formal 16 MiB cap、semantic payload、scope/final ID、render/write/Kio/G0はfalse
 - `pdf-text`のnarrow feasibility sliceは1--72 ASCII text-layer pages、4,096--149,504 bytes、PDF 1.4の
   non-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
-  2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validatorは
-  2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`である。
+  2,075 bytes / `2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d`、validatorは
+  2,233 bytes / `9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a`である。
   これにより局所feasibilityは10 contributor variants、full 69,236 contributor sourcesを覆うが、
   同slice単体は、多言語PDF、個別semantic content、positive query anchor、Kio actual chunks、
   source-instance recipe/G0を証明しない。source-instance値は下流assignment packageが別に束縛する。
   source-profile catalogは72,559 bytes / `f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d`である。
 - 後続のincidental-text narrow feasibility sliceは11 variantsをstdlib-onlyで局所実装する。renderer contractは
-  9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、独立validator contractは
-  10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。全出力は
+  9,139 bytes / `ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e`、独立validator contractは
+  10,090 bytes / `8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0`である。全出力は
   512 KiB以下、EMLはCRLFかつwire line 78 bytes以下である。凍結catalogを変更せず、そのinventory marginalが
   full 60,414 sourcesを占める11 incidental variantsをformat-levelで覆うが、source別recipe、semantic payload、
   materialization、actual incidental chunk上限、Kio/G0/writeを証明しない

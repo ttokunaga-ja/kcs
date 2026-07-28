@@ -41,6 +41,11 @@ def snapshot(path: Path) -> dict:
 
 
 def main() -> int:
+    # 記録は追記でなければならない。毎回まっさらから書き直すと、前の実行で適用した
+    # 対応が記録から消える (実際に消した)。何を当てたかは後から検算する唯一の手掛かり
+    # なので、既存の記録に積む。
+    record = HERE / "applied.json"
+    history: dict[str, str] = json.loads(record.read_text()) if record.exists() else {}
     applied: dict[str, str] = {}
     for round_number in range(1, 25):
         after = snapshot(HERE / f"after-{round_number}.json")
@@ -71,7 +76,7 @@ def main() -> int:
         subprocess.run([sys.executable, str(HERE / "apply_digests.py"), *fresh],
                        cwd=ROOT, check=True)
 
-    (HERE / "applied.json").write_text(json.dumps(applied, indent=2, sort_keys=True) + "\n")
+    record.write_text(json.dumps({**history, **applied}, indent=2, sort_keys=True) + "\n")
     return 0
 
 

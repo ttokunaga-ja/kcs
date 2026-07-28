@@ -37,12 +37,12 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(renderer.canonical_json_bytes(renderer_value)), 5_976)
         self.assertEqual(
             renderer.renderer_contract_sha256(renderer_value),
-            "c9c5b93f61e2da72e1ddc20867d97c52d0a525f4b273427016c625ca21f04056",
+            "9ccb3969a77660887924573d097e621d055e38d5305b041876a4379f27b965e4",
         )
         self.assertEqual(len(validator.canonical_json_bytes(validator_value)), 6_557)
         self.assertEqual(
             validator.validator_contract_sha256(validator_value),
-            "a5c2bcbf73f4add58b2b4b7543840f1451dad3c6ec7503106b861be9d21675b3",
+            "23e8bc3b1fe93a1c8348e765dd60b9d10a1bda95c353e138cc8c3adfb2055c5e",
         )
         self.assertTrue(renderer.validate_renderer_contract(renderer_value))
         self.assertTrue(validator.validate_validator_contract(validator_value))

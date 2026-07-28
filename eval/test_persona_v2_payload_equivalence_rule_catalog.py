@@ -42,7 +42,7 @@ UPSTREAM_GOLDENS = (
     (
         "persona-v2-source-semantic-membership-suite",
         49_837,
-        "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28",
+        "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072",
     ),
     (
         "persona-v2-concrete-overlay-membership-suite",
@@ -52,7 +52,7 @@ UPSTREAM_GOLDENS = (
     (
         "persona-v2-source-parameter-assignment-suite",
         72_535,
-        "ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a",
+        "42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3",
     ),
 )
 

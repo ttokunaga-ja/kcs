@@ -2,27 +2,27 @@
   "persona_v2_aggregate_byte_distribution_catalog": {
     "builder": "build_aggregate_byte_distribution_catalog",
     "bytes": 1576125,
-    "sha256": "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343"
+    "sha256": "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2"
   },
   "persona_v2_capacity_fact_truth_occurrence_policy": {
     "builder": "build_capacity_fact_truth_occurrence_policy",
     "bytes": 29868,
-    "sha256": "9f9653c1bb7a794bea33fe208b1de3c63f8dc011b8ac13f2d9a6955333681cd4"
+    "sha256": "8657cbf653b9de88c76265ff9ced8b0a39a2e11494e144578b7f082a246100cc"
   },
   "persona_v2_chunk_accounting": {
     "builder": "build_chunk_accounting_contract",
     "bytes": 19801,
-    "sha256": "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2"
+    "sha256": "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52"
   },
   "persona_v2_concrete_overlay_membership_package": {
     "builder": "build_concrete_overlay_membership_suite_descriptor",
     "bytes": 51133,
-    "sha256": "4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a"
+    "sha256": "129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737"
   },
   "persona_v2_contract": {
     "builder": "build_envelope_contract",
     "bytes": 71979,
-    "sha256": "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
+    "sha256": "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7"
   },
   "persona_v2_core_extension_allocation_manifest": {
     "error": "PersonaV2CoreExtensionAllocationManifestError: core extension allocation descriptor differs from frozen golden"
@@ -30,17 +30,17 @@
   "persona_v2_core_extension_legacy_source_allocation_compatibility_audit": {
     "builder": "build_core_extension_legacy_source_allocation_compatibility_audit",
     "bytes": 3500,
-    "sha256": "1c52c83f8bd98407212e4014e7b006f38a93b0f82ff59a922a858d7e5663bfe2"
+    "sha256": "b34cb526d22866b9186fd24d73e691445dd37ea77f5d354ac4e7344343653e10"
   },
   "persona_v2_fact_graph": {
     "builder": "build_fact_graph_suite",
     "bytes": 530029,
-    "sha256": "568ae74b33fe2afa636f8d1f16d4001c34c91ca469108f899f0cf0ca101377bf"
+    "sha256": "c690d7bcb10451899caa72b1530b41a758e6301128f75f78ec1366328840fa38"
   },
   "persona_v2_fact_membership": {
     "builder": "build_fact_membership_suite",
     "bytes": 90450,
-    "sha256": "af70ce76948098f6e3bfa2245449c9d879ca8e26009bfd0e09c173f1933c9d27"
+    "sha256": "15aed029e5900f327aca912caf7c70a72710caaeb3817515439960cad4626ad1"
   },
   "persona_v2_formal_leaf_placement_binding": {
     "error": "PersonaV2FormalLeafPlacementBindingError: unsupported formal-leaf placement descriptor value type: tuple"
@@ -48,12 +48,12 @@
   "persona_v2_formal_source_recipe_catalog": {
     "builder": "build_formal_source_recipe_catalog",
     "bytes": 386152,
-    "sha256": "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8"
+    "sha256": "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df"
   },
   "persona_v2_format_implementation_registry": {
     "builder": "build_format_implementation_registry",
     "bytes": 333881,
-    "sha256": "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683"
+    "sha256": "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d"
   },
   "persona_v2_g0_blocker_resolution_ledger": {
     "error": "AttributeError: module 'eval.persona_v2_g0_blocker_resolution_ledger' has no attribute 'canonical_json_bytes'"
@@ -64,37 +64,42 @@
   "persona_v2_history_readiness_contract": {
     "builder": "build_history_readiness_contract",
     "bytes": 241996,
-    "sha256": "ed00a59780e8b4223ed798112ea04349d15cfac586362b9b3bf65b161b831213"
+    "sha256": "2ef0e54d85dd3d960bb34cec034298c7d385a7d49f6cdbbc8833b0f9c700f4e1"
   },
   "persona_v2_joint_problem": {
     "builder": "build_joint_problem",
     "bytes": 744137,
-    "sha256": "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074"
+    "sha256": "f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207"
   },
   "persona_v2_joint_solver_policy": {
     "builder": "build_joint_solver_policy",
     "bytes": 83004,
-    "sha256": "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857"
+    "sha256": "47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712"
   },
   "persona_v2_lifecycle_coverage_catalog": {
     "builder": "build_lifecycle_coverage_catalog",
     "bytes": 1385596,
-    "sha256": "ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236"
+    "sha256": "1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4"
   },
   "persona_v2_lifecycle_demand": {
     "builder": "build_lifecycle_demand",
     "bytes": 463571,
-    "sha256": "32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080"
+    "sha256": "372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005"
+  },
+  "persona_v2_lifecycle_effective_membership_reconciliation": {
+    "builder": "build_lifecycle_effective_membership_suite_descriptor",
+    "bytes": 69195,
+    "sha256": "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29"
   },
   "persona_v2_overlay_compatible_byte_distribution": {
     "builder": "build_overlay_compatible_byte_distribution",
     "bytes": 91039,
-    "sha256": "e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89"
+    "sha256": "a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc"
   },
   "persona_v2_overlay_contract": {
     "builder": "build_overlay_contract",
     "bytes": 71179,
-    "sha256": "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c"
+    "sha256": "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23"
   },
   "persona_v2_overlay_reservation_layout": {
     "error": "PersonaV2OverlayReservationError: persona v2 overlay reservation origin exceeds canonical byte cap"
@@ -102,17 +107,17 @@
   "persona_v2_payload_equivalence_rule_catalog": {
     "builder": "build_payload_equivalence_rule_catalog",
     "bytes": 8649,
-    "sha256": "118cd0ff8f5fdf92bba40150889f006d5b8a9d7300e78ea426794561e1d2d9f6"
+    "sha256": "00dc78f6dd54a06e2669ffaeea08afdb56d2fe6bd978d342ca10cc3ed5919128"
   },
   "persona_v2_primary_use_case_catalog": {
     "builder": "build_primary_use_case_catalog",
     "bytes": 30008,
-    "sha256": "024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624"
+    "sha256": "73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed"
   },
   "persona_v2_query_history_target_resolution": {
     "builder": "build_query_history_target_resolution",
     "bytes": 4478576,
-    "sha256": "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc"
+    "sha256": "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff"
   },
   "persona_v2_query_intent": {
     "error": "PersonaV2QueryIntentError: persona v2 query intent exceeds canonical byte cap"
@@ -120,22 +125,22 @@
   "persona_v2_realism_profile": {
     "builder": "build_realism_profile",
     "bytes": 36811,
-    "sha256": "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05"
+    "sha256": "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb"
   },
   "persona_v2_recursive_robustness_lane_catalog": {
     "builder": "build_recursive_robustness_lane_catalog",
     "bytes": 76099,
-    "sha256": "49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2"
+    "sha256": "af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8"
   },
   "persona_v2_review_request_catalog": {
     "builder": "build_review_request_catalog",
     "bytes": 42931,
-    "sha256": "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab"
+    "sha256": "2d3be0065215cf3886aff13f35138511d3279c8333031868f78f75633ca8d6dd"
   },
   "persona_v2_route_affinity": {
     "builder": "build_route_affinity",
     "bytes": 70626,
-    "sha256": "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790"
+    "sha256": "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957"
   },
   "persona_v2_semantic_oracle": {
     "error": "PersonaV2SemanticOracleError: persona v2 semantic oracle exceeds canonical byte cap"
@@ -148,41 +153,51 @@
   "persona_v2_source_inventory_layout": {
     "builder": "build_source_inventory_layout",
     "bytes": 274566,
-    "sha256": "ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba"
+    "sha256": "81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a"
   },
   "persona_v2_source_inventory_package": {
     "builder": "build_source_intent_suite_descriptor",
     "bytes": 45887,
-    "sha256": "b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706"
+    "sha256": "9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3"
   },
   "persona_v2_source_inventory_profile": {
     "builder": "build_source_inventory_profile_catalog",
     "bytes": 87391,
-    "sha256": "be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196"
+    "sha256": "9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0"
+  },
+  "persona_v2_source_matched_lifecycle_inventory": {
+    "builder": "build_source_matched_lifecycle_suite_descriptor",
+    "bytes": 14605,
+    "sha256": "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
+  },
+  "persona_v2_source_parameter_assignment_package": {
+    "builder": "build_source_parameter_assignment_suite_descriptor",
+    "bytes": 72535,
+    "sha256": "42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3"
   },
   "persona_v2_source_profile_catalog": {
     "builder": "build_source_profile_catalog",
     "bytes": 72559,
-    "sha256": "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac"
+    "sha256": "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d"
   },
   "persona_v2_source_semantic_capacity_axis_catalog": {
     "builder": "build_source_semantic_capacity_axis_catalog",
     "bytes": 50473,
-    "sha256": "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29"
+    "sha256": "5415894f1925166bebc46561001a406203a4296dcd7c6678557327692ecc66f3"
   },
   "persona_v2_source_semantic_membership_package": {
-    "builder": "build_source_semantic_membership_catalog",
-    "bytes": 436495,
-    "sha256": "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62"
+    "builder": "build_source_semantic_membership_suite_descriptor",
+    "bytes": 49837,
+    "sha256": "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072"
   },
   "persona_v2_topology": {
     "builder": "build_topology_contract",
     "bytes": 134195,
-    "sha256": "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
+    "sha256": "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a"
   },
   "persona_v2_variant_catalog": {
     "builder": "build_variant_catalog",
     "bytes": 211733,
-    "sha256": "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec"
+    "sha256": "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9"
   }
 }

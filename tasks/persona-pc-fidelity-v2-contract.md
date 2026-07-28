@@ -39,7 +39,7 @@ baseからbyte-exactに継承する。family/persona/suite投影は全variantか
 全203,000 source intentsのcontent parameterをexactly once束縛する。non-EML exact duplicateは5,080 pairs、
 EMLは9,153 sources / 2,800 hosts / 5,690 membershipsであり、pilot 20,300 + full-residual 182,700 =
 full 203,000をorigin unionだけで閉じ、full Hamiltonを再実行しない。suite descriptorは72,535 canonical bytes、
-SHA-256 `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`である。
+SHA-256 `42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3`である。
 expanded view 17,527,680 bytesは保存せずreceiptだけをinline課金する。現最大p12の既知pre-solve componentsは
 15,573,860 bytes、frame/header前の名目余裕は1,203,356 bytesだが、formal complete 16 MiB証明、scope、
 final ID、render/write、Kio、G0 authorityはすべてfalseである。
@@ -62,7 +62,7 @@ pilot source refs、93 family witnesses (52/33/8)、7,630 pre-solve source/scope
 event-created pre-solve source intentはsuite 3,630、dependency groupは各人48 source coupling + 6 scope barrier =
 54、suite 1,080である。content-only projectionはsource selectionとsource/scope event意味を別sectionで持つ。
 canonical suiteは14,605 bytes、SHA-256
-`c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`で、producer-independentな全20人
+`b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b`で、producer-independentな全20人
 再構成を通過した。最大persona body 103,981 bytes、非永続event body 318,664 bytes、LF込みrow 973 bytes、
 content-only projection 256,790 bytesである。このsource-matched suite単体はeffective membership、solver、
 compiled history、physical materialization、observed evaluation、Kio、G0 authorityを持たない。その下流の
@@ -71,7 +71,7 @@ base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / compa
 exactly once合成し、1,033,680 present-fact referencesを持つ。さらに3,630 event-created intentsを
 `P W1 carry 300 / P-prime empty 300 / other empty 3,030`へ閉じ、300 witnessesの正当consumerを
 matching W0 PとW1 descendantの600 refsだけに限定する。compact ownerは2,573 rows、canonical suiteは
-69,195 bytes、SHA-256 `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`である。
+69,195 bytes、SHA-256 `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`である。
 73件の`effective-membership-shard-content-commitment`は自身のeffective bodyのSHA/count/rangeだけを
 namespace projectionへ束縛する。禁止対象のupstream pinやderivation receiptではない。rendition-groupの
 semantic relationは含める一方、family/variant/gate/use-case/format-selection roleは除外する。
@@ -1129,7 +1129,7 @@ blocker resolution ledgerのentry keyは少なくとも
 解決を推論しない。例えばhistorical 61-format missingは333,881 bytes / SHA-256
 `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d`のall-71 registry、formal recipe unboundは
 386,152 / `0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df`、semantic missingは
-49,837 / `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`、concrete membership missingは
+49,837 / `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`、concrete membership missingは
 51,133 / `129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`のexact downstream claimでだけ
 supersedeできる。root capacity/calibrationはG4、actual chunks/render/index/history receiptはG2/G7へ
 `deferred-post-g0`とする。旧pinned bodyやそのfalse/blocker fieldは変更しない。
@@ -1367,7 +1367,7 @@ semantic-membership packageは専用CI job `persona-v2-source-semantic-membershi
 suite、expanded providers、Hamilton/component closure、version counts、tamper rejectionを回帰する。catalogは
 436,495 canonical bytes / SHA-256
 `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b`、suite descriptorは49,837 bytes /
-`62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`に固定する。compact bodiesは
+`6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`に固定する。compact bodiesは
 1,006,627 bytes、expanded context/fact-membership body receiptsは121,020,941 / 135,741,615 bytesを束縛する。
 remote CI greenは主張しない。このsemantic gate単体からconcrete overlay completionを推論しない。
 
@@ -1389,16 +1389,16 @@ solution/proof、final W0 persona plan、history plan、query/oracle bundleは�
 
 `pdf-text`の局所feasibilityは1--72 ASCII text-layer pages、4,096 + 2,048 × (pages - 1) bytesを固定し、
 PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
-2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validator contractは
-2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`、source-profile catalogは
+2,075 bytes / `2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d`、validator contractは
+2,233 bytes / `9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a`、source-profile catalogは
 72,559 bytes / `f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d`である。これにより
 10 contributor feasibility variantsがfull 69,236 contributor sourcesを局所的に覆うが、多言語content、
 sourceごとのsemantic recipe、positive query anchor、production Kio chunks、G0を証明しない。
 
 incidental-textの局所feasibilityは`csv`、`eml`、`html`、`ipynb`、`json`、`jsonl`、`log`、`sql`、
 `tsv`、`xml`、`yaml`をstdlib-onlyの決定論的rendererとbuilder非依存validatorで検査する。renderer contractは
-9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、validator contractは
-10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。各出力は
+9,139 bytes / `ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e`、validator contractは
+10,090 bytes / `8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0`である。各出力は
 512 KiB以下、EMLはCRLFかつwire line 78 bytes以下とする。この11 variantはinventory marginal上full 60,414
 incidental sourcesを覆うが、formal source recipe、source別semantic content、materialization、actual incidental
 chunks、Kio、G0、filesystem/write authorityを証明しない。

@@ -1,22 +1,23 @@
-# 改名で動いた凍結 digest を採り直す — 未完の作業の引き継ぎ
+# 改名で動いた凍結 digest を採り直す
 
 `kcs` → `kio` の全面改名にあたり、canonical JSON に入る文字列
 (`ARTIFACT_SCHEMA` / `FIXTURE_ID` / `kcs_path_media_type` などのフィールド名) が
-動いたため、それを覆う凍結 digest を採り直している。**この作業は未完である。**
+動いたため、それを覆う凍結 digest を採り直している。
 
-## 現状
+## 不変条件 — これが破れたら止める
 
-| | |
-|---|---:|
-| テキストの `kcs` | 0 行 (175 ファイル改名済み) |
-| 採り直した digest | **29 対** |
-| 残る failures | 18 |
-| 残る errors | 45 |
-
-**`canonical_bytes` は 1 つも動いていない。** `kcs` と `kio` は同じ 3 文字なので
-canonical JSON の長さは変わらず、digest だけが動く。これは 4 ラウンド全 artifact で
-検査済みで、**この不変条件が破れたら改名以外の変化が混じった証拠**なので、
+**`canonical_bytes` は 1 つも動かない。** `kcs` と `kio` は同じ 3 文字なので
+canonical JSON の長さは変わらず、digest だけが動く。artifact 43 件・契約 16 件の
+全ラウンドで検査しており、**破れたら改名以外の変化が混じった証拠**なので、
 そのときは digest を差し替えずに止めること。
+
+もう 1 つの検査: `eval/repin/` 以外で**変更された行はすべて 64 桁 digest を含む**。
+含まない行が出たら、それは改名の範囲外の変更である。
+
+```bash
+git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
+  | grep -vE '^(\+\+\+|---)' | grep -vE '[0-9a-f]{64}' | wc -l   # 0 であること
+```
 
 ## 手法 — 推測を入れないこと
 
@@ -39,53 +40,82 @@ canonical JSON の長さは変わらず、digest だけが動く。これは 4 �
 1. `bytes` が前後で一致するか (違えば停止)
 2. `old` が repo に実在するか (無ければ builder の選択が正本でない — 採用しない)
 
+## 生産者を取りこぼさないこと
+
+`snapshot.py` の列挙は 2 度外していて、そのたびに「解けない残件」に見えていた。
+
+| 取りこぼし | 原因 | 直し方 |
+|---|---|---|
+| per-persona の 3 モジュール | `ARTIFACT_KIND` を条件にしていたが、この 3 つは持たず `build_*_suite_descriptor` で pin する | suite descriptor があればそれを正本とする |
+| renderer / validator contract 16 件 | `*_validator.py` を「テスト側」と誤認して除外。契約側は `CONTRACT_KIND` で `build_renderer_contract` | `contract_snapshot.py` を分け、`PAIR_SPECS` から生産者を引く |
+
+2 つ目は 44 件のエラーを 1 つの根 (`contributor-text-renderer-contract`) として
+まとめて説明していた。**「別々の残件に見えるもの」がひとつの取りこぼしであることが
+ある**ので、残件は原因でまとめてから数えること。
+
+契約の正準化はモジュールごとに違う (`raw-image-media` だけ terminal-LF 付き ASCII)。
+共通ハッシャで測ると、そこだけ静かに別の値になる。**モジュール自身の
+`*_contract_sha256()` で測る**こと。
+
+## ログから対応を採るときの落とし穴
+
+テスト内に直接書かれた digest (`assertEqual(f(x), "<64 hex>")`) は artifact 単位の
+差分では拾えないので、失敗ログの `A != B` から採る。どちらが old かは
+**repo に実在するか**で決める (`assertEqual` の引数順はテストごとに違う)。
+
+**ログは必ずいまのツリーで採り直すこと。** 一度 digest を当てた後の repo に古い
+ログを当てると、新しい値のほうが repo に実在するので対応が反転し、正しく直した分を
+巻き戻す。空撃ちで実際に再現した。`from_test_log.py` が自分でテストを走らせるのは
+この取り違えを構造的に不可能にするためで、ログを引数で渡す口はわざと持たせていない。
+
+## 測定範囲 — 正本は CI の 91 モジュール
+
+`eval/test_*.py` は 94 個あり、CI はうち **91 個**を回している
+(残り 3 個は改名前ツリーでも組めないため除外されている)。
+
+一時期 24 モジュールだけを流して残件を数えていたが、これは**スイートの 26%**でしかなく、
+しかも重い cold build 系に偏っていた。軽い側にこそテスト内リテラルが多い。
+残件を数えるときは CI のリストを正本にすること。
+
+```bash
+grep -oE "eval\.test_[a-z0-9_]+" .github/workflows/ci.yml | sort -u > /tmp/ci-modules.txt
+```
+
 ## ファイル
 
 | | |
 |---|---|
-| `snapshot.py` | 全 artifact を組んで `(bytes, sha256)` を記録。改名後は `--allow-fail` |
+| `snapshot.py` | artifact を組んで `(bytes, sha256)` を記録。改名後は `--allow-fail` |
+| `contract_snapshot.py` | renderer / validator contract 16 件を同じ形で記録 |
 | `converge.py` | `before.json` を正として、対応の取れた分だけ繰り返し適用 |
+| `from_test_log.py` | テストを走らせ、失敗ログからテスト内リテラルの対応を採る |
 | `apply_digests.py` | `old:new` を全域置換 |
 | `before.json` | **改名前ツリーでの実測値。これが正本** |
-| `applied.json` | 適用済みの 29 対 |
+| `applied.json` | 適用済みの対応 |
 
-`before.json` は改名前 (`978e874`) のツリーでしか採れない。失うと
-`git stash` して採り直すことになるので消さないこと。
-
-## 残作業
-
-### (a) 3 モジュール・44 件
-
-`source_matched_lifecycle_inventory` / `source_parameter_assignment_package` /
-`lifecycle_effective_membership_reconciliation`。
-
-`snapshot.py` が **「モジュール内で最初に見つかる `build_*`」を正本と仮定**して
-おり、この 6 モジュールでは外れている (`before.json` に `error` が入っている)。
-正本 builder を特定して `snapshot.py::artifacts()` を直せば、同じ収束ループで解ける。
-
-### (b) renderer validator 系・12 件
-
-`AssertionError: '<D>' != '<D>'`。テスト内に直接書かれた digest で、artifact 単位の
-差分では拾えない。テストログの `A != B` から対応を取り、**どちらが repo に実在するか**で
-old/new を判定する方式が有効 (assertEqual の引数順はテストごとに違うので、順序に
-依存しない判定が要る)。
-
-### (c) `tasks/` の golden-freeze 記録
-
-約 180 行がコード文字列を凍結 digest と並べて引用している (21 行は同一行)。
-(a)(b) が終わって digest が確定してから更新する。
-
-### (d) OCR 検証用 PNG
-
-`experiments/ocr-verification/fixtures/generated-images/*.png` に **"KCS" が画素として
-描かれている**。テキスト置換では届かない。画像を再生成すると OCR 期待値の digest が
-動くので、別件として扱うこと。
+`before.json` は改名前 (`978e874`) のツリーでしか採れない。失うと採り直しになるので
+消さないこと。改名前ツリーは `git archive 978e874 eval | tar -x -C /tmp/pre` で復元できる。
 
 ## 進め方
 
 ```bash
-python3 eval/repin/converge.py                     # 収束ループ
-python3 -m unittest $(cat /tmp/wave-modules.txt)   # 残りを測る
+python3 eval/repin/converge.py                       # artifact の収束ループ
+python3 eval/repin/from_test_log.py \
+  --modules /tmp/ci-modules.txt --log /tmp/wave.log --out /tmp/pairs.txt
+python3 eval/repin/apply_digests.py $(cat /tmp/pairs.txt)
 ```
 
-改名前の値と突き合わせたいときは `git stash` で戻せる。
+`from_test_log.py` を当てた後は同じモジュールを流し直すこと。対応が反転していれば
+元の失敗に戻るので、この再実行が反転も捕まえる。
+
+## 済んでいること
+
+- テキストの `kcs` は 0 行 (175 ファイル改名済み)。残る 6 箇所はこのディレクトリの
+  散文とコメントで、改名作業そのものを説明しているので旧名を残すのが正しい。
+- OCR 検証用 PNG の画素に描かれていた "KCS" は `90c9983` で 2 枚とも再生成済み、
+  ground truth は `b8eefe4` で画素に合わせ直し済み。画像 digest を pin している
+  箇所は 15 枚すべてについて 0 件で、OCR 出力は gitignore なので凍結値は動かない。
+- `tasks/` に出る 127 個の digest のうち 103 個は `eval/crates/docs` にも現れるので
+  全域置換で追随する。残る 24 個は `tasks/` にしか無く、改名前の実測値
+  (`before.json` / 契約 16 件) のどれとも一致しないため、取り残された pin ではなく
+  過去の測定の記録である。
