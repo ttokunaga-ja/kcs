@@ -1006,7 +1006,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     red-team pass verified allocation, identity, attachment fanout/overlap, conflict-template assignment,
     row caps, and tamper rejection; a formal approval receipt is still not bound.
     The representative p01 live compatibility roots are consequently repinned at semantic 48,210 /
-    `57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3`, corpus 3,496 /
+    `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`, corpus 3,496 /
     `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`, evaluation 5,032 /
     `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`, and suite 2,609 /
     `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`; they remain
@@ -1046,7 +1046,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Their shard bodies total 108,682,911 bytes; the largest LF-inclusive row is 558 bytes and the largest
     shard is 2,225,794 bytes.  The suite descriptor is 45,887 canonical bytes, SHA-256
     `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`.  Representative bindings are
-    p01 pilot origin 13,043 / `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df`,
+    p01 pilot origin 13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`,
     p01 pilot profile 7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`,
     p12 full-residual origin 15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`,
     and p12 full profile 10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`.
@@ -1889,7 +1889,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245`.  The pre-freeze independent full gate
+    `9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`.  The pre-freeze full dependency gate
+    `2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full

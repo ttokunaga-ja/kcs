@@ -101,7 +101,7 @@ active blocker evidenceに限りresolution v2を発行しない。
 さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
 16,735 canonical bytes / SHA-256
-`3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`で局所golden固定した。
+`2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`で局所golden固定した。
 これは327 aligned / 1,673 mismatch、concrete distractor 0 / shortfall 4,340を保持するnon-authorizing sliceであり、
 authoritative corpus/evaluation closureやresolution v2ではない。
 一方、non-authorizing device-lane compositorは20 logical personasを3 fresh replayの60 distinct roots、60 isolated
@@ -1463,7 +1463,7 @@ v2で実装済み（planning only、non-authorizing）:
   shard bodiesは合計108,682,911 bytes、最大rowはLF込み558 bytes、最大shardは2,225,794 bytes。
   suite descriptorは45,887 bytes / SHA-256
   `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`。代表pinはp01 pilot origin
-  13,043 / `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df`、p01 pilot profile
+  13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`、p01 pilot profile
   7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`、p12 residual origin
   15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`、p12 full profile
   10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`である。p12の
@@ -1565,8 +1565,8 @@ v2で実装済み（planning only、non-authorizing）:
   W3/W5 surface editはfact carry-forwardとし、P/X/Yだけをrevision fact候補にする。compiled planではない
 - 人物ごと90 positive + 15 negative、suite 2,100 intents、3 replay 6,300 observationsとなるquery-intentと
   semantic oracle候補を実装。p01は65,798 bytes /
-  `a03e44be981facb65742e38f76874f6c17fde4d428befc365ddacf1f3a355d0b`、199,521 bytes /
-  `97ebd590e39eaf9b7b8026895fb21df18af425f47e94b452734c1b60b7008954`。200 restore anchorsと
+  `5478902782eaa7f92952e3f09cf73a8e1af0bf1360e34edad2eca044e6211729`、199,521 bytes /
+  `653508e88689f34e70d8702e4d59bfde9bde1dbf8f45190963a043435571a0c3`。200 restore anchorsと
   200 final-deleted documentsを分離するが、query/oracleからfull membershipへのtarget binding、同topic/languageのrendered distractor
   vocabulary attestation、compiled `(raw_hash, section)` relevanceはfalse
 - content、evidence、evaluationを別DAGへ注入し、query変更や同一bodyのreview receipt差替えがcorpus
@@ -1576,7 +1576,7 @@ v2で実装済み（planning only、non-authorizing）:
   source ID namespaceとして不適格であり、G0 rootとして発行しない。その後の12/12 projection inventoryと
   253-body namespace v3の局所golden固定は、この旧p01 candidateの履歴的評価を書き換えない。
   p01 representative live-DAG compatibility pinはsemantic 48,210 bytes /
-  `57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3`、corpus 3,496 /
+  `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`、corpus 3,496 /
   `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`、evaluation 5,032 /
   `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`、suite 2,609 /
   `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`。full 20-person closureではない。

@@ -103,7 +103,7 @@ replayと独立した2 hash-seed cold buildが上記literalを再現して成立
 `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245`で局所golden固定した。
+`9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -117,7 +117,7 @@ distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000�
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
 dependenciesを束縛し、16,735 canonical bytes / SHA-256
-`3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93`で局所golden固定した。
+`2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`で局所golden固定した。
 同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
 4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
 evaluation execution authorityを与えない。
@@ -1278,7 +1278,7 @@ core/G0 rootへ含めず、正式なupstream pinが更新されるまでnon-auth
 | --- | ---: | --- |
 | all-71 inventory profile catalog | 87,391 | `9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0` |
 | source inventory suite descriptor | 45,887 | `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3` |
-| p01 pilot origin manifest | 13,043 | `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df` |
+| p01 pilot origin manifest | 13,043 | `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3` |
 | p01 pilot profile manifest | 7,814 | `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b` |
 | p12 full-residual origin manifest | 15,474 | `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe` |
 | p12 full profile manifest | 10,369 | `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b` |

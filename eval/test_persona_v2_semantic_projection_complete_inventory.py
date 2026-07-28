@@ -104,7 +104,7 @@ EXPECTED_CLASS_BYTES = {
 EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "base-source-content-context": 2_484_590,
     "concrete-overlay-relations": 658_944,
-    "effective-source-membership": 103_864,
+    "effective-source-membership": 103_840,
     "fact-graph": 23_252,
     "payload-equivalence-rules": 4_288,
     "primary-use-case-corpus-half": 6_790,

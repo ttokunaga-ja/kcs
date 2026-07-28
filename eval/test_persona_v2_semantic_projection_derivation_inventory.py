@@ -73,7 +73,7 @@ EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
 )
 EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "base-source-content-context": 2_484_590,
-    "effective-source-membership": 103_864,
+    "effective-source-membership": 103_840,
     "query-independent-lifecycle-fact-rendition-rules": 256_790,
 }
 

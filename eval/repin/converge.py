@@ -79,13 +79,21 @@ def main() -> int:
                 # 前進しないので、外して最後にまとめて報告する。
                 held[name] = f"bytes moved {before['bytes']} -> {now['bytes']}"
                 continue
+            # 上流が直るたびに下流の digest はもう一度動く。`old` を一度使ったら
+            # 打ち切る書き方だと、その二度目以降を取りこぼす — 実際に
+            # `corpus_input_closure_v3` が round 1 の中間値で止まり、46 件の
+            # エラーとして残っていた。適用済みの鎖を辿って **いま repo にある値**
+            # と対応を取る。
             old, new = before["sha256"], now["sha256"]
-            if old == new or old in applied:
+            current = old
+            while current in applied:
+                current = applied[current]
+            if current == new:
                 continue
-            if not in_repo(old):
+            if not in_repo(current):
                 continue  # この artifact の pin を取り違えている。採用しない
-            fresh.append(f"{old}:{new}")
-            applied[old] = new
+            fresh.append(f"{current}:{new}")
+            applied[current] = new
 
         print(f"round {round_number}: built {built}/{len(after)}, new pairs {len(fresh)}",
               flush=True)

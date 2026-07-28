@@ -5,7 +5,7 @@
   },
   "persona_v2_capacity_fact_truth_occurrence_policy::build_capacity_fact_truth_occurrence_policy": {
     "bytes": 29868,
-    "sha256": "8657cbf653b9de88c76265ff9ced8b0a39a2e11494e144578b7f082a246100cc"
+    "sha256": "993d84d5122788b6dd70b4c3b628a3776ed14f9f8bf69065364d0a588f5c82a3"
   },
   "persona_v2_chunk_accounting::build_chunk_accounting_contract": {
     "bytes": 19801,
@@ -38,11 +38,11 @@
   },
   "persona_v2_corpus_input_closure_v3::build_corpus_input_closure_v3": {
     "bytes": 7590,
-    "sha256": "66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245"
+    "sha256": "9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d"
   },
   "persona_v2_evaluation_target_resolution_closure_slice::build_evaluation_target_resolution_closure_slice": {
     "bytes": 16735,
-    "sha256": "3619177292ed1f14c540e0152256edf19ea9854205263c602bd2027d66891d93"
+    "sha256": "2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7"
   },
   "persona_v2_fact_graph::build_fact_graph_suite": {
     "bytes": 530029,
@@ -80,7 +80,7 @@
   },
   "persona_v2_history_readiness_contract::build_history_readiness_contract": {
     "bytes": 241996,
-    "sha256": "3cfa2c73cdac9c22b9825517c32a6a3b6357024f9827d861b33f480280169095"
+    "sha256": "f21bd22f017e17ad26bf2bb456c45eaab774abba50dbb91dc421c2bc9da2241d"
   },
   "persona_v2_incidental_text_renderer::build_renderer_contract": {
     "bytes": 9139,
@@ -288,7 +288,7 @@
   },
   "persona_v2_source_semantic_capacity_axis_catalog::build_source_semantic_capacity_axis_catalog": {
     "bytes": 50473,
-    "sha256": "5415894f1925166bebc46561001a406203a4296dcd7c6678557327692ecc66f3"
+    "sha256": "35b1ddcc1fb526bfa96a254731b75091f7c6f45be8477474955506e55e5927d8"
   },
   "persona_v2_source_semantic_membership_package::build_source_semantic_membership_catalog": {
     "bytes": 436495,

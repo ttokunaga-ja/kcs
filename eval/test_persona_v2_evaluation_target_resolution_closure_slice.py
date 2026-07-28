@@ -110,7 +110,7 @@ class PersonaV2EvaluationTargetResolutionClosureSliceTests(unittest.TestCase):
             (pins[3]["canonical_bytes"], pins[3]["sha256"]),
             (
                 7_590,
-                "66d78474d80e4aa75266c98bab0177e3dd5196685088acab826580345bb8b245",
+                "9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d",
             ),
         )
         self.assertEqual(
