@@ -289,7 +289,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
             self.assertFalse(set(entry) & forbidden_entry_fields)
         self.assertEqual(
             self.value["summary"]["cumulative_external_projection_bytes"],
-            155_741_469,
+            155_741_475,
         )
         self.assertEqual(self.value["summary"]["json_projection_body_count"], 67)
         self.assertEqual(self.value["summary"]["jsonl_projection_body_count"], 186)

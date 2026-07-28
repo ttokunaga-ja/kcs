@@ -103,7 +103,7 @@ replayと独立した2 hash-seed cold buildが上記literalを再現して成立
 `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d`で局所golden固定した。
+`0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -117,7 +117,7 @@ distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000�
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
 dependenciesを束縛し、16,735 canonical bytes / SHA-256
-`2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`で局所golden固定した。
+`4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`で局所golden固定した。
 同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
 4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
 evaluation execution authorityを与えない。

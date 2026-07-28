@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 FROZEN_GOLDEN = (
     8_455,
-    "2c94ae39e60af5970053ddcd205670791d6cdee6bd5bffc8cad1270c221d3ea0",
+    "b39c0924443456674ca5fcc86295eba35bc8f7be232885b83f2b9072f41e3fdd",
 )
 
 

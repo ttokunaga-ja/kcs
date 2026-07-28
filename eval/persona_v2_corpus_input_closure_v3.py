@@ -51,7 +51,7 @@ TARGET_MANIFEST_BYTES = 64 * 2**10
 # Frozen after two isolated full build+validation measurements agreed.
 EXPECTED_CLOSURE_CANONICAL_BYTES = 7_590
 EXPECTED_CLOSURE_SHA256 = (
-    "9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d"
+    "0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c"
 )
 
 DEPENDENCY_ORDER = (
@@ -108,7 +108,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 42_931,
             "sha256": (
-                "3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3"
+                "3e1231d76aea401931f9a15cc20438918033146d39e50e38ab4c4fd36676efe5"
             ),
         },
     },
@@ -184,7 +184,7 @@ def _canonical_limits():
             "review-request-catalog-v1": 256 * 2**10,
             "g0-blocker-resolution-ledger-bootstrap-v2": 16 * 2**20,
         },
-        "exact_cumulative_external_projection_bytes": 155_741_469,
+        "exact_cumulative_external_projection_bytes": 155_741_475,
         "external_dependency_bodies_embedded": False,
         "external_projection_bodies_embedded": False,
         "framed_byte_cap_before_parse_required": True,

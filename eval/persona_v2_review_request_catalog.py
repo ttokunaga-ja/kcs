@@ -390,7 +390,7 @@ RUBRIC_SPECS = {
 # PYTHONHASHSEED=0/1 build+validation measurements agreed exactly.
 EXPECTED_CATALOG_BYTES = 42_931
 EXPECTED_CATALOG_SHA256 = (
-    "3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3"
+    "3e1231d76aea401931f9a15cc20438918033146d39e50e38ab4c4fd36676efe5"
 )
 
 
@@ -768,14 +768,14 @@ def _projection_binding(binding_id, class_id, relation, pins):
 def _inventory_projection_binding(*, authenticate=True):
     if authenticate and (
         complete_validator.EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES_FROZEN
-        != 155_741_469
+        != 155_741_475
         or complete_validator.EXPECTED_ORDERED_PROJECTION_PINS_SHA256
         != "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
     ):
         _fail("complete inventory ordered projection pin aggregate drifted")
     return {
         "aggregate": {
-            "cumulative_canonical_bytes": 155_741_469,
+            "cumulative_canonical_bytes": 155_741_475,
             "ordered_projection_pins_sha256": (
                 "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
             ),

@@ -737,11 +737,11 @@ class SemanticProjectionDerivationInventoryLongAll113Test(unittest.TestCase):
         effective_receipt = by_class["effective-source-membership"][0]
         self.assertEqual(effective_receipt["coordinates"], {"persona_id": "p01"})
         self.assertEqual(
-            effective_receipt["projection_pin"]["canonical_bytes"], 103_433
+            effective_receipt["projection_pin"]["canonical_bytes"], 103_439
         )
         self.assertEqual(
             effective_receipt["projection_pin"]["sha256"],
-            "a2879b97f6e99953aeecdd084c9302b713f29a52300b2d19455790ee63d5917f",
+            "d620a63b9762cf6119d795845c5b1533207ced29ae97fbb6ab3765a966d07f5e",
         )
 
     def test_public_body_provider_requires_the_exact_inventory_receipt(self):

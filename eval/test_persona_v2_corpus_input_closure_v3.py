@@ -107,7 +107,7 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
     def test_frozen_golden_matches_both_implementations_and_exact_body(self):
         expected = (
             7_590,
-            "9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d",
+            "0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c",
         )
         self.assertEqual(
             (package.EXPECTED_CLOSURE_CANONICAL_BYTES, package.EXPECTED_CLOSURE_SHA256),

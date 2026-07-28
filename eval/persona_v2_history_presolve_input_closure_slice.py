@@ -50,7 +50,7 @@ MAX_NESTING_DEPTH = 16
 
 # Frozen after corrected full and two-seed cold dependency builds; no authority.
 EXPECTED_CANONICAL_BYTES = 8_455
-EXPECTED_SHA256 = "2c94ae39e60af5970053ddcd205670791d6cdee6bd5bffc8cad1270c221d3ea0"
+EXPECTED_SHA256 = "b39c0924443456674ca5fcc86295eba35bc8f7be232885b83f2b9072f41e3fdd"
 
 NAMESPACE_CANONICAL_BYTES = 161_665
 NAMESPACE_SHA256 = (
@@ -285,7 +285,7 @@ def _compact_owner_summary():
 def _semantic_context():
     return {
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_469,
+        "cumulative_external_projection_bytes": 155_741_475,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,

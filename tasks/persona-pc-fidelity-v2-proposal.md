@@ -101,7 +101,7 @@ active blocker evidenceに限りresolution v2を発行しない。
 さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
 16,735 canonical bytes / SHA-256
-`2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`で局所golden固定した。
+`4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`で局所golden固定した。
 これは327 aligned / 1,673 mismatch、concrete distractor 0 / shortfall 4,340を保持するnon-authorizing sliceであり、
 authoritative corpus/evaluation closureやresolution v2ではない。
 一方、non-authorizing device-lane compositorは20 logical personasを3 fresh replayの60 distinct roots、60 isolated

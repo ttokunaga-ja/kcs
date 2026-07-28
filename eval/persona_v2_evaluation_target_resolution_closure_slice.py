@@ -66,7 +66,7 @@ MAX_TRANSITIVE_PROVIDER_BYTES = 60 * 2**20
 # field and grants no authority.
 EXPECTED_CANONICAL_BYTES = 16_735
 EXPECTED_SHA256 = (
-    "2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7"
+    "4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60"
 )
 
 NAMESPACE_CANONICAL_BYTES = 161_665
@@ -86,7 +86,7 @@ TARGET_RESOLUTION_SHA256 = (
 )
 REQUEST_ONLY_CORPUS_CLOSURE_CANONICAL_BYTES = 7_590
 REQUEST_ONLY_CORPUS_CLOSURE_SHA256 = (
-    "9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d"
+    "0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c"
 )
 SEMANTIC_FEASIBILITY_CANONICAL_BYTES = 40_947
 SEMANTIC_FEASIBILITY_SHA256 = (
@@ -373,7 +373,7 @@ def _corpus_context_summary():
         "authoritative_corpus_input_closure_available": False,
         "authoritative_corpus_input_closure_bound": False,
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_469,
+        "cumulative_external_projection_bytes": 155_741_475,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,

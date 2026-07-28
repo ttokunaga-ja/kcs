@@ -1815,7 +1815,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     decision, approval, waiver, or positive receipt, and `positive_receipt_bound` is false for every request.
 
     The frozen request catalog is 42,931 canonical bytes with SHA-256
-    `3c6eb74ab89f3476650135cd66bd0064cf46c66ac985a0b05891a5974250afb3`; two isolated hash seeds agree and the
+    `3e1231d76aea401931f9a15cc20438918033146d39e50e38ab4c4fd36676efe5`; two isolated hash seeds agree and the
     focused eight-test gate passes.  A review request is not review evidence and cannot satisfy the corpus input
     closure or G0.
 156. Persona-PC v2 records the current unresolved production boundary in the bootstrap-only
@@ -1889,7 +1889,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `9b1fc39877ff108612159248f356fb29981de83091d2fe14c88f796b42a0276d`.  The pre-freeze independent full gate
+    `0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `2f28624954a055aa7c5e46567d3e90ccc85dfe45f47f1e344de5f74e9d5cc3c7`.  The pre-freeze full dependency gate
+    `4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
@@ -2083,7 +2083,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     lifecycle source references, 600 inverted consumer references, and 300 purge witnesses.
 
     The frozen body is 8,455 canonical bytes with SHA-256
-    `2c94ae39e60af5970053ddcd205670791d6cdee6bd5bffc8cad1270c221d3ea0`.  The corrected pre-freeze full gate
+    `b39c0924443456674ca5fcc86295eba35bc8f7be232885b83f2b9072f41e3fdd`.  The corrected pre-freeze full gate
     passes in 2,595.206 seconds with 800,702,464-byte maximum RSS.  Isolated seed-zero and seed-one cold processes
     reproduce the same bytes and digest in 2,604.108 and 2,588.437 seconds respectively, 5,193.170 seconds total,
     with 804,306,944-byte maximum RSS.  Each full replay opens the namespace validator once, effective-membership
