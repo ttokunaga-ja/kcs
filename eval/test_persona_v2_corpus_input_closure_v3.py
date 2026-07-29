@@ -86,7 +86,7 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
         self.assertEqual(namespace_pin["canonical_bytes"], 161_665)
         self.assertEqual(
             namespace_pin["sha256"],
-            "bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637",
+            "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
         )
 
     def test_body_is_compact_pin_only_and_has_no_downstream_fields(self):
@@ -107,7 +107,7 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
     def test_frozen_golden_matches_both_implementations_and_exact_body(self):
         expected = (
             7_590,
-            "cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec",
+            "b1bb9af0af2a76486040251e4f1243ae69437099a141a34f48b98800cd7ba80d",
         )
         self.assertEqual(
             (package.EXPECTED_CLOSURE_CANONICAL_BYTES, package.EXPECTED_CLOSURE_SHA256),

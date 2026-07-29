@@ -46,7 +46,7 @@ MAX_ARTIFACT_BYTES = 2 * 2**20
 TARGET_ARTIFACT_BYTES = 512 * 2**10
 EXPECTED_CANONICAL_BYTES = 40_947
 EXPECTED_SHA256 = (
-    "22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27"
+    "573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f"
 )
 
 DEPENDENCY_ORDER = (
@@ -86,7 +86,7 @@ DEPENDENCY_PINS = {
         "artifact_schema": "kio.persona.pc-corpus-semantic-namespace/v3",
         "artifact_schema_version": 3,
         "canonical_bytes": 161_665,
-        "sha256": "bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637",
+        "sha256": "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
     },
     "complete-semantic-projection-inventory-v2": {
         "artifact_schema": "kio.persona.pc-semantic-projection-derivation-inventory/v2",

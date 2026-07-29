@@ -63,7 +63,7 @@ EXACT_CUMULATIVE_EXTERNAL_PROJECTION_BYTES = 155_741_381
 # Frozen after two isolated full validations under distinct hash seeds agreed.
 EXPECTED_CLOSURE_CANONICAL_BYTES = 7_590
 EXPECTED_CLOSURE_SHA256 = (
-    "cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec"
+    "b1bb9af0af2a76486040251e4f1243ae69437099a141a34f48b98800cd7ba80d"
 )
 
 DEPENDENCY_ORDER = (
@@ -87,7 +87,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 161_665,
             "sha256": (
-                "bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637"
+                "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa"
             ),
         },
     },
@@ -123,7 +123,7 @@ DEPENDENCY_SPECS = {
             "body_framing": "canonical-json",
             "canonical_bytes": 42_931,
             "sha256": (
-                "3e1231d76aea401931f9a15cc20438918033146d39e50e38ab4c4fd36676efe5"
+                "33011fa5b41a0f99d61fd93b8ce5fc949b7d19eab4276cac688bb1ceb6eccb26"
             ),
         },
     },

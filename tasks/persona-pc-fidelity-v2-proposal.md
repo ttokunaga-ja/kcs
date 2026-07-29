@@ -96,7 +96,7 @@ scope/quota/cohort allocation、canonical solution/proof、正式G0 rootは未�
 in-memory projection feasibility auditでも、2,000 contributor targetsのbaseline一致は327、distractor候補上限は
 1,060 / 5,400、revision join unknownは2,000、all-condition exact resolutionは0であり、このblockerを確認した。
 同auditは40,947 canonical bytes / SHA-256
-`22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`で局所golden固定済みだが、
+`573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f`で局所golden固定済みだが、
 active blocker evidenceに限りresolution v2を発行しない。
 さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを

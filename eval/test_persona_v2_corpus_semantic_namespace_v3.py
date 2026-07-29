@@ -230,7 +230,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
         self.assertLessEqual(len(self.raw), package.MAX_MANIFEST_BYTES)
         expected_golden = (
             161_665,
-            "bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637",
+            "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
         )
         self.assertEqual(
             (

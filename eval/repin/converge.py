@@ -95,9 +95,20 @@ def main() -> int:
             # エラーとして残っていた。適用済みの鎖を辿って **いま repo にある値**
             # と対応を取る。
             old, new = before["sha256"], now["sha256"]
+            # 鎖は**過去の実行の分も**辿る。`applied` (この実行) だけを辿る版は、
+            # 改名前の値が既に置換済みの artifact を二度と拾えなかった — その後
+            # 数値を直して digest がまた動いても、起点が repo に無いので対応が
+            # 立たず、「0 対」と報告しながら 46 件のエラーが残っていた。
+            # `applied.json` は「この artifact に最後に当てた値」を持っている。
+            chain = {**history, **applied}
             current = old
-            while current in applied:
-                current = applied[current]
+            for _ in range(len(chain) + 1):
+                if current not in chain:
+                    break
+                current = chain[current]
+            else:
+                print(f"[stop] {name}: 対応の鎖が閉じない", file=sys.stderr)
+                continue
             if current == new:
                 continue
             if not in_repo(current):

@@ -100,10 +100,10 @@ v2候補は局所completion claimを満たすだけで、`corpus_semantic_namesp
 replayと独立した2 hash-seed cold buildが上記literalを再現して成立した。
 その下流ではprojection bodyを含まない253-entry/12-classの
 `kio.persona.pc-corpus-semantic-namespace/v3`を161,665 canonical bytes / SHA-256
-`bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637`で局所golden固定した。
+`70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec`で局所golden固定した。
+`b1bb9af0af2a76486040251e4f1243ae69437099a141a34f48b98800cd7ba80d`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -112,7 +112,7 @@ positive review receipt、production blocker ledger、topic/language/fact/revisi
 このgapのin-memory projection feasibility auditは、contributor target 2,000件中baseline全predicate一致327、不一致1,673、
 distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000、all-condition exact 0を示す。
 同auditは40,947 canonical bytes / SHA-256
-`22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`で局所golden固定したが、
+`573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f`で局所golden固定したが、
 不足を認証するactive blocker evidenceに限り、resolution v2やcompletion evidenceではない。
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
