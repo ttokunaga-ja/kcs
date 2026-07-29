@@ -696,9 +696,9 @@ binding 名、artifact schema/version、canonical bytes、full SHA-256 の組で
 | `persona-v2-source-matched-lifecycle-suite` | `kio.persona.pc-source-matched-lifecycle-suite/v1` | 1 | 14,605 | `b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b` |
 | `lifecycle-effective-membership-reconciliation-v1` | `kio.persona.pc-lifecycle-effective-membership-reconciliation/v1` | 1 | 69,195 | `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29` |
 | `query-history-target-resolution-v1` | `kio.persona.pc-query-history-target-resolution/v1` | 1 | 4,478,576 | `8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff` |
-| `query-history-semantic-resolution-feasibility-audit` | `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584` |
+| `query-history-semantic-resolution-feasibility-audit` | `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` | 1 | 40,947 | `22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27` |
 | `complete-semantic-projection-inventory-v2` | `kio.persona.pc-semantic-projection-derivation-inventory/v2` | 2 | 697,466 | `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91` |
-| `corpus-semantic-namespace-v3` | `kio.persona.pc-corpus-semantic-namespace/v3` | 3 | 161,665 | `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509` |
+| `corpus-semantic-namespace-v3` | `kio.persona.pc-corpus-semantic-namespace/v3` | 3 | 161,665 | `bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637` |
 
 `query-history-target-resolution-v1` は frozen baseline input にすぎない。feasibility audit 自身が
 `query-history-target-resolution-v2-not-issued` を記録しているため、v1 pin を v2 artifact として

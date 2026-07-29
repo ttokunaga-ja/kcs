@@ -89,7 +89,7 @@ class PersonaV2EvaluationTargetResolutionClosureSliceTests(unittest.TestCase):
             (pins[0]["canonical_bytes"], pins[0]["sha256"]),
             (
                 161_665,
-                "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
+                "bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637",
             ),
         )
         self.assertEqual(
@@ -110,14 +110,14 @@ class PersonaV2EvaluationTargetResolutionClosureSliceTests(unittest.TestCase):
             (pins[3]["canonical_bytes"], pins[3]["sha256"]),
             (
                 7_590,
-                "0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c",
+                "cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec",
             ),
         )
         self.assertEqual(
             (pins[4]["canonical_bytes"], pins[4]["sha256"]),
             (
                 40_947,
-                "1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584",
+                "22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27",
             ),
         )
 

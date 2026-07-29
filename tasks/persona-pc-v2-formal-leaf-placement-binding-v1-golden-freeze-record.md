@@ -15,7 +15,7 @@ chunk.  It also does not select an allocation/source-plan successor.
 | --- | --- |
 | descriptor schema | `kio.persona.pc-formal-leaf-placement-binding/v1` |
 | descriptor canonical bytes | 27,117 |
-| descriptor SHA-256 | `d67b54fd1851358902842f464611d07008a06750a3165e58d47bd22954e92dc8` |
+| descriptor SHA-256 | `ce60077869f899473b439b3a48446a629016d9c5c2ba472445aee1fb427f1237` |
 | external body ID | `persona-pc-v2-formal-leaf-placement-rows-v1` |
 | external body framing | canonical UTF-8 NFC LF-JSONL |
 | external LF-JSONL bytes | 889,056 |
@@ -40,7 +40,7 @@ format registry, source recipe, history plan, or query plan.
 | input | canonical bytes / SHA-256 |
 | --- | --- |
 | topology v2 (`kio.persona.pc-topology/v2`) | 134,195 / `02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a` |
-| device-lane compositor v1 (`kio.persona.pc-device-lane-compositor/v1`) | 41,099 / `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf` |
+| device-lane compositor v1 (`kio.persona.pc-device-lane-compositor/v1`) | 41,099 / `8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f` |
 
 Both producer and independent validator read and authenticate each upstream
 twice.  The validator then regenerates every row independently, reads the

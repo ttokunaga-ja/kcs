@@ -1007,7 +1007,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     row caps, and tamper rejection; a formal approval receipt is still not bound.
     The representative p01 live compatibility roots are consequently repinned at semantic 48,210 /
     `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`, corpus 3,496 /
-    `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`, evaluation 5,032 /
+    `438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757`, evaluation 5,032 /
     `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`, and suite 2,609 /
     `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`; they remain
     compatibility-only candidates, not G0 or source-identity authority.
@@ -1048,7 +1048,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`.  Representative bindings are
     p01 pilot origin 13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`,
     p01 pilot profile 7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`,
-    p12 full-residual origin 15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`,
+    p12 full-residual origin 15,474 / `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4`,
     and p12 full profile 10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`.
     A full profile reuses the exact pilot origin manifest and pilot shard descriptors before adding the
     full-residual origin.  Every pilot/full profile manifest also binds the overlay-reservation-suite SHA
@@ -1803,7 +1803,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     exactly 253 direct edges, maximum depth one, and zero unused entries.
 
     The frozen namespace is 161,665 canonical bytes with SHA-256
-    `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`.  The logged two-hash-seed cold gate
+    `bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637`.  The logged two-hash-seed cold gate
     completes in 5,160.296 seconds total; the seed measurements are 2,586.128 and 2,573.607 seconds with maximum RSS
     795,803,648 bytes.  Each seed authenticates 253 unique receipts and 506 projection-provider calls.  `namespace
     golden frozen` is a local artifact claim only: `namespace issued`, source-identity authority, production corpus
@@ -1852,7 +1852,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
     `formal-replay-01` is only the unratified designated candidate for `ambient-home` and `byte-stress`; the G0
     selection remains false.  The frozen compositor is 41,099 canonical bytes with SHA-256
-    `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`.  Pre- and post-freeze isolated hash seeds
+    `8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f`.  Pre- and post-freeze isolated hash seeds
     reproduce the same body, the focused twelve-test gate and independent audit are clean, and producer/validator
     golden drift is fail-closed.  No physical root, registry, file, chunk, inode, or receipt is claimed observed;
     filesystem writer, capacity, lane-isolation readback, Kio/history execution, production composition, and G0 all
@@ -1875,7 +1875,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     zero, four-domain disjointness is unproved, and query-history target resolution v2 is not issued.
 
     The current audit candidate is 40,947 canonical bytes with SHA-256
-    `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`, but its golden constants deliberately remain
+    `22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`, but its golden constants deliberately remain
     unset pending isolated full/cold acceptance.  The in-memory all-persona projection build completes in 465.03 seconds; fourteen
     focused tests, byte compilation, diff checks, and the final independent audit pass.  These measurements are
     active blocker evidence, not a frozen production closure.  A v2 source-semantic resolution must add sufficient
@@ -1889,7 +1889,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c`.  The pre-freeze independent full gate
+    `cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
@@ -1913,7 +1913,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     issued.
 
     The frozen body is exactly 40,947 canonical bytes with SHA-256
-    `1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`.  The pre-freeze all-persona build plus
+    `22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`.  The pre-freeze all-persona build plus
     producer-independent validation passes in 458.502 seconds with 301,400,064-byte maximum RSS.  Two isolated cold
     processes under hash seeds zero and one reproduce the same bytes and digest in 452.817 and 451.303 seconds,
     respectively, with 303,005,696-byte maximum RSS.  After both producer and independent-validator golden pairs
@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`.  The pre-freeze full dependency gate
+    `1d2ff1822bc3e15a7c3d9e58ce55eb1908340bc3a1c445fd566e0539b25ff282`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
@@ -2083,7 +2083,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     lifecycle source references, 600 inverted consumer references, and 300 purge witnesses.
 
     The frozen body is 8,455 canonical bytes with SHA-256
-    `b39c0924443456674ca5fcc86295eba35bc8f7be232885b83f2b9072f41e3fdd`.  The corrected pre-freeze full gate
+    `c410988e53c4e440d9658898cc4a29e82520117ddc3a2623b3edd5d8b8d2a2a3`.  The corrected pre-freeze full gate
     passes in 2,595.206 seconds with 800,702,464-byte maximum RSS.  Isolated seed-zero and seed-one cold processes
     reproduce the same bytes and digest in 2,604.108 and 2,588.437 seconds respectively, 5,193.170 seconds total,
     with 804,306,944-byte maximum RSS.  Each full replay opens the namespace validator once, effective-membership

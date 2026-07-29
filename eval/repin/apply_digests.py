@@ -44,6 +44,14 @@ def main() -> int:
     touched = 0
     replacements = 0
     for relative in files:
+        # 自分の記録は書き換えない。`before.json` は追跡下のテキストなので全域置換の
+        # 対象に入っており、ラウンドごとに「改名前の実測値」が「適用後の値」へ静かに
+        # 上書きされていた。記録が失われるだけでなく、`before == after` になった
+        # artifact の対応が**見つからなくなる** — ラウンドが早々に「新規 0」で終わる
+        # のは収束ではなく、比較対象が消えたためだった。74 件が一度も再 pin されずに
+        # 残っていたのはこれが原因である。
+        if relative.startswith("eval/repin/"):
+            continue
         path = ROOT / relative
         try:
             text = path.read_text(encoding="utf-8")

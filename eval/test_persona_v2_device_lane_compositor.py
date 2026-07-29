@@ -42,7 +42,7 @@ class PersonaV2DeviceLaneCompositorTests(unittest.TestCase):
         self.assertLess(len(self.raw), producer.TARGET_COMPOSITOR_BYTES)
         expected = (
             41_099,
-            "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf",
+            "8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f",
         )
         self.assertEqual(
             (producer.EXPECTED_CANONICAL_BYTES, producer.EXPECTED_SHA256),

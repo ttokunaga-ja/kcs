@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
+import inspect
 import json
 import re
 import sys
@@ -46,9 +47,28 @@ def artifacts() -> list[tuple[str, str]]:
     found = []
     for path in sorted((ROOT / "eval").glob("persona_v2_*.py")):
         source = path.read_text(encoding="utf-8")
-        for builder in re.findall(r"^def (build_[a-z0-9_]+)\(\s*\)\s*:", source, re.M):
+        for builder in re.findall(r"^def (build_[a-z0-9_]+)\(", source, re.M):
             found.append((path.stem, builder))
     return found
+
+
+def callable_with_no_arguments(function) -> bool:
+    """引数なしで呼べるかを署名で判定する。
+
+    `\\(\\s*\\)` という正規表現で「引数を取らない」を判定していた版は、
+    **既定値付きの引数を持つ builder** を取りこぼした
+    (`build_device_lane_compositor(envelope_value=None)` は引数なしで呼べる)。
+    ソースの見た目で当てるのをやめ、署名に訊く。
+    """
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return all(
+        parameter.default is not inspect.Parameter.empty
+        or parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+        for parameter in parameters
+    )
 
 
 def canonical_bytes(module, value) -> bytes:
@@ -93,7 +113,10 @@ def main() -> int:
             module = importlib.import_module(f"eval.{module_name}")
             if args.allow_fail and hasattr(module, "_fail"):
                 module._fail = lambda *a, **k: None
-            raw = canonical_bytes(module, getattr(module, builder)())
+            function = getattr(module, builder)
+            if not callable_with_no_arguments(function):
+                continue
+            raw = canonical_bytes(module, function())
         except Exception as error:
             result[key] = {"error": f"{type(error).__name__}: {error}"[:200]}
             print(f"  [skip] {key}: {type(error).__name__}", file=sys.stderr, flush=True)

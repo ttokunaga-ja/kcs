@@ -96,17 +96,17 @@ scope/quota/cohort allocation、canonical solution/proof、正式G0 rootは未�
 in-memory projection feasibility auditでも、2,000 contributor targetsのbaseline一致は327、distractor候補上限は
 1,060 / 5,400、revision join unknownは2,000、all-condition exact resolutionは0であり、このblockerを確認した。
 同auditは40,947 canonical bytes / SHA-256
-`1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`で局所golden固定済みだが、
+`22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`で局所golden固定済みだが、
 active blocker evidenceに限りresolution v2を発行しない。
 さらに`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory v2、
 query-history target resolution v1、request-only corpus closure v3、同feasibility auditの5 direct dependenciesを
 16,735 canonical bytes / SHA-256
-`4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`で局所golden固定した。
+`1d2ff1822bc3e15a7c3d9e58ce55eb1908340bc3a1c445fd566e0539b25ff282`で局所golden固定した。
 これは327 aligned / 1,673 mismatch、concrete distractor 0 / shortfall 4,340を保持するnon-authorizing sliceであり、
 authoritative corpus/evaluation closureやresolution v2ではない。
 一方、non-authorizing device-lane compositorは20 logical personasを3 fresh replayの60 distinct roots、60 isolated
 registries、1,200 formal scopes、609,000 W0 source filesへexact mappingした。41,099 canonical bytes / SHA-256
-`eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`で、ambient/byte-stress designated replayは
+`8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f`で、ambient/byte-stress designated replayは
 unratified、writer/materialization/readback/G0 authorityはfalseである。
 現行`kio-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
@@ -1421,7 +1421,7 @@ v2で実装済み（planning only、non-authorizing）:
   10,820 scoresを束縛し、25 declared hard-zeroと854 out-of-domainを除外する。clone、secondary-only
   maximum、max/coverage機械違反は0である。9 checksのうち8 machine checksがpassし、独立human reviewが
   未成立であることを記録するnegative receiptは3,944 bytes、SHA-256
-  `3c236722b900a26b12a7546b3a073dd71d1c935e1d313cb1261781c75ed4fd98`。承認receiptではなく、
+  `a67c947842f02075b129a7ae9956e69964fc57ff606b8f3454f9462e3310ce4a`。承認receiptではなく、
   solver/G0 authorityはfalse
 - 人物別`kio.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/36 typed facts/
   4 unordered W0-current conflict sets/4 revision chains、suite合計80 graph/320 entities/720 facts/
@@ -1465,7 +1465,7 @@ v2で実装済み（planning only、non-authorizing）:
   `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`。代表pinはp01 pilot origin
   13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`、p01 pilot profile
   7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`、p12 residual origin
-  15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`、p12 full profile
+  15,474 / `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4`、p12 full profile
   10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`である。p12の
   8,598,540-byte current-component ledgerは**unique source shard bodies + 2 origin manifests + 2 profile manifestsのみ**
   の部分合計で、新しいsemantic/fact componentを合算していない。semantic/fact projection、concrete overlay、
@@ -1577,7 +1577,7 @@ v2で実装済み（planning only、non-authorizing）:
   253-body namespace v3の局所golden固定は、この旧p01 candidateの履歴的評価を書き換えない。
   p01 representative live-DAG compatibility pinはsemantic 48,210 bytes /
   `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`、corpus 3,496 /
-  `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`、evaluation 5,032 /
+  `438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757`、evaluation 5,032 /
   `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`、suite 2,609 /
   `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`。full 20-person closureではない。
   既知schemaのfield completenessは各注入bodyのexact provider validatorが正本で、closure scannerは

@@ -100,10 +100,10 @@ v2候補は局所completion claimを満たすだけで、`corpus_semantic_namesp
 replayと独立した2 hash-seed cold buildが上記literalを再現して成立した。
 その下流ではprojection bodyを含まない253-entry/12-classの
 `kio.persona.pc-corpus-semantic-namespace/v3`を161,665 canonical bytes / SHA-256
-`a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`で局所golden固定した。
+`bbb0941e7e640130fb57e07c1301991679c2dea80407573b82e9ef575b074637`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`0274e64948183130ee641e72ee805e580087337cd6cf409eb00f59922af9933c`で局所golden固定した。
+`cd2dbcf3829beb13c2278d93f2d410df8f99611dabc7a3e4c6ce579f671a53ec`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -112,18 +112,18 @@ positive review receipt、production blocker ledger、topic/language/fact/revisi
 このgapのin-memory projection feasibility auditは、contributor target 2,000件中baseline全predicate一致327、不一致1,673、
 distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000、all-condition exact 0を示す。
 同auditは40,947 canonical bytes / SHA-256
-`1c560530df91462a2c2b35b746d8398f14c5cdff16bfe86fadcf105c5947b584`で局所golden固定したが、
+`22e8e9b2af457ebe35c4655c49435eea72955cc753d5bd132c5bc469ce3aba27`で局所golden固定したが、
 不足を認証するactive blocker evidenceに限り、resolution v2やcompletion evidenceではない。
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
 dependenciesを束縛し、16,735 canonical bytes / SHA-256
-`4b666bec97f20f1db3246f034ddefde7b8ba4e116e0b0bf43a44b582841e9c60`で局所golden固定した。
+`1d2ff1822bc3e15a7c3d9e58ce55eb1908340bc3a1c445fd566e0539b25ff282`で局所golden固定した。
 同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
 4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
 evaluation execution authorityを与えない。
 物理pathについては`kio.persona.pc-device-lane-compositor/v1`が20 logical personasを3 fresh replayの60 distinct
 device roots、60 isolated registries、1,200 formal scopes、609,000 W0 source filesへ写像する。bodyは41,099
-canonical bytes / SHA-256 `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`である。
+canonical bytes / SHA-256 `8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f`である。
 `formal-replay-01`はambient/byte-stressのunratified candidateに限り、writer/materialization/readback/G0 authorityはfalseである。
 overlay scope placement、positive independent review、authoritative production corpus/evaluation/history closure、
 production blocker resolution ledger、
@@ -1280,7 +1280,7 @@ core/G0 rootへ含めず、正式なupstream pinが更新されるまでnon-auth
 | source inventory suite descriptor | 45,887 | `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3` |
 | p01 pilot origin manifest | 13,043 | `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3` |
 | p01 pilot profile manifest | 7,814 | `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b` |
-| p12 full-residual origin manifest | 15,474 | `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe` |
+| p12 full-residual origin manifest | 15,474 | `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4` |
 | p12 full profile manifest | 10,369 | `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b` |
 
 bounded artifact上限は次を目標とする。すべて最大nesting depth 64、string 4,096 bytesとし、最終loaderは

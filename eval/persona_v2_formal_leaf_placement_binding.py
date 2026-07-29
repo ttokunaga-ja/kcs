@@ -66,7 +66,7 @@ COMPOSITOR_PIN = (
     "kio.persona.pc-device-lane-compositor/v1",
     1,
     41_099,
-    "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf",
+    "8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f",
 )
 
 # Frozen content-only receipts for the independently regenerated body.  The
@@ -75,7 +75,7 @@ COMPOSITOR_PIN = (
 EXPECTED_BODY_BYTES = 889_056
 EXPECTED_BODY_SHA256 = "98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e"
 EXPECTED_CANONICAL_BYTES = 27_117
-EXPECTED_SHA256 = "d67b54fd1851358902842f464611d07008a06750a3165e58d47bd22954e92dc8"
+EXPECTED_SHA256 = "ce60077869f899473b439b3a48446a629016d9c5c2ba472445aee1fb427f1237"
 
 ROW_FIELDS = frozenset(
     {

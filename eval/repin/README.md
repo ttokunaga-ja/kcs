@@ -80,8 +80,14 @@ git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
 
 | 取りこぼし | 原因 | 直し方 |
 |---|---|---|
-| per-persona の 3 モジュール | `ARTIFACT_KIND` を条件にしていたが、この 3 つは持たず `build_*_suite_descriptor` で pin する | suite descriptor があればそれを正本とする |
+| per-persona の 3 モジュール | 最初の `build_*` を正本と仮定していた | 正本を選ぶのをやめ、全部測る |
+| `corpus_input_closure_v3` | `ARTIFACT_KIND = "` を条件にしていたが、複数行で書いている | 同上 |
+| `overlay_reservation_layout` | `builders[0]` が origin suite で byte cap に当たる | 同上 |
 | renderer / validator contract 16 件 | `*_validator.py` を「テスト側」と誤認して除外。契約側は `CONTRACT_KIND` で `build_renderer_contract` | `contract_snapshot.py` を分け、`PAIR_SPECS` から生産者を引く |
+| `device_lane_compositor` | `\(\s*\)` で「引数なし」を判定していたが、`build_device_lane_compositor(envelope_value=None)` は既定値付きで引数なし呼び出しができる | `inspect.signature` で**実際に呼べるか**を訊く |
+
+**4 回とも、ソースの見た目からコードの性質を当てにいって外している。** 正規表現で
+形を判定する限りこの種の取りこぼしは繰り返す。判定できるものは実行時に訊くこと。
 
 2 つ目は 44 件のエラーを 1 つの根 (`contributor-text-renderer-contract`) として
 まとめて説明していた。**「別々の残件に見えるもの」がひとつの取りこぼしであることが
@@ -91,9 +97,34 @@ git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
 共通ハッシャで測ると、そこだけ静かに別の値になる。**モジュール自身の
 `*_contract_sha256()` で測る**こと。
 
+## 道具は自分の記録を書き換えてはならない
+
+`apply_digests.py` は「追跡下の全テキストファイル」を置換対象にしており、その中に
+**`before.json` 自身**が入っていた。ラウンドごとに「改名前の実測値」が「適用後の値」
+へ上書きされ、正本が失われていた。同じ builder の記録値がコミットを追うごとに
+`47b75b37 → 66d78474 → 9b1fc398 → 0274e649` と動いている。
+
+被害は記録の劣化にとどまらない。`before[X]` が「X の現在値」になると
+`before == after` が成立し、**その artifact の対応が見つからなくなる**。ラウンドが
+早々に「新規 0」で終わっていたのは収束ではなく、比較対象が消えたためだった。
+真の改名前スナップショットを戻した瞬間に 74 対が現れたのは、その 74 件が一度も
+再 pin されていなかったからである。
+
+同じ根が検査側にもあった。`in_repo()` は `git grep` で「その digest を pin して
+いる箇所があるか」を見るが、`before.json` 自身を数えていた。既に再 pin し終えた
+artifact でも改名前の値が記録に残っているので条件を満たし、**幻の対応が立つ**
+(74 件の対応が成立して置換対象 0 件、という形で現れた)。
+
+`eval/repin/` は置換対象からも検査対象からも外してある。**道具が自分の記録を
+外界についての証拠として扱ってはならない。**
+
+どちらの症状も**進捗が実際より良く見える**方向に出る — 片方は「収束が早い」、
+もう片方は「対応が多く採れた」。誤りが望ましい形で現れると気づきにくい。
+
 ## 「収束した」は収束の証拠ではない
 
-`converge.py` は当初 `old` を一度使ったら以後その artifact を見ない書き方だった。
+同じ「新規 0」という嘘には原因が 2 つあった。上の記録破壊がひとつ。もうひとつは、
+`converge.py` が当初 `old` を一度使ったら以後その artifact を見ない書き方だったこと。
 だが**上流が直れば下流の digest はもう一度動く**。二度目の対応は `old` が適用済み
 なので枝刈りされ、ラウンドは「新規 0」と報告して止まる — 対応が無いからではなく、
 探すのをやめていたからである。`corpus_input_closure_v3` がこれで round 1 の

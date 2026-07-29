@@ -66,7 +66,7 @@ class PersonaV2HistoryReadinessContractTests(unittest.TestCase):
         self.assertEqual(pin["canonical_bytes"], 8_455)
         self.assertEqual(
             pin["sha256"],
-            "b39c0924443456674ca5fcc86295eba35bc8f7be232885b83f2b9072f41e3fdd",
+            "c410988e53c4e440d9658898cc4a29e82520117ddc3a2623b3edd5d8b8d2a2a3",
         )
         self.assertEqual(
             pin["pin_status"], "accepted-frozen-history-slice-body-pin-not-issued"
@@ -93,7 +93,7 @@ class PersonaV2HistoryReadinessContractTests(unittest.TestCase):
         self.assertEqual(replay_pin["canonical_bytes"], 41_099)
         self.assertEqual(
             replay_pin["sha256"],
-            "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf",
+            "8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f",
         )
         self.assertFalse(replay_pin["body_opened_in_fast_candidate_build"])
         self.assertFalse(replay_pin["body_required_for_full_acceptance"])

@@ -43,8 +43,18 @@ BYTES_MAY_MOVE = {
 
 
 def in_repo(digest: str) -> bool:
-    return bool(subprocess.run(["git", "grep", "-Il", digest],
-                               cwd=ROOT, capture_output=True, text=True).stdout.strip())
+    """その digest を pin している箇所が repo にあるか。
+
+    `eval/repin/` は数えない。`before.json` は改名前の実測値を持っているので、
+    そこを数えると **自分の記録を「repo にある証拠」として扱う**ことになり、
+    既に再 pin し終えた artifact にも幻の対応が立つ (74 件の対応が成立して
+    置換対象 0 件、という形で現れた)。置換側だけ除外して検査側を残していた。
+    """
+    completed = subprocess.run(
+        ["git", "grep", "-Il", digest, "--", ".", ":(exclude)eval/repin"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    return bool(completed.stdout.strip())
 
 
 def snapshot(path: Path) -> dict:

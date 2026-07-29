@@ -61,7 +61,7 @@ class PersonaV2RouteReviewReceiptTests(unittest.TestCase):
         self.assertLess(len(raw), receipt.MAX_ROUTE_REVIEW_RECEIPT_BYTES)
         self.assertEqual(
             receipt.route_review_receipt_sha256(self.value, self.route),
-            "3c236722b900a26b12a7546b3a073dd71d1c935e1d313cb1261781c75ed4fd98",
+            "a67c947842f02075b129a7ae9956e69964fc57ff606b8f3454f9462e3310ce4a",
         )
         self.assertTrue(
             receipt.validate_negative_route_review_receipt(self.value, self.route)

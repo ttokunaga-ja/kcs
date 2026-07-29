@@ -39,7 +39,7 @@ PERSONA_ID = "p01"
 EXPECTED_ROOT_IDENTITIES = {
     "corpus": (
         3_496,
-        "e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69",
+        "438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757",
     ),
     "evaluation": (
         5_032,
