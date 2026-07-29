@@ -513,7 +513,7 @@ def _compact_owner_summary():
 def _semantic_context():
     return {
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_475,
+        "cumulative_external_projection_bytes": 155_741_381,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,

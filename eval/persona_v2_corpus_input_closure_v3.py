@@ -184,7 +184,7 @@ def _canonical_limits():
             "review-request-catalog-v1": 256 * 2**10,
             "g0-blocker-resolution-ledger-bootstrap-v2": 16 * 2**20,
         },
-        "exact_cumulative_external_projection_bytes": 155_741_475,
+        "exact_cumulative_external_projection_bytes": 155_741_381,
         "external_dependency_bodies_embedded": False,
         "external_projection_bodies_embedded": False,
         "framed_byte_cap_before_parse_required": True,

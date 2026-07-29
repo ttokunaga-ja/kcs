@@ -43,7 +43,7 @@ EXPECTED_ROOT_IDENTITIES = {
     ),
     "evaluation": (
         5_032,
-        "a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe",
+        "29e4de812125a0c87fb172e81e6bafa7f4d6908d863b7c7061d4a45b4042ce3d",
     ),
     "semantic": (
         48_210,

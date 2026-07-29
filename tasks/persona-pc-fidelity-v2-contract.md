@@ -1279,7 +1279,7 @@ core/G0 rootへ含めず、正式なupstream pinが更新されるまでnon-auth
 | all-71 inventory profile catalog | 87,391 | `9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0` |
 | source inventory suite descriptor | 45,887 | `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3` |
 | p01 pilot origin manifest | 13,043 | `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3` |
-| p01 pilot profile manifest | 7,814 | `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b` |
+| p01 pilot profile manifest | 7,814 | `400c5cd6999bac2f0c6d8bb722480a881d09aa1742014e6ca3da1e8da63d1309` |
 | p12 full-residual origin manifest | 15,474 | `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4` |
 | p12 full profile manifest | 10,369 | `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b` |
 

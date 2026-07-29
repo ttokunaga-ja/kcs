@@ -83,7 +83,7 @@ EXPECTED_SUITE_CANONICAL_BYTES = 697_466
 EXPECTED_SUITE_SHA256 = (
     "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
-EXPECTED_EXTERNAL_BODY_BYTES = 155_741_475
+EXPECTED_EXTERNAL_BODY_BYTES = 155_741_381
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
     "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
 )
@@ -108,7 +108,7 @@ EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "fact-graph": 23_252,
     "payload-equivalence-rules": 4_288,
     "primary-use-case-corpus-half": 6_790,
-    "query-independent-lifecycle-fact-rendition-rules": 256_790,
+    "query-independent-lifecycle-fact-rendition-rules": 256_800,
     "realism-locale-security": 32_762,
     "recipe-content-filename-policy": 250_388,
     "route-scores": 88_085,

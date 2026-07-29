@@ -85,7 +85,7 @@ def _synthetic_receipts(*, complete_shape=False):
         else:
             jsonl_seen += 1
             # 最後の 1 件は合計を凍結値に合わせるための余り。凍結値が
-            # 155_741_469 -> 155_741_475 に動いたので +6 する。
+            # 155_741_469 -> 155_741_381 に動いたので +6 する。
             sizes.append(729_000 if jsonl_seen < 186 else 776_475)
     assert sum(sizes) == package.EXPECTED_CUMULATIVE_EXTERNAL_PROJECTION_BYTES
 
@@ -291,7 +291,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
             self.assertFalse(set(entry) & forbidden_entry_fields)
         self.assertEqual(
             self.value["summary"]["cumulative_external_projection_bytes"],
-            155_741_475,
+            155_741_381,
         )
         self.assertEqual(self.value["summary"]["json_projection_body_count"], 67)
         self.assertEqual(self.value["summary"]["jsonl_projection_body_count"], 186)

@@ -1464,7 +1464,7 @@ v2で実装済み（planning only、non-authorizing）:
   suite descriptorは45,887 bytes / SHA-256
   `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`。代表pinはp01 pilot origin
   13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`、p01 pilot profile
-  7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`、p12 residual origin
+  7,814 / `400c5cd6999bac2f0c6d8bb722480a881d09aa1742014e6ca3da1e8da63d1309`、p12 residual origin
   15,474 / `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4`、p12 full profile
   10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`である。p12の
   8,598,540-byte current-component ledgerは**unique source shard bodies + 2 origin manifests + 2 profile manifestsのみ**
@@ -1578,7 +1578,7 @@ v2で実装済み（planning only、non-authorizing）:
   p01 representative live-DAG compatibility pinはsemantic 48,210 bytes /
   `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`、corpus 3,496 /
   `438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757`、evaluation 5,032 /
-  `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`、suite 2,609 /
+  `29e4de812125a0c87fb172e81e6bafa7f4d6908d863b7c7061d4a45b4042ce3d`、suite 2,609 /
   `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`。full 20-person closureではない。
   既知schemaのfield completenessは各注入bodyのexact provider validatorが正本で、closure scannerは
   canonical fieldと宣言済みaliasに対するdefense-in-depthである。両方を通ってもG0/solver/write authorityはfalse

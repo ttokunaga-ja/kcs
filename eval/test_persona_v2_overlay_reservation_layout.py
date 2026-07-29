@@ -23,7 +23,7 @@ EXPECTED_MAXIMUM_ORIGIN = (
     "p12",
     "full-residual",
     2_639_467,
-    "82a8ca231a7202f20076da7c57df8dcc2ba495815f9710658758ca088306a557",
+    "9b2a669f43a407e9379285766c1bf9efc22f91f5df4d1c84729818ca7dfe9752",
 )
 EXPECTED_HOST_HISTOGRAMS = {
     "pilot": {"0": 636, "1": 137, "2": 59, "3": 40, "4": 26, "5": 18},

@@ -373,7 +373,7 @@ def _corpus_context_summary():
         "authoritative_corpus_input_closure_available": False,
         "authoritative_corpus_input_closure_bound": False,
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_475,
+        "cumulative_external_projection_bytes": 155_741_381,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,
