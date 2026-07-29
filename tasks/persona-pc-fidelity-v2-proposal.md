@@ -1466,7 +1466,7 @@ v2で実装済み（planning only、non-authorizing）:
   13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`、p01 pilot profile
   7,814 / `400c5cd6999bac2f0c6d8bb722480a881d09aa1742014e6ca3da1e8da63d1309`、p12 residual origin
   15,474 / `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4`、p12 full profile
-  10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`である。p12の
+  10,369 / `d67ae94a6eff54ebcc3b3689119b77c2affef6b0735350a5db6b05b841008a56`である。p12の
   8,598,540-byte current-component ledgerは**unique source shard bodies + 2 origin manifests + 2 profile manifestsのみ**
   の部分合計で、新しいsemantic/fact componentを合算していない。semantic/fact projection、concrete overlay、
   formal/aggregate/effective bodiesとsource-instance assignmentを加えた既知p12は15,573,860 bytesまで閉じた。
@@ -1579,7 +1579,7 @@ v2で実装済み（planning only、non-authorizing）:
   `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`、corpus 3,496 /
   `438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757`、evaluation 5,032 /
   `29e4de812125a0c87fb172e81e6bafa7f4d6908d863b7c7061d4a45b4042ce3d`、suite 2,609 /
-  `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`。full 20-person closureではない。
+  `9217e519a382ff51e10305dc77a6e1b2ce4401f543f159ad190e72fb029a76b8`。full 20-person closureではない。
   既知schemaのfield completenessは各注入bodyのexact provider validatorが正本で、closure scannerは
   canonical fieldと宣言済みaliasに対するdefense-in-depthである。両方を通ってもG0/solver/write authorityはfalse
 - 20人、pilot/fullのW0--W5 checkpoint literal、20 roots/replay、3 replay、203,000 files/replay、
@@ -1633,7 +1633,7 @@ base JSONLは1 body 4 MiB / 4,096 rows / LF込み768 bytes per row、他の2種�
 image、full owner、direct owner bodyを再認証する。
 凍結したinventoryは293,285 canonical bytes / SHA-256
 `e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`、ordered projection-pin digestは
-`a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`である。external 113 bodyは
+`ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455`である。external 113 bodyは
 合計128,144,915 bytes、base 73 bodyは203,000 rows / 121,020,941 bytes（最大body 2,484,590 bytes、
 LF込み最大row 633 bytes）、effective最大bodyは103,864 bytes、lifecycle最大bodyは256,790 bytesである。
 ordered digestのpreimageはreceipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON arrayである。

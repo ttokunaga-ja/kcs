@@ -51,7 +51,7 @@ EXPECTED_ROOT_IDENTITIES = {
     ),
     "suite": (
         2_609,
-        "8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22",
+        "9217e519a382ff51e10305dc77a6e1b2ce4401f543f159ad190e72fb029a76b8",
     ),
 }
 

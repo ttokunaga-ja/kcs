@@ -1199,7 +1199,7 @@ Decision 150のv1 artifactでは`semantic_payload_projection_bound=false`、
 partial inventoryのcanonical bodyは293,285 bytes / SHA-256
 `e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`、receipt順の
 `{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
-`a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`で固定する。
+`ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455`で固定する。
 external 113 body合計は128,144,915 bytes、base 73 bodyは203,000 rows / 121,020,941 bytes、
 最大body 2,484,590 bytes、LF込み最大row 633 bytesである。effective最大bodyは103,864 bytes、
 lifecycle最大bodyは256,790 bytesとし、producer、独立validator、2 hash-seed cold gateが同じliteralを検証する。
@@ -1281,7 +1281,7 @@ core/G0 rootへ含めず、正式なupstream pinが更新されるまでnon-auth
 | p01 pilot origin manifest | 13,043 | `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3` |
 | p01 pilot profile manifest | 7,814 | `400c5cd6999bac2f0c6d8bb722480a881d09aa1742014e6ca3da1e8da63d1309` |
 | p12 full-residual origin manifest | 15,474 | `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4` |
-| p12 full profile manifest | 10,369 | `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b` |
+| p12 full profile manifest | 10,369 | `d67ae94a6eff54ebcc3b3689119b77c2affef6b0735350a5db6b05b841008a56` |
 
 bounded artifact上限は次を目標とする。すべて最大nesting depth 64、string 4,096 bytesとし、最終loaderは
 bodyを読む前のframed byte capを持つ。現solver-policy sidecarの512 KiBはmaterialize済みvalueに対する
