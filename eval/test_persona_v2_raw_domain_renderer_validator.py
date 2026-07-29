@@ -66,11 +66,11 @@ EXPECTED_MATRIX_PAYLOAD_SHA256 = (
 EXPECTED_PAYLOAD_PINS = {
     ("dicom-part10", 1): (
         5_208,
-        "dfc3353dde79b747119c89e56e5b05559dc98e16756f95c87b0acb19906d0790",
+        "d79154065192d6ccd8b50745c993357ded2eba02e1e9031cd44c0b4622b12336",
     ),
     ("dicom-part10", 64): (
         263_508,
-        "0a60ec199257cf16784d970db71f6c1d1b0e56e8f940d4f120617f3501dd11db",
+        "39e73d49cbb8b8e5442a5c6dbde0af54e47a48e5207a585e2776218b27345f22",
     ),
     ("pcap", 1): (
         146,

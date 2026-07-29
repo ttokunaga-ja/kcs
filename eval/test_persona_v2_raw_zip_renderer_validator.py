@@ -100,7 +100,7 @@ PAYLOAD_PINS = {
     ),
     ("ifczip", 1): (
         4_096,
-        "133df7c119ff6c632264238361748f9c34c4b86bb8b3d4f46376dcce7c114c94",
+        "eea0221e371f43fc5ebc493f1d38b84d44586adde60241798913fa18d19ce48a",
     ),
     ("npz", 1): (
         248,

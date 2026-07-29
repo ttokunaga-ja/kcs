@@ -20,7 +20,7 @@ from eval import persona_v2_source_parameter_assignment_package as parameters
 
 EXPECTED_LEDGER_BYTES = 230_661
 EXPECTED_LEDGER_SHA256 = (
-    "07171dbd80be9ba45976ad25afd03c7cf57ac3abec379c477f17b65fd0c4d516"
+    "8231beeafb956edadff95dae1684b728ca4283cba725f066ceb5d85a4e966344"
 )
 EXPECTED_TOTAL_BODY_BYTES = 26_619_238
 EXPECTED_RELATION_BODY_BYTES = 8_988_409

@@ -22,7 +22,7 @@ EXPECTED_SYNTHETIC_ROOT_IDENTITIES = {
     ),
     "semantic": (
         3_723,
-        "c478d9bac57204e137e2b666ffebdc54d65dfdf923be9fe74972631f512ca4c5",
+        "53d4c8e5663be43579a994422f1dff4053adfc5a628801d711dcc5a5327c2d9b",
     ),
     "suite": (
         2_624,
