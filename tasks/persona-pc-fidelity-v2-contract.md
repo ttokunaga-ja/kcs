@@ -117,7 +117,7 @@ distractor候補上限1,060 / 5,400、不足4,340、revision join unknown 2,000�
 その下流の`kio.persona.pc-evaluation-target-resolution-closure-slice/v1`は、namespace v3、complete inventory
 v2、query-history target resolution v1、request-only corpus closure v3、同feasibility auditのexact 5 direct
 dependenciesを束縛し、16,735 canonical bytes / SHA-256
-`635f67fc988cc7d339698fe6c8c8e211390e164e0df11cb216d2f497fff0d1a5`で局所golden固定した。
+`02351c5c4df712c345b3f5e9e1851c779b82e4d08d445b7da7e833b9f9f787d3`で局所golden固定した。
 同sliceは2,000 targetの327 aligned / 1,673 mismatch、5,400 distractorのconcrete mapping 0 / shortfall
 4,340をblocker stateとして保持するだけで、authoritative corpus/evaluation closure、resolution v2、query rendering、
 evaluation execution authorityを与えない。
