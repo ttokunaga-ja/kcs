@@ -79,7 +79,7 @@ producer-independent validatorは全203,000 W0 + 3,630 event-created universeを
 fail closedとする。solver、complete post-W0 membership、compiled history、physical materialization、
 observed evaluation、Kio、G0 authorityは引き続きfalseである。別laneの
 `kio.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
-`c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`で、actual host case modeと
+`af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`で、actual host case modeと
 materializationは未束縛である。
 Decision 150の`kio.persona.pc-semantic-projection-derivation-inventory/v1`と
 `kio.persona.pc-semantic-projection-derivation-receipt/v1`は、membership-free base source content-context
@@ -220,7 +220,7 @@ Unicode/case-collision 13へexact整数化する。20 personaのpath/depth vecto
 manifest-only expected failureとしてcandidate/realizedを分け、作成済みfileへ数えない。このliteral 20-person
 depth/path tableは`kio.persona.pc-recursive-robustness-lane-catalog/v1`へ実装済みである。suite file-depthは
 D6=2,855 / D7=1,901 / D8=364、planned Dmax人数は8/9/3で、bodyは76,099 canonical bytes、SHA-256
-`c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`である。target OS/case modeは
+`af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`である。target OS/case modeは
 metadata-only、native host case modeはunboundとし、各人253--256の実現範囲をactual receiptで閉じる。
 formal 100k母数へ混ぜず、materialization/write/G0 authorityはfalseである。
 同catalogのhistorical `robustness-root/devices/{persona_id}/ambient-home`と

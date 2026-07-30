@@ -145,8 +145,17 @@ def main() -> int:
         if not fresh:
             print(f"\n[done] {len(applied)} pairs applied over {round_number - 1} rounds")
             break
-        subprocess.run([sys.executable, str(HERE / "apply_digests.py"), *fresh],
-                       cwd=ROOT, check=True)
+        # `check=True` にしてはいけない。`apply_digests.py` は空振りした対応が
+        # あると 1 を返すが、例外で抜けると下の `record.write_text` に到達せず
+        # **当てた対応の記録ごと失われる**。記録が消えると次の実行が鎖を辿れず、
+        # 「新規 0 対」を収束と誤読する。報告してループを抜け、記録は必ず残す。
+        completed = subprocess.run([sys.executable, str(HERE / "apply_digests.py"), *fresh],
+                                   cwd=ROOT)
+        if completed.returncode != 0:
+            print(f"[stop] round {round_number}: 適用が空振りした対応がある。"
+                  "ソースが old でも new でもない第三の値を持っているので、"
+                  "そこを実測で決めてから再開すること。", file=sys.stderr)
+            break
 
     record.write_text(json.dumps({**history, **applied}, indent=2, sort_keys=True) + "\n")
     for name, why in sorted(held.items()):

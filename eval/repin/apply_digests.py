@@ -42,7 +42,7 @@ def main() -> int:
     ).stdout.split()
 
     touched = 0
-    replacements = 0
+    per_pair = dict.fromkeys(pairs, 0)
     for relative in files:
         # 自分の記録は書き換えない。`before.json` は追跡下のテキストなので全域置換の
         # 対象に入っており、ラウンドごとに「改名前の実測値」が「適用後の値」へ静かに
@@ -60,13 +60,29 @@ def main() -> int:
         updated = text
         for old, new in pairs.items():
             if old in updated:
-                replacements += updated.count(old)
+                per_pair[old] += updated.count(old)
                 updated = updated.replace(old, new)
         if updated != text:
             path.write_text(updated, encoding="utf-8")
             touched += 1
 
+    replacements = sum(per_pair.values())
     print(f"  {len(pairs)} pair -> {replacements} occurrences in {touched} files")
+
+    # 0 箇所置換の対応は合算では見えない。452 対応のうち 1 件が空振りしても
+    # 「N occurrences in M files」は大きな数を出し続ける。converge は `old` が
+    # repo に実在することを確かめてから対応を採るので、直後の適用が 0 箇所に
+    # なるのは矛盾であり、**ソースが old でも new でもない第三の値を持っている**
+    # ことを意味する。2026-07-30 に見つけた `c1ae7e10…` はこれだった —
+    # 早いラウンドが `--allow-fail` 下の候補を焼き、依存を直した後のラウンドが
+    # 作った正しい対応が、ソースがもう old を含まないので空振りしていた。
+    # 気付いたのはツールではなくテストスイートで、4 時間の走行を 1 回無駄にした。
+    empty = [old for old, count in per_pair.items() if count == 0]
+    if empty:
+        print(f"[stop] {len(empty)} pair replaced nothing:", file=sys.stderr)
+        for old in empty:
+            print(f"  {old} -> {pairs[old]}", file=sys.stderr)
+        return 1
     return 0
 
 

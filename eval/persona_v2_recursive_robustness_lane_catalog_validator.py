@@ -37,7 +37,7 @@ MAX_DEPENDENCY_BYTES = 512 * 1024
 # pin in its body, so the hash authenticates only the catalog body bytes.
 EXPECTED_CATALOG_CANONICAL_BYTES = 76_099
 EXPECTED_CATALOG_SHA256 = (
-    "c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685"
+    "af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8"
 )
 
 PERSONA_IDS = tuple(f"p{index:02d}" for index in range(1, 21))

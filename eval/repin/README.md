@@ -90,6 +90,22 @@ git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
 **どれも、ソースの見た目からコードの性質を当てにいって外している。** 正規表現で
 形を判定する限りこの種の取りこぼしは繰り返す。判定できるものは実行時に訊くこと。
 
+### 座標が 2 つ以上ある 13 個は、今も `snapshot.py` の外にいる
+
+`(persona_id, origin)` / `(persona_id, profile)` / `(persona_id, origin, shard)` を
+要求する builder が 13 個ある (`concrete_overlay_membership_package` 3、
+`source_inventory_package` 3、`source_semantic_membership_package` 2、
+`source_parameter_assignment_package` 2、`lifecycle_effective_membership_reconciliation` 2、
+`overlay_reservation_layout` 1)。`snapshot.py` は persona 1 座標までしか展開しない。
+
+**これは検出の穴ではない。** 13 個の凍結値はモジュール側の `_fail` 番か
+テスト側の assert で押さえられているので、動けばスイートが赤くなる。穴が開いて
+いるのは**修復側** — converge が対応を自動で組めないので、赤が出たら手で採る。
+
+座標の定義域をモジュール横断で一般化してはいけない。shard の序数は
+`concrete_overlay` が 0 始まり、`source_inventory` が 1 始まりで、片方を読んで
+一般化したときは 60 件の偽の失敗が出た。定義域は必ずそのモジュール自身から引く。
+
 ## 圧縮・符号化されたデータの中身には改名が届かない
 
 `persona_v2_core_extension_allocation_manifest.py` は登録簿の投影を
@@ -99,7 +115,7 @@ zlib+base64 のソースリテラルとして持っている。その中の
 validator の両方に同じ blob があり、両方に残っていた。
 
 見つけ方: ソース内の base64 らしきリテラルを総当りで復号し (必要なら zlib
-展開も試し)、中身に `kcs` が無いか探す。`/tmp/blobscan.py` がそれをやる。
+展開も試し)、中身に `kcs` が無いか探す。`blobscan.py` がそれをやる。
 改名の最初にこれを回すべきだった。
 
 直し方: blob を復号 → 文字列を置換 → **JSON として構造が変わっていないこと
@@ -179,7 +195,7 @@ artifact でも改名前の値が記録に残っているので条件を満た�
 
 ## 「収束した」は収束の証拠ではない
 
-同じ「新規 0」という嘘には原因が 2 つあった。上の記録破壊がひとつ。もうひとつは、
+同じ「新規 0」という嘘には原因が 3 つあった。上の記録破壊がひとつ。ふたつめは、
 `converge.py` が当初 `old` を一度使ったら以後その artifact を見ない書き方だったこと。
 だが**上流が直れば下流の digest はもう一度動く**。二度目の対応は `old` が適用済み
 なので枝刈りされ、ラウンドは「新規 0」と報告して止まる — 対応が無いからではなく、
@@ -188,6 +204,29 @@ artifact でも改名前の値が記録に残っているので条件を満た�
 
 いまは適用済みの鎖を辿って **いま repo にある値** と対応を取る。ラウンドが
 「新規 0」で終わったら、それは**テストが緑であることで裏を取るまで信じない**こと。
+
+みっつめ (2026-07-30 に判明): **空振りした対応が合算の陰に隠れる。**
+`apply_digests.py` は `452 pair -> N occurrences in M files` と合算でしか
+報告していなかったので、そのうち 1 対が 0 箇所置換でも大きな数が出続けた。
+converge は `old` が repo に実在することを確かめてから対応を採るので、直後の
+適用が 0 箇所になるのは矛盾であり、**ソースが old でも new でもない第三の値を
+持っている**ことを意味する。
+
+その第三の値は `recursive_robustness_lane_catalog` の `c1ae7e10…` だった。
+改名前ツリーの pin は `49d6fa26…` (`before.json` の実測と一致、テストは 13 件緑)、
+改名後の正しい値は `af73e879…`。`c1ae7e10…` は**改名前ツリーに存在しない** —
+早いラウンドが `--allow-fail` 下の候補を焼き、依存を直した後のラウンドが作った
+正しい対応は、ソースがもう `49d6fa26…` を含まないので空振りしていた。
+どの時点でも正しくなかった値が、コード 2 箇所と `tasks/` 3 文書に残っていた。
+
+いまは対応ごとに件数を数え、0 のものを列挙して 1 を返す。converge 側は
+`check=True` を外して報告してから抜ける — 例外で抜けると記録を書く行に
+到達せず、当てた対応の記録ごと失われる (それが原因 1 の再来になる)。
+
+**気付いたのはツールではなくテストスイートだった。** 4 時間の CI 走行 1 回を
+これに使った。`tasks/` に書かれた digest はテストが押さえていないので、
+コード側にも同じ値があるかを併せて確かめること — 今回 79 件のうち 77 件は
+コードにもあり、残り 2 件は文書だけだったので個別に実測した。
 
 ## 性質値は digest と同じようには直せない
 
@@ -271,8 +310,20 @@ python3 eval/repin/apply_digests.py $(cat /tmp/pairs.txt)
 
 ## 済んでいること
 
-- テキストの `kcs` は 0 行 (175 ファイル改名済み)。残る 6 箇所はこのディレクトリの
-  散文とコメントで、改名作業そのものを説明しているので旧名を残すのが正しい。
+- テキストの `kcs` は 0 行 (175 ファイル改名済み)。残る 19 箇所はこのディレクトリの
+  散文と、値が動いた理由を書いた 2 つのコメントで、改名作業そのものを説明して
+  いるので旧名を残すのが正しい。符号化されたデータの中も `blobscan.py` で 0 件、
+  未追跡ファイルも 0 件、`kiokio` のような全域置換の事故痕も 0 件。
+- 2026-07-31 時点で **CI 91 モジュールと `cargo test --workspace` が緑**。
+  最後の CI 全体走行 (1218 tests / 4h02m) が出した 3 件はこの 2 系統だった:
+  - `recursive_robustness_lane_catalog` の `c1ae7e10…` — どの時点でも正しくなかった
+    値。上の「空振りした対応が合算の陰に隠れる」を参照。`af73e879…` に直して 13 件緑。
+  - `semantic_projection_complete_inventory` の `EXPECTED_CLASS_BYTES` 2 件 —
+    salt 下流の性質値。`effective-source-membership` -89、
+    `query-independent-lifecycle-fact-rendition-rules` +1 で正味 -88。12 件緑。
+- `tasks/` に改名が新しく書き込んだ digest 79 個は全件裏を取った。77 個はコード側にも
+  あり緑のスイートが押さえている。2 個は文書にしかないので builder を直接呼んで
+  実測し一致を確認した (`fact_membership[p01]` 4,519 / `history_intent[p01]` 14,657)。
 - OCR 検証用 PNG の画素に描かれていた "KCS" は `90c9983` で 2 枚とも再生成済み、
   ground truth は `b8eefe4` で画素に合わせ直し済み。画像 digest を pin している
   箇所は 15 枚すべてについて 0 件で、OCR 出力は gitignore なので凍結値は動かない。

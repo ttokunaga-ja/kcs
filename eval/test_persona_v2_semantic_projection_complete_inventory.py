@@ -87,14 +87,26 @@ EXPECTED_EXTERNAL_BODY_BYTES = 155_741_381
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
     "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
 )
+# 2026-07-30 に 2 件を動かした。原因は改名で、`_domain_key` の前置詞が
+# `kcs-lifecycle-v1/` から `kio-lifecycle-v1/` になり照合の DFS 探索順が変わった。
+# `effective-source-membership` が -89、`query-independent-lifecycle-fact-rendition-rules`
+# が +1 で、正味 -88。この表だけが古いまま残っていたので、合計は
+# `EXPECTED_EXTERNAL_BODY_BYTES` (155_741_381) と 88 食い違っていた —
+# **どちらの値でも通らない状態**で、class_bytes の assert が先に落ちるために
+# 累積側の矛盾は表に出ていなかった。
+#
+# 155_741_381 の方が正しいことは、`corpus_semantic_namespace_v3` とその validator が
+# cumulative を再計算して比較していて緑であることから分かる。+1 の方も
+# `review_request_catalog` 側が `sum(row[1] for row in LIFECYCLE_PROJECTION_PINS)` を
+# 5_057_287 と照合していて緑である。実測と合わせて 3 方向で一致している。
 EXPECTED_CLASS_BYTES = {
     "base-source-content-context": 121_020_941,
     "concrete-overlay-relations": 8_988_409,
-    "effective-source-membership": 2_066_688,
+    "effective-source-membership": 2_066_599,
     "fact-graph": 461_816,
     "payload-equivalence-rules": 4_288,
     "primary-use-case-corpus-half": 6_790,
-    "query-independent-lifecycle-fact-rendition-rules": 5_057_286,
+    "query-independent-lifecycle-fact-rendition-rules": 5_057_287,
     "realism-locale-security": 32_762,
     "recipe-content-filename-policy": 250_388,
     "route-scores": 88_085,

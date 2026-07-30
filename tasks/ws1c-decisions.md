@@ -1334,7 +1334,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     mates as manifest-only failures, whereas a case-sensitive run may realize all 256.  Candidate, realized, and
     unrealized outcomes must be reconciled by the execution receipt rather than inferred from persona metadata.
     The body is 76,099 canonical bytes with SHA-256
-    `c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`; thirteen focused tests, hash-seed
+    `af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`; thirteen focused tests, hash-seed
     determinism, independent reconstruction, hostile-type/path/TOCTOU probes, and final review pass.  No folder,
     file, Kio, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
     nonauthorizing core CI job, and lifecycle-demand plus recursive-robustness tests are included in the inputs job;

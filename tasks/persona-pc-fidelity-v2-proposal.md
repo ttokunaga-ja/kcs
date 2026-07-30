@@ -59,7 +59,7 @@ producer-independent validatorによる全20人再構成を持つが、scope/quo
 membership、compiled history、physical materialization、observed evaluation、execution authorityはない。
 recursive ambient laneは`kio.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
 128 directories、D6--D8、candidate/native realization分離を固定した。canonical bodyは76,099 bytes、SHA-256
-`c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`で、actual filesystem case modeと
+`af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`で、actual filesystem case modeと
 materialization receiptは未束縛である。
 Decision 150の`kio.persona.pc-semantic-projection-derivation-inventory/v1`は、3/12分類・113 bodiesの
 凍結済み歴史的predecessorとして変更しない。その下流のv2候補は
@@ -421,7 +421,7 @@ D6=2,855 / D7=1,901 / D8=364、planned Dmax人数はD6/D7/D8=8/9/3である。ta
 metadata-onlyであり、実行hostのfilesystem semanticsとは見なさない。native実現数は実行前には各人
 253--256の範囲で、case-insensitiveならportable ASCII case-collision mate 3件をmanifest-only expected
 failure、case-sensitiveなら256件すべてをrealizeする条件表をreceiptで照合する。bodyは76,099 canonical
-bytes、SHA-256 `c1ae7e10cd644370b48eac3723926b5e3168b2a33c867e2a0638d1ef72a03685`で、
+bytes、SHA-256 `af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`で、
 materialization/write/G0 authorityはすべてfalseである。
 
 ### 3.6 利用者属性の初期v2候補
