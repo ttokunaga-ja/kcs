@@ -315,7 +315,9 @@ python3 eval/repin/apply_digests.py $(cat /tmp/pairs.txt)
   いるので旧名を残すのが正しい。符号化されたデータの中も `blobscan.py` で 0 件、
   未追跡ファイルも 0 件、`kiokio` のような全域置換の事故痕も 0 件。
 - 2026-07-31 時点で **CI 91 モジュールと `cargo test --workspace` が緑**。
-  最後の CI 全体走行 (1218 tests / 4h02m) が出した 3 件はこの 2 系統だった:
+  `b9ff08f` で全体を流し直して `Ran 1218 tests / OK (skipped=23)` / 4h05m、
+  `cargo test --workspace` は 1438 passed。その 1 つ前の全体走行
+  (1218 tests / 4h02m) が出した 3 件はこの 2 系統だった:
   - `recursive_robustness_lane_catalog` の `c1ae7e10…` — どの時点でも正しくなかった
     値。上の「空振りした対応が合算の陰に隠れる」を参照。`af73e879…` に直して 13 件緑。
   - `semantic_projection_complete_inventory` の `EXPECTED_CLASS_BYTES` 2 件 —
