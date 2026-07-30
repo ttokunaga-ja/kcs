@@ -31,6 +31,7 @@ BEFORE = json.loads((HERE / "before.json").read_text())
 # 番人ごと外さないのは、これが実際に仕事をしたからである — 43 artifact しか
 # 測っていなかったときは静かだったが、81 builder に広げた最初のラウンドで
 # 下記の salt を捕まえた。理由を書かずにここへ足さないこと。
+# `[pNN]` を除いた名前を書けば、その builder の全 persona に適用される。
 BYTES_MAY_MOVE = {
     "persona_v2_query_history_semantic_resolution_feasibility"
     "::build_query_history_semantic_resolution_feasibility_audit": (
@@ -39,7 +40,30 @@ BYTES_MAY_MOVE = {
         "記録しているので、その差が自身のバイト数に出る "
         "(8312760 -> 8313318 を記録して 40947 -> 40949)。"
     ),
+    # 下記 3 家系は salt が変えた照合そのものを載せているので、中身が動く。
+    # 20 persona すべてで前後のバイト数が違い、増える persona と減る persona が
+    # 混在する — 差分から方向を推測できないので、値は必ず実測で採る。
+    # 実際にこの一覧が個別測定の裏付けになった: class 最大値 103864 -> 103840 は
+    # p12、rendition 最大値 256790 -> 256800 は p04、MAX_PERSONA_BYTES
+    # 103981 -> 103962 は p16 のものだった。
+    "persona_v2_lifecycle_effective_membership_reconciliation"
+    "::build_lifecycle_effective_membership_content_projection": (
+        "salt が照合を変えた結果を載せる per-persona 投影。"
+    ),
+    "persona_v2_source_matched_lifecycle_inventory"
+    "::build_source_matched_lifecycle_content_projection": (
+        "salt が照合を変えた結果を載せる per-persona 投影。"
+    ),
+    "persona_v2_source_matched_lifecycle_inventory"
+    "::build_source_matched_lifecycle_persona": (
+        "salt が照合を変えた結果を載せる per-persona 本体。"
+    ),
 }
+
+
+def bytes_may_move(name: str) -> bool:
+    """`[pNN]` 付きの名前も、家系の名前で許可されているかを見る。"""
+    return name in BYTES_MAY_MOVE or name.split("[", 1)[0] in BYTES_MAY_MOVE
 
 
 def in_repo(digest: str) -> bool:
@@ -81,7 +105,7 @@ def main() -> int:
             if "sha256" not in before or "sha256" not in after.get(name, {}):
                 continue
             now = after[name]
-            if before["bytes"] != now["bytes"] and name not in BYTES_MAY_MOVE:
+            if before["bytes"] != now["bytes"] and not bytes_may_move(name):
                 # その対応を採らない。全体を止めるのではない — 番人の役割は
                 # 「この対応は信用しない」であって「他も測るな」ではない。
                 # 引数を取らない builder を全部測るようにしてから、凍結 artifact

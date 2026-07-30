@@ -14,7 +14,7 @@ FIXTURE_ID = "kio-persona-pc-v2-test"
 EXPECTED_SYNTHETIC_ROOT_IDENTITIES = {
     "corpus": (
         3_245,
-        "5baa2a0e7768c30d64e3b4adbc2da5e4bed4f7772096e574f42225350877bbeb",
+        "845c78909d0fa9d38ef580b75ac3ff7d675d782ab53963c56e3fb9aeeba7d3fe",
     ),
     "evaluation": (
         4_014,

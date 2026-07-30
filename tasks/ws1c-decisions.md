@@ -982,7 +982,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     contributor sources and 61 incidental/raw variants still unimplemented.  It does not prove distinct
     semantic PDF contents, multilingual extraction, query anchors, actual Kio chunks, source recipes, or
     M3-1 Recall.  The p01 representative source-intent is now 9,886 bytes / SHA-256
-    `e292df1136841f1b246515374e29b9a6926c5b12c15e9d3c39eea5a375bbe3c3`; all twenty source-intent
+    `0404e234e447d8bf7af2822eb2fabefd59235d356d8ea3237811883f8b3ffd97`; all twenty source-intent
     digests change because their source-profile binding changes, and fourteen representatives select
     `pdf-text`.  The compatibility-only live closure includes both PDF implementation providers and is
     pinned at semantic 47,495 /
@@ -1738,7 +1738,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The frozen v2 descriptor is exactly 697,466 canonical bytes with SHA-256
     `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`.  Its 253 external bodies total exactly
     155,741,469 bytes.  The canonical JSON array of ordered `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
-    `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`.  The three large JSONL domains contain
+    `d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`.  The three large JSONL domains contain
     exactly 203,000 base rows, 25,560 concrete-overlay rows, and 203,000 source-parameter assignment rows.  Their
     maximum LF-inclusive row sizes are 633, 388, and 110 bytes; maximum bodies are 2,484,590, 658,944, and 367,471
     bytes.  The shared parameter catalog defines 363 cells, while the exact assignment domain uses 354 and leaves
@@ -1815,7 +1815,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     decision, approval, waiver, or positive receipt, and `positive_receipt_bound` is false for every request.
 
     The frozen request catalog is 42,931 canonical bytes with SHA-256
-    `33011fa5b41a0f99d61fd93b8ce5fc949b7d19eab4276cac688bb1ceb6eccb26`; two isolated hash seeds agree and the
+    `1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098`; two isolated hash seeds agree and the
     focused eight-test gate passes.  A review request is not review evidence and cannot satisfy the corpus input
     closure or G0.
 156. Persona-PC v2 records the current unresolved production boundary in the bootstrap-only
@@ -1889,7 +1889,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `b1bb9af0af2a76486040251e4f1243ae69437099a141a34f48b98800cd7ba80d`.  The pre-freeze independent full gate
+    `ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856

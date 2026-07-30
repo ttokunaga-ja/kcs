@@ -85,9 +85,20 @@ git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
 | `overlay_reservation_layout` | `builders[0]` が origin suite で byte cap に当たる | 同上 |
 | renderer / validator contract 16 件 | `*_validator.py` を「テスト側」と誤認して除外。契約側は `CONTRACT_KIND` で `build_renderer_contract` | `contract_snapshot.py` を分け、`PAIR_SPECS` から生産者を引く |
 | `device_lane_compositor` | `\(\s*\)` で「引数なし」を判定していたが、`build_device_lane_compositor(envelope_value=None)` は既定値付きで引数なし呼び出しができる | `inspect.signature` で**実際に呼べるか**を訊く |
+| per-persona builder 約 26 個 × 20 personas | 引数なしで呼べるものしか測っていなかった | `persona_argument()` で判定し、persona ごとに 1 件として記録 |
 
-**4 回とも、ソースの見た目からコードの性質を当てにいって外している。** 正規表現で
+**どれも、ソースの見た目からコードの性質を当てにいって外している。** 正規表現で
 形を判定する限りこの種の取りこぼしは繰り返す。判定できるものは実行時に訊くこと。
+
+## 赤の件数は破損の件数ではない
+
+最後の取りこぼしがそれを一番はっきり示した。`build_fact_graph(persona_id)` の pin は
+**19 件 (p02-p20) がバイト数そのままで digest だけ動いた**状態、つまり改名以外に
+理由の無い未再 pin のまま残っていた。だがテストは最初の不一致で fail-fast するので、
+**19 件の破損が 2 件のエラーとして見えていた**。
+
+だから「残り N 件」で進捗を測ってはいけない。測るなら、**測定対象の網羅**
+(どの builder を測っているか) で測ること。
 
 2 つ目は 44 件のエラーを 1 つの根 (`contributor-text-renderer-contract`) として
 まとめて説明していた。**「別々の残件に見えるもの」がひとつの取りこぼしであることが

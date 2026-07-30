@@ -71,6 +71,24 @@ def callable_with_no_arguments(function) -> bool:
     )
 
 
+def persona_argument(function) -> bool:
+    """persona_id 1 つだけを取る builder か。
+
+    引数なしで呼べる builder しか測らない版は、**per-persona builder を丸ごと
+    落としていた**。`build_fact_graph(persona_id)` の pin は 19 件 (p02-p20) が
+    バイト数そのままで digest だけ動いた状態、つまり改名以外に理由の無い
+    未再 pin のまま残っていた。しかもテストは最初の不一致で fail-fast するので、
+    19 件が 2 件のエラーとして見えていた。
+    """
+    try:
+        parameters = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    required = [p for p in parameters if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(required) == 1 and "persona" in required[0].name
+
+
 def canonical_bytes(module, value) -> bytes:
     """モジュール自身のハッシャで測る。無ければ共通の正準化に落とす。
 
@@ -114,9 +132,27 @@ def main() -> int:
             if args.allow_fail and hasattr(module, "_fail"):
                 module._fail = lambda *a, **k: None
             function = getattr(module, builder)
-            if not callable_with_no_arguments(function):
+            if callable_with_no_arguments(function):
+                raw = canonical_bytes(module, function())
+            elif persona_argument(function):
+                # per-persona builder は persona ごとに 1 件として記録する。
+                envelope = importlib.import_module("eval.persona_v2_contract")
+                for persona in envelope.PERSONA_IDS:
+                    try:
+                        one = canonical_bytes(module, function(persona))
+                    except Exception as error:
+                        result[f"{key}[{persona}]"] = {
+                            "error": f"{type(error).__name__}: {error}"[:200]}
+                        continue
+                    result[f"{key}[{persona}]"] = {
+                        "bytes": len(one),
+                        "sha256": hashlib.sha256(one).hexdigest(),
+                    }
+                print(f"  {key}[*]: {len(envelope.PERSONA_IDS)} personas",
+                      file=sys.stderr, flush=True)
                 continue
-            raw = canonical_bytes(module, function())
+            else:
+                continue
         except Exception as error:
             result[key] = {"error": f"{type(error).__name__}: {error}"[:200]}
             print(f"  [skip] {key}: {type(error).__name__}", file=sys.stderr, flush=True)

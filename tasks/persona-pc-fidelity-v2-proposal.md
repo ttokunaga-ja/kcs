@@ -68,7 +68,7 @@ Decision 150の`kio.persona.pc-semantic-projection-derivation-inventory/v1`は�
 framingはcanonical JSON 67 bodies / LF終端canonical JSONL 186 bodiesで、descriptorは697,466 canonical
 bytes / SHA-256 `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external bodiesは
 合計155,741,469 bytes、ordered projection-pin digestは
-`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。最終local acceptanceは、
+`d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`である。最終local acceptanceは、
 all-253 independent full replayと独立した2 hash-seed cold buildがこれらのliteralを再現して成立した。
 remote CI greenは別結果が得られるまで主張しない。
 exact 203,000-key/73-shard source-inventory layout、overlay contract、
@@ -1552,13 +1552,13 @@ v2で実装済み（planning only、non-authorizing）:
   exact declared bytes/SHAをfail closedで検査する。ただし外側frame header/dispatcherとのbindingは未実装
 - 20人各1件のrepresentative `source-intent-origin-shard`候補を実装。PDF feasibility追加後は合計198,387 bytes、
   1 row 436--446 bytes、p01は9,886 bytes / SHA-256
-  `e292df1136841f1b246515374e29b9a6926c5b12c15e9d3c39eea5a375bbe3c3`。これらの`...-0001` key grammarは
+  `0404e234e447d8bf7af2822eb2fabefd59235d356d8ea3237811883f8b3ffd97`。これらの`...-0001` key grammarは
   現structural inventoryと互換だが、既存bodyをformal pilot bodyとして再利用していない。代表候補と新しい
   full structural packageのsemantic/formal completionを読み替えない
 - representative source intentのW0 `present_fact_ids`をexact projectionする人物別fact-membershipと、
   solver割当前のconditional history-intent templateを実装。p01はそれぞれ4,519 bytes /
-  `7aaa717778e3517ea91e3355f723e6840c95ec7ed8dd9101a4b19e074354bfb2`、14,657 bytes /
-  `82f2c0ebcb6acaa28e04a2d69e93bf81882a5984b5618214ed1a1ef004134507`。typed revisionはW0→W1、
+  `2a373e3ae56c397058a93b799f2728f617658ae322910b4bad9c3c4d8ecb25cb`、14,657 bytes /
+  `8929ad20e89f660e32852111e012071a74b5127e124f2b69e474b4ae411a0f99`。typed revisionはW0→W1、
   このrepresentative body内ではunordered fact pairをdistinct branchへ未割当である。full semantic sidecarは
   source-owned A/B profilesを割り当て、full concrete packageがreservation/sourceとのjoinを束縛するが、
   solved scope placementはまだない。
@@ -1652,7 +1652,7 @@ source-instance parameters 74、lifecycle fact/rendition 20、payload equivalenc
 697,466 canonical bytes / SHA-256
 `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、receipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
-`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。v1 projection bytes/pinsは
+`d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`である。v1 projection bytes/pinsは
 再解釈・再pinしない。
 
 v2候補は局所completion claimとして`semantic_payload_projection_bound=true`、

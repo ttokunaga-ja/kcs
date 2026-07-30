@@ -15,7 +15,7 @@ from eval import persona_v2_review_request_catalog_validator as independent
 
 EXPECTED_GOLDEN = (
     42_931,
-    "33011fa5b41a0f99d61fd93b8ce5fc949b7d19eab4276cac688bb1ceb6eccb26",
+    "1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098",
 )
 EXPECTED_CLASS_ORDER = (
     "topology-activity",
@@ -159,7 +159,7 @@ class PersonaV2ReviewRequestCatalogContractTests(unittest.TestCase):
         self.assertEqual(semantic["ordered_projection_pins"], [])
         self.assertEqual(
             semantic["aggregate"]["ordered_projection_pins_sha256"],
-            "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c",
+            "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8",
         )
 
     def test_catalog_is_request_only_and_grants_no_authority(self):

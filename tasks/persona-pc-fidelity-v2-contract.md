@@ -93,7 +93,7 @@ payload equivalence 1である。framingはcanonical JSON 67 bodies / LF終端ca
 missing projection class ledgerは空である。descriptorは697,466 canonical bytes / SHA-256
 `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、ordered projection-pin digestは
-`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。v1 projection bytes/pinsは
+`d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`である。v1 projection bytes/pinsは
 再生成して継承し、再解釈・再pinしない。
 v2候補は局所completion claimを満たすだけで、`corpus_semantic_namespace_issued=false`、
 `g0_contract_frozen=false`、全authority fieldはfalseである。最終local acceptanceはall-253 independent full
@@ -103,7 +103,7 @@ replayと独立した2 hash-seed cold buildが上記literalを再現して成立
 `70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa`で局所golden固定した。
 これはunissued namespaceでありsource-ID authorityではない。その下流のrequest-only
 `kio.persona.pc-corpus-input-closure-manifest/v3`も7,590 canonical bytes / SHA-256
-`b1bb9af0af2a76486040251e4f1243ae69437099a141a34f48b98800cd7ba80d`で局所golden固定した。
+`ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f`で局所golden固定した。
 同closureはnamespace、complete inventory、7-class review request catalog、3-source/36-active-claim bootstrap
 ledgerのexact 4 direct dependenciesを束縛するが、positive receiptは0件で全authorityはfalseである。
 さらに20 x 105 query-history target-resolution bridgeを固定したが、
@@ -1218,7 +1218,7 @@ canonical JSONL 186 bodiesである。
 v2 descriptorは697,466 canonical bytes / SHA-256
 `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`、external 253 bodiesは
 合計155,741,469 bytes、receipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
-`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。descriptor 2 MiB、
+`d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`である。descriptor 2 MiB、
 cumulative external 256 MiB、cold build RSS 1 GiBのhard cap内に保つ。v1の113 projection bytes/pinsは
 再生成して継承し、再解釈・再pinしない。
 

@@ -43,13 +43,25 @@ def in_repo(digest: str) -> bool:
 
 
 def run_tests(modules: list[str], log: Path) -> str:
+    """テストを走らせ、**進行中もログを読める形で**書き出す。
+
+    出力をまとめて受け取って最後に書く版は、CI の 91 モジュールで 3 時間以上
+    「ログが空でプロセスは生きている」状態が続き、進んでいるのか止まっている
+    のか判断できなかった。長い測定では途中が見えることが結果と同じくらい重要
+    なので、`unittest` の出力を直接ログへ流す。進行はドットで見える。
+
+    `-v` は付けない。下の `blocks()` はこのログを解析するので、検証済みの出力
+    形式を進捗を見るためだけに変えたくない。
+    """
     print(f"[run] {len(modules)} modules -> {log}", flush=True)
-    completed = subprocess.run([sys.executable, "-m", "unittest", *modules],
-                               cwd=ROOT, capture_output=True, text=True)
-    text = completed.stdout + completed.stderr
-    log.write_text(text, encoding="utf-8")
+    with log.open("w", encoding="utf-8") as sink:
+        completed = subprocess.run(
+            [sys.executable, "-m", "unittest", *modules],
+            cwd=ROOT, stdout=sink, stderr=subprocess.STDOUT, text=True,
+        )
+    text = log.read_text(encoding="utf-8", errors="replace")
     tail = [line for line in text.splitlines() if line.startswith(("Ran ", "OK", "FAILED"))]
-    print("  " + " / ".join(tail[-2:]), flush=True)
+    print(f"  exit={completed.returncode}  " + " / ".join(tail[-2:]), flush=True)
     return text
 
 
