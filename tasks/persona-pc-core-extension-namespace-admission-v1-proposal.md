@@ -27,8 +27,8 @@ The frozen source candidate pinned by this proposal is exactly:
 
 | source item | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333` |
-| external rows `persona-core-v1-extension-allocation-rows-v1` | 426,889 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436` |
+| external rows `persona-core-v1-extension-allocation-rows-v1` | 426,889 | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 
 Those pins attest an authored, frozen **candidate** only.  They do not record a
 formal decision or issue an admission.
@@ -202,7 +202,7 @@ including an explicit empty coordinate map:
   "artifact_schema_version": 1,
   "body_framing": "canonical-json",
   "canonical_bytes": 5357,
-  "sha256": "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333",
+  "sha256": "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436",
   "coordinates": {},
   "owner_id": "persona-core-v1-extension-allocation-manifest-v1",
   "owner_role": "frozen-content-candidate-descriptor"
@@ -217,7 +217,7 @@ The source rows direct-body pin is:
   "canonical_bytes": 426889,
   "direct_pin_id": "persona-core-v1-extension-allocation-rows-v1",
   "direct_pin_role": "frozen-content-candidate-rows",
-  "sha256": "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45"
+  "sha256": "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5"
 }
 ```
 

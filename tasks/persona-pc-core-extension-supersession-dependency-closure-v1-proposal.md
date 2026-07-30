@@ -13,8 +13,8 @@ The local count-only incompatibility audit has these frozen candidate pins:
 
 | item | bytes | SHA-256 |
 | --- | ---: | --- |
-| audit descriptor | 3,500 | `cceb525f9e3b4912b6ea582f9fe0596056ad257b6ef8a875365d79ebc40883f1` |
-| audit delta JSONL | 236,068 | `a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44` |
+| audit descriptor | 3,500 | `f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1` |
+| audit delta JSONL | 236,068 | `ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd` |
 
 The 566 common `(persona_id, family_id, variant_id)` coordinates have equal
 suite totals but not equal allocations:

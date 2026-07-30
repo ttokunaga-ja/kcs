@@ -848,7 +848,7 @@ def _authenticate_projection_contracts():
         f"p{ordinal:02d}" for ordinal in range(1, 21)
     ):
         _fail("lifecycle projection literal order drifted")
-    if sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_286:
+    if sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_287:
         _fail("lifecycle projection literal byte total drifted")
     all_sizes_and_digests = [
         (spec[3], spec[4]) for spec in SINGLETON_PROJECTION_SPECS.values()

@@ -59,7 +59,7 @@ TARGET_ARTIFACT_BYTES = 512 * 2**10
 
 # Frozen after an all-persona full reconstruction and two isolated cold
 # reconstructions under distinct hash seeds agreed byte-for-byte.
-EXPECTED_CANONICAL_BYTES = 40_947
+EXPECTED_CANONICAL_BYTES = 40_949
 EXPECTED_SHA256 = (
     "573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f"
 )

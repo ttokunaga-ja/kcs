@@ -78,12 +78,12 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(package._expected_golden(), independent._expected_golden())
         self.assertEqual(
             package._expected_golden(),
-            (5_357, "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333"),
+            (5_357, "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"),
         )
         self.assertEqual(len(self.body), 426_889)
         self.assertEqual(
             hashlib.sha256(self.body).hexdigest(),
-            "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45",
+            "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5",
         )
         self.assertEqual(self.value["body_canonical_bytes"], len(self.body))
         self.assertEqual(self.value["body_sha256"], hashlib.sha256(self.body).hexdigest())
@@ -450,7 +450,7 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(provider.call_count, 2)
         self.assertEqual(
             (len(self.raw), hashlib.sha256(self.raw).hexdigest()),
-            (5357, "351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333"),
+            (5357, "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"),
         )
         self.assertLess(time.monotonic() - started, 120)
 

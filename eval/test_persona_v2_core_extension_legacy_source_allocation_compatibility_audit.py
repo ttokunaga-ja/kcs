@@ -86,9 +86,9 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
     def test_identity_exact_goldens_and_independent_replay(self):
         exact = (
             3_500,
-            "cceb525f9e3b4912b6ea582f9fe0596056ad257b6ef8a875365d79ebc40883f1",
+            "f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1",
             236_068,
-            "a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44",
+            "ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd",
         )
         self.assertEqual(audit._expected_golden(), exact)
         self.assertEqual(independent._expected_golden(), exact)
@@ -305,7 +305,7 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
             "len(a.core_extension_legacy_source_allocation_delta_body_bytes()),"
             "hashlib.sha256(a.core_extension_legacy_source_allocation_delta_body_bytes()).hexdigest())"
         )
-        expected = "3500 cceb525f9e3b4912b6ea582f9fe0596056ad257b6ef8a875365d79ebc40883f1 236068 a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44"
+        expected = "3500 f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1 236068 ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd"
         for seed in ("0", "1"):
             env = dict(os.environ, PYTHONHASHSEED=seed)
             completed = subprocess.run(

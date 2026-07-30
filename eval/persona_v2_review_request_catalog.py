@@ -713,7 +713,7 @@ def _lifecycle_projection_pins(*, authenticate=True):
         != "persona-pc-v2-source-matched-lifecycle-content-projection"
         or lifecycle_projection.PROJECTION_SCHEMA
         != "kio.persona.pc-source-matched-lifecycle-content-projection/v1"
-        or sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_286
+        or sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_287
     ):
         _fail("current lifecycle projection contract drifted")
     result = []

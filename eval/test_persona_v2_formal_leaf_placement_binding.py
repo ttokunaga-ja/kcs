@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 BODY_RECEIPT = (
     889_056,
-    "98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e",
+    "4555526caca91a23ddac8581178cbc61c5036b5e3333d12066060644b3a8f460",
 )
 DESCRIPTOR_RECEIPT = (
     27_117,

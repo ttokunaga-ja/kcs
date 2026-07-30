@@ -19,7 +19,7 @@ chunk.  It also does not select an allocation/source-plan successor.
 | external body ID | `persona-pc-v2-formal-leaf-placement-rows-v1` |
 | external body framing | canonical UTF-8 NFC LF-JSONL |
 | external LF-JSONL bytes | 889,056 |
-| external LF-JSONL SHA-256 | `98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e` |
+| external LF-JSONL SHA-256 | `4555526caca91a23ddac8581178cbc61c5036b5e3333d12066060644b3a8f460` |
 | rows | 1,200 = 3 replays × 20 personas × 20 scopes |
 | row order | replay → persona → scope ordinal |
 | registries planned | 60 = 3 replays × 20 personas |

@@ -89,7 +89,7 @@ class PersonaV2SourceSemanticCapacityAxisCatalogTests(unittest.TestCase):
         expected = package._require_golden_parity()
         exact = (
             50_473,
-            "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85",
+            "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8",
         )
         self.assertEqual(expected, exact)
         self.assertEqual(expected, independent._expected_golden())

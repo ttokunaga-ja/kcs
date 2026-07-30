@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `1d2ff1822bc3e15a7c3d9e58ce55eb1908340bc3a1c445fd566e0539b25ff282`.  The pre-freeze full dependency gate
+    `635f67fc988cc7d339698fe6c8c8e211390e164e0df11cb216d2f497fff0d1a5`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
@@ -2000,7 +2000,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     answer, relevance, evaluation, clock, network, randomness, or environment input.
 
     The frozen body is 50,473 canonical bytes with SHA-256
-    `2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85`.  After replacing self-referential
+    `e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8`.  After replacing self-referential
     unexecuted-gate claims with explicit external-receipt boundaries and correcting UTF-8 byte preflight, the
     pre-freeze full trust-root replay passes in 45.241 seconds with 66,404,352-byte maximum RSS, forty body-provider
     calls across twenty unique personas, and one semantic-catalog body opening.  Isolated hash seeds zero and one
@@ -2024,7 +2024,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     10,032, neutral-required is 1,672, and future-before-introduction is zero.
 
     The frozen body is 29,868 canonical bytes with SHA-256
-    `d0affa86583286cbf2eb466f807b3998c6be0d77dff7e541f91dca2c46271b11`.  The pre-freeze full two-read replay
+    `85883ef574c917ec6197b9cebc2da5979d879cc29c5ac6ef0cab56e200c86601`.  The pre-freeze full two-read replay
     passes in 4.808 seconds with 62,767,104-byte maximum RSS, and isolated hash seeds zero and one reproduce the same
     bytes and digest in 9.721 seconds total.  Producer and independent-validator golden pairs were then frozen
     atomically.  The focused fast gate passes fourteen tests, and the post-freeze full replay passes in 4.927 seconds
@@ -2039,7 +2039,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     does not imply remote green.
 166. Persona-PC v2 adopts the `persona-core-v1` extension-allocation design, but does not yet freeze or issue its
     manifest.  The design binds three exact inputs: the 2,410-byte core family-count matrix at SHA-256
-    `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7`, the 71,979-byte persona envelope at
+    `271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561`, the 71,979-byte persona envelope at
     `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7`, and the 333,881-byte all-71 format
     implementation registry at `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d`.  The
     registry proves renderer/validator feasibility only; it is not a formal source recipe, source-instance, physical
@@ -2058,7 +2058,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The adopted row contract has an exact 23-key schema, schema version one, zero-based family ordinals 0--14, and
     zero-based family-local variant ordinals.  Unknown or missing fields and Boolean-as-integer values fail closed.
     The expected, not-yet-golden external LF-JSONL candidate is 426,889 bytes with SHA-256
-    `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`, 566 rows, 539 full non-zero rows,
+    `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`, 566 rows, 539 full non-zero rows,
     maximum LF-inclusive row size 786 bytes, and exact first/last row identities and pins.  A bounded descriptor must
     bind that body ID, bytes, digest, count, order, first/last rows, and two-read TOCTOU checks without embedding it.
 

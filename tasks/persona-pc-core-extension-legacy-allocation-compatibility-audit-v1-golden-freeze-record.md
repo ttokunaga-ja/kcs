@@ -8,8 +8,8 @@ evaluation authority, or G0 gate.
 
 | item | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| audit descriptor | 3,500 | `cceb525f9e3b4912b6ea582f9fe0596056ad257b6ef8a875365d79ebc40883f1` |
-| external delta JSONL | 236,068 | `a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44` |
+| audit descriptor | 3,500 | `f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1` |
+| external delta JSONL | 236,068 | `ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd` |
 
 Identity:
 
@@ -27,8 +27,8 @@ order, then ASCII variant ID.  Its maximum LF-inclusive row size is 529 bytes.
 
 | input | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| core extension allocation descriptor | 5,357 | `351e40d1300a104b87169d7e0518d6191514c1251ffe2c4b3872f68a4fe35333` |
-| core extension allocation external rows | 426,889 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| core extension allocation descriptor | 5,357 | `f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436` |
+| core extension allocation external rows | 426,889 | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 | legacy v2 variant catalog | 211,733 | `807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9` |
 
 The comparison coordinate is exactly

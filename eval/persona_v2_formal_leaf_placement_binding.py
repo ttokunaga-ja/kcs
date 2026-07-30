@@ -73,7 +73,7 @@ COMPOSITOR_PIN = (
 # descriptor pin below is computed after its freeze-status claim is set true;
 # neither pin grants filesystem, KIO, history, or G0 authority.
 EXPECTED_BODY_BYTES = 889_056
-EXPECTED_BODY_SHA256 = "98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e"
+EXPECTED_BODY_SHA256 = "4555526caca91a23ddac8581178cbc61c5036b5e3333d12066060644b3a8f460"
 EXPECTED_CANONICAL_BYTES = 27_117
 EXPECTED_SHA256 = "ce60077869f899473b439b3a48446a629016d9c5c2ba472445aee1fb427f1237"
 

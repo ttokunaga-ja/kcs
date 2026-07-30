@@ -75,7 +75,7 @@ class PersonaV2CapacityFactTruthOccurrencePolicyTests(unittest.TestCase):
         self.assertLess(len(self.raw), package.TARGET_CATALOG_BYTES)
         exact = (
             29_868,
-            "d0affa86583286cbf2eb466f807b3998c6be0d77dff7e541f91dca2c46271b11",
+            "85883ef574c917ec6197b9cebc2da5979d879cc29c5ac6ef0cab56e200c86601",
         )
         self.assertEqual(package._require_golden_parity(), exact)
         self.assertEqual(independent._expected_golden(), exact)
@@ -178,7 +178,7 @@ class PersonaV2CapacityFactTruthOccurrencePolicyTests(unittest.TestCase):
         self.assertEqual(axis["canonical_bytes"], 50_473)
         self.assertEqual(
             axis["sha256"],
-            "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85",
+            "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8",
         )
         self.assertIs(axis["accepted"], True)
         self.assertIs(axis["frozen"], True)

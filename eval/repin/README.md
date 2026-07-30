@@ -90,6 +90,44 @@ git diff -U0 -- . ':(exclude)eval/repin' | grep -E '^[+-]' \
 **どれも、ソースの見た目からコードの性質を当てにいって外している。** 正規表現で
 形を判定する限りこの種の取りこぼしは繰り返す。判定できるものは実行時に訊くこと。
 
+## 圧縮・符号化されたデータの中身には改名が届かない
+
+`persona_v2_core_extension_allocation_manifest.py` は登録簿の投影を
+zlib+base64 のソースリテラルとして持っている。その中の
+`"artifact_schema":"kcs.persona.pc-format-implementation-registry/v2"` は
+**テキスト全域置換でも `git grep kcs` でも見つからない**。producer と
+validator の両方に同じ blob があり、両方に残っていた。
+
+見つけ方: ソース内の base64 らしきリテラルを総当りで復号し (必要なら zlib
+展開も試し)、中身に `kcs` が無いか探す。`/tmp/blobscan.py` がそれをやる。
+改名の最初にこれを回すべきだった。
+
+直し方: blob を復号 → 文字列を置換 → **JSON として構造が変わっていないこと
+を検算** → 再圧縮 → base64 → その blob 自身の pin を実測して更新。
+`kcs`/`kio` は同長なので展開後の bytes は変わらない (22,639 のまま)。
+
+## `--allow-fail` は依存の壊れを吸収し、誤った値を焼くことがある
+
+`source_semantic_capacity_axis_catalog::EXPECTED_SHA256` は最初期のコミット
+(406528a、"INCOMPLETE. 18 failures and 45 errors remain") で `2bcb84e6…` に
+repin されていた。この値は**per-persona builder の fact-graph pin がまだ
+壊れている状態**で焼かれたものだった — `_build_state()` は内部で
+`_snapshot_fact_graphs()` を呼び、fact-graph の pin 不一致があれば `_fail`
+するが、`snapshot.py --allow-fail` はその `_fail` を無害化するので、
+**壊れた入力のまま candidate が計算され、それがそのまま「新しい正しい値」
+として記録された**。fact-graph の pin (19 件) を後から直したら、この
+catalog の candidate はもう一度動いた。
+
+見つかった経緯: per-persona builder を測定対象に含めてもこの catalog は
+「不動」(改名前後で digest 一致) と出ていた — 一致していたのではなく、
+**両方とも壊れた入力から計算されていたので一致していた**。実際のコードを
+直接 import して例外の有無を試すまで気づけなかった。
+
+教訓: `--allow-fail` で測った candidate は、**その artifact 自身が依存する
+下流の pin が全て直っている状態でなければ信用できない**。依存関係の末端
+(salt の直接の影響を受けるモジュール) から直して、そこに依存する側は
+**最後にもう一度、`_fail` を黙らせずに直接呼んで**確かめること。
+
 ## 赤の件数は破損の件数ではない
 
 最後の取りこぼしがそれを一番はっきり示した。`build_fact_graph(persona_id)` の pin は
@@ -203,6 +241,8 @@ grep -oE "eval\.test_[a-z0-9_]+" .github/workflows/ci.yml | sort -u > /tmp/ci-mo
 | `contract_snapshot.py` | renderer / validator contract 16 件を同じ形で記録 |
 | `converge.py` | `before.json` を正として、対応の取れた分だけ繰り返し適用 |
 | `from_test_log.py` | テストを走らせ、失敗ログからテスト内リテラルの対応を採る |
+| `realcheck.py` | `--allow-fail` 抜きで builder を直接呼ぶ。**収束宣言の前に必ず回す** |
+| `blobscan.py` | base64/zlib リテラルを展開して `kcs` 残存を探す。**改名の最初に回す** |
 | `apply_digests.py` | `old:new` を全域置換 |
 | `before.json` | **改名前ツリーでの実測値。これが正本** |
 | `applied.json` | 適用済みの対応 |

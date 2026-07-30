@@ -44,7 +44,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Must remain byte-identical to the non-authorizing producer golden.
 EXPECTED_CANONICAL_BYTES = 29_868
-EXPECTED_SHA256 = "d0affa86583286cbf2eb466f807b3998c6be0d77dff7e541f91dca2c46271b11"
+EXPECTED_SHA256 = "85883ef574c917ec6197b9cebc2da5979d879cc29c5ac6ef0cab56e200c86601"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 CHECKPOINT_ORDER = (
@@ -104,7 +104,7 @@ CAPACITY_AXIS_PIN = (
     "kio.persona.pc-source-semantic-capacity-axis-catalog/v1",
     1,
     50_473,
-    "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85",
+    "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8",
 )
 
 FACT_GRAPH_PINS = (

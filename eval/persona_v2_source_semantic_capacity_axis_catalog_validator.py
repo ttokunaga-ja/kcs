@@ -39,7 +39,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Must remain byte-identical to the non-authorizing producer golden.
 EXPECTED_CANONICAL_BYTES = 50_473
-EXPECTED_SHA256 = "2bcb84e6ca46f09b29a3f4756191b98970a4f78101e4455675b6c713dc1cab85"
+EXPECTED_SHA256 = "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 TOPIC_SLOT_ORDER = ("g01", "g02", "g03", "g04")

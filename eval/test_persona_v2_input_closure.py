@@ -26,7 +26,7 @@ EXPECTED_SYNTHETIC_ROOT_IDENTITIES = {
     ),
     "suite": (
         2_624,
-        "c98bac72e2597b5f90944fe8c1d47888ed5e607555768a1dd4e1ea5642e4b58d",
+        "135ca8c0a7e27e6ed1911867fcf2172594be71da1bfbf4539927c2dcc902311f",
     ),
 }
 

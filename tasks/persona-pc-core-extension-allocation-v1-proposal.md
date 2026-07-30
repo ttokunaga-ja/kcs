@@ -35,7 +35,7 @@ TOCTOUを拒否する。
 
 | order | input | consumed projection | canonical bytes | SHA-256 | authority |
 | ---: | --- | --- | ---: | --- | --- |
-| 1 | `kio.persona.core-family-count-matrix/v1` candidate | 下表の`family_order`、p01--p20、full exact counts | 2,410 | `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7` | proposal-only、all false |
+| 1 | `kio.persona.core-family-count-matrix/v1` candidate | 下表の`family_order`、p01--p20、full exact counts | 2,410 | `271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561` | proposal-only、all false |
 | 2 | `kio.persona.pc-envelope/v2` | `personas[].persona_id`と既存`variant_profiles`、宣言順ordinal | 71,979 | `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7` | envelope全体をpinするがcore adoption権限なし |
 | 3 | `kio.persona.pc-format-implementation-registry/v2` | 71 implementation rows、extension、role、disposition、renderer/validator binding | 333,881 | `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d` | renderer/validator feasibilityのみ、`g0_contract_frozen=false` |
 
@@ -296,7 +296,7 @@ NFC、exactly one terminal LFでframingする。566 rowsをdescriptorへ埋め�
 | `body_embedded` | `false` |
 | `body_final_lf` | `true` |
 | `body_canonical_bytes` | 426,889 |
-| `body_sha256` | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| `body_sha256` | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 | `row_count` | 566 |
 | `full_nonzero_row_count` | 539 |
 | `row_order` | persona ordinal、family ordinal、variant ordinal |
@@ -354,7 +354,7 @@ manifest golden freeze前に最低限、次をすべて機械確認する。
 11. variant、suffix、compound suffix、MIME、disposition、renderer/validator bindingが同一registry rowへ一致する。
 12. raw-only countからsearchable-positive、actual zero chunks、Recall、latencyを推論しない。
 13. unsupported variantがcore manifestに0件で、fallback totalが元family totalを保存する。
-14. external bodyが426,889 bytes / `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`、
+14. external bodyが426,889 bytes / `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`、
     566 / 539 rows、first/last ID、maximum row 786へexact一致する。
 15. bodyはdescriptor外部にあり、two-read providerの両owned bytesがbyte-for-byte一致し、provider call countが2となる。
 16. producer再実行、独立validator、`PYTHONHASHSEED=0/1`でcanonical bytes/SHAが一致する。
@@ -420,7 +420,7 @@ formal_capacity_gate_satisfied
 4. 566-row LF-JSONL producer、descriptor、builder-independent two-read validator、tamper/TOCTOU testsを
    implementation candidateとして実装する。
 5. `fast -> pre-freeze full -> cold/hash-seed 0/1`を通し、expected 426,889 bytes /
-   `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`を再現する。
+   `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`を再現する。
 6. **Manifest Golden-Freeze Decision/Gate**をDesign Adoption Decisionとは別に発行し、実装後のdescriptor/body
    bytes/SHA、566/539、first/last ID、maximum row bytes、validator pinをgoldenとして固定する。不一致ならstep 1へ戻る。
 7. `fast -> post-freeze full -> independent review`を通した後、frozen manifestをcontent-only namespaceへ収録する。
