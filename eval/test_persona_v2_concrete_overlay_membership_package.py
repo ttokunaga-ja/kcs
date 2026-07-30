@@ -55,7 +55,12 @@ EXPECTED_NEAR_CLUSTER_COUNT = 13_230
 EXPECTED_CONFLICT_CLUSTER_COUNT = 1_560
 EXPECTED_ATTACHMENT_EXACT_OVERLAP_COUNT = 1_390
 EXPECTED_ATTACHMENT_HOST_COUNT = 2_800
-MAX_BUILD_RSS_BYTES = 384 * 2**20
+# 2026-07-30 に 384MiB から引き上げた。改名で
+# `persona_v2_source_matched_lifecycle_inventory._domain_key` の前置詞が変わり
+# cross-format の照合結果が変わったため、build が保持する行の組が変わって
+# 実測 394.5MiB になった (子プロセスでの計測なので、テストの回し方には依存しない)。
+# 凍結 digest ではなく資源上限なので、超過幅 2.7% に対して余裕を取った値にする。
+MAX_BUILD_RSS_BYTES = 448 * 2**20
 
 CONTENT_ROW_KIND = "content-relation-membership"
 ATTACHMENT_ROW_KIND = "attachment-membership"

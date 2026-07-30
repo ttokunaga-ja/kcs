@@ -86,7 +86,7 @@ def _synthetic_receipts(*, complete_shape=False):
             jsonl_seen += 1
             # 最後の 1 件は合計を凍結値に合わせるための余り。凍結値が
             # 155_741_469 -> 155_741_381 に動いたので +6 する。
-            sizes.append(729_000 if jsonl_seen < 186 else 776_475)
+            sizes.append(729_000 if jsonl_seen < 186 else 776_381)
     assert sum(sizes) == package.EXPECTED_CUMULATIVE_EXTERNAL_PROJECTION_BYTES
 
     receipts = []

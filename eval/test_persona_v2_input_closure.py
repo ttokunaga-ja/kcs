@@ -18,7 +18,7 @@ EXPECTED_SYNTHETIC_ROOT_IDENTITIES = {
     ),
     "evaluation": (
         4_014,
-        "83e5e5da0880596facdcd299c52eabfe1855fef99ce4794dd34c753cc9409cfd",
+        "f1aec08623b5b5282f315c22addeb15e79ed8d3fc716e0eb64c58c16a59ff325",
     ),
     "semantic": (
         3_723,
