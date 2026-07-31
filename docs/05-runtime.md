@@ -1235,7 +1235,14 @@ phase 順序    = prepared (closure 確定・記帳)
               → done: **順序固定** — (1) `.kio/purge/epoch` を journal の target_epoch へ更新
                 (temp 書込 → file fsync → atomic rename → 親 directory fsync)、(2) その後に
                 journal を除去 + directory fsync。journal が先に消える実装は、除去〜increment 間の
-                crash で「journal 不在 × 旧 epoch」の ABA 窓を作るため禁止
+                crash で「journal 不在 × 旧 epoch」の ABA 窓を作るため禁止。
+                **順序の固定は全 platform の義務だが、「親 directory fsync」は POSIX のみの手段である**
+                — Windows には directory fsync に当たる操作が無い (directory handle は
+                `FILE_FLAG_BACKUP_SEMANTICS` を要し、`FlushFileBuffers` はそこへ書込権限を要求する)。
+                Windows ではこの耐久性を NTFS の metadata journalling に委ねる。**弱い保証である**
+                ことを明示しておく。実装は `kio-core::purge::sync_directory` の 2 arm に分かれており、
+                Windows arm は fsync を行わない代わりに R23-07 の fail-closed 側 (親が不在、または
+                directory でない場合に呼出元へ surface する) を保つ
 クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
               (各 phase は再実行安全 — planned_commit を journal から publish するため同一 hash を
               再現でき、時刻の再計算をしない)。journal が active な間の fsck は incomplete (exit 3 —

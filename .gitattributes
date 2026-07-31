@@ -1,2 +1,17 @@
+# Bytes are the identity in this repository -- digests are taken over file
+# contents -- so Git must never rewrite line endings, in either direction, on
+# any platform. Git for Windows installs with core.autocrlf=true by default, and
+# without this line a clone there converts all 1,557 LF text files to CRLF: every
+# fixture read from the working tree then hashes differently than it does on
+# Linux or macOS, and the failures surface far from their cause.
+#
+# `-text` (never convert) rather than `text=auto eol=lf` (normalize on checkin)
+# on purpose. text=auto lets Git decide what is text and rewrite it while
+# committing, which is the same class of silent byte mangling -- it would corrupt
+# a fixture whose whole point was to carry CRLF. No tracked file contains CR
+# today, so this is protective, not a migration. It does not affect diffs: the
+# `text` attribute governs eol conversion only, `diff` is a separate attribute.
+* -text
+
 # Security audit exports preserve source bytes for receipt and checksum bindings.
 security/audits/** -whitespace

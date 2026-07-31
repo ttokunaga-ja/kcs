@@ -212,10 +212,15 @@ fn r23_26_restore_conflict_no_force_is_exit_3_with_retry_disposition() {
     // context.path names the conflicting destination leaf (exact string may be
     // realpath-canonicalized on platforms with a symlinked temp dir, e.g.
     // macOS's /var -> /private/var, so this checks the suffix rather than an
-    // exact match).
+    // exact match). Separators are normalized first because the value is a
+    // native path: on Windows it arrives as `r23-26-out\notes.md` and the
+    // suffix check fails on the separator alone, which says nothing about the
+    // behaviour under test. Same `.replace('\\', "/")` idiom as
+    // step4b_ledger_contract.rs.
     assert!(error["context"]["path"]
         .as_str()
         .unwrap()
+        .replace('\\', "/")
         .ends_with("r23-26-out/notes.md"));
     // Preflight rejection must not have touched the pre-existing file.
     assert_eq!(

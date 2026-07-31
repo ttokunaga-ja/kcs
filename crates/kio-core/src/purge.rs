@@ -1977,8 +1977,40 @@ fn same_windows_private_file(left: &File, right: &File) -> bool {
 /// "markerless absence" / "journal reappears after crash" window §3.5
 /// exists to close (LC49's ordering guarantee already depended on this
 /// being durable; only the failure path was silently discarded).
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+/// Windows counterpart. **Windows has no directory fsync**, so this arm cannot
+/// make the same durability promise as the POSIX one above.
+///
+/// The POSIX body does not merely degrade here -- it fails outright, every
+/// time. `File::open` on a directory returns ERROR_ACCESS_DENIED (os error 5)
+/// because Rust does not pass `FILE_FLAG_BACKUP_SEMANTICS`, which is what
+/// getting a directory handle requires. Opening one by hand does not rescue
+/// it: `sync_all` calls `FlushFileBuffers`, which wants write access that a
+/// directory handle cannot carry. So the three call sites
+/// (`write_private_replace`, `quarantine_then_unlink`,
+/// `restore_private_no_clobber`) turned every purge-journal write on Windows
+/// into `KIO-E-STORE-IO-001`, which is what four tests were failing on.
+/// The ordering §3.5 buys from the POSIX fsync comes from NTFS's own metadata
+/// journalling instead; that is a weaker promise and is recorded as such in
+/// 05-runtime.md §3.5.
+///
+/// What survives is the *fail-closed* half of R23-07: a parent that is missing
+/// or is not a directory still surfaces to the caller rather than
+/// type-checking as success. That is the failure this arm can actually see.
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    if fs::metadata(path)?.is_dir() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "sync_directory expects a directory",
+        ))
+    }
 }
 
 fn corrupt_state(message: impl Into<String>) -> KioError {
@@ -2774,6 +2806,20 @@ mod tests {
         assert!(sync_directory(&missing).is_err());
         // The success path is unaffected: an existing directory syncs fine.
         assert!(sync_directory(dir.path()).is_ok());
+    }
+
+    /// The Windows arm keeps R23-07's fail-closed half without a real fsync,
+    /// so the one case that distinguishes it from a bare `Ok(())` is worth
+    /// holding: a path that exists but is a file must still be an error.
+    /// On POSIX this is not a failure at all -- `File::open` + `sync_all` on a
+    /// regular file succeeds -- so the assertion is genuinely platform-local.
+    #[cfg(windows)]
+    #[test]
+    fn r23_07_sync_directory_rejects_a_file_on_windows() {
+        let (dir, _state) = setup();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, b"x").unwrap();
+        assert!(sync_directory(&file).is_err());
     }
 
     #[test]

@@ -39,8 +39,20 @@ sqlite に依存し、可搬でも commit 可能でもない。ここに要る�
 python3 eval/v3/v3_mrl.py \
   --corpus eval/fixtures/normalized-corpus \
   --queries eval/golden-queries-fixture-b.jsonl \
+  --limit 1013 \
   --out v3b-mrl.json
 ```
+
+**`--limit` は必ず渡すこと。** 既定は 400 で、`collect_passages` は
+`sorted()` 順に 400 件で打ち切る。このコーパスは persona 順に並ぶので
+**p09〜p20 の 12 persona が丸ごと落ち**、answerable が 24 問中 **9 問**まで下がる。
+`recall_at_k` の足切りは「過半が引けなければ測らない」なので 9 < 12 で発火し、
+`measured: false` だけが返る — GPU セッションを 1 回無駄にする。
+
+そのとき返る注記は「index 済み fixture から取り出した Markdown を渡すこと」だが、
+**この状況ではその注記は原因を指していない**。コーパスは正しく、足りないのは
+`--limit` である。全件 1,013 passage (文書 1,015 のうち 2 本は 40 文字未満で
+`collect_passages` が除外する) を渡せば **24/24 が answerable** になる。
 
 このコーパスなら **24/24 の query が正解を引ける**ので、`v3_mrl.py` の recall
 ガードは発火せず、実際の recall@10 が両幅で出る。生のコーパス
