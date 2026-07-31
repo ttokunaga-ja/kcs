@@ -4,10 +4,33 @@ on:
   push:
   pull_request:
 
+# timeout-minutes の決め方 (2026-07-31 に 6 ジョブを見直したときの規則)
+#
+# **観測された最遅成功の 2 倍**を上限に置く。1.2〜1.5 倍では足りない — ubuntu ランナー
+# の速度差は実測でそれより大きい。`persona-v2-source-semantic-membership-full` は
+# 同じ仕事を 41.9m / 44.9m で終えた回と、60m の上限に当たり続けた回が混在し、
+# main の直近 10 run で **8 回打ち切られていた**。上限に当たったジョブは「何分必要
+# だったか」を教えないので、当たり続ける限り正しい上限は決められない。
+#
+# 見直し前は 6 ジョブが上限の 60% 以上で走っており (87/86/86/85/75/69%)、遅い日に
+# どれかが落ちる状態だった。マージのたびに赤い run が出て、「この赤は変更のせいか
+# 環境のせいか」の切り分けに人手がかかる — 計器が信用できないと、その下流の判断が
+# すべて鈍る。**上限は費用ではない**: ジョブが実際にその時間走らない限り課金も遅延も
+# 生じず、効くのは本当にハングしたときだけである。
+#
+# GitHub hosted runner の 1 ジョブ上限は 360 分で、これは設定で超えられない。
+# `persona-v2-history-presolve-input-closure-cold` は最遅成功 206.3m なので 2 倍が
+# 取れず 1.74 倍で頭打ちである。**このジョブがこれ以上重くなったら、上限ではなく
+# 分割で対処すること。**
+#
+# 上限に当てるのではなく所要時間を縮めたくなったら、それは別の作業として測ること。
+# ここを締めても速くはならない。
+
 jobs:
   persona-v2-nonauthorizing-core:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 最遅成功 13.1m (n=8)
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +64,8 @@ jobs:
 
   persona-v2-nonauthorizing-inputs:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 最遅成功 20.6m (n=10)
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +100,10 @@ jobs:
 
   persona-v2-source-semantic-membership-full:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 最遅成功 44.9m (n=2)。直近 10 run のうち 8 回は 60m の旧上限で打ち切られており、
+    # 真に必要な時間は上限に当たっている限り観測できない。2 倍は成功例に対する倍率で
+    # あって打ち切り例に対するものではないので、これでも足りなければ再度上げること。
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -221,7 +248,9 @@ jobs:
 
   persona-v2-closure-contract-fast:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 最遅成功 25.5m (n=10)。下流 2 ジョブが `needs:` で待つので、ここが落ちると
+    # history-presolve 系が丸ごと走らない
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -292,7 +321,8 @@ jobs:
   persona-v2-history-presolve-input-closure-full:
     needs: persona-v2-closure-contract-fast
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 最遅成功 103.7m (n=10)
+    timeout-minutes: 210
 
     steps:
       - uses: actions/checkout@v4
@@ -304,7 +334,10 @@ jobs:
   persona-v2-history-presolve-input-closure-cold:
     needs: persona-v2-closure-contract-fast
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # 最遅成功 206.3m (n=10)。360 は GitHub hosted runner の 1 ジョブ上限そのもので、
+    # 設定では超えられない。したがって倍率は 1.74 で頭打ちであり、**この 1 件だけは
+    # 他の 5 件と違って「余裕を足せば済む」状態ではない**。次に重くなったら分割する
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
