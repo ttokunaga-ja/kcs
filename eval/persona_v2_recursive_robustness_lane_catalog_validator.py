@@ -24,10 +24,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-recursive-robustness-lane-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-recursive-robustness-lane-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-recursive-robustness-lane-catalog"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 LANE_ID = "recursive-robustness-v1"
 MAX_CATALOG_BYTES = 512 * 1024
@@ -37,7 +37,7 @@ MAX_DEPENDENCY_BYTES = 512 * 1024
 # pin in its body, so the hash authenticates only the catalog body bytes.
 EXPECTED_CATALOG_CANONICAL_BYTES = 76_099
 EXPECTED_CATALOG_SHA256 = (
-    "49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2"
+    "af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8"
 )
 
 PERSONA_IDS = tuple(f"p{index:02d}" for index in range(1, 21))
@@ -65,7 +65,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_formal_gate",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
@@ -78,18 +78,18 @@ AUTHORITY_FIELDS = frozenset(
 DEPENDENCY_PINS = {
     "persona-v2-topology": (
         "persona-pc-v2-topology",
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         2,
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
         "formal-scope-non-overlap-reference-owner",
     ),
     "persona-v2-realism-profile": (
         "persona-pc-v2-realism-profile",
-        "kcs.persona.pc-realism-profile/v2",
+        "kio.persona.pc-realism-profile/v2",
         2,
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
         "persona-role-and-target-case-semantics-owner",
     ),
 }
@@ -131,7 +131,7 @@ PERSONA_KEYS = frozenset(
         "formal_gate_eligible",
         "formal_scope_overlap",
         "formal_scope_reference_count",
-        "kcs_control_tree_allowed",
+        "kio_control_tree_allowed",
         "lane_id",
         "lane_local_gate_role",
         "manifest_relative_path",
@@ -267,7 +267,7 @@ def _relative_parts(path, *, label):
         if (
             not part
             or part in (".", "..")
-            or part.casefold() == ".kcs"
+            or part.casefold() == ".kio"
             or len(part.encode("utf-8", "strict")) > 255
         ):
             _fail(f"{label} contains a prohibited path component")
@@ -459,7 +459,7 @@ def _expected_persona_row(authored, *, ordinal, topology_row, realism_row):
         "formal_gate_eligible": False,
         "formal_scope_overlap": False,
         "formal_scope_reference_count": len(scopes),
-        "kcs_control_tree_allowed": False,
+        "kio_control_tree_allowed": False,
         "lane_id": LANE_ID,
         "lane_local_gate_role": "raw_only",
         "manifest_relative_path": manifest_path,
@@ -736,7 +736,7 @@ def _validate_recursive_robustness_lane_catalog_snapshot(
             for key in (
                 "formal_gate_eligible",
                 "formal_scope_overlap",
-                "kcs_control_tree_allowed",
+                "kio_control_tree_allowed",
                 "registered_scope",
             )
         ):

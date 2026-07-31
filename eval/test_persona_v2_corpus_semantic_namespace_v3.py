@@ -84,7 +84,9 @@ def _synthetic_receipts(*, complete_shape=False):
             sizes.append(300_000)
         else:
             jsonl_seen += 1
-            sizes.append(729_000 if jsonl_seen < 186 else 776_469)
+            # 最後の 1 件は合計を凍結値に合わせるための余り。凍結値が
+            # 155_741_469 -> 155_741_381 に動いたので +6 する。
+            sizes.append(729_000 if jsonl_seen < 186 else 776_381)
     assert sum(sizes) == package.EXPECTED_CUMULATIVE_EXTERNAL_PROJECTION_BYTES
 
     receipts = []
@@ -126,7 +128,7 @@ def _synthetic_receipts(*, complete_shape=False):
                     "full_owner_pins": [
                         {
                             "artifact_kind": "synthetic-owner",
-                            "artifact_schema": "kcs.synthetic.owner/v1",
+                            "artifact_schema": "kio.synthetic.owner/v1",
                             "artifact_schema_version": 1,
                             "body_framing": "canonical-json",
                             "canonical_bytes": 1,
@@ -143,7 +145,7 @@ def _synthetic_receipts(*, complete_shape=False):
                     "receipt_id": f"receipt-{ordinal}",
                     "row_kind": "semantic-projection-derivation-receipt",
                     "row_schema": (
-                        "kcs.persona.pc-semantic-projection-derivation-receipt/v2"
+                        "kio.persona.pc-semantic-projection-derivation-receipt/v2"
                     ),
                     "validation": {
                         "independent_derivation_validation_required": True,
@@ -181,7 +183,7 @@ def _synthetic_complete_inventory():
         "predecessor_inventory_binding": {
             "artifact_kind": "synthetic-predecessor",
             "artifact_schema": (
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v1"
             ),
             "artifact_schema_version": 1,
             "body_framing": "canonical-json",
@@ -228,7 +230,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
         self.assertLessEqual(len(self.raw), package.MAX_MANIFEST_BYTES)
         expected_golden = (
             161_665,
-            "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
+            "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
         )
         self.assertEqual(
             (
@@ -289,7 +291,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
             self.assertFalse(set(entry) & forbidden_entry_fields)
         self.assertEqual(
             self.value["summary"]["cumulative_external_projection_bytes"],
-            155_741_469,
+            155_741_381,
         )
         self.assertEqual(self.value["summary"]["json_projection_body_count"], 67)
         self.assertEqual(self.value["summary"]["jsonl_projection_body_count"], 186)
@@ -381,7 +383,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
     def test_wrong_pin_identity_version_framing_and_caps_fail_closed(self):
         mutations = {
             "kind": ("artifact_kind", "foreign-kind"),
-            "schema": ("artifact_schema", "kcs.foreign/v1"),
+            "schema": ("artifact_schema", "kio.foreign/v1"),
             "version": ("artifact_schema_version", 2),
             "framing": ("body_framing", "canonical-jsonl-lf"),
             "size-bool": ("canonical_bytes", True),
@@ -414,7 +416,7 @@ class CorpusSemanticNamespaceV3FastContractTest(unittest.TestCase):
         query["query_oracle_bundle"] = {}
         cases["query-top-level"] = query
         old_v2 = copy.deepcopy(self.value)
-        old_v2["artifact_schema"] = "kcs.persona.pc-corpus-semantic-namespace/v2"
+        old_v2["artifact_schema"] = "kio.persona.pc-corpus-semantic-namespace/v2"
         cases["old-v2-candidate"] = old_v2
         embedded_body = copy.deepcopy(self.value)
         embedded_body["projection_entries"][0]["body"] = {"forbidden": True}
@@ -805,8 +807,8 @@ class CorpusSemanticNamespaceV3FastBoundaryTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_NAMESPACE_V3_FULL") == "1",
-    "set KCS_RUN_NAMESPACE_V3_FULL=1 for the all-253 trust-source gate",
+    os.environ.get("KIO_RUN_NAMESPACE_V3_FULL") == "1",
+    "set KIO_RUN_NAMESPACE_V3_FULL=1 for the all-253 trust-source gate",
 )
 class CorpusSemanticNamespaceV3LongAll253Test(unittest.TestCase):
     def test_full_complete_inventory_and_two_body_replays(self):
@@ -849,8 +851,8 @@ class CorpusSemanticNamespaceV3LongAll253Test(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_NAMESPACE_V3_COLD") == "1",
-    "set KCS_RUN_NAMESPACE_V3_COLD=1 for the two-hash-seed all-253 gate",
+    os.environ.get("KIO_RUN_NAMESPACE_V3_COLD") == "1",
+    "set KIO_RUN_NAMESPACE_V3_COLD=1 for the two-hash-seed all-253 gate",
 )
 class CorpusSemanticNamespaceV3LongColdHashSeedTest(unittest.TestCase):
     def test_two_hashseeds_are_stable_and_resource_bounded(self):

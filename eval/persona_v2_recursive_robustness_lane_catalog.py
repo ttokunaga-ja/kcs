@@ -6,7 +6,7 @@ retrieval/history roots: every row is an unregistered, raw-only robustness
 candidate plan with its own manifest and future observed receipt.
 
 Nothing in this module creates a directory or file, predicts an observed
-filesystem result, registers a KCS scope, or grants writer, execution, formal
+filesystem result, registers a KIO scope, or grants writer, execution, formal
 gate, or G0 authority.
 """
 
@@ -29,10 +29,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-recursive-robustness-lane-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-recursive-robustness-lane-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-recursive-robustness-lane-catalog"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 LANE_ID = "recursive-robustness-v1"
 MAX_CATALOG_BYTES = 512 * 1024
@@ -63,7 +63,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_formal_gate",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
@@ -76,11 +76,11 @@ AUTHORITY_FIELDS = frozenset(
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-topology": (
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     "persona-v2-realism-profile": (
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
 }
 
@@ -160,7 +160,7 @@ def _relative_parts(path, *, label):
     if any(
         not part
         or part in (".", "..")
-        or part.casefold() == ".kcs"
+        or part.casefold() == ".kio"
         or len(part.encode("utf-8", "strict")) > 255
         for part in parts
     ):
@@ -321,7 +321,7 @@ def _persona_row(authored, *, ordinal, topology_row, realism_row):
         "formal_gate_eligible": False,
         "formal_scope_overlap": False,
         "formal_scope_reference_count": len(topology_row["scopes"]),
-        "kcs_control_tree_allowed": False,
+        "kio_control_tree_allowed": False,
         "lane_id": LANE_ID,
         "lane_local_gate_role": "raw_only",
         "manifest_relative_path": manifest_path,

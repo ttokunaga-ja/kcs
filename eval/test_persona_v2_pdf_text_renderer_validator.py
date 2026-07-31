@@ -25,7 +25,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
                 data=rendered.data,
                 extension=rendered.extension,
                 content_media_type=rendered.content_media_type,
-                expected_kcs_path_media_type=rendered.expected_kcs_path_media_type,
+                expected_kio_path_media_type=rendered.expected_kio_path_media_type,
                 expected_offline_disposition=rendered.expected_offline_disposition,
             )
         )
@@ -42,7 +42,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -82,12 +82,12 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(renderer.canonical_json_bytes(renderer_value)), 2_075)
         self.assertEqual(
             renderer.renderer_contract_sha256(renderer_value),
-            "ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6",
+            "2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d",
         )
         self.assertEqual(len(validator.canonical_json_bytes(validator_value)), 2_233)
         self.assertEqual(
             validator.validator_contract_sha256(validator_value),
-            "78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e",
+            "9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a",
         )
         self.assertTrue(renderer.validate_renderer_contract(renderer_value))
         self.assertTrue(validator.validate_validator_contract(validator_value))
@@ -162,7 +162,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
                 self.assertTrue(receipt["xref_validated"])
                 self.assertTrue(receipt["trailer_validated"])
                 self.assertFalse(receipt["actual_chunks_attested"])
-                self.assertFalse(receipt["kcs_execution_attested"])
+                self.assertFalse(receipt["kio_execution_attested"])
                 self.assertEqual(first.data.count(b"stream\nBT\n"), complexity)
                 self.assertEqual(first.data.count(b"%%EOF\n"), 1)
                 self.assertLessEqual(
@@ -209,7 +209,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             (
                 rendered.extension,
                 rendered.content_media_type,
-                rendered.expected_kcs_path_media_type,
+                rendered.expected_kio_path_media_type,
                 rendered.expected_offline_disposition,
             ),
             ("pdf", "application/pdf", "application/pdf", "local_pdf_text"),
@@ -244,7 +244,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -293,7 +293,7 @@ class PersonaV2PdfTextRendererValidatorTests(unittest.TestCase):
             replace(valid_validation, data=bytearray(valid_validation.data)),
             replace(valid_validation, extension="txt"),
             replace(valid_validation, content_media_type="text/plain"),
-            replace(valid_validation, expected_kcs_path_media_type="text/plain"),
+            replace(valid_validation, expected_kio_path_media_type="text/plain"),
             replace(valid_validation, expected_offline_disposition="local_text"),
         )
         for request in invalid_validation_requests:

@@ -4,7 +4,7 @@ This bounded vertical slice covers only the two non-container special
 ``raw_only`` variants in the persona-PC v2 dictionary: classic PCAP and DICOM
 Part 10.  It accepts no persona, path, source, scope, query, digest, or planning
 identity.  Successful rendering proves local format and byte feasibility only;
-it grants no filesystem, source-plan, KCS, history, or G0 authority.
+it grants no filesystem, source-plan, KIO, history, or G0 authority.
 
 Payload construction uses only Python's standard library.  The shared artifact
 helper is used solely to canonicalize the small, non-authorizing descriptor.
@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-domain-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-domain-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-domain-renderer"
 RENDERER_ID = "persona-v2-id-free-raw-domain-feasibility-renderer"
@@ -76,8 +76,8 @@ _DICOM_SERIES_INSTANCE_UID = b"2.25.220000000000000000000000000000000000001"
 _DICOM_SOP_INSTANCE_UID_PREFIX = "2.25.2000000000000000000000000000000000000"
 _DICOM_TRANSFER_SYNTAX_UID = b"1.2.840.10008.1.2.1"
 _DICOM_IMPLEMENTATION_CLASS_UID = b"2.25.2"
-_DICOM_IMPLEMENTATION_VERSION = b"KCSRAW_2"
-_DICOM_PRIVATE_CREATOR = b"KCS_BOUNDED"
+_DICOM_IMPLEMENTATION_VERSION = b"KIORAW_2"
+_DICOM_PRIVATE_CREATOR = b"KIO_BOUNDED"
 _DICOM_LONG_VRS = frozenset(
     (b"OB", b"OD", b"OF", b"OL", b"OW", b"SQ", b"UC", b"UN", b"UR", b"UT")
 )
@@ -91,7 +91,7 @@ _VARIANT_ROWS = {
         ),
         "complexity_measure": "frames",
         "content_media_type": "application/dicom",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "family": "domain_binary",
         "filename_extension": "dcm",
@@ -109,7 +109,7 @@ _VARIANT_ROWS = {
         "base_bytes": PCAP_GLOBAL_HEADER_BYTES + PCAP_RECORD_BYTES,
         "complexity_measure": "packets",
         "content_media_type": "application/vnd.tcpdump.pcap",
-        "expected_kcs_path_media_type": "application/octet-stream",
+        "expected_kio_path_media_type": "application/octet-stream",
         "expected_offline_disposition": "unsupported_binary",
         "family": "domain_binary",
         "filename_extension": "pcap",
@@ -142,7 +142,7 @@ class RenderedRawDomain:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     target_complexity: int
     target_bytes: int
@@ -467,7 +467,7 @@ def render_raw_domain(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         target_complexity=request.target_complexity,
         target_bytes=target,
@@ -514,7 +514,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -545,7 +545,7 @@ def _negative_authority():
         "authorizes_renderer_execution": False,
         "authorizes_source_intents": False,
         "authorizes_source_plan": False,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
     }
 
 
@@ -571,7 +571,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "two-id-free-formal-ordinary-raw-domain-binary-feasibility-variants-"
-            "only-not-source-materialization-or-kcs-attestation"
+            "only-not-source-materialization-or-kio-attestation"
         ),
         "payload_identity_policy": {
             "content_digest_embedded": False,

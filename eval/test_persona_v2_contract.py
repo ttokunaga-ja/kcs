@@ -6,16 +6,16 @@ import unittest
 from eval import persona_fixture_spec as v1
 from eval import persona_v2_contract as spec
 
-EXPECTED_ENVELOPE_SHA256 = "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
+EXPECTED_ENVELOPE_SHA256 = "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7"
 
 
 class PersonaV2EnvelopeContractTests(unittest.TestCase):
     def test_header_and_authority_are_exact_and_negative(self):
         contract = spec.build_envelope_contract()
-        self.assertEqual(contract["artifact_schema"], "kcs.persona.pc-envelope/v2")
+        self.assertEqual(contract["artifact_schema"], "kio.persona.pc-envelope/v2")
         self.assertEqual(contract["artifact_schema_version"], 2)
         self.assertEqual(contract["artifact_kind"], "persona-pc-v2-envelope")
-        self.assertEqual(contract["fixture_id"], "kcs-persona-pc-v2")
+        self.assertEqual(contract["fixture_id"], "kio-persona-pc-v2")
         self.assertEqual(contract["fixture_schema_version"], 2)
         self.assertFalse(contract["g0_contract_frozen"])
         self.assertEqual(
@@ -43,7 +43,7 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
                 "filesystem_writer_available": False,
                 "formal_capacity_gate_satisfied": False,
                 "history_executor_available": False,
-                "kcs_execution_available": False,
+                "kio_execution_available": False,
                 "query_instances_rendered": False,
                 "query_spec_hashed": False,
                 "renderer_available": False,

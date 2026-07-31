@@ -36,13 +36,13 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_inventory_profile as inventory_profile
 
 
-CATALOG_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-catalog/v2"
+CATALOG_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-catalog/v2"
 CATALOG_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-catalog"
-ORIGIN_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-origin-manifest/v2"
+ORIGIN_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-origin-manifest/v2"
 ORIGIN_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-origin-manifest"
-PROFILE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-profile-manifest/v2"
+PROFILE_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-profile-manifest/v2"
 PROFILE_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-profile-manifest"
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -79,7 +79,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -88,7 +88,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "formal_complete_persona_package_cap_proved",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "query_spec_hashed",
         "renderer_available",
@@ -698,7 +698,7 @@ def _canonical_catalog():
             "concrete-logical-overlay-materialization",
             "history-and-checkpoint-transition-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "semantic_profiles": [],
@@ -1667,7 +1667,7 @@ def _canonical_origin_manifest(persona_id, origin):
             "concrete-overlay-materialization",
             "history-checkpoint-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "summary": {
@@ -1888,7 +1888,7 @@ def _canonical_profile_manifest(persona_id, profile):
             "concrete-overlay-materialization",
             "history-checkpoint-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "summary": {
@@ -2197,7 +2197,7 @@ def _build_canonical_suite_descriptor():
             "concrete-logical-overlay-materialization",
             "history-and-checkpoint-transition-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "summary": {

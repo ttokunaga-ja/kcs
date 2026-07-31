@@ -4,7 +4,7 @@ This module derives the finite ``persona-core-v1`` extension allocation from
 the authored family-count matrix, the public envelope variant weights, and the
 frozen implementation registry.  It emits a compact descriptor plus an
 external canonical LF-JSONL body; it does not select source instances, write
-files, execute KCS, mutate history, or grant G0 authority.
+files, execute KIO, mutate history, or grant G0 authority.
 """
 
 from __future__ import annotations
@@ -27,18 +27,18 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_core_extension_allocation_manifest_validator as independent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.core-extension-allocation-manifest/v1"
+ARTIFACT_SCHEMA = "kio.persona.core-extension-allocation-manifest/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-core-v1-extension-allocation-manifest-candidate"
 ARTIFACT_ID = "persona-core-v1-extension-allocation-manifest-v1"
 BODY_ID = "persona-core-v1-extension-allocation-rows-v1"
-ROW_SCHEMA = "kcs.persona.core-extension-allocation-row/v1"
+ROW_SCHEMA = "kio.persona.core-extension-allocation-row/v1"
 PROFILE_ID = "persona-core-v1"
 MAX_MANIFEST_BYTES = 512 * 2**10
 MAX_BODY_BYTES = 512 * 2**10
 MAX_ROW_BYTES_INCLUDING_LF = 2_048
 EXPECTED_BODY_BYTES = 426_889
-EXPECTED_BODY_SHA256 = "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45"
+EXPECTED_BODY_SHA256 = "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5"
 EXPECTED_ROW_COUNT = 566
 EXPECTED_FULL_NONZERO_ROW_COUNT = 539
 EXPECTED_MAXIMUM_ROW_BYTES = 786
@@ -49,7 +49,7 @@ EXPECTED_VARIANT_COUNT = 71
 # full/two-seed cold gate.  This freezes a content-only candidate descriptor;
 # it does not issue a namespace entry or grant execution authority.
 EXPECTED_CANONICAL_BYTES = 5_357
-EXPECTED_SHA256 = "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"
+EXPECTED_SHA256 = "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 FAMILY_ORDER = (
@@ -71,32 +71,32 @@ FAMILY_ORDER = (
 )
 
 CORE_MATRIX_PIN = (
-    "kcs.persona.core-family-count-matrix/v1",
+    "kio.persona.core-family-count-matrix/v1",
     2_410,
-    "045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7",
+    "271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561",
 )
 ENVELOPE_PIN = (
-    "kcs.persona.pc-envelope/v2",
+    "kio.persona.pc-envelope/v2",
     2,
     71_979,
-    "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+    "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
 )
 FORMAT_REGISTRY_PIN = (
-    "kcs.persona.pc-format-implementation-registry/v2",
+    "kio.persona.pc-format-implementation-registry/v2",
     2,
     333_881,
-    "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+    "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
 )
 FORMAT_REGISTRY_PROJECTION_PIN = (
     22_639,
-    "a2cf577c178bda8373952e087df5e5decba60d38fd875c13fc374f15410d0f57",
+    "3ef3404825c89dd97e9394ef039f8c7c25e7c94ee1e2ac5465f756cff79ca9af",
 )
 # zlib/base64 is a source-literal transport for the bounded consumed
 # projection only.  It is not a registry loader and cannot execute renderer
 # probes.  ``source_registry_sha256`` binds this projection to the full frozen
 # all-71 registry pin above.
 _FROZEN_FORMAT_REGISTRY_PROJECTION_ZLIB_B64 = (
-    "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"
+    "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"
 )
 
 ROW_FIELDS = frozenset(
@@ -133,7 +133,7 @@ AUTHORITY_FIELDS = (
     "authorizes_filesystem_mutation",
     "authorizes_g0_freeze",
     "authorizes_history_mutation",
-    "authorizes_kcs_execution",
+    "authorizes_kio_execution",
     "authorizes_physical_write",
     "authorizes_query_plan",
     "authorizes_renderer_execution",
@@ -799,7 +799,7 @@ def require_frozen_core_extension_allocation_manifest():
     _fail(
         "the descriptor/body golden is frozen but remains an unissued content-only "
         "candidate: namespace issuance, solver, source plan, render/write, history, "
-        "KCS, evaluation, and G0 authority are all absent"
+        "KIO, evaluation, and G0 authority are all absent"
     )
 
 

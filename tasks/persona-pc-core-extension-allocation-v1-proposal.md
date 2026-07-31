@@ -35,14 +35,14 @@ TOCTOUを拒否する。
 
 | order | input | consumed projection | canonical bytes | SHA-256 | authority |
 | ---: | --- | --- | ---: | --- | --- |
-| 1 | `kcs.persona.core-family-count-matrix/v1` candidate | 下表の`family_order`、p01--p20、full exact counts | 2,410 | `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7` | proposal-only、all false |
-| 2 | `kcs.persona.pc-envelope/v2` | `personas[].persona_id`と既存`variant_profiles`、宣言順ordinal | 71,979 | `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370` | envelope全体をpinするがcore adoption権限なし |
-| 3 | `kcs.persona.pc-format-implementation-registry/v2` | 71 implementation rows、extension、role、disposition、renderer/validator binding | 333,881 | `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683` | renderer/validator feasibilityのみ、`g0_contract_frozen=false` |
+| 1 | `kio.persona.core-family-count-matrix/v1` candidate | 下表の`family_order`、p01--p20、full exact counts | 2,410 | `271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561` | proposal-only、all false |
+| 2 | `kio.persona.pc-envelope/v2` | `personas[].persona_id`と既存`variant_profiles`、宣言順ordinal | 71,979 | `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7` | envelope全体をpinするがcore adoption権限なし |
+| 3 | `kio.persona.pc-format-implementation-registry/v2` | 71 implementation rows、extension、role、disposition、renderer/validator binding | 333,881 | `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d` | renderer/validator feasibilityのみ、`g0_contract_frozen=false` |
 
 input 1のcanonical bodyは次のshapeである。
 
 ```json
-{"family_order":["md","txt_log","code","structured_text","csv_tsv","html_eml","ipynb","pdf_text","pdf_scan","docx","xlsx","pptx","image","media","domain_binary"],"profile_id":"persona-core-v1","rows":[{"counts":[2880,1200,3840,1680,480,600,24,720,12,24,20,20,480,0,20],"persona_id":"p01","total_files":12000},{"counts":[3000,4200,2250,3300,750,450,0,600,10,30,20,20,300,0,70],"persona_id":"p02","total_files":15000},{"counts":[600,500,30,1800,1400,1600,0,2400,400,800,300,20,100,0,50],"persona_id":"p03","total_files":10000},{"counts":[1000,400,2500,1400,1600,0,2000,700,10,20,20,20,300,0,30],"persona_id":"p04","total_files":10000},{"counts":[720,840,1200,2160,3000,30,25,600,10,25,2640,480,240,0,30],"persona_id":"p05","total_files":12000},{"counts":[320,320,20,400,1600,20,20,1840,1120,800,640,20,560,0,320],"persona_id":"p06","total_files":8000},{"counts":[700,700,0,210,210,280,0,1960,1540,980,20,15,350,20,15],"persona_id":"p07","total_files":7000},{"counts":[1200,20,10,240,320,480,0,1440,15,1760,640,1600,240,10,25],"persona_id":"p08","total_files":8000},{"counts":[270,1980,0,90,540,30,0,900,360,1170,30,450,1800,1350,30],"persona_id":"p09","total_files":9000},{"counts":[220,30,0,220,770,550,0,2200,330,1650,2530,2420,30,0,50],"persona_id":"p10","total_files":11000},{"counts":[300,500,0,20,200,2800,0,1800,25,2000,700,1200,400,20,35],"persona_id":"p11","total_files":10000},{"counts":[2880,4000,480,3200,1440,1920,0,800,20,480,30,20,640,30,60],"persona_id":"p12","total_files":16000},{"counts":[210,350,0,140,15,1260,0,2100,840,1750,140,20,140,0,35],"persona_id":"p13","total_files":7000},{"counts":[260,25,15,910,2600,390,0,2080,650,1300,4160,520,25,0,65],"persona_id":"p14","total_files":13000},{"counts":[320,320,0,15,720,1600,0,1920,160,2160,560,20,160,10,35],"persona_id":"p15","total_files":8000},{"counts":[160,160,15,320,1120,20,0,2080,1280,1280,480,20,400,25,640],"persona_id":"p16","total_files":8000},{"counts":[240,45,0,20,160,80,0,2000,960,400,800,240,1600,15,1440],"persona_id":"p17","total_files":8000},{"counts":[360,1920,30,480,2400,30,0,2160,600,1200,2160,60,240,0,360],"persona_id":"p18","total_files":12000},{"counts":[720,25,0,15,180,180,0,1620,360,1980,540,1800,1080,450,50],"persona_id":"p19","total_files":9000},{"counts":[600,2500,20,200,200,1500,0,2000,1200,300,15,15,1000,400,50],"persona_id":"p20","total_files":10000}],"schema":"kcs.persona.core-family-count-matrix/v1"}
+{"family_order":["md","txt_log","code","structured_text","csv_tsv","html_eml","ipynb","pdf_text","pdf_scan","docx","xlsx","pptx","image","media","domain_binary"],"profile_id":"persona-core-v1","rows":[{"counts":[2880,1200,3840,1680,480,600,24,720,12,24,20,20,480,0,20],"persona_id":"p01","total_files":12000},{"counts":[3000,4200,2250,3300,750,450,0,600,10,30,20,20,300,0,70],"persona_id":"p02","total_files":15000},{"counts":[600,500,30,1800,1400,1600,0,2400,400,800,300,20,100,0,50],"persona_id":"p03","total_files":10000},{"counts":[1000,400,2500,1400,1600,0,2000,700,10,20,20,20,300,0,30],"persona_id":"p04","total_files":10000},{"counts":[720,840,1200,2160,3000,30,25,600,10,25,2640,480,240,0,30],"persona_id":"p05","total_files":12000},{"counts":[320,320,20,400,1600,20,20,1840,1120,800,640,20,560,0,320],"persona_id":"p06","total_files":8000},{"counts":[700,700,0,210,210,280,0,1960,1540,980,20,15,350,20,15],"persona_id":"p07","total_files":7000},{"counts":[1200,20,10,240,320,480,0,1440,15,1760,640,1600,240,10,25],"persona_id":"p08","total_files":8000},{"counts":[270,1980,0,90,540,30,0,900,360,1170,30,450,1800,1350,30],"persona_id":"p09","total_files":9000},{"counts":[220,30,0,220,770,550,0,2200,330,1650,2530,2420,30,0,50],"persona_id":"p10","total_files":11000},{"counts":[300,500,0,20,200,2800,0,1800,25,2000,700,1200,400,20,35],"persona_id":"p11","total_files":10000},{"counts":[2880,4000,480,3200,1440,1920,0,800,20,480,30,20,640,30,60],"persona_id":"p12","total_files":16000},{"counts":[210,350,0,140,15,1260,0,2100,840,1750,140,20,140,0,35],"persona_id":"p13","total_files":7000},{"counts":[260,25,15,910,2600,390,0,2080,650,1300,4160,520,25,0,65],"persona_id":"p14","total_files":13000},{"counts":[320,320,0,15,720,1600,0,1920,160,2160,560,20,160,10,35],"persona_id":"p15","total_files":8000},{"counts":[160,160,15,320,1120,20,0,2080,1280,1280,480,20,400,25,640],"persona_id":"p16","total_files":8000},{"counts":[240,45,0,20,160,80,0,2000,960,400,800,240,1600,15,1440],"persona_id":"p17","total_files":8000},{"counts":[360,1920,30,480,2400,30,0,2160,600,1200,2160,60,240,0,360],"persona_id":"p18","total_files":12000},{"counts":[720,25,0,15,180,180,0,1620,360,1980,540,1800,1080,450,50],"persona_id":"p19","total_files":9000},{"counts":[600,2500,20,200,200,1500,0,2000,1200,300,15,15,1000,400,50],"persona_id":"p20","total_files":10000}],"schema":"kio.persona.core-family-count-matrix/v1"}
 ```
 
 input 2は既存envelope全体をpinするが、core compilerが読んでよいのは人物ID、familyごとの
@@ -241,12 +241,12 @@ manifest、source plan、solver input、全下流closureをadditive re-freezeす
 
 ## 8. 566-row manifest contract候補
 
-正本候補は`kcs.persona.core-extension-allocation-manifest/v1`とし、exactly 566 rowsをpersona、family、
+正本候補は`kio.persona.core-extension-allocation-manifest/v1`とし、exactly 566 rowsをpersona、family、
 variant ordinal順に持つ。1 rowのkey setは次のexact 23 keysであり、optional keyはない。
 
 ```text
 schema_version
-row_schema = kcs.persona.core-extension-allocation-row/v1
+row_schema = kio.persona.core-extension-allocation-row/v1
 row_id
 profile_id = persona-core-v1
 persona_id
@@ -272,7 +272,7 @@ format_registry_sha256
 
 validatorは`set(row.keys())`がこの23-key setへexact一致することをsemantic field validationより先に確認し、
 unknown keyとmissing keyをともに拒否する。`schema_version`はboolではないexact integer `1`、
-`row_schema`はexact string `kcs.persona.core-extension-allocation-row/v1`である。
+`row_schema`はexact string `kio.persona.core-extension-allocation-row/v1`である。
 
 `family_ordinal`はboolではない0-based exact integerで、§2の`family_order`に対応する`0..14`である。
 `variant_ordinal`もboolではない0-based exact integerだが、global ordinalではない。各
@@ -288,15 +288,15 @@ NFC、exactly one terminal LFでframingする。566 rowsをdescriptorへ埋め�
 
 | descriptor field | exact candidate value |
 | --- | --- |
-| `artifact_schema` | `kcs.persona.core-extension-allocation-manifest/v1` |
+| `artifact_schema` | `kio.persona.core-extension-allocation-manifest/v1` |
 | `artifact_id` | `persona-core-v1-extension-allocation-manifest-v1` |
 | `body_id` | `persona-core-v1-extension-allocation-rows-v1` |
-| `row_schema` | `kcs.persona.core-extension-allocation-row/v1` |
+| `row_schema` | `kio.persona.core-extension-allocation-row/v1` |
 | `body_encoding` | `canonical-json-per-row-utf8-nfc-lf` |
 | `body_embedded` | `false` |
 | `body_final_lf` | `true` |
 | `body_canonical_bytes` | 426,889 |
-| `body_sha256` | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| `body_sha256` | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 | `row_count` | 566 |
 | `full_nonzero_row_count` | 539 |
 | `row_order` | persona ordinal、family ordinal、variant ordinal |
@@ -354,7 +354,7 @@ manifest golden freeze前に最低限、次をすべて機械確認する。
 11. variant、suffix、compound suffix、MIME、disposition、renderer/validator bindingが同一registry rowへ一致する。
 12. raw-only countからsearchable-positive、actual zero chunks、Recall、latencyを推論しない。
 13. unsupported variantがcore manifestに0件で、fallback totalが元family totalを保存する。
-14. external bodyが426,889 bytes / `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`、
+14. external bodyが426,889 bytes / `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`、
     566 / 539 rows、first/last ID、maximum row 786へexact一致する。
 15. bodyはdescriptor外部にあり、two-read providerの両owned bytesがbyte-for-byte一致し、provider call countが2となる。
 16. producer再実行、独立validator、`PYTHONHASHSEED=0/1`でcanonical bytes/SHAが一致する。
@@ -401,7 +401,7 @@ authorizes_solver_execution
 authorizes_renderer_execution
 authorizes_physical_write
 authorizes_filesystem_mutation
-authorizes_kcs_execution
+authorizes_kio_execution
 authorizes_history_mutation
 authorizes_replay_execution
 authorizes_query_plan
@@ -420,7 +420,7 @@ formal_capacity_gate_satisfied
 4. 566-row LF-JSONL producer、descriptor、builder-independent two-read validator、tamper/TOCTOU testsを
    implementation candidateとして実装する。
 5. `fast -> pre-freeze full -> cold/hash-seed 0/1`を通し、expected 426,889 bytes /
-   `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`を再現する。
+   `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`を再現する。
 6. **Manifest Golden-Freeze Decision/Gate**をDesign Adoption Decisionとは別に発行し、実装後のdescriptor/body
    bytes/SHA、566/539、first/last ID、maximum row bytes、validator pinをgoldenとして固定する。不一致ならstep 1へ戻る。
 7. `fast -> post-freeze full -> independent review`を通した後、frozen manifestをcontent-only namespaceへ収録する。

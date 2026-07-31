@@ -86,9 +86,9 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
     def test_identity_exact_goldens_and_independent_replay(self):
         exact = (
             3_500,
-            "1c52c83f8bd98407212e4014e7b006f38a93b0f82ff59a922a858d7e5663bfe2",
+            "f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1",
             236_068,
-            "a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44",
+            "ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd",
         )
         self.assertEqual(audit._expected_golden(), exact)
         self.assertEqual(independent._expected_golden(), exact)
@@ -162,10 +162,10 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
         binding = self.descriptor["legacy_variant_catalog_binding"]
         self.assertEqual(binding, {
             "artifact_kind": "persona-pc-v2-variant-catalog",
-            "artifact_schema": "kcs.persona.pc-variant-catalog/v2",
+            "artifact_schema": "kio.persona.pc-variant-catalog/v2",
             "artifact_schema_version": 2,
             "canonical_bytes": 211_733,
-            "sha256": "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+            "sha256": "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
         })
         core_binding = self.descriptor["core_allocation_binding"]
         self.assertEqual(core_binding["canonical_bytes"], 5_357)
@@ -294,8 +294,8 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_CORE_LEGACY_ALLOCATION_AUDIT_COLD") == "1",
-        "set KCS_RUN_CORE_LEGACY_ALLOCATION_AUDIT_COLD=1 for cold hash-seed replay",
+        os.environ.get("KIO_RUN_CORE_LEGACY_ALLOCATION_AUDIT_COLD") == "1",
+        "set KIO_RUN_CORE_LEGACY_ALLOCATION_AUDIT_COLD=1 for cold hash-seed replay",
     )
     def test_opt_in_two_seed_cold_replay(self):
         code = (
@@ -305,7 +305,7 @@ class CoreExtensionLegacyAllocationCompatibilityAuditTests(unittest.TestCase):
             "len(a.core_extension_legacy_source_allocation_delta_body_bytes()),"
             "hashlib.sha256(a.core_extension_legacy_source_allocation_delta_body_bytes()).hexdigest())"
         )
-        expected = "3500 1c52c83f8bd98407212e4014e7b006f38a93b0f82ff59a922a858d7e5663bfe2 236068 a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44"
+        expected = "3500 f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1 236068 ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd"
         for seed in ("0", "1"):
             env = dict(os.environ, PYTHONHASHSEED=seed)
             completed = subprocess.run(

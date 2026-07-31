@@ -4,7 +4,7 @@ The validator duplicates all metadata, formulas, PDF objects, OOXML parts,
 and classic ZIP_STORED framing that it accepts.  It deliberately imports no
 renderer, catalog, or planning module.  A successful receipt attests only
 bounded local bytes and structure, never source identity, physical placement,
-KCS execution, observed chunks, history, solver output, or G0 completion.
+KIO execution, observed chunks, history, solver output, or G0 completion.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-document-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-document-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-document-validator"
 VALIDATOR_ID = "persona-v2-id-free-raw-document-standalone-validator"
@@ -53,7 +53,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -77,7 +77,7 @@ _VARIANT_ROWS = {
         "base_bytes": 8_192,
         "complexity_measure": "document-sections",
         "content_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "expected_offline_disposition": "await_conversion",
         "family": "docx",
         "filename_extension": "docx",
@@ -90,7 +90,7 @@ _VARIANT_ROWS = {
         "base_bytes": 8_192,
         "complexity_measure": "scan-pages",
         "content_media_type": "application/pdf",
-        "expected_kcs_path_media_type": "application/pdf",
+        "expected_kio_path_media_type": "application/pdf",
         "expected_offline_disposition": "awaiting_ocr",
         "family": "pdf_scan",
         "filename_extension": "pdf",
@@ -103,7 +103,7 @@ _VARIANT_ROWS = {
         "base_bytes": 16_384,
         "complexity_measure": "slides",
         "content_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "expected_offline_disposition": "await_conversion",
         "family": "pptx",
         "filename_extension": "pptx",
@@ -116,7 +116,7 @@ _VARIANT_ROWS = {
         "base_bytes": 12_288,
         "complexity_measure": "worksheets",
         "content_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "expected_offline_disposition": "await_conversion",
         "family": "xlsx",
         "filename_extension": "xlsx",
@@ -204,7 +204,7 @@ class RawDocumentValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -255,7 +255,7 @@ def _validate_request_shape(request):
     metadata = (
         request.extension,
         request.content_media_type,
-        request.expected_kcs_path_media_type,
+        request.expected_kio_path_media_type,
         request.expected_offline_disposition,
     )
     if any(type(value) is not str for value in metadata):
@@ -263,7 +263,7 @@ def _validate_request_shape(request):
     expected = (
         profile["filename_extension"],
         profile["content_media_type"],
-        profile["expected_kcs_path_media_type"],
+        profile["expected_kio_path_media_type"],
         profile["expected_offline_disposition"],
     )
     if metadata != expected:
@@ -1474,7 +1474,7 @@ def validate_raw_document_payload(request):
         "byte_length": len(request.data),
         "container_member_count": member_count,
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "observed_complexity_measure": profile["complexity_measure"],
         "observed_local_complexity": request.target_complexity,
         "pdf_text_layer_absent": pdf_text_layer_absent,
@@ -1496,7 +1496,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -1531,7 +1531,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -1547,7 +1547,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "four-id-free-formal-ordinary-raw-document-validation-variants-only-"
-            "not-byte-stress-source-materialization-or-kcs-attestation"
+            "not-byte-stress-source-materialization-or-kio-attestation"
         ),
         "independence_contract": {
             "imports_planning_modules": False,

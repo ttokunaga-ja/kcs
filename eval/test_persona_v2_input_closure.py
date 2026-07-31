@@ -10,23 +10,23 @@ from eval import persona_v2_artifact_common as common
 from eval import persona_v2_input_closure as closure
 
 
-FIXTURE_ID = "kcs-persona-pc-v2-test"
+FIXTURE_ID = "kio-persona-pc-v2-test"
 EXPECTED_SYNTHETIC_ROOT_IDENTITIES = {
     "corpus": (
         3_245,
-        "5baa2a0e7768c30d64e3b4adbc2da5e4bed4f7772096e574f42225350877bbeb",
+        "845c78909d0fa9d38ef580b75ac3ff7d675d782ab53963c56e3fb9aeeba7d3fe",
     ),
     "evaluation": (
         4_014,
-        "83e5e5da0880596facdcd299c52eabfe1855fef99ce4794dd34c753cc9409cfd",
+        "f1aec08623b5b5282f315c22addeb15e79ed8d3fc716e0eb64c58c16a59ff325",
     ),
     "semantic": (
         3_723,
-        "c478d9bac57204e137e2b666ffebdc54d65dfdf923be9fe74972631f512ca4c5",
+        "53d4c8e5663be43579a994422f1dff4053adfc5a628801d711dcc5a5327c2d9b",
     ),
     "suite": (
         2_624,
-        "c98bac72e2597b5f90944fe8c1d47888ed5e607555768a1dd4e1ea5642e4b58d",
+        "135ca8c0a7e27e6ed1911867fcf2172594be71da1bfbf4539927c2dcc902311f",
     ),
 }
 
@@ -121,13 +121,13 @@ def _world(
     oracle_final_id=False,
 ):
     route = _body(
-        schema="kcs.persona.pc-route-affinity/v2",
+        schema="kio.persona.pc-route-affinity/v2",
         kind="persona-pc-v2-route-affinity-matrix",
         payload={"route_value": route_value},
     )
     route_pin = _pin("route-body", "corpus-semantic", route)
     source = _body(
-        schema="kcs.persona.pc-source-intent-origin-shard/v2",
+        schema="kio.persona.pc-source-intent-origin-shard/v2",
         kind="persona-pc-v2-source-intent-origin-shard",
         payload={"intent_key": "p01-intent-pilot-syn-0001"},
         dependencies=(("route-body", route_pin["sha256"]),),
@@ -148,7 +148,7 @@ def _world(
     )
 
     receipt = _body(
-        schema="kcs.persona.pc-review-evidence/v2",
+        schema="kio.persona.pc-review-evidence/v2",
         kind="persona-pc-v2-review-evidence",
         payload={"review_evidence": review_value},
         dependencies=(("route-body", route_pin["sha256"]),),
@@ -175,7 +175,7 @@ def _world(
     )
 
     query = _body(
-        schema="kcs.persona.pc-query-intent/v2",
+        schema="kio.persona.pc-query-intent/v2",
         kind="persona-pc-v2-query-intent",
         payload={
             "formal_relevance_compiled": formal_compiled,
@@ -191,7 +191,7 @@ def _world(
     if oracle_final_id:
         oracle_payload["final_source_id"] = "forbidden-final-source"
     oracle = _body(
-        schema="kcs.persona.pc-semantic-oracle/v2",
+        schema="kio.persona.pc-semantic-oracle/v2",
         kind="persona-pc-v2-semantic-oracle",
         payload=oracle_payload,
         dependencies=(
@@ -469,7 +469,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
     def test_exact_schema_length_and_sha_pins_fail_closed(self):
         world = _world()
         for field, replacement, message in (
-            ("artifact_schema", "kcs.wrong/v2", "artifact_schema drifted"),
+            ("artifact_schema", "kio.wrong/v2", "artifact_schema drifted"),
             ("canonical_bytes", 1, "canonical byte length"),
             ("sha256", "0" * 64, "SHA-256 differs"),
         ):
@@ -549,7 +549,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         orphan = _body(
-            schema="kcs.persona.pc-fact-graph/v2",
+            schema="kio.persona.pc-fact-graph/v2",
             kind="persona-pc-v2-fact-graph",
             payload={"fact": "orphan"},
         )
@@ -613,13 +613,13 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         leaf_b = _body(
-            schema="kcs.persona.pc-fact-graph/v2",
+            schema="kio.persona.pc-fact-graph/v2",
             kind="persona-pc-v2-fact-graph",
             payload={"leaf": "b"},
         )
         pin_b = _pin("leaf-b", "corpus-semantic", leaf_b)
         leaf_a = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"hidden_downstream_sha256": pin_b["sha256"]},
         )
@@ -634,7 +634,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         missing_variant = _body(
-            schema="kcs.persona.pc-source-intent-origin-shard/v2",
+            schema="kio.persona.pc-source-intent-origin-shard/v2",
             kind="persona-pc-v2-source-intent-origin-shard",
             payload={"intent_key": "p01-intent-pilot-syn-0001"},
             dependencies=(("variant-catalog", "f" * 64),),
@@ -658,19 +658,19 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         envelope_body = _body(
-            schema="kcs.persona.pc-envelope/v2",
+            schema="kio.persona.pc-envelope/v2",
             kind="persona-pc-v2-envelope",
             payload={"value": "envelope"},
         )
         topology_body = _body(
-            schema="kcs.persona.pc-topology/v2",
+            schema="kio.persona.pc-topology/v2",
             kind="persona-pc-v2-topology",
             payload={"value": "topology"},
         )
         envelope_pin = _pin("envelope", "corpus-semantic", envelope_body)
         topology_pin = _pin("topology", "corpus-semantic", topology_body)
         explicit_owner_mismatch = _body(
-            schema="kcs.persona.pc-route-affinity/v2",
+            schema="kio.persona.pc-route-affinity/v2",
             kind="persona-pc-v2-route-affinity-matrix",
             payload={"value": "bad-explicit-bindings"},
         )
@@ -701,7 +701,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         spoofed_topology = _body(
-            schema="kcs.persona.pc-fact-graph/v2",
+            schema="kio.persona.pc-fact-graph/v2",
             kind="persona-pc-v2-fact-graph",
             payload={"value": "not-topology"},
         )
@@ -709,7 +709,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             "topology", "corpus-semantic", spoofed_topology
         )
         spoofed_owner_route = _body(
-            schema="kcs.persona.pc-route-affinity/v2",
+            schema="kio.persona.pc-route-affinity/v2",
             kind="persona-pc-v2-route-affinity-matrix",
             payload={"value": "spoofed-owner"},
         )
@@ -738,7 +738,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         malformed_dependency = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "x"},
         )
@@ -772,7 +772,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         )
         for input_bindings in malformed_collections:
             malformed_collection = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={"value": "x"},
             )
@@ -798,7 +798,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
         novel_sha_field = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"new_contract_sha256": "e" * 64},
         )
@@ -825,7 +825,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             "opaque",
         ):
             digest_field = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={digest_key: "d" * 64},
             )
@@ -847,7 +847,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
         digest_key_body = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"d" * 64: "value"},
         )
@@ -862,7 +862,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
         for artifact_digest in ("A" * 64, "aA" * 32):
             opaque_case_variant = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={"opaque": artifact_digest},
             )
@@ -888,7 +888,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
             key_case_variant = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={artifact_digest: "value"},
             )
@@ -912,7 +912,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
         back_binding = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "x"},
         )
@@ -928,7 +928,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         digest_back_binding = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"corpus_input_closure_digest": "0" * 64},
         )
@@ -1048,7 +1048,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
         contradictory_binding_metadata = {
             "artifact_kind": "persona-pc-v2-not-the-owner",
-            "artifact_schema": "kcs.persona.pc-not-the-owner/v2",
+            "artifact_schema": "kio.persona.pc-not-the-owner/v2",
             "artifact_schema_version": 3,
             "canonical_bytes": 1,
             "fixture_id": "wrong-fixture",
@@ -1110,7 +1110,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         schema_back_binding = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"downstream_schema": closure.EVALUATION_INPUT_CLOSURE_SCHEMA},
         )
@@ -1138,7 +1138,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             "can-solve",
         ):
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={"value": "x"},
             )
@@ -1178,7 +1178,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
         for capability_key in ("solver_enabled", "write_enabled", "g0_enabled"):
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={capability_key: True},
             )
@@ -1206,7 +1206,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         )
         for capability_key in positive_capability_aliases:
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={capability_key: True},
             )
@@ -1229,7 +1229,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         }
         for capability_key, capability_value in double_negative_capabilities.items():
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={capability_key: capability_value},
             )
@@ -1286,7 +1286,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         )
         for index, capability_payload in enumerate(split_capability_claims):
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload=capability_payload,
             )
@@ -1310,7 +1310,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         )
         for authority_key in inverted_authority_aliases:
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={authority_key: False},
             )
@@ -1337,7 +1337,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         )
         for authority_key in inside_authority_aliases:
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={"value": "x"},
             )
@@ -1354,7 +1354,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
         missing_authority_field = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "x"},
         )
@@ -1378,7 +1378,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         generic_authority_on_known_schema = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "x"},
         )
@@ -1407,12 +1407,12 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
         relocated_capability_metadata = (
             (
-                "kcs.persona.pc-joint-solver-policy/v2",
+                "kio.persona.pc-joint-solver-policy/v2",
                 "pre_solve_prohibited_fields",
                 ["source_id", "materialization_id"],
             ),
             (
-                "kcs.persona.pc-source-intent-origin-shard/v2",
+                "kio.persona.pc-source-intent-origin-shard/v2",
                 "allowed_history_cohort_ids",
                 ["P", "X", "Y"],
             ),
@@ -1434,7 +1434,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     )
 
         exact_execution_mode = _body(
-            schema="kcs.persona.pc-realism-profile/v2",
+            schema="kio.persona.pc-realism-profile/v2",
             kind="persona-pc-v2-realism-profile",
             payload={"value": "exact-execution-mode"},
         )
@@ -1480,7 +1480,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         exact_history_assignment = _body(
-            schema="kcs.persona.pc-source-intent-origin-shard/v2",
+            schema="kio.persona.pc-source-intent-origin-shard/v2",
             kind="persona-pc-v2-source-intent-origin-shard",
             payload={"value": "exact-history-assignment"},
         )
@@ -1529,7 +1529,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         subtree_body = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={
                 "history_cohort_templates": [
@@ -1542,7 +1542,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             },
         )
         subtree_path = (
-            "kcs.persona.pc-source-profile-catalog/v2",
+            "kio.persona.pc-source-profile-catalog/v2",
             ("payload", "history_cohort_templates"),
         )
         subtree_raw = _canonicalize(
@@ -1585,7 +1585,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             del closure._EXACT_CAPABILITY_SUBTREE_PINS[subtree_path]
 
         solver_metadata = _body(
-            schema="kcs.persona.pc-joint-solver-policy/v2",
+            schema="kio.persona.pc-joint-solver-policy/v2",
             kind="persona-pc-v2-joint-solver-policy",
             payload={
                 "authority_exact_false_fields": [
@@ -1606,7 +1606,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         identity_boundary = _body(
-            schema="kcs.persona.pc-joint-solver-policy/v2",
+            schema="kio.persona.pc-joint-solver-policy/v2",
             kind="persona-pc-v2-joint-solver-policy",
             payload={
                 "final_identity_derivation": (
@@ -1649,7 +1649,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             ("source-shard-p01", source_pin["sha256"]),
         )
         relational_oracle = _body(
-            schema="kcs.persona.pc-semantic-oracle/v2",
+            schema="kio.persona.pc-semantic-oracle/v2",
             kind="persona-pc-v2-semantic-oracle",
             payload={"value": "relational-history-template-check"},
             dependencies=semantic_oracle_dependencies,
@@ -1767,7 +1767,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                     build_relational_oracle(drifted_oracle)
 
         receipt_metadata = _body(
-            schema="kcs.persona.pc-review-evidence/v2",
+            schema="kio.persona.pc-review-evidence/v2",
             kind="persona-pc-v2-review-evidence",
             payload={"review": "negative"},
         )
@@ -1855,7 +1855,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
         for forbidden_key in ("query_text", "answer", "distractors"):
             leaky_corpus_body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={forbidden_key: "evaluation-only-semantics"},
             )
@@ -1908,7 +1908,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
     def test_canonical_order_and_trusted_anchor_composition_fail_closed(self):
         body = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"z_ready": False, "a_complete": False},
         )
@@ -2011,7 +2011,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
     def test_builders_enforce_root_cap_before_return(self):
         body = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "x"},
         )
@@ -2044,7 +2044,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
         pin_by_id = {}
         for index, entry_id in enumerate(dependency_ids):
             body = _body(
-                schema="kcs.persona.pc-synthetic-binding-leaf/v2",
+                schema="kio.persona.pc-synthetic-binding-leaf/v2",
                 kind="persona-pc-v2-synthetic-binding-leaf",
                 payload={"ordinal": index},
             )
@@ -2068,7 +2068,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             pin_by_id[entry_id] = pin
 
         consumer = _body(
-            schema="kcs.persona.pc-source-profile-catalog/v2",
+            schema="kio.persona.pc-source-profile-catalog/v2",
             kind="persona-pc-v2-source-profile-catalog",
             payload={"value": "mixed-bindings"},
         )
@@ -2236,7 +2236,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                 dependencies = ((previous_id, previous_sha256),)
                 dependency_ids = (previous_id,)
             body = _body(
-                schema="kcs.persona.pc-source-profile-catalog/v2",
+                schema="kio.persona.pc-source-profile-catalog/v2",
                 kind="persona-pc-v2-source-profile-catalog",
                 payload={"ordinal": index},
                 dependencies=dependencies,
@@ -2263,7 +2263,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
     def test_route_review_exact_digest_evidence_is_narrowly_allowlisted(self):
         route = _body(
-            schema="kcs.persona.pc-route-affinity/v2",
+            schema="kio.persona.pc-route-affinity/v2",
             kind="persona-pc-v2-route-affinity-matrix",
             payload={"route": "candidate"},
         )
@@ -2276,7 +2276,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
 
         def receipt_with_checks(checks):
             receipt = _body(
-                schema="kcs.persona.pc-route-review-receipt/v2",
+                schema="kio.persona.pc-route-review-receipt/v2",
                 kind="persona-pc-v2-route-review-receipt",
                 payload={"review": "negative"},
                 dependencies=(("route-affinity-body", route_pin["sha256"]),),
@@ -2472,7 +2472,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             )
 
         hybrid = _body(
-            schema="kcs.persona.pc-query-review-receipt/v2",
+            schema="kio.persona.pc-query-review-receipt/v2",
             kind="persona-pc-v2-query-review-receipt",
             payload={"neutral": "bytes"},
         )

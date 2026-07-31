@@ -909,7 +909,7 @@ UTF-8 byte order 最小**の chunk を指す。逆引きの探索範囲は検索
 | `eval/run_eval.py` (合成・CI 常時) | M3-1/2/3 = 1.0 / 1.0 / 1.0 (目標 0.8) | ❌ 天井。劣化を検出できない |
 | `eval/run_baseline.py` (fixture-b 24 問) | kio 0.9167、hard3 は 6/8 | ✅ 余地がある |
 
-その fixture は失われていなかった。当時は改名前の `kcs-` 名で残っていた
+その fixture は失われていなかった。当時は改名前の `kio-` 名で残っていた
 (**2026-07-28 に `kio-` へ改名済み**)。所在は 2026-07-28 に実測し直した:
 
 | 場所 | golden 24 問 | `.kio` | 中身 |
@@ -921,7 +921,7 @@ UTF-8 byte order 最小**の chunk を指す。逆引きの探索範囲は検索
 qhard の 24 ファイルは `/tmp` にしか無かったため `~/kio-baseline-corpus-qhard` へ
 保全済み (バイト一致確認済み)。
 
-> **訂正 (2026-07-28)**: 本節は以前 `/private/tmp/kcs-fixture-run` を
+> **訂正 (2026-07-28)**: 本節は以前 `/private/tmp/kio-fixture-run` を
 > 「index 済み store」と書いていたが**誤り**だった。実際には `.kio` が 1 つも無く
 > golden query の正解も 0/24 で、index 済みの実体は `~/kio-dogfood/corpus-v1/corpus`
 > にある (`scope-registry.sqlite` の 433 scope もそちらを指している)。

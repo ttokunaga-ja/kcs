@@ -36,14 +36,14 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ORIGIN_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-origin-manifest/v1"
+    "kio.persona.pc-lifecycle-effective-membership-origin-manifest/v1"
 )
 PROFILE_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-profile-manifest/v1"
+    "kio.persona.pc-lifecycle-effective-membership-profile-manifest/v1"
 )
-SUITE_SCHEMA = "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1"
+SUITE_SCHEMA = "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1"
 PROJECTION_SCHEMA = (
-    "kcs.persona.pc-lifecycle-effective-membership-content-projection/v1"
+    "kio.persona.pc-lifecycle-effective-membership-content-projection/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 
@@ -69,26 +69,30 @@ EXPECTED_INVERTED_CONSUMER_REFERENCE_COUNT = 600
 EXPECTED_PRESENT_FACT_REFERENCE_COUNT = 1_033_680
 EXPECTED_SUITE_CANONICAL_BYTES = 69_195
 EXPECTED_SUITE_SHA256 = (
-    "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c"
+    "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29"
 )
 EXPECTED_MAX_ORIGIN_MANIFEST_BYTES = 5_592
 EXPECTED_MAX_PROFILE_MANIFEST_BYTES = 3_301
-EXPECTED_MAX_CONTENT_PROJECTION_BYTES = 103_864
+# 2026-07-28 に 103_864 から動いた。改名で `_domain_key` の前置詞が変わり
+# cross-format の照合結果が変わったため、最大の content projection が別の
+# ペルソナのものになった。観測された最大値であって選んだ閾値ではないので、
+# 実測に合わせる。同じ組の他の 6 つは動いていない。
+EXPECTED_MAX_CONTENT_PROJECTION_BYTES = 103_840
 EXPECTED_MAX_COMPACT_ROW_BYTES_INCLUDING_LF = 1_136
 EXPECTED_MAX_EXPANDED_ROW_BYTES_INCLUDING_LF = 913
 EXPECTED_MAX_EVENT_LINEAGE_ROW_BYTES_INCLUDING_LF = 571
 EXPECTED_MAX_INVERTED_ROW_BYTES_INCLUDING_LF = 600
-EXPECTED_P01_PILOT_COMPACT_BODY_BYTES = 127_240
+EXPECTED_P01_PILOT_COMPACT_BODY_BYTES = 127_252
 EXPECTED_P01_PILOT_COMPACT_BODY_SHA256 = (
-    "5a9b2462ee982cc1daa28e9584b032619159a8026d4c19d7ddbca4be233e8e2d"
+    "b4dc476b51916e67d2e6c021f9a50a319611fe3840719c5de10ba4fd26f0404d"
 )
 EXPECTED_P12_FULL_RESIDUAL_COMPACT_BODY_BYTES = 2_460
 EXPECTED_P12_FULL_RESIDUAL_COMPACT_BODY_SHA256 = (
     "aefbfd79351fce4cd369e7fbf548db1734882e14f14ec524bb4499acc036234d"
 )
-EXPECTED_P01_CONTENT_PROJECTION_BYTES = 103_433
+EXPECTED_P01_CONTENT_PROJECTION_BYTES = 103_439
 EXPECTED_P01_CONTENT_PROJECTION_SHA256 = (
-    "a2879b97f6e99953aeecdd084c9302b713f29a52300b2d19455790ee63d5917f"
+    "d620a63b9762cf6119d795845c5b1533207ced29ae97fbb6ab3765a966d07f5e"
 )
 EXPECTED_W0_MODE_COUNTS = {
     "base-inheritance": 200_800,
@@ -128,7 +132,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
@@ -138,7 +142,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
     }
@@ -1175,7 +1179,7 @@ def _canonical_origin_manifest(persona_id, origin):
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "filesystem-materialization-capacity-and-kcs-observation",
+            "filesystem-materialization-capacity-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {
@@ -1545,7 +1549,7 @@ def _canonical_profile_manifest(persona_id, profile):
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "physical-capacity-materialization-and-kcs-observation",
+            "physical-capacity-materialization-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {
@@ -1776,7 +1780,7 @@ def _canonical_suite_descriptor():
         "remaining_blockers": [
             "joint-scope-bucket-cohort-quota-solution-and-proof",
             "solution-compiled-complete-post-W0-membership-and-history-plan",
-            "physical-capacity-materialization-and-kcs-observation",
+            "physical-capacity-materialization-and-kio-observation",
             "formal-G0-approval",
         ],
         "summary": {
@@ -2166,7 +2170,7 @@ def require_solution_compiled_history_and_execution():
     raise PersonaV2LifecycleEffectiveMembershipReconciliationError(
         "effective W0 lifecycle membership and purge-witness isolation are exact, "
         "but joint solving, complete post-W0 membership, compiled history, "
-        "physical materialization, capacity/KCS observations, and G0 authority "
+        "physical materialization, capacity/KIO observations, and G0 authority "
         "remain downstream"
     )
 

@@ -9,7 +9,7 @@ from eval import persona_v2_semantic_oracle as semantic_oracle
 
 EXPECTED_P01_CANONICAL_BYTES = 199_521
 EXPECTED_P01_SHA256 = (
-    "97ebd590e39eaf9b7b8026895fb21df18af425f47e94b452734c1b60b7008954"
+    "653508e88689f34e70d8702e4d59bfde9bde1dbf8f45190963a043435571a0c3"
 )
 
 

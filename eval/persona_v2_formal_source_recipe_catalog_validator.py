@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_format_implementation_registry_validator as registry_validator
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-formal-source-recipe-profile-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-formal-source-recipe-profile-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-formal-source-recipe-profile-catalog"
 MAX_CATALOG_BYTES = 1024 * 1024
@@ -39,37 +39,37 @@ EXPECTED_PROFILE_COUNT = 71
 # dependency change is therefore review-visible.
 EXPECTED_CATALOG_CANONICAL_BYTES = 386_152
 EXPECTED_CATALOG_SHA256 = (
-    "973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8"
+    "0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df"
 )
 
 DEPENDENCY_PINS = {
     "persona-v2-variant-catalog": (
         "persona-pc-v2-variant-catalog",
-        "kcs.persona.pc-variant-catalog/v2",
+        "kio.persona.pc-variant-catalog/v2",
         2,
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     "persona-v2-source-inventory-profile-catalog": (
         "persona-pc-v2-source-inventory-profile-catalog",
-        "kcs.persona.pc-source-inventory-profile-catalog/v2",
+        "kio.persona.pc-source-inventory-profile-catalog/v2",
         2,
         87_391,
-        "be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196",
+        "9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0",
     ),
     "persona-v2-format-implementation-registry": (
         "persona-pc-v2-format-implementation-registry",
-        "kcs.persona.pc-format-implementation-registry/v2",
+        "kio.persona.pc-format-implementation-registry/v2",
         2,
         333_881,
-        "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+        "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
     ),
     "persona-v2-source-semantic-membership-catalog": (
         "persona-pc-v2-source-semantic-membership-catalog",
-        "kcs.persona.pc-source-semantic-membership-catalog/v2",
+        "kio.persona.pc-source-semantic-membership-catalog/v2",
         2,
         436_495,
-        "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62",
+        "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b",
     ),
 }
 
@@ -95,7 +95,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -107,7 +107,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "renderer_execution_environment_available",
         "semantic_payload_adapter_available",
     }
@@ -693,7 +693,7 @@ def _profile_row(
         _fail(f"upstream semantic recipe-slot binding drifted: {variant_id}")
     exact_fields = (
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -740,8 +740,8 @@ def _profile_row(
         "complexity_byte_policy": _complexity_byte_policy(implementation_row),
         "content_media_type": variant_row["content_media_type"],
         "content_policy": _content_policy(semantic_row, variant_id),
-        "expected_kcs_path_media_type": variant_row[
-            "expected_kcs_path_media_type"
+        "expected_kio_path_media_type": variant_row[
+            "expected_kio_path_media_type"
         ],
         "expected_offline_disposition": variant_row[
             "expected_offline_disposition"
@@ -934,7 +934,7 @@ def _expected_value(
             "scope-bucket-cohort-quota-solver-solution-and-proof-unbound",
             "ordinary-tail-counts-byte-histograms-and-capacity-receipts-unbound",
             "production-mime-and-actual-chunk-observation-unbound",
-            "physical-render-write-history-kcs-and-g0-authority-absent",
+            "physical-render-write-history-kio-and-g0-authority-absent",
         ],
     }
 

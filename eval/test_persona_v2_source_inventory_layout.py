@@ -61,7 +61,7 @@ class PersonaV2SourceInventoryLayoutTests(unittest.TestCase):
         self.assertEqual(len(raw), 274_566)
         self.assertEqual(
             layout.source_inventory_layout_sha256(self.value),
-            "ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba",
+            "81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a",
         )
         self.assertTrue(layout.validate_source_inventory_layout(self.value))
         self.assertLessEqual(len(raw), layout.MAX_LAYOUT_BYTES)

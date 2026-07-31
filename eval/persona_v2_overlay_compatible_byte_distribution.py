@@ -13,7 +13,7 @@ aggregate artifact immutable and supersedes only its EML histogram:
 
 The artifact remains aggregate.  It binds no source-to-bin assignment, content
 payload, decoded attachment bytes, scope, chunk quota, final identifier,
-render, filesystem write, history operation, KCS execution, or G0 authority.
+render, filesystem write, history operation, KIO execution, or G0 authority.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_overlay_reservation_layout as reservation
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-overlay-compatible-byte-distribution/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-overlay-compatible-byte-distribution/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-overlay-compatible-byte-distribution"
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -60,15 +60,15 @@ EXPECTED_FULL_RAW_DELTA_BYTES = -5_095_424
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-aggregate-byte-distribution-catalog": (
         1_576_125,
-        "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343",
+        "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2",
     ),
     "persona-v2-format-implementation-registry": (
         333_881,
-        "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+        "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
     ),
     "persona-v2-overlay-reservation-suite": (
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
 }
 
@@ -79,7 +79,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -89,7 +89,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_instance_parameters_bound",
     }
 )
@@ -655,8 +655,8 @@ def _probe_receipts(inputs, formula, renderer_provider, validator_provider):
             {
                 "content_media_type": implementation_row["content_media_type"],
                 "data": data,
-                "expected_kcs_path_media_type": implementation_row[
-                    "expected_kcs_path_media_type"
+                "expected_kio_path_media_type": implementation_row[
+                    "expected_kio_path_media_type"
                 ],
                 "expected_offline_disposition": implementation_row[
                     "expected_offline_disposition"
@@ -677,7 +677,7 @@ def _probe_receipts(inputs, formula, renderer_provider, validator_provider):
                 "attachment_count": complexity,
                 "byte_length": target_bytes,
                 "identity_tokens_absent": True,
-                "kcs_execution_attested": False,
+                "kio_execution_attested": False,
                 "observed_complexity_measure": "attachments",
                 "observed_local_complexity": complexity,
                 "structure_validated": True,
@@ -865,7 +865,7 @@ def _build_catalog(
         "effective_html_eml_family_projection_rows": html_eml_family_summaries,
         "completion_scope": (
             "aggregate-eml-overlay-compatible-parameter-histogram-supersession-"
-            "only-no-source-assignment-no-content-no-render-write-history-kcs-or-g0"
+            "only-no-source-assignment-no-content-no-render-write-history-kio-or-g0"
         ),
         "effective_persona_summaries": persona_summaries,
         "effective_suite_summary": suite_summary,
@@ -993,7 +993,7 @@ def require_source_instance_parameter_assignment():
     raise PersonaV2OverlayCompatibleByteDistributionError(
         "the EML aggregate is now overlay-compatible, but all 203,000 source "
         "assignments, exact-duplicate coassignment, semantic payloads, solution, "
-        "rendering, writes, history, KCS, capacity readback, and G0 remain absent"
+        "rendering, writes, history, KIO, capacity readback, and G0 remain absent"
     )
 
 

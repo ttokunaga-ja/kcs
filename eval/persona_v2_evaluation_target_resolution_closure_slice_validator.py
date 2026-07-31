@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-evaluation-target-resolution-closure-slice/v1"
+    "kio.persona.pc-evaluation-target-resolution-closure-slice/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = (
@@ -64,31 +64,31 @@ MAX_TRANSITIVE_PROVIDER_BYTES = 60 * 2**20
 
 EXPECTED_CANONICAL_BYTES = 16_735
 EXPECTED_SHA256 = (
-    "bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2"
+    "02351c5c4df712c345b3f5e9e1851c779b82e4d08d445b7da7e833b9f9f787d3"
 )
 
 NAMESPACE_CANONICAL_BYTES = 161_665
 NAMESPACE_SHA256 = (
-    "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509"
+    "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa"
 )
 COMPLETE_INVENTORY_CANONICAL_BYTES = 697_466
 COMPLETE_INVENTORY_SHA256 = (
-    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
 ORDERED_PROJECTION_PINS_SHA256 = (
-    "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
+    "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
 )
 TARGET_RESOLUTION_CANONICAL_BYTES = 4_478_576
 TARGET_RESOLUTION_SHA256 = (
-    "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc"
+    "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff"
 )
 REQUEST_ONLY_CORPUS_CLOSURE_CANONICAL_BYTES = 7_590
 REQUEST_ONLY_CORPUS_CLOSURE_SHA256 = (
-    "47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126"
+    "ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f"
 )
-SEMANTIC_FEASIBILITY_CANONICAL_BYTES = 40_947
+SEMANTIC_FEASIBILITY_CANONICAL_BYTES = 40_949
 SEMANTIC_FEASIBILITY_SHA256 = (
-    "890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136"
+    "573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f"
 )
 TRANSITIVE_BINDING_ROWS_CANONICAL_BYTES = 24_961
 TRANSITIVE_BINDING_ROWS_SHA256 = (
@@ -126,7 +126,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_execution",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_execution",
         "authorizes_query_rendering",
@@ -848,7 +848,7 @@ def _expected_direct_pins():
             artifact_kind=(
                 "persona-pc-v2-projection-pin-corpus-semantic-namespace"
             ),
-            artifact_schema="kcs.persona.pc-corpus-semantic-namespace/v3",
+            artifact_schema="kio.persona.pc-corpus-semantic-namespace/v3",
             artifact_schema_version=3,
             canonical_bytes=NAMESPACE_CANONICAL_BYTES,
             sha256=NAMESPACE_SHA256,
@@ -860,7 +860,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-complete-semantic-projection-derivation-inventory"
             ),
             artifact_schema=(
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v2"
             ),
             artifact_schema_version=2,
             canonical_bytes=COMPLETE_INVENTORY_CANONICAL_BYTES,
@@ -871,7 +871,7 @@ def _expected_direct_pins():
             dependency_role="evaluation-target-resolution",
             artifact_kind="persona-pc-v2-query-history-target-resolution",
             artifact_schema=(
-                "kcs.persona.pc-query-history-target-resolution/v1"
+                "kio.persona.pc-query-history-target-resolution/v1"
             ),
             artifact_schema_version=1,
             canonical_bytes=TARGET_RESOLUTION_CANONICAL_BYTES,
@@ -886,7 +886,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-corpus-input-closure-manifest-request-only-"
                 "candidate"
             ),
-            artifact_schema="kcs.persona.pc-corpus-input-closure-manifest/v3",
+            artifact_schema="kio.persona.pc-corpus-input-closure-manifest/v3",
             artifact_schema_version=3,
             canonical_bytes=REQUEST_ONLY_CORPUS_CLOSURE_CANONICAL_BYTES,
             sha256=REQUEST_ONLY_CORPUS_CLOSURE_SHA256,
@@ -903,7 +903,7 @@ def _expected_direct_pins():
                 "feasibility-audit"
             ),
             artifact_schema=(
-                "kcs.persona.pc-query-history-semantic-resolution-"
+                "kio.persona.pc-query-history-semantic-resolution-"
                 "feasibility-audit/v1"
             ),
             artifact_schema_version=1,
@@ -968,7 +968,7 @@ def _corpus_context_summary():
         "authoritative_corpus_input_closure_available": False,
         "authoritative_corpus_input_closure_bound": False,
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_469,
+        "cumulative_external_projection_bytes": 155_741_381,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,
@@ -1605,7 +1605,7 @@ def _expected_value(snapshot):
             "abstract-event-templates-not-compiled-to-history-event-identities",
             "scope-bucket-cohort-quota-solution-proof-and-final-source-plan-not-built",
             "query-render-byte-uniqueness-and-compiled-relevance-not-built",
-            "filesystem-render-index-history-kcs-receipts-and-g0-not-built",
+            "filesystem-render-index-history-kio-receipts-and-g0-not-built",
         ],
         "summary": {
             "abstract_companion_binding_count": 200,

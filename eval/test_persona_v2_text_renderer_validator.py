@@ -25,7 +25,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
                 data=rendered.data,
                 extension=rendered.extension,
                 content_media_type=rendered.content_media_type,
-                expected_kcs_path_media_type=rendered.expected_kcs_path_media_type,
+                expected_kio_path_media_type=rendered.expected_kio_path_media_type,
                 expected_offline_disposition=rendered.expected_offline_disposition,
             )
         )
@@ -37,12 +37,12 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(renderer.canonical_json_bytes(renderer_value)), 5_976)
         self.assertEqual(
             renderer.renderer_contract_sha256(renderer_value),
-            "c9c5b93f61e2da72e1ddc20867d97c52d0a525f4b273427016c625ca21f04056",
+            "9ccb3969a77660887924573d097e621d055e38d5305b041876a4379f27b965e4",
         )
         self.assertEqual(len(validator.canonical_json_bytes(validator_value)), 6_557)
         self.assertEqual(
             validator.validator_contract_sha256(validator_value),
-            "a5c2bcbf73f4add58b2b4b7543840f1451dad3c6ec7503106b861be9d21675b3",
+            "23e8bc3b1fe93a1c8348e765dd60b9d10a1bda95c353e138cc8c3adfb2055c5e",
         )
         self.assertTrue(renderer.validate_renderer_contract(renderer_value))
         self.assertTrue(validator.validate_validator_contract(validator_value))
@@ -112,7 +112,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
                     )
                     self.assertEqual(receipt["target_bytes"], len(first.data))
                     self.assertFalse(receipt["actual_chunks_attested"])
-                    self.assertFalse(receipt["kcs_execution_attested"])
+                    self.assertFalse(receipt["kio_execution_attested"])
                     self.assertIsNone(forbidden_payload.search(first.data))
                     if previous_target is not None:
                         profile = next(
@@ -179,7 +179,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
                 (
                     rendered.extension,
                     rendered.content_media_type,
-                    rendered.expected_kcs_path_media_type,
+                    rendered.expected_kio_path_media_type,
                     rendered.expected_offline_disposition,
                 ),
                 exact,
@@ -198,7 +198,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -237,7 +237,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         changed = bytearray(rendered.data)
@@ -251,7 +251,7 @@ class PersonaV2TextRendererValidatorTests(unittest.TestCase):
             replace(valid_validation, data=rendered.data[:-1]),
             replace(valid_validation, extension="txt"),
             replace(valid_validation, content_media_type="text/plain"),
-            replace(valid_validation, expected_kcs_path_media_type="text/plain"),
+            replace(valid_validation, expected_kio_path_media_type="text/plain"),
             replace(valid_validation, expected_offline_disposition="raw_only"),
         )
         for request in invalid_validation_requests:

@@ -72,7 +72,7 @@ class PersonaV2G0BlockerResolutionLedgerTests(unittest.TestCase):
     def test_frozen_golden_is_exact_and_owned_independently(self):
         expected_bytes = 21_645
         expected_sha256 = (
-            "e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2"
+            "48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97"
         )
         self.assertEqual(len(self.raw), expected_bytes)
         self.assertEqual(hashlib.sha256(self.raw).hexdigest(), expected_sha256)
@@ -129,7 +129,7 @@ class PersonaV2G0BlockerResolutionLedgerTests(unittest.TestCase):
         ):
             self.assertEqual(
                 producer.EXPECTED_BOOTSTRAP_CANDIDATE_SHA256,
-                "e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2",
+                "48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97",
             )
             with self.assertRaisesRegex(
                 validator.PersonaV2G0BlockerResolutionLedgerValidationError,
@@ -447,7 +447,7 @@ class PersonaV2G0BlockerResolutionLedgerTests(unittest.TestCase):
         shared_path = [token] * validator.MAX_FIELD_PATH_DEPTH
         resolver_pin = {
             "artifact_kind": "bounded-test-resolver",
-            "artifact_schema": "kcs.persona.test-resolver/v1",
+            "artifact_schema": "kio.persona.test-resolver/v1",
             "artifact_schema_version": 1,
             "body_framing": validator.BODY_FRAMING,
             "canonical_bytes": 1,

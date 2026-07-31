@@ -20,7 +20,7 @@ from eval import persona_v2_overlay_contract as overlay
 
 EXPECTED_CANONICAL_BYTES = 463_571
 EXPECTED_SHA256 = (
-    "32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080"
+    "372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005"
 )
 
 
@@ -382,7 +382,7 @@ class PersonaV2LifecycleDemandTests(unittest.TestCase):
         self.assertEqual(operation["source_participation"], "incidental_searchable")
         self.assertEqual(
             operation["runtime_interpretation"],
-            "source-delete-plus-destination-ingest-across-independent-kcs-stores-not-product-cross-scope-lineage-inference",
+            "source-delete-plus-destination-ingest-across-independent-kio-stores-not-product-cross-scope-lineage-inference",
         )
         self.assertEqual(len(operation["preconditions"]), 10)
         terms = {

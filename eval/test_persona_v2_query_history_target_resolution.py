@@ -26,7 +26,7 @@ class PersonaV2QueryHistoryTargetResolutionTests(unittest.TestCase):
         value = self.value
         self.assertEqual(
             value["artifact_schema"],
-            "kcs.persona.pc-query-history-target-resolution/v1",
+            "kio.persona.pc-query-history-target-resolution/v1",
         )
         self.assertEqual(value["summary"]["persona_count"], 20)
         self.assertEqual(value["summary"]["query_capability_bijection_count"], 2_100)
@@ -50,17 +50,17 @@ class PersonaV2QueryHistoryTargetResolutionTests(unittest.TestCase):
         self.assertEqual(len(self.raw), 4_478_576)
         self.assertEqual(
             hashlib.sha256(self.raw).hexdigest(),
-            "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+            "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff",
         )
         self.assertEqual(resolution.EXPECTED_CANONICAL_BYTES, 4_478_576)
         self.assertEqual(independent.EXPECTED_CANONICAL_BYTES, 4_478_576)
         self.assertEqual(
             resolution.EXPECTED_SHA256,
-            "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+            "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff",
         )
         self.assertEqual(
             independent.EXPECTED_SHA256,
-            "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+            "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff",
         )
         self.assertEqual(
             len({row["query_key"] for row in value["resolution_rows"]}),

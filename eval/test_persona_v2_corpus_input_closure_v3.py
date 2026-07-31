@@ -86,7 +86,7 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
         self.assertEqual(namespace_pin["canonical_bytes"], 161_665)
         self.assertEqual(
             namespace_pin["sha256"],
-            "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
+            "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
         )
 
     def test_body_is_compact_pin_only_and_has_no_downstream_fields(self):
@@ -107,7 +107,7 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
     def test_frozen_golden_matches_both_implementations_and_exact_body(self):
         expected = (
             7_590,
-            "47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126",
+            "ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f",
         )
         self.assertEqual(
             (package.EXPECTED_CLOSURE_CANONICAL_BYTES, package.EXPECTED_CLOSURE_SHA256),
@@ -644,8 +644,8 @@ class CorpusInputClosureV3FastTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_CORPUS_INPUT_CLOSURE_V3_FULL") == "1",
-    "set KCS_RUN_CORPUS_INPUT_CLOSURE_V3_FULL=1 for the long all-253 gate",
+    os.environ.get("KIO_RUN_CORPUS_INPUT_CLOSURE_V3_FULL") == "1",
+    "set KIO_RUN_CORPUS_INPUT_CLOSURE_V3_FULL=1 for the long all-253 gate",
 )
 class CorpusInputClosureV3LongFullTest(unittest.TestCase):
     def test_full_current_dependency_and_all_253_validation(self):
@@ -707,8 +707,8 @@ class CorpusInputClosureV3LongFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_CORPUS_INPUT_CLOSURE_V3_COLD") == "1",
-    "set KCS_RUN_CORPUS_INPUT_CLOSURE_V3_COLD=1 for two isolated cold gates",
+    os.environ.get("KIO_RUN_CORPUS_INPUT_CLOSURE_V3_COLD") == "1",
+    "set KIO_RUN_CORPUS_INPUT_CLOSURE_V3_COLD=1 for two isolated cold gates",
 )
 class CorpusInputClosureV3LongColdHashSeedTest(unittest.TestCase):
     def test_two_isolated_hash_seeds_are_byte_stable(self):
@@ -785,7 +785,7 @@ print(json.dumps({
                     "TZ": "UTC",
                 }
             )
-            env.pop("KCS_RUN_CORPUS_INPUT_CLOSURE_V3_COLD", None)
+            env.pop("KIO_RUN_CORPUS_INPUT_CLOSURE_V3_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=root,

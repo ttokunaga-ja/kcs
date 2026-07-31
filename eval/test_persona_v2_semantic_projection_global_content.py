@@ -23,15 +23,15 @@ from eval import persona_v2_topology as topology
 EXPECTED_PROJECTION_PINS = {
     "topology-path-load": (
         133_187,
-        "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
+        "36c27d36ba074b884090a094541b33e34f719c2ed6c817309d26c9d9e2395db6",
     ),
     "realism-locale-security": (
         32_762,
-        "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
+        "6aec6942e00305334d90e0094c1a1903af2f6dd941ccc8e2e08d6f91980086ed",
     ),
     "route-scores": (
         88_085,
-        "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
+        "a555ef18181f525ca713e5f3655969dbd8d8b0ba3a205a5ae700f9ba2234ff03",
     ),
 }
 EXPECTED_DIRECT_FRAGMENT_PINS = {
@@ -55,28 +55,28 @@ EXPECTED_DIRECT_FRAGMENT_PINS = {
 EXPECTED_OWNER_PINS = {
     "full-topology-owner-pin": (
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     "full-realism-owner-pin": (
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
     "full-route-owner-pin": (
         70_626,
-        "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+        "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
     ),
 }
 EXPECTED_SCHEMAS = {
     "topology-path-load": (
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
         "persona-pc-v2-topology-path-load-content-projection",
     ),
     "realism-locale-security": (
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
         "persona-pc-v2-realism-locale-security-content-projection",
     ),
     "route-scores": (
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
         "persona-pc-v2-route-scores-content-projection",
     ),
 }
@@ -135,7 +135,7 @@ class PersonaV2SemanticProjectionGlobalContentTests(unittest.TestCase):
                 self.assertEqual(value["artifact_schema"], schema)
                 self.assertEqual(value["artifact_kind"], kind)
                 self.assertEqual(value["artifact_schema_version"], 1)
-                self.assertEqual(value["fixture_id"], "kcs-persona-pc-v2")
+                self.assertEqual(value["fixture_id"], "kio-persona-pc-v2")
                 self.assertEqual(value["fixture_schema_version"], 2)
                 self.assertEqual(set(value), package.TOP_LEVEL_FIELDS)
                 raw = package.canonical_json_bytes(value)

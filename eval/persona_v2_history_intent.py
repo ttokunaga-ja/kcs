@@ -7,7 +7,7 @@ conditional cohort templates, the one W0-to-W1 typed-fact transition required
 by the bound representative membership, surface-edit carry-forward rules, and
 delete/restore lifecycle dependency templates.
 
-No row in this module authorizes filesystem or KCS history mutation.  The
+No row in this module authorizes filesystem or KIO history mutation.  The
 restore/deleted rows are schema prototypes and count as zero of the required
 ten distinct anchors per persona.
 """
@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_fact_membership as fact_membership
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-history-intent/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-history-intent/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-history-intent"
 MAX_HISTORY_INTENT_BYTES = 256 * 1024
@@ -636,7 +636,7 @@ def _canonical_history_intent(persona_id, *, membership_value=None):
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
         },
         "canonical_limits": {
             "framed_byte_cap_before_body_required": True,

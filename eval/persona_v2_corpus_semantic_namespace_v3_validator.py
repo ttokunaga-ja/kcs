@@ -23,9 +23,9 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA_VERSION = 3
-NAMESPACE_SCHEMA = "kcs.persona.pc-corpus-semantic-namespace/v3"
+NAMESPACE_SCHEMA = "kio.persona.pc-corpus-semantic-namespace/v3"
 NAMESPACE_KIND = "persona-pc-v2-projection-pin-corpus-semantic-namespace"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 PROJECTION_CLASS_ORDER = (
@@ -66,7 +66,7 @@ MAX_PROJECTION_CLASS_COUNT = 12
 MAX_COORDINATE_FIELDS = 4
 MAX_IDENTITY_STRING_BYTES = 4 * 2**10
 MAX_CUMULATIVE_EXTERNAL_PROJECTION_BYTES = 256 * 2**20
-EXPECTED_CUMULATIVE_EXTERNAL_PROJECTION_BYTES = 155_741_469
+EXPECTED_CUMULATIVE_EXTERNAL_PROJECTION_BYTES = 155_741_381
 MAX_JSON_PROJECTION_BYTES = 384 * 2**10
 MAX_JSONL_PROJECTION_BYTES = 4 * 2**20
 EXPECTED_JSON_PROJECTION_COUNT = 67
@@ -76,15 +76,15 @@ EXPECTED_JSONL_PROJECTION_COUNT = 186
 # all-253 builds with distinct Python hash seeds.
 EXPECTED_NAMESPACE_CANONICAL_BYTES = 161_665
 EXPECTED_NAMESPACE_SHA256 = (
-    "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509"
+    "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa"
 )
 
 COMPLETE_INVENTORY_CANONICAL_BYTES = 697_466
 COMPLETE_INVENTORY_SHA256 = (
-    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
 COMPLETE_INVENTORY_SCHEMA = (
-    "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+    "kio.persona.pc-semantic-projection-derivation-inventory/v2"
 )
 COMPLETE_INVENTORY_KIND = (
     "persona-pc-v2-complete-semantic-projection-derivation-inventory"
@@ -94,56 +94,56 @@ MAX_COMPLETE_INVENTORY_BYTES = 2 * 2**20
 EXPECTED_PROJECTION_IDENTITIES = {
     "topology-path-load": (
         "persona-pc-v2-topology-path-load-content-projection",
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
     ),
     "realism-locale-security": (
         "persona-pc-v2-realism-locale-security-content-projection",
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
     ),
     "route-scores": (
         "persona-pc-v2-route-scores-content-projection",
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
     ),
     "primary-use-case-corpus-half": (
         "persona-pc-v2-primary-use-case-corpus-content-projection",
-        "kcs.persona.pc-primary-use-case-corpus-content-projection/v1",
+        "kio.persona.pc-primary-use-case-corpus-content-projection/v1",
     ),
     "recipe-content-filename-policy": (
         "persona-pc-v2-recipe-content-filename-policy-content-projection",
-        "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1",
+        "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
     ),
     "fact-graph": (
         "persona-pc-v2-fact-graph-content-projection",
-        "kcs.persona.pc-fact-graph-content-projection/v1",
+        "kio.persona.pc-fact-graph-content-projection/v1",
     ),
     "base-source-content-context": (
         "persona-pc-v2-base-source-content-context-shard-projection",
-        "kcs.persona.pc-base-source-content-context-shard-projection/v1",
+        "kio.persona.pc-base-source-content-context-shard-projection/v1",
     ),
     "effective-source-membership": (
         "persona-pc-v2-lifecycle-effective-membership-content-projection",
-        "kcs.persona.pc-lifecycle-effective-membership-content-projection/v1",
+        "kio.persona.pc-lifecycle-effective-membership-content-projection/v1",
     ),
     "concrete-overlay-relations": (
         "persona-pc-v2-concrete-overlay-relations-origin-projection",
-        "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1",
+        "kio.persona.pc-concrete-overlay-relations-origin-projection/v1",
     ),
     "query-independent-lifecycle-fact-rendition-rules": (
         "persona-pc-v2-source-matched-lifecycle-content-projection",
-        "kcs.persona.pc-source-matched-lifecycle-content-projection/v1",
+        "kio.persona.pc-source-matched-lifecycle-content-projection/v1",
     ),
     "payload-equivalence-rules": (
         "persona-pc-v2-payload-equivalence-rules-projection",
-        "kcs.persona.pc-payload-equivalence-rules-projection/v1",
+        "kio.persona.pc-payload-equivalence-rules-projection/v1",
     ),
 }
 PARAMETER_CELL_IDENTITY = (
     "persona-pc-v2-source-parameter-cell-content-projection",
-    "kcs.persona.pc-source-parameter-cell-content-projection/v1",
+    "kio.persona.pc-source-parameter-cell-content-projection/v1",
 )
 PARAMETER_ASSIGNMENT_IDENTITY = (
     "persona-pc-v2-source-instance-parameter-assignment-shard-projection",
-    "kcs.persona.pc-source-instance-parameter-assignment-shard-projection/v1",
+    "kio.persona.pc-source-instance-parameter-assignment-shard-projection/v1",
 )
 
 AUTHORITY_FIELDS = frozenset(
@@ -155,7 +155,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -168,7 +168,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",

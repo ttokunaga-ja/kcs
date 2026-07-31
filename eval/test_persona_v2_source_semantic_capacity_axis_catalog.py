@@ -89,7 +89,7 @@ class PersonaV2SourceSemanticCapacityAxisCatalogTests(unittest.TestCase):
         expected = package._require_golden_parity()
         exact = (
             50_473,
-            "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29",
+            "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8",
         )
         self.assertEqual(expected, exact)
         self.assertEqual(expected, independent._expected_golden())
@@ -162,7 +162,7 @@ class PersonaV2SourceSemanticCapacityAxisCatalogTests(unittest.TestCase):
             logical, label="test capacity-cell key", max_bytes=4 * 1024
         )
         self.assertEqual(first["capacity_cell_id"], hashlib.sha256(framed).hexdigest())
-        other = b"kcs/persona-pc-v2/source-semantic-capacity-slot-order/v1\x00" + framed.split(b"\x00", 1)[1]
+        other = b"kio/persona-pc-v2/source-semantic-capacity-slot-order/v1\x00" + framed.split(b"\x00", 1)[1]
         self.assertNotEqual(first["capacity_cell_id"], hashlib.sha256(other).hexdigest())
 
     def test_external_persona_bodies_are_bounded_and_receipt_exact(self):
@@ -193,7 +193,7 @@ class PersonaV2SourceSemanticCapacityAxisCatalogTests(unittest.TestCase):
         self.assertEqual(len(bindings), 21)
         self.assertEqual(
             (bindings[0]["canonical_bytes"], bindings[0]["sha256"]),
-            (436_495, "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62"),
+            (436_495, "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b"),
         )
         self.assertFalse(bindings[0]["body_opened_for_axis_derivation"])
         self.assertTrue(all(row["body_opened_for_axis_derivation"] for row in bindings[1:]))
@@ -618,8 +618,8 @@ class PersonaV2SourceSemanticCapacityAxisCatalogTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL") == "1",
-    "set KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1 for full trust-root validation",
+    os.environ.get("KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL") == "1",
+    "set KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1 for full trust-root validation",
 )
 class PersonaV2SourceSemanticCapacityAxisCatalogFullTest(unittest.TestCase):
     def test_full_semantic_catalog_opening_and_body_replay(self):
@@ -681,8 +681,8 @@ class PersonaV2SourceSemanticCapacityAxisCatalogFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD") == "1",
-    "set KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1 for two isolated full builds",
+    os.environ.get("KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD") == "1",
+    "set KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1 for two isolated full builds",
 )
 class PersonaV2SourceSemanticCapacityAxisCatalogColdTest(unittest.TestCase):
     def test_two_hashseed_full_builds_are_byte_identical(self):
@@ -763,7 +763,7 @@ print(json.dumps({
                     "TZ": "UTC",
                 }
             )
-            environment.pop("KCS_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD", None)
+            environment.pop("KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

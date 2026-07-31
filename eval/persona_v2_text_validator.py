@@ -3,7 +3,7 @@
 Independence is intentional: this module does not import the renderer and
 duplicates the frozen formulas and templates it checks.  A renderer bug cannot
 make validation succeed merely by changing a shared rendering helper.  The
-receipt proves only local bytes/structure; it never attests KCS chunk output.
+receipt proves only local bytes/structure; it never attests KIO chunk output.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-text-validator/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-text-validator/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-text-validator"
 VALIDATOR_ID = "persona-v2-id-free-text-standalone-validator"
@@ -50,7 +50,7 @@ REQUEST_FIELDS = (
     "data",
     "extension",
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
 )
 
@@ -72,7 +72,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-c++src",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "cpp",
@@ -84,7 +84,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-go",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "go",
@@ -96,7 +96,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/javascript",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "js",
@@ -108,7 +108,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/markdown",
-        "expected_kcs_path_media_type": "text/markdown",
+        "expected_kio_path_media_type": "text/markdown",
         "expected_offline_disposition": "local_text",
         "family": "md",
         "filename_extension": "markdown",
@@ -120,7 +120,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/markdown",
-        "expected_kcs_path_media_type": "text/markdown",
+        "expected_kio_path_media_type": "text/markdown",
         "expected_offline_disposition": "local_text",
         "family": "md",
         "filename_extension": "md",
@@ -132,7 +132,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "# ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-python",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "py",
@@ -144,7 +144,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-rust",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "rs",
@@ -156,7 +156,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/typescript",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "ts",
@@ -168,7 +168,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/plain",
-        "expected_kcs_path_media_type": "text/plain",
+        "expected_kio_path_media_type": "text/plain",
         "expected_offline_disposition": "local_text",
         "family": "txt_log",
         "filename_extension": "txt",
@@ -214,7 +214,7 @@ class TextValidationRequest:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
 
 
@@ -299,13 +299,13 @@ def _validate_request_shape(request):
     expected_metadata = (
         profile["filename_extension"],
         profile["content_media_type"],
-        profile["expected_kcs_path_media_type"],
+        profile["expected_kio_path_media_type"],
         profile["expected_offline_disposition"],
     )
     actual_metadata = (
         request.extension,
         request.content_media_type,
-        request.expected_kcs_path_media_type,
+        request.expected_kio_path_media_type,
         request.expected_offline_disposition,
     )
     if any(type(value) is not str for value in actual_metadata):
@@ -416,7 +416,7 @@ def validate_text_payload(request):
         "actual_chunks_attested": False,
         "byte_length": len(request.data),
         "identity_tokens_absent": True,
-        "kcs_execution_attested": False,
+        "kio_execution_attested": False,
         "observed_complexity_measure": observed_measure,
         "observed_local_complexity": request.target_complexity,
         "structure_validated": True,
@@ -434,7 +434,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -472,7 +472,7 @@ def _canonical_contract_value():
             "authorizes_physical_write": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "canonical_limits": {
             "framed_byte_cap_before_body_required": True,
@@ -481,7 +481,7 @@ def _canonical_contract_value():
             "self_hash_embedded": False,
         },
         "implementation_scope": (
-            "nine-id-free-text-feasibility-variants-only-not-kcs-attestation"
+            "nine-id-free-text-feasibility-variants-only-not-kio-attestation"
         ),
         "independence_contract": {
             "imports_renderer_module": False,

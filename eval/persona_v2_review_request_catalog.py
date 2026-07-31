@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-review-request-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-review-request-catalog/v1"
 ARTIFACT_KIND = "persona-pc-v2-non-authorizing-review-request-catalog"
 ARTIFACT_SCHEMA_VERSION = 1
 
@@ -75,7 +75,7 @@ REVIEW_CLASS_ORDER = (
 AUTHORITY_FIELDS = (
     "authorizes_approval",
     "authorizes_g0_freeze",
-    "authorizes_history_or_kcs",
+    "authorizes_history_or_kio",
     "authorizes_positive_review_receipt",
     "authorizes_render_or_write",
     "authorizes_reviewer_identity",
@@ -139,59 +139,59 @@ REQUEST_FIELDS = frozenset(
 SUBJECT_PIN_SPECS = {
     "topology": (
         "persona-pc-v2-topology",
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         2,
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
     "realism-profile": (
         "persona-pc-v2-realism-profile",
-        "kcs.persona.pc-realism-profile/v2",
+        "kio.persona.pc-realism-profile/v2",
         2,
         36_811,
-        "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
+        "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb",
     ),
     "variant-catalog": (
         "persona-pc-v2-variant-catalog",
-        "kcs.persona.pc-variant-catalog/v2",
+        "kio.persona.pc-variant-catalog/v2",
         2,
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     "route-affinity": (
         "persona-pc-v2-route-affinity-matrix",
-        "kcs.persona.pc-route-affinity/v2",
+        "kio.persona.pc-route-affinity/v2",
         2,
         70_626,
-        "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790",
+        "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957",
     ),
     "overlay-contract": (
         "persona-pc-v2-overlay-contract",
-        "kcs.persona.pc-overlay-contract/v2",
+        "kio.persona.pc-overlay-contract/v2",
         2,
         71_179,
-        "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c",
+        "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23",
     ),
     "overlay-reservation-suite": (
         "persona-pc-v2-overlay-reservation-suite",
-        "kcs.persona.pc-overlay-reservation-suite/v2",
+        "kio.persona.pc-overlay-reservation-suite/v2",
         2,
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
     "chunk-accounting": (
         "persona-pc-v2-chunk-accounting",
-        "kcs.persona.pc-chunk-accounting/v1",
+        "kio.persona.pc-chunk-accounting/v1",
         1,
         19_801,
-        "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2",
+        "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52",
     ),
     "complete-semantic-projection-inventory": (
         "persona-pc-v2-complete-semantic-projection-derivation-inventory",
-        "kcs.persona.pc-semantic-projection-derivation-inventory/v2",
+        "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         2,
         697_466,
-        "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+        "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
     ),
 }
 
@@ -241,67 +241,67 @@ RELATION_PROJECTION_PINS = (
     ("p20", "full-residual", 443_622, "67d03842fdc7e0b7aca77677d2a373a480f1964f3ea63f7e539d9f86207a6c88"),
 )
 LIFECYCLE_PROJECTION_PINS = (
-    ("p01", 253_399, "d4fc17cf6a55eef7da90b5ef3e2d3c345278f5e3eb2e792a19d3e526c136fadd"),
-    ("p02", 250_463, "830c8c274201733344b301e7c32e40254a39d038926bc42e9618925b1ee64e82"),
-    ("p03", 250_908, "798890dd6af7ce6023fc26011f37edf4b657d21abe196ae5cc4cfd3df3d54945"),
-    ("p04", 256_790, "e2d81bece3ec9d047bbe83c2fb3b59afbd092296e933f825a466d2e6a67553bf"),
-    ("p05", 253_846, "7496a11e8f78eb30a66db6dc57c65379754fba340359e314d4dfa73fcc6e6202"),
-    ("p06", 254_482, "6de815105ccf59f696e89f390200a30b4e46a6d2a05297ed4166b108d214f9d9"),
-    ("p07", 251_538, "7163203e090e60f0e12ac73c950b5058bbe8ec3c7cb22b926dc7e45119bb0c88"),
-    ("p08", 254_435, "e939d9f910c1ee2f8c8d55ce64f33b91bcaea858f24691f53a9bd3aa13db7b4b"),
-    ("p09", 254_599, "6e788c607eff80079f51673ff13e1a201d7952c211a9a91a8916e58101716e8b"),
-    ("p10", 254_778, "dc715a1ad5afc3ff50976354fc91440108e40102d70cec2ec0560f1645871924"),
-    ("p11", 251_478, "eaf855c0e8d92db7c75ddd2740866b138878c6bae37101649fe7dbc618114a3e"),
-    ("p12", 250_654, "736109af031c9df402030df56211874ab0a341c39dc697d9ad1b927f9b6756a4"),
-    ("p13", 252_069, "0f9775ef93c26f8a4a8fd85f23e594d7b13e5045662511171d7e7b2d0813d2e4"),
-    ("p14", 254_399, "782bea9e5725d966304f2b43539cee0b1f2f273dd0a34da9d08d05cabc487b42"),
-    ("p15", 251_242, "bd020adc292d2624988f330123439e1c9ca8e990be747cfc0f7f84aafff40fb7"),
-    ("p16", 251_972, "70db52b9fdde278b5e758fac63cc7005f88084e91fd2f3f566f44ad98c04b4e1"),
-    ("p17", 252_024, "a102f9d57077462c68119acb19143dec582b1393fa6087d02f3cb82ae1f1d6af"),
-    ("p18", 251_550, "6ad67a1159dbe2529f435ca1fea9bb846d977eb56ebf5f416cc2dc2d30c04a56"),
-    ("p19", 254_977, "94cf1e382423a632d0fd82bda5a826a28d0d4b6ba8604b46d225f0530a0594ba"),
-    ("p20", 251_683, "bfb5efac5589060a5bf81fd9c53d880c68f9f20a9d82397893663102a546d859"),
+    ("p01", 253_386, "3ab896112e5732b38e0b53a2d13ef20cccdb47d134d3ba0d038677bcea00cc05"),
+    ("p02", 250_488, "67d7d781d570d6927aa84db882a294e7b7a87330feea354da1062f7e7394926e"),
+    ("p03", 250_852, "84945b282b6b1913fc28a383bffaf5af66577dc295a81d39a7a49bd48deec207"),
+    ("p04", 256_800, "330064e042bb811b1af9625757506c7ddc3beab180f5dc1970c823cde0b60cbc"),
+    ("p05", 253_865, "6ccc3b6c6656ba63e9b68d62cdd61b8bf2fad576d590df81416622a5486f4061"),
+    ("p06", 254_432, "d148748295a6a41aa3798f5bfa883f4a740f373c8caf42b282b85b6ab422bf42"),
+    ("p07", 251_576, "a99f6a0a5f28254809ad69a351fb91fba95719d8210809ee38431758eaf0ff5a"),
+    ("p08", 254_488, "be1b6be7ea3dc05638160aed921f64bee1309953ec01aafcf75f3e8ee37a2485"),
+    ("p09", 254_631, "efc24aad5d9797a628dca269aaac9c05bc72d037a6b3cccca34cef6e54c9932f"),
+    ("p10", 254_715, "b3c9db08f1104f3f8b0e0183b75664b3c44ec09757c45ba464d9a75a2146b43e"),
+    ("p11", 251_491, "238dc10825129749b28f490f347142d56f7845fbd3a0c87790d3f17d0c5e5008"),
+    ("p12", 250_645, "799620662d66416a8aa2a81cd64658d5b7be74a962659474ae9fcad1bd29086f"),
+    ("p13", 252_072, "bfba095f2813566f285cd254942a8ab505efc541093ebdefb1b53351f8925c91"),
+    ("p14", 254_387, "23cd11fa455d47b61fc38810f1a72bc155609e034eee2e142c9b73b110d33500"),
+    ("p15", 251_229, "6d25e9c390592eda7b3727c7d3bb117d820acd013d5fd14d2f8cf98ccfeaa79e"),
+    ("p16", 251_966, "1049e9251a5702f3d40f91f2b8b9fa9af156b9260ec8a302c32037c747b18923"),
+    ("p17", 251_994, "07b236e15984f5e71eb583e6f491d75d1b759970275f45c871e278bfe1ae941c"),
+    ("p18", 251_573, "3589f1457a7f231e904f734884684e1495a7c3e4be30707dff23eceeafa7414e"),
+    ("p19", 255_022, "b23f60b52eea5871ee0f236ba5b93b10c26caecd3c47afc9a9e63e3ee6f6a06d"),
+    ("p20", 251_675, "6d0bf32c17d5d2bc9a846a8a2aed88cb4a1a6949cc31fb6a04666f08f1ea7292"),
 )
 
 SINGLETON_PROJECTION_SPECS = {
     "topology-path-load": (
         "persona-pc-v2-topology-path-load-content-projection",
-        "kcs.persona.pc-topology-path-load-content-projection/v1",
+        "kio.persona.pc-topology-path-load-content-projection/v1",
         "canonical-json",
         133_187,
-        "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
+        "36c27d36ba074b884090a094541b33e34f719c2ed6c817309d26c9d9e2395db6",
         "projection-derivation-topology-path-load",
     ),
     "realism-locale-security": (
         "persona-pc-v2-realism-locale-security-content-projection",
-        "kcs.persona.pc-realism-locale-security-content-projection/v1",
+        "kio.persona.pc-realism-locale-security-content-projection/v1",
         "canonical-json",
         32_762,
-        "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
+        "6aec6942e00305334d90e0094c1a1903af2f6dd941ccc8e2e08d6f91980086ed",
         "projection-derivation-realism-locale-security",
     ),
     "recipe-content-filename-policy": (
         "persona-pc-v2-recipe-content-filename-policy-content-projection",
-        "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1",
+        "kio.persona.pc-recipe-content-filename-policy-content-projection/v1",
         "canonical-json",
         250_388,
-        "81a9fd5a44ac1cdda977ee4ed36fffdd6c0f9944bc41efb2cb4ef07d30819e7b",
+        "c7570d0f0436e5321929f84e13e59a130fba2f9976764493d04e1ad9aaf7e4ba",
         "projection-derivation-recipe-content-filename-policy",
     ),
     "route-scores": (
         "persona-pc-v2-route-scores-content-projection",
-        "kcs.persona.pc-route-scores-content-projection/v1",
+        "kio.persona.pc-route-scores-content-projection/v1",
         "canonical-json",
         88_085,
-        "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
+        "a555ef18181f525ca713e5f3655969dbd8d8b0ba3a205a5ae700f9ba2234ff03",
         "projection-derivation-route-scores",
     ),
     "payload-equivalence-rules": (
         "persona-pc-v2-payload-equivalence-rules-projection",
-        "kcs.persona.pc-payload-equivalence-rules-projection/v1",
+        "kio.persona.pc-payload-equivalence-rules-projection/v1",
         "canonical-json",
         4_288,
-        "05f8124cd1bd09652701d38ffd702824f3cff8d40a161815969071cd678e14e1",
+        "a23ca9032d9779d9ebdde1d490354f70e5f1c0a09db9e8e3eaea26098e477649",
         "payload-equivalence-rules-global",
     ),
 }
@@ -390,7 +390,7 @@ RUBRIC_SPECS = {
 # PYTHONHASHSEED=0/1 build+validation measurements agreed exactly.
 EXPECTED_CATALOG_BYTES = 42_931
 EXPECTED_CATALOG_SHA256 = (
-    "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab"
+    "1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098"
 )
 
 
@@ -677,7 +677,7 @@ def _relation_projection_pins(*, authenticate=True):
         relation_projection.RELATION_KIND
         != "persona-pc-v2-concrete-overlay-relations-origin-projection"
         or relation_projection.RELATION_SCHEMA
-        != "kcs.persona.pc-concrete-overlay-relations-origin-projection/v1"
+        != "kio.persona.pc-concrete-overlay-relations-origin-projection/v1"
         or relation_projection.EXPECTED_RELATION_BODY_COUNT != 40
         or sum(row[2] for row in RELATION_PROJECTION_PINS) != 8_988_409
     ):
@@ -712,8 +712,8 @@ def _lifecycle_projection_pins(*, authenticate=True):
         lifecycle_projection.PROJECTION_KIND
         != "persona-pc-v2-source-matched-lifecycle-content-projection"
         or lifecycle_projection.PROJECTION_SCHEMA
-        != "kcs.persona.pc-source-matched-lifecycle-content-projection/v1"
-        or sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_286
+        != "kio.persona.pc-source-matched-lifecycle-content-projection/v1"
+        or sum(row[1] for row in LIFECYCLE_PROJECTION_PINS) != 5_057_287
     ):
         _fail("current lifecycle projection contract drifted")
     result = []
@@ -768,16 +768,16 @@ def _projection_binding(binding_id, class_id, relation, pins):
 def _inventory_projection_binding(*, authenticate=True):
     if authenticate and (
         complete_validator.EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES_FROZEN
-        != 155_741_469
+        != 155_741_381
         or complete_validator.EXPECTED_ORDERED_PROJECTION_PINS_SHA256
-        != "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
+        != "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
     ):
         _fail("complete inventory ordered projection pin aggregate drifted")
     return {
         "aggregate": {
-            "cumulative_canonical_bytes": 155_741_469,
+            "cumulative_canonical_bytes": 155_741_381,
             "ordered_projection_pins_sha256": (
-                "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
+                "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
             ),
         },
         "binding_id": "complete-inventory-all-253-ordered-pins",

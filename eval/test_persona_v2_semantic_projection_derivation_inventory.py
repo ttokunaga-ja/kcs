@@ -65,16 +65,16 @@ EXPECTED_BASE_BODY_BYTES = 121_020_941
 EXPECTED_BASE_MAXIMUM_ROW_BYTES_INCLUDING_LF = 633
 EXPECTED_SUITE_CANONICAL_BYTES = 293_285
 EXPECTED_SUITE_SHA256 = (
-    "5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84"
+    "e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb"
 )
-EXPECTED_CUMULATIVE_PROJECTION_BYTES = 128_144_915
+EXPECTED_CUMULATIVE_PROJECTION_BYTES = 128_144_827
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
-    "a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d"
+    "ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455"
 )
 EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "base-source-content-context": 2_484_590,
-    "effective-source-membership": 103_864,
-    "query-independent-lifecycle-fact-rendition-rules": 256_790,
+    "effective-source-membership": 103_840,
+    "query-independent-lifecycle-fact-rendition-rules": 256_800,
 }
 
 EXPECTED_TOP_LEVEL_FIELDS = frozenset(
@@ -121,7 +121,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -134,7 +134,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -202,11 +202,11 @@ class SemanticProjectionDerivationInventoryContractTest(unittest.TestCase):
 
         self.assertEqual(
             package.SUITE_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-inventory/v1",
+            "kio.persona.pc-semantic-projection-derivation-inventory/v1",
         )
         self.assertEqual(
             package.RECEIPT_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-receipt/v1",
+            "kio.persona.pc-semantic-projection-derivation-receipt/v1",
         )
         self.assertEqual(
             tuple(package.PROJECTION_CLASS_ORDER), EXPECTED_PROJECTION_CLASS_ORDER
@@ -415,7 +415,7 @@ class SemanticProjectionDerivationInventoryLongAll113Test(unittest.TestCase):
                 "corpus-semantic-namespace-not-issued",
                 "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
                 "joint-solver-solution-proof-and-final-source-plan-not-built",
-                "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+                "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
             ],
         )
 
@@ -737,11 +737,11 @@ class SemanticProjectionDerivationInventoryLongAll113Test(unittest.TestCase):
         effective_receipt = by_class["effective-source-membership"][0]
         self.assertEqual(effective_receipt["coordinates"], {"persona_id": "p01"})
         self.assertEqual(
-            effective_receipt["projection_pin"]["canonical_bytes"], 103_433
+            effective_receipt["projection_pin"]["canonical_bytes"], 103_439
         )
         self.assertEqual(
             effective_receipt["projection_pin"]["sha256"],
-            "a2879b97f6e99953aeecdd084c9302b713f29a52300b2d19455790ee63d5917f",
+            "d620a63b9762cf6119d795845c5b1533207ced29ae97fbb6ab3765a966d07f5e",
         )
 
     def test_public_body_provider_requires_the_exact_inventory_receipt(self):

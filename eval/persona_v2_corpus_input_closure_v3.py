@@ -33,12 +33,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_semantic_projection_complete_inventory as complete
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-corpus-input-closure-manifest/v3"
+ARTIFACT_SCHEMA = "kio.persona.pc-corpus-input-closure-manifest/v3"
 ARTIFACT_KIND = (
     "persona-pc-v2-corpus-input-closure-manifest-request-only-candidate"
 )
 ARTIFACT_SCHEMA_VERSION = 3
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 HYPOTHESIS_STATUS = (
     "authored-benchmark-request-only-corpus-input-closure-candidate-"
@@ -51,7 +51,7 @@ TARGET_MANIFEST_BYTES = 64 * 2**10
 # Frozen after two isolated full build+validation measurements agreed.
 EXPECTED_CLOSURE_CANONICAL_BYTES = 7_590
 EXPECTED_CLOSURE_SHA256 = (
-    "47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126"
+    "ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f"
 )
 
 DEPENDENCY_ORDER = (
@@ -69,12 +69,12 @@ DEPENDENCY_SPECS = {
             "artifact_kind": (
                 "persona-pc-v2-projection-pin-corpus-semantic-namespace"
             ),
-            "artifact_schema": "kcs.persona.pc-corpus-semantic-namespace/v3",
+            "artifact_schema": "kio.persona.pc-corpus-semantic-namespace/v3",
             "artifact_schema_version": 3,
             "body_framing": "canonical-json",
             "canonical_bytes": 161_665,
             "sha256": (
-                "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509"
+                "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa"
             ),
         },
     },
@@ -86,13 +86,13 @@ DEPENDENCY_SPECS = {
                 "persona-pc-v2-complete-semantic-projection-derivation-inventory"
             ),
             "artifact_schema": (
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v2"
             ),
             "artifact_schema_version": 2,
             "body_framing": "canonical-json",
             "canonical_bytes": 697_466,
             "sha256": (
-                "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+                "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
             ),
         },
     },
@@ -103,12 +103,12 @@ DEPENDENCY_SPECS = {
             "artifact_kind": (
                 "persona-pc-v2-non-authorizing-review-request-catalog"
             ),
-            "artifact_schema": "kcs.persona.pc-review-request-catalog/v1",
+            "artifact_schema": "kio.persona.pc-review-request-catalog/v1",
             "artifact_schema_version": 1,
             "body_framing": "canonical-json",
             "canonical_bytes": 42_931,
             "sha256": (
-                "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab"
+                "1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098"
             ),
         },
     },
@@ -120,13 +120,13 @@ DEPENDENCY_SPECS = {
                 "persona-pc-v2-g0-blocker-resolution-ledger-candidate"
             ),
             "artifact_schema": (
-                "kcs.persona.pc-g0-blocker-resolution-ledger/v2"
+                "kio.persona.pc-g0-blocker-resolution-ledger/v2"
             ),
             "artifact_schema_version": 2,
             "body_framing": "canonical-json",
             "canonical_bytes": 21_645,
             "sha256": (
-                "e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2"
+                "48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97"
             ),
         },
     },
@@ -184,7 +184,7 @@ def _canonical_limits():
             "review-request-catalog-v1": 256 * 2**10,
             "g0-blocker-resolution-ledger-bootstrap-v2": 16 * 2**20,
         },
-        "exact_cumulative_external_projection_bytes": 155_741_469,
+        "exact_cumulative_external_projection_bytes": 155_741_381,
         "external_dependency_bodies_embedded": False,
         "external_projection_bodies_embedded": False,
         "framed_byte_cap_before_parse_required": True,

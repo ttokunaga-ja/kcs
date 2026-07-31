@@ -18,7 +18,7 @@ from eval import persona_v2_variant_catalog as variants
 
 EXPECTED_CANONICAL_BYTES = 72_559
 EXPECTED_CANONICAL_SHA256 = (
-    "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac"
+    "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d"
 )
 
 
@@ -124,7 +124,7 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
             "family",
             "filename_extension",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "gate_role",
         )

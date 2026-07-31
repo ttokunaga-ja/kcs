@@ -21,10 +21,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_overlay_contract as overlay
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-chunk-accounting/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-chunk-accounting/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-chunk-accounting"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 MAX_ACCOUNTING_BYTES = 256 * 1024
 MAX_DEPENDENCY_BYTES = 2 * 1024 * 1024
@@ -32,17 +32,17 @@ MAX_DEPENDENCY_BYTES = 2 * 1024 * 1024
 # Installed only after independent semantic validation of the final body.
 EXPECTED_ACCOUNTING_CANONICAL_BYTES = 19_801
 EXPECTED_ACCOUNTING_SHA256 = (
-    "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2"
+    "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52"
 )
 
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-envelope": (
         71_979,
-        "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+        "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
     ),
     "persona-v2-overlay-contract": (
         71_179,
-        "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c",
+        "e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23",
     ),
 }
 
@@ -78,13 +78,13 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_evaluation_target_resolution",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_solver_execution",
         "compiled_history_plan_available",
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_instance_matching_available",
     }
 )
@@ -380,7 +380,7 @@ def _expected_operation_contracts():
                 "raw-bytes-facts-tool-profile-generation-and-chunk-set-are-preserved",
             ],
             "runtime_interpretation": (
-                "source-delete-plus-destination-ingest-across-independent-kcs-"
+                "source-delete-plus-destination-ingest-across-independent-kio-"
                 "stores-not-product-cross-scope-lineage-inference"
             ),
             "source_participation": "incidental_searchable",
@@ -690,7 +690,7 @@ def _validate_formula_semantics(value, envelope_value):
     if metrics[0].get("identity_fields_observed") != ["scope_id", "chunk_id"]:
         _fail("search semantic identity must remain scope-qualified")
     if metrics[0].get("chunk_id_is_chunk_hash") is not True:
-        _fail("search chunk_id must be explicitly identical to KCS chunk_hash")
+        _fail("search chunk_id must be explicitly identical to KIO chunk_hash")
     if metrics[1].get("identity_fields") != ["chunk_id"]:
         _fail("persona-global hash identity must remain diagnostic and scopeless")
     if metrics[2].get("identity_fields_observed") != [

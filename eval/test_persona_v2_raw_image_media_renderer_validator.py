@@ -107,8 +107,8 @@ MATRIX = {
 }
 
 EXPECTED_VARIANTS = tuple(sorted(MATRIX))
-RENDERER_CONTRACT_SHA256 = "25231398ec7002e5ce7fbfe3d3089e14a9ef8547bc9a9f580cc385dd88fcda00"
-VALIDATOR_CONTRACT_SHA256 = "b0fdf9e944b0df72b2f8d8601a83f6958654f92272466fd49b897a3b3e168953"
+RENDERER_CONTRACT_SHA256 = "c64b762b102aa4fbad000fc21ef2c810d1746daab9a11f959226cec45f16f92e"
+VALIDATOR_CONTRACT_SHA256 = "a1c544dcc3f68167aefd3bba2cc90cd4fdd124473485e834f8a0e662df52ad9a"
 REPRESENTATIVE_AGGREGATE_SHA256 = "d6985d963aa7b020359eb5afb01b209deaec07eb95c94c0839f39225416a7823"
 
 REPRESENTATIVE_CASES = {
@@ -165,7 +165,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
             data=rendered.data,
             extension=rendered.extension,
             content_media_type=rendered.content_media_type,
-            expected_kcs_path_media_type=rendered.expected_kcs_path_media_type,
+            expected_kio_path_media_type=rendered.expected_kio_path_media_type,
             expected_offline_disposition=rendered.expected_offline_disposition,
         )
 
@@ -199,7 +199,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
                 self.assertEqual(row["family"], expected["family"])
                 self.assertEqual(row["filename_extension"], expected["extension"])
                 self.assertEqual(row["content_media_type"], expected["content"])
-                self.assertEqual(row["expected_kcs_path_media_type"], expected["path"])
+                self.assertEqual(row["expected_kio_path_media_type"], expected["path"])
                 self.assertEqual(row["expected_offline_disposition"], expected["disposition"])
                 self.assertEqual(row["gate_role"], "raw_only")
                 self.assertEqual(row["complexity"]["measure"], expected["measure"])
@@ -279,7 +279,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
             self.assertEqual(row["family"], expected["family"])
             self.assertEqual(row["filename_extension"], expected["extension"])
             self.assertEqual(row["content_media_type"], expected["content"])
-            self.assertEqual(row["expected_kcs_path_media_type"], expected["path"])
+            self.assertEqual(row["expected_kio_path_media_type"], expected["path"])
             self.assertEqual(row["expected_offline_disposition"], expected["disposition"])
             self.assertEqual(row["gate_role"], "raw_only")
             self.assertEqual(row["complexity_contract"]["complexity_unit"], expected["measure"])
@@ -306,7 +306,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256(rendered.data).hexdigest(), expected_sha)
             self.assertEqual(rendered.extension, MATRIX[variant]["extension"])
             self.assertEqual(rendered.content_media_type, MATRIX[variant]["content"])
-            self.assertEqual(rendered.expected_kcs_path_media_type, MATRIX[variant]["path"])
+            self.assertEqual(rendered.expected_kio_path_media_type, MATRIX[variant]["path"])
             self.assertEqual(rendered.expected_offline_disposition, MATRIX[variant]["disposition"])
             self.assertEqual(rendered.size_lane, "feasibility-only")
             self.assertTrue(all(token not in rendered.data.lower() for token in forbidden_tokens))
@@ -317,7 +317,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
             self.assertTrue(receipt["structure_validated"])
             self.assertTrue(receipt["identity_tokens_absent"])
             self.assertFalse(receipt["actual_chunks_attested"])
-            self.assertFalse(receipt["kcs_execution_attested"])
+            self.assertFalse(receipt["kio_execution_attested"])
             expected_complexity = width * height if width else count
             self.assertEqual(receipt["observed_local_complexity"], expected_complexity)
             aggregate_rows.append(
@@ -476,7 +476,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
                     valid.data,
                     valid.extension,
                     valid.content_media_type,
-                    valid.expected_kcs_path_media_type,
+                    valid.expected_kio_path_media_type,
                     valid.expected_offline_disposition,
                 )
             )
@@ -484,7 +484,7 @@ class PersonaV2RawImageMediaRendererValidatorTest(unittest.TestCase):
         self._assert_validator_rejects(replace(valid, variant=ExplosiveRepr()))
         self._assert_validator_rejects(replace(valid, width=True))
         self._assert_validator_rejects(replace(valid, expected_offline_disposition="incidental_sniff"))
-        self._assert_validator_rejects(replace(valid, expected_kcs_path_media_type="image/jpeg"))
+        self._assert_validator_rejects(replace(valid, expected_kio_path_media_type="image/jpeg"))
 
         self.assertFalse(hasattr(base, "__dict__"))
         self.assertFalse(hasattr(rendered, "__dict__"))

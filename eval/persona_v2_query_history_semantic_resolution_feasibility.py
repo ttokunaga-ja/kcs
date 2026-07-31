@@ -46,22 +46,22 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1"
+    "kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = (
     "persona-pc-v2-query-history-semantic-resolution-feasibility-audit"
 )
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 MAX_ARTIFACT_BYTES = 2 * 2**20
 TARGET_ARTIFACT_BYTES = 512 * 2**10
 
 # Frozen after an all-persona full reconstruction and two isolated cold
 # reconstructions under distinct hash seeds agreed byte-for-byte.
-EXPECTED_CANONICAL_BYTES = 40_947
+EXPECTED_CANONICAL_BYTES = 40_949
 EXPECTED_SHA256 = (
-    "890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136"
+    "573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f"
 )
 
 DEPENDENCY_ORDER = (
@@ -75,40 +75,40 @@ DEPENDENCY_ORDER = (
 
 DEPENDENCY_PINS = {
     "query-history-target-resolution-v1": {
-        "artifact_schema": "kcs.persona.pc-query-history-target-resolution/v1",
+        "artifact_schema": "kio.persona.pc-query-history-target-resolution/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 4_478_576,
-        "sha256": "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc",
+        "sha256": "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff",
     },
     "source-semantic-membership-suite-v2": {
-        "artifact_schema": "kcs.persona.pc-source-semantic-membership-suite/v2",
+        "artifact_schema": "kio.persona.pc-source-semantic-membership-suite/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 49_837,
-        "sha256": "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28",
+        "sha256": "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072",
     },
     "source-matched-lifecycle-suite-v1": {
-        "artifact_schema": "kcs.persona.pc-source-matched-lifecycle-suite/v1",
+        "artifact_schema": "kio.persona.pc-source-matched-lifecycle-suite/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 14_605,
-        "sha256": "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8",
+        "sha256": "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b",
     },
     "lifecycle-effective-membership-reconciliation-v1": {
-        "artifact_schema": "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1",
+        "artifact_schema": "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1",
         "artifact_schema_version": 1,
         "canonical_bytes": 69_195,
-        "sha256": "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c",
+        "sha256": "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29",
     },
     "corpus-semantic-namespace-v3": {
-        "artifact_schema": "kcs.persona.pc-corpus-semantic-namespace/v3",
+        "artifact_schema": "kio.persona.pc-corpus-semantic-namespace/v3",
         "artifact_schema_version": 3,
         "canonical_bytes": 161_665,
-        "sha256": "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
+        "sha256": "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
     },
     "complete-semantic-projection-inventory-v2": {
-        "artifact_schema": "kcs.persona.pc-semantic-projection-derivation-inventory/v2",
+        "artifact_schema": "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         "artifact_schema_version": 2,
         "canonical_bytes": 697_466,
-        "sha256": "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+        "sha256": "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
     },
 }
 
@@ -142,7 +142,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_execution",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_execution",
         "authorizes_query_history_target_resolution_v2",
@@ -774,12 +774,19 @@ def _build_from_snapshot(snapshot):
         "graph-normal": 360,
     } or total_maximum != 1_060:
         _fail("suite distractor feasibility totals drifted")
+    # 2026-07-28 に 13/87 から 10/90 へ動かした。原因は改名で、
+    # `persona_v2_source_matched_lifecycle_inventory._domain_key` の
+    # 前置詞が `kcs-lifecycle-v1/` から `kio-lifecycle-v1/` になったため
+    # domain-separated-sha256-order の DFS 探索順が変わり、cross-format の
+    # 照合結果が変わった。salt だけを戻すと 13 が復帰することを確かめてある。
+    # distractor 分類の内訳 (720/3720/600/360) と上界 1060 は動いていないので、
+    # 変わったのは照合の選び方であって fixture の構造ではない。
     p01_baseline = persona_rows[0]["baseline_target_feasibility"]
     if (
-        p01_baseline["baseline_aligned_count"] != 13
-        or p01_baseline["baseline_mismatch_count"] != 87
+        p01_baseline["baseline_aligned_count"] != 10
+        or p01_baseline["baseline_mismatch_count"] != 90
     ):
-        _fail("p01 baseline 13-aligned/87-mismatch sentinel drifted")
+        _fail("p01 baseline 10-aligned/90-mismatch sentinel drifted")
 
     value = {
         "artifact_kind": ARTIFACT_KIND,

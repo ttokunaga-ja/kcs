@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variants
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-intent-origin-shard/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-intent-origin-shard/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-source-intent-origin-shard"
 
@@ -111,7 +111,7 @@ AUTHORITY_FIELDS = frozenset(
         "actual_chunks_attested",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -121,7 +121,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "history_executor_available",
         "joint_allocation_proved",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_intent_refinement_policy_bound",
     }
 )
@@ -396,7 +396,7 @@ def _source_profile_projection(profile):
         "complexity_contract": copy.deepcopy(profile["complexity_contract"]),
         "content_media_type": profile["content_media_type"],
         "expected_disposition": profile["expected_offline_disposition"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
         "formal_source_recipe_profile_id": profile["source_recipe_profile_id"],

@@ -11,7 +11,7 @@ downstream reservation or membership work rather than completed here.
 It deliberately contains no source row, intent value, cluster instance,
 logical-document instance, scope assignment, planned ledger, or observed
 ledger.  The artifact therefore grants no G0, solver, renderer, filesystem,
-KCS, write, or history authority and makes no source-format feasibility claim.
+KIO, write, or history authority and makes no source-format feasibility claim.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-overlay-contract/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-overlay-contract/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-overlay-contract"
 MAX_OVERLAY_CONTRACT_BYTES = 256 * 1024
@@ -469,7 +469,7 @@ def _relation_semantics():
             "anchor_role": "canonical-original-copy-role",
             "branch_relation": "same-branch",
             "checkpoint_history_relation": (
-                "orthogonal-visible-W0-copy-not-a-KCS-history-version"
+                "orthogonal-visible-W0-copy-not-a-KIO-history-version"
             ),
             "decoded_payload_relation": "exactly-equal",
             "derivative_role": "exact-copy-role",
@@ -484,7 +484,7 @@ def _relation_semantics():
             "anchor_role": "earlier-logical-revision",
             "branch_relation": "same-linear-branch",
             "checkpoint_history_relation": (
-                "orthogonal-both-W0-visible-not-a-KCS-history-transition"
+                "orthogonal-both-W0-visible-not-a-KIO-history-transition"
             ),
             "decoded_payload_relation": "different-but-semantically-near",
             "derivative_role": "later-logical-revision",
@@ -501,7 +501,7 @@ def _relation_semantics():
             "anchor_role": "canonical-main-branch-copy",
             "branch_relation": "distinct-unordered-branches",
             "checkpoint_history_relation": (
-                "orthogonal-both-W0-visible-not-a-KCS-history-transition"
+                "orthogonal-both-W0-visible-not-a-KIO-history-transition"
             ),
             "decoded_payload_relation": "different-with-conflicting-typed-fact-required",
             "derivative_role": "conflicting-branch-copy",
@@ -562,7 +562,7 @@ def _attachment_contract():
 
 def _membership_shard_schema():
     return {
-        "artifact_schema": "kcs.persona.pc-overlay-membership-shard/v2",
+        "artifact_schema": "kio.persona.pc-overlay-membership-shard/v2",
         "body_encoding": {
             "bom_allowed": False,
             "canonical_json": "UTF-8-NFC-sorted-keys-compact-no-float-no-null",
@@ -625,7 +625,7 @@ def _membership_shard_schema():
             "reuse-exact-pilot-shard-bytes-and-sha256-plus-full-residual-shards"
         ),
         "full_manifest_schema": {
-            "artifact_schema": "kcs.persona.pc-overlay-membership-manifest/v2",
+            "artifact_schema": "kio.persona.pc-overlay-membership-manifest/v2",
             "exact_fields": [
                 "artifact_schema",
                 "artifact_schema_version",
@@ -675,7 +675,7 @@ def _membership_shard_schema():
         ],
         "origin_order": ["pilot", "full-residual"],
         "origin_manifest_schema": {
-            "artifact_schema": "kcs.persona.pc-overlay-origin-manifest/v2",
+            "artifact_schema": "kio.persona.pc-overlay-origin-manifest/v2",
             "exact_fields": [
                 "artifact_schema",
                 "artifact_schema_version",
@@ -1283,8 +1283,8 @@ def _ledger_schema(realism_value):
             "sorted_unique_string_list_fields": ["intent_keys", "materialization_ids"],
         },
         "instance_artifact_schemas": {
-            "observed": "kcs.persona.pc-eight-axis-observed-ledger/v2",
-            "planned": "kcs.persona.pc-eight-axis-planned-ledger/v2",
+            "observed": "kio.persona.pc-eight-axis-observed-ledger/v2",
+            "planned": "kio.persona.pc-eight-axis-planned-ledger/v2",
         },
         "hash_back_reference_rules": [
             "all-hash-edges-follow-hash-dag-order-only",
@@ -1302,7 +1302,7 @@ def _ledger_schema(realism_value):
             "canonical-allocation-solution",
             "final-source-plan",
             "planned-eight-axis-ledger",
-            "filesystem-and-KCS-history-execution",
+            "filesystem-and-KIO-history-execution",
             "root-attestation-and-history-execution-receipt",
             "observed-eight-axis-ledger",
         ],
@@ -1311,14 +1311,14 @@ def _ledger_schema(realism_value):
             "canonical-allocation-solution-binds-overlay-membership-manifest-sha256",
             "final-source-plan-binds-canonical-allocation-solution-sha256",
             "planned-eight-axis-ledger-binds-overlay-membership-canonical-allocation-final-source-plan-and-history-intent-sha256s",
-            "filesystem-and-KCS-history-execution-binds-planned-eight-axis-ledger-manifest-sha256",
+            "filesystem-and-KIO-history-execution-binds-planned-eight-axis-ledger-manifest-sha256",
             "root-attestation-and-history-execution-receipt-bind-planned-ledger-and-execution-evidence-sha256s",
             "observed-eight-axis-ledger-binds-planned-ledger-root-attestation-and-history-execution-receipt-sha256s",
         ],
         "manifest_schemas": {
             "observed": {
                 "artifact_schema": (
-                    "kcs.persona.pc-eight-axis-observed-ledger-manifest/v2"
+                    "kio.persona.pc-eight-axis-observed-ledger-manifest/v2"
                 ),
                 "exact_fields": [
                     "artifact_schema",
@@ -1337,7 +1337,7 @@ def _ledger_schema(realism_value):
             },
             "planned": {
                 "artifact_schema": (
-                    "kcs.persona.pc-eight-axis-planned-ledger-manifest/v2"
+                    "kio.persona.pc-eight-axis-planned-ledger-manifest/v2"
                 ),
                 "exact_fields": [
                     "artifact_schema",
@@ -1420,7 +1420,7 @@ def _canonical_overlay_contract_value():
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

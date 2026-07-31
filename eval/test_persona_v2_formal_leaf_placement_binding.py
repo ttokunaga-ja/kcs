@@ -29,11 +29,11 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 BODY_RECEIPT = (
     889_056,
-    "98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e",
+    "4555526caca91a23ddac8581178cbc61c5036b5e3333d12066060644b3a8f460",
 )
 DESCRIPTOR_RECEIPT = (
     27_117,
-    "de518d1fef7a6955462774ace7321943ff5ca918be7f6210380890fca78857f8",
+    "ce60077869f899473b439b3a48446a629016d9c5c2ba472445aee1fb427f1237",
 )
 
 
@@ -300,7 +300,7 @@ class PersonaV2FormalLeafPlacementBindingTests(unittest.TestCase):
         planning_digest["planning_digests"]["scope_registry_sha256"] = "0" * 64
         mutations.append(planning_digest)
         registry = self.fresh()
-        registry["registry_summaries"][0]["registry_root"] = "formal-replay-01/devices/p02-forged/.kcs-eval-device"
+        registry["registry_summaries"][0]["registry_root"] = "formal-replay-01/devices/p02-forged/.kio-eval-device"
         mutations.append(registry)
         extra = self.fresh()
         extra["writer_receipt"] = {}

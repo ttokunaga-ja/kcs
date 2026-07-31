@@ -13,7 +13,7 @@ from eval import persona_v2_overlay_reservation_layout as reservation
 
 
 EXPECTED_CANONICAL_BYTES = 91_039
-EXPECTED_SHA256 = "e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89"
+EXPECTED_SHA256 = "a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc"
 
 
 class PersonaV2OverlayCompatibleByteDistributionTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class PersonaV2OverlayCompatibleByteDistributionTests(unittest.TestCase):
                 "attachment_count": complexity,
                 "byte_length": target_bytes,
                 "identity_tokens_absent": True,
-                "kcs_execution_attested": False,
+                "kio_execution_attested": False,
                 "observed_complexity_measure": "attachments",
                 "observed_local_complexity": complexity,
                 "structure_validated": True,

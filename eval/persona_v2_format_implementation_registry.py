@@ -3,7 +3,7 @@
 This sidecar closes only the renderer/independent-validator implementation
 surface.  It deliberately does not rewrite the historical ten-ready/
 sixty-one-missing source-profile catalog, bind any formal source recipe or
-source instance, or grant execution, filesystem, KCS, history, solver, or G0
+source instance, or grant execution, filesystem, KIO, history, solver, or G0
 authority.
 """
 
@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-format-implementation-registry/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-format-implementation-registry/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-format-implementation-registry"
 MAX_REGISTRY_BYTES = 512 * 1024
@@ -72,7 +72,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_plan",
         "authorizes_renderer_execution",
@@ -84,7 +84,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "renderer_execution_environment_available",
     }
 )
@@ -540,7 +540,7 @@ def _render_probe(pair_id, variant_id, parameters):
     return {
         "content_media_type": rendered.content_media_type,
         "data": rendered.data,
-        "expected_kcs_path_media_type": rendered.expected_kcs_path_media_type,
+        "expected_kio_path_media_type": rendered.expected_kio_path_media_type,
         "expected_offline_disposition": rendered.expected_offline_disposition,
         "extension": rendered.extension,
         "target_bytes": rendered.target_bytes,
@@ -556,7 +556,7 @@ def _validate_probe(pair_id, variant_id, parameters, rendered):
         "data": rendered["data"],
         "extension": rendered["extension"],
         "content_media_type": rendered["content_media_type"],
-        "expected_kcs_path_media_type": rendered["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": rendered["expected_kio_path_media_type"],
         "expected_offline_disposition": rendered["expected_offline_disposition"],
     }
     return validate(validation_request(**validation_kwargs))
@@ -635,7 +635,7 @@ def _format_specific_metadata(renderer_row):
     normalized_keys = {
         "complexity",
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -794,7 +794,7 @@ def _canonical_registry():
     implementation_rows = []
     exact_metadata = (
         "content_media_type",
-        "expected_kcs_path_media_type",
+        "expected_kio_path_media_type",
         "expected_offline_disposition",
         "family",
         "filename_extension",
@@ -849,8 +849,8 @@ def _canonical_registry():
                     conformance_receipts[variant_id]
                 ),
                 "content_media_type": variant_row["content_media_type"],
-                "expected_kcs_path_media_type": variant_row[
-                    "expected_kcs_path_media_type"
+                "expected_kio_path_media_type": variant_row[
+                    "expected_kio_path_media_type"
                 ],
                 "expected_offline_disposition": variant_row[
                     "expected_offline_disposition"
@@ -991,7 +991,7 @@ def _canonical_registry():
         "remaining_blockers": [
             "all-formal-source-recipe-profiles-remain-unbound",
             "all-source-instance-identities-and-source-level-allocation-remain-unbound",
-            "physical-render-write-history-and-kcs-observation-not-present",
+            "physical-render-write-history-and-kio-observation-not-present",
             "formal-persona-package-cap-and-byte-stress-gates-not-proved",
         ],
     }

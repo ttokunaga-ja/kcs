@@ -78,12 +78,12 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(package._expected_golden(), independent._expected_golden())
         self.assertEqual(
             package._expected_golden(),
-            (5_357, "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"),
+            (5_357, "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"),
         )
         self.assertEqual(len(self.body), 426_889)
         self.assertEqual(
             hashlib.sha256(self.body).hexdigest(),
-            "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45",
+            "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5",
         )
         self.assertEqual(self.value["body_canonical_bytes"], len(self.body))
         self.assertEqual(self.value["body_sha256"], hashlib.sha256(self.body).hexdigest())
@@ -440,8 +440,8 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_CORE_EXTENSION_ALLOCATION_FULL") == "1",
-        "set KCS_RUN_CORE_EXTENSION_ALLOCATION_FULL=1 to run the pre-freeze full gate",
+        os.environ.get("KIO_RUN_CORE_EXTENSION_ALLOCATION_FULL") == "1",
+        "set KIO_RUN_CORE_EXTENSION_ALLOCATION_FULL=1 to run the pre-freeze full gate",
     )
     def test_opt_in_descriptor_full_gate(self):
         started = time.monotonic()
@@ -450,13 +450,13 @@ class PersonaV2CoreExtensionAllocationManifestTests(unittest.TestCase):
         self.assertEqual(provider.call_count, 2)
         self.assertEqual(
             (len(self.raw), hashlib.sha256(self.raw).hexdigest()),
-            (5357, "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"),
+            (5357, "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"),
         )
         self.assertLess(time.monotonic() - started, 120)
 
     @unittest.skipUnless(
-        os.environ.get("KCS_RUN_CORE_EXTENSION_ALLOCATION_COLD") == "1",
-        "set KCS_RUN_CORE_EXTENSION_ALLOCATION_COLD=1 to run two hash-seed cold replays",
+        os.environ.get("KIO_RUN_CORE_EXTENSION_ALLOCATION_COLD") == "1",
+        "set KIO_RUN_CORE_EXTENSION_ALLOCATION_COLD=1 to run two hash-seed cold replays",
     )
     def test_opt_in_two_seed_cold_replay(self):
         root = Path(__file__).resolve().parents[1]

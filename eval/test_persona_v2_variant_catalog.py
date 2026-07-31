@@ -34,7 +34,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
                 "filesystem_writer_available",
                 "formal_capacity_gate_satisfied",
                 "history_executor_available",
-                "kcs_execution_available",
+                "kio_execution_available",
                 "query_instances_rendered",
                 "query_spec_hashed",
                 "renderer_available",
@@ -48,7 +48,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
         self.assertEqual(len(raw), 211_733)
         self.assertEqual(
             catalog.variant_catalog_sha256(value),
-            "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+            "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
         )
         self.assertTrue(catalog.validate_variant_catalog(value))
 
@@ -154,7 +154,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
         }
         for variant_id, (content_mime, path_mime) in examples.items():
             self.assertEqual(by_id[variant_id]["content_media_type"], content_mime)
-            self.assertEqual(by_id[variant_id]["expected_kcs_path_media_type"], path_mime)
+            self.assertEqual(by_id[variant_id]["expected_kio_path_media_type"], path_mime)
         self.assertEqual(by_id["jsonl-gzip"]["compound_suffix_parts"], ["jsonl", "gz"])
         self.assertEqual(by_id["dicom-part10"]["filename_extension"], "dcm")
         for row in value["variant_rows"]:
@@ -189,7 +189,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
                 }[row["gate_role"]],
             )
         self.assertIs(
-            value["kcs_media_policy"]["cross_language_production_tables_verified"],
+            value["kio_media_policy"]["cross_language_production_tables_verified"],
             False,
         )
         self.assertIn(
@@ -214,7 +214,7 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
             row = by_id[variant_id]
             self.assertEqual(row["family"], family_by_variant[variant_id])
             self.assertEqual(row["filename_extension"], metadata["extension"])
-            self.assertEqual(row["expected_kcs_path_media_type"], metadata["media_type"])
+            self.assertEqual(row["expected_kio_path_media_type"], metadata["media_type"])
             self.assertEqual(row["gate_role"], metadata["gate_role"])
             self.assertEqual(
                 row["expected_offline_disposition"],

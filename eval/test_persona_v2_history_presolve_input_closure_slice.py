@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - direct discovery compatibility
 
 FROZEN_GOLDEN = (
     8_455,
-    "34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8",
+    "64131249be0313bfbccdbc673fa56bd2f54e1a534ac5c52323d6e64741c55f2d",
 )
 
 
@@ -105,19 +105,19 @@ class PersonaV2HistoryPresolveInputClosureSliceTests(unittest.TestCase):
             [
                 (
                     161_665,
-                    "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509",
+                    "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa",
                 ),
                 (
                     697_466,
-                    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69",
+                    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91",
                 ),
                 (
                     14_605,
-                    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8",
+                    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b",
                 ),
                 (
                     69_195,
-                    "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c",
+                    "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29",
                 ),
             ],
         )
@@ -918,8 +918,8 @@ class PersonaV2HistoryPresolveInputClosureSliceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL") == "1",
-    "set KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1 for all-dependency validation",
+    os.environ.get("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL") == "1",
+    "set KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1 for all-dependency validation",
 )
 class PersonaV2HistoryPresolveInputClosureSliceFullTest(unittest.TestCase):
     def test_full_dependency_acceptance(self):
@@ -1017,8 +1017,8 @@ class PersonaV2HistoryPresolveInputClosureSliceFullTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD") == "1",
-    "set KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1 for two isolated full builds",
+    os.environ.get("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD") == "1",
+    "set KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1 for two isolated full builds",
 )
 class PersonaV2HistoryPresolveInputClosureSliceColdTest(unittest.TestCase):
     def test_two_hashseed_full_builds_are_byte_identical(self):
@@ -1127,7 +1127,7 @@ print(json.dumps({
                     "TZ": "UTC",
                 }
             )
-            environment.pop("KCS_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD", None)
+            environment.pop("KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD", None)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

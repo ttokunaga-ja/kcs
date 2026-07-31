@@ -58,14 +58,14 @@ FACT_CLASS_ID = "fact-graph"
 CLASS_ORDER = (PRIMARY_CLASS_ID, RECIPE_CLASS_ID, FACT_CLASS_ID)
 
 PRIMARY_SCHEMA = (
-    "kcs.persona.pc-primary-use-case-corpus-content-projection/v1"
+    "kio.persona.pc-primary-use-case-corpus-content-projection/v1"
 )
 PRIMARY_KIND = "persona-pc-v2-primary-use-case-corpus-content-projection"
 RECIPE_SCHEMA = (
-    "kcs.persona.pc-recipe-content-filename-policy-content-projection/v1"
+    "kio.persona.pc-recipe-content-filename-policy-content-projection/v1"
 )
 RECIPE_KIND = "persona-pc-v2-recipe-content-filename-policy-content-projection"
-FACT_SCHEMA = "kcs.persona.pc-fact-graph-content-projection/v1"
+FACT_SCHEMA = "kio.persona.pc-fact-graph-content-projection/v1"
 FACT_KIND = "persona-pc-v2-fact-graph-content-projection"
 
 PRIMARY_COORDINATES = {"scope": "suite"}
@@ -129,7 +129,7 @@ PRIMARY_ROW_FIELDS = (
 )
 RECIPE_ROW_SCALAR_FIELDS = (
     "content_media_type",
-    "expected_kcs_path_media_type",
+    "expected_kio_path_media_type",
     "expected_offline_disposition",
     "family",
     "format_feasibility_render_template_id",
@@ -1210,7 +1210,7 @@ def _expected_full_fact_graph(persona_id, shared):
     graph_count = len(graphs)
     return {
         "artifact_kind": "persona-pc-v2-fact-graph",
-        "artifact_schema": "kcs.persona.pc-fact-graph/v2",
+        "artifact_schema": "kio.persona.pc-fact-graph/v2",
         "artifact_schema_version": 2,
         "authority": {
             "actual_chunks_attested": False,
@@ -1222,7 +1222,7 @@ def _expected_full_fact_graph(persona_id, shared):
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,

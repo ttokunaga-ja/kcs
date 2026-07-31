@@ -4,7 +4,7 @@ This vertical slice covers only ``pdf-scan``, ``docx``, ``xlsx``, and
 ``pptx`` in the formal ordinary (at most 512 KiB) lane.  Requests carry no
 persona, source, path, query, digest, or history identity.  Rendering proves
 only that bounded canonical bytes can be produced; it grants no source-plan,
-physical-write, KCS, chunk, history, solver, or G0 authority.
+physical-write, KIO, chunk, history, solver, or G0 authority.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-raw-document-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-raw-document-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-raw-document-renderer"
 RENDERER_ID = "persona-v2-id-free-raw-document-feasibility-renderer"
@@ -65,7 +65,7 @@ _VARIANT_ROWS = {
         "base_bytes": 8_192,
         "complexity_measure": "document-sections",
         "content_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "expected_offline_disposition": "await_conversion",
         "family": "docx",
         "filename_extension": "docx",
@@ -78,7 +78,7 @@ _VARIANT_ROWS = {
         "base_bytes": 8_192,
         "complexity_measure": "scan-pages",
         "content_media_type": "application/pdf",
-        "expected_kcs_path_media_type": "application/pdf",
+        "expected_kio_path_media_type": "application/pdf",
         "expected_offline_disposition": "awaiting_ocr",
         "family": "pdf_scan",
         "filename_extension": "pdf",
@@ -91,7 +91,7 @@ _VARIANT_ROWS = {
         "base_bytes": 16_384,
         "complexity_measure": "slides",
         "content_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "expected_offline_disposition": "await_conversion",
         "family": "pptx",
         "filename_extension": "pptx",
@@ -104,7 +104,7 @@ _VARIANT_ROWS = {
         "base_bytes": 12_288,
         "complexity_measure": "worksheets",
         "content_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "expected_kcs_path_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "expected_kio_path_media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "expected_offline_disposition": "await_conversion",
         "family": "xlsx",
         "filename_extension": "xlsx",
@@ -157,7 +157,7 @@ class RenderedRawDocument:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     target_complexity: int
     target_bytes: int
@@ -892,7 +892,7 @@ def render_raw_document(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         target_complexity=request.target_complexity,
         target_bytes=target_bytes,
@@ -911,7 +911,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -943,7 +943,7 @@ def _canonical_contract_value():
             "authorizes_renderer_execution": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "byte_stress_lane_implemented": False,
         "canonical_limits": {
@@ -957,7 +957,7 @@ def _canonical_contract_value():
         },
         "implementation_scope": (
             "four-id-free-formal-ordinary-raw-document-feasibility-variants-only-"
-            "not-byte-stress-source-materialization-or-kcs-attestation"
+            "not-byte-stress-source-materialization-or-kio-attestation"
         ),
         "payload_identity_policy": {
             "content_digest_embedded": False,

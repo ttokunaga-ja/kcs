@@ -40,10 +40,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variant_catalog
 
 
-PERSONA_SCHEMA = "kcs.persona.pc-source-matched-lifecycle-persona/v1"
-SUITE_SCHEMA = "kcs.persona.pc-source-matched-lifecycle-suite/v1"
+PERSONA_SCHEMA = "kio.persona.pc-source-matched-lifecycle-persona/v1"
+SUITE_SCHEMA = "kio.persona.pc-source-matched-lifecycle-suite/v1"
 PROJECTION_SCHEMA = (
-    "kcs.persona.pc-source-matched-lifecycle-content-projection/v1"
+    "kio.persona.pc-source-matched-lifecycle-content-projection/v1"
 )
 CONTENT_PROJECTION_SCHEMA = PROJECTION_SCHEMA
 ARTIFACT_SCHEMA_VERSION = 1
@@ -67,7 +67,7 @@ MAX_EVENT_BODY_BYTES = 4 * 2**20
 MAX_EVENT_ROW_BYTES_INCLUDING_LF = 1_024
 EXPECTED_SUITE_CANONICAL_BYTES = 14_605
 EXPECTED_SUITE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
 
 EXPECTED_PRIMARY_MATCHES_PER_PERSONA = 105
@@ -336,7 +336,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_rendering",
         "authorizes_renderer_execution",
@@ -347,7 +347,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
     }
 )
@@ -355,35 +355,35 @@ AUTHORITY_FIELDS = frozenset(
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-lifecycle-coverage-catalog": (
         1_385_596,
-        "ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236",
+        "1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4",
     ),
     "persona-v2-primary-use-case-catalog": (
         30_008,
-        "024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624",
+        "73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed",
     ),
     "persona-v2-variant-catalog": (
         211_733,
-        "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
+        "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9",
     ),
     "persona-v2-source-inventory-suite": (
         45_887,
-        "b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706",
+        "9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3",
     ),
     "persona-v2-overlay-reservation-suite": (
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
     "persona-v2-source-semantic-membership-suite": (
         49_837,
-        "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28",
+        "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072",
     ),
     "persona-v2-source-inventory-profile-catalog": (
         87_391,
-        "be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196",
+        "9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0",
     ),
     "persona-v2-source-instance-parameter-assignment-suite": (
         72_535,
-        "ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a",
+        "42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3",
     ),
 }
 
@@ -1271,7 +1271,7 @@ def _persona_origin_bindings(joined):
 
 def _domain_key(domain, intent_key):
     raw = (
-        b"kcs-lifecycle-v1/"
+        b"kio-lifecycle-v1/"
         + _ascii_key(domain)
         + b"/"
         + _ascii_key(intent_key)
@@ -2550,7 +2550,7 @@ def _expected_persona_value(
             "scope-bucket-cohort-quota-solver-solution-and-proof-not-built",
             "solution-compiled-history-plan-and-pre-w2-patch-not-built",
             "query-render-evaluation-target-and-relevance-not-built",
-            "filesystem-render-index-history-kcs-receipts-and-g0-not-built",
+            "filesystem-render-index-history-kio-receipts-and-g0-not-built",
         ],
         "summary": {
             "companion_source_match_count": len(companion_rows),
@@ -2747,7 +2747,7 @@ def _expected_suite_value(inputs, reconstructed):
             "effective-lifecycle-membership-overlay-not-built",
             "joint-scope-quota-solver-and-proof-not-built",
             "compiled-history-plan-and-execution-not-built",
-            "query-render-evaluation-and-kcs-observation-not-built",
+            "query-render-evaluation-and-kio-observation-not-built",
             "g0-contract-not-frozen",
         ],
         "summary": {

@@ -9,7 +9,7 @@ root per persona and replay.
 
 The concrete designated replay for the ambient and byte-stress lanes is not a
 frozen G0 decision.  ``formal-replay-01`` is therefore recorded only as an
-unratified candidate.  No filesystem, registry, history, KCS, capacity, or G0
+unratified candidate.  No filesystem, registry, history, KIO, capacity, or G0
 authority is granted by this artifact.
 """
 
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_device_lane_compositor_validator as independent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-device-lane-compositor/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-device-lane-compositor/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-non-authorizing-device-lane-compositor-candidate"
 BODY_FRAMING = "canonical-json"
@@ -47,12 +47,12 @@ MAX_EXPANDED_NODE_COUNT = 100_000
 # Python hash seeds.
 EXPECTED_CANONICAL_BYTES = 41_099
 EXPECTED_SHA256 = (
-    "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf"
+    "8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f"
 )
 
 ENVELOPE_CANONICAL_BYTES = 71_979
 ENVELOPE_SHA256 = (
-    "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
+    "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7"
 )
 
 REPLAY_IDS = (
@@ -75,7 +75,7 @@ AUTHORITY_FIELDS = (
     "authorizes_filesystem_materialization",
     "authorizes_g0_freeze",
     "authorizes_history_execution",
-    "authorizes_kcs_execution",
+    "authorizes_kio_execution",
     "authorizes_physical_write",
     "authorizes_registry_creation",
     "designated_replay_selection_authoritative",
@@ -191,7 +191,7 @@ def _formal_mapping(replay_id, persona_id, role_slug):
         "fresh_w0_build_required": True,
         "home_root": f"{device_root}/home",
         "physical_materialization_claimed": False,
-        "registry_root": f"{device_root}/.kcs-eval-device",
+        "registry_root": f"{device_root}/.kio-eval-device",
         "replay_id": replay_id,
     }
 

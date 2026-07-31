@@ -42,11 +42,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_variant_catalog as variants
 
 
-PERSONA_SCHEMA = "kcs.persona.pc-source-matched-lifecycle-persona/v1"
+PERSONA_SCHEMA = "kio.persona.pc-source-matched-lifecycle-persona/v1"
 PERSONA_KIND = "persona-pc-v2-source-matched-lifecycle-persona"
-SUITE_SCHEMA = "kcs.persona.pc-source-matched-lifecycle-suite/v1"
+SUITE_SCHEMA = "kio.persona.pc-source-matched-lifecycle-suite/v1"
 SUITE_KIND = "persona-pc-v2-source-matched-lifecycle-suite"
-PROJECTION_SCHEMA = "kcs.persona.pc-source-matched-lifecycle-content-projection/v1"
+PROJECTION_SCHEMA = "kio.persona.pc-source-matched-lifecycle-content-projection/v1"
 PROJECTION_KIND = "persona-pc-v2-source-matched-lifecycle-content-projection"
 ARTIFACT_SCHEMA_VERSION = 1
 
@@ -69,11 +69,11 @@ EXPECTED_RAW_ONLY_WITNESS_COUNT = 8
 
 ASSIGNMENT_SUITE_CANONICAL_BYTES = 72_535
 ASSIGNMENT_SUITE_SHA256 = (
-    "ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a"
+    "42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3"
 )
 EXPECTED_SUITE_CANONICAL_BYTES = 14_605
 EXPECTED_SUITE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
 
 SEARCHABLE_POSITIVE_FAMILIES = frozenset(
@@ -291,7 +291,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_rendering",
         "authorizes_renderer_execution",
@@ -302,7 +302,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
     }
 )
@@ -365,7 +365,7 @@ def _ascii(value):
 
 
 def _domain_key(domain, intent_key):
-    raw = b"kcs-lifecycle-v1/" + _ascii(domain) + b"/" + _ascii(intent_key)
+    raw = b"kio-lifecycle-v1/" + _ascii(domain) + b"/" + _ascii(intent_key)
     return hashlib.sha256(raw).digest(), _ascii(intent_key)
 
 
@@ -2104,7 +2104,7 @@ def _construct_persona(
             "scope-bucket-cohort-quota-solver-solution-and-proof-not-built",
             "solution-compiled-history-plan-and-pre-w2-patch-not-built",
             "query-render-evaluation-target-and-relevance-not-built",
-            "filesystem-render-index-history-kcs-receipts-and-g0-not-built",
+            "filesystem-render-index-history-kio-receipts-and-g0-not-built",
         ],
         "summary": {
             "companion_source_match_count": len(selection["companion_rows"]),
@@ -2325,7 +2325,7 @@ def _canonical_suite_descriptor():
             "effective-lifecycle-membership-overlay-not-built",
             "joint-scope-quota-solver-and-proof-not-built",
             "compiled-history-plan-and-execution-not-built",
-            "query-render-evaluation-and-kcs-observation-not-built",
+            "query-render-evaluation-and-kio-observation-not-built",
             "g0-contract-not-frozen",
         ],
         "summary": {

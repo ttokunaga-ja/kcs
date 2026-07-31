@@ -69,8 +69,8 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
                 data=rendered.data,
                 extension=rendered.extension,
                 content_media_type=rendered.content_media_type,
-                expected_kcs_path_media_type=(
-                    rendered.expected_kcs_path_media_type
+                expected_kio_path_media_type=(
+                    rendered.expected_kio_path_media_type
                 ),
                 expected_offline_disposition=(
                     rendered.expected_offline_disposition
@@ -88,7 +88,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -126,7 +126,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             "archive_format",
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -148,7 +148,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             )
             self.assertEqual(renderer_rows[variant]["gate_role"], "raw_only")
             self.assertEqual(
-                renderer_rows[variant]["expected_kcs_path_media_type"],
+                renderer_rows[variant]["expected_kio_path_media_type"],
                 "application/octet-stream",
             )
             self.assertEqual(
@@ -174,14 +174,14 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
         )
         self.assertEqual(
             renderer.renderer_contract_sha256(renderer_contract),
-            "d23a9b29f4e26748f32f07e201c1294ede5cd4534a27533e9ddc9b88a01d8cb8",
+            "b6568684532d51bdc25d885bcbd18d04006d90a073397db30353f9e982998b70",
         )
         self.assertEqual(
             len(validator.canonical_json_bytes(validator_contract)), 15_885
         )
         self.assertEqual(
             validator.validator_contract_sha256(validator_contract),
-            "2e98faae761d7ae4aaaeba37a560d4e78dc3cc948551abde1acc399018d31bf6",
+            "3ac1ce2f3df3820e28ec77029347df151e5c138f398ee068e5942fc769100e57",
         )
         self.assertTrue(renderer.validate_renderer_contract(renderer_contract))
         self.assertTrue(validator.validate_validator_contract(validator_contract))
@@ -517,7 +517,7 @@ class PersonaV2RawTarGzipRendererValidatorTests(unittest.TestCase):
             replace(valid, data=bytearray(rendered.data)),
             replace(valid, extension="jsonl"),
             replace(valid, content_media_type="application/octet-stream"),
-            replace(valid, expected_kcs_path_media_type="application/gzip"),
+            replace(valid, expected_kio_path_media_type="application/gzip"),
             replace(valid, expected_offline_disposition="incidental_sniff"),
         )
         for request in invalid:

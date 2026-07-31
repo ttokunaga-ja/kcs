@@ -33,12 +33,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_matched_lifecycle_inventory as lifecycle
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-history-presolve-input-closure-slice/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-history-presolve-input-closure-slice/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = (
     "persona-pc-v2-non-authorizing-history-presolve-input-closure-slice"
 )
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_MANIFEST_BYTES = 128 * 2**10
@@ -52,23 +52,23 @@ MAX_INTEGER_MAGNITUDE = 2**63 - 1
 
 # Must remain byte-identical to the non-authorizing producer golden.
 EXPECTED_CANONICAL_BYTES = 8_455
-EXPECTED_SHA256 = "34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8"
+EXPECTED_SHA256 = "64131249be0313bfbccdbc673fa56bd2f54e1a534ac5c52323d6e64741c55f2d"
 
 NAMESPACE_CANONICAL_BYTES = 161_665
 NAMESPACE_SHA256 = (
-    "a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509"
+    "70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa"
 )
 COMPLETE_INVENTORY_CANONICAL_BYTES = 697_466
 COMPLETE_INVENTORY_SHA256 = (
-    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
 SOURCE_MATCHED_LIFECYCLE_CANONICAL_BYTES = 14_605
 SOURCE_MATCHED_LIFECYCLE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
 EFFECTIVE_MEMBERSHIP_CANONICAL_BYTES = 69_195
 EFFECTIVE_MEMBERSHIP_SHA256 = (
-    "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c"
+    "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29"
 )
 DIRECT_DEPENDENCY_CANONICAL_BYTES = 942_931
 
@@ -90,7 +90,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_g0_freeze",
         "authorizes_history_input_closure",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_planned_event_identifiers",
         "authorizes_renderer_execution",
@@ -431,7 +431,7 @@ def _expected_direct_pins():
             artifact_kind=(
                 "persona-pc-v2-projection-pin-corpus-semantic-namespace"
             ),
-            artifact_schema="kcs.persona.pc-corpus-semantic-namespace/v3",
+            artifact_schema="kio.persona.pc-corpus-semantic-namespace/v3",
             artifact_schema_version=3,
             canonical_bytes=161_665,
             sha256=NAMESPACE_SHA256,
@@ -443,7 +443,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-complete-semantic-projection-derivation-inventory"
             ),
             artifact_schema=(
-                "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+                "kio.persona.pc-semantic-projection-derivation-inventory/v2"
             ),
             artifact_schema_version=2,
             canonical_bytes=697_466,
@@ -453,7 +453,7 @@ def _expected_direct_pins():
             dependency_id="source-matched-lifecycle-suite-v1",
             dependency_role="query-independent-presolve-lifecycle-demand",
             artifact_kind="persona-pc-v2-source-matched-lifecycle-suite",
-            artifact_schema="kcs.persona.pc-source-matched-lifecycle-suite/v1",
+            artifact_schema="kio.persona.pc-source-matched-lifecycle-suite/v1",
             artifact_schema_version=1,
             canonical_bytes=14_605,
             sha256=SOURCE_MATCHED_LIFECYCLE_SHA256,
@@ -465,7 +465,7 @@ def _expected_direct_pins():
                 "persona-pc-v2-lifecycle-effective-membership-reconciliation"
             ),
             artifact_schema=(
-                "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1"
+                "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1"
             ),
             artifact_schema_version=1,
             canonical_bytes=69_195,
@@ -513,7 +513,7 @@ def _compact_owner_summary():
 def _semantic_context():
     return {
         "complete_inventory_evidence_bound": True,
-        "cumulative_external_projection_bytes": 155_741_469,
+        "cumulative_external_projection_bytes": 155_741_381,
         "external_projection_bodies_embedded": False,
         "namespace_entry_count": 253,
         "namespace_issued": False,
@@ -857,7 +857,7 @@ def _unresolved_solution_compilation():
         "filesystem_write_receipt_count": 0,
         "g0_approval_receipt_count": 0,
         "history_mutation_receipt_count": 0,
-        "kcs_execution_receipt_count": 0,
+        "kio_execution_receipt_count": 0,
         "path_assignment_count": 0,
         "planned_event_id_count": 0,
         "planned_materialization_id_count": 0,
@@ -914,7 +914,7 @@ def _expected_value(snapshot):
         "hypothesis_status": (
             "authored-pinned-query-independent-structural-w0-only-presolve-"
             "history-input-slice-not-authoritative-not-observed-"
-            "filesystem-history-or-kcs-execution"
+            "filesystem-history-or-kio-execution"
         ),
         "orders": {
             "direct_dependencies": "declared-dependency-order",
@@ -926,7 +926,7 @@ def _expected_value(snapshot):
             "scope-bucket-cohort-path-quota-solution-and-proof-not-built",
             "planned-and-final-source-materialization-event-identifiers-not-built",
             "solution-compiled-history-plan-not-built",
-            "render-write-index-history-mutation-and-kcs-receipts-not-built",
+            "render-write-index-history-mutation-and-kio-receipts-not-built",
             "production-input-closures-and-positive-approval-not-bound",
             "formal-g0-contract-not-frozen",
         ],

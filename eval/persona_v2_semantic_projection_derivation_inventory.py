@@ -31,15 +31,15 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_membership_package as base_semantic
 
 
-SUITE_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+SUITE_SCHEMA = "kio.persona.pc-semantic-projection-derivation-inventory/v1"
 SUITE_KIND = "persona-pc-v2-semantic-projection-derivation-inventory"
-RECEIPT_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-receipt/v1"
+RECEIPT_SCHEMA = "kio.persona.pc-semantic-projection-derivation-receipt/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_SCHEMA = SUITE_SCHEMA
 ARTIFACT_KIND = SUITE_KIND
 
 BASE_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-base-source-content-context-shard-projection/v1"
+    "kio.persona.pc-base-source-content-context-shard-projection/v1"
 )
 BASE_PROJECTION_KIND = "persona-pc-v2-base-source-content-context-shard-projection"
 
@@ -96,7 +96,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -109,7 +109,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -147,29 +147,29 @@ EXPECTED_RECEIPT_COUNTS = {
 
 SOURCE_SEMANTIC_SUITE_BYTES = 49_837
 SOURCE_SEMANTIC_SUITE_SHA256 = (
-    "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28"
+    "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072"
 )
 MATCHED_SUITE_BYTES = 14_605
 MATCHED_SUITE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
 EFFECTIVE_SUITE_BYTES = 69_195
 EFFECTIVE_SUITE_SHA256 = (
-    "14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c"
+    "a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29"
 )
 
 EXPECTED_SUITE_CANONICAL_BYTES = 293_285
 EXPECTED_SUITE_SHA256 = (
-    "5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84"
+    "e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb"
 )
-EXPECTED_CUMULATIVE_PROJECTION_BYTES = 128_144_915
+EXPECTED_CUMULATIVE_PROJECTION_BYTES = 128_144_827
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
-    "a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d"
+    "ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455"
 )
 EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "base-source-content-context": 2_484_590,
-    "effective-source-membership": 103_864,
-    "query-independent-lifecycle-fact-rendition-rules": 256_790,
+    "effective-source-membership": 103_840,
+    "query-independent-lifecycle-fact-rendition-rules": 256_800,
 }
 
 
@@ -217,7 +217,7 @@ def _negative_authority():
         "authorizes_final_identifiers": False,
         "authorizes_g0_freeze": False,
         "authorizes_history_mutation": False,
-        "authorizes_kcs_execution": False,
+        "authorizes_kio_execution": False,
         "authorizes_namespace_completion": False,
         "authorizes_physical_write": False,
         "authorizes_query_rendering": False,
@@ -230,7 +230,7 @@ def _negative_authority():
         "filesystem_writer_available": False,
         "formal_capacity_gate_satisfied": False,
         "history_executor_available": False,
-        "kcs_execution_available": False,
+        "kio_execution_available": False,
         "physical_materialization_observed": False,
         "solver_solution_available": False,
         "source_identity_namespace_authoritative": False,
@@ -890,7 +890,7 @@ def _canonical_inventory():
             "corpus-semantic-namespace-not-issued",
             "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
             "joint-solver-solution-proof-and-final-source-plan-not-built",
-            "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+            "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
         ],
         "summary": {
             "covered_projection_class_count": len(COVERED_CLASS_ORDER),

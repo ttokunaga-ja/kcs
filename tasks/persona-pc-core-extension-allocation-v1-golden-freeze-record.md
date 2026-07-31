@@ -15,12 +15,12 @@ Kio, evaluation, or actual chunk claims.
 
 | item | exact value |
 | --- | --- |
-| descriptor schema | `kcs.persona.core-extension-allocation-manifest/v1` |
+| descriptor schema | `kio.persona.core-extension-allocation-manifest/v1` |
 | descriptor canonical bytes | 5,357 |
-| descriptor SHA-256 | `ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f` |
+| descriptor SHA-256 | `f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436` |
 | external body ID | `persona-core-v1-extension-allocation-rows-v1` |
 | external LF-JSONL bytes | 426,889 |
-| external LF-JSONL SHA-256 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| external LF-JSONL SHA-256 | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 | rows / full non-zero rows | 566 / 539 |
 | first row | `persona-core-v1-extension-p01-md-md`, 745 bytes, `351991d32d2b21171ec21a77fd3ba2a52ef89638e845cf2ce590addeba885fb5` |
 | last row | `persona-core-v1-extension-p20-domain_binary-source-drop-ustar`, 778 bytes, `e663127e173334127c6333909370038fa83181d903a1866a9d1380711fd0b09b` |
@@ -36,12 +36,12 @@ The allocation consumes only these pinned input projections:
 
 | input | bytes / SHA-256 |
 | --- | --- |
-| core family-count matrix | 2,410 / `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7` |
-| persona-PC envelope | 71,979 / `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370` |
-| all-71 format implementation registry | 333,881 / `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683` |
+| core family-count matrix | 2,410 / `271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561` |
+| persona-PC envelope | 71,979 / `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7` |
+| all-71 format implementation registry | 333,881 / `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d` |
 
 The all-71 registry is consumed through a frozen 22,639-byte, SHA-256
-`a2cf577c178bda8373952e087df5e5decba60d38fd875c13fc374f15410d0f57`
+`3ef3404825c89dd97e9394ef039f8c7c25e7c94ee1e2ac5465f756cff79ca9af`
 read-only projection.  It contains exactly the allocation-needed variant ID,
 family, suffix, role, offline disposition, and renderer/validator binding
 fields, and binds the full registry hash above.  This deliberately prevents a
@@ -74,8 +74,8 @@ open.
 | gate | result |
 | --- | --- |
 | focused fast gate | 15 passed, 2 opt-in skipped |
-| post-freeze full gate (`KCS_RUN_CORE_EXTENSION_ALLOCATION_FULL=1`) | passed |
-| post-freeze two-seed cold gate (`KCS_RUN_CORE_EXTENSION_ALLOCATION_COLD=1`) | passed |
+| post-freeze full gate (`KIO_RUN_CORE_EXTENSION_ALLOCATION_FULL=1`) | passed |
+| post-freeze two-seed cold gate (`KIO_RUN_CORE_EXTENSION_ALLOCATION_COLD=1`) | passed |
 | direct `PYTHONHASHSEED=0/1`, `LANG=C`, `LC_ALL=C`, `TZ=UTC` replay | identical descriptor and body bytes/SHA |
 | independent re-audit | no remaining implementation freeze blocker |
 

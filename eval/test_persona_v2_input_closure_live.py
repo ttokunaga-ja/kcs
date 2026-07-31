@@ -39,19 +39,19 @@ PERSONA_ID = "p01"
 EXPECTED_ROOT_IDENTITIES = {
     "corpus": (
         3_496,
-        "e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69",
+        "438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757",
     ),
     "evaluation": (
         5_032,
-        "a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe",
+        "29e4de812125a0c87fb172e81e6bafa7f4d6908d863b7c7061d4a45b4042ce3d",
     ),
     "semantic": (
         48_210,
-        "57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3",
+        "33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8",
     ),
     "suite": (
         2_609,
-        "8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22",
+        "9217e519a382ff51e10305dc77a6e1b2ce4401f543f159ad190e72fb029a76b8",
     ),
 }
 

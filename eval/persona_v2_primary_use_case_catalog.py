@@ -29,10 +29,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-primary-use-case-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-primary-use-case-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-primary-use-case-catalog"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 MAX_CATALOG_BYTES = 256 * 1024
 
@@ -89,7 +89,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_evaluation_target_resolution",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_rendering",
         "authorizes_solver_execution",
@@ -97,7 +97,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "source_instance_matching_available",
     }
@@ -106,11 +106,11 @@ AUTHORITY_FIELDS = frozenset(
 EXPECTED_DEPENDENCY_PINS = {
     "persona-v2-envelope": (
         71_979,
-        "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+        "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
     ),
     "persona-v2-topology": (
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
     ),
 }
 

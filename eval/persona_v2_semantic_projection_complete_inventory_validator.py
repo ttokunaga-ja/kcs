@@ -31,11 +31,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA_VERSION = 2
-SUITE_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-inventory/v2"
+SUITE_SCHEMA = "kio.persona.pc-semantic-projection-derivation-inventory/v2"
 SUITE_KIND = "persona-pc-v2-complete-semantic-projection-derivation-inventory"
-RECEIPT_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-receipt/v2"
+RECEIPT_SCHEMA = "kio.persona.pc-semantic-projection-derivation-receipt/v2"
 PARTIAL_V1_RECEIPT_SCHEMA = (
-    "kcs.persona.pc-semantic-projection-derivation-receipt/v1"
+    "kio.persona.pc-semantic-projection-derivation-receipt/v1"
 )
 
 PROJECTION_CLASS_ORDER = (
@@ -93,11 +93,11 @@ TARGET_JSON_BODY_BYTES = 256 * 2**10
 
 EXPECTED_SUITE_CANONICAL_BYTES = 697_466
 EXPECTED_SUITE_SHA256 = (
-    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
-EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES_FROZEN = 155_741_469
+EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES_FROZEN = 155_741_381
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
-    "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
+    "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
 )
 
 AUTHORITY_FIELDS = frozenset(
@@ -109,7 +109,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -122,7 +122,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -304,7 +304,7 @@ EXPECTED_REMAINING_BLOCKERS = [
     "corpus-input-query-history-closures-and-blocker-resolution-ledger-not-complete",
     "joint-solver-solution-proof-and-final-source-plan-not-built",
     "solution-compiled-history-plan-and-g0-descriptor-not-built",
-    "physical-materialization-capacity-kcs-history-and-evaluation-not-observed",
+    "physical-materialization-capacity-kio-history-and-evaluation-not-observed",
 ]
 EXPECTED_ORDERS = {
     "derivation_receipts": (
@@ -1355,7 +1355,7 @@ def _prevalidate_inventory(value):
         _fail("complete inventory predecessor binding schema drifted")
     if (
         predecessor["artifact_schema"]
-        != "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+        != "kio.persona.pc-semantic-projection-derivation-inventory/v1"
         or predecessor["canonical_bytes"]
         != partial_validator.EXPECTED_SUITE_CANONICAL_BYTES
         or predecessor["sha256"] != partial_validator.EXPECTED_SUITE_SHA256

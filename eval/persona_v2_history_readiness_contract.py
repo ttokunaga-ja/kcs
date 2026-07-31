@@ -14,7 +14,7 @@ only to bind the exact formal replay-ID namespace.  Neither dependency is
 issued by this candidate, and their acceptance grants no runtime authority.
 Fast construction is pin-only; the opt-in full path independently replays the
 live history body.  No query,
-oracle, evaluation result, filesystem observation, history mutation, KCS
+oracle, evaluation result, filesystem observation, history mutation, KIO
 execution, or G0 authority is imported or granted.
 """
 
@@ -36,10 +36,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_history_readiness_contract_validator as independent
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-history-readiness-contract/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-history-readiness-contract/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-static-non-authorizing-history-readiness-contract-candidate"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CONTRACT_BYTES = 512 * 2**10
@@ -54,11 +54,11 @@ EXPECTED_SHA256 = None
 
 HISTORY_SLICE_CANONICAL_BYTES = 8_455
 HISTORY_SLICE_SHA256 = (
-    "34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8"
+    "64131249be0313bfbccdbc673fa56bd2f54e1a534ac5c52323d6e64741c55f2d"
 )
 DEVICE_COMPOSITOR_CANONICAL_BYTES = 41_099
 DEVICE_COMPOSITOR_SHA256 = (
-    "eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf"
+    "8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f"
 )
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
@@ -128,7 +128,7 @@ PERSONA_CHECKPOINT_RECEIPT_FIELDS = (
     "checkpoint",
     "checkpoint_event_journal_sha256",
     "checkpoint_filesystem_snapshot_sha256",
-    "checkpoint_kcs_snapshot_sha256",
+    "checkpoint_kio_snapshot_sha256",
     "checkpoint_ordinal",
     "chunking_config_sha256",
     "compiled_history_plan_sha256",
@@ -209,7 +209,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_g0_freeze",
         "authorizes_history_input_closure",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_replay_execution",
         "authorizes_runtime_receipt_issuance",
@@ -362,7 +362,7 @@ def _candidate_dependency_snapshot():
 def _require_dependency_constant_alignment():
     if (
         history_slice.ARTIFACT_SCHEMA
-        != "kcs.persona.pc-history-presolve-input-closure-slice/v1"
+        != "kio.persona.pc-history-presolve-input-closure-slice/v1"
         or history_slice.ARTIFACT_SCHEMA_VERSION != 1
         or history_slice.ARTIFACT_KIND
         != "persona-pc-v2-non-authorizing-history-presolve-input-closure-slice"
@@ -370,7 +370,7 @@ def _require_dependency_constant_alignment():
         != HISTORY_SLICE_CANONICAL_BYTES
         or history_slice.EXPECTED_SHA256 != HISTORY_SLICE_SHA256
         or independent.history_validator.ARTIFACT_SCHEMA
-        != "kcs.persona.pc-history-presolve-input-closure-slice/v1"
+        != "kio.persona.pc-history-presolve-input-closure-slice/v1"
         or independent.history_validator.ARTIFACT_SCHEMA_VERSION != 1
         or independent.history_validator.ARTIFACT_KIND
         != "persona-pc-v2-non-authorizing-history-presolve-input-closure-slice"
@@ -379,7 +379,7 @@ def _require_dependency_constant_alignment():
         or independent.history_validator.EXPECTED_SHA256
         != HISTORY_SLICE_SHA256
         or device_compositor.ARTIFACT_SCHEMA
-        != "kcs.persona.pc-device-lane-compositor/v1"
+        != "kio.persona.pc-device-lane-compositor/v1"
         or device_compositor.ARTIFACT_SCHEMA_VERSION != 1
         or device_compositor.ARTIFACT_KIND
         != "persona-pc-v2-non-authorizing-device-lane-compositor-candidate"
@@ -388,7 +388,7 @@ def _require_dependency_constant_alignment():
         or device_compositor.EXPECTED_SHA256 != DEVICE_COMPOSITOR_SHA256
         or not _strict_equal(device_compositor.REPLAY_IDS, REPLAY_IDS)
         or independent.compositor_validator.ARTIFACT_SCHEMA
-        != "kcs.persona.pc-device-lane-compositor/v1"
+        != "kio.persona.pc-device-lane-compositor/v1"
         or independent.compositor_validator.ARTIFACT_SCHEMA_VERSION != 1
         or independent.compositor_validator.ARTIFACT_KIND
         != "persona-pc-v2-non-authorizing-device-lane-compositor-candidate"
@@ -611,7 +611,7 @@ def _field_contracts():
             "schema_identity": {
                 "fixture_id": FIXTURE_ID,
                 "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
-                "seal_schema": "kcs.persona.pc-history-readiness-checkpoint-seal/v1",
+                "seal_schema": "kio.persona.pc-history-readiness-checkpoint-seal/v1",
                 "seal_schema_version": 1,
             },
         },
@@ -644,7 +644,7 @@ def _field_contracts():
             "schema_identity": {
                 "fixture_id": FIXTURE_ID,
                 "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
-                "receipt_schema": "kcs.persona.pc-history-readiness-replay-container-receipt/v1",
+                "receipt_schema": "kio.persona.pc-history-readiness-replay-container-receipt/v1",
                 "receipt_schema_version": 1,
             },
         },
@@ -663,7 +663,7 @@ def _field_contracts():
                 "container_receipt_is_root_receipt_predecessor": True,
                 "device_and_registry_root_ids_must_be_distinct": True,
                 "device_and_registry_root_sets_have_exactly_60_members_each": True,
-                "receipt_emitted_before_any_writer_or_kcs_mutation": True,
+                "receipt_emitted_before_any_writer_or_kio_mutation": True,
                 "scope_count": 20,
             },
             "digest_fields": [
@@ -688,7 +688,7 @@ def _field_contracts():
             "schema_identity": {
                 "fixture_id": FIXTURE_ID,
                 "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
-                "receipt_schema": "kcs.persona.pc-history-readiness-persona-root-receipt/v1",
+                "receipt_schema": "kio.persona.pc-history-readiness-persona-root-receipt/v1",
                 "receipt_schema_version": 1,
             },
         },
@@ -710,7 +710,7 @@ def _field_contracts():
             "digest_fields": [
                 "checkpoint_event_journal_sha256",
                 "checkpoint_filesystem_snapshot_sha256",
-                "checkpoint_kcs_snapshot_sha256",
+                "checkpoint_kio_snapshot_sha256",
                 "chunking_config_sha256",
                 "compiled_history_plan_sha256",
                 "current_endpoint_set_sha256",
@@ -733,7 +733,7 @@ def _field_contracts():
                 "metric_id": "search-semantic-endpoint-v1/contract-contributor",
                 "fixture_id": FIXTURE_ID,
                 "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
-                "receipt_schema": "kcs.persona.pc-history-readiness-persona-checkpoint-receipt/v1",
+                "receipt_schema": "kio.persona.pc-history-readiness-persona-checkpoint-receipt/v1",
                 "receipt_schema_version": 1,
             },
         },
@@ -770,7 +770,7 @@ def _field_contracts():
             "schema_identity": {
                 "fixture_id": FIXTURE_ID,
                 "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
-                "terminal_schema": "kcs.persona.pc-history-readiness-replay-terminal/v1",
+                "terminal_schema": "kio.persona.pc-history-readiness-replay-terminal/v1",
                 "terminal_schema_version": 1,
             },
         },

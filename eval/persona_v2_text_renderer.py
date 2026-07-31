@@ -4,7 +4,7 @@ This is deliberately a narrow vertical slice.  It proves deterministic byte
 and structural formulas for nine contributor variants, but it does not accept
 persona, scope, source, intent, materialization, or final-source identifiers.
 It therefore cannot allocate a source plan or write a fixture tree.  Observed
-KCS chunks remain a later attestation concern.
+KIO chunks remain a later attestation concern.
 
 The v1 renderer is intentionally not imported: its payload identity and digest
 embedding semantics are incompatible with the v2 source-recipe boundary.
@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
 
 
-CONTRACT_SCHEMA = "kcs.persona.pc-id-free-text-renderer/v2"
+CONTRACT_SCHEMA = "kio.persona.pc-id-free-text-renderer/v2"
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_KIND = "persona-pc-v2-id-free-text-renderer"
 RENDERER_ID = "persona-v2-id-free-text-feasibility-renderer"
@@ -69,7 +69,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-c++src",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "cpp",
@@ -81,7 +81,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-go",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "go",
@@ -93,7 +93,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/javascript",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "js",
@@ -105,7 +105,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/markdown",
-        "expected_kcs_path_media_type": "text/markdown",
+        "expected_kio_path_media_type": "text/markdown",
         "expected_offline_disposition": "local_text",
         "family": "md",
         "filename_extension": "markdown",
@@ -117,7 +117,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/markdown",
-        "expected_kcs_path_media_type": "text/markdown",
+        "expected_kio_path_media_type": "text/markdown",
         "expected_offline_disposition": "local_text",
         "family": "md",
         "filename_extension": "md",
@@ -129,7 +129,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "# ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-python",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "py",
@@ -141,7 +141,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/x-rust",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "rs",
@@ -153,7 +153,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "// ",
         "complexity_measure": "normalized-hard-split-spans",
         "content_media_type": "text/typescript",
-        "expected_kcs_path_media_type": "text/x-code",
+        "expected_kio_path_media_type": "text/x-code",
         "expected_offline_disposition": "local_text",
         "family": "code",
         "filename_extension": "ts",
@@ -165,7 +165,7 @@ _VARIANT_ROWS = {
         "comment_prefix": "not-applicable",
         "complexity_measure": "atx-h2-sections",
         "content_media_type": "text/plain",
-        "expected_kcs_path_media_type": "text/plain",
+        "expected_kio_path_media_type": "text/plain",
         "expected_offline_disposition": "local_text",
         "family": "txt_log",
         "filename_extension": "txt",
@@ -207,7 +207,7 @@ class RenderedText:
     data: bytes
     extension: str
     content_media_type: str
-    expected_kcs_path_media_type: str
+    expected_kio_path_media_type: str
     expected_offline_disposition: str
     target_complexity: int
     target_bytes: int
@@ -342,7 +342,7 @@ def render_text(request):
         data=data,
         extension=profile["filename_extension"],
         content_media_type=profile["content_media_type"],
-        expected_kcs_path_media_type=profile["expected_kcs_path_media_type"],
+        expected_kio_path_media_type=profile["expected_kio_path_media_type"],
         expected_offline_disposition=profile["expected_offline_disposition"],
         target_complexity=request.target_complexity,
         target_bytes=target_bytes,
@@ -358,7 +358,7 @@ def _contract_variant_row(variant):
             "measure": profile["complexity_measure"],
         },
         "content_media_type": profile["content_media_type"],
-        "expected_kcs_path_media_type": profile["expected_kcs_path_media_type"],
+        "expected_kio_path_media_type": profile["expected_kio_path_media_type"],
         "expected_offline_disposition": profile["expected_offline_disposition"],
         "family": profile["family"],
         "filename_extension": profile["filename_extension"],
@@ -395,7 +395,7 @@ def _canonical_contract_value():
             "authorizes_physical_write": False,
             "authorizes_source_intents": False,
             "authorizes_source_plan": False,
-            "kcs_execution_attested": False,
+            "kio_execution_attested": False,
         },
         "canonical_limits": {
             "framed_byte_cap_before_body_required": True,

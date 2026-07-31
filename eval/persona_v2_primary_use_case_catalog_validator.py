@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-primary-use-case-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-primary-use-case-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-primary-use-case-catalog"
 MAX_CATALOG_BYTES = 256 * 1024
@@ -32,7 +32,7 @@ MAX_DEPENDENCY_BYTES = 512 * 1024
 # Installed with the deterministic producer body; never embedded in that body.
 EXPECTED_CATALOG_CANONICAL_BYTES = 30_008
 EXPECTED_CATALOG_SHA256 = (
-    "024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624"
+    "73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed"
 )
 
 EXPECTED_PERSONA_IDS = tuple(f"p{index:02d}" for index in range(1, 21))
@@ -98,18 +98,18 @@ EXPECTED_FORMAT_TERM_TO_FAMILY = dict(EXPECTED_FORMAT_TERM_ROWS)
 DEPENDENCY_PINS = {
     "persona-v2-envelope": (
         "persona-pc-v2-envelope",
-        "kcs.persona.pc-envelope/v2",
+        "kio.persona.pc-envelope/v2",
         2,
         71_979,
-        "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
+        "12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7",
         "persona-role-and-physical-family-marginal-owner",
     ),
     "persona-v2-topology": (
         "persona-pc-v2-topology",
-        "kcs.persona.pc-topology/v2",
+        "kio.persona.pc-topology/v2",
         2,
         134_195,
-        "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
+        "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a",
         "exact-representative-relative-scope-owner",
     ),
 }
@@ -122,7 +122,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_evaluation_target_resolution",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_query_rendering",
         "authorizes_solver_execution",
@@ -130,7 +130,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "source_instance_matching_available",
     }
@@ -282,7 +282,7 @@ def _dependency_binding(name, role, value, *, canonical, validate):
         value.get("artifact_kind") != expected_kind
         or value.get("artifact_schema") != expected_schema
         or value.get("artifact_schema_version") != expected_version
-        or value.get("fixture_id") != "kcs-persona-pc-v2"
+        or value.get("fixture_id") != "kio-persona-pc-v2"
         or value.get("fixture_schema_version") != 2
     ):
         _fail(f"{name} dependency identity drifted")
@@ -292,7 +292,7 @@ def _dependency_binding(name, role, value, *, canonical, validate):
         "artifact_schema_version": expected_version,
         "canonical_bytes": size,
         "dependency_role": role,
-        "fixture_id": "kcs-persona-pc-v2",
+        "fixture_id": "kio-persona-pc-v2",
         "fixture_schema_version": 2,
         "name": name,
         "sha256": digest,
@@ -503,7 +503,7 @@ def _validate_static(value, expected_bindings):
         value["artifact_kind"] != ARTIFACT_KIND
         or value["artifact_schema"] != ARTIFACT_SCHEMA
         or value["artifact_schema_version"] != ARTIFACT_SCHEMA_VERSION
-        or value["fixture_id"] != "kcs-persona-pc-v2"
+        or value["fixture_id"] != "kio-persona-pc-v2"
         or value["fixture_schema_version"] != 2
         or value["g0_contract_frozen"] is not False
     ):

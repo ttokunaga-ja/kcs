@@ -90,11 +90,11 @@ MATRIX = {
 EXPECTED_VARIANTS = tuple(sorted(MATRIX))
 EXPECTED_RENDERER_BYTES = 4_657
 EXPECTED_RENDERER_SHA256 = (
-    "ac43d8e60fe288552e5edf1e11d98123b34766db8387460cb9f7ddf70af3ba2c"
+    "6bfdd03e48b261c83d0678fb888a29d946da69174ba37781e2762672d1c312ff"
 )
 EXPECTED_VALIDATOR_BYTES = 5_183
 EXPECTED_VALIDATOR_SHA256 = (
-    "c664596fce5331268ad69886b3f2d159e090241b4ef2848ac4ce64c52a1a572a"
+    "e57a3c8a0daa70254d87a8d9b48777e8ce8a83c12ce1bff867bd296d44fa350e"
 )
 EXPECTED_MATRIX_PAYLOAD_SHA256 = (
     "f5b19a7b2201c8e699eef539bf1e124c6d24c0076a71aff018821b8cf4fba171"
@@ -150,7 +150,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -163,7 +163,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         return rendered, validator.validate_raw_document_payload(request)
@@ -269,7 +269,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -315,7 +315,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 self.assertEqual(row["raw_byte_formula"], expected_formula)
                 self.assertEqual(row["filename_extension"], extension)
                 self.assertEqual(row["content_media_type"], content_mime)
-                self.assertEqual(row["expected_kcs_path_media_type"], path_mime)
+                self.assertEqual(row["expected_kio_path_media_type"], path_mime)
                 self.assertEqual(row["expected_offline_disposition"], disposition)
                 self.assertEqual(row["family"], family)
                 self.assertEqual(row["render_template"], template)
@@ -329,7 +329,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 "family",
                 "filename_extension",
                 "content_media_type",
-                "expected_kcs_path_media_type",
+                "expected_kio_path_media_type",
                 "expected_offline_disposition",
                 "gate_role",
             ):
@@ -439,7 +439,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                             "byte_length": expected_bytes,
                             "container_member_count": expected_members,
                             "identity_tokens_absent": True,
-                            "kcs_execution_attested": False,
+                            "kio_execution_attested": False,
                             "observed_complexity_measure": measure,
                             "observed_local_complexity": complexity,
                             "pdf_text_layer_absent": variant == "pdf-scan",
@@ -634,7 +634,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
                 valid.data,
                 valid.extension,
                 valid.content_media_type,
-                valid.expected_kcs_path_media_type,
+                valid.expected_kio_path_media_type,
                 valid.expected_offline_disposition,
             ),
             replace(valid, schema_version=True),
@@ -642,7 +642,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
             replace(valid, data=BytesSubclass(valid.data)),
             replace(valid, extension="DOCX"),
             replace(valid, content_media_type="application/zip"),
-            replace(valid, expected_kcs_path_media_type="application/octet-stream"),
+            replace(valid, expected_kio_path_media_type="application/octet-stream"),
             replace(valid, expected_offline_disposition="unsupported_binary"),
             replace(valid, target_complexity=2),
         ):
@@ -869,7 +869,7 @@ class PersonaV2RawDocumentRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(historical_catalog.canonical_json_bytes(historical)), 72_559)
         self.assertEqual(
             historical_catalog.source_profile_catalog_sha256(historical),
-            "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac",
+            "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d",
         )
         self.assertEqual(historical["coverage"]["ready_variant_count"], 10)
         self.assertEqual(historical["coverage"]["not_ready_variant_count"], 61)

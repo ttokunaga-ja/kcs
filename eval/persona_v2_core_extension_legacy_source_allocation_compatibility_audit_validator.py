@@ -24,17 +24,17 @@ except ImportError:  # pragma: no cover - direct-script compatibility
 
 
 ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-core-extension-legacy-source-allocation-compatibility-audit/v1"
+    "kio.persona.pc-core-extension-legacy-source-allocation-compatibility-audit/v1"
 )
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-core-extension-legacy-source-allocation-compatibility-audit"
 ARTIFACT_ID = "persona-core-v1-legacy-source-allocation-compatibility-audit-v1"
 BODY_ID = "persona-core-v1-legacy-source-allocation-delta-rows-v1"
 DELTA_ROW_SCHEMA = (
-    "kcs.persona.pc-core-extension-legacy-source-allocation-delta-row/v1"
+    "kio.persona.pc-core-extension-legacy-source-allocation-delta-row/v1"
 )
 PROFILE_ID = "persona-core-v1"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_DESCRIPTOR_BYTES = 128 * 2**10
@@ -44,22 +44,22 @@ MAX_INPUT_CATALOG_BYTES = 2 * 2**20
 
 CORE_DESCRIPTOR_BYTES = 5_357
 CORE_DESCRIPTOR_SHA256 = (
-    "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f"
+    "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436"
 )
 CORE_BODY_BYTES = 426_889
 CORE_BODY_SHA256 = (
-    "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45"
+    "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5"
 )
 CORE_ARTIFACT_ID = "persona-core-v1-extension-allocation-manifest-v1"
 CORE_BODY_ID = "persona-core-v1-extension-allocation-rows-v1"
-CORE_ARTIFACT_SCHEMA = "kcs.persona.core-extension-allocation-manifest/v1"
+CORE_ARTIFACT_SCHEMA = "kio.persona.core-extension-allocation-manifest/v1"
 CORE_ARTIFACT_KIND = "persona-core-v1-extension-allocation-manifest-candidate"
 
 LEGACY_CATALOG_BYTES = 211_733
 LEGACY_CATALOG_SHA256 = (
-    "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec"
+    "807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9"
 )
-LEGACY_CATALOG_SCHEMA = "kcs.persona.pc-variant-catalog/v2"
+LEGACY_CATALOG_SCHEMA = "kio.persona.pc-variant-catalog/v2"
 LEGACY_CATALOG_KIND = "persona-pc-v2-variant-catalog"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
@@ -95,9 +95,9 @@ EXPECTED_PILOT_L1_DELTA = 7_050
 # Filled only after producer and independent-validator replay agree.  The
 # candidate remains non-authorizing even when both pairs are configured.
 EXPECTED_CANONICAL_BYTES = 3_500
-EXPECTED_SHA256 = "1c52c83f8bd98407212e4014e7b006f38a93b0f82ff59a922a858d7e5663bfe2"
+EXPECTED_SHA256 = "f2eb954e5d097cd41ed5cd7f92904b9987f6b08eb5532a9587ea6bd6043a27b1"
 EXPECTED_BODY_CANONICAL_BYTES = 236_068
-EXPECTED_BODY_SHA256 = "a755ef7ee770796f7d0a02c261c706089b23b6a016a766d6962e600bf027de44"
+EXPECTED_BODY_SHA256 = "ff2f50a342e92e8b43c4d743811ee7bddd6772c20c6e2cf0530ee160ca0385dd"
 
 AUTHORITY_FIELDS = frozenset(
     {

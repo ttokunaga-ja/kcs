@@ -20,7 +20,7 @@ from eval import persona_v2_lifecycle_coverage_catalog_validator as independent
 
 EXPECTED_CANONICAL_BYTES = 1_385_596
 EXPECTED_SHA256 = (
-    "ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236"
+    "1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4"
 )
 
 
@@ -302,7 +302,7 @@ class PersonaV2LifecycleCoverageCatalogTests(unittest.TestCase):
                 "artifact_schema_version": 1,
                 "canonical_bytes": 1,
                 "dependency_role": "forbidden",
-                "fixture_id": "kcs-persona-pc-v2",
+                "fixture_id": "kio-persona-pc-v2",
                 "fixture_schema_version": 2,
                 "name": "semantic-oracle",
                 "sha256": "0" * 64,

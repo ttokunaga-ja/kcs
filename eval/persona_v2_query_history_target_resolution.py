@@ -8,7 +8,7 @@ domain-separated bipartite matcher; it is never an ordinal zip.
 The artifact deliberately stops at abstract keys.  In particular, it does not
 claim that the currently selected W0 source already contains the oracle fact,
 or expose a solved scope/path, final source/materialization/chunk/section ID,
-rendered query, compiled event, or KCS observation.  Those facts require the
+rendered query, compiled event, or KIO observation.  Those facts require the
 effective lifecycle membership overlay and the later solver/compiler stages.
 """
 
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_matched_lifecycle_inventory as lifecycle
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-query-history-target-resolution/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-query-history-target-resolution/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-query-history-target-resolution"
 MAX_ARTIFACT_BYTES = 8 * 2**20
@@ -42,7 +42,7 @@ TARGET_ARTIFACT_BYTES = 6 * 2**20
 MAX_EXPANDED_NODE_COUNT = 1_000_000
 EXPECTED_CANONICAL_BYTES = 4_478_576
 EXPECTED_SHA256 = (
-    "4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc"
+    "8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff"
 )
 
 MATCHING_ALGORITHM = (
@@ -222,7 +222,7 @@ def _authority():
         "authorizes_final_identifiers": False,
         "authorizes_g0_freeze": False,
         "authorizes_history_execution": False,
-        "authorizes_kcs_execution": False,
+        "authorizes_kio_execution": False,
         "authorizes_physical_write": False,
         "authorizes_query_execution": False,
         "authorizes_query_rendering": False,
@@ -825,7 +825,7 @@ def _canonical_resolution(*, dependency_observer=None):
             "scope-bucket-cohort-quota-solution-and-proof-not-built",
             "query-render-and-byte-uniqueness-attestation-not-built",
             "compiled-final-identity-relevance-not-built",
-            "filesystem-render-index-history-kcs-receipts-and-g0-not-built",
+            "filesystem-render-index-history-kio-receipts-and-g0-not-built",
         ],
         "resolution_contract": {
             "abstract_keys_only": True,

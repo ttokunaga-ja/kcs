@@ -658,7 +658,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     history-ready claims can become true.  The 20-person/400-scope tiny W0 generation and two-scope offline
     probe are synthetic development evidence only, not a 400-scope attestation or full-scale result.
 107. Persona-PC fidelity v2 is a side-by-side planning contract, never an in-place reinterpretation of
-    `kcs-persona-pc-v1`.  V2 must use a bounded framed header and exact artifact-kind/schema plus fixture ID/
+    `kio-persona-pc-v1`.  V2 must use a bounded framed header and exact artifact-kind/schema plus fixture ID/
     schema dispatch, and must always write fresh roots.  Pilot must be solved first as an exact Hamilton-
     marginal source/quota/cohort plan; those source rows must be embedded unchanged into full, which adds
     sources to reach its own exact marginals.  Thus pilot must become a true source-ID/byte subset without
@@ -685,7 +685,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     until their later observed gates.  Until all 400 paths, authored physical/chunk load vectors, their
     explicit rubric and review receipt, the joint solver, source recipes, oracle membership, and bounded canonical hashes exist,
     `g0_contract_frozen=false` is mandatory.
-108. The persona-PC v2 exact topology is a separate `kcs.persona.pc-topology/v2` sidecar that binds the
+108. The persona-PC v2 exact topology is a separate `kio.persona.pc-topology/v2` sidecar that binds the
     envelope SHA instead of embedding 400 rows into the envelope.  Its input is 400 literal, authored
     stress-design hypotheses: 20 personas, each 12 primary and eight persona-specific secondary paths.  Only the
     eight secondary functional slots are shared.  Paths and physical/contributor activity units are never
@@ -720,11 +720,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     731/1,707/2,498/1,989; 7,300/17,042/24,995/19,899; and
     6,569/15,335/22,497/17,910.  Minimum global headroom is +27 pilot and +664 full;
     minimum pilot scope lower headroom is p13 +56, while p17 is +76.
-    The bound `kcs.persona.pc-joint-problem/v2` artifact materializes pilot, full, and coordinatewise
+    The bound `kio.persona.pc-joint-problem/v2` artifact materializes pilot, full, and coordinatewise
     full-minus-pilot marginals and necessary feasibility checks.  Its canonical body is 744,137 bytes,
-    SHA-256 `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`, bound to envelope
-    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370` and topology
-    `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`.
+    SHA-256 `f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207`, bound to envelope
+    `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7` and topology
+    `02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a`.
     It contains no source rows, route, quota/cohort assignment, canonical allocation solution, or
     certificate, so all G0/write/history authority remains false.  Physical ratios are stress inputs,
     not observed user statistics; persona realism remains separately blocked by
@@ -777,8 +777,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     bounded canonical exact replay or a complete lower-bound/dual proof.  None of these semantics grants
     G0, rendering, write, or history authority.
 111. The first v2 solver-policy artifact is frozen only as the generic aggregate core, schema
-    `kcs.persona.pc-joint-solver-policy/v2`: 83,004 canonical bytes, SHA-256
-    `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`.  It binds the envelope,
+    `kio.persona.pc-joint-solver-policy/v2`: 83,004 canonical bytes, SHA-256
+    `47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712`.  It binds the envelope,
     topology, and joint necessary problem one-way; defines the A/C axes, hard aggregate equations,
     strict 16-component objective, checked 127-bit arithmetic, and provisional deterministic counters;
     and contains no route matrix, realism/source-intent refinement, source recipe, solution, proof, or
@@ -788,11 +788,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     resource limits remain empirically uncalibrated.
 112. Persona-PC v2 realism is split into an exact profile/marginal artifact and later intent
     membership so that the hash graph remains one-way.  Schema
-    `kcs.persona.pc-realism-profile/v2` binds twenty literal, independently rooted synthetic-owner
+    `kio.persona.pc-realism-profile/v2` binds twenty literal, independently rooted synthetic-owner
     hypotheses for OS/case/device metadata, locale/language weights, pinned timezone offsets,
     retention and mtime buckets, permission and placement weights, account counts, and exact
     duplicate/near/conflict/attachment marginal targets.  Its canonical body is 36,811 bytes,
-    SHA-256 `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`.
+    SHA-256 `990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb`.
     Full-suite targets are 5,080 exact duplicates, 13,230 near revisions, 1,560 conflict copies,
     5,690 standalone attachments, and 19,870 binary content-relation clusters; pilot is exactly one
     tenth.  Exact/near/conflict are mutually exclusive, binary, physical-member-disjoint relation
@@ -802,8 +802,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     logical-document scoring/search participation, the eight-axis ledger, independent review,
     source-intent refinement, G0, rendering, writing, and history authority all remain false.
 113. Persona-PC v2 variant identity/marginal completion is a separate non-authorizing sidecar,
-    schema `kcs.persona.pc-variant-catalog/v2`, canonical body 211,733 bytes, SHA-256
-    `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`.
+    schema `kio.persona.pc-variant-catalog/v2`, canonical body 211,733 bytes, SHA-256
+    `807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9`.
     It exactly projects all 71 variant identities and all 566 persona/family/variant tiny/pilot/full
     marginals, separates content MIME from current Kio path MIME, and assigns format-specific
     complexity units rather than collapsing EML, notebooks, tabular rows, HTML sections, and
@@ -841,8 +841,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     aggregate/source/materialization/rendered-byte pilot subset nor feasibility, G0, solver,
     renderer, filesystem, write, or history authority.
 115. The first complete route-affinity candidate is schema
-    `kcs.persona.pc-route-affinity/v2`, 70,626 canonical bytes, SHA-256
-    `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`.
+    `kio.persona.pc-route-affinity/v2`, 70,626 canonical bytes, SHA-256
+    `7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957`.
     It contains exactly the 541 full-active rows and 10,820 scope scores from the solver-policy
     axis, excludes the 25 declared hard-zero rows, and does not create rows for the 854
     persona/global-variant pairs outside the declared axis.  Every row has maximum score four in
@@ -853,7 +853,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     the policy's 566-row declared axis before construction.  It has no independent human-review
     receipt, so route review, solver, source-plan, G0, write, and history authority remain false.
 116. Typed fact input is a separate per-person upstream leaf, schema
-    `kcs.persona.pc-fact-graph/v2`.  The twenty leaves contain exactly four authored synthetic
+    `kio.persona.pc-fact-graph/v2`.  The twenty leaves contain exactly four authored synthetic
     project/case graphs each: 80 graphs, 320 entities, 640 typed facts, and 80 revision chains in the
     suite.  Bodies are 23,720--24,010 canonical bytes, 477,082 bytes total, and each is below the
     1 MiB fact-graph subcap.  Revision prior facts are current only at W0 and history-only from W1;
@@ -900,15 +900,15 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     manifest.  Until both actual readers and v2 bindings exist, caller-declared projections cannot clear
     `formal_capacity_gate_satisfied=false` or authorize a physical write.
 118. The current non-authorizing persona-PC v2 planning core is pinned as: envelope 71,979 bytes / SHA-256
-    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`; topology
-    134,195 / `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`;
-    joint problem 744,137 / `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`;
-    solver policy 83,004 / `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`;
-    realism 36,811 / `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`;
-    variant catalog 211,733 / `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`;
+    `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7`; topology
+    134,195 / `02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a`;
+    joint problem 744,137 / `f76a2b8ae5557a45af2c4e758b1f2b7663809ef80d7f33987abe3f5e9fc17207`;
+    solver policy 83,004 / `47266ca9ea01bce9462e349ab0d4348975f98a9efbab12252e0f8be3c4263712`;
+    realism 36,811 / `990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb`;
+    variant catalog 211,733 / `807dd3cdd8df613ac21e6ba64877fb5abb40c72ed4949abaa0d440a449e7f9e9`;
     and route candidate 70,626 /
-    `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`.
-    The candidate `kcs.persona.pc-overlay-contract/v2`, ID-free text renderer/validator, and source-profile
+    `7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957`.
+    The candidate `kio.persona.pc-overlay-contract/v2`, ID-free text renderer/validator, and source-profile
     catalog are deliberately outside this pinned planning core.  They bind no overlay instances or exact
     placement, have `source_recipe_profile_id=not-bound`, do not complete a source-profile vertical slice,
     and grant no renderer, filesystem, Kio, history, capacity, or write authority.  Overlay membership,
@@ -918,11 +918,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     renderer, independent validator, and format anchor minima for M3-1; and a compiled mapping from v2
     logical-document expectations to the formal MVP distinct `(raw_hash, section)` relevance metric.
 119. Persona-PC v2 pre-solve identity is split into four one-way layers.  A future
-    `kcs.persona.pc-corpus-semantic-namespace/v2` contains only content-affecting semantic payloads and
+    `kio.persona.pc-corpus-semantic-namespace/v2` contains only content-affecting semantic payloads and
     is the only namespace eligible to seed solver output and planned source identity.  Review/evidence
-    receipts are added only by `kcs.persona.pc-corpus-input-closure-manifest/v2`; query intent and semantic
-    oracle are added only by `kcs.persona.pc-evaluation-input-closure-manifest/v2`; and
-    `kcs.persona.pc-suite-input-closure-descriptor/v2` binds the corpus and evaluation closures.  Therefore
+    receipts are added only by `kio.persona.pc-corpus-input-closure-manifest/v2`; query intent and semantic
+    oracle are added only by `kio.persona.pc-evaluation-input-closure-manifest/v2`; and
+    `kio.persona.pc-suite-input-closure-descriptor/v2` binds the corpus and evaluation closures.  Therefore
     a query-only mutation changes evaluation and suite identity but not corpus identity, while substituting
     a review receipt for an unchanged body changes evidence/corpus/evaluation/suite identity but not the
     semantic namespace, solution, planned IDs, or rendered bytes.  A content-affecting route-body mutation
@@ -962,8 +962,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8`.  No G0, solver,
     renderer, filesystem, Kio, history, capacity, or write authority follows from the fact-pair prerequisite.
 121. Full source cardinality and contributor-format feasibility are separate non-authorizing slices.  The
-    new `kcs.persona.pc-source-inventory-layout/v2` is 274,566 canonical bytes, SHA-256
-    `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`.  It reserves exactly
+    new `kio.persona.pc-source-inventory-layout/v2` is 274,566 canonical bytes, SHA-256
+    `81fcec92df932d9357b5202a6eda3f6c11ac9bd70762a281cbc2d094d6e8579a`.  It reserves exactly
     20,300 pilot plus 182,700 `full-residual` keys, twenty pilot plus fifty-three residual shard ranges,
     all 566 persona/variant marginals, the 25 hard-zero rows, and exact full gate-role counts
     69,236 contributor / 60,414 incidental / 73,350 raw-only.  A full manifest must begin with the exact
@@ -974,15 +974,15 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     ordinal.  The separate `pdf-text` local-feasibility slice renders 1--72 deterministic ASCII text-layer
     pages at `4,096 + 2,048 * (pages - 1)` bytes, caps PDF 1.4 non-stream lines at 255 bytes, and independently
     validates page tree, stream length, xref, trailer, bounded decimal tokens, and identity absence.  Its
-    renderer is 2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`;
-    validator 2,233 / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`;
+    renderer is 2,075 bytes / `2c204a3d75af98de293d109e31bf36bf6d3309dac2deaa392ad899a6eb70f43d`;
+    validator 2,233 / `9a85da7bc77ae088d1d088e0c2646f206b8d80644c9c1995e94736a93d05511a`;
     and the ten-ready-row source-profile catalog 72,559 /
-    `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`.  This supersedes the
+    `f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d`.  This supersedes the
     earlier 9-ready/62-outstanding count with ten contributor feasibility variants covering all 69,236
     contributor sources and 61 incidental/raw variants still unimplemented.  It does not prove distinct
     semantic PDF contents, multilingual extraction, query anchors, actual Kio chunks, source recipes, or
     M3-1 Recall.  The p01 representative source-intent is now 9,886 bytes / SHA-256
-    `e292df1136841f1b246515374e29b9a6926c5b12c15e9d3c39eea5a375bbe3c3`; all twenty source-intent
+    `0404e234e447d8bf7af2822eb2fabefd59235d356d8ea3237811883f8b3ffd97`; all twenty source-intent
     digests change because their source-profile binding changes, and fourteen representatives select
     `pdf-text`.  The compatibility-only live closure includes both PDF implementation providers and is
     pinned at semantic 47,495 /
@@ -995,10 +995,10 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 122. Persona-PC v2 now has an exact pre-source overlay-reservation boundary, without converting that
     reservation into concrete overlay membership.  This decision preserves decisions 120 and 121 as
     historical records while superseding decision 120's current overlay-contract pin and dependency/
-    completion wording.  The current `kcs.persona.pc-overlay-contract/v2` is 71,179 canonical bytes,
-    SHA-256 `ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c`.
+    completion wording.  The current `kio.persona.pc-overlay-contract/v2` is 71,179 canonical bytes,
+    SHA-256 `e9154297f6dd5cf30ccbcc819d725cb08c533ec84a7b2df359937ddfb6517c23`.
     The compact reservation suite is 21,680 canonical bytes, SHA-256
-    `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`, and binds forty exact
+    `0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4`, and binds forty exact
     persona/origin artifacts: pilot and full-residual for each of twenty personas.  Together they reserve
     25,560 rows, 46,840 distinct overlay source-intent references, and 2,100 pilot contributor-only
     semantic-anchor slots.  The largest origin body is 2,639,467 bytes and the largest canonical JSONL
@@ -1006,10 +1006,10 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     red-team pass verified allocation, identity, attachment fanout/overlap, conflict-template assignment,
     row caps, and tamper rejection; a formal approval receipt is still not bound.
     The representative p01 live compatibility roots are consequently repinned at semantic 48,210 /
-    `57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3`, corpus 3,496 /
-    `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`, evaluation 5,032 /
-    `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`, and suite 2,609 /
-    `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`; they remain
+    `33a0a720e084d8bd732c7a36f7b0a89d90f79e55d8b5c761124c9e947a20b6d8`, corpus 3,496 /
+    `438bdb4d825d510ac2a8de2b7abd7edfe3446b8a4d93070c6f777c11e2640757`, evaluation 5,032 /
+    `29e4de812125a0c87fb172e81e6bafa7f4d6908d863b7c7061d4a45b4042ce3d`, and suite 2,609 /
+    `9217e519a382ff51e10305dc77a6e1b2ce4401f543f159ad190e72fb029a76b8`; they remain
     compatibility-only candidates, not G0 or source-identity authority.
     The one-way dependency order is variant catalog -> source-inventory layout -> typed fact graphs ->
     overlay contract -> overlay reservation suite/origins -> source-profile catalog -> source-intent
@@ -1032,24 +1032,24 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     may be copied to satisfy a fresh replay.
 123. Persona-PC v2 now materializes the complete structural source-slot package without claiming semantic
     or executable source-intent completion.  The all-variant
-    `kcs.persona.pc-source-inventory-profile-catalog/v2` assigns one unique inventory-only profile ID to
+    `kio.persona.pc-source-inventory-profile-catalog/v2` assigns one unique inventory-only profile ID to
     each of the 71 variants and is 87,391 canonical bytes, SHA-256
-    `be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196`.  All 71 formal source-recipe
+    `9b0de3defbc106f0bfa8b96ca2134886acd6766ac69196e3498b6b6f7edf43c0`.  All 71 formal source-recipe
     slots remain `reserved-unbound` with `profile_id=not-bound`; ten profiles have only local feasibility
     implementations and sixty-one remain implementation-missing.  Inventory-profile identity therefore
     grants no formal recipe, renderer/validator execution, source-level feasibility, G0, filesystem, Kio,
     history, capacity, or write authority.
-    The downstream `kcs.persona.pc-source-inventory-origin-manifest/v2`,
-    `kcs.persona.pc-source-inventory-profile-manifest/v2`, and
-    `kcs.persona.pc-source-inventory-suite/v2` bind exactly 203,000 reference-only source-slot rows in
+    The downstream `kio.persona.pc-source-inventory-origin-manifest/v2`,
+    `kio.persona.pc-source-inventory-profile-manifest/v2`, and
+    `kio.persona.pc-source-inventory-suite/v2` bind exactly 203,000 reference-only source-slot rows in
     73 canonical JSONL shard bodies, forty persona/origin manifests, and forty persona/profile manifests.
     Their shard bodies total 108,682,911 bytes; the largest LF-inclusive row is 558 bytes and the largest
     shard is 2,225,794 bytes.  The suite descriptor is 45,887 canonical bytes, SHA-256
-    `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706`.  Representative bindings are
-    p01 pilot origin 13,043 / `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df`,
-    p01 pilot profile 7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`,
-    p12 full-residual origin 15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`,
-    and p12 full profile 10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`.
+    `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`.  Representative bindings are
+    p01 pilot origin 13,043 / `19b5c2616d7188ac5f68c90ebcecb19e8c7e5c4b636829621230c1abb1f910f3`,
+    p01 pilot profile 7,814 / `400c5cd6999bac2f0c6d8bb722480a881d09aa1742014e6ca3da1e8da63d1309`,
+    p12 full-residual origin 15,474 / `f9c531177e434c5b73d396b0c1390d658ee630b9046264bc1a27daa4c4ce1fc4`,
+    and p12 full profile 10,369 / `d67ae94a6eff54ebcc3b3689119b77c2affef6b0735350a5db6b05b841008a56`.
     A full profile reuses the exact pilot origin manifest and pilot shard descriptors before adding the
     full-residual origin.  Every pilot/full profile manifest also binds the overlay-reservation-suite SHA
     directly, rather than relying only on an indirect origin-manifest path.  The existing representative
@@ -1070,14 +1070,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     independent persona domains and every upstream structural, reservation, and typed-fact-graph pin.
     This decision supersedes only earlier statements that full source-owned membership, semantic contexts,
     or distinct source-owned conflict-branch profiles were absent; all historical artifact pins remain.
-    `kcs.persona.pc-source-semantic-membership-catalog/v2` binds forty-five fact profiles per persona,
+    `kio.persona.pc-source-semantic-membership-catalog/v2` binds forty-five fact profiles per persona,
     nine hundred for the suite: one empty profile, thirty-two W0-current singleton profiles, four
     graph-normal-W0 profiles, and eight conflict-branch profiles.  It also binds four persona-local topics
     per persona, eighty total, and seventy-one semantic profiles in one-to-one correspondence with the
     inventory profiles.  The origin, profile, and suite schemas are respectively
-    `kcs.persona.pc-source-semantic-membership-origin-manifest/v2`,
-    `kcs.persona.pc-source-semantic-membership-profile-manifest/v2`, and
-    `kcs.persona.pc-source-semantic-membership-suite/v2`.
+    `kio.persona.pc-source-semantic-membership-origin-manifest/v2`,
+    `kio.persona.pc-source-semantic-membership-profile-manifest/v2`, and
+    `kio.persona.pc-source-semantic-membership-suite/v2`.
     The compact package persists seventy-three source-shard total-projection rows, 2,100 semantic-anchor
     override rows, and 1,560 conflict-pair override rows, 3,733 rows in total.  Expanded providers resolve
     exactly 203,000 content contexts and exactly 203,000 source-owned present-fact memberships.  The sparse
@@ -1114,8 +1114,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     implementations, the corpus semantic namespace and query/history mappings, joint allocation,
     rendering/writing, edits/history, fresh-storage replays, and evaluation.
     The final catalog pin is 436,495 canonical bytes with SHA-256
-    `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62`; the suite descriptor pin is
-    49,837 bytes with SHA-256 `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`.
+    `d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b`; the suite descriptor pin is
+    49,837 bytes with SHA-256 `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`.
     Compact origin bodies total 1,006,627 bytes, and the expanded context and fact-membership receipts bind
     121,020,941 and 135,741,615 bytes respectively.  The conservative current-component maximum is p12 at
     12,070,092 bytes with 4,707,124 bytes of planning headroom; this remains narrower than the formal
@@ -1136,7 +1136,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     and 1,560 conflict copies; attachments have 2,800 hosts and 1,390 exact-overlap rows.
     Each full profile reuses the exact matching pilot origin and shard bytes/SHA before adding the residual
     origin, and shard indices restart at origin-local zero.  The suite descriptor is 51,133 canonical bytes,
-    SHA-256 `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`.
+    SHA-256 `129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`.
     The current-component ledger conservatively adds the overlay contract, unique concrete origin bodies,
     and both profile manifests to the semantic base without double-charging reservation/catalog components,
     the draft projection receipt, or the global suite descriptor.  Its maximum is p12 at 13,275,672 bytes,
@@ -1164,9 +1164,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     inventory marginals total 60,414 incidental sources, but this is only format-level feasibility, not a
     source-by-source materialization or search-participation proof.
     The renderer contract is 9,139 canonical bytes with SHA-256
-    `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`; the builder-independent validator
+    `ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e`; the builder-independent validator
     contract is 10,090 bytes with SHA-256
-    `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`.  The min/middle/max payload matrix
+    `8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0`.  The min/middle/max payload matrix
     SHA-256 is `c95779f318c0c2d54734e6868b56a0238c0fabd09409735046b505dc37843cdf`.
     Exact byte formulas are `512 + 96 * (n - 1)` for log/jsonl at n=1..4,096;
     `1,024 + 256 * (n - 1)` for json/yaml/xml at n=1..1,024;
@@ -1194,28 +1194,28 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     pilot 20,300, full-residual 182,700, full 203,000, and 541 active persona-variant rows.  This availability
     is format-level feasibility only and does not bind one of those counts to a physical source instance.
     Raw-document renderer/validator contracts are 4,657 / 5,183 bytes with SHA-256
-    `ac43d8e60fe288552e5edf1e11d98123b34766db8387460cb9f7ddf70af3ba2c` /
-    `c664596fce5331268ad69886b3f2d159e090241b4ef2848ac4ce64c52a1a572a`; their min/mid/max payload
+    `6bfdd03e48b261c83d0678fb888a29d946da69174ba37781e2762672d1c312ff` /
+    `e57a3c8a0daa70254d87a8d9b48777e8ce8a83c12ce1bff867bd296d44fa350e`; their min/mid/max payload
     aggregate is `f5b19a7b2201c8e699eef539bf1e124c6d24c0076a71aff018821b8cf4fba171`.
     Raw image/media contracts are 7,504 / 8,223 bytes with SHA-256
-    `25231398ec7002e5ce7fbfe3d3089e14a9ef8547bc9a9f580cc385dd88fcda00` /
-    `b0fdf9e944b0df72b2f8d8601a83f6958654f92272466fd49b897a3b3e168953`.
+    `c64b762b102aa4fbad000fc21ef2c810d1746daab9a11f959226cec45f16f92e` /
+    `a1c544dcc3f68167aefd3bba2cc90cd4fdd124473485e834f8a0e662df52ad9a`.
     Raw ZIP contracts are 18,670 / 20,737 bytes with SHA-256
-    `037897466c19ce476e4d5a7fff00d18905bbe80ad42d326b503c744d4e3dd1bb` /
-    `8c9390fa0667860e17a872b3c16e047d688dcc7919c73a4933eddfa38082aeec`.
+    `ecb621ade5bd81a3f5962a4ee10ea018c14c2ecd6d93a8e565378ba4065a2a4d` /
+    `4dc04c3689bbef7253a76dd7f046af5cf26734386494c4296c56fd080f6fd0d6`.
     Raw USTAR/GZIP contracts are 14,589 / 15,885 bytes with SHA-256
-    `d23a9b29f4e26748f32f07e201c1294ede5cd4534a27533e9ddc9b88a01d8cb8` /
-    `2e98faae761d7ae4aaaeba37a560d4e78dc3cc948551abde1acc399018d31bf6`.
+    `b6568684532d51bdc25d885bcbd18d04006d90a073397db30353f9e982998b70` /
+    `3ac1ce2f3df3820e28ec77029347df151e5c138f398ee068e5942fc769100e57`.
     Raw PCAP/DICOM contracts are 3,680 / 3,970 bytes with SHA-256
-    `d23868cb344a49ee2c2d354cfe0eb6b0ea9abd07163d573f1ba3b99da229f6ce` /
-    `520ced5cc89ca1bc5a0da45e14c7406e9d7e791d07ae27b2997749cf11ed2e9b`.
+    `63e84afe98283aad93427e2b8260b7dfc30e9f0b20af3ee4d9968f7459872303` /
+    `c305e733011f2791237b3ffd6d7e3e044330bf81201794f2e85702edffd88a82`.
     The DICOM variant is a Multi-frame Grayscale Byte Secondary Capture Part 10 object with the matching
     `.7.2` SOP Class, mandatory Patient/Study/Series/SC/Multi-frame attributes, a Page Number Vector target for
     Frame Increment Pointer, and a deterministic complexity-specific SOP Instance UID.
-    The downstream `kcs.persona.pc-format-implementation-registry/v2` binds all three frozen catalogs,
+    The downstream `kio.persona.pc-format-implementation-registry/v2` binds all three frozen catalogs,
     eight implementation pairs, sixteen contract bodies, seventy-one unique ownership rows, exact source-count
     coverage, and 213 actual minimum/midpoint/maximum payload probes.  It is 333,881 canonical bytes with SHA-256
-    `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`.  Its standalone validator imports
+    `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d`.  Its standalone validator imports
     no registry producer or renderer; it treats the eight independent validator modules as the trusted validation
     base, directly validates each supplied payload for the requested variant, and compares payload and receipt
     digests.  This closes a review finding in which an external validator provider could rethread or relabel a
@@ -1231,8 +1231,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     parameters plus exact event inventory and semantic closure, joint solution/proof, streaming writing, edits/
     history, fresh-storage replays, and observed structural/chunk/search/capacity/latency evaluation.
 128. Persona-PC v2 now adds a downstream non-authorizing formal source-recipe profile catalog for all seventy-one
-    variants.  `kcs.persona.pc-formal-source-recipe-profile-catalog/v2` is 386,152 canonical bytes with SHA-256
-    `973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8`.  It binds each frozen inventory recipe
+    variants.  `kio.persona.pc-formal-source-recipe-profile-catalog/v2` is 386,152 canonical bytes with SHA-256
+    `0ac0906397c8d81b7504637fe119d45ae2ffa7acb7cb47b719c985121ce1b2df`.  It binds each frozen inventory recipe
     slot to exactly one semantic content slot, filename slot, implementation owner, renderer/validator contract,
     and runtime receipt policy.  It also freezes exact full/pilot incidental controls: eligible chunk ceilings
     135,000/13,500, base ceilings 15,000/1,500, high ceilings 210,000/21,000, high bases 30,000/3,000, and
@@ -1250,12 +1250,12 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     folder/file writing, edits/history, three fresh-storage replays, and observed evaluation.
 129. Persona-PC v2 now adds an exact aggregate byte-distribution catalog downstream of the frozen variant,
     all-format implementation, formal recipe, and realism artifacts.  The
-    `kcs.persona.pc-aggregate-byte-distribution-catalog/v2` body contains 566 persona-variant histograms,
+    `kio.persona.pc-aggregate-byte-distribution-catalog/v2` body contains 566 persona-variant histograms,
     300 persona-family projections, twenty persona summaries, and one suite summary.  Pilot and full-residual
     counts are allocated independently and full is their coordinatewise sum for counts, histograms, raw bytes,
     rounded planning bytes, and tail counts; nearest-rank p50/p95 are recomputed from the merged full histogram
     rather than subtracted or averaged.  The final body is 1,576,125 canonical bytes, SHA-256
-    `7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`.
+    `9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2`.
     Full covers 203,000 sources, 5,034,302,718 raw bytes, 5,194,530,816 bytes after per-file 4 KiB rounding,
     p50 8,192 bytes, p95 129,024 bytes, maximum 2,621,440 bytes, and 160 formal tails.  Every persona has
     exactly one pilot, seven residual, and eight full tails; p12 is the largest at 417,591,296 rounded bytes.
@@ -1271,12 +1271,12 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     authority follows.
 130. Persona-PC v2 now makes the required one-person/one-primary-use-case relationship explicit rather than
     inferring use-case coverage from twenty role labels.  The non-authorizing
-    `kcs.persona.pc-primary-use-case-catalog/v2` contains exactly twenty unique persona IDs and twenty unique
+    `kio.persona.pc-primary-use-case-catalog/v2` contains exactly twenty unique persona IDs and twenty unique
     primary-use-case IDs.  Each row preserves the proposal trigger, desired outcome, and authored format terms,
     normalizes those terms to positive frozen physical-family marginals, and binds the exact persona role and
     representative primary topology scope together with allowlisted lifecycle capabilities and query strata.
     The body is 30,008 canonical bytes, SHA-256
-    `024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624`.
+    `73939fc66fc234b5a8b3bfb8e6362b12807015204fd49253dde870a7f29528ed`.
     Required families mean minimum use-case witnesses, not the complete physical mix.  Scope paths are
     persona-root-relative, data is synthetic/non-PII, and rendered query text, source/final IDs, source-instance
     membership, evaluation target resolution, execution, and G0 authority are absent.  The independent validator
@@ -1290,13 +1290,13 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     original object in a `finally` block after callbacks.  Existing coordinate digest/nondeterminism checks remain
     intact.  Provider-side mutations of target and upstream suite metadata are rejected by new regression tests.
     Existing producer bodies and pins remain unchanged: source suite 45,887 bytes /
-    `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706`, semantic suite 49,837 /
-    `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`, and concrete suite 51,133 /
-    `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`.  The three mutation regressions and the
+    `9f216f3d986bdc92f7b07e0d2bfe266dc03df46d990f8ded706ad802d227edc3`, semantic suite 49,837 /
+    `6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072`, and concrete suite 51,133 /
+    `129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737`.  The three mutation regressions and the
     three existing full public-validator paths pass locally, together with `py_compile` and diff checks.  This is
     validator hardening only; it does not implement the 203,000 source-instance parameter package or add authority.
 132. Persona-PC v2 now separates chunk cardinality and physical cardinality in a dedicated non-authorizing
-    `kcs.persona.pc-chunk-accounting/v1` sidecar.  Contract checkpoints count distinct scope-qualified semantic
+    `kio.persona.pc-chunk-accounting/v1` sidecar.  Contract checkpoints count distinct scope-qualified semantic
     endpoints `(scope_id, chunk_id)`, with `chunk_id == chunk_hash`; persona-global chunk hashes,
     `(scope_id, chunk_id, path)` history bindings, and physical CAS/materialization counters remain separate
     metrics.  Current and history-only endpoints are disjoint within contract and incidental participation, and
@@ -1307,25 +1307,25 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     W5-pre totals remain below the pilot and full incidental caps.  Performance uses the scope-qualified endpoint
     count while formal Recall retains the separately compiled `(raw_hash, section)` denominator.
     The body is 19,801 canonical bytes with SHA-256
-    `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`.  Thirteen focused tests, four hash seeds,
+    `66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52`.  Thirteen focused tests, four hash seeds,
     independent reconstruction, mutation probes, and final read-only review pass with no blocker.  All execution,
     source-instance, observed receipt, write, Kio, history, capacity, and G0 authority remains false.
-133. Persona-PC v2 now adds the exact pre-solve `kcs.persona.pc-lifecycle-demand/v2` artifact downstream of the
+133. Persona-PC v2 now adds the exact pre-solve `kio.persona.pc-lifecycle-demand/v2` artifact downstream of the
     authenticated chunk-accounting sidecar.  Each of twenty personas owns one byte-stable anonymous payload with
     105 capabilities: one hundred contributor capabilities and five unreserved incidental cross-scope moves.
     Pilot and full bind the same origin payload bytes.  The artifact fixes U35/I5, P/X/Y/N lifecycle demand,
     distinct P-prime/X-prime capacity replacements, restore plus paired-delete net-zero groups, pairwise-disjoint
     current-restored/final-deleted/purged states, surface fact carry-forward, persona emphasis witnesses, and the
     move crosswalk across four ledgers and twelve projections.  It directly binds chunk accounting at
-    19,801 bytes / `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`, requires the W0
+    19,801 bytes / `66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52`, requires the W0
     sum of five positive endpoint observations, `qIM <= uIM = 350`, and `nIM = 5`, and labels file/inode/object
     deltas planned and conditional until actual receipts exist.  The lifecycle body is 463,571 canonical bytes
-    with SHA-256 `32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`.
+    with SHA-256 `372a466e3994c9e41662457f144fc03338d96b76f57f9306e62bbe9511422005`.
     Nineteen focused tests, four hash seeds, ten history-intent regressions, independent dependency reauthentication,
     adversarial repinning probes, and final review pass.  Source-instance matching, W0 observation, compiled event
     instances, concrete paths, actual C/H/physical receipts, evaluation targets, execution, and G0 remain false.
 134. Persona-PC v2 now implements the separate non-authorizing
-    `kcs.persona.pc-recursive-robustness-lane-catalog/v1`.  It fixes twenty distinct representative ambient paths,
+    `kio.persona.pc-recursive-robustness-lane-catalog/v1`.  It fixes twenty distinct representative ambient paths,
     256 file candidates and 128 authored directories per persona, the exact category vector
     `102/38/38/26/26/13/13`, suite file-depth counts D6/D7/D8=`2,855/1,901/364`, and planned-Dmax persona counts
     `8/9/3`.  Formal scope overlap, `.kio`, absolute paths, traversal, and formal gate eligibility are forbidden.
@@ -1334,7 +1334,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     mates as manifest-only failures, whereas a case-sensitive run may realize all 256.  Candidate, realized, and
     unrealized outcomes must be reconciled by the execution receipt rather than inferred from persona metadata.
     The body is 76,099 canonical bytes with SHA-256
-    `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`; thirteen focused tests, hash-seed
+    `af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8`; thirteen focused tests, hash-seed
     determinism, independent reconstruction, hostile-type/path/TOCTOU probes, and final review pass.  No folder,
     file, Kio, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
     nonauthorizing core CI job, and lifecycle-demand plus recursive-robustness tests are included in the inputs job;
@@ -1349,7 +1349,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Missing, mismatched, zero, out-of-range, or duplicate patches fail closed; contract C/H remains `(0,0)`.
     The same clarification separates G0 serialized/planning/path caps from G4 actual root-bound byte/inode capacity,
     defines exact `source-origin-to-solver-phase-v1` mapping (`pilot -> pilot`, `full-residual -> full-minus-pilot`),
-    and requires a future `kcs.persona.pc-g0-blocker-resolution-ledger/v2` to classify immutable historical blocker
+    and requires a future `kio.persona.pc-g0-blocker-resolution-ledger/v2` to classify immutable historical blocker
     fields by exact artifact pin/path as active, downstream-resolved, post-G0 deferred, or historical-local-negative.
     Existing pinned artifacts and their historical false fields are not rewritten.
     The formerly ambiguous sixteen-MiB denominator is now the pre-solve corpus-input persona package only: unique
@@ -1364,9 +1364,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `pre_solve_persona_input_package_cap_proved=false`; G0, solution, compiled-runtime history, qIM patch, actual
     chunks, root capacity, render/write/history/Kio execution, and all other authorities remain false.
 136. Persona-PC v2 now inserts a non-authorizing
-    `kcs.persona.pc-overlay-compatible-byte-distribution/v2` sidecar between the immutable aggregate-byte base and
+    `kio.persona.pc-overlay-compatible-byte-distribution/v2` sidecar between the immutable aggregate-byte base and
     source-instance parameter assignment.  The base remains pinned at 1,576,125 bytes /
-    `7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`; it is not rewritten.  Its EML bins expose
+    `9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2`; it is not rewritten.  Its EML bins expose
     only complexities 0, 1, and 5, while the concrete overlay requires all host fanouts 1 through 5, making all
     forty persona-origin coordinates infeasible without a downstream refinement.  The sidecar directly binds the
     base catalog, all-71 implementation registry, and concrete-overlay reservation suite, assigns each EML host
@@ -1377,7 +1377,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     after per-file 4-KiB rounding, p50 8,192, p95 129,024, max 2,621,440, and 160 formal tails; p12 is the largest
     persona at 411,774,976 rounded bytes.  Pilot and full-residual are respectively 499,432,669 / 515,411,968 and
     4,529,774,625 / 4,674,023,424 raw / rounded bytes and close exactly to full.  The canonical sidecar is 91,039
-    bytes with SHA-256 `e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89`.
+    bytes with SHA-256 `a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc`.
     Twenty focused tests, two hash seeds, dependency and origin-manifest authentication, independent reconstruction,
     direct native-payload validation, forged-receipt rejection, provider-alias and metadata-TOCTOU probes, strict
     bool/integer rejection, and read-only P0/P1 review pass.  The artifact grants no source assignment,
@@ -1438,7 +1438,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     content changes alter the namespace.  Namespace eligibility does not grant solver, G0, execution, or write
     authority.
 140. Lifecycle fact overlays do not become a second owner beside the immutable source-semantic singleton rows.  A
-    downstream `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1` must authenticate base membership,
+    downstream `kio.persona.pc-lifecycle-effective-membership-reconciliation/v1` must authenticate base membership,
     source-matched coverage, typed purge-witness rows, and rendition relations, then emit exactly one effective W0
     fact/semantic-section membership for every one of the 203,000 sources.  Unselected sources inherit base
     semantics; primary anchors replace singleton membership with the same-topic graph-normal W0 set; P anchors alone
@@ -1449,11 +1449,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     base and effective membership owners.  Base full bodies and reconciliation/derivation receipts remain in corpus
     input closure, and namespace eligibility stays false until source matching and reconciliation complete.
 141. The query-independent lifecycle coverage design is implemented as
-    `kcs.persona.pc-lifecycle-coverage-catalog/v1`.  It binds 2,100 primary capability rows, 200 cross-format
+    `kio.persona.pc-lifecycle-coverage-catalog/v1`.  It binds 2,100 primary capability rows, 200 cross-format
     companion requirements, 300 suite-unique purge-witness requirements, twenty move-receipt policies, twelve
     accounting projections, nineteen symbolic operations, nine scope-relation rules, and thirteen path-transition
     rules.  Its canonical body is 1,385,596 bytes with SHA-256
-    `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`.  The producer and independent validator
+    `1760eeed4bde8c7a1c2c720a437fb4c3d62971af3f2159e768696e938389b9d4`.  The producer and independent validator
     pass thirteen focused tests, two hash seeds, strict-type and re-pin tamper tests, dependency tamper, detached-build,
     and target/dependency TOCTOU tests.  The catalog supersedes the historical `U35/Y30/I5` snapshot only for
     coverage classification.  It selects no concrete source, imports no query/oracle, owns no effective membership,
@@ -1467,8 +1467,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     receipts.  That entire pipeline runs on exactly three fresh storages including the first run, followed by one
     cross-replay evaluation; it is not one initial run plus three additional replays.
 143. Persona-PC v2 source-instance parameter assignment is implemented as
-    `kcs.persona.pc-source-instance-parameter-assignment-suite/v2`, a 72,535-byte canonical suite with SHA-256
-    `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`.  It binds 363 shared explicit
+    `kio.persona.pc-source-instance-parameter-assignment-suite/v2`, a 72,535-byte canonical suite with SHA-256
+    `42c437213fa9cd0c48ad0ca05477d968aba3d62d87be7ba23e9c201c473699e3`.  It binds 363 shared explicit
     `{variant_id}/{bin_id}` cells, 2,643 positive persona-cell projections, forty origin manifests containing
     4,759 compact owner rows, forty pilot/full profiles, and seventy-three authenticated non-persisted expanded-view
     receipts to all 203,000 source intents.  Pilot 20,300 and full-residual 182,700 are allocated independently;
@@ -1517,7 +1517,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     observed receipt.  The existing twenty-row catalog remains a non-authorizing marginal join; Decision 146 records
     the implemented source-matching bridge without granting downstream execution authority.
 146. The query-independent source-matched lifecycle bridge is implemented as
-    `kcs.persona.pc-source-matched-lifecycle-suite/v1`.  Each persona owns exactly 105 primary matches
+    `kio.persona.pc-source-matched-lifecycle-suite/v1`.  Each persona owns exactly 105 primary matches
     (100 contributor semantic anchors and five overlay-unreserved incidental sources), ten distinct-family
     cross-format companions, five explicitly reserved unused semantic anchors, and its required-family witnesses.
     The suite therefore binds 2,100 primary matches, 200 companions, 2,300 lifecycle source refs, and 93 format
@@ -1540,7 +1540,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     contains normalized source-selection, source-event, and scope-event sections with created-source, dependency,
     predecessor, operation, delta, fact, path/scope, and visibility refs, while excluding receipts and runtime/query/
     solution metadata.  The final suite is 14,605 canonical bytes with SHA-256
-    `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`; observed maxima are 103,981 bytes per
+    `b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b`; observed maxima are 103,981 bytes per
     persona owner, 318,664 bytes per non-persisted event body, 973 bytes per LF-inclusive event row, and 256,790
     bytes per content-only projection.  Hard caps remain 512 KiB/persona, 4 MiB/event body, 1,024 bytes/event row,
     and 384 KiB/projection with a 256 KiB projection target.
@@ -1602,7 +1602,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     a final independent static/adversarial review found no P0/P1 issue.  Artifact schemas, canonical package pins,
     public APIs, and all negative authority remain unchanged.
 149. The lifecycle effective-membership reconciliation is implemented as
-    `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1` with a producer-independent validator.  Its
+    `kio.persona.pc-lifecycle-effective-membership-reconciliation/v1` with a producer-independent validator.  Its
     formal W0 domain is the existing 203,000 source keys across 73 shards.  The exact modes are 200,800 base
     inheritances, 1,700 graph-normal overrides, 300 graph-normal-plus-witness overrides, and 200 companion mirrors;
     the exact fact distribution is 73,350 empty, 100 singleton, 3,120 conflict-branch, 126,130 graph-normal-only, and
@@ -1617,7 +1617,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     these are not upstream pins or derivation receipts.  It retains rendition-group semantic relations while
     excluding family, variant, gate, use-case, format-selection, query/oracle, solution, authority, physical, and
     runtime fields.  The frozen suite is 69,195 canonical bytes with SHA-256
-    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  Observed maxima are 5,592-byte origin,
+    `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`.  Observed maxima are 5,592-byte origin,
     3,301-byte profile, 103,864-byte projection, and LF-inclusive rows of 1,136 compact / 913 expanded / 571 event /
     600 inverted bytes.  The compact hard cap is therefore 2,048 bytes; expanded/event/inverted row caps remain
     1,024 bytes.
@@ -1633,8 +1633,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     materialization, capacity/Kio observation, namespace completion, G0, and every write/execution authority remain
     false and downstream.
 150. Persona-PC v2 freezes a partial semantic-projection derivation inventory before issuing any production semantic
-    namespace.  `kcs.persona.pc-semantic-projection-derivation-inventory/v1` contains exactly 113 external projection
-    bodies, each represented by `kcs.persona.pc-semantic-projection-derivation-receipt/v1`: 73 membership-free base
+    namespace.  `kio.persona.pc-semantic-projection-derivation-inventory/v1` contains exactly 113 external projection
+    bodies, each represented by `kio.persona.pc-semantic-projection-derivation-receipt/v1`: 73 membership-free base
     source content-context JSONL shard bodies, twenty effective-source-membership projections, and twenty
     query-independent lifecycle-fact/rendition-rule projections.  These cover exactly three of the twelve required
     class IDs: `base-source-content-context`, `effective-source-membership`, and
@@ -1657,9 +1657,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The canonical inventory cap is 1 MiB and the cumulative external-projection hard cap is 144 MiB.  Each base JSONL
     body is capped at 4 MiB, 4,096 rows, and 768 bytes per LF-inclusive row.  Each effective and lifecycle projection
     has a 384 KiB hard cap and 256 KiB target.  The frozen inventory is exactly 293,285 canonical bytes with SHA-256
-    `5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`; the canonical JSON array of ordered
+    `e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb`; the canonical JSON array of ordered
     `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
-    `a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`.  Its 113 external bodies total exactly
+    `ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455`.  Its 113 external bodies total exactly
     128,144,915 bytes.  The 73 base bodies contain exactly 203,000 rows and 121,020,941 bytes, with a 633-byte maximum
     LF-inclusive row and 2,484,590-byte maximum body; effective and lifecycle maximum bodies are 103,864 and 256,790
     bytes.  These literal pins are independently enforced by the producer, validator, and cold two-hash-seed gate.
@@ -1678,8 +1678,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     and only then proceed to the joint solver.
 151. Persona-PC v2 will complete the twelve-class semantic projection inventory in a new version rather than mutate
     the frozen Decision 150 artifact.  The target schemas are
-    `kcs.persona.pc-semantic-projection-derivation-inventory/v2` and
-    `kcs.persona.pc-semantic-projection-derivation-receipt/v2`.  The v2 inventory has exactly 253 projection bodies
+    `kio.persona.pc-semantic-projection-derivation-inventory/v2` and
+    `kio.persona.pc-semantic-projection-derivation-receipt/v2`.  The v2 inventory has exactly 253 projection bodies
     in minimum-class order: topology path/load 1, realism/locale/security 1, route scores 1, primary-use-case corpus
     half 1, recipe/content/filename policy 1, persona fact graphs 20, base source content-context shards 73,
     effective source membership 20, concrete-overlay relation origins 40, source-instance parameters 74,
@@ -1726,7 +1726,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     positive review receipts, blocker resolution, solver, G0, render/write/history/Kio, and physical 120,000-chunk
     attestation remain separate downstream gates.
 152. Persona-PC v2 accepts the complete twelve-class semantic-projection derivation inventory as the additive
-    `kcs.persona.pc-semantic-projection-derivation-inventory/v2` artifact.  It contains exactly 253 independently
+    `kio.persona.pc-semantic-projection-derivation-inventory/v2` artifact.  It contains exactly 253 independently
     bound projection bodies in minimum-class order: topology path/load 1, realism/locale/security 1, route scores 1,
     primary-use-case corpus half 1, recipe/content/filename policy 1, persona fact graphs 20, base source
     content-context shards 73, effective source membership 20, concrete-overlay relation origins 40,
@@ -1736,9 +1736,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     projection bodies and pins, completion claims, and negative authority are neither amended nor superseded.
 
     The frozen v2 descriptor is exactly 697,466 canonical bytes with SHA-256
-    `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`.  Its 253 external bodies total exactly
+    `820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91`.  Its 253 external bodies total exactly
     155,741,469 bytes.  The canonical JSON array of ordered `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
-    `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`.  The three large JSONL domains contain
+    `d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8`.  The three large JSONL domains contain
     exactly 203,000 base rows, 25,560 concrete-overlay rows, and 203,000 source-parameter assignment rows.  Their
     maximum LF-inclusive row sizes are 633, 388, and 110 bytes; maximum bodies are 2,484,590, 658,944, and 367,471
     bytes.  The shared parameter catalog defines 363 cells, while the exact assignment domain uses 354 and leaves
@@ -1791,44 +1791,44 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     oracle-poisoning regressions without changing the authenticated domain or any completion claim.
 
     The suite remains exactly 69,195 canonical bytes with SHA-256
-    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  The final focused module passes fifteen
+    `a624066396a534308c58cffe4f827160ea6d5f726c9507d9115e0ddb18752a29`.  The final focused module passes fifteen
     tests in 1,748.406 seconds, including cache-poisoning, detached-candidate, authority, coordinate, pin, event-domain,
     provider, and TOCTOU regressions.  Independent final review found no remaining P0/P1/P2 issue.  Solver, post-W0
     complete membership, compiled history, write/Kio execution, physical receipts, and G0 remain false.
 154. Persona-PC v2 freezes a projection-pin-only corpus semantic namespace as the additive
-    `kcs.persona.pc-corpus-semantic-namespace/v3` artifact.  It contains exactly 253 entries and twelve class IDs in
+    `kio.persona.pc-corpus-semantic-namespace/v3` artifact.  It contains exactly 253 entries and twelve class IDs in
     the complete-inventory order.  Every entry contains only its class, logical coordinates, ordinal, and exact
     projection pin; no projection body, derivation receipt, owner body, inventory pin, query/oracle, review evidence,
     blocker ledger, solver value, final ID, runtime receipt, or authority is embedded.  Its graph is one root with
     exactly 253 direct edges, maximum depth one, and zero unused entries.
 
     The frozen namespace is 161,665 canonical bytes with SHA-256
-    `a8bc67e182ff57b64ae6df0f97bd5be31faf6e5f7b7cfbd0bc3f1ba7bc5cc509`.  The logged two-hash-seed cold gate
+    `70fa743199265efd51ee940dd7032cb72d7c445561989c675060f15c158caafa`.  The logged two-hash-seed cold gate
     completes in 5,160.296 seconds total; the seed measurements are 2,586.128 and 2,573.607 seconds with maximum RSS
     795,803,648 bytes.  Each seed authenticates 253 unique receipts and 506 projection-provider calls.  `namespace
     golden frozen` is a local artifact claim only: `namespace issued`, source-identity authority, production corpus
     closure, review approval, solver, G0, and every execution/write authority remain false.
 155. Persona-PC v2 represents the remaining human review work with the non-authorizing
-    `kcs.persona.pc-review-request-catalog/v1`.  It has seven exact review classes, eight subject pins, eight
+    `kio.persona.pc-review-request-catalog/v1`.  It has seven exact review classes, eight subject pins, eight
     bindings, and 65 explicit relevant projection pins selected from the independently reconstructed 253-entry
     registry.  The route review requires reviewer kind `independent-human`.  It contains no reviewer identity,
     decision, approval, waiver, or positive receipt, and `positive_receipt_bound` is false for every request.
 
     The frozen request catalog is 42,931 canonical bytes with SHA-256
-    `28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab`; two isolated hash seeds agree and the
+    `1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098`; two isolated hash seeds agree and the
     focused eight-test gate passes.  A review request is not review evidence and cannot satisfy the corpus input
     closure or G0.
 156. Persona-PC v2 records the current unresolved production boundary in the bootstrap-only
-    `kcs.persona.pc-g0-blocker-resolution-ledger/v2` profile `bootstrap-three-source-v1`.  Its three historical
+    `kio.persona.pc-g0-blocker-resolution-ledger/v2` profile `bootstrap-three-source-v1`.  Its three historical
     sources contain 36 claims: 21 blockers and fifteen false-completion claims, all with status `active-g0`.  The
     ledger explicitly defers G2/G3/G4/G7 and the pre-W2 runtime patch; it reports both closure eligibility and G0
     eligibility false.  The historical source universe and source registry are deliberately incomplete.
 
     The frozen bootstrap is 21,645 canonical bytes with SHA-256
-    `e6428d280f8438875896dc210102611cfef54fd569e5c50ad9874ecef68146f2`; two seeds agree and 24 focused tests pass.
+    `48c9c36a965fbae34b1a89b041515a267284149801120b12e16b548fc4a96c97`; two seeds agree and 24 focused tests pass.
     This artifact is not the production blocker-resolution ledger and cannot resolve or waive any claim.
 157. Persona-PC v2 binds the query/oracle/lifecycle cardinality bridge as
-    `kcs.persona.pc-query-history-target-resolution/v1`.  It contains exactly twenty personas by 105 mappings,
+    `kio.persona.pc-query-history-target-resolution/v1`.  It contains exactly twenty personas by 105 mappings,
     2,100 total, split into 1,800 positive and 300 negative capabilities.  Matching is constrained by semantic class
     rather than an ordinal zip.  It also binds 5,400 distinct abstract distractor intent/document references, but it
     maps zero concrete distractor sources and proves zero source topic, language, or fact equalities.  Scope/path,
@@ -1836,12 +1836,12 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     execution authority are absent.
 
     The frozen bridge is 4,478,576 canonical bytes with SHA-256
-    `4ddf5c98f489586f4cff976de4bea651e07a594f8dd9ac7b96e5ec617a5a88bc`; two isolated seeds agree and eleven
+    `8beed1ca21ebe80e029bcd003795306086514adcd852b98a9eed334fcd73f4ff`; two isolated seeds agree and eleven
     focused tests pass.  Subsequent auditing shows this v1 bridge is not a source-semantic resolution: topic,
     language, fact/revision visibility, 5,400 concrete distractors, and four-domain disjointness remain mandatory
     downstream blockers.
 158. Persona-PC v2 freezes the physical path composition plan as the non-authorizing
-    `kcs.persona.pc-device-lane-compositor/v1`.  It derives the exact twenty portable role slugs from the frozen v2
+    `kio.persona.pc-device-lane-compositor/v1`.  It derives the exact twenty portable role slugs from the frozen v2
     envelope and maps three fresh replay containers to sixty distinct
     `<replay>/devices/{persona_id}-{role_slug}` roots, sixty isolated registry roots, and 1,200 formal leaf scopes.
     The plan carries 203,000 W0 files per replay and 609,000 across all three, with 120,000 planned current contract
@@ -1852,7 +1852,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
     `formal-replay-01` is only the unratified designated candidate for `ambient-home` and `byte-stress`; the G0
     selection remains false.  The frozen compositor is 41,099 canonical bytes with SHA-256
-    `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf`.  Pre- and post-freeze isolated hash seeds
+    `8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f`.  Pre- and post-freeze isolated hash seeds
     reproduce the same body, the focused twelve-test gate and independent audit are clean, and producer/validator
     golden drift is fail-closed.  No physical root, registry, file, chunk, inode, or receipt is claimed observed;
     filesystem writer, capacity, lane-isolation readback, Kio/history execution, production composition, and G0 all
@@ -1861,7 +1861,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Remote GitHub Actions for Decisions 153--160 remain unverified because the repository/account billing or spending
     gate previously stopped the workflow before jobs.  Local frozen or candidate evidence does not imply remote green.
 159. Persona-PC v2 does not promote the v1 query-history target bridge to a source-semantic resolution.  The
-    non-authorizing `kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` joins the exact query,
+    non-authorizing `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` joins the exact query,
     oracle, target-resolution, source-semantic, source-matched lifecycle, and effective-membership projections used
     by the audit, while leaving revision-chain and checkpoint-effective membership predicates explicitly unknown.
     The in-memory twenty-person projection replay finds only 327 of 2,000 contributor targets aligned on the available baseline
@@ -1875,21 +1875,21 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     zero, four-domain disjointness is unproved, and query-history target resolution v2 is not issued.
 
     The current audit candidate is 40,947 canonical bytes with SHA-256
-    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`, but its golden constants deliberately remain
+    `573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f`, but its golden constants deliberately remain
     unset pending isolated full/cold acceptance.  The in-memory all-persona projection build completes in 465.03 seconds; fourteen
     focused tests, byte compilation, diff checks, and the final independent audit pass.  These measurements are
     active blocker evidence, not a frozen production closure.  A v2 source-semantic resolution must add sufficient
     persona-local membership candidates, exact revision/checkpoint ownership, all 5,400 concrete distractor source
     mappings, and four-domain disjointness before solver, evaluation closure, G0, or execution authority can advance.
 160. Persona-PC v2 freezes the request-only corpus input closure as the additive
-    `kcs.persona.pc-corpus-input-closure-manifest/v3` artifact.  It binds exactly four direct dependencies: the
+    `kio.persona.pc-corpus-input-closure-manifest/v3` artifact.  It binds exactly four direct dependencies: the
     locally frozen corpus semantic namespace v3, complete semantic-projection inventory v2, seven-class review
     request catalog, and bootstrap blocker-resolution ledger.  It carries seven review requests, zero positive
     review receipts, and all 36 bootstrap G0 claims as active.  Every production, completion, G0, solver, solution,
     render, filesystem/write, history, Kio, capacity, and evaluation authority remains exactly false.
 
     The frozen body is 7,590 canonical bytes with SHA-256
-    `47b75b37ceb811e78473bd4f51013f85a95d64167c89e180c417d94620737126`.  The pre-freeze independent full gate
+    `ee7010335ab6d50c9b36492e6bfd71c5d445544aeda95649002bbb66b798bd3f`.  The pre-freeze independent full gate
     passes in 2,673.298 seconds, and two isolated hash-seed cold builds reproduce the exact body and pin in
     5,363.608 seconds total.  After freezing the golden constants and strengthening the import-boundary check, the
     post-freeze working-tree full gate passes one test in 2,669.858 seconds.  Its measured closure build is 2,669.856
@@ -1904,7 +1904,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Actions is still unverified because the repository/account billing or spending gate previously stopped jobs;
     local acceptance does not imply remote green.
 161. Persona-PC v2 freezes the non-authorizing
-    `kcs.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` as active blocker evidence.  Its body
+    `kio.persona.pc-query-history-semantic-resolution-feasibility-audit/v1` as active blocker evidence.  Its body
     and findings remain exactly those recorded by Decision 159: the live baseline examines 2,000 contributor
     targets, aligns 327 and mismatches 1,673; all-condition exact resolution is proved for zero targets and remains
     `unknown-not-proved`; revision joins remain unknown for all 2,000; and the 5,400 abstract distractor references
@@ -1913,7 +1913,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     issued.
 
     The frozen body is exactly 40,947 canonical bytes with SHA-256
-    `890ce6510d9baa4b5faf533cb927bd296f12e289247bb63f88ee2303565af136`.  The pre-freeze all-persona build plus
+    `573810a44e1823a685338cc87d249aea57934a9be3ba7940f02285d0fab16d0f`.  The pre-freeze all-persona build plus
     producer-independent validation passes in 458.502 seconds with 301,400,064-byte maximum RSS.  Two isolated cold
     processes under hash seeds zero and one reproduce the same bytes and digest in 452.817 and 451.303 seconds,
     respectively, with 303,005,696-byte maximum RSS.  After both producer and independent-validator golden pairs
@@ -1927,7 +1927,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     slice, while the later resolution-v2 owner must add exact topic/language/fact/revision/checkpoint mappings,
     sufficient persona-local distractor capacity, all 5,400 concrete mappings, and four-domain disjointness.
 162. Persona-PC v2 freezes the non-authorizing
-    `kcs.persona.pc-evaluation-target-resolution-closure-slice/v1`.  It binds exactly five frozen direct
+    `kio.persona.pc-evaluation-target-resolution-closure-slice/v1`.  It binds exactly five frozen direct
     dependencies: corpus semantic namespace v3, complete semantic-projection inventory v2, query-history target
     resolution v1, request-only corpus input closure v3, and the source-semantic feasibility audit v1.  It also
     authenticates the ordered commitment to sixty transitive query-intent, semantic-oracle, and source-matched
@@ -1942,7 +1942,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     v2, exact source-semantic resolution, and the authoritative evaluation closure remain absent.
 
     The frozen body is exactly 16,735 canonical bytes with SHA-256
-    `bc2ea1eaee2362e0edda3fb326fc4dd9e0e92d978ebdd04b6a8b6c380f12c3b2`.  The pre-freeze full dependency gate
+    `02351c5c4df712c345b3f5e9e1851c779b82e4d08d445b7da7e833b9f9f787d3`.  The pre-freeze full dependency gate
     passes in 2,674.851 seconds with 831,684,608-byte maximum RSS.  Isolated hash seeds zero and one reproduce the
     same bytes and digest in 2,650.206 and 2,639.799 seconds with maximum RSS 824,295,424 bytes.  After producer and
     independent-validator golden pairs were frozen, the focused gate passes nineteen tests and the post-freeze full
@@ -1991,7 +1991,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     chunk attestation remain false.  Remote GitHub Actions remains unverified because the repository/account billing
     or spending gate previously stopped jobs; local evidence does not imply remote green.
 164. Persona-PC v2 freezes the non-authorizing
-    `kcs.persona.pc-source-semantic-capacity-axis-catalog/v1`.  It defines exactly 15,048 query-independent capacity
+    `kio.persona.pc-source-semantic-capacity-axis-catalog/v1`.  It defines exactly 15,048 query-independent capacity
     cells over twenty personas, 38 eligible persona-language pairs, four semantic topics per persona, nine facts per
     topic, and eleven replicas per fact cell.  Twenty bounded persona-sharded JSONL bodies are bound by exact receipts;
     all full-hex cell IDs are domain-separated, globally collision-free, and ordered within each persona body by
@@ -2000,7 +2000,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     answer, relevance, evaluation, clock, network, randomness, or environment input.
 
     The frozen body is 50,473 canonical bytes with SHA-256
-    `4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29`.  After replacing self-referential
+    `e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8`.  After replacing self-referential
     unexecuted-gate claims with explicit external-receipt boundaries and correcting UTF-8 byte preflight, the
     pre-freeze full trust-root replay passes in 45.241 seconds with 66,404,352-byte maximum RSS, forty body-provider
     calls across twenty unique personas, and one semantic-catalog body opening.  Isolated hash seeds zero and one
@@ -2015,7 +2015,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     repository/account billing or spending gate previously stopped jobs; local freeze evidence does not imply remote
     green.
 165. Persona-PC v2 freezes the non-authorizing
-    `kcs.persona.pc-capacity-fact-truth-occurrence-policy/v1`.  It joins the locally frozen, unissued capacity axis to
+    `kio.persona.pc-capacity-fact-truth-occurrence-policy/v1`.  It joins the locally frozen, unissued capacity axis to
     the twenty frozen fact graphs without importing query, oracle, relevance, answer, or evaluation data.  The policy
     contains exactly 720 persona-sharded rows, 36 per persona, and covers all 15,048 capacity cells at the seven
     ordered checkpoints for 105,336 projections.  Its branch cells split 11,704 stable, 1,672 prior/stale-copy, and
@@ -2024,7 +2024,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     10,032, neutral-required is 1,672, and future-before-introduction is zero.
 
     The frozen body is 29,868 canonical bytes with SHA-256
-    `9f9653c1bb7a794bea33fe208b1de3c63f8dc011b8ac13f2d9a6955333681cd4`.  The pre-freeze full two-read replay
+    `85883ef574c917ec6197b9cebc2da5979d879cc29c5ac6ef0cab56e200c86601`.  The pre-freeze full two-read replay
     passes in 4.808 seconds with 62,767,104-byte maximum RSS, and isolated hash seeds zero and one reproduce the same
     bytes and digest in 9.721 seconds total.  Producer and independent-validator golden pairs were then frozen
     atomically.  The focused fast gate passes fourteen tests, and the post-freeze full replay passes in 4.927 seconds
@@ -2039,9 +2039,9 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     does not imply remote green.
 166. Persona-PC v2 adopts the `persona-core-v1` extension-allocation design, but does not yet freeze or issue its
     manifest.  The design binds three exact inputs: the 2,410-byte core family-count matrix at SHA-256
-    `045d85cf7325d0ec51217f61f2069b6dd145bfcb3b4477b4eb005d0a800d9ab7`, the 71,979-byte persona envelope at
-    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`, and the 333,881-byte all-71 format
-    implementation registry at `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`.  The
+    `271358e948ec060238ed519a8d38ae2283e6eefce28c1075c4f02c9984d98561`, the 71,979-byte persona envelope at
+    `12a5f175cbcd9b1ea9886c8a8e3b673b857f6b314ba48c9b71e6b279150244a7`, and the 333,881-byte all-71 format
+    implementation registry at `59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d`.  The
     registry proves renderer/validator feasibility only; it is not a formal source recipe, source-instance, physical
     file, searchability, or G0 authority.
 
@@ -2058,7 +2058,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The adopted row contract has an exact 23-key schema, schema version one, zero-based family ordinals 0--14, and
     zero-based family-local variant ordinals.  Unknown or missing fields and Boolean-as-integer values fail closed.
     The expected, not-yet-golden external LF-JSONL candidate is 426,889 bytes with SHA-256
-    `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45`, 566 rows, 539 full non-zero rows,
+    `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5`, 566 rows, 539 full non-zero rows,
     maximum LF-inclusive row size 786 bytes, and exact first/last row identities and pins.  A bounded descriptor must
     bind that body ID, bytes, digest, count, order, first/last rows, and two-read TOCTOU checks without embedding it.
 
@@ -2075,7 +2075,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     P0/P1/P2 issue.  Remote GitHub Actions remains unverified because the repository/account billing or spending gate
     previously stopped jobs; local design evidence does not imply remote green.
 167. Persona-PC v2 freezes the non-authorizing
-    `kcs.persona.pc-history-presolve-input-closure-slice/v1`.  The compact query-independent slice binds exactly four
+    `kio.persona.pc-history-presolve-input-closure-slice/v1`.  The compact query-independent slice binds exactly four
     frozen roots: corpus semantic namespace v3, complete semantic-projection inventory v2, source-matched lifecycle
     v1, and lifecycle effective-membership reconciliation v1.  It closes only structural pre-solver history demand
     and the already-proved W0 membership and purge-witness views.  Its summary remains exactly twenty personas,
@@ -2083,7 +2083,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     lifecycle source references, 600 inverted consumer references, and 300 purge witnesses.
 
     The frozen body is 8,455 canonical bytes with SHA-256
-    `34902a3663f2eeefb014696b38e761561e6f5e55060243ca71579f3400ac02d8`.  The corrected pre-freeze full gate
+    `64131249be0313bfbccdbc673fa56bd2f54e1a534ac5c52323d6e64741c55f2d`.  The corrected pre-freeze full gate
     passes in 2,595.206 seconds with 800,702,464-byte maximum RSS.  Isolated seed-zero and seed-one cold processes
     reproduce the same bytes and digest in 2,604.108 and 2,588.437 seconds respectively, 5,193.170 seconds total,
     with 804,306,944-byte maximum RSS.  Each full replay opens the namespace validator once, effective-membership

@@ -21,7 +21,7 @@ from eval import persona_v2_variant_catalog as variant_catalog
 
 EXPECTED_REGISTRY_BYTES = 333_881
 EXPECTED_REGISTRY_SHA256 = (
-    "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683"
+    "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d"
 )
 EXPECTED_PAIR_VARIANT_COUNTS = {
     "contributor-text": 9,
@@ -39,9 +39,9 @@ EXPECTED_PAIR_PAYLOAD_AGGREGATES = {
     "incidental-text": "c95779f318c0c2d54734e6868b56a0238c0fabd09409735046b505dc37843cdf",
     "raw-document": "f5b19a7b2201c8e699eef539bf1e124c6d24c0076a71aff018821b8cf4fba171",
     "raw-image-media": "880bb2be57d857b310116ac9cd91b566f341aee84c044939bafdc0056cc23440",
-    "raw-zip": "39e62f8e4e78247dfbf62eb0b576876f5053b928576d8db7f3ce54699fa464dc",
+    "raw-zip": "d3e3c776aee5adc538729ae8cd6611f0128a9448a921ca183c7b8cc7998da8f6",
     "raw-tar-gzip": "da82d8dbfb10dedfc881ff363a37bb5cfff4a015e7b3deb0536625ee96ea7f5d",
-    "raw-domain": "61d6d991af039c12aea5409017a4e0931f7db2ff958bafe8c887b86505f22b1f",
+    "raw-domain": "c3b157a903ab2d98659776c562e3d72160956453c8e8f772f1dc617074f85f7f",
 }
 FORMAT_PAIRS = (
     "text",
@@ -512,7 +512,7 @@ class PersonaV2FormatImplementationRegistryTests(unittest.TestCase):
             "data": b"",
             "extension": "",
             "content_media_type": "",
-            "expected_kcs_path_media_type": "",
+            "expected_kio_path_media_type": "",
             "expected_offline_disposition": "",
         }
         for pair_id, (

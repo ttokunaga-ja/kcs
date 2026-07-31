@@ -8,7 +8,7 @@ upstream bodies one origin at a time to verify every concrete join.
 
 Success proves only the pre-solve overlay membership package.  Scope
 placement, rendered bytes, observed raw/chunk identities, query relevance,
-history execution, KCS execution, G0 freeze, and write authority remain absent.
+history execution, KIO execution, G0 freeze, and write authority remain absent.
 """
 
 from __future__ import annotations
@@ -45,18 +45,18 @@ PLACEMENT_ORDER = (
 )
 
 ORIGIN_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-concrete-overlay-membership-origin-manifest/v2"
+    "kio.persona.pc-concrete-overlay-membership-origin-manifest/v2"
 )
 ORIGIN_ARTIFACT_KIND = (
     "persona-pc-v2-concrete-overlay-membership-origin-manifest"
 )
 PROFILE_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-concrete-overlay-membership-profile-manifest/v2"
+    "kio.persona.pc-concrete-overlay-membership-profile-manifest/v2"
 )
 PROFILE_ARTIFACT_KIND = (
     "persona-pc-v2-concrete-overlay-membership-profile-manifest"
 )
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-concrete-overlay-membership-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-concrete-overlay-membership-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-concrete-overlay-membership-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -83,7 +83,7 @@ MAX_PERSONA_PACKAGE_BYTES = 16 * 2**20
 # imports the producer that emits this descriptor.
 EXPECTED_SUITE_DESCRIPTOR_BYTES = 51_133
 EXPECTED_SUITE_SHA256 = (
-    "4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a"
+    "129eb05bd2331996742d69489f270f1012855d16cf8e47d5bd991a1b67305737"
 )
 
 AUTHORITY_FIELDS = frozenset(
@@ -92,7 +92,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -101,7 +101,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "formal_complete_persona_package_cap_proved",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "query_spec_hashed",
         "renderer_available",
@@ -330,7 +330,7 @@ REMAINING_BLOCKERS = [
     "corpus-semantic-namespace-and-query-history-target-mapping",
     "scope-placement-joint-allocation-and-proof",
     "actual-payload-search-and-raw-identity-attestation",
-    "render-write-chunk-observation-history-and-kcs-execution",
+    "render-write-chunk-observation-history-and-kio-execution",
     "future-complete-persona-package-cap-proof",
 ]
 HYPOTHESIS_STATUS = "authored-benchmark-stress-join-not-observed-user-statistics"

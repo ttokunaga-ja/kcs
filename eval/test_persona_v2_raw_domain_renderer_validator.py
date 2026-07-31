@@ -54,23 +54,23 @@ MATRIX = {
 EXPECTED_VARIANTS = tuple(sorted(MATRIX))
 EXPECTED_RENDERER_BYTES = 3_680
 EXPECTED_RENDERER_SHA256 = (
-    "d23868cb344a49ee2c2d354cfe0eb6b0ea9abd07163d573f1ba3b99da229f6ce"
+    "63e84afe98283aad93427e2b8260b7dfc30e9f0b20af3ee4d9968f7459872303"
 )
 EXPECTED_VALIDATOR_BYTES = 3_970
 EXPECTED_VALIDATOR_SHA256 = (
-    "520ced5cc89ca1bc5a0da45e14c7406e9d7e791d07ae27b2997749cf11ed2e9b"
+    "c305e733011f2791237b3ffd6d7e3e044330bf81201794f2e85702edffd88a82"
 )
 EXPECTED_MATRIX_PAYLOAD_SHA256 = (
-    "61d6d991af039c12aea5409017a4e0931f7db2ff958bafe8c887b86505f22b1f"
+    "c3b157a903ab2d98659776c562e3d72160956453c8e8f772f1dc617074f85f7f"
 )
 EXPECTED_PAYLOAD_PINS = {
     ("dicom-part10", 1): (
         5_208,
-        "dfc3353dde79b747119c89e56e5b05559dc98e16756f95c87b0acb19906d0790",
+        "d79154065192d6ccd8b50745c993357ded2eba02e1e9031cd44c0b4622b12336",
     ),
     ("dicom-part10", 64): (
         263_508,
-        "0a60ec199257cf16784d970db71f6c1d1b0e56e8f940d4f120617f3501dd11db",
+        "39e73d49cbb8b8e5442a5c6dbde0af54e47a48e5207a585e2776218b27345f22",
     ),
     ("pcap", 1): (
         146,
@@ -169,7 +169,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
             rendered.data if data is None else data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -260,7 +260,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -311,7 +311,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                 self.assertEqual(row["render_template"], template)
                 self.assertEqual(row["gate_role"], "raw_only")
                 self.assertEqual(
-                    row["expected_kcs_path_media_type"], "application/octet-stream"
+                    row["expected_kio_path_media_type"], "application/octet-stream"
                 )
                 self.assertEqual(
                     row["expected_offline_disposition"], "unsupported_binary"
@@ -325,7 +325,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                 "family",
                 "filename_extension",
                 "content_media_type",
-                "expected_kcs_path_media_type",
+                "expected_kio_path_media_type",
                 "expected_offline_disposition",
                 "gate_role",
             ):
@@ -429,7 +429,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
                         receipt["observed_complexity_measure"], exact[6]
                     )
                     self.assertIs(receipt["actual_chunks_attested"], False)
-                    self.assertIs(receipt["kcs_execution_attested"], False)
+                    self.assertIs(receipt["kio_execution_attested"], False)
                     self.assertIs(receipt["structure_validated"], True)
                     self.assertIs(receipt["identity_tokens_absent"], True)
                     if variant == "pcap":
@@ -626,7 +626,7 @@ class PersonaV2RawDomainRendererValidatorTests(unittest.TestCase):
             replace(valid, data=BytesSubclass(valid.data)),
             replace(valid, extension="PCAP"),
             replace(valid, content_media_type="application/octet-stream"),
-            replace(valid, expected_kcs_path_media_type="application/vnd.tcpdump.pcap"),
+            replace(valid, expected_kio_path_media_type="application/vnd.tcpdump.pcap"),
             replace(valid, expected_offline_disposition="incidental_sniff"),
         ):
             with self.assertRaises(validator.PersonaV2RawDomainValidatorError):

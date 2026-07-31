@@ -42,48 +42,48 @@ ROUTE_CLASS_ID = "route-scores"
 CLASS_ORDER = (TOPOLOGY_CLASS_ID, REALISM_CLASS_ID, ROUTE_CLASS_ID)
 
 TOPOLOGY_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-topology-path-load-content-projection/v1"
+    "kio.persona.pc-topology-path-load-content-projection/v1"
 )
 TOPOLOGY_PROJECTION_KIND = (
     "persona-pc-v2-topology-path-load-content-projection"
 )
 REALISM_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-realism-locale-security-content-projection/v1"
+    "kio.persona.pc-realism-locale-security-content-projection/v1"
 )
 REALISM_PROJECTION_KIND = (
     "persona-pc-v2-realism-locale-security-content-projection"
 )
-ROUTE_PROJECTION_SCHEMA = "kcs.persona.pc-route-scores-content-projection/v1"
+ROUTE_PROJECTION_SCHEMA = "kio.persona.pc-route-scores-content-projection/v1"
 ROUTE_PROJECTION_KIND = "persona-pc-v2-route-scores-content-projection"
 
 TOPOLOGY_OWNER_BYTES = 134_195
 TOPOLOGY_OWNER_SHA256 = (
-    "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
+    "02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a"
 )
 REALISM_OWNER_BYTES = 36_811
 REALISM_OWNER_SHA256 = (
-    "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05"
+    "990139d3a544ad57ea77752a6a2de8d4345897e961ca85bd506bd1ee041b3fdb"
 )
 ROUTE_OWNER_BYTES = 70_626
 ROUTE_OWNER_SHA256 = (
-    "e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790"
+    "7536b815ed5f614db2c31d49138385c7be76c71d45d7fc30f3380b3a9ae3b957"
 )
 
 EXPECTED_PROJECTION_PINS = (
     (
         TOPOLOGY_CLASS_ID,
         133_187,
-        "32b71dae205988d9671d6c3635bbe9690a03af4db363229c413f79c457375483",
+        "36c27d36ba074b884090a094541b33e34f719c2ed6c817309d26c9d9e2395db6",
     ),
     (
         REALISM_CLASS_ID,
         32_762,
-        "9bf892c4cf71608c167e5dfcf168cad4fff125293689b178a5acc57dfb30130d",
+        "6aec6942e00305334d90e0094c1a1903af2f6dd941ccc8e2e08d6f91980086ed",
     ),
     (
         ROUTE_CLASS_ID,
         88_085,
-        "c088ba4cfabffd9474afee35d0874bfae45fd07a801ccd763bfe97b6d17ce535",
+        "a555ef18181f525ca713e5f3655969dbd8d8b0ba3a205a5ae700f9ba2234ff03",
     ),
 )
 EXPECTED_DIRECT_FRAGMENT_PINS = (
@@ -788,7 +788,7 @@ def _direct_pin(raw, *, direct_pin_id, direct_pin_role):
 def _topology_owner_pin():
     return _full_owner_pin(
         artifact_kind="persona-pc-v2-topology",
-        artifact_schema="kcs.persona.pc-topology/v2",
+        artifact_schema="kio.persona.pc-topology/v2",
         canonical_bytes=TOPOLOGY_OWNER_BYTES,
         owner_id="persona-v2-topology",
         owner_role="full-topology-owner-pin",
@@ -799,7 +799,7 @@ def _topology_owner_pin():
 def _realism_owner_pin():
     return _full_owner_pin(
         artifact_kind="persona-pc-v2-realism-profile",
-        artifact_schema="kcs.persona.pc-realism-profile/v2",
+        artifact_schema="kio.persona.pc-realism-profile/v2",
         canonical_bytes=REALISM_OWNER_BYTES,
         owner_id="persona-v2-realism-profile",
         owner_role="full-realism-owner-pin",
@@ -810,7 +810,7 @@ def _realism_owner_pin():
 def _route_owner_pin():
     return _full_owner_pin(
         artifact_kind="persona-pc-v2-route-affinity-matrix",
-        artifact_schema="kcs.persona.pc-route-affinity/v2",
+        artifact_schema="kio.persona.pc-route-affinity/v2",
         canonical_bytes=ROUTE_OWNER_BYTES,
         owner_id="persona-v2-route-affinity",
         owner_role="full-route-owner-pin",

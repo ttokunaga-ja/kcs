@@ -3,7 +3,7 @@
 The envelope freezes 71 variant identities and 566 persona/family/variant
 marginals, but deliberately marks renderer/validator feasibility incomplete.
 This sidecar expands every identity into a single extension, content MIME,
-expected KCS path MIME, gate role, search/complexity/byte contract, safety
+expected KIO path MIME, gate role, search/complexity/byte contract, safety
 profile, and exact tiny/pilot/full marginal row.  It is still non-authorizing:
 v2 ID-free renderers and independent validators are not implemented yet.
 """
@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_input_bindings as input_bindings
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-variant-catalog/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-variant-catalog/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-variant-catalog"
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -327,7 +327,7 @@ def _variant_row(family, variant_id):
         },
         "compound_suffix_parts": extension.split("."),
         "content_media_type": _content_mime(variant_id),
-        "expected_kcs_path_media_type": metadata["media_type"],
+        "expected_kio_path_media_type": metadata["media_type"],
         "expected_offline_disposition": metadata["expected_offline_disposition"],
         "family": family,
         "filename_extension": extension,
@@ -476,7 +476,7 @@ def _canonical_catalog_value():
             "filesystem_writer_available": False,
             "formal_capacity_gate_satisfied": False,
             "history_executor_available": False,
-            "kcs_execution_available": False,
+            "kio_execution_available": False,
             "query_instances_rendered": False,
             "query_spec_hashed": False,
             "renderer_available": False,
@@ -500,7 +500,7 @@ def _canonical_catalog_value():
         "fixture_schema_version": envelope.FIXTURE_SCHEMA_VERSION,
         "g0_contract_frozen": False,
         "input_bindings": input_bindings.build_upstream_bindings(),
-        "kcs_media_policy": {
+        "kio_media_policy": {
             "cross_language_production_tables_verified": False,
             "policy_id": "current-offline-path-media-type-expectation-v2",
             "policy_schema_version": 2,

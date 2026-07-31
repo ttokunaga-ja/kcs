@@ -86,12 +86,12 @@ DUPLICATE_DIAGNOSTIC_PERSONAS = frozenset(
 # a coordinated accidental re-pin remains review-visible.
 EXPECTED_SUITE_BYTES = 14_605
 EXPECTED_SUITE_SHA256 = (
-    "c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8"
+    "b2ec04ef66476cc71b4ae1fb3275b8d5787eb560b5a7a7e2a3f03d690b77688b"
 )
-EXPECTED_ACTUAL_MAX_EVENT_BODY_BYTES = 318_664
+EXPECTED_ACTUAL_MAX_EVENT_BODY_BYTES = 318_846
 EXPECTED_ACTUAL_MAX_EVENT_ROW_BYTES_INCLUDING_LF = 973
-EXPECTED_ACTUAL_MAX_PERSONA_BYTES = 103_981
-EXPECTED_ACTUAL_MAX_PROJECTION_BYTES = 256_790
+EXPECTED_ACTUAL_MAX_PERSONA_BYTES = 103_962
+EXPECTED_ACTUAL_MAX_PROJECTION_BYTES = 256_800
 
 MAX_COLD_BUILD_SECONDS = 15 * 60
 MAX_COLD_BUILD_RSS_BYTES = 512 * 2**20
@@ -1236,7 +1236,7 @@ class PersonaV2SourceMatchedLifecycleInventoryTests(unittest.TestCase):
                 duplicate.sort(
                     key=lambda row: (
                         hashlib.sha256(
-                            b"kcs-lifecycle-v1/diagnostic-source/"
+                            b"kio-lifecycle-v1/diagnostic-source/"
                             + row["source_intent_key"].encode("ascii")
                         ).digest(),
                         row["source_intent_key"].encode("ascii"),

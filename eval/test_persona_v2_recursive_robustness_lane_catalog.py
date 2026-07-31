@@ -21,7 +21,7 @@ from eval import persona_v2_topology as topology
 
 EXPECTED_CANONICAL_BYTES = 76_099
 EXPECTED_SHA256 = (
-    "49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2"
+    "af73e879541dc8e57207a0321b6e96c720c5faf828027b93782c204828036bf8"
 )
 
 
@@ -455,7 +455,7 @@ class PersonaV2RecursiveRobustnessLaneCatalogTests(unittest.TestCase):
             self.assertIs(row["registered_scope"], False)
             self.assertIs(row["formal_gate_eligible"], False)
             self.assertIs(row["formal_scope_overlap"], False)
-            self.assertIs(row["kcs_control_tree_allowed"], False)
+            self.assertIs(row["kio_control_tree_allowed"], False)
             self.assertEqual(row["requested_chunks"], 0)
             self.assertEqual(row["lane_local_gate_role"], "raw_only")
             self.assertEqual(row["path_state"], "contract-only-not-materialized")
@@ -473,7 +473,7 @@ class PersonaV2RecursiveRobustnessLaneCatalogTests(unittest.TestCase):
                 path = row[path_key]
                 self.assertFalse(path.startswith(("/", "\\")))
                 self.assertNotIn("..", path.split("/"))
-                self.assertNotIn(".kcs", [part.casefold() for part in path.split("/")])
+                self.assertNotIn(".kio", [part.casefold() for part in path.split("/")])
             self.assertNotEqual(
                 row["device_relative_ambient_root"],
                 row["device_relative_formal_root"],
@@ -602,13 +602,13 @@ class PersonaV2RecursiveRobustnessLaneCatalogTests(unittest.TestCase):
         for changed in mutations:
             self._assert_independent_rejects_rehashed(changed)
 
-    def test_rehashed_traversal_absolute_kcs_overlap_and_receipt_alias_are_rejected(self):
+    def test_rehashed_traversal_absolute_kio_overlap_and_receipt_alias_are_rejected(self):
         path_mutations = (
             "../escape",
             "/tmp/escape",
             "\\server\\share\\escape",
             "C:/temp/escape",
-            ".kcs/objects/escape",
+            ".kio/objects/escape",
         )
         for path in path_mutations:
             changed = copy.deepcopy(self.value)

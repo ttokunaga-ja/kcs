@@ -8,7 +8,7 @@ admissible semantic domain from independently validated upstream artifacts and
 checks compact and expanded JSONL one bounded shard at a time.
 
 Successful validation is evidence about this non-authorizing metadata package
-only.  It grants no renderer, writer, solver, history, query, KCS, or G0
+only.  It grants no renderer, writer, solver, history, query, KIO, or G0
 authority.
 """
 
@@ -80,7 +80,7 @@ EXPECTED_MAXIMUM_CONTEXT_SHARD_BODY_BYTES = 2_484_590
 EXPECTED_MAXIMUM_MEMBERSHIP_SHARD_BODY_BYTES = 3_030_632
 EXPECTED_SUITE_DESCRIPTOR_BYTES = 49_837
 EXPECTED_SUITE_SHA256 = (
-    "62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28"
+    "6027147bff72129aa308daa79c10581f6eceec9b04eb4667dbe72c0194ac6072"
 )
 EXPECTED_P12_CURRENT_COMPONENT_BYTES = 12_070_092
 
@@ -96,17 +96,17 @@ MAX_PROFILE_MANIFEST_BYTES = 256 * 1024
 MAX_SUITE_DESCRIPTOR_BYTES = 512 * 1024
 MAX_PERSONA_PACKAGE_BYTES = 16 * 2**20
 
-CATALOG_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-catalog/v2"
+CATALOG_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-catalog/v2"
 CATALOG_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-catalog"
 ORIGIN_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-source-semantic-membership-origin-manifest/v2"
+    "kio.persona.pc-source-semantic-membership-origin-manifest/v2"
 )
 ORIGIN_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-origin-manifest"
 PROFILE_ARTIFACT_SCHEMA = (
-    "kcs.persona.pc-source-semantic-membership-profile-manifest/v2"
+    "kio.persona.pc-source-semantic-membership-profile-manifest/v2"
 )
 PROFILE_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-profile-manifest"
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-membership-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-membership-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-source-semantic-membership-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -116,7 +116,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -125,7 +125,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "formal_complete_persona_package_cap_proved",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "query_instances_rendered",
         "query_spec_hashed",
         "renderer_available",
@@ -1232,7 +1232,7 @@ def _validate_catalog(catalog):
             "concrete-logical-overlay-materialization",
             "history-and-checkpoint-transition-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         label="semantic catalog blocker ledger",
@@ -1436,7 +1436,7 @@ def _prevalidate_origin_manifest(
             "concrete-overlay-materialization",
             "history-checkpoint-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         label=f"source semantic origin blocker ledger {persona_id}/{origin}",
@@ -1710,7 +1710,7 @@ def _expected_profile_manifest(
             "concrete-overlay-materialization",
             "history-checkpoint-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "summary": {
@@ -2045,7 +2045,7 @@ def _expected_suite_descriptor(
             "concrete-logical-overlay-materialization",
             "history-and-checkpoint-transition-membership",
             "scope-placement-allocation-and-proof",
-            "render-write-chunk-observation-and-kcs-execution",
+            "render-write-chunk-observation-and-kio-execution",
             "future-complete-persona-package-cap-proof",
         ],
         "summary": {

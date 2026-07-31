@@ -97,7 +97,10 @@ def _synthetic_snapshot():
             capability_key = f"{persona_id}-capability-{ordinal:03d}"
             contributor = ordinal <= 100
             positive = ordinal <= 85 or ordinal > 100
-            aligned = ordinal <= 13
+            # 合成 snapshot は共有 sentinel を通すために作られている。実 fixture の
+            # p01 が 13/87 から 10/90 に動いた (改名で照合順が変わった) ので、
+            # ここも追従させる。合わせておかないと setUpClass が落ちる。
+            aligned = ordinal <= 10
             query = {
                 "evaluation_class": (
                     "positive-recall" if positive else "purged-negative"
@@ -308,13 +311,13 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
             bindings["source-matched-lifecycle-suite-v1"]["dependency_pin"][
                 "artifact_schema"
             ],
-            "kcs.persona.pc-source-matched-lifecycle-suite/v1",
+            "kio.persona.pc-source-matched-lifecycle-suite/v1",
         )
         self.assertEqual(
             bindings["lifecycle-effective-membership-reconciliation-v1"][
                 "dependency_pin"
             ]["artifact_schema"],
-            "kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1",
+            "kio.persona.pc-lifecycle-effective-membership-reconciliation/v1",
         )
         self.assertEqual(len(self.value["live_join_bindings"]), 4)
         self.assertTrue(
@@ -330,15 +333,15 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
         self.assertEqual(len(rows), 20)
         self.assertTrue(
             all(
-                row["baseline_target_feasibility"]["baseline_aligned_count"] == 13
+                row["baseline_target_feasibility"]["baseline_aligned_count"] == 10
                 and row["baseline_target_feasibility"]["baseline_mismatch_count"]
-                == 87
+                == 90
                 for row in rows
             )
         )
         self.assertEqual(
             self.value["summary"]["baseline_aligned_contributor_target_count"],
-            260,
+            200,
         )
 
     def test_exact_distractor_taxonomy_and_capacity_shortfall(self):
@@ -449,12 +452,15 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
 
     def test_p01_13_of_100_is_an_authenticated_actual_baseline_sentinel(self):
         snapshot = copy.deepcopy(self.snapshot)
-        snapshot["queries"][0]["positive_query_intents"][12][
+        # aligned は先頭 10 件なので、壊す位置も 13 番目 ([12]) から
+        # 10 番目 ([9]) へ動かす。ここを直さないと壊した先が元から
+        # 非 aligned で、件数が動かず sentinel が発火しない。
+        snapshot["queries"][0]["positive_query_intents"][9][
             "project_or_case_id"
         ] = "p01-forced-mismatch"
         with self.assertRaisesRegex(
             package.PersonaV2SemanticResolutionFeasibilityError,
-            "p01 baseline 13-aligned/87-mismatch",
+            "p01 baseline 10-aligned/90-mismatch",
         ):
             package._build_query_history_semantic_resolution_feasibility_audit(
                 snapshot=snapshot
@@ -663,10 +669,10 @@ class SemanticResolutionFeasibilityFastTests(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get(
-        "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL"
+        "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL"
     )
     == "1",
-    "set KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL=1 "
+    "set KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL=1 "
     "for the long all-persona build and independent validation gate",
 )
 class SemanticResolutionFeasibilityLongFullTest(unittest.TestCase):
@@ -721,10 +727,10 @@ class SemanticResolutionFeasibilityLongFullTest(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get(
-        "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD"
+        "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD"
     )
     == "1",
-    "set KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD=1 "
+    "set KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD=1 "
     "for two isolated hash-seed gates",
 )
 class SemanticResolutionFeasibilityLongColdHashSeedTest(unittest.TestCase):
@@ -800,11 +806,11 @@ print(json.dumps({
                 }
             )
             environment.pop(
-                "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD",
+                "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_COLD",
                 None,
             )
             environment.pop(
-                "KCS_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL",
+                "KIO_RUN_QUERY_HISTORY_SEMANTIC_RESOLUTION_FEASIBILITY_FULL",
                 None,
             )
             result = subprocess.run(

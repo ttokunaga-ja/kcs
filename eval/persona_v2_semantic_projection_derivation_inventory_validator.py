@@ -38,12 +38,12 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_semantic_membership_package_validator as source_semantic_validator
 
 
-SUITE_SCHEMA = "kcs.persona.pc-semantic-projection-derivation-inventory/v1"
+SUITE_SCHEMA = "kio.persona.pc-semantic-projection-derivation-inventory/v1"
 SUITE_KIND = "persona-pc-v2-semantic-projection-derivation-inventory"
 ARTIFACT_SCHEMA_VERSION = 1
 
 BASE_PROJECTION_SCHEMA = (
-    "kcs.persona.pc-base-source-content-context-shard-projection/v1"
+    "kio.persona.pc-base-source-content-context-shard-projection/v1"
 )
 BASE_PROJECTION_KIND = (
     "persona-pc-v2-base-source-content-context-shard-projection"
@@ -80,16 +80,16 @@ EXPECTED_BASE_ROW_COUNT = 203_000
 EXPECTED_BASE_BODY_BYTES = 121_020_941
 EXPECTED_SUITE_CANONICAL_BYTES = 293_285
 EXPECTED_SUITE_SHA256 = (
-    "5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84"
+    "e06e66901e24fda63a097dd2a5625cc562ea80008e8e6f5b961ce3c7a792dcdb"
 )
-EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES = 128_144_915
+EXPECTED_CUMULATIVE_EXTERNAL_BODY_BYTES = 128_144_827
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
-    "a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d"
+    "ca822990637fc89bf153ae99735018ca24cd3b8ef75cc307c2e46fba781e6455"
 )
 _EXPECTED_CLASS_MAXIMUM_BODY_BYTES = (
     (BASE_CLASS, 2_484_590),
-    (EFFECTIVE_CLASS, 103_864),
-    (MATCHED_CLASS, 256_790),
+    (EFFECTIVE_CLASS, 103_840),
+    (MATCHED_CLASS, 256_800),
 )
 
 MAX_SUITE_BYTES = 1 * 2**20
@@ -109,7 +109,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -122,7 +122,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -1132,7 +1132,7 @@ def _receipt(
         },
         "receipt_id": receipt_id,
         "row_kind": "semantic-projection-derivation-receipt",
-        "row_schema": "kcs.persona.pc-semantic-projection-derivation-receipt/v1",
+        "row_schema": "kio.persona.pc-semantic-projection-derivation-receipt/v1",
         "validation": {
             "independent_derivation_validation_required": True,
             "projection_pin_matches_external_body": True,
@@ -1576,7 +1576,7 @@ EXPECTED_REMAINING_BLOCKERS = [
     "corpus-semantic-namespace-not-issued",
     "corpus-input-closure-and-blocker-resolution-ledger-not-complete",
     "joint-solver-solution-proof-and-final-source-plan-not-built",
-    "compiled-history-physical-materialization-capacity-kcs-and-g0-not-observed",
+    "compiled-history-physical-materialization-capacity-kio-and-g0-not-observed",
 ]
 
 
@@ -1627,7 +1627,7 @@ def _prevalidate_receipts(receipts):
             _fail("projection derivation receipt class/order drifted")
         if receipt.get("row_kind") != "semantic-projection-derivation-receipt" or receipt.get(
             "row_schema"
-        ) != "kcs.persona.pc-semantic-projection-derivation-receipt/v1":
+        ) != "kio.persona.pc-semantic-projection-derivation-receipt/v1":
             _fail("projection derivation receipt row identity drifted")
         receipt_id = receipt.get("receipt_id")
         if type(receipt_id) is not str or not receipt_id:

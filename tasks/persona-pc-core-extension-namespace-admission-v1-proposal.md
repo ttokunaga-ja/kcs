@@ -27,8 +27,8 @@ The frozen source candidate pinned by this proposal is exactly:
 
 | source item | canonical bytes | SHA-256 |
 | --- | ---: | --- |
-| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f` |
-| external rows `persona-core-v1-extension-allocation-rows-v1` | 426,889 | `f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45` |
+| descriptor `persona-core-v1-extension-allocation-manifest-v1` | 5,357 | `f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436` |
+| external rows `persona-core-v1-extension-allocation-rows-v1` | 426,889 | `a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5` |
 
 Those pins attest an authored, frozen **candidate** only.  They do not record a
 formal decision or issue an admission.
@@ -93,11 +93,11 @@ These names are candidates, not issued identifiers.
 
 | field | candidate value |
 | --- | --- |
-| artifact schema | `kcs.persona.pc-core-extension-allocation-content-projection/v1` |
+| artifact schema | `kio.persona.pc-core-extension-allocation-content-projection/v1` |
 | artifact kind | `persona-pc-v2-core-extension-allocation-content-projection` |
 | projection class ID | `core-extension-allocation` |
 | body ID | `persona-core-v1-extension-allocation-content-projection-rows-v1` |
-| row schema | `kcs.persona.pc-core-extension-allocation-content-projection-row/v1` |
+| row schema | `kio.persona.pc-core-extension-allocation-content-projection-row/v1` |
 | body framing | canonical JSON per row, UTF-8 NFC, exactly one LF per row |
 | namespace coordinates, when admitted | `{ "profile_id": "persona-core-v1" }` |
 | expected projection entries, when admitted | exactly 1 |
@@ -114,7 +114,7 @@ key set contains the following 13 fields; there are no optional fields.
 
 ```text
 schema_version = 1
-row_schema = kcs.persona.pc-core-extension-allocation-content-projection-row/v1
+row_schema = kio.persona.pc-core-extension-allocation-content-projection-row/v1
 profile_id
 persona_id
 family_id
@@ -198,11 +198,11 @@ including an explicit empty coordinate map:
 ```json
 {
   "artifact_kind": "persona-core-v1-extension-allocation-manifest-candidate",
-  "artifact_schema": "kcs.persona.core-extension-allocation-manifest/v1",
+  "artifact_schema": "kio.persona.core-extension-allocation-manifest/v1",
   "artifact_schema_version": 1,
   "body_framing": "canonical-json",
   "canonical_bytes": 5357,
-  "sha256": "ca7caa3813d8f359785cb4dc65e7155f6e36153ba651e1a4b3af0d3695780e9f",
+  "sha256": "f5b63b30fa06fb230d4b58574390f0f99e2402d2b8af12e137d63406777a0436",
   "coordinates": {},
   "owner_id": "persona-core-v1-extension-allocation-manifest-v1",
   "owner_role": "frozen-content-candidate-descriptor"
@@ -217,7 +217,7 @@ The source rows direct-body pin is:
   "canonical_bytes": 426889,
   "direct_pin_id": "persona-core-v1-extension-allocation-rows-v1",
   "direct_pin_role": "frozen-content-candidate-rows",
-  "sha256": "f31f696e1692758e4fc52133dba733af77b74d16711034ee05d75b16d64f7d45"
+  "sha256": "a45af96c53035133fb693021a3e8134105f04f6439f91db51f3d51e0cffefcf5"
 }
 ```
 

@@ -32,11 +32,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_source_inventory_profile as inventory_profile
 
 
-ORIGIN_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-origin-manifest/v2"
+ORIGIN_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-origin-manifest/v2"
 ORIGIN_ARTIFACT_KIND = "persona-pc-v2-source-inventory-origin-manifest"
-PROFILE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-profile-manifest/v2"
+PROFILE_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-profile-manifest/v2"
 PROFILE_ARTIFACT_KIND = "persona-pc-v2-source-inventory-profile-manifest"
-SUITE_ARTIFACT_SCHEMA = "kcs.persona.pc-source-inventory-suite/v2"
+SUITE_ARTIFACT_SCHEMA = "kio.persona.pc-source-inventory-suite/v2"
 SUITE_ARTIFACT_KIND = "persona-pc-v2-source-inventory-suite"
 ARTIFACT_SCHEMA_VERSION = 2
 
@@ -62,7 +62,7 @@ AUTHORITY_FIELDS = frozenset(
         "actual_chunks_attested",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -72,7 +72,7 @@ AUTHORITY_FIELDS = frozenset(
         "formal_capacity_gate_satisfied",
         "history_executor_available",
         "joint_allocation_proved",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_intent_refinement_policy_bound",
     }
 )
@@ -807,7 +807,7 @@ SUITE_REMAINING_BLOCKERS = [
     "concrete-overlay-membership-shards-and-manifests-not-present",
     "source-level-scope-placement-allocation-not-solved",
     "future-complete-persona-package-cap-not-proved",
-    "render-write-chunk-observation-history-and-kcs-execution-not-present",
+    "render-write-chunk-observation-history-and-kio-execution-not-present",
 ]
 
 LEDGER_INCLUDED_COMPONENTS = [

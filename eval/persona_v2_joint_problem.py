@@ -22,7 +22,7 @@ from eval import persona_v2_contract as envelope
 from eval import persona_v2_topology as topology
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-joint-problem/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-joint-problem/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-joint-allocation-problem"
 COMPLETION_SCOPE = (

@@ -15,7 +15,7 @@ from eval import persona_v2_review_request_catalog_validator as independent
 
 EXPECTED_GOLDEN = (
     42_931,
-    "28d8bb490426a56f403a42a70e9a396282c12fd122e9336c1fd04cc74f8b97ab",
+    "1b444a6d1617907160fce3945e0c5608fdeeefb50c87565263f23b6c0d1cb098",
 )
 EXPECTED_CLASS_ORDER = (
     "topology-activity",
@@ -72,7 +72,7 @@ class PersonaV2ReviewRequestCatalogContractTests(unittest.TestCase):
         self.assertEqual(package.review_request_catalog_sha256(), EXPECTED_GOLDEN[1])
         self.assertEqual(
             self.value["artifact_schema"],
-            "kcs.persona.pc-review-request-catalog/v1",
+            "kio.persona.pc-review-request-catalog/v1",
         )
         tree = ast.parse(inspect.getsource(independent))
         imports = []
@@ -159,7 +159,7 @@ class PersonaV2ReviewRequestCatalogContractTests(unittest.TestCase):
         self.assertEqual(semantic["ordered_projection_pins"], [])
         self.assertEqual(
             semantic["aggregate"]["ordered_projection_pins_sha256"],
-            "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c",
+            "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8",
         )
 
     def test_catalog_is_request_only_and_grants_no_authority(self):

@@ -57,7 +57,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_completion",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -70,7 +70,7 @@ EXPECTED_AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "physical_materialization_observed",
         "solver_solution_available",
         "source_identity_namespace_authoritative",
@@ -81,20 +81,32 @@ EXPECTED_JSON_BODY_COUNT = 67
 EXPECTED_JSONL_BODY_COUNT = 186
 EXPECTED_SUITE_CANONICAL_BYTES = 697_466
 EXPECTED_SUITE_SHA256 = (
-    "6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69"
+    "820c976a930c3f2ed0a54e44c08b01cad8a0879513f1b06012e353fb9bd3fd91"
 )
-EXPECTED_EXTERNAL_BODY_BYTES = 155_741_469
+EXPECTED_EXTERNAL_BODY_BYTES = 155_741_381
 EXPECTED_ORDERED_PROJECTION_PINS_SHA256 = (
-    "f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c"
+    "d9ffe202e88bff01c3238e0b4749e4c9cd1e8a759b420d2e12dcf27d8b25b7c8"
 )
+# 2026-07-30 に 2 件を動かした。原因は改名で、`_domain_key` の前置詞が
+# `kcs-lifecycle-v1/` から `kio-lifecycle-v1/` になり照合の DFS 探索順が変わった。
+# `effective-source-membership` が -89、`query-independent-lifecycle-fact-rendition-rules`
+# が +1 で、正味 -88。この表だけが古いまま残っていたので、合計は
+# `EXPECTED_EXTERNAL_BODY_BYTES` (155_741_381) と 88 食い違っていた —
+# **どちらの値でも通らない状態**で、class_bytes の assert が先に落ちるために
+# 累積側の矛盾は表に出ていなかった。
+#
+# 155_741_381 の方が正しいことは、`corpus_semantic_namespace_v3` とその validator が
+# cumulative を再計算して比較していて緑であることから分かる。+1 の方も
+# `review_request_catalog` 側が `sum(row[1] for row in LIFECYCLE_PROJECTION_PINS)` を
+# 5_057_287 と照合していて緑である。実測と合わせて 3 方向で一致している。
 EXPECTED_CLASS_BYTES = {
     "base-source-content-context": 121_020_941,
     "concrete-overlay-relations": 8_988_409,
-    "effective-source-membership": 2_066_688,
+    "effective-source-membership": 2_066_599,
     "fact-graph": 461_816,
     "payload-equivalence-rules": 4_288,
     "primary-use-case-corpus-half": 6_790,
-    "query-independent-lifecycle-fact-rendition-rules": 5_057_286,
+    "query-independent-lifecycle-fact-rendition-rules": 5_057_287,
     "realism-locale-security": 32_762,
     "recipe-content-filename-policy": 250_388,
     "route-scores": 88_085,
@@ -104,11 +116,11 @@ EXPECTED_CLASS_BYTES = {
 EXPECTED_CLASS_MAXIMUM_BODY_BYTES = {
     "base-source-content-context": 2_484_590,
     "concrete-overlay-relations": 658_944,
-    "effective-source-membership": 103_864,
+    "effective-source-membership": 103_840,
     "fact-graph": 23_252,
     "payload-equivalence-rules": 4_288,
     "primary-use-case-corpus-half": 6_790,
-    "query-independent-lifecycle-fact-rendition-rules": 256_790,
+    "query-independent-lifecycle-fact-rendition-rules": 256_800,
     "realism-locale-security": 32_762,
     "recipe-content-filename-policy": 250_388,
     "route-scores": 88_085,
@@ -249,11 +261,11 @@ class SemanticProjectionCompleteInventoryContractTest(unittest.TestCase):
     def test_exact_public_contract_and_independent_module_boundary(self):
         self.assertEqual(
             package.SUITE_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-inventory/v2",
+            "kio.persona.pc-semantic-projection-derivation-inventory/v2",
         )
         self.assertEqual(
             package.RECEIPT_SCHEMA,
-            "kcs.persona.pc-semantic-projection-derivation-receipt/v2",
+            "kio.persona.pc-semantic-projection-derivation-receipt/v2",
         )
         self.assertEqual(tuple(package.PROJECTION_CLASS_ORDER), EXPECTED_CLASS_ORDER)
         self.assertEqual(tuple(independent.PROJECTION_CLASS_ORDER), EXPECTED_CLASS_ORDER)
@@ -311,7 +323,7 @@ class SemanticProjectionCompleteInventoryContractTest(unittest.TestCase):
             independent._partial_v1_receipt(v2_receipt),
             {
                 "row_schema": (
-                    "kcs.persona.pc-semantic-projection-derivation-receipt/v1"
+                    "kio.persona.pc-semantic-projection-derivation-receipt/v1"
                 )
             },
         )

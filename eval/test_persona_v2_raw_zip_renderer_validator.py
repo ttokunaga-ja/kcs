@@ -78,11 +78,11 @@ MATRIX = {
 
 EXPECTED_RENDERER_BYTES = 18_670
 EXPECTED_RENDERER_SHA256 = (
-    "037897466c19ce476e4d5a7fff00d18905bbe80ad42d326b503c744d4e3dd1bb"
+    "ecb621ade5bd81a3f5962a4ee10ea018c14c2ecd6d93a8e565378ba4065a2a4d"
 )
 EXPECTED_VALIDATOR_BYTES = 20_737
 EXPECTED_VALIDATOR_SHA256 = (
-    "8c9390fa0667860e17a872b3c16e047d688dcc7919c73a4933eddfa38082aeec"
+    "4dc04c3689bbef7253a76dd7f046af5cf26734386494c4296c56fd080f6fd0d6"
 )
 
 PAYLOAD_PINS = {
@@ -100,7 +100,7 @@ PAYLOAD_PINS = {
     ),
     ("ifczip", 1): (
         4_096,
-        "133df7c119ff6c632264238361748f9c34c4b86bb8b3d4f46376dcce7c114c94",
+        "eea0221e371f43fc5ebc493f1d38b84d44586adde60241798913fa18d19ce48a",
     ),
     ("npz", 1): (
         248,
@@ -152,7 +152,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -165,7 +165,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         return rendered, validator.validate_raw_zip_payload(request)
@@ -283,7 +283,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             "complexity",
             "compound_suffix_parts",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -307,7 +307,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                     self.assertEqual(row["filename_extension"], exact["extension"])
                     self.assertEqual(row["compound_suffix_parts"], [exact["extension"]])
                     self.assertEqual(row["content_media_type"], "application/zip")
-                    self.assertEqual(row["expected_kcs_path_media_type"], "application/octet-stream")
+                    self.assertEqual(row["expected_kio_path_media_type"], "application/octet-stream")
                     self.assertEqual(row["expected_offline_disposition"], "unsupported_binary")
                     self.assertEqual(row["family"], "domain_binary")
                     self.assertEqual(row["gate_role"], "raw_only")
@@ -321,7 +321,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                 for key in (
                     "compound_suffix_parts",
                     "content_media_type",
-                    "expected_kcs_path_media_type",
+                    "expected_kio_path_media_type",
                     "expected_offline_disposition",
                     "family",
                     "filename_extension",
@@ -383,7 +383,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
                     self.assertTrue(receipt["structure_validated"])
                     self.assertTrue(receipt["zip_subset_validated"])
                     self.assertFalse(receipt["actual_chunks_attested"])
-                    self.assertFalse(receipt["kcs_execution_attested"])
+                    self.assertFalse(receipt["kio_execution_attested"])
                     if variant in GENERIC_VARIANTS:
                         self.assertEqual(receipt["member_count"], complexity)
                         if previous is not None:
@@ -623,7 +623,7 @@ class PersonaV2RawZipRendererValidatorTests(unittest.TestCase):
             {"data": BytesSubclass(request.data)},
             {"extension": "npz"},
             {"content_media_type": "application/octet-stream"},
-            {"expected_kcs_path_media_type": "application/zip"},
+            {"expected_kio_path_media_type": "application/zip"},
             {"expected_offline_disposition": "incidental_sniff"},
             {"data": request.data[:-1]},
             {"data": request.data + b"x"},

@@ -22,10 +22,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_fact_graph as fact_graph
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-source-semantic-capacity-axis-catalog/v1"
+ARTIFACT_SCHEMA = "kio.persona.pc-source-semantic-capacity-axis-catalog/v1"
 ARTIFACT_SCHEMA_VERSION = 1
 ARTIFACT_KIND = "persona-pc-v2-source-semantic-capacity-axis-catalog-candidate"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 
 MAX_CATALOG_BYTES = 2 * 2**20
@@ -39,7 +39,7 @@ MAX_PREFLIGHT_CONTAINER_ITEMS = 4_096
 
 # Must remain byte-identical to the non-authorizing producer golden.
 EXPECTED_CANONICAL_BYTES = 50_473
-EXPECTED_SHA256 = "4ed31455acb12c49b9dd14e2dd51f8ee81ed2a4845444949a80626df84ac8a29"
+EXPECTED_SHA256 = "e54d39d31f325a3df1a8b671b3449f6d5f448ca6fa570bb480dd00466d9795d8"
 
 PERSONA_IDS = tuple(f"p{ordinal:02d}" for ordinal in range(1, 21))
 TOPIC_SLOT_ORDER = ("g01", "g02", "g03", "g04")
@@ -49,7 +49,7 @@ REPLICA_COUNT_PER_FACT_CELL = 11
 EXPECTED_PERSONA_LANGUAGE_PAIR_COUNT = 38
 EXPECTED_CAPACITY_CELL_COUNT = 15_048
 
-CELL_DOMAIN_LABEL = "kcs/persona-pc-v2/source-semantic-capacity-cell/v1"
+CELL_DOMAIN_LABEL = "kio/persona-pc-v2/source-semantic-capacity-cell/v1"
 CELL_LOGICAL_KEY_FIELDS = (
     "persona_id",
     "topic_id",
@@ -61,32 +61,32 @@ CELL_ROW_FIELDS = frozenset(("capacity_cell_id", *CELL_LOGICAL_KEY_FIELDS))
 
 SEMANTIC_CATALOG_PIN = (
     "persona-pc-v2-source-semantic-membership-catalog",
-    "kcs.persona.pc-source-semantic-membership-catalog/v2",
+    "kio.persona.pc-source-semantic-membership-catalog/v2",
     2,
     436_495,
-    "45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62",
+    "d54ad435447a6b7adf87c0190bd8ed452caa3015b82ac18da1c81825efeba63b",
 )
 FACT_GRAPH_PINS = (
-    ("p01", 26_403, "94ab0655788534db4e784709a044fda2cdbeb69775082354b900068e8cbcd70d"),
-    ("p02", 26_353, "92afd654b99da2b4eb537fd9269e0e95405a530e6c01d54eaaaeb8dae42887ef"),
-    ("p03", 26_479, "648b4cb41ba37f925be9022ac683c8982e8aa8dc5d3a4cda0a020d93ae7d88ad"),
-    ("p04", 26_569, "c184999ebbdc043cbb687965815e970954577022632a2b76720e4249e507bf32"),
-    ("p05", 26_536, "ed8b9a49a65f9b9df00693492b1d27d8a52a70e23ba4d873a779160d54747b20"),
-    ("p06", 26_522, "2c523a93fa6279b62aba2a7708a0929861b850f90260377e647455c8a810fe02"),
-    ("p07", 26_672, "c2bc8a08e54de557617b5fe1c0b75732100c971c27bf1e6dc9bbc73b34bad3a4"),
-    ("p08", 26_506, "fdce514cd277e9a5758a97fe6e814c68c3a29ec1d06c8cdd233f9adcb7650ae5"),
-    ("p09", 26_544, "7db7bab2e3ca1c9c91ef7108a097646894907d358f9a304f72ee662e62c52a19"),
-    ("p10", 26_497, "d7fb092cddfcfe45e6fc6910e35c33d8e00c1a99f8b272ff50e6d7c9edce1503"),
-    ("p11", 26_428, "f2882db025022ee476ed2dba11e2813ecc3e0620df00ad2321295113d583c301"),
-    ("p12", 26_518, "e86896736e304e1ba0b56fc43ddc31021db5cdb9b11f1edadd6ab9851389d994"),
-    ("p13", 26_487, "c13953d43b88a817b4a6147c0e00c432f48ecaa7600610a5a87c3dc8e62cadb3"),
-    ("p14", 26_426, "203cc67a8deaf06042d9a201237f89ceefe4c814705325d427c3dc1ecc7b1f62"),
-    ("p15", 26_535, "302f8ba3fe9ee3a890724fb675a09a158d3890e70622b978441966b14af4a26e"),
-    ("p16", 26_577, "ee1d0718b7b9cacc370ead3a19f1e8e5d22bdaf89fcb4503af2f225d17a77567"),
-    ("p17", 26_483, "c342080dc551a4da7b2fbbcd0948bd80ffbc5300e3c04fae7400207639aaa119"),
-    ("p18", 26_485, "26f3c8bbdd4af1ad87572a22ca45961d1276b30d699185331876839a73063eb9"),
-    ("p19", 26_442, "02e33ebfdd8c381b704c2c0f67577f27588f5c4d442baad6e256570faf926b2f"),
-    ("p20", 26_546, "423d3973d26d7ab8e234c1f93f04c166e3fcdc62b560101bbb4b893960a70df7"),
+    ("p01", 26_403, "2a17d26201ba45a1b7b3a5d42dbedf5b4cbae5a1f379e8213c5e3a6dcc23df65"),
+    ("p02", 26_353, "8d7ef439aed58689dc873841dda12d17146d8646c90d9556578fedb423d7c8aa"),
+    ("p03", 26_479, "527241e5864f47824f946910c7e0767867936326c0c67770bff5c500d3d52cdb"),
+    ("p04", 26_569, "f02368bc0e29c631d68e73bb60dc0ddca101222198afdd63a13cf7c534c2d9ef"),
+    ("p05", 26_536, "361d944568a68f3d473ff39c03ea5f505642ae028ad12dc111ce623b772cdb3a"),
+    ("p06", 26_522, "843aa6c73d977f4e7a945e1f4fe676d9075925025bb0a7af1dfa70c4b672782d"),
+    ("p07", 26_672, "ae37f7e554b65bf9c7585939380ae3895f671febbb18476be5f12243700cc447"),
+    ("p08", 26_506, "32bae5c07b44e7b1252336543fe2bb82ce97d35ac0bc2f86bd2e7166fd0e2094"),
+    ("p09", 26_544, "8d8971744bf6fbac7c0767243ba5cd9e1f51ddf5d52de29b1a2fe63a2fa94942"),
+    ("p10", 26_497, "f2cb61e8ad2ad4378b277d00e807097a3fdb8243a7bb7642b24f563bb6072457"),
+    ("p11", 26_428, "33dd344e33a1388c2531fb79b125b6558879c7e95a8e2ea546625b82189f0bb4"),
+    ("p12", 26_518, "a2bc87ee8e32000f596ed7bd5e82edf6e7f5b01d3d24159cc759d2d4fd861b07"),
+    ("p13", 26_487, "d71117236a333b56033bcb902cd257ebe765f84fa3322ac4851f04c9aaaaf359"),
+    ("p14", 26_426, "187695085ab888ed56c421d2d5d9a10816ad25e333745146a3409235937ca1f5"),
+    ("p15", 26_535, "f8f534aed03a97e14f7f4633adf590819f92f0926a9abd59e025a4337054f362"),
+    ("p16", 26_577, "a4425ecd87232455a3db0bd77b7a9ee2917ea05d5742014d80f281dd19562064"),
+    ("p17", 26_483, "743c2fd1aacf8228315f4e4b2272d41493d580c1526c24ec70a8a837150bd9f7"),
+    ("p18", 26_485, "197d85105b0f0928787347f29babcf25c5173034897d9e7761c73c92abc26a2e"),
+    ("p19", 26_442, "763dacdb0ee888088bdec4b3bda5ef598ba8fe19989d41e74c3f4b3bf1d912b8"),
+    ("p20", 26_546, "70012f4de6c82cbb6220940a27000009344236e3bb5742e9975d5ea904d08db9"),
 )
 
 AUTHORITY_FIELDS = frozenset(
@@ -97,7 +97,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_identifier_assignment",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_namespace_issuance",
         "authorizes_physical_write",
         "authorizes_query_rendering",
@@ -371,7 +371,7 @@ def _semantic_catalog_binding():
 def _fact_graph_binding(persona_id, byte_count, digest):
     return {
         "artifact_kind": "persona-pc-v2-fact-graph",
-        "artifact_schema": "kcs.persona.pc-fact-graph/v2",
+        "artifact_schema": "kio.persona.pc-fact-graph/v2",
         "artifact_schema_version": 2,
         "body_opened_for_axis_derivation": True,
         "canonical_bytes": byte_count,
@@ -400,7 +400,7 @@ def _snapshot_fact_graphs(values):
             _fail(f"{persona_id} fact-graph pin drifted")
         if (
             snapshot.get("artifact_kind") != "persona-pc-v2-fact-graph"
-            or snapshot.get("artifact_schema") != "kcs.persona.pc-fact-graph/v2"
+            or snapshot.get("artifact_schema") != "kio.persona.pc-fact-graph/v2"
             or snapshot.get("artifact_schema_version") != 2
             or snapshot.get("fixture_id") != FIXTURE_ID
             or snapshot.get("fixture_schema_version") != FIXTURE_SCHEMA_VERSION

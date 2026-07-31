@@ -9,21 +9,21 @@ from eval import persona_v2_overlay_reservation_validator as independent_validat
 
 EXPECTED_SUITE_BYTES = 21_680
 EXPECTED_SUITE_SHA256 = (
-    "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d"
+    "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4"
 )
 EXPECTED_P01_PILOT = (
     206_597,
-    "7c7d425966f1a47f1b2995311e4f4c9dc119add4102b5ff51081bcc82e8b5a27",
+    "e6eca603623c57fc527f6b6b24d689683e0a099dece907844c42c8805ed28618",
 )
 EXPECTED_P01_RESIDUAL = (
     1_742_353,
-    "d2a38cf02dfe4004da4aed457e2e85f17fd3cadd31efde0d3092a4d0bf256001",
+    "9ec0903021f9dd24028f43d02de9da60da8d1f8700cf4dc2c0fe4a3f35d64a42",
 )
 EXPECTED_MAXIMUM_ORIGIN = (
     "p12",
     "full-residual",
     2_639_467,
-    "82a8ca231a7202f20076da7c57df8dcc2ba495815f9710658758ca088306a557",
+    "9b2a669f43a407e9379285766c1bf9efc22f91f5df4d1c84729818ca7dfe9752",
 )
 EXPECTED_HOST_HISTOGRAMS = {
     "pilot": {"0": 636, "1": 137, "2": 59, "3": 40, "4": 26, "5": 18},

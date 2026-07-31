@@ -13,13 +13,13 @@ chunk.  It also does not select an allocation/source-plan successor.
 
 | item | exact value |
 | --- | --- |
-| descriptor schema | `kcs.persona.pc-formal-leaf-placement-binding/v1` |
+| descriptor schema | `kio.persona.pc-formal-leaf-placement-binding/v1` |
 | descriptor canonical bytes | 27,117 |
-| descriptor SHA-256 | `de518d1fef7a6955462774ace7321943ff5ca918be7f6210380890fca78857f8` |
+| descriptor SHA-256 | `ce60077869f899473b439b3a48446a629016d9c5c2ba472445aee1fb427f1237` |
 | external body ID | `persona-pc-v2-formal-leaf-placement-rows-v1` |
 | external body framing | canonical UTF-8 NFC LF-JSONL |
 | external LF-JSONL bytes | 889,056 |
-| external LF-JSONL SHA-256 | `98e7239f498c8ebff3f2c754a24036ac7c5263a2f5f6b2bb66275ceaccd8f66e` |
+| external LF-JSONL SHA-256 | `4555526caca91a23ddac8581178cbc61c5036b5e3333d12066060644b3a8f460` |
 | rows | 1,200 = 3 replays × 20 personas × 20 scopes |
 | row order | replay → persona → scope ordinal |
 | registries planned | 60 = 3 replays × 20 personas |
@@ -39,8 +39,8 @@ format registry, source recipe, history plan, or query plan.
 
 | input | canonical bytes / SHA-256 |
 | --- | --- |
-| topology v2 (`kcs.persona.pc-topology/v2`) | 134,195 / `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f` |
-| device-lane compositor v1 (`kcs.persona.pc-device-lane-compositor/v1`) | 41,099 / `eb1a82d631b810ca96d90c84f9324263b4bb1018f0cde2a8339037a183d35bdf` |
+| topology v2 (`kio.persona.pc-topology/v2`) | 134,195 / `02e0e68d37378a1123743673aad826757d17480de77a5a7313f09932c5759c4a` |
+| device-lane compositor v1 (`kio.persona.pc-device-lane-compositor/v1`) | 41,099 / `8c9071d0549c7d876068aa145de369f21f787ca2f23dfeb61254efa4e83b808f` |
 
 Both producer and independent validator read and authenticate each upstream
 twice.  The validator then regenerates every row independently, reads the

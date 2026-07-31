@@ -28,13 +28,13 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_overlay_reservation_layout as reservation
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-overlay-compatible-byte-distribution/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-overlay-compatible-byte-distribution/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-overlay-compatible-byte-distribution"
 MAX_CATALOG_BYTES = 2 * 2**20
 EXPECTED_CATALOG_CANONICAL_BYTES = 91_039
 EXPECTED_CATALOG_SHA256 = (
-    "e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89"
+    "a9e214e5dde82edf4967d5502f15fd92ffa6a1016c67a177dd574835a9962ddc"
 )
 ORIGIN_ORDER = ("pilot", "full-residual")
 PROFILE_ORDER = ("pilot", "full-residual", "full")
@@ -44,15 +44,15 @@ QUANTUM = 4_096
 EXPECTED_PINS = {
     "persona-v2-aggregate-byte-distribution-catalog": (
         1_576_125,
-        "7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343",
+        "9bef8b1af10411bb1e8cc662aa95a64e155ea81e3db7e1be56433e83539450d2",
     ),
     "persona-v2-format-implementation-registry": (
         333_881,
-        "f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683",
+        "59ae0b2e5c755732e6937e70ada4b243ea2c7432a9ce654c7e9c219b4a13bc5d",
     ),
     "persona-v2-overlay-reservation-suite": (
         21_680,
-        "11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d",
+        "0423ed61ea7b39dd5229e2ad6f972fc12055717ad401ee9b74911dd5696f15a4",
     ),
 }
 
@@ -63,7 +63,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_final_source_identifiers",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_renderer_execution",
         "authorizes_solver_execution",
@@ -73,7 +73,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_instance_parameters_bound",
     }
 )
@@ -179,7 +179,7 @@ def _static_fields():
         },
         "completion_scope": (
             "aggregate-eml-overlay-compatible-parameter-histogram-supersession-"
-            "only-no-source-assignment-no-content-no-render-write-history-kcs-or-g0"
+            "only-no-source-assignment-no-content-no-render-write-history-kio-or-g0"
         ),
         "orders": {
             "effective_html_eml_family_projection_rows": "persona-id",
@@ -545,8 +545,8 @@ def _probe_receipts(renderer_provider, validator_provider, formula, eml_row):
             {
                 "content_media_type": eml_row["content_media_type"],
                 "data": data,
-                "expected_kcs_path_media_type": eml_row[
-                    "expected_kcs_path_media_type"
+                "expected_kio_path_media_type": eml_row[
+                    "expected_kio_path_media_type"
                 ],
                 "expected_offline_disposition": eml_row[
                     "expected_offline_disposition"
@@ -567,7 +567,7 @@ def _probe_receipts(renderer_provider, validator_provider, formula, eml_row):
                 "attachment_count": complexity,
                 "byte_length": expected_bytes,
                 "identity_tokens_absent": True,
-                "kcs_execution_attested": False,
+                "kio_execution_attested": False,
                 "observed_complexity_measure": "attachments",
                 "observed_local_complexity": complexity,
                 "structure_validated": True,

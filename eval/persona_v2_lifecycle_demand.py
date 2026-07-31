@@ -32,16 +32,16 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_overlay_contract as overlay
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-lifecycle-demand/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-lifecycle-demand/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-lifecycle-demand"
-FIXTURE_ID = "kcs-persona-pc-v2"
+FIXTURE_ID = "kio-persona-pc-v2"
 FIXTURE_SCHEMA_VERSION = 2
 MAX_LIFECYCLE_DEMAND_BYTES = 2 * 1024 * 1024
 
 EXPECTED_CHUNK_ACCOUNTING_CANONICAL_BYTES = 19_801
 EXPECTED_CHUNK_ACCOUNTING_SHA256 = (
-    "d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2"
+    "66a9bd0b5ab8c5f61cd4bdc66b45532810d65b056fcaf8955fff7f366248ab52"
 )
 
 PERSONA_IDS = tuple(f"p{index:02d}" for index in range(1, 21))
@@ -58,7 +58,7 @@ AUTHORITY_FIELDS = frozenset(
         "authorizes_evaluation_target_resolution",
         "authorizes_g0_freeze",
         "authorizes_history_mutation",
-        "authorizes_kcs_execution",
+        "authorizes_kio_execution",
         "authorizes_physical_write",
         "authorizes_source_instance_matching",
         "authorizes_solver_execution",
@@ -66,7 +66,7 @@ AUTHORITY_FIELDS = frozenset(
         "filesystem_writer_available",
         "formal_capacity_gate_satisfied",
         "history_executor_available",
-        "kcs_execution_available",
+        "kio_execution_available",
         "source_instance_matching_available",
     }
 )
@@ -226,7 +226,7 @@ def _accounting_cross_scope_move_operation():
             "raw-bytes-facts-tool-profile-generation-and-chunk-set-are-preserved",
         ],
         "runtime_interpretation": (
-            "source-delete-plus-destination-ingest-across-independent-kcs-"
+            "source-delete-plus-destination-ingest-across-independent-kio-"
             "stores-not-product-cross-scope-lineage-inference"
         ),
         "source_participation": "incidental_searchable",

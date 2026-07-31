@@ -21,7 +21,7 @@ from eval.persona_v2_topology_data import (
 )
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-topology/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-topology/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-topology"
 MAX_TOPOLOGY_BYTES = 512 * 1024

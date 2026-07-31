@@ -35,11 +35,11 @@ MATRIX = {
 EXPECTED_VARIANTS = tuple(sorted(MATRIX))
 EXPECTED_RENDERER_BYTES = 9_139
 EXPECTED_RENDERER_SHA256 = (
-    "22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4"
+    "ff45586b0ee85ae5c3778e63ad550a02522b95a1e0a11010ba963ce26e74103e"
 )
 EXPECTED_VALIDATOR_BYTES = 10_090
 EXPECTED_VALIDATOR_SHA256 = (
-    "67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75"
+    "8f3cc8505a55b329c9b735269ffbae2a632b1de727d939e5e3ec2ab40fd747d0"
 )
 EXPECTED_MATRIX_PAYLOAD_SHA256 = (
     "c95779f318c0c2d54734e6868b56a0238c0fabd09409735046b505dc37843cdf"
@@ -89,7 +89,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
 
@@ -102,7 +102,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
             rendered.data,
             rendered.extension,
             rendered.content_media_type,
-            rendered.expected_kcs_path_media_type,
+            rendered.expected_kio_path_media_type,
             rendered.expected_offline_disposition,
         )
         return rendered, validator.validate_incidental_text_payload(request)
@@ -172,7 +172,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
         shared = {
             "complexity",
             "content_media_type",
-            "expected_kcs_path_media_type",
+            "expected_kio_path_media_type",
             "expected_offline_disposition",
             "family",
             "filename_extension",
@@ -208,7 +208,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
                 self.assertEqual(row["family"], family)
                 self.assertEqual(row["render_template"], template)
                 self.assertEqual(row["gate_role"], "incidental_searchable")
-                self.assertEqual(row["expected_kcs_path_media_type"], "application/octet-stream")
+                self.assertEqual(row["expected_kio_path_media_type"], "application/octet-stream")
                 self.assertEqual(row["expected_offline_disposition"], "incidental_sniff")
             self.assertEqual(
                 {key: renderer_rows[variant][key] for key in shared},
@@ -219,7 +219,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
                 "family",
                 "filename_extension",
                 "content_media_type",
-                "expected_kcs_path_media_type",
+                "expected_kio_path_media_type",
                 "expected_offline_disposition",
                 "gate_role",
             ):
@@ -286,7 +286,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
                             "attachment_count": complexity if variant == "eml" else 0,
                             "byte_length": expected_bytes,
                             "identity_tokens_absent": True,
-                            "kcs_execution_attested": False,
+                            "kio_execution_attested": False,
                             "observed_complexity_measure": measure,
                             "observed_local_complexity": complexity,
                             "structure_validated": True,
@@ -360,7 +360,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
             replace(valid, data=BytesSubclass(valid.data)),
             replace(valid, extension="JSON"),
             replace(valid, content_media_type="application/json; charset=utf-8"),
-            replace(valid, expected_kcs_path_media_type="application/json"),
+            replace(valid, expected_kio_path_media_type="application/json"),
             replace(valid, expected_offline_disposition="local_text"),
             replace(valid, target_complexity=3),
         )
@@ -388,7 +388,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
                         source_payload.data,
                         target_payload.extension,
                         target_payload.content_media_type,
-                        target_payload.expected_kcs_path_media_type,
+                        target_payload.expected_kio_path_media_type,
                         target_payload.expected_offline_disposition,
                     )
                     with self.subTest(source=source, target=target):
@@ -538,7 +538,7 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
         self.assertEqual(len(historical_catalog.canonical_json_bytes(historical)), 72_559)
         self.assertEqual(
             historical_catalog.source_profile_catalog_sha256(historical),
-            "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac",
+            "f575c597281071b1a9abb1d6dac1c244a42a2a302eb4d1f9ee79278276680d7d",
         )
         self.assertEqual(historical["coverage"]["ready_variant_count"], 10)
         self.assertEqual(historical["coverage"]["not_ready_variant_count"], 61)

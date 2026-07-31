@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_route_affinity as route_affinity
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-route-review-receipt/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-route-review-receipt/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-route-review-receipt"
 COMPLETION_SCOPE = (

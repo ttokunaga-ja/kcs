@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_fact_graph as fact_graph
 
 
-ARTIFACT_SCHEMA = "kcs.persona.pc-query-intent/v2"
+ARTIFACT_SCHEMA = "kio.persona.pc-query-intent/v2"
 ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-query-intent"
 MAX_QUERY_INTENT_BYTES = 1 * 2**20
