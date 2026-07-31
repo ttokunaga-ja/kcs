@@ -62,6 +62,14 @@ directory に到達するまで連鎖してから、当該 subtree 配下の pub
 各削除後に包含 directory を fsync してから journal phase / postcondition を前進させる** (fsync 前の
 前進は電源断で削除だけが巻き戻る)。crash が残した temp は次回書き込み系コマンド冒頭で掃除する。
 03 §2 / 05 §8.1 の「fsync 規律」参照は本 ¶ を指す。
+**「親 directory fsync」は POSIX でのみ実行可能な手段である。** Windows には対応する操作が無く
+(directory handle は `FILE_FLAG_BACKUP_SEMANTICS` を要し、`FlushFileBuffers` はそこへ書込権限を
+要求する)、この耐久性は NTFS の metadata journalling に委ねられる — **弱い保証である**ことを
+明示しておく。順序そのもの (rename / unlink の後に前進する) は全 platform の義務であり、
+弱まるのは「その時点で耐久済みである」という主張の強さだけである。実装は
+`kio-core::purge::sync_directory` の 2 arm に集約されており、purge journal と objects/ の CAS
+leaf の双方がこれを共有する (Windows arm は fsync を行わない代わりに、親が不在または directory
+でない場合に呼出元へ surface する)。purge 側の帰結は [05-runtime.md §3.5](05-runtime.md) を参照。
 
 # 2. Prepared Units と差分判定
 
