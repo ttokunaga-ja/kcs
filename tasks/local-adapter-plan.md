@@ -801,12 +801,45 @@ Stage 2 完了後に、段階 A/B の実測をもって着手可否を判断す�
 |---|---|---|
 | V1 | Sarashina2.2-OCR の vLLM 対応 (モデルカードは transformers + `trust_remote_code` のみ) | 不可なら Stage 3 の第二 profile は `cmd` dispatcher が必要になりコストが跳ねる (裁定 5 により変更は許容) |
 | V2 | PaddleOCR-VL の bbox 出力形式の詳細 (Markdown 内タグか別 JSON か) | Stage 3 の bbox 写像の実装形 |
-| V3 | Qwen3-VL-Embedding の MRL 768 次元での劣化幅 | 768 維持か native 2048 へ移行かの判断。2048 にすると `chunk_vec` の DDL 改訂 + 全再埋め込み |
+| V3 | Qwen3-VL-Embedding の MRL 768 次元での劣化幅 — **V3a は 2026-07-28 に実測済み、V3b が未実施** | 768 維持か native 2048 へ移行かの判断。2048 にすると `chunk_vec` の DDL 改訂 + 全再埋め込み。**未決の間は `dimensions` / `tool_profile_hash` が暫定で、恒久コーパスを埋め込めない。**下記 |
 | V4 | ✅ **2026-07-27 確定** — vLLM の chat template 既定値と推奨 instruction の実物 | D3 の `prompt_template_hash` の中身。下記 |
 | V5 | llama.cpp #18665 / #19516 の進捗 | マージされれば Mac が D5 により再埋め込みなしで合流できる |
 | V7 | chunk 境界による URI 分断の発生頻度 | W3。dogfood corpus で計測 |
 | V8 | asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**疑い。下記 |
 | V9 | tokenizer / vision preprocessor config が `model_version_pin` の対象外 | 同一 profile を名乗ったまま空間が割れうる。下記 |
+
+### V3 は 2 段構えで、a だけ済んでいる (2026-07-28・GPU 実機)
+
+測定の全文と成果物は [eval/v3/results/](../eval/v3/results/README.md)。
+RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
+
+**V3a (近傍構造)** — 切り詰めが近傍をどれだけ入れ替えるか。GPU だけで回る。
+
+| 測定 | 値 |
+|---|---:|
+| 近傍一致率 mean (k=10) | **0.8037** |
+| 近傍一致率 min | 0.1000 |
+| top-1 一致率 | 0.7500 |
+| 観測次元 (native) | 2048 |
+
+判断表の `< 0.85` に落ちたので **V3b 送り**。曖昧帯 (0.85–0.95) も V3b 送りなので、
+回避できたのは `≥ 0.95` の場合だけだった。
+
+> **この 0.8037 は下振れした推定である。** 主計器は集合の重なりを数えるので、僅差の
+> 入れ替わりと大差の入れ替わりを区別できない。独立実装の tie 診断によれば native 側の
+> 上位 10 位と 11 位のギャップは中央値 **0.00394**、768 が失った類似度は中央値
+> **0.00445** で同じ桁である (境界ギャップ < 0.01 の passage が 136 本中 110 本)。
+> **集合は入れ替わるが、入れ替わった先は元とほぼ同じ近さにある。** コーパスが V3a では
+> 同一プロジェクトの計画文書に偏っていたことが効いており、実際の Kio アーカイブは
+> より異質なので overlap は上がる方向に動く。
+
+**V3b (24 問 recall)** — **未実施。これが V3 の結論を出す。**
+実行手順・罠・報告形式は [eval/v3/V3B-PROMPT.md](../eval/v3/V3B-PROMPT.md) にまとめてある。
+OCR 済み本文は `eval/fixtures/normalized-corpus/` に commit 済みなので**追加費用はゼロ**、
+必要なのは GPU 1 セッションだけである。
+
+V3a からの予測: 失った類似度がこの水準なら **recall@10 の差は小さく出るはず**。
+大きな差が出たら MRL 幅ではなく別の要因を先に疑うこと。
 
 ### V4 は 2026-07-27 に確定 (GPU 実機)
 
