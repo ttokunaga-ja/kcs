@@ -1977,8 +1977,15 @@ fn same_windows_private_file(left: &File, right: &File) -> bool {
 /// "markerless absence" / "journal reappears after crash" window §3.5
 /// exists to close (LC49's ordering guarantee already depended on this
 /// being durable; only the failure path was silently discarded).
+///
+/// `pub(crate)` because the object store needs the identical guarantee for its
+/// own post-`remove_file` entries: [`crate::cas`] carried two hand-rolled
+/// copies of the pre-R23-07 `if let Ok(dir) = File::open(parent)` shape, which
+/// reproduced both defects one layer down — the discarded POSIX fsync, and the
+/// permanent Windows no-op. They now call this, so the two arms have exactly
+/// one definition to keep correct.
 #[cfg(not(windows))]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
 
@@ -1990,7 +1997,7 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 /// because Rust does not pass `FILE_FLAG_BACKUP_SEMANTICS`, which is what
 /// getting a directory handle requires. Opening one by hand does not rescue
 /// it: `sync_all` calls `FlushFileBuffers`, which wants write access that a
-/// directory handle cannot carry. So the three call sites
+/// directory handle cannot carry. So the three purge call sites
 /// (`write_private_replace`, `quarantine_then_unlink`,
 /// `restore_private_no_clobber`) turned every purge-journal write on Windows
 /// into `KIO-E-STORE-IO-001`, which is what four tests were failing on.
@@ -1998,11 +2005,16 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 /// journalling instead; that is a weaker promise and is recorded as such in
 /// 05-runtime.md §3.5.
 ///
+/// The [`crate::cas`] callers would have hit that same wall the moment their
+/// swallowed `let _ =` became a propagated `?` — on Windows the old block was
+/// not merely lossy but a permanent no-op — which is why they must adopt this
+/// arm and not just the POSIX one.
+///
 /// What survives is the *fail-closed* half of R23-07: a parent that is missing
 /// or is not a directory still surfaces to the caller rather than
 /// type-checking as success. That is the failure this arm can actually see.
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     if fs::metadata(path)?.is_dir() {
         Ok(())
     } else {

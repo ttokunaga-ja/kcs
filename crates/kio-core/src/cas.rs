@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::error::{IoResultExt, KioError, Result};
+use crate::purge::sync_directory;
 
 pub const CAS_STREAM_BUFFER_BYTES: usize = 64 * 1024;
 pub const MAX_RAW_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
@@ -537,9 +538,13 @@ impl ObjectStore {
                 return Err(error);
             }
             fs::remove_file(&quarantine).kio_io(&quarantine)?;
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
+            // R23-07: propagate. The rename that published the repaired bytes
+            // and the quarantine unlink above are both only as durable as this
+            // entry, and the unlink already fails the repair loudly — swallowing
+            // the sync that backs it let `repair_raw` answer `true` for a repair
+            // that a crash could still undo. Retry is idempotent: a slot that
+            // already verifies returns `false` before any mutation.
+            sync_directory(parent).kio_io(parent)?;
             Ok(())
         })();
         if result.is_err() {
@@ -1806,9 +1811,13 @@ where
     // logical leaf is already absent and the purge barrier keeps reads closed.
     verify(&quarantine)?;
     fs::remove_file(&quarantine).kio_io(&quarantine)?;
-    if let Ok(directory) = File::open(parent) {
-        let _ = directory.sync_all();
-    }
+    // R23-07: propagate. The leaf's *absence* is the result this function
+    // reports, and it is durable only once the parent entry is. Swallowing the
+    // failure let every `remove_*` caller answer `true` for a removal a crash
+    // could resurrect — the "markerless absence" window §3.5 exists to close,
+    // here in the object store rather than the purge journal. Retry is
+    // idempotent: an already-absent slot returns `false` before any mutation.
+    sync_directory(parent).kio_io(parent)?;
     Ok(())
 }
 
