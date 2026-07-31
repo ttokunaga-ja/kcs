@@ -54,13 +54,20 @@ pub const LOCAL_EMBEDDING_MODEL_FAMILY: &str = "qwen3-vl-embedding";
 /// cannot read.
 ///
 /// V4 measured the server returning **2048** natively, so this is a genuine
-/// truncation and not a no-op. Whether 768 costs retrieval quality is V3's
-/// question, and until V3 answers it this value is provisional — it is a
-/// `tool_profile_hash` input, so moving it orphans every vector already stored
-/// (03 §7). No equality check against 2048 lives in the code: a later model in
-/// the same family may be wider, and truncating a wider vector is still MRL.
-/// What must never happen is truncating *up*, which
-/// [`truncate_and_renormalize`] rejects.
+/// truncation and not a no-op. Whether that costs retrieval quality was V3's
+/// question, and **V3 answered it on 2026-08-01: it does not.** Over the 24
+/// golden queries against the OCR'd fixture, recall@10 was 0.5417 at native
+/// 2048 and 0.5833 at 768 — the truncation did not show up as a loss, so this
+/// value is **settled**, not provisional, and with it the `tool_profile_hash`
+/// it feeds. Read the +1 query as noise at n=24 rather than as 768 being
+/// better; the claim is only that no cost was measurable, which is enough,
+/// because widening to 2048 buys a lower measured recall at the price of a
+/// `chunk_vec` DDL revision and re-embedding everything (03 §7).
+/// `eval/v3/results/README.md` has the numbers and the reasoning.
+///
+/// No equality check against 2048 lives in the code: a later model in the same
+/// family may be wider, and truncating a wider vector is still MRL. What must
+/// never happen is truncating *up*, which [`truncate_and_renormalize`] rejects.
 pub const LOCAL_EMBEDDING_DIMENSIONS: u32 = 768;
 
 /// The model id sent on the wire when `tools.toml` names none. Matches

@@ -120,6 +120,26 @@ def cosine(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
+def apply_query_instruction(instruction: str, query: str) -> str:
+    """V8(a): **query 側にだけ** instruct prefix を付ける (passage は素のまま)。
+
+    Qwen3-Embedding 系の標準運用は非対称で、query だけに
+    `Instruct: <task>\\nQuery: ` を前置する。Kio は
+    `prompt_template_hash` が (T, I) を 1 組しか畳まないので
+    **この非対称運用を構造的に採れない** (`tasks/local-adapter-plan.md` §11 の V8)。
+    ここで測るのは「採れないことでどれだけ損しているか」であって、
+    採用の準備ではない。
+
+    prefix は**リテラルとして連結する**。書式をこちらで組み立てると、
+    出力に記録した文字列と実際に送った文字列がずれ得る — 何を送ったかは
+    `v3-mrl.json` の `query_instruction` がそのまま正本であるべきである。
+    唯一の加工は `\\n` の実改行への展開で、シェルから改行を渡せないため。
+    """
+    if not instruction:
+        return query
+    return instruction.replace("\\n", "\n") + query
+
+
 # --- 計器 (1) 近傍の一致率 ---------------------------------------------------
 
 
@@ -283,6 +303,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=400, help="passage 数の上限")
     parser.add_argument("--max-chars", type=int, default=4000)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--query-instruction",
+        default="",
+        help="V8(a): query 側にだけ前置する instruct prefix (passage は素のまま)。"
+        "`\\n` は実改行へ展開する。既定の空文字は現行の対称運用",
+    )
     parser.add_argument("--out", type=Path, default=Path("v3-mrl.json"))
     args = parser.parse_args()
 
@@ -333,7 +359,13 @@ def main() -> int:
         queries = [pair for pair in queries if pair[0]]
         query_vectors = [
             truncate_and_renormalize(
-                embed_one(args.base_url, args.model, text, args.timeout), native_width
+                embed_one(
+                    args.base_url,
+                    args.model,
+                    apply_query_instruction(args.query_instruction, text),
+                    args.timeout,
+                ),
+                native_width,
             )
             for text, _ in queries
         ]
@@ -359,6 +391,8 @@ def main() -> int:
         "native_dimensions": native_width,
         "truncated_dimensions": args.width,
         "neighbour_agreement": agreement,
+        # V8(a): 送った prefix をそのまま残す。空文字が現行の対称運用である。
+        "query_instruction": args.query_instruction,
         "recall": recall,
     }
     args.out.write_text(

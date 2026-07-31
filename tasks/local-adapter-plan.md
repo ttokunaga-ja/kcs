@@ -504,8 +504,11 @@ purge 済み画像の URI が chunk 本文に残る場合がある。`related_im
 > `preferred_request_kind: Sync` を宣言し、mock 実装で end-to-end に動作する。
 > **実 HTTP wire (U2) は 2026-07-28 に実装済み** (下記 U2 節)。V4 で template・
 > instruction・重み pin が実測で決まったので placeholder は要らなかった。
-> ただし **`dimensions` だけは V3 決着まで暫定**なので、`tool_profile_hash` を凍結扱いに
-> せず、恒久コーパスを埋め込まないこと。
+> ~~ただし **`dimensions` だけは V3 決着まで暫定**なので、`tool_profile_hash` を凍結扱いに
+> せず、恒久コーパスを埋め込まないこと。~~
+> **2026-08-01 解除** — V3b が 768 を確定させた (§11 の V3)。`dimensions = 768` と
+> `tool_profile_hash` = `sha256:f9f610bb…439a` は**確定**であり、
+> **恒久コーパスを埋め込んでよい**。
 >
 > 実装した dispatch:
 >
@@ -801,14 +804,14 @@ Stage 2 完了後に、段階 A/B の実測をもって着手可否を判断す�
 |---|---|---|
 | V1 | Sarashina2.2-OCR の vLLM 対応 (モデルカードは transformers + `trust_remote_code` のみ) | 不可なら Stage 3 の第二 profile は `cmd` dispatcher が必要になりコストが跳ねる (裁定 5 により変更は許容) |
 | V2 | PaddleOCR-VL の bbox 出力形式の詳細 (Markdown 内タグか別 JSON か) | Stage 3 の bbox 写像の実装形 |
-| V3 | Qwen3-VL-Embedding の MRL 768 次元での劣化幅 — **V3a は 2026-07-28 に実測済み、V3b が未実施** | 768 維持か native 2048 へ移行かの判断。2048 にすると `chunk_vec` の DDL 改訂 + 全再埋め込み。**未決の間は `dimensions` / `tool_profile_hash` が暫定で、恒久コーパスを埋め込めない。**下記 |
+| V3 | ✅ **2026-08-01 確定** — Qwen3-VL-Embedding の MRL 768 次元での劣化幅 (V3a 2026-07-28 / V3b 2026-08-01) | **768 で確定。** 24 問 recall@10 は 2048 が 0.5417、768 が 0.5833 で切り詰めの代償が出なかった。`dimensions` / `tool_profile_hash` の**暫定扱いを解除**し、恒久コーパスの埋め込み禁止も解けた。下記 |
 | V4 | ✅ **2026-07-27 確定** — vLLM の chat template 既定値と推奨 instruction の実物 | D3 の `prompt_template_hash` の中身。下記 |
 | V5 | llama.cpp #18665 / #19516 の進捗 | マージされれば Mac が D5 により再埋め込みなしで合流できる |
 | V7 | chunk 境界による URI 分断の発生頻度 | W3。dogfood corpus で計測 |
-| V8 | asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**疑い。下記 |
+| V8 | ✅ **2026-08-01 (a) 実測** — asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**。**ただし採れたとしても得ではなかった** (recall 両幅とも悪化) ので (b) の仕様改訂は実測上の動機を持たない。下記 |
 | V9 | tokenizer / vision preprocessor config が `model_version_pin` の対象外 | 同一 profile を名乗ったまま空間が割れうる。下記 |
 
-### V3 は 2 段構えで、a だけ済んでいる (2026-07-28・GPU 実機)
+### V3 は 2 段構えで、**両方とも済んだ** (V3a 2026-07-28 / V3b 2026-08-01・GPU 実機)
 
 測定の全文と成果物は [eval/v3/results/](../eval/v3/results/README.md)。
 RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
@@ -833,13 +836,30 @@ RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
 > 同一プロジェクトの計画文書に偏っていたことが効いており、実際の Kio アーカイブは
 > より異質なので overlap は上がる方向に動く。
 
-**V3b (24 問 recall)** — **未実施。これが V3 の結論を出す。**
-実行手順・罠・報告形式は [eval/v3/V3B-PROMPT.md](../eval/v3/V3B-PROMPT.md) にまとめてある。
-OCR 済み本文は `eval/fixtures/normalized-corpus/` に commit 済みなので**追加費用はゼロ**、
-必要なのは GPU 1 セッションだけである。
+**V3b (24 問 recall)** — ✅ **2026-08-01 実施。これが V3 の結論を出した。**
+`eval/fixtures/normalized-corpus` の 1013 passages (persona 20 本すべて) に対し、
+`answerable` 24/24 で測れた。手順は [eval/v3/V3B-PROMPT.md](../eval/v3/V3B-PROMPT.md)。
 
-V3a からの予測: 失った類似度がこの水準なら **recall@10 の差は小さく出るはず**。
-大きな差が出たら MRL 幅ではなく別の要因を先に疑うこと。
+| 幅 | recall@10 |
+|---|---:|
+| native 2048 | 0.5417 (13/24) |
+| **MRL 768** | **0.5833 (14/24)** |
+
+**切り詰めの代償は測定に現れなかった** (差 +0.0417 = 1 問、n=24 なのでノイズ)。
+正しい読みは「768 が recall を落とすという証拠は出なかった」であり、
+それが移行しない理由として十分である — 2048 は `chunk_vec` の DDL 改訂と
+**全再埋め込み**を要するのに、実測 recall はより低い。
+
+V3a の予測 (「失った類似度がこの水準なら recall@10 の差は小さく出るはず」) は当たった。
+
+> **2 回の実行は完全一致しなかった。** recall は両幅とも一致し、外した query の集合まで
+> 同一だったが、**近傍一致率だけ 1013 passage 中 1 本ぶんずれた** (top-1 で 0.000987)。
+> vLLM のバッチ構成に依存する浮動小数の揺れが同点を割ったものと見られる。
+> 近傍が中央値 0.004 しか離れていない (V3a の tie 診断) こととも整合する。
+> **判断に使う recall は再現した**が、近傍一致率を 3 桁目まで引用しないこと。
+
+**→ `dimensions` は 768 で確定。`tool_profile_hash` = `sha256:f9f610bb…439a` の
+暫定扱いを解除し、恒久コーパスの埋め込み禁止も解けた。**
 
 ### V4 は 2026-07-27 に確定 (GPU 実機)
 
@@ -898,6 +918,24 @@ adapter を 1 つしか持たず、query も `EmbeddingInputType::Query` とし�
 書き留める価値がある。着手順は (a) まず対称運用のコストを測る — V3 と同じ 24 問計器が使える。
 (b) 実際に効くと分かってから、query 用 profile を分ける仕様改訂を検討する。
 (b) はゲートの意味そのものを変える大改訂なので、(a) の実測なしに入らないこと。
+
+> **(a) の実測 (2026-08-01・V3b と同じセッション)** — 全文は
+> [eval/v3/results/](../eval/v3/results/README.md)。`v3_mrl.py` に
+> `--query-instruction` を足し、passage は素のまま query にだけ
+> `Instruct: …\nQuery: ` を前置して同じ 24 問を回した。
+>
+> | 条件 | recall@10 (2048) | recall@10 (768) |
+> |---|---:|---:|
+> | 対称 (現行) | 0.5417 | **0.5833** |
+> | 非対称 (query 側 instruct) | 0.4583 | 0.5417 |
+>
+> **非対称は両幅とも悪化した。** したがって (b) の仕様改訂へは進まない —
+> **構造的に採れない運用が、採れたとしても得ではなかった**ので、
+> ゲートの意味を変える代償を払う理由が無い。
+>
+> n=24 なので 1〜2 問の差はノイズである。主張は「非対称が有利だという証拠は
+> 出なかった」までで、「非対称は有害である」ではない。他モデル・他コーパスで
+> 事情が変われば測り直す価値は残る。**V8 はここで「書き留めて閉じる」。**
 
 ### V9 — pin されていない決定要因がある [新規・2026-07-27]
 
