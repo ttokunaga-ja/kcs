@@ -139,11 +139,21 @@ end-to-end を成立させるためである。**承認行も課金も発生し�
 
 見るべきこと:
 
-- `init` が `.kio` を作る
-- `index --preview` が送信ポリシーを表示し、**何も送らない**
-- `index --approve --offline` が完走する
-- `search` が note-02.md を引く
+- `init` が `.kio` を作る (`initialized` と出る)
+- `index --preview` が `preview` を返し、**何も送らない**
+- `index --approve --offline` が `indexed` で完走する
+- `search` が **1 件以上**返す
+- `status` が投入した 2 ファイルを列挙する
 - パス表示に `\` と `/` の混在で壊れた形が出ていない
+
+> **`--json` を付けると `resolved_mode: "text"` / `fallback: true` が出るが、これは正常
+> である。** 既定の `auto` は hybrid を試みてから text へ落ちる設計で、この smoke には
+> embedding adapter を設定していないので落ちるのが正しい。**`fallback: true` を故障と
+> 読まないこと。**
+>
+> この手順一式は 2026-07-31 に macOS で実際に流して、上記の出力になることを確認して
+> ある (`search "設計メモ"` は 1 件、`resolved_mode: text`)。**したがって Windows で
+> ここが失敗したら、手順の誤りではなく Windows 固有の問題である。**
 
 ---
 
@@ -157,7 +167,7 @@ end-to-end を成立させるためである。**承認行も課金も発生し�
 | eol 内訳 | w/lf 1558 / w/-text 15 / w/none 3 |
 | 3 ファイルの SHA-256 | 上表と一致 |
 | `cargo test --workspace` | 1,412 passed / 0 failed |
-| smoke | `search` が投入した文書を引く |
+| smoke | `init`→`index --preview`→`index --approve --offline`→`search` が完走し、`search` が 1 件以上返す (`fallback: true` は正常) |
 
 ---
 
