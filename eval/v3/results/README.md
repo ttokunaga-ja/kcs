@@ -10,6 +10,18 @@
 > → `tool_profile_hash` = `sha256:f9f610bb…439a` の**暫定扱いを解除**し、
 > 恒久コーパスの埋め込み禁止も解ける。詳細は下記「判断」。
 
+> **0.5417 / 0.5833 を Kio の検索品質と読まないこと。** `tasks/local-adapter-plan.md`
+> の品質計器の表は同じ 24 問 fixture で `run_baseline.py` の **0.9167** を挙げているが、
+> **計器が違う**。`run_baseline.py` は実際の `kio` バイナリを
+> `kio --json search <query> --all-scopes` で回すので chunk 分割・hybrid・集約まで
+> 通っている。`v3_mrl.py` は Kio を通さず **1 ファイル = 1 passage** (分割なし・
+> 先頭 4000 文字) の素の cosine だけを見る。
+>
+> 粗いままにしてあるのは意図的で、**比べているのは同じベクトルの 2 つの幅**だから
+> である。分割規則も入力構築も instruction も両側で相殺されるので、幅の効果だけが
+> 残る。**絶対値には意味が無く、差だけが意味を持つ。** 0.5417 は 0.9167 からの
+> 劣化ではない。
+
 | | |
 |---|---|
 | モデル | `Qwen/Qwen3-VL-Embedding-2B` revision `9f2f7e71` |
