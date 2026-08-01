@@ -83,7 +83,25 @@ EXPECTED_MAXIMUM_EXPANDED_ROW_BYTES_INCLUDING_LF = 913
 EXPECTED_MAXIMUM_EVENT_LINEAGE_ROW_BYTES_INCLUDING_LF = 571
 EXPECTED_MAXIMUM_INVERTED_ROW_BYTES_INCLUDING_LF = 600
 
-MAX_COLD_BUILD_SECONDS = 15 * 60
+# 2026-08-01 に 15 分から引き上げた。**凍結値の drift ではなく wall-clock である。**
+# この予算に当たっても値は 1 つも動いていないので、fixture を採り直して黙らせては
+# ならない (`subprocess.TimeoutExpired` であって assert の失敗ではない)。
+#
+# 実測: この cold build は M4 Pro で **503.2s**、予算 900s の 56% しか使わない。
+# それでも CI (ubuntu-latest) では直近 10 run のうち 8 回 900s を超えて落ちていた。
+# つまりランナーが 1.79 倍遅ければ当たる位置に、ずっと張り付いていた。
+#
+# **改名は原因ではない。** 3 つで確かめた: (1) 改名前 `978e874` の同テストも CI で
+# 落ちている、(2) 測定スクリプト本体が改名前後でバイト同一、(3) 同じ機械で測ると
+# 改名前 503.9s / 改名後 503.2s で **0.999 倍** — salt の影響範囲に入るモジュール
+# なので疑ったが、差は無かった。
+#
+# 同じ 15 分を持つ `source_parameter_assignment_package` と
+# `source_matched_lifecycle_inventory` は 8/8 で通っている。予算が一律に短いのでは
+# なく、**このモジュールだけが重い**。30 分は CI の実効値 (~900s) に対して約 2 倍で、
+# ジョブ側の timeout-minutes (120) には影響しない — 予算は上限であって目標ではなく、
+# 引き上げても所要は変わらないためである。
+MAX_COLD_BUILD_SECONDS = 30 * 60
 MAX_COLD_BUILD_RSS_BYTES = 512 * 2**20
 P12_NOMINAL_PRE_SOLVE_HEADROOM_BYTES = 1_203_356
 

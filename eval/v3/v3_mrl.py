@@ -257,12 +257,21 @@ def recall_at_k(
             misses.append(text)
     if scored_total == 0:
         return {"measured": False, "note": "no query carried an expected answer"}
+    # `misses[:10]` で切っていたときは、外した query が 11 件あっても 10 件しか
+    # 残らなかった。V3b の native 2048 が実際にそれで、13/24 命中 = miss 11 件に対し
+    # 記録は 10 件しかなく、**どの query を外したかが 1 件分だけ復元できなかった**。
+    # 幅どうしの miss 集合を突き合わせる (768 が拾えた query はどれか) のは
+    # V3 の読み方そのものなので、欠けると比較が成立しない。
+    #
+    # 上限は外す。`scored_total` が上界であり、eval の query 数は 24 なので
+    # 大きさは問題にならない。件数も併記して、リストを数えなくても分かるようにする。
     return {
         "measured": True,
         "queries": scored_total,
         "k": k,
         "recall": hits / scored_total,
-        "misses": misses[:10],
+        "missed": len(misses),
+        "misses": misses,
     }
 
 
