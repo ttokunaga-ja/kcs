@@ -138,12 +138,25 @@ pub struct EnvLocalEmbeddingClient {
 }
 
 impl EnvLocalEmbeddingClient {
+    /// `timeout_seconds` is D7's `[adapter.policy.offline_api].timeout_seconds`
+    /// (07 §7). `None` keeps the shared default, which is exactly what an absent
+    /// sub-table means -- 07 §7 says unspecified keys inherit the parent, and
+    /// the parent's documented 300 is what `HttpPolicy::default` already
+    /// carries. So `None` is the pre-D7 behaviour, not a special case.
+    ///
+    /// No built-in `offline_api` default is invented here. 07 §7 defers that
+    /// value to Stage 3's local-OCR measurement.
     #[must_use]
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        timeout_seconds: Option<u64>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             model: model.into(),
-            http_policy: HttpPolicy::default(),
+            http_policy: timeout_seconds
+                .map_or_else(HttpPolicy::default, HttpPolicy::with_timeout_seconds),
         }
     }
 }
@@ -990,6 +1003,7 @@ mod tests {
         let client = EnvLocalEmbeddingClient::new(
             format!("http://{address}/"),
             LOCAL_EMBEDDING_DEFAULT_MODEL,
+            None,
         );
         let vector = client
             .embed_messages(

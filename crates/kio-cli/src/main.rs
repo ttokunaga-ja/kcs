@@ -780,6 +780,9 @@ fn run(cli: Cli) -> Result<Value> {
     // QA19 (step4b-contract-tests-p3a.md §F): publish the declared
     // `[pricing]` tables the same way, at the same call site.
     register_declared_pricing_from_tools_config();
+    // D7 (07 §7): publish `[adapter.policy.<execution_mode>].timeout_seconds`
+    // from `config.toml`, the third registry at this same call site.
+    register_execution_timeouts_from_user_config();
     match cli.command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
@@ -23085,6 +23088,39 @@ fn register_declared_adapters_from_tools_config() {
         }
     }
     register_declared_adapters(map);
+}
+
+/// D7 (07 §7): parse the (already schema-validated) user `config.toml` and
+/// publish `[adapter.policy.<execution_mode>].timeout_seconds` to the
+/// process-global registry, so the offline embedding client can be built under
+/// it. The declarations/pricing sibling of the two functions around it,
+/// registered at the same CLI-startup call site.
+///
+/// Only `offline_api` is read. The other two modes are rejected by
+/// `enforce_config_semantics` as not-implemented, and reading a value that
+/// nothing honours would turn today's loud rejection into a silent no-op --
+/// which is strictly worse than not supporting it.
+///
+/// Best-effort like its siblings: a missing/unreadable file registers an empty
+/// map, which means "inherit the parent" and is the pre-D7 behaviour exactly.
+fn register_execution_timeouts_from_user_config() {
+    use kio_adapter::tool_lock::register_execution_timeouts;
+    let mut map = std::collections::HashMap::new();
+    if let Ok(text) = fs::read_to_string(user_config_toml_path()) {
+        if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+            if let Some(seconds) = value
+                .get("adapter")
+                .and_then(|adapter| adapter.get("policy"))
+                .and_then(|policy| policy.get("offline_api"))
+                .and_then(|mode| mode.get("timeout_seconds"))
+                .and_then(toml::Value::as_integer)
+                .and_then(|seconds| u64::try_from(seconds).ok())
+            {
+                map.insert("offline_api".to_owned(), seconds);
+            }
+        }
+    }
+    register_execution_timeouts(map);
 }
 
 /// QA19 (step4b-contract-tests-p3a.md §F, 03 §11 L832-837): parse the

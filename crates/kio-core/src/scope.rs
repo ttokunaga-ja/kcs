@@ -2549,6 +2549,20 @@ pub fn enforce_config_semantics(config: &Value) -> Result<()> {
                 ));
             }
         }
+        // D7 (07 §7): `[adapter.policy.<execution_mode>]` overrides the parent
+        // for that mode. Only `offline_api` is wired -- the CLI reads it into
+        // the execution-timeout registry and the offline embedding client is
+        // built under it. The other two modes are rejected here rather than
+        // accepted, because a value nothing honours is worse than a value
+        // refused: today's loud error would become a silent no-op, and the
+        // operator would believe a timeout is in force that is not.
+        for mode in ["online_api", "deterministic_library"] {
+            if policy.get(mode).is_some() {
+                return Err(KioError::not_implemented(format!(
+                    "adapter.policy.{mode} (only offline_api is wired)"
+                )));
+            }
+        }
     }
     // QA61 (step4b-contract-tests-p3a.md §R, arbitration #7): `include_neighbors`
     // was removed from `config.schema.json` entirely (it disappeared from the
@@ -4167,6 +4181,7 @@ pub fn discard_network_approval_pending(kio_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::enforce_config_semantics;
     use super::{
         append_jsonl_rotating, civil_from_days, discard_network_approval_pending,
         format_unix_seconds, format_utc_seconds, network_approvals_initialized,
@@ -4176,6 +4191,49 @@ mod tests {
         PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
         MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
+
+    /// D7 (07 §7): the `offline_api` sub-table is wired, so a non-default
+    /// timeout there is accepted rather than rejected.
+    #[test]
+    fn d7_offline_api_timeout_override_is_accepted() {
+        let config = serde_json::json!({
+            "adapter": { "policy": { "offline_api": { "timeout_seconds": 1800 } } }
+        });
+        assert!(enforce_config_semantics(&config).is_ok());
+    }
+
+    /// The parent value is untouched by D7 — still only the documented default.
+    /// Widening it would change every online adapter's behaviour, including the
+    /// billed ones, which D7 does not ask for.
+    #[test]
+    fn d7_leaves_the_parent_timeout_rejection_alone() {
+        let config = serde_json::json!({
+            "adapter": { "policy": { "timeout_seconds": 600 } }
+        });
+        assert!(enforce_config_semantics(&config).is_err());
+        let documented_default = serde_json::json!({
+            "adapter": { "policy": { "timeout_seconds": 300 } }
+        });
+        assert!(enforce_config_semantics(&documented_default).is_ok());
+    }
+
+    /// The other two modes are refused, not ignored. Nothing honours them yet,
+    /// and accepting a timeout that never takes effect is worse than refusing
+    /// it: the operator would believe a limit is in force that is not.
+    #[test]
+    fn d7_refuses_the_execution_modes_that_are_not_wired() {
+        for mode in ["online_api", "deterministic_library"] {
+            let config = serde_json::json!({
+                "adapter": { "policy": { mode: { "timeout_seconds": 600 } } }
+            });
+            let error = enforce_config_semantics(&config).expect_err(mode);
+            assert_eq!(
+                error.error_code(),
+                "KIO-E-CONFIG-NOT-IMPLEMENTED-001",
+                "{mode}"
+            );
+        }
+    }
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
     use crate::dag::{CommitType, NormalizeRef};
     use crate::purge::PurgeState;

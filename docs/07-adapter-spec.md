@@ -1060,6 +1060,16 @@ require_command_confirmation = true
 > ([tasks/local-adapter-plan.md](../tasks/local-adapter-plan.md))。
 > なお `max_input_bytes` など他のキーも同じ機構で上書きできるが、**現時点で
 > execution_mode 差を必要とするのは `timeout_seconds` のみ**である。
+>
+> **実装状況 (2026-08-02)**: 配線されているのは **`offline_api` の
+> `timeout_seconds` だけ**である。`online_api` / `deterministic_library` の
+> sub-table は `KIO-E-CONFIG-NOT-IMPLEMENTED-001` で**拒否する** — 何も honour
+> しない値を受理すると、現在の大声の拒否が黙った no-op に退化し、運用者は効いて
+> いない上限が効いていると信じることになる。親の `timeout_seconds` も従来どおり
+> 既定の 300 以外を拒否する (広げると課金の走る online adapter の挙動まで変わる
+> ため、D7 の範囲外)。sub-table が無い場合は親を継承 = 既定のままで、**D7 以前と
+> 挙動は 1 ミリも変わらない**。`offline_api` の既定値は上記のとおり Stage 3 待ちで、
+> こちらで発明していない。
 
 任意コマンド/任意 URL を使う外部 Adapter dispatcher は将来仕様とする。実装する場合は
 **初回実行時** に command / URL / scope / network policy を preview し、ユーザー承認を

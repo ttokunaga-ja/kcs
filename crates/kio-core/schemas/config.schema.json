@@ -145,7 +145,28 @@
             "redact_logs": { "type": "boolean" },
             "store_request_body": { "type": "boolean" },
             "store_response_body": { "type": "boolean" },
-            "require_command_confirmation": { "type": "boolean" }
+            "require_command_confirmation": { "type": "boolean" },
+            "online_api": {
+              "type": "object",
+              "properties": {
+                "timeout_seconds": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            },
+            "offline_api": {
+              "type": "object",
+              "properties": {
+                "timeout_seconds": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            },
+            "deterministic_library": {
+              "type": "object",
+              "properties": {
+                "timeout_seconds": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            }
           },
           "additionalProperties": false
         }

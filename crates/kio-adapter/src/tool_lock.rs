@@ -934,6 +934,34 @@ pub fn registered_declared_pricing(role: &str) -> BTreeMap<String, f64> {
         .unwrap_or_default()
 }
 
+/// D7: process-global registry of `[adapter.policy.<execution_mode>]
+/// .timeout_seconds` from the user `config.toml`, keyed by execution mode — the
+/// third sibling of [`DECLARED_ADAPTERS`] and [`DECLARED_PRICING`], registered
+/// at the same CLI-startup call site.
+///
+/// A registry rather than a read here because `kio-adapter` is a library and
+/// does not open `config.toml`; the CLI owns config loading and hands the parsed
+/// values down, exactly as it already does for declarations and pricing.
+static EXECUTION_TIMEOUTS: std::sync::OnceLock<std::collections::HashMap<String, u64>> =
+    std::sync::OnceLock::new();
+
+/// D7: register the per-execution-mode timeouts parsed from `config.toml`.
+/// Idempotent-once, same as [`register_declared_adapters`].
+pub fn register_execution_timeouts(map: std::collections::HashMap<String, u64>) {
+    let _ = EXECUTION_TIMEOUTS.set(map);
+}
+
+/// D7: the registered `timeout_seconds` for an execution mode, or `None` when
+/// the sub-table is absent.
+///
+/// `None` means "inherit the parent" (07 §7), and the parent's documented 300 is
+/// already what `HttpPolicy::default` carries — so an absent sub-table is not a
+/// special case anywhere downstream, it is simply the existing behaviour.
+#[must_use]
+pub fn registered_execution_timeout(execution_mode: &str) -> Option<u64> {
+    EXECUTION_TIMEOUTS.get()?.get(execution_mode).copied()
+}
+
 /// R13-2: resolve the API key for an online adapter `role` — the declared
 /// `tools.toml` `auth` when present (env/plain/keychain via [`resolve_auth`],
 /// keychain being a loud error), else the legacy `fallback_env` variable. `None`
