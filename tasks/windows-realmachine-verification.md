@@ -152,10 +152,12 @@ cargo test --workspace --all-targets --locked
 | 日付 | commit | Windows | macOS | 差 | 出所 |
 |---|---|---:|---:|---:|---|
 | 2026-07-31 | `028b7f7` | 1,412 | 1,438 | 26 | CI (両 job とも同一コマンド) |
-| 2026-08-02 | `c29ecac` | **1,418** | — | — | Windows 実機 |
+| 2026-08-02 | `c29ecac` | **1,418** | 1,444 | 26 | Windows 実機 / macOS 手元 |
 
 31 バイナリ / 0 failed / 0 ignored は両日とも同じ。8/2 の 1,418 は 7/31 の 1,412 に
-D7 の 6 件 (`http_policy.rs` 3 / `scope.rs` 3、いずれも cfg 無し) が乗った数と一致する。
+D7 の 6 件 (`http_policy.rs` 3 / `scope.rs` 3、いずれも cfg 無し) が乗った数と一致し、
+**差の 26 は 2 つの commit にまたがって動いていない**。これが「増えた 6 件は
+Windows でも走った」ことの裏取りである。
 
 > **差の 26 は「`#[cfg(unix)]` のテスト数」ではなく差し引きである。**
 > `#[cfg(unix)]` / `#[cfg(not(windows))]` のテストが Windows で消える一方、
