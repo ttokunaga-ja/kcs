@@ -358,6 +358,7 @@ jobs:
       - run: >-
           python3 -m unittest
           eval.test_eval_env
+          eval.test_u7_same_space
           eval.test_persona_fixture
           eval.test_persona_person_plan
           eval.test_persona_full_scale_limits

@@ -737,10 +737,24 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 - **pairwise similarity に特別扱いは不要** — 単一マルチモーダル空間の強制
   ([03 §7](../docs/03-data-model.md)) により image と chunk の vector は定義上 cosine 比較可能
 
-#### U7 image/text 同一空間の契約検査 [P0]
+#### U7 image/text 同一空間の契約検査 [P0] — 検査は実装済み・実行は GPU 待ち (2026-08-01)
 §2 の「テキストは一致・画像だけ乖離」は KIO の互換ゲートで検知できない。
 **参照実装との数値一致を採用条件とする**受け入れ検査を持つ。
 vLLM 経路 (公式サポート) では優先度が下がるが、llama.cpp 経路では必須。
+
+実装は [eval/u7/](../eval/u7/README.md)。serving 側は `local_embedding.rs` と同一の
+wire (`/v1/embeddings` + `messages`、画像は `data:` URI) で送り、参照側は
+transformers。画像は既存の合成 fixture 15 枚を使うので**追加費用はゼロ**。
+
+設計上の要点が 2 つある。**判定はモダリティごとに、最小値で行う** — 平均を採ると
+「片方だけずれる」という探している欠陥を計器が自分で消す。そして **text は対照群
+である**: 報告された失敗は text が合って image がずれる形なので、**text すら合わ
+なければ経路ではなく参照ハーネスを疑う** (`harness-suspect` として独立に結論を出す)。
+V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれで、取り違えると
+健全な経路を捨てるか壊れた経路を通すことになる。
+
+判定と wire の形は `eval/test_u7_same_space.py` (14 件) が CI の `rust` ジョブで
+守っている。**数値一致そのものは未測定** — GPU 実機が要る。
 
 #### U8 `image_object_hashes` の writer / reader [P1]
 現在 3 構造体に宣言のみ ([07 §5.1](../docs/07-adapter-spec.md) が明記)。
@@ -1070,7 +1084,7 @@ Stage 2 (段階 B・U1-U11)  local_embedding.rs + 画像埋め込み + ランキ
    ├ U5  ✅ 問題 A — 参照元 chunk の text rank 継承 (C2)
    ├ U6  ✅ 問題 B — 同枠 quota / 型非依存 MMR (C2、既存コード無改修)
    ├ U2  ✅ 実 vLLM の messages 配線 + MRL 再正規化 (2026-07-28)
-   ├ U7  ⏳ image/text 同一空間の数値一致検査 — U2 の後
+   ├ U7  ◐ 検査は実装済み (eval/u7)。数値一致の実測は GPU 待ち — llama.cpp 採用時に必須
    └ U8  — image_object_hashes の writer — C1 が chunk 本文の逆引きで代替。
           埋め込み対象の列挙としては不要になった (writer なき宣言は残る)
                  ↓
