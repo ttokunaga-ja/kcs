@@ -10,6 +10,24 @@
 **Windows 実機で clone したリポジトリが、Linux / macOS と同じバイトを持ち、
 ビルドとテストが通り、`kio` が実際に動くことを確かめる。**
 
+## ✅ 2026-08-02 に実機で完走した
+
+Windows 10.0.26200 / Git 2.53.0 / rustc 1.97.1 (msvc) / `C:\kio` / `core.autocrlf=true`
+のまま、`commit c29ecac` で全項目 PASS した。
+
+| | 結果 |
+|---|---|
+| `w/crlf` | **0** (`core.autocrlf` を触らずに) |
+| 3 ファイルの SHA-256 | 一致。`git check-attr text -- Cargo.toml` → `text: unset` |
+| `cargo build` / `cargo test` | 成功 / **1,418 passed / 0 failed** (31 バイナリ) |
+| smoke | `init`→`index --preview`→`index --approve --offline`→`search` 完走。1 件ヒット |
+
+**`.gitattributes` の `* -text` は実機で効いている。** 任務の目的は達成済みなので、
+以降この手順を回すのは**回帰確認**である。新規の検証としてもう一度やる必要はない。
+
+その過程で見つかった 2 つの落とし穴 (どちらも Kio ではなく PowerShell 側) は
+§4 の後に追記してある。**日本語が化けて見えても Kio の不具合ではない。**
+
 ---
 
 # なぜ CI では足りないのか — ここが任務の核心
@@ -25,8 +43,12 @@ CRLF へ変換する。**Kio はファイルのバイト列そのものが ident
 
 GitHub の ubuntu / windows ランナーはこの変換をしない設定で走るため、**CI は何度
 緑になってもこの問題について何も言わない**。2026-07-31 に `.gitattributes` へ
-`* -text` (一切変換しない) を宣言して塞いだが、**その宣言が実機で効いていることは
-まだ実機で確かめられていない。** それがこの任務である。
+`* -text` (一切変換しない) を宣言して塞ぎ、**2026-08-02 に実機で効いていることを
+確かめた** (上記)。
+
+**この構造は今後も変わらない。** `.gitattributes` を触ったとき、あるいは
+バイナリ / 改行に敏感な fixture を足したときは、CI が緑でも実機で回すこと。
+CI がこの欠陥を見つけてくれることは、これからも無い。
 
 ---
 
@@ -83,7 +105,11 @@ git ls-files --eol | Select-String "w/crlf" | Measure-Object | Select-Object -Ex
 
 # (b) eol の内訳が Linux/macOS と一致すること
 git ls-files --eol | ForEach-Object { ($_ -split '\s+')[1] } | Group-Object | Select-Object Count,Name
-#   → w/lf 1558 / w/-text 15 / w/none 3
+#   → 判定は「w/crlf の行が存在しないこと」だけ。内訳の絶対数はファイルが
+#     増減すれば当然動くので、合否ではない。
+#     参考値 2026-07-31: w/lf 1558 / w/-text 15 / w/none 3  (tracked 1576)
+#     参考値 2026-08-02: w/lf 1564 / w/-text 15 / w/none 3  (tracked 1582)
+#     数が違っても、合計が `git ls-files | Measure-Object` と一致していれば正常
 
 # (c) 実ファイルのバイトが一致すること
 Get-FileHash .gitattributes -Algorithm SHA256
@@ -100,6 +126,13 @@ Get-FileHash docs\README.md -Algorithm SHA256
 > **`git status` は検出器にならない。** 変換が起きていても status はクリーンに見える
 > (Git が比較時に正規化して戻すため)。作業ツリーの実バイトを見る (a)(c) が要る。
 
+> **`w/` を見ること。`i/` ではない。** `git ls-files --eol` は 2 列出す。`i/` は
+> オブジェクトストアの中身なので、**どの OS からでも同じ結果になり CI でも見える**
+> (2026-08-02 時点で `i/crlf` は 0)。`w/` は clone が作業ツリーへ書いた実バイトで、
+> **`core.autocrlf` が効くのはこちらだけ**である。つまり `i/crlf` = 0 は
+> 「CRLF を commit していない」ことしか言わず、この任務が問うている
+> 「clone が CRLF に変換していない」ことは `w/crlf` = 0 でしか分からない。
+
 > **上表の hash は commit `028b7f7` 時点の値である。** これらのファイルが後日変更されれば
 > 当然ずれるので、**hash が違ったら「CRLF 変換が起きた」と即断せず、まず
 > `git log -1 --format=%H -- <file>` でその後に変更されていないかを見ること。**
@@ -113,10 +146,23 @@ cargo build --workspace --locked
 cargo test --workspace --all-targets --locked
 ```
 
-期待値 (2026-07-31 の CI 実測): **31 バイナリ / 1,412 passed / 0 failed / 0 ignored**。
+**判定は `0 failed` である。** passed の数は裏取りであって合否ではない —
+テストが増えれば当然増える。
 
-> macOS では 1,438 passed になる。差の 26 件は `#[cfg(unix)]` のテストで、
-> Windows では最初からコンパイルされない。**1,412 と 1,438 の差は異常ではない。**
+| 日付 | commit | Windows | macOS | 差 | 出所 |
+|---|---|---:|---:|---:|---|
+| 2026-07-31 | `028b7f7` | 1,412 | 1,438 | 26 | CI (両 job とも同一コマンド) |
+| 2026-08-02 | `c29ecac` | **1,418** | — | — | Windows 実機 |
+
+31 バイナリ / 0 failed / 0 ignored は両日とも同じ。8/2 の 1,418 は 7/31 の 1,412 に
+D7 の 6 件 (`http_policy.rs` 3 / `scope.rs` 3、いずれも cfg 無し) が乗った数と一致する。
+
+> **差の 26 は「`#[cfg(unix)]` のテスト数」ではなく差し引きである。**
+> `#[cfg(unix)]` / `#[cfg(not(windows))]` のテストが Windows で消える一方、
+> `#[cfg(windows)]` のテスト (`windows_known_profile_is_an_absolute_fallback`、
+> `home_and_xdg_unset_use_windows_profile_without_cwd_device_state` など) が
+> 逆に増える。**26 という数だけを見て `cfg(unix)` を数えても合わない。**
+> 数が合わないときに見るべきは差ではなく、下記のとおり**名前**である。
 
 ## 4. 実際に動かす (テストが通ることと、動くことは別)
 
@@ -206,10 +252,10 @@ Kio の不具合の根拠にならない。**格納側を確認してから報�
 |---|---|
 | `core.autocrlf` | 既定 (true) のまま |
 | clone 先パス長 | 84 文字以内 |
-| `w/crlf` のファイル数 | **0** |
-| eol 内訳 | w/lf 1558 / w/-text 15 / w/none 3 |
+| `w/crlf` のファイル数 | **0** ← これが合否 |
+| eol 内訳 | 合計が tracked 数と一致 (2026-08-02: w/lf 1564 / w/-text 15 / w/none 3 = 1582)。絶対数は合否ではない |
 | 3 ファイルの SHA-256 | 上表と一致 |
-| `cargo test --workspace` | 1,412 passed / 0 failed |
+| `cargo test --workspace` | **0 failed** ← これが合否 (2026-08-02: 1,418 passed) |
 | smoke | `init`→`index --preview`→`index --approve --offline`→`search` が完走し、`search` が 1 件以上返す (`fallback: true` は正常) |
 
 ---
@@ -220,8 +266,10 @@ Kio の不具合の根拠にならない。**格納側を確認してから報�
 いない。`git check-attr text -- Cargo.toml` を実行して `text: unset` になるか確認し、
 結果を報告する。これは**この任務が見つけるために存在する欠陥**なので、詳細に書くこと。
 
-**テスト数が 1,412 と違う** → どのテストが増減したかを名前で報告する。数だけでは
-原因が分からない。
+**テスト数が上表と違う** → 落ちていないなら、まず**それが正常**である可能性を疑う
+(このリポジトリは動いており、テストは増える)。そのうえで `cargo test -- --list` の
+差分を**名前で**報告する。数だけでは、テストが増えたのか、Windows で丸ごと
+コンパイルされていないモジュールがあるのか区別できない。
 
 **特定のテストだけ落ちる** → 落ちたテスト名・エラーコード・panic 位置をそのまま報告する。
 2026-07-31 に直したのは `KIO-E-STORE-IO-001` (directory fsync) とパス区切りの 2 系統なので、
@@ -247,7 +295,7 @@ docs/README.md  <hash>  一致: <はい|いいえ>
 
 ## ビルド / テスト
 cargo build: <成功|失敗>
-cargo test:  <n> passed / <n> failed  (期待 1412 / 0)
+cargo test:  <n> passed / <n> failed  (合否は failed=0。passed は 2026-08-02 に 1418)
 落ちたテスト: <名前を列挙、無ければ「なし」>
 
 ## smoke
