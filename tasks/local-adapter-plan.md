@@ -619,9 +619,23 @@ D4 によりテキストのみでも同形式を使う。
 >   **一致することをテストで凍結した**。Python 移植と Rust 実装が独立に同じ値を
 >   出しており、どちらかがずれたら落ちる
 >
-> **未実装**: D7 の `[adapter.policy.offline_api]` timeout 上書きは config 形の
-> 確定のみで、実装は入っていない。現状は共通の既定 (実効 30 秒) で、
-> chunk 1 件の embedding には十分。Stage 3 のローカル OCR では効いてくる。
+> **D7 は 2026-08-02 に配線した** (以前はここに「config 形の確定のみで実装なし」と
+> 書いてあった)。`[adapter.policy.offline_api].timeout_seconds` が
+> `EnvLocalEmbeddingClient` の `HttpPolicy` に届く。
+>
+> **`overall_timeout` だけ上げても効かない**のが要点だった。`authenticated_agent` は
+> overall / read / write の**最小値**から 1 つの deadline を作るので、read と write が
+> 既定の 30 秒のままだと 1800 を設定しても 30 秒で切れる。CPU 推論の VLM が数分間
+> 何も返さないのは、まさにその read timeout が殺す挙動である。よって 3 つとも動かす。
+> `connect_timeout` は 30 秒のまま — モデルが重くても TCP 接続は遅くならず、伸ばすと
+> 「サーバが起動していない」が長いハングに化ける。
+>
+> 配線したのは **`offline_api` だけ**である。`online_api` /
+> `deterministic_library` の sub-table は拒否する — honour しない値を受理すると
+> 大声の拒否が黙った no-op に退化する。親の `timeout_seconds` も 300 以外は従来
+> どおり拒否 (広げると課金の走る online adapter の挙動が変わり、D7 の範囲を超える)。
+> **`offline_api` の既定値は発明していない** — 07 §7 が Stage 3 の実測待ちと
+> しているので、未設定なら親を継承し D7 以前と挙動は変わらない。
 
 > **実 vLLM との smoke test 済み (2026-07-28・GPU 実機・commit `2e7a2ba`)**
 >

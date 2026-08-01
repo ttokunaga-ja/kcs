@@ -31,6 +31,33 @@ impl Default for HttpPolicy {
     }
 }
 
+impl HttpPolicy {
+    /// D7: the policy for an execution mode whose `timeout_seconds` was set in
+    /// `[adapter.policy.<execution_mode>]` (07 §7).
+    ///
+    /// **`overall_timeout` alone would do nothing.** `authenticated_agent`
+    /// configures one deadline from [`effective_overall_timeout`], which is the
+    /// *minimum* of overall / read / write — so raising overall to 1800 while
+    /// read and write stay at 30 still gives a 30 second wall. The whole point
+    /// of D7 is that a CPU-inference VLM sends nothing for minutes while it
+    /// works, which is exactly what a 30 second read timeout kills. So the read
+    /// and write limits move with it.
+    ///
+    /// `connect_timeout` deliberately does not. Establishing a TCP connection to
+    /// a loopback address does not get slower because the model is large, and a
+    /// long connect timeout turns "the server is not running" into a very slow
+    /// hang instead of a quick error.
+    pub(crate) fn with_timeout_seconds(seconds: u64) -> Self {
+        let timeout = Duration::from_secs(seconds);
+        Self {
+            connect_timeout: Duration::from_secs(30),
+            read_timeout: timeout,
+            write_timeout: timeout,
+            overall_timeout: timeout,
+        }
+    }
+}
+
 /// Authenticated provider requests fail closed on redirects. This prevents a
 /// provider-specific credential header from being replayed to a new origin.
 pub(crate) fn authenticated_agent(policy: HttpPolicy) -> ureq::Agent {
@@ -175,6 +202,35 @@ pub(crate) fn parse_json_bytes_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D7's whole effect depends on this. `authenticated_agent` builds one
+    /// deadline from the *minimum* of overall/read/write, so a policy that
+    /// raised only `overall_timeout` would still wall at the default 30 second
+    /// read timeout and the configured value would do nothing — the silent
+    /// no-op D7 exists to avoid.
+    #[test]
+    fn a_configured_timeout_is_not_clamped_by_the_default_read_and_write_limits() {
+        let policy = HttpPolicy::with_timeout_seconds(1800);
+        assert_eq!(effective_overall_timeout(policy), Duration::from_secs(1800));
+    }
+
+    /// The default is unchanged by D7: min(300, 30, 30).
+    #[test]
+    fn the_default_policy_still_walls_at_thirty_seconds() {
+        assert_eq!(
+            effective_overall_timeout(HttpPolicy::default()),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// Connect deliberately does not follow. A local model being slow to think
+    /// does not make the TCP handshake slow, and stretching connect turns "the
+    /// server is not running" into a long hang instead of a fast error.
+    #[test]
+    fn connect_timeout_does_not_follow_the_configured_timeout() {
+        let policy = HttpPolicy::with_timeout_seconds(1800);
+        assert_eq!(policy.connect_timeout, Duration::from_secs(30));
+    }
 
     #[test]
     fn retry_after_ms_parses_numeric_seconds_form() {

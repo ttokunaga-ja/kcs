@@ -795,8 +795,17 @@ pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn Em
                 .model
                 .clone()
                 .unwrap_or_else(|| LOCAL_EMBEDDING_DEFAULT_MODEL.to_owned());
+            // D7: `[adapter.policy.offline_api].timeout_seconds` (07 §7). Read
+            // at construction like `url` and `model` above, and absent means
+            // inherit the parent's documented 300 rather than a value invented
+            // here -- 07 §7 defers the offline default to Stage 3's measurement.
+            let timeout_seconds = crate::tool_lock::registered_execution_timeout("offline_api");
             Ok(Box::new(LocalEmbeddingAdapter::with_client(
-                crate::local_embedding::EnvLocalEmbeddingClient::new(base_url, model),
+                crate::local_embedding::EnvLocalEmbeddingClient::new(
+                    base_url,
+                    model,
+                    timeout_seconds,
+                ),
             )))
         }
         EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real) => {
