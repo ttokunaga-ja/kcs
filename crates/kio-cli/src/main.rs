@@ -26,9 +26,9 @@ use kio_adapter::batch_client::{
     BatchJobStatus, BatchOutputLine, MistralBatchClient,
 };
 use kio_adapter::catalog::{
-    active_embedding_execution, adopted_embedding_profile, builtin_offline_markdownize_adapter,
-    builtin_prepare_profile, convert_office_to_pdf, declared_embedding_profile_for,
-    embedding_adapter_profile, embedding_preferred_request_kind,
+    active_embedding_execution, active_local_ocr_execution, adopted_embedding_profile,
+    builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
+    declared_embedding_profile_for, embedding_adapter_profile, embedding_preferred_request_kind,
     resolve_standard_online_markdownize_profile_with_bbox, run_embedding,
     run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
     standard_online_markdownize_profile_with_bbox, AdoptedEmbeddingExecution,
@@ -22669,6 +22669,43 @@ fn active_online_tool_identities(repo: &Repository) -> Result<Vec<(String, Strin
     Ok(identities)
 }
 
+/// The adapters the `--send-secrets` consent actually speaks about.
+///
+/// Deliberately NOT [`active_online_tool_ids`], because the two consents ask
+/// different questions. `ConsentOperation::Network` asks whether data may leave
+/// this machine; `ConsentOperation::SendSecrets` asks whether a file the user
+/// was warned is a credential may be handed to a given tool. An `offline_api`
+/// adapter answers "no" to the first — which is why 07 §3 (2) exempts it from
+/// `approvals[]` — and "yes, it is being handed one" to the second.
+///
+/// The 2026-08-02 ruling settles that the hold applies to `offline_api`
+/// markdownize: the hold's subject is the content, not the destination's
+/// position on the network, and a local model server is a separate process
+/// (usually a container) that can log what it is given. The error directions
+/// are asymmetric — being too permissive drops credentials into a model
+/// server's logs, while being too strict costs the user one flag.
+///
+/// Getting this wrong the *other* way would have been quieter and worse: with
+/// only a local pipeline declared, keying the hold off the online markdownize
+/// id makes `--send-secrets` record consent for Mistral in order to run
+/// PaddleOCR — an audit row naming a tool that never saw the file.
+fn secrets_consent_tool_ids() -> Result<Vec<String>> {
+    let mut tool_ids = vec![match active_local_ocr_execution() {
+        Some(execution) => kio_adapter::local_ocr_markdownize::profile_for(execution).adapter_id,
+        None => online_markdownize_profile().adapter_id,
+    }];
+    // The embedding side keeps the online-only rule: 07 §3 (2)'s exemption is
+    // unchanged there, and no ruling has extended the hold to it. A local
+    // embedding adapter receives chunk text that markdownize already produced,
+    // so the file-level hold has already had its say by then.
+    if let Some(adapter_id) = active_online_embedding_adapter_id()? {
+        tool_ids.push(adapter_id);
+    }
+    tool_ids.sort();
+    tool_ids.dedup();
+    Ok(tool_ids)
+}
+
 /// Whether Tier B (candidate-secret) files may be sent to online adapters for
 /// this scope, i.e. `--send-secrets` was recorded at least once (N1c).
 fn secrets_send_approved(repo: &Repository) -> bool {
@@ -22676,7 +22713,7 @@ fn secrets_send_approved(repo: &Repository) -> bool {
 }
 
 fn secrets_send_approved_in_kio_dir(kio_dir: &Path) -> bool {
-    active_online_tool_ids().is_ok_and(|tool_ids| {
+    secrets_consent_tool_ids().is_ok_and(|tool_ids| {
         !tool_ids.is_empty()
             && tool_ids.iter().all(|tool_id| {
                 trusted_consent_present(kio_dir, Some(tool_id), ConsentOperation::SendSecrets)
@@ -22688,7 +22725,7 @@ fn secrets_send_approved_in_kio_dir(kio_dir: &Path) -> bool {
 /// Record the explicit `--send-secrets` approval (N1c). Idempotent: appended as
 /// an audit trail; `secrets_send_approved` accepts only a row bound to this scope.
 fn write_secrets_approval(repo: &Repository, preview: &ScanPreview) -> Result<()> {
-    for tool_id in active_online_tool_ids()? {
+    for tool_id in secrets_consent_tool_ids()? {
         write_device_consent(repo, &tool_id, ConsentOperation::SendSecrets)?;
     }
     let path = repo.kio_dir().join(SECRETS_APPROVAL_FILE);

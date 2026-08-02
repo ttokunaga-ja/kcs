@@ -305,16 +305,44 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 > (適用形は [05-runtime.md §1.1](05-runtime.md) の consent gate)。逆に `--online` が
 > offline_api Adapter に対して何かを開くこともない (開くべき閉鎖が存在しない)。
 >
-> **現行実装 (2026-07-28)**: Embedding の `url` は上記の条件下で**受理される**。
-> Markdownize の `url`、および両者の `cmd` / `args` は引き続き一律 schema error
-> (`cmd` / `args` は将来の外部 dispatcher の領分 — §7)。
+> **現行実装 (2026-08-02 更新)**: Embedding と Markdownize の**両方**で `url` が
+> 上記の条件下で**受理される** (Markdownize は 2026-08-02 に解禁。それ以前は
+> 一律 schema error だった)。**両者の `cmd` / `args` は引き続き一律 schema error**
+> — 将来の外部 dispatcher の領分である (§7)。
+>
+> 緩和は **role 単位ではなく target 単位**である。`offline_api` を宣言できるのは
+> その kind を持つ tool_id だけで、cloud API の tool_id に `offline_api` を
+> 宣言することも、その逆も schema error になる。
 >
 > ```toml
 > [embedding.qwen3_vl_embedding_local]
 > kind  = "offline_api"
 > url   = "http://127.0.0.1:8000"      # loopback リテラルのみ。末尾の /v1 は不要
 > model = "Qwen/Qwen3-VL-Embedding-2B" # 省略時はこの値
+>
+> [markdown.paddleocr_vl_local]
+> kind  = "offline_api"
+> url   = "http://127.0.0.1:8080"      # 末尾の /layout-parsing は不要
+> model = "PaddleOCR-VL-0.9B"          # 接頭辞 `PaddleOCR-VL` で照合
 > ```
+>
+> > **Markdownize の口は `POST {url}/layout-parsing` であって
+> > `/v1/chat/completions` ではない。** PaddleOCR-VL は 2 段構成で、
+> > OpenAI 互換の `genai_server` が提供するのは段 2 (VLM 認識) だけであり、
+> > bbox もレイアウトも読み順も返らない。上流も OpenAI クライアントでの
+> > 直接利用を明示的に非推奨としている。詳細は
+> > `tasks/local-adapter-plan.md` §11 の V2。
+>
+> **secrets hold は offline_api にも適用する (2026-08-02 確定)。**
+> Tier A ([10 §1.1](10-operations.md)) として明示承認で取り込まれたファイルは、
+> `--send-secrets` が無い限り**ローカル Adapter にも渡さない**。上の (2) が
+> 免除したのは approvals[] / `allow_network` — すなわち「データが機械の外へ
+> 出るか」を問う gate であって、secrets hold が問うているのは**中身が資格情報か**
+> であり、送り先のネットワーク上の位置ではない。ローカルモデルサーバは
+> 別プロセス (多くはコンテナ) であり、プロンプトをログに残しうる。
+> **誤る向きが非対称である**ことが決め手で、緩い側で誤れば資格情報が
+> モデルサーバのログに落ちるが、厳しい側で誤ってもユーザーがフラグを
+> 1 つ足すだけで済む。
 >
 > **`tool_id` はテーブル名で表す。`[embedding]` の直下に `tool_id` は書けない**
 > (2026-07-28 訂正: 以前の例はそう書いていたが `KIO-E-CONFIG-SCHEMA-001` で
