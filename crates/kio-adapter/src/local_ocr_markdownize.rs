@@ -242,10 +242,33 @@ pub struct LayoutParsedPage {
 /// to the wrong figure is frozen for the life of the archive and can only be
 /// undone by re-running markdownize over everything.
 pub fn parse_layout_parsing(body: &Value) -> Result<Vec<LayoutParsedPage>> {
+    // The service answers inside an envelope — `{logId, errorCode, errorMsg,
+    // result}` — and the pages live under `result`, not at the top level.
+    // Measured 2026-08-02 against paddleocr-vl:latest-nvidia-gpu-offline; the
+    // earlier top-level reading came from the docs and matched nothing the
+    // server actually sends, so every real response was rejected.
+    //
+    // `errorCode` is checked before the payload because it rides on an HTTP
+    // 200: the transport is happy while the pipeline is not, and reading past
+    // it would turn a service-side failure into "a document with no pages".
+    if let Some(code) = body.get("errorCode").and_then(Value::as_i64) {
+        if code != 0 {
+            let message = body
+                .get("errorMsg")
+                .and_then(Value::as_str)
+                .unwrap_or("(no errorMsg)");
+            return Err(violation(format!(
+                "layout-parsing returned errorCode {code}: {message}"
+            )));
+        }
+    }
     let results = body
-        .get("layoutParsingResults")
+        .get("result")
+        .and_then(|result| result.get("layoutParsingResults"))
         .and_then(Value::as_array)
-        .ok_or_else(|| violation("layout-parsing response has no layoutParsingResults array"))?;
+        .ok_or_else(|| {
+            violation("layout-parsing response has no result.layoutParsingResults array")
+        })?;
     if results.is_empty() {
         return Err(violation("layout-parsing returned no pages"));
     }
@@ -389,11 +412,23 @@ fn parse_block_bbox(page_index: usize, block: &Value) -> Result<[i64; 4]> {
 /// reading `markdown.images`' keys — a map is sorted by key, and key order has
 /// nothing to do with where a figure sits on the page.
 fn markdown_image_paths(markdown: &str) -> Vec<String> {
-    let mut paths = Vec::new();
+    // Both spellings are collected with their byte offset and then sorted, so
+    // the result is document order regardless of which form each figure used.
+    // Order is the whole contract here: `pair_images_with_boxes` zips this list
+    // against the boxes, so a list in the wrong order silently mis-pairs bboxes.
+    let mut found: Vec<(usize, String)> = Vec::new();
+    collect_markdown_image_refs(markdown, &mut found);
+    collect_html_image_refs(markdown, &mut found);
+    found.sort_by_key(|(offset, _)| *offset);
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The CommonMark spelling, `![alt](target)`.
+fn collect_markdown_image_refs(markdown: &str, found: &mut Vec<(usize, String)>) {
     let bytes = markdown.as_bytes();
     let mut cursor = 0;
-    while let Some(found) = markdown[cursor..].find("![") {
-        let open = cursor + found;
+    while let Some(offset) = markdown[cursor..].find("![") {
+        let open = cursor + offset;
         let Some(alt_end) = markdown[open..].find("](") else {
             break;
         };
@@ -403,14 +438,43 @@ fn markdown_image_paths(markdown: &str) -> Vec<String> {
         };
         let target = markdown[target_start..target_start + target_len].trim();
         if !target.is_empty() {
-            paths.push(target.to_owned());
+            found.push((open, target.to_owned()));
         }
         cursor = target_start + target_len + 1;
         if cursor >= bytes.len() {
             break;
         }
     }
-    paths
+}
+
+/// The spelling PaddleOCR-VL actually emits.
+///
+/// Measured 2026-08-02: a figure comes back as
+/// `<div style="text-align: center;"><img src="imgs/img_in_chart_box_….jpg"
+/// alt="Image" width="82%" /></div>` — there is no `![](…)` anywhere in the
+/// Markdown, so scanning only for the CommonMark form found zero references
+/// while `markdown.images` carried one, and the count check rejected every page
+/// that had a figure on it.
+///
+/// Deliberately not a general HTML parser: it reads `src` out of `<img …>` and
+/// nothing else. Anything more would be inventing behaviour for inputs that
+/// have not been observed.
+fn collect_html_image_refs(markdown: &str, found: &mut Vec<(usize, String)>) {
+    // The same scan the rewriter uses (`replace_image_placeholders` reaches it
+    // through `next_markdown_image_target`). Sharing it is the point: if
+    // collection and rewriting disagreed about what an image reference is, the
+    // lists would desynchronise and bboxes would pair with the wrong figures.
+    let mut cursor = 0;
+    while let Some((start, end)) = crate::mistral_ocr::next_html_image_target(markdown, cursor) {
+        let target = markdown[start..end].trim();
+        if !target.is_empty() {
+            found.push((start, target.to_owned()));
+        }
+        cursor = end.saturating_add(1).min(markdown.len());
+        if cursor >= markdown.len() {
+            break;
+        }
+    }
 }
 
 /// Attach one box to one figure, or refuse.
@@ -828,17 +892,27 @@ pub struct MockLocalOcrClient;
 
 impl LocalOcrClient for MockLocalOcrClient {
     fn layout_parse(&self, _file_base64: &str, _file_type: LayoutFileType) -> Result<Value> {
+        // Shaped like the real envelope, measured 2026-08-02. A mock that
+        // answers in a shape the service does not send is worse than no mock:
+        // it turns CI green over a wire that cannot work, which is how the
+        // top-level `layoutParsingResults` reading survived until a GPU box
+        // finally sent a real response.
         Ok(json!({
-            "layoutParsingResults": [{
-                "prunedResult": {
-                    "parsing_res_list": [
-                        {"block_label": "text", "block_content": "Kio local OCR mock page.",
-                         "block_bbox": [10, 10, 500, 40], "block_id": 0, "block_order": 0}
-                    ]
-                },
-                "markdown": {"text": "Kio local OCR mock page.\n", "images": {}}
-            }],
-            "dataInfo": {}
+            "logId": "00000000-0000-0000-0000-000000000000",
+            "errorCode": 0,
+            "errorMsg": "Success",
+            "result": {
+                "dataInfo": {"width": 1240, "height": 1754, "type": "image"},
+                "layoutParsingResults": [{
+                    "prunedResult": {
+                        "parsing_res_list": [
+                            {"block_label": "text", "block_content": "Kio local OCR mock page.",
+                             "block_bbox": [10, 10, 500, 40], "block_id": 0, "block_order": null}
+                        ]
+                    },
+                    "markdown": {"text": "Kio local OCR mock page.\n", "images": {}}
+                }]
+            }
         }))
     }
 }
@@ -847,12 +921,22 @@ impl LocalOcrClient for MockLocalOcrClient {
 mod tests {
     use super::*;
 
+    /// The envelope the service actually sends (measured 2026-08-02): pages sit
+    /// under `result`, beside a `dataInfo`, with `logId`/`errorCode`/`errorMsg`
+    /// outside it. Tests build the real shape so that a schema regression fails
+    /// here rather than only on a GPU box.
     fn page_body(markdown: &str, images: Value, blocks: Value) -> Value {
         json!({
-            "layoutParsingResults": [{
-                "prunedResult": {"parsing_res_list": blocks},
-                "markdown": {"text": markdown, "images": images}
-            }]
+            "logId": "00000000-0000-0000-0000-000000000000",
+            "errorCode": 0,
+            "errorMsg": "Success",
+            "result": {
+                "dataInfo": {"width": 1240, "height": 1754, "type": "image"},
+                "layoutParsingResults": [{
+                    "prunedResult": {"parsing_res_list": blocks},
+                    "markdown": {"text": markdown, "images": images}
+                }]
+            }
         })
     }
 
@@ -916,6 +1000,67 @@ mod tests {
     }
 
     #[test]
+    fn the_html_figure_markup_the_service_really_emits_is_paired() {
+        // Verbatim from a 2026-08-02 capture against
+        // paddleocr-vl:latest-nvidia-gpu-offline. PaddleOCR-VL wraps figures in
+        // a centred div and never writes `![](…)`, and it sends `block_order`
+        // as null, so both of those are reproduced exactly rather than tidied.
+        let body = page_body(
+            "# Quarterly Reliability Review\n\nprose\n\n<div style=\"text-align: center;\">\
+             <img src=\"imgs/img_in_chart_box_107_567_1130_1073.jpg\" alt=\"Image\" \
+             width=\"82%\" /></div>\n\n\n<div style=\"text-align: center;\">\
+             Figure 1: Incident count by month.</div>\n",
+            json!({"imgs/img_in_chart_box_107_567_1130_1073.jpg": png_base64()}),
+            json!([
+                {"block_label": "doc_title", "block_bbox": [106, 91, 840, 146], "block_order": null},
+                {"block_label": "text", "block_bbox": [102, 240, 1044, 356], "block_order": null},
+                {"block_label": "chart", "block_bbox": [107, 567, 1130, 1073], "block_order": null},
+                {"block_label": "figure_title", "block_bbox": [105, 1103, 667, 1136], "block_order": null},
+            ]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        let images = &pages[0].images;
+        assert_eq!(images.len(), 1, "the chart block is the only figure");
+        // Absolute pixels, straight through: the source page is 1240x1754 and
+        // this box is the chart's real position on it.
+        assert_eq!(images[0].bbox, Some([107, 567, 1130, 1073]));
+        // `figure_title` is a caption, not a figure — it must not become an image.
+        assert_eq!(pages[0].images.len(), 1);
+    }
+
+    #[test]
+    fn both_image_spellings_come_back_in_document_order() {
+        // Mixed on purpose: sorting by offset is what keeps the zip in
+        // `pair_images_with_boxes` aligned with the boxes.
+        let markdown = "<img src=\"first.png\">\n\n![](second.png)\n\n<IMG SRC='third.png'/>\n";
+        assert_eq!(
+            markdown_image_paths(markdown),
+            vec![
+                "first.png".to_owned(),
+                "second.png".to_owned(),
+                "third.png".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_img_tag_does_not_hang_or_invent_a_path() {
+        for markdown in [
+            "<img",
+            "<img>",
+            "<img src=>",
+            "<img src=\"unterminated",
+            "<img src=''>",
+            "<img alt=\"no src\">",
+        ] {
+            assert!(
+                markdown_image_paths(markdown).is_empty(),
+                "unexpected path from {markdown:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_figure_count_mismatch_fails_rather_than_guessing() {
         // Two references, one figure block. Any pairing here would be a guess,
         // and 07 §9 would freeze it permanently.
@@ -961,7 +1106,10 @@ mod tests {
         // has to point at the endpoint, because "no bboxes" is otherwise
         // indistinguishable from "a page with no figures".
         let body = json!({
-            "layoutParsingResults": [{"markdown": {"text": "recognized text\n"}}]
+            "errorCode": 0,
+            "result": {
+                "layoutParsingResults": [{"markdown": {"text": "recognized text\n"}}]
+            }
         });
         let error = parse_layout_parsing(&body).unwrap_err().to_string();
         assert!(error.contains("genai_server"), "{error}");
@@ -969,8 +1117,31 @@ mod tests {
 
     #[test]
     fn an_empty_result_array_is_rejected() {
-        let body = json!({"layoutParsingResults": []});
+        let body = json!({"errorCode": 0, "result": {"layoutParsingResults": []}});
         assert!(parse_layout_parsing(&body).is_err());
+    }
+
+    #[test]
+    fn pages_at_the_top_level_are_not_accepted() {
+        // The pre-2026-08-02 reading. Keeping it rejected means a future change
+        // back to the documented-but-wrong shape cannot pass silently.
+        let body = json!({"layoutParsingResults": [{"markdown": {"text": "x\n"}}]});
+        let error = parse_layout_parsing(&body).unwrap_err().to_string();
+        assert!(error.contains("result.layoutParsingResults"), "{error}");
+    }
+
+    #[test]
+    fn a_nonzero_error_code_is_not_read_past() {
+        // The service returns HTTP 200 and reports failure in the body, so the
+        // transport cannot catch this one.
+        let body = json!({
+            "errorCode": 500,
+            "errorMsg": "Internal error",
+            "result": {"layoutParsingResults": []}
+        });
+        let error = parse_layout_parsing(&body).unwrap_err().to_string();
+        assert!(error.contains("errorCode 500"), "{error}");
+        assert!(error.contains("Internal error"), "{error}");
     }
 
     #[test]
@@ -1157,10 +1328,10 @@ mod tests {
     #[test]
     fn supplied_hints_select_pages_instead_of_minting_new_ones() {
         let client = RecordingClient {
-            body: json!({"layoutParsingResults": [
+            body: json!({"errorCode": 0, "result": {"layoutParsingResults": [
                 {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "one\n"}},
                 {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "two\n"}},
-            ]}),
+            ]}}),
             seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         let mut request = request("application/pdf");

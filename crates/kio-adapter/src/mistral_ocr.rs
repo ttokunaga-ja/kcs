@@ -1648,13 +1648,65 @@ fn project_bbox_annotations(markdown: &str, scope_id: &str, images: &[OcrImage])
     Ok(output)
 }
 
+/// The next image target at or after `cursor`, in either spelling.
+///
+/// Mistral writes CommonMark `![](…)`. PaddleOCR-VL writes HTML `<img src="…">`
+/// and never the CommonMark form (measured 2026-08-02), so a rewriter that
+/// knows only the first leaves relative `imgs/…` paths in the normalized
+/// Markdown — which is precisely what Stage 1.5's `related_images[]` cannot
+/// read. Whichever spelling appears first wins, so the replacement order stays
+/// document order for a page that mixes them.
 fn next_markdown_image_target(markdown: &str, cursor: usize) -> Option<(usize, usize)> {
+    match (
+        next_commonmark_image_target(markdown, cursor),
+        next_html_image_target(markdown, cursor),
+    ) {
+        (Some(commonmark), Some(html)) => Some(if commonmark.0 <= html.0 { commonmark } else { html }),
+        (found, None) | (None, found) => found,
+    }
+}
+
+fn next_commonmark_image_target(markdown: &str, cursor: usize) -> Option<(usize, usize)> {
     let image_start = markdown[cursor..].find("![")? + cursor;
     let label_end = markdown[image_start + 2..].find("](")? + image_start + 2;
     let target_start = label_end + 2;
     let relative_end = markdown[target_start..].find(')')?;
     let target_end = target_start + relative_end;
     Some((target_start, target_end))
+}
+
+/// Byte range of the `src` value of the next `<img …>` at or after `cursor`.
+///
+/// Shared with [`crate::local_ocr_markdownize`] on purpose: the code that
+/// *collects* references and the code that *rewrites* them must agree on what
+/// counts as one, or the two lists desynchronise and bboxes pair with the wrong
+/// figures. Deliberately not a general HTML parser — it reads `src` out of
+/// `<img …>` and nothing else.
+pub(crate) fn next_html_image_target(markdown: &str, cursor: usize) -> Option<(usize, usize)> {
+    // ASCII lowercasing preserves byte offsets, so indices into `lower` index
+    // `markdown` too.
+    let lower = markdown.to_ascii_lowercase();
+    let mut scan = cursor;
+    while scan < markdown.len() {
+        let tag_start = lower[scan..].find("<img")? + scan;
+        let tag_end = lower[tag_start..]
+            .find('>')
+            .map_or(markdown.len(), |end| tag_start + end);
+        if let Some(src) = lower[tag_start..tag_end].find("src=") {
+            let value_start = tag_start + src + "src=".len();
+            if let Some(&quote) = markdown.as_bytes().get(value_start) {
+                if quote == b'"' || quote == b'\'' {
+                    let inner = value_start + 1;
+                    if let Some(len) = markdown[inner..tag_end].find(quote as char) {
+                        return Some((inner, inner + len));
+                    }
+                }
+            }
+        }
+        // Past the '>' — a malformed tag must not spin here.
+        scan = tag_end.saturating_add(1);
+    }
+    None
 }
 
 #[cfg(test)]
