@@ -13,25 +13,46 @@
 # 任務
 
 **Stage 3 のローカル OCR 経路が、実際の PaddleOCR-VL サーバに対して動くことを確かめ、
-コードが「文書から起こした推測」で持っている 3 つの値を実測へ置き換える。**
+コードが「文書から起こした推測」で持っている値を実測へ置き換える。**
 
-Stage 3 のコードは 2026-08-02 に完成し、mock で end-to-end に通っている
-(`cargo test`: 1477 passed)。**しかし実サーバには 1 度も接続していない。**
-応答 schema は公式ドキュメントから起こしたもので、実物を見ていない。
+## 第 1 回の結果 [2026-08-02/03]
+
+**1 度目の実機接続は済んでいる。**そこで応答 schema が 2 箇所で誤っていることが分かり、
+どちらも直して push した (`1feed04` / `1194dba` / `86d4508`、`cargo test`: 1487 passed)。
+
+- **ページは top-level に無い** — `{logId, errorCode, errorMsg, result}` の封筒の中。
+  `errorCode` は HTTP 200 に乗って返るので、先に検査しないとサービス側の失敗が
+  「ページの無い文書」に化ける
+- **図は CommonMark で来ない** — `<div style="text-align: center;"><img src="…"></div>`。
+  `![](…)` はどこにも無い
+- **`block_order` は全ブロックで `null`** — doc が言う読み順は実在しなかった
+
+**この 3 つを直した結果、正規化後の Markdown のバイト列が変わっている。**
+`<img>` は `![](…)` へ、`<div>` は中身を残して除去される。つまり
+**第 1 回で OCR 済みの文書は作り直しになる** (`.kio` を消して index し直すこと)。
 
 ---
 
-# なぜこれが要るのか — 3 つの未実測値
+# 残っている未実測値
 
 | # | 値 | いまの状態 | 誤っていると何が起きるか |
 |---|---|---|---|
-| **A** | `/layout-parsing` の応答 schema | ドキュメント由来 | `parse_layout_parsing` が実応答を弾く。**あるいはもっと悪く、黙って別の解釈をする** |
-| **B** | `LOCAL_OCR_MODEL_VERSION_PIN` | `unmeasured:` のプレースホルダ | 03 §5.1 が要求する重みの sha256 が無い。**採用できない** |
-| **C** | 決定性 | 未確認 | 07 §9 の first-instance-wins で**ブレが永久凍結される** |
+| **C** | 決定性 | **未実測** | 07 §9 の first-instance-wins で**ブレが永久凍結される** |
+| **B** | `LOCAL_OCR_MODEL_VERSION_PIN` | **`unmeasured:` のプレースホルダ** | 03 §5.1 が要求する重みの sha256 が無い。**採用できない** |
+| **D** | 図が 2 つ以上のページ | **未実測** | `block_order` が全 null なので配列順に縮退する。読み順と違えば **bbox が入れ替わったまま凍結** |
+| **E** | 表がどう来るか | **未実測** | 表が HTML なら、**表を含むページは今は失敗する** (下記) |
+| A | 応答 schema | 第 1 回で実測・反映済み | 未知の形が残っていれば `parse_layout_parsing` が弾く |
 
 **C が最も取り返しがつかない。** `/layout-parsing` には `temperature` も `seed` も
 渡す口が無く、決定性はサーバ設定の責務である。同一入力が 2 回で違う結果を返すなら、
 最初の 1 回がアーカイブの寿命ぶん固定される。
+
+**E について先に断っておく。** 07 §5 は生 HTML を禁じており、adapter は実測された
+`<div>` だけを剥がす。それ以外の生 HTML が残ったページは **offline 経路が拒否する**
+(`status: failed` / `fallback_reason: contract_violation`、索引には何も入らない)。
+**表が HTML で来るなら表を含むページは失敗する。これは意図した挙動**で、非適合の
+unit を永久凍結させるより安いという判断である。失敗したこと自体が求めている実測なので、
+**失敗しても「壊れた」とは報告しないでよい** — 生の `markdown.text` を添付してほしい。
 
 ---
 
@@ -170,13 +191,25 @@ url   = "http://127.0.0.1:8080"   # 末尾の /layout-parsing は不要。loopba
 model = "PaddleOCR-VL-0.9B"       # 実際に動いている名前に合わせる (接頭辞 PaddleOCR-VL で照合)
 ```
 
+**第 1 回で作った `.kio` は使い回さないこと。**正規化後のバイト列が変わっており、
+07 §9 の first-instance-wins は最初の結果を保持するので、古い索引の上で index し直しても
+新しい正規化は反映されない。`rm -rf .kio` するか、新しいディレクトリで始める。
+
 ```bash
-mkdir -p /tmp/kio-ocr && cd /tmp/kio-ocr
+rm -rf /tmp/kio-ocr && mkdir -p /tmp/kio-ocr && cd /tmp/kio-ocr
 cp <スキャン PDF (テキストレイヤ無し)> ./scan.pdf
 kio init
 kio index --approve --offline     # --offline でよい。07 §3 が offline_api を止めない
 kio search "<PDF 中の語>"
 ```
+
+**PDF は 3 種類ほしい** (別々に index して構わない):
+
+| | 何を測るか |
+|---|---|
+| 図が 1 つのページ | 第 1 回の再現 + `related_images[]` |
+| **図が 2 つ以上のページ** | 読み順。`block_order` が全 null なので配列順に落ちる |
+| **表を含むページ** | 表が HTML で来るか。来るなら拒否されるはず |
 
 **期待**:
 
