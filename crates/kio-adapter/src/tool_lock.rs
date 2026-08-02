@@ -264,6 +264,108 @@ const EMBEDDING_RUNTIME_TARGETS: &[EmbeddingRuntimeTarget] = &[
     },
 ];
 
+/// One markdownize implementation this build can execute (07 §5.2).
+///
+/// The same generalization the embedding role got, and for the same reason: the
+/// markdown arm hard-coded Mistral's name and `online_api`, which left
+/// `offline_api` unreachable for this role no matter what `tools.toml` said.
+struct MarkdownRuntimeTarget {
+    tool_id: &'static str,
+    /// `execution_mode` as spelled in `tools.toml`.
+    kind: &'static str,
+    /// A declared `model` must start with this. A prefix rather than an exact
+    /// string because both vendors version the name in place —
+    /// `mistral-ocr-2505`, `PaddleOCR-VL-1.6-0.9B` — and 03 §5.1 pins the
+    /// weights by digest, so the name is a routing hint, not the identity.
+    model_prefix: &'static str,
+}
+
+pub(crate) const LOCAL_OCR_TOOL_ID: &str = "paddleocr_vl_local";
+
+const MARKDOWN_RUNTIME_TARGETS: &[MarkdownRuntimeTarget] = &[
+    MarkdownRuntimeTarget {
+        tool_id: "mistral_ocr_markdownize",
+        kind: "online_api",
+        model_prefix: "mistral-ocr-",
+    },
+    MarkdownRuntimeTarget {
+        tool_id: LOCAL_OCR_TOOL_ID,
+        kind: "offline_api",
+        model_prefix: "PaddleOCR-VL",
+    },
+];
+
+/// Which markdown target a declaration means.
+///
+/// Mirrors [`embedding_runtime_target`], including its caveat: resolving the
+/// flat `[markdown]` form by `kind` is unambiguous only while one target exists
+/// per kind. A second offline markdownize implementation — which is what
+/// Sarashina2.2-OCR would be, once it can be served at all — must make
+/// `tool_id` mandatory rather than let this pick one.
+fn markdown_runtime_target(
+    tool_id: Option<&str>,
+    table: &toml::value::Table,
+) -> Result<&'static MarkdownRuntimeTarget> {
+    if let Some(tool_id) = tool_id {
+        return MARKDOWN_RUNTIME_TARGETS
+            .iter()
+            .find(|target| target.tool_id == tool_id)
+            .ok_or_else(|| {
+                AdapterError::ConfigSchema(format!(
+                    "unsupported markdown adapter `{tool_id}`; this build executes only {}",
+                    supported_markdown_tool_ids()
+                ))
+            });
+    }
+    let kind = table
+        .get("kind")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("online_api");
+    MARKDOWN_RUNTIME_TARGETS
+        .iter()
+        .find(|target| target.kind == kind)
+        .ok_or_else(|| {
+            AdapterError::ConfigSchema(format!(
+                "tools.toml `markdown.kind` must be `online_api` or `offline_api` (got `{kind}`)"
+            ))
+        })
+}
+
+fn supported_markdown_tool_ids() -> String {
+    MARKDOWN_RUNTIME_TARGETS
+        .iter()
+        .map(|target| format!("`{}`", target.tool_id))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The execution-time twin of [`markdown_runtime_target`].
+fn declared_markdown_runtime_target(
+    declared: &DeclaredAdapter,
+) -> Result<&'static MarkdownRuntimeTarget> {
+    if let Some(tool_id) = declared.tool_id.as_deref() {
+        return MARKDOWN_RUNTIME_TARGETS
+            .iter()
+            .find(|target| target.tool_id == tool_id)
+            .ok_or_else(|| {
+                AdapterError::ConfigSchema(format!(
+                    "declared markdown adapter `{tool_id}` does not match any effective runtime \
+                     ({})",
+                    supported_markdown_tool_ids()
+                ))
+            });
+    }
+    let kind = declared.kind.as_deref().unwrap_or("online_api");
+    MARKDOWN_RUNTIME_TARGETS
+        .iter()
+        .find(|target| target.kind == kind)
+        .ok_or_else(|| {
+            AdapterError::ConfigSchema(format!(
+                "declared markdown kind `{kind}` does not match any effective runtime"
+            ))
+        })
+}
+
 /// Which target a declaration means.
 ///
 /// A `[embedding.<tool_id>]` section names it outright. The flat `[embedding]`
@@ -397,27 +499,43 @@ fn validate_supported_runtime_target(
     tool_id: Option<&str>,
     table: &toml::value::Table,
 ) -> Result<()> {
-    let unsupported_target =
-        table.contains_key("cmd") || table.contains_key("args") || table.contains_key("url");
+    // No shared `cmd || args || url` precheck any more: `url` is now legitimate
+    // on both roles when the resolved target is `offline_api`, so lumping it in
+    // with `cmd`/`args` would refuse the local adapters before their own arm
+    // could apply D1's loopback check.
     match role {
         "markdown" => {
-            if tool_id.is_some_and(|id| id != "mistral_ocr_markdownize") {
+            let target = markdown_runtime_target(tool_id, table)?;
+            // `cmd`/`args` stay refused for both kinds, exactly as on the
+            // embedding role: Kio never spawns a process (05 §5), and the
+            // external dispatcher that would is still future work (07 §7).
+            // `url` is what an offline_api target needs, and it is admissible
+            // only after the D1 loopback check.
+            if table.contains_key("cmd") || table.contains_key("args") {
                 return Err(AdapterError::ConfigSchema(format!(
-                    "unsupported markdown adapter `{}`; this build executes only `mistral_ocr_markdownize`",
-                    tool_id.unwrap_or_default()
+                    "markdown cmd/args targets are unsupported by the built-in runtime (`{}`)",
+                    target.tool_id
                 )));
             }
-            if unsupported_target {
-                return Err(AdapterError::ConfigSchema(
-                    "markdown cmd/args/url targets are unsupported by the built-in Mistral runtime"
-                        .to_owned(),
-                ));
-            }
-            require_online_kind("markdown", table)?;
-            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
-                if !model.starts_with("mistral-ocr-") {
+            match table.get("url").and_then(toml::Value::as_str) {
+                Some(url) if target.kind == "offline_api" => {
+                    validate_offline_url("markdown", url)?;
+                }
+                Some(_) => {
                     return Err(AdapterError::ConfigSchema(format!(
-                        "unsupported markdown model `{model}` for the built-in Mistral runtime"
+                        "markdown url targets are unsupported for `{}`; only an \
+                         `offline_api` adapter may declare one",
+                        target.tool_id
+                    )));
+                }
+                None => {}
+            }
+            require_declared_kind("markdown", table, target.kind)?;
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
+                if !model.starts_with(target.model_prefix) {
+                    return Err(AdapterError::ConfigSchema(format!(
+                        "unsupported markdown model `{model}`; expected a `{}` model for `{}`",
+                        target.model_prefix, target.tool_id
                     )));
                 }
             }
@@ -503,10 +621,10 @@ fn validate_supported_runtime_target(
     Ok(())
 }
 
-fn require_online_kind(role: &str, table: &toml::value::Table) -> Result<()> {
-    require_declared_kind(role, table, "online_api")
-}
-
+/// `expected` always comes from a resolved runtime target now. The former
+/// `require_online_kind` wrapper is gone with its last caller: hard-coding
+/// `online_api` is exactly the assumption that kept `offline_api` unreachable
+/// for the markdown role.
 fn require_declared_kind(role: &str, table: &toml::value::Table, expected: &str) -> Result<()> {
     if table
         .get("kind")
@@ -987,16 +1105,14 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
     } else {
         None
     };
-    if role == "markdown" {
-        if let Some(actual) = declared.tool_id.as_deref() {
-            if actual != "mistral_ocr_markdownize" {
-                return Err(AdapterError::ConfigSchema(format!(
-                    "declared {role} adapter `{actual}` does not match effective runtime \
-                     `mistral_ocr_markdownize`"
-                )));
-            }
-        }
-    }
+    // Resolved for the same reason as the embedding target: this gate runs at
+    // execution time, so a relaxation applied only to the config-load gate
+    // would accept a declaration at startup and refuse it at the moment of use.
+    let markdown_target = if role == "markdown" {
+        Some(declared_markdown_runtime_target(declared)?)
+    } else {
+        None
+    };
     if matches!(role, "markdown" | "embedding")
         && (declared.cmd.is_some() || !declared.args.is_empty())
     {
@@ -1004,18 +1120,28 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
             "declared {role} target cannot be executed by the built-in runtime"
         )));
     }
-    match (declared.url.as_deref(), embedding_target) {
-        (Some(url), Some(target)) if target.kind == "offline_api" => {
-            validate_offline_url("embedding", url)?;
+    // A `url` is admissible only on an `offline_api` target, and only after the
+    // D1 literal-loopback check — for either role.
+    let offline_url_role = match (embedding_target, markdown_target) {
+        (Some(target), _) if target.kind == "offline_api" => Some("embedding"),
+        (_, Some(target)) if target.kind == "offline_api" => Some("markdown"),
+        _ => None,
+    };
+    match (declared.url.as_deref(), offline_url_role) {
+        (Some(url), Some(url_role)) => {
+            validate_offline_url(url_role, url)?;
         }
-        (Some(_), _) if matches!(role, "markdown" | "embedding") => {
+        (Some(_), None) if matches!(role, "markdown" | "embedding") => {
             return Err(AdapterError::ConfigSchema(format!(
                 "declared {role} target cannot be executed by the built-in runtime"
             )));
         }
         _ => {}
     }
-    let expected_kind = embedding_target.map_or("online_api", |target| target.kind);
+    let expected_kind = embedding_target
+        .map(|target| target.kind)
+        .or(markdown_target.map(|target| target.kind))
+        .unwrap_or("online_api");
     if matches!(role, "markdown" | "embedding")
         && declared
             .kind
@@ -1025,6 +1151,18 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
         return Err(AdapterError::ConfigSchema(format!(
             "declared {role} kind does not match effective `{expected_kind}` runtime"
         )));
+    }
+    if let Some(target) = markdown_target {
+        if declared
+            .model
+            .as_deref()
+            .is_some_and(|model| !model.starts_with(target.model_prefix))
+        {
+            return Err(AdapterError::ConfigSchema(format!(
+                "declared markdown model does not match effective `{}` runtime",
+                target.tool_id
+            )));
+        }
     }
     if let Some(target) = embedding_target {
         if declared
@@ -1038,16 +1176,11 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
             )));
         }
     }
-    if role == "markdown"
-        && declared
-            .model
-            .as_deref()
-            .is_some_and(|model| !model.starts_with("mistral-ocr-"))
-    {
-        return Err(AdapterError::ConfigSchema(
-            "declared markdown model is not supported by the Mistral OCR runtime".to_owned(),
-        ));
-    }
+    // The Mistral-prefixed markdown model check that used to live here is gone:
+    // the `markdown_target` block above does the same job against the resolved
+    // target's prefix. Leaving both in place made the local pipeline pass the
+    // first check and fail the second with a message naming Mistral, which is
+    // precisely the two-gates-disagree failure this function exists to prevent.
     Ok(())
 }
 
@@ -1309,11 +1442,99 @@ auth = "env:MISTRAL_API_KEY"
              cmd = \"vllm\"\n"
         );
         assert!(validate_tools_toml(cmd_entry.as_bytes()).is_err());
-        // markdown has no offline target yet (Stage 3), so it stays online-only.
+        // Stage 3 added an offline markdown target, and this must stay failing:
+        // the relaxation is per-target, not per-role. Mistral OCR is a cloud
+        // API, so declaring it `offline_api` is a claim about the network that
+        // is simply untrue.
         assert!(validate_tools_toml(
             b"[markdown.mistral_ocr_markdownize]\nkind = \"offline_api\"\n"
         )
         .is_err());
+        // Symmetrically, the local pipeline may not be declared online.
+        let online_local = format!("[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"online_api\"\n");
+        assert!(validate_tools_toml(online_local.as_bytes()).is_err());
+        // And an online markdown target still cannot name a url.
+        assert!(validate_tools_toml(
+            b"[markdown.mistral_ocr_markdownize]\nurl = \"http://127.0.0.1:8118\"\n"
+        )
+        .is_err());
+        let cmd_local = format!(
+            "[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"offline_api\"\ncmd = \"paddleocr\"\n"
+        );
+        assert!(validate_tools_toml(cmd_local.as_bytes()).is_err());
+    }
+
+    /// Stage 3 (07 §3 / D1): the markdown role gets the same offline target
+    /// treatment the embedding role got, resolved from the same kind of table.
+    #[test]
+    fn offline_markdown_accepts_only_a_loopback_url() {
+        let entry = |url: &str| {
+            format!(
+                "[markdown.{LOCAL_OCR_TOOL_ID}]\n\
+                 kind = \"offline_api\"\n\
+                 url = \"{url}\"\n\
+                 model = \"PaddleOCR-VL-0.9B\"\n"
+            )
+        };
+
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+            "unix:/tmp/kio-ocr.sock",
+        ] {
+            validate_tools_toml(entry(url).as_bytes())
+                .unwrap_or_else(|error| panic!("{url} must be accepted: {error}"));
+        }
+
+        for url in [
+            "http://localhost.evil.example",
+            "https://api.example.com",
+            "http://10.0.0.5:8080",
+        ] {
+            let error = validate_tools_toml(entry(url).as_bytes())
+                .expect_err(&format!("{url} must be rejected"));
+            assert!(
+                error.to_string().contains("KIO-E-CONFIG-OFFLINE-URL-001"),
+                "{url} must be refused as a non-loopback target, got: {error}"
+            );
+        }
+    }
+
+    /// The model name is checked by prefix because upstream versions it in
+    /// place — `PaddleOCR-VL-0.9B` became `PaddleOCR-VL-1.6-0.9B` — while
+    /// 03 §5.1 pins the weights by digest. A name from the *other* target is
+    /// still refused, which is what stops a copy-pasted Mistral entry from
+    /// being accepted as the local one.
+    #[test]
+    fn markdown_models_are_matched_against_their_own_target() {
+        for model in ["PaddleOCR-VL-0.9B", "PaddleOCR-VL-1.6-0.9B"] {
+            let entry = format!(
+                "[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"offline_api\"\nmodel = \"{model}\"\n"
+            );
+            validate_tools_toml(entry.as_bytes())
+                .unwrap_or_else(|error| panic!("{model} must be accepted: {error}"));
+        }
+        let crossed = format!(
+            "[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"offline_api\"\nmodel = \"mistral-ocr-2505\"\n"
+        );
+        assert!(validate_tools_toml(crossed.as_bytes()).is_err());
+        assert!(validate_tools_toml(
+            b"[markdown.mistral_ocr_markdownize]\nmodel = \"PaddleOCR-VL-0.9B\"\n"
+        )
+        .is_err());
+    }
+
+    /// An unknown markdown tool_id must name what this build *can* run, the
+    /// way the embedding role's error does — otherwise the operator learns only
+    /// that their name was wrong, not what to write instead.
+    #[test]
+    fn an_unknown_markdown_tool_id_lists_the_supported_ones() {
+        let error = validate_tools_toml(b"[markdown.some_other_ocr]\nkind = \"offline_api\"\n")
+            .expect_err("unknown tool_id must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("mistral_ocr_markdownize"), "{message}");
+        assert!(message.contains(LOCAL_OCR_TOOL_ID), "{message}");
     }
 
     /// The execution-time gate must reach the same verdict as the config-load
@@ -1348,6 +1569,48 @@ auth = "env:MISTRAL_API_KEY"
             ..DeclaredAdapter::default()
         };
         assert!(validate_declared_runtime_target("embedding", &wrong_model).is_err());
+    }
+
+    /// Stage 3's half of the same agreement. The execution-time gate is the one
+    /// that runs at the moment a document is sent, so a markdown relaxation
+    /// applied only to the config-load gate would accept the local pipeline at
+    /// startup and then refuse it mid-index.
+    #[test]
+    fn declared_markdown_target_agrees_with_the_config_gate() {
+        let offline = |url: &str| DeclaredAdapter {
+            tool_id: Some(LOCAL_OCR_TOOL_ID.to_owned()),
+            kind: Some("offline_api".to_owned()),
+            url: Some(url.to_owned()),
+            model: Some("PaddleOCR-VL-0.9B".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        validate_declared_runtime_target("markdown", &offline("http://127.0.0.1:8080")).unwrap();
+        let error =
+            validate_declared_runtime_target("markdown", &offline("https://ocr.example.com"))
+                .expect_err("a remote url must be refused at execution time too");
+        assert!(error.to_string().contains("KIO-E-CONFIG-OFFLINE-URL-001"));
+
+        // The online markdown target is unchanged: still no url.
+        let online_with_url = DeclaredAdapter {
+            tool_id: Some("mistral_ocr_markdownize".to_owned()),
+            url: Some("http://127.0.0.1:8080".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        assert!(validate_declared_runtime_target("markdown", &online_with_url).is_err());
+
+        let crossed_model = DeclaredAdapter {
+            tool_id: Some(LOCAL_OCR_TOOL_ID.to_owned()),
+            kind: Some("offline_api".to_owned()),
+            model: Some("mistral-ocr-2505".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        assert!(validate_declared_runtime_target("markdown", &crossed_model).is_err());
+
+        let unknown = DeclaredAdapter {
+            tool_id: Some("some_other_ocr".to_owned()),
+            ..DeclaredAdapter::default()
+        };
+        assert!(validate_declared_runtime_target("markdown", &unknown).is_err());
     }
 
     #[test]

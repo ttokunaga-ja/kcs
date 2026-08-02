@@ -838,7 +838,7 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 |---|---|
 | S3-A seam + `POST /layout-parsing` クライアント | ✅ |
 | S3-B 応答写像 (markdown / images / bbox) | ✅ |
-| S3-C tool_lock ゲートへの tool_id 登録 | ⬜ |
+| S3-C tool_lock ゲートへの tool_id 登録 | ✅ |
 | S3-D CLI 配線 (consent / ledger / batch lane) | ⬜ |
 | 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ⬜ **未測定** |
 | 実サーバでの受け入れ検査 | ⬜ GPU 実機が要る |
@@ -861,6 +861,13 @@ digest ではない。**採用時に重みを落として sha256 を採ること
 > **応答 schema は一次資料 (公式ドキュメント) から起こしたもので、実サーバの
 > 応答を見て書いたものではない。**実機で初めて回すときは、まず生の応答を 1 本
 > 記録して `parse_layout_parsing` のテストへ足すこと。
+
+**S3-C で計画書 §6 の「ゲートは 2 つある」が実際に効いた。** markdown role を
+tool_id ごとの表へ一般化したあと、`validate_declared_runtime_target` の**末尾に
+Mistral の model prefix をベタ書きした 3 つ目の判定が残っており**、ローカル
+pipeline が config 読込ゲートを通ったあと実行時ゲートで「Mistral OCR runtime では
+未対応」と落ちた。両ゲートの一致を主張するテストが先に落ちたので気付けた。
+**embedding のときと同じ罠が、同じ関数の別の場所に埋まっていた。**
 
 ---
 
