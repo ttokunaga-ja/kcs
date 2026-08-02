@@ -1053,6 +1053,47 @@ HTML 表を返し、タスクが `failed` / `contract_violation` で止まり ch
 できないことを確認する。配線しただけで一度も発火を見ない検査は、まさに今回
 助言のまま放置されていたものと同じである。
 
+### S3-F — 実機 2 回目で決着した 2 点 [2026-08-03 裁定]
+
+GPU 実機の第 2 回で実測が付いたので、保留していた 2 点を裁定した。
+**どちらも「現状維持」**であり、変更は入れていない。記録する目的は、
+同じ調査を繰り返させないことと、次に動かすときの前提を残すことである。
+
+#### 表は HTML で来る。**拒否のままとする**
+
+実測 (2026-08-03、`paddleocr-vl:latest-nvidia-gpu-offline`): PaddleOCR-VL は表を
+**GFM のパイプ記法では返さない**。返ってくるのは
+
+```html
+<table border=1 style='margin: auto; word-wrap: break-word;'><tr><td style='...'>Data class</td>…</table>
+```
+
+で、`<div>` は含まれない。したがって `unwrap_presentational_html` では剥がれず、
+[07 §5](../docs/07-adapter-spec.md) の「生 HTML 禁止」に触れて
+`raw HTML and autolinks are forbidden` で拒否される。**表を含むページは索引に入らない。**
+
+→ **裁定: 拒否のままとする。** GFM へ変換すればページは通るが、`colspan`/`rowspan`・
+セル内のパイプや改行のエスケープを伴う**損失のある変換**であり、
+07 §9 の first-instance-wins でその結果が恒久化される。
+「非適合の unit を永久凍結させるより、拒否のほうが安い」という `86d4508` の判断は、
+変換の損失に対しても同じように成り立つ。変換を入れるなら、
+**何を落とすかを決めてからにする**。
+
+> **`§3.2` の表の「表→HTML」は Sarashina2.2-OCR の欄だった。**
+> PaddleOCR-VL については未実測のままだったので、ここで埋まったことになる。
+
+#### 拒否されたページの画像オブジェクトは残る。**現状維持とする**
+
+実測: unit が acceptance で拒否されても、`.kio/objects/image/` には画像オブジェクトが
+書かれている (図 2 つのページで 2 個)。`normalized_units` と `chunks` は 0 のままなので、
+**「索引には何も入らない」は index については真**だが、object store には参照されない
+object が残る。`persist_pages_images` が unit の構築より前に走るためである。
+
+→ **裁定: 現状維持。** object は content-addressed なので、参照されない object が
+残っても **identity を汚さない** — 同じページが後で通れば同じ hash で再利用される。
+繰り返し失敗しても内容が同じなら増えない。これを塞ぐには永続化を adapter から
+CLI の acceptance の後ろへ移す必要があり、クレート境界をまたぐ変更に見合わない。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image
