@@ -636,6 +636,26 @@ impl<C> LocalOcrMarkdownizeAdapter<C> {
     }
 }
 
+impl<C: LocalOcrClient + 'static> LocalOcrMarkdownizeAdapter<C> {
+    /// Attach the store and the verified bytes and hand back a trait object.
+    ///
+    /// Exists so the catalog's two arms differ only in the client they build:
+    /// both need the same two attachments, and spelling them twice is how one
+    /// arm ends up shipping without an image store and silently producing
+    /// empty `related_images[]`.
+    #[must_use]
+    pub fn into_boxed(
+        self,
+        kio_dir: &Path,
+        verified_raw_bytes: &[u8],
+    ) -> Box<dyn MarkdownizeAdapter> {
+        Box::new(
+            self.with_image_store(kio_dir.to_path_buf())
+                .with_verified_raw_bytes(verified_raw_bytes.to_vec()),
+        )
+    }
+}
+
 impl<C: LocalOcrClient> MarkdownizeAdapter for LocalOcrMarkdownizeAdapter<C> {
     fn profile(&self) -> AdapterProfile {
         profile_for(self.execution)

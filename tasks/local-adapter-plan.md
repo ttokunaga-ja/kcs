@@ -839,7 +839,8 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 | S3-A seam + `POST /layout-parsing` クライアント | ✅ |
 | S3-B 応答写像 (markdown / images / bbox) | ✅ |
 | S3-C tool_lock ゲートへの tool_id 登録 | ✅ |
-| S3-D CLI 配線 (consent / ledger / batch lane) | ⬜ |
+| S3-D resolver (`active_local_ocr_execution` / `local_ocr_markdownize_adapter`) | ✅ |
+| S3-D CLI 配線 | ⬜ **想定より大きい。下記** |
 | 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ⬜ **未測定** |
 | 実サーバでの受け入れ検査 | ⬜ GPU 実機が要る |
 
@@ -861,6 +862,39 @@ digest ではない。**採用時に重みを落として sha256 を採ること
 > **応答 schema は一次資料 (公式ドキュメント) から起こしたもので、実サーバの
 > 応答を見て書いたものではない。**実機で初めて回すときは、まず生の応答を 1 本
 > 記録して `parse_layout_parsing` のテストへ足すこと。
+
+### S3-D は「オフライン経路に挿す」では届かない [2026-08-02 実測]
+
+最初、ローカル OCR を `offline_markdownize_from_verified_bytes`
+(= deterministic のベースライン経路) に挿した。**間違いだった。**
+mock を有効にして index を回し、`tasks.jsonl` を読んで判った:
+
+```
+notes.md   done      (オフライン経路)
+scan.pdf   pending   output_ref = "online:mistral_ocr_markdownize"
+                     fallback_reason = "network_opt_in_required"
+```
+
+**スキャン PDF はオフライン経路に来ない。**テキストレイヤが無いので
+deterministic Prepare は unit を作らず、**online markdownize タスクとして
+enqueue される**。つまりあの位置に挿したローカル OCR が見るのは
+「すでにテキストが取れる文書」だけ — **OCR が要らない文書の集合**である。
+
+しかも**テキストレイヤ付き PDF では有害**になる。正確で無料の抽出を、
+不可逆な OCR に置き換えてしまう。
+
+→ **正しい位置は enrichment 経路**である。`offline_api` の markdownize
+adapter が有効なら、online タスクを作る代わりに**その場で満たす**。
+そこは ledger 予約・budget cap・secrets hold・auth revive・batch lane が
+絡む区画 (`execute_pending_markdownize_tasks` 周辺) なので、
+**S3-A/B/C とは規模が違う。**独立したチャンクとして立てること。
+
+> **この誤りは「profile が切り替わったか」だけを見るテストでは通ってしまう。**
+> 実際に通っていた。`tool-lock.json` の profile_hash は確かに入れ替わるからである。
+> 捕まえたのは**「mock が出すはずの本文が索引に入っているか」を見る 1 行**だった。
+> **profile の一致ではなく、生成物の由来を見ること。**profile だけ入れ替わって
+> 中身が別 adapter 由来、という状態が最悪で、アーカイブは触っていない内容に
+> ローカル pipeline の identity を主張することになる。
 
 **S3-C で計画書 §6 の「ゲートは 2 つある」が実際に効いた。** markdown role を
 tool_id ごとの表へ一般化したあと、`validate_declared_runtime_target` の**末尾に

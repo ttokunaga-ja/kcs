@@ -35,10 +35,29 @@ pub const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
 /// 17 test files, none of which should change meaning because a second
 /// implementation appeared.
 pub const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
+/// The offline markdownize seam, separate from both of the above for the same
+/// reason they are separate from each other: a test that drives local OCR must
+/// not accidentally switch the embedding backend, or vice versa.
+pub const TEST_LOCAL_OCR_ENV: &str = "KIO_TEST_LOCAL_OCR";
 
 /// Re-exported so the index path can gate image enrichment without naming the
 /// concrete local adapter module (which stays private, like `gemini_embedding`).
 pub use crate::local_embedding::IMAGE_OBJECT_CAPABILITY;
+
+use crate::local_ocr_markdownize::{
+    EnvLocalOcrClient, LayoutFileType, LocalOcrExecution, LocalOcrMarkdownizeAdapter,
+    MockLocalOcrClient,
+};
+
+/// Whether the local OCR pipeline can handle this media type at all.
+///
+/// Re-exported through the catalog so the CLI can ask without naming the
+/// adapter module: everything it cannot route stays on the deterministic
+/// built-in, which is the pre-Stage-3 behaviour for those types.
+#[must_use]
+pub fn local_ocr_handles_media_type(media_type: &str) -> bool {
+    LayoutFileType::from_media_type(media_type).is_ok()
+}
 
 #[must_use]
 pub fn builtin_prepare_profile() -> AdapterProfile {
@@ -61,6 +80,79 @@ pub fn standard_online_markdownize_profile_with_bbox(enabled: bool) -> AdapterPr
 
 pub fn builtin_offline_markdownize_adapter() -> Box<dyn MarkdownizeAdapter> {
     Box::new(DeterministicAdapter)
+}
+
+/// The active `offline_api` markdownize backend, or `None` when none is
+/// configured — in which case the deterministic built-in keeps running exactly
+/// as before.
+///
+/// Mirrors `active_local_embedding_execution`, including the reason a
+/// declaration selects `Real` rather than `Mock`: an `offline_api` adapter
+/// authenticates to nothing, so the declaration itself is the activation
+/// signal, and the mock stays reachable only through the env seam. That
+/// asymmetry is what stops a `tools.toml` entry from silently writing mock
+/// Markdown into a real archive.
+#[must_use]
+pub fn active_local_ocr_execution() -> Option<LocalOcrExecution> {
+    match std::env::var(TEST_LOCAL_OCR_ENV).ok().as_deref() {
+        Some("mock") => Some(LocalOcrExecution::Mock),
+        Some(_) => None,
+        None => declared_offline_markdownize().then_some(LocalOcrExecution::Real),
+    }
+}
+
+/// Whether `tools.toml` declares the markdown role as `offline_api`.
+fn declared_offline_markdownize() -> bool {
+    crate::tool_lock::registered_declared_adapter("markdown")
+        .and_then(|declared| declared.kind)
+        .is_some_and(|kind| kind == "offline_api")
+}
+
+/// Build the offline markdownize adapter for a resolved execution.
+///
+/// `verified_raw_bytes` are the caller's already-verified bytes, passed in for
+/// the same reason the online OCR adapter takes them: re-opening the path here
+/// would read bytes nobody checked against `raw_hash`.
+pub fn local_ocr_markdownize_adapter(
+    execution: LocalOcrExecution,
+    scope_id: &str,
+    kio_dir: &Path,
+    verified_raw_bytes: &[u8],
+) -> Result<Box<dyn MarkdownizeAdapter>> {
+    let adapter = match execution {
+        LocalOcrExecution::Mock => {
+            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, scope_id)
+                .into_boxed(kio_dir, verified_raw_bytes)
+        }
+        LocalOcrExecution::Real => {
+            let declared =
+                crate::tool_lock::registered_declared_adapter("markdown").ok_or_else(|| {
+                    AdapterError::ConfigSchema(
+                        "the offline markdownize adapter resolved without a declaration".to_owned(),
+                    )
+                })?;
+            // Re-runs D1's literal-loopback check at the moment of use. An
+            // entry that passed at load time and points elsewhere now must not
+            // send — the document is the payload, and it is the user's.
+            crate::tool_lock::validate_declared_runtime_target("markdown", &declared)?;
+            let base_url = declared.url.clone().ok_or_else(|| {
+                AdapterError::ConfigSchema(
+                    "an offline_api markdownize adapter must declare `url`".to_owned(),
+                )
+            })?;
+            // D7: `[adapter.policy.offline_api].timeout_seconds` (07 §7). A
+            // document pipeline is the case that number exists for — a
+            // multi-page PDF can hold the socket quiet for minutes.
+            let timeout_seconds = crate::tool_lock::registered_execution_timeout("offline_api");
+            LocalOcrMarkdownizeAdapter::new(
+                EnvLocalOcrClient::new(base_url, timeout_seconds),
+                LocalOcrExecution::Real,
+                scope_id,
+            )
+            .into_boxed(kio_dir, verified_raw_bytes)
+        }
+    };
+    Ok(adapter)
 }
 
 /// The adopted embedding model pin, re-exported so the CLI's Batch lane can
