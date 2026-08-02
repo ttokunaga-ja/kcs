@@ -840,7 +840,7 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 | S3-B 応答写像 (markdown / images / bbox) | ✅ |
 | S3-C tool_lock ゲートへの tool_id 登録 | ✅ |
 | S3-D resolver (`active_local_ocr_execution` / `local_ocr_markdownize_adapter`) | ✅ |
-| S3-D CLI 配線 | ⬜ **想定より大きい。下記** |
+| **S3-E enrichment 経路への配線** | ✅ **2026-08-02**。`kio index` 1 回で完結 |
 | 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ⬜ **未測定** |
 | 実サーバでの受け入れ検査 | ⬜ GPU 実機が要る |
 
@@ -925,6 +925,32 @@ adapter が有効なら、online タスクを作る代わりに**その場で満
 > **profile の一致ではなく、生成物の由来を見ること。**profile だけ入れ替わって
 > 中身が別 adapter 由来、という状態が最悪で、アーカイブは触っていない内容に
 > ローカル pipeline の identity を主張することになる。
+
+### S3-E — enrichment 経路への配線 [2026-08-02 完了]
+
+**`kio index` 1 回で完結する。**online は enqueue と send を分けているが、
+その分割は**承認と課金のため**であり、ローカル pipeline はどちらも持たない。
+2 コマンド目は何も守らない儀式になる。ただし**タスクは作る** — リトライ・
+部分失敗の記録・クラッシュ復帰・`pending_enrichment_tasks` の正直さは
+全部そこに乗っているので、作ってから同じ pass で消化する。
+
+| | |
+|---|---|
+| `output_ref` | **`offline:<tool_id>`** (新設の `TaskOutputRef::Offline`) |
+| enqueue 時 status | `secrets_hold` なら Paused、それ以外は `ready_for_local_adapter` |
+| ledger | **行を開かない。**解放すべき予約も無いので失敗経路で取り残しが起きない |
+| 実行 | `run_index_pipeline` の末尾 (`execute_pending_offline_markdownize_tasks`) |
+| 失敗時 | retryable なら **Pending のまま** — モデルサーバ未起動は日常。次の index が拾う |
+
+**`offline:` 接頭辞は装飾ではない。**online lane のゲート
+(network opt-in / ledger 予約 / batch 送信 / auth revive) は全て `output_ref` で
+対象を選ぶので、ローカルのタスクを `online:` で名付けると**全部に拾われ**、
+それぞれに例外を足す羽目になる。接頭辞 1 つで既定が正しくなる。
+
+**実装中に踏んだ罠**: OCR-from-scratch (= スキャン PDF) では `prepared_units` が
+空で、**unit の identity は adapter の応答の中にしか無い**。空の要求 hints を
+そのまま永続化へ渡すと、文書全体が 0 unit として扱われ契約違反で落ちる。
+online 側が使っていた `effective_prepared_unit_hints` を公開して共有した。
 
 **S3-C で計画書 §6 の「ゲートは 2 つある」が実際に効いた。** markdown role を
 tool_id ごとの表へ一般化したあと、`validate_declared_runtime_target` の**末尾に

@@ -468,7 +468,12 @@ fn supports_ocr_from_scratch(media_type: &str) -> bool {
     )
 }
 
-fn effective_prepared_unit_hints(
+/// `pub` so the offline (Stage 3) route derives its effective hints the same
+/// way the online one does. When a caller supplies no hints -- the
+/// OCR-from-scratch case, which is every scanned PDF -- the unit identities
+/// exist only in the adapter's response, and passing the empty request set
+/// through to persistence makes the whole document look like zero units.
+pub fn effective_prepared_unit_hints(
     requested: &[PreparedUnitHint],
     raw_hash: &str,
     response: &MarkdownizeResponse,

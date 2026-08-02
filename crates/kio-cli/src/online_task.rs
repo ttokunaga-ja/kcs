@@ -22,6 +22,10 @@ pub(crate) fn targets_standard_online_markdownize(
                 && (task.unit_keys.is_some()
                     || task.fallback_reason.as_deref() == Some("online_adapter_done"))
         }
-        Ok(TaskOutputRef::Embedding { .. }) | Err(_) => false,
+        // An `offline_api` task is deliberately invisible here. Every caller of
+        // this predicate drives the ONLINE lane — the network opt-in, the
+        // ledger reservation, the batch send, the auth revive — and a local
+        // pipeline's task must not be picked up by any of them.
+        Ok(TaskOutputRef::Offline { .. } | TaskOutputRef::Embedding { .. }) | Err(_) => false,
     }
 }

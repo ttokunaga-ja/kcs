@@ -186,6 +186,17 @@ pub enum TaskOutputRef {
     Online {
         adapter_id: String,
     },
+    /// An `offline_api` adapter's enrichment task (Stage 3).
+    ///
+    /// A separate variant rather than reusing `Online` with a local adapter id,
+    /// because `output_ref` is a durable record: calling a loopback pipeline
+    /// "online" in the task journal would assert something untrue about where
+    /// the document went, and every gate that keys off `Online` — the network
+    /// opt-in, the ledger, the batch lane — would then have to special-case its
+    /// way back out. The prefix is the distinction those gates read.
+    Offline {
+        adapter_id: String,
+    },
     Embedding {
         chunk_id: String,
     },
@@ -545,6 +556,14 @@ pub fn validate_task_output_ref(
             return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
         }
         return Ok(TaskOutputRef::Online {
+            adapter_id: adapter_id.to_owned(),
+        });
+    }
+    if let Some(adapter_id) = descriptor.output_ref.strip_prefix("offline:") {
+        if descriptor.task_type != TaskType::Markdownize || !is_safe_logical_id(adapter_id) {
+            return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
+        }
+        return Ok(TaskOutputRef::Offline {
             adapter_id: adapter_id.to_owned(),
         });
     }

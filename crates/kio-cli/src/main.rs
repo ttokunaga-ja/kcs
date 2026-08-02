@@ -28,13 +28,15 @@ use kio_adapter::batch_client::{
 use kio_adapter::catalog::{
     active_embedding_execution, active_local_ocr_execution, adopted_embedding_profile,
     builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
-    declared_embedding_profile_for, embedding_adapter_profile, embedding_preferred_request_kind,
+    declared_embedding_profile_for, effective_prepared_unit_hints, embedding_adapter_profile,
+    embedding_preferred_request_kind, local_ocr_handles_media_type, local_ocr_markdownize_adapter,
     resolve_standard_online_markdownize_profile_with_bbox, run_embedding,
     run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
     standard_online_markdownize_profile_with_bbox, AdoptedEmbeddingExecution,
     DeclaredEmbeddingProfile, EmbeddingExecution, StandardOnlineMarkdownizeRequest,
 };
 use kio_adapter::identity::tool_profile_hash;
+use kio_adapter::local_ocr_markdownize::LocalOcrExecution;
 use kio_adapter::office_convert::{is_office_media, resolve_office_converter};
 use kio_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
 use kio_adapter::traits::{MarkdownizeAdapter, PreferredRequestKind};
@@ -14212,6 +14214,184 @@ fn classify_online_markdownize_precondition(
     })
 }
 
+/// Run every Pending `offline_api` markdownize task this pass.
+///
+/// Called from `kio index` rather than `kio batch resume`, because the two
+/// commands are split by *approval and billing* and a local pipeline has
+/// neither. The task itself is kept — it is what carries retry, partial-failure
+/// recording, crash recovery, and an honest `pending_enrichment_tasks` — so
+/// this is the same machinery as the online lane with the two gates that have
+/// no subject removed.
+///
+/// No ledger row is opened and none is settled. That is not an omission to be
+/// checked for: there is no reservation to release either, so the failure path
+/// cannot strand one the way the online lane's can.
+fn execute_pending_offline_markdownize_tasks(
+    repo: &Repository,
+    store: &TaskStore,
+) -> Result<usize> {
+    let Some(execution) = active_local_ocr_execution() else {
+        return Ok(0);
+    };
+    let profile = kio_adapter::local_ocr_markdownize::profile_for(execution);
+    let output_ref = offline_output_ref(&profile.adapter_id);
+    let mut executed = 0_usize;
+    for task in store.all().map_err(pipeline_to_kio)? {
+        if task.task_type != TaskType::Markdownize
+            || task.status != TaskStatus::Pending
+            || task.output_ref != output_ref
+        {
+            continue;
+        }
+        // Reused verbatim from the online lane, and worth reusing: it is what
+        // refuses a task whose file was edited, purged, or pushed past the
+        // input cap since enqueue. Persisting v2 bytes under v1's raw_hash
+        // would break content-addressing identically on either route.
+        let prepared_input = match classify_online_markdownize_precondition(repo, &task) {
+            OnlineMarkdownizePrecondition::Send(prepared_input) => prepared_input,
+            OnlineMarkdownizePrecondition::Retire => {
+                retire_offline_markdownize_task(store, &task.task_id, "invalid_input")?;
+                continue;
+            }
+            _ => continue,
+        };
+        let task_id = task.task_id.clone();
+        match execute_offline_markdownize_task(repo, &task, prepared_input, execution) {
+            Ok(outcome) => {
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.status = outcome.status;
+                            candidate.output_ref = outcome.output_ref.clone();
+                            candidate.fallback_reason = Some("local_adapter_done".to_owned());
+                            candidate.heartbeat_at = None;
+                            candidate.mode = Some(outcome.mode);
+                            candidate.changed_unit_keys = outcome.changed_unit_keys.clone();
+                            if outcome.status == TaskStatus::Partial {
+                                candidate.attempts = candidate.attempts.saturating_add(1);
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kio)?;
+                executed += 1;
+            }
+            Err(failure) => {
+                // Left Pending on a retryable failure — a model server that is
+                // not up yet is the ordinary case, and the next `kio index`
+                // should simply pick the task up again. Only a genuinely
+                // non-retryable one is retired, so a stopped server never
+                // silently discards work.
+                let retryable = !matches!(
+                    failure.retry_kind,
+                    RetryErrorKind::InvalidInput | RetryErrorKind::ContractViolation
+                );
+                let reason = if retryable {
+                    "local_adapter_unavailable"
+                } else {
+                    "contract_violation"
+                };
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.attempts = candidate.attempts.saturating_add(1);
+                            candidate.fallback_reason = Some(reason.to_owned());
+                            if !retryable {
+                                candidate.status = TaskStatus::Failed;
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kio)?;
+            }
+        }
+    }
+    Ok(executed)
+}
+
+fn retire_offline_markdownize_task(store: &TaskStore, task_id: &str, reason: &str) -> Result<()> {
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id {
+                candidate.status = TaskStatus::Failed;
+                candidate.fallback_reason = Some(reason.to_owned());
+                candidate.heartbeat_at = None;
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kio)?;
+    Ok(())
+}
+
+/// One document through the local pipeline.
+///
+/// Always a Full send. The incremental path the online lane tries first exists
+/// to avoid re-billing pages that did not change; with nothing to bill, its
+/// only remaining effect would be extra ways to be wrong about page
+/// correspondence.
+fn execute_offline_markdownize_task(
+    repo: &Repository,
+    task: &TaskDescriptor,
+    prepared_input: PreparedOnlineMarkdownizeInput,
+    execution: LocalOcrExecution,
+) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
+    let PreparedOnlineMarkdownizeInput {
+        media_type,
+        bytes,
+        prepared_units,
+        ..
+    } = prepared_input;
+    let profile = kio_adapter::local_ocr_markdownize::profile_for(execution);
+    let scope_id = repo.scope_id_for_adapter();
+    let adapter = local_ocr_markdownize_adapter(execution, &scope_id, repo.kio_dir(), &bytes)
+        .map_err(task_failure_from_adapter)?;
+    let hints = prepared_unit_hints(&prepared_units);
+    let response = adapter
+        .markdownize(MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: task.input_hash.clone(),
+                path: Some(task.input_path.clone()),
+            },
+            media_type: media_type.clone(),
+            prepared_unit_hint: Some(hints.clone()),
+            mode: AdapterMarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            // 07 §5.2's bbox_annotation is Mistral's prompt-and-charge feature;
+            // the local adapter refuses the flag rather than pretending.
+            bbox_annotation_enabled: false,
+            tool_profile_hash: profile.tool_profile_hash.clone(),
+            spec_version: 1,
+            // No ledger row exists, so there is no intent token to carry.
+            idempotency_token: None,
+        })
+        .map_err(task_failure_from_adapter)?;
+    // OCR-from-scratch is the normal case here: a scanned PDF has no text layer,
+    // so `prepared_units` is empty and the unit identities exist only in the
+    // response. Passing the empty request set straight through made every such
+    // document persist as zero units and fail the contract check.
+    let effective_hints = effective_prepared_unit_hints(&hints, &task.input_hash, &response)
+        .map_err(task_failure_from_adapter)?;
+    materialize_online_markdownize_response(
+        repo,
+        task,
+        prepared_units,
+        &media_type,
+        &bytes,
+        None,
+        profile.tool_profile_hash,
+        response,
+        &effective_hints,
+    )
+}
+
 fn execute_online_markdownize_task(
     repo: &Repository,
     task: &TaskDescriptor,
@@ -18528,6 +18708,34 @@ fn online_output_ref(adapter_id: &str) -> String {
     format!("online:{adapter_id}")
 }
 
+/// Stage 3: the enrichment task of an `offline_api` markdownize adapter.
+///
+/// The prefix is load-bearing, not cosmetic. `output_ref` is what the online
+/// lane matches on (`targets_standard_online_markdownize`), so a local
+/// pipeline's task keyed `online:` would be swept up by the network opt-in
+/// gate, the ledger reservation and the batch sender — each of which would then
+/// need its own exception. One prefix keeps all of them correct by default.
+fn offline_output_ref(adapter_id: &str) -> String {
+    format!("offline:{adapter_id}")
+}
+
+/// The status a freshly-enqueued `offline_api` markdownize task takes.
+///
+/// Only the secrets hold survives from the online decision tree. The budget
+/// branch has nothing to weigh — a local run has no price — and the network
+/// branch has nothing to gate, because 07 §3 (2) exempts `offline_api` from the
+/// opt-in and `--offline` does not stop it either. What remains is the
+/// 2026-08-02 ruling: a Tier A credential still needs `--send-secrets` before
+/// it is handed to a local model server, which is a separate process that can
+/// log what it is given.
+fn offline_markdownize_enqueue_status(secrets_hold: bool) -> (TaskStatus, Option<&'static str>) {
+    if secrets_hold {
+        (TaskStatus::Paused, Some(SECRETS_TIER_B_HOLD))
+    } else {
+        (TaskStatus::Pending, Some("ready_for_local_adapter"))
+    }
+}
+
 fn explicitly_allowed_tier_a_paths(preview: &ScanPreview) -> BTreeSet<String> {
     preview
         .candidates
@@ -19444,6 +19652,16 @@ fn run_index_pipeline(
             )?;
         }
     }
+    // Stage 3: drain the `offline_api` markdownize tasks this pass just enqueued
+    // (and any left Pending by an earlier run whose model server was down).
+    //
+    // Here rather than in `kio batch resume` because that split exists for
+    // approval and billing, and a local pipeline has neither — asking for a
+    // second command would be ceremony guarding nothing. The task is still
+    // created first and drained second, so a crash mid-OCR leaves a Pending
+    // task the next `index` picks up rather than a silently unenriched file.
+    let executed = execute_pending_offline_markdownize_tasks(repo, &task_store)?;
+    result.pending_online_tasks = result.pending_online_tasks.saturating_sub(executed);
     Ok(result)
 }
 
@@ -22061,7 +22279,17 @@ fn enqueue_online_placeholder_task(
         }
     }
     let online_profile = online_markdownize_profile_for(repo)?;
-    let output_ref = online_output_ref(&online_profile.adapter_id);
+    // Stage 3: a declared `offline_api` pipeline owns this enrichment instead
+    // of the cloud OCR. Resolved once, here, so the task's `output_ref` and the
+    // status decision below cannot disagree about which route it is on.
+    let local_ocr = active_local_ocr_execution()
+        .filter(|_| local_ocr_handles_media_type(&candidate.media_type));
+    let output_ref = match local_ocr {
+        Some(execution) => offline_output_ref(
+            &kio_adapter::local_ocr_markdownize::profile_for(execution).adapter_id,
+        ),
+        None => online_output_ref(&online_profile.adapter_id),
+    };
     let effective_bbox_policy = bbox_annotation_enabled(repo)?;
     // R15-2: supersede any stale online markdownize task for THIS path whose
     // `input_hash` differs from the current content. The file was edited after that
@@ -22202,7 +22430,9 @@ fn enqueue_online_placeholder_task(
     // — a Paused task with `secrets_tier_b_hold`, visible in `kio status`, that
     // `batch resume` will not un-hold and `execute_pending_markdownize_tasks` will
     // not send. The hold takes precedence over budget/network reasons.
-    let (status, reason) = if secrets_hold {
+    let (status, reason) = if local_ocr.is_some() {
+        offline_markdownize_enqueue_status(secrets_hold)
+    } else if secrets_hold {
         (TaskStatus::Paused, Some(SECRETS_TIER_B_HOLD))
     } else if !budget.allowed && budget_caps.hard_stop {
         // F5: only a hard-stop cap pauses the task. Under soft-stop the online task
