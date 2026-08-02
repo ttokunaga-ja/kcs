@@ -1959,6 +1959,168 @@ mod tests {
         assert!(validate_normalized_markdown_v1("```html\n<div>x</div>\n```\n").is_ok());
     }
 
+    /// Every `/layout-parsing` response shape PaddleOCR-VL has been *observed*
+    /// to produce, run through the offline adapter, judged by the v1 validator
+    /// above.
+    ///
+    /// It lives in this crate because the validator does. `kio-pipeline` depends
+    /// on `kio-adapter` and not the other way round, so the same test written
+    /// over there would need a second copy of the v1 rules — and a second copy
+    /// of a rule is what put the wrong image spelling into the archive once
+    /// already (`1194dba`).
+    ///
+    /// # Why a table, and why only measurements
+    ///
+    /// The adapter's mock has been wrong about this service three times: the
+    /// response envelope (`1feed04`), the figure markup (`1194dba`), and the way
+    /// a page ends (`d66d063`). Every time, the suite stayed green — the mock
+    /// and the code agreed with each other while the service disagreed with
+    /// both — and every time the truth arrived from a GPU box instead of from
+    /// CI. The third one is the sharpest: making acceptance fatal (`86d4508`)
+    /// was verified against a mock whose page happened to end in exactly one LF,
+    /// while the real service ends a prose page with none and a table page with
+    /// two, so the change refused every real page and nothing here noticed.
+    ///
+    /// So each row below is a shape someone captured from the running service,
+    /// with the commit that recorded it. The rule for the next person is the
+    /// point of the whole test: **when you measure a new shape, add a row.** It
+    /// fails until the adapter handles the shape, which is the notice that was
+    /// missing all three times.
+    ///
+    /// What it cannot do is speak for shapes nobody has captured yet. This is a
+    /// record of what has been seen, not a proof about what the service can
+    /// send.
+    #[test]
+    fn every_measured_service_shape_produces_v1_markdown_or_a_named_refusal() {
+        use kio_adapter::local_ocr_markdownize::{
+            LayoutFileType, LocalOcrClient, LocalOcrExecution, LocalOcrMarkdownizeAdapter,
+        };
+        use kio_adapter::traits::MarkdownizeAdapter;
+        use serde_json::json;
+
+        #[derive(Clone)]
+        struct CannedClient(Value);
+        impl LocalOcrClient for CannedClient {
+            fn layout_parse(
+                &self,
+                _file_base64: &str,
+                _file_type: LayoutFileType,
+            ) -> kio_adapter::Result<Value> {
+                Ok(self.0.clone())
+            }
+        }
+
+        // `\x89PNG\r\n\x1a\nkio conformance fixture` — a PNG signature is all
+        // `sniff_media_type` reads, and no consumer decodes the pixels.
+        const PNG_BASE64: &str = "iVBORw0KGgpraW8gY29uZm9ybWFuY2UgZml4dHVyZQ==";
+
+        // (label, markdown.text, markdown.images, parsing_res_list, expected)
+        //
+        // `None` = the adapter's output must satisfy v1. `Some(reason)` = it
+        // must not, and the validator must say so with that reason, because
+        // refusing is the decided behaviour rather than an accident (07 §5,
+        // ruling in `0737422`).
+        let shapes: Vec<(&str, String, Value, Value, Option<&str>)> = vec![
+            (
+                // d66d063: a page ending in prose came back with no trailing LF.
+                "prose page, no trailing newline",
+                "Kio conformance page".to_owned(),
+                json!({}),
+                json!([]),
+                None,
+            ),
+            (
+                // d66d063: a page ending in a table came back with two.
+                "page ending in two newlines",
+                "Kio conformance page\n\n".to_owned(),
+                json!({}),
+                json!([]),
+                None,
+            ),
+            (
+                // 1194dba: figures arrive as HTML inside a centred div, with the
+                // caption in a second one, and never as `![](…)`.
+                "centred div around an img, caption in another div",
+                "prose\n\n<div style=\"text-align: center;\">\
+                 <img src=\"imgs/img_in_chart_box_107_567_1130_1073.jpg\" alt=\"Image\" \
+                 width=\"82%\" /></div>\n\n<div style=\"text-align: center;\">\
+                 Figure 1: Incident count by month.</div>"
+                    .to_owned(),
+                json!({ "imgs/img_in_chart_box_107_567_1130_1073.jpg": PNG_BASE64 }),
+                json!([{"block_label": "chart", "block_bbox": [107, 567, 1130, 1073],
+                        "block_order": null}]),
+                None,
+            ),
+            (
+                // 0737422: tables arrive as raw HTML with no div anywhere, so
+                // `unwrap_presentational_html` cannot reach them. Refusing beats
+                // a lossy GFM conversion that 07 §9 would then freeze.
+                "html table",
+                "prose\n\n<table border=1 style='margin: auto;'>\
+                 <tr><td>Data class</td><td>Count</td></tr></table>\n"
+                    .to_owned(),
+                json!({}),
+                json!([]),
+                Some("raw HTML and autolinks are forbidden"),
+            ),
+        ];
+
+        for (label, text, images, blocks, expected) in shapes {
+            let body = json!({
+                "errorCode": 0,
+                "result": {
+                    "layoutParsingResults": [{
+                        "prunedResult": {"parsing_res_list": blocks},
+                        "markdown": {"text": text, "images": images}
+                    }]
+                }
+            });
+            let adapter = LocalOcrMarkdownizeAdapter::new(
+                CannedClient(body),
+                LocalOcrExecution::Real,
+                "scope-1",
+            )
+            .with_verified_raw_bytes(b"%PDF-1.7 bytes".to_vec());
+            let response = adapter
+                .markdownize(adapter_types::MarkdownizeRequest {
+                    raw: adapter_types::RawInput {
+                        raw_hash: format!("sha256:{}", "a".repeat(64)),
+                        path: Some("scan.pdf".to_owned()),
+                    },
+                    media_type: "application/pdf".to_owned(),
+                    prepared_unit_hint: Some(Vec::new()),
+                    mode: adapter_types::MarkdownizeMode::Full,
+                    previous: None,
+                    hints: None,
+                    restrict_to_hint_pages: false,
+                    bbox_annotation_enabled: false,
+                    tool_profile_hash: format!("sha256:{}", "b".repeat(64)),
+                    spec_version: 1,
+                    idempotency_token: None,
+                })
+                .unwrap_or_else(|error| panic!("{label}: adapter refused outright: {error}"));
+
+            for unit in &response.updated_units {
+                let verdict = validate_normalized_markdown_v1(&unit.markdown);
+                match expected {
+                    None => assert!(
+                        verdict.is_ok(),
+                        "{label}: expected v1-conformant output, got {:?} for {:?}",
+                        verdict.unwrap_err(),
+                        unit.markdown
+                    ),
+                    Some(reason) => {
+                        let actual = verdict.expect_err(&format!(
+                            "{label}: expected a refusal, got conformant {:?}",
+                            unit.markdown
+                        ));
+                        assert_eq!(actual, reason, "{label}: refused for the wrong reason");
+                    }
+                }
+            }
+        }
+    }
+
     // QA41 (via validate_unit_shapes/validate_markdownize_response): a v1
     // violation in an accepted unit's markdown rejects the whole response,
     // parameterized over the same 6 shapes as the pure-function test above.
