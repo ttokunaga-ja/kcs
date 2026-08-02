@@ -828,6 +828,40 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 - 採用ゲート: [experiments/ocr-verification](../experiments/ocr-verification) の fixture で
   Mistral OCR ベースラインと突き合わせる
 
+### 進捗 — S3-A / S3-B は 2026-08-02 に実装済み
+
+[local_ocr_markdownize.rs](../crates/kio-adapter/src/local_ocr_markdownize.rs) に
+`LocalOcrClient` seam・`/layout-parsing` 実クライアント・応答写像・`MarkdownizeAdapter`
+実装・CI 用 mock が入り、**単体 22 件**が回っている。
+
+| | 状態 |
+|---|---|
+| S3-A seam + `POST /layout-parsing` クライアント | ✅ |
+| S3-B 応答写像 (markdown / images / bbox) | ✅ |
+| S3-C tool_lock ゲートへの tool_id 登録 | ⬜ |
+| S3-D CLI 配線 (consent / ledger / batch lane) | ⬜ |
+| 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ⬜ **未測定** |
+| 実サーバでの受け入れ検査 | ⬜ GPU 実機が要る |
+
+**設計上いちばん効いている判断**: 図と bbox の対応が付かないページは、
+**推測せずエラーにする**。画像オブジェクトは content-addressed で 07 §9 の
+first-instance-wins により永続化されるので、**誤った bbox は書いた瞬間に凍り、
+全 markdownize をやり直す以外に取り消せない。**しかも誤った値は下流からは
+正しい値と見分けが付かない。「Markdown 中の参照順」と「`block_order` 順」を
+突き合わせ、数が食い違えば当該ページを失敗させる。
+
+副産物として、**`genai_server` の応答を渡されたら名指しでそう言う** —
+`parsing_res_list` を欠く応答は「図の無いページ」と区別が付かないため、
+エラーメッセージに endpoint を取り違えた可能性を書いてある。
+
+**`LOCAL_OCR_MODEL_VERSION_PIN` は `unmeasured:` 接頭辞のプレースホルダで、
+digest ではない。**採用時に重みを落として sha256 を採ること (V4 と同じ手順)。
+テストがこの接頭辞を固定しているので、`sha256:` に見せかけたまま採用はできない。
+
+> **応答 schema は一次資料 (公式ドキュメント) から起こしたもので、実サーバの
+> 応答を見て書いたものではない。**実機で初めて回すときは、まず生の応答を 1 本
+> 記録して `parse_layout_parsing` のテストへ足すこと。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image

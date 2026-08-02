@@ -1,0 +1,1181 @@
+//! The `offline_api` Markdownize adapter — PaddleOCR-VL reached over loopback
+//! (07 §5.2's document-processing category, 07 §3's D1 url restriction).
+//!
+//! # Why this does not talk `/v1/chat/completions`
+//!
+//! The plan originally described this adapter as posting a data-URI image to an
+//! OpenAI-compatible `/v1/chat/completions`, the way a generative VLM would be
+//! driven. **That endpoint cannot do the job**, and the reason is architectural
+//! rather than a matter of request shape.
+//!
+//! PaddleOCR-VL is two models. `PP-DocLayoutV2` (an RT-DETR detector plus a
+//! pointer network) finds the layout elements, classifies them, and predicts
+//! reading order; the 0.9B VLM then recognizes the content of regions that have
+//! *already been cropped for it*. **Bounding boxes come from the first model,
+//! and the OpenAI-compatible `paddleocr genai_server` serves only the second.**
+//! Calling it directly returns recognized text for a region nobody located,
+//! with no layout, no reading order, no bbox and no Markdown assembly — and
+//! Kio cannot make up the difference, because the missing stage is a separate
+//! detection model. Upstream says so in as many words: "It is strongly
+//! discouraged to directly call such services through plain HTTP requests or
+//! OpenAI clients to process document images."
+//!
+//! So the target is `POST /layout-parsing`, the end-to-end pipeline service.
+//! It is a PaddleX-shaped API, not a chat one, which places this adapter in
+//! 07 §8's *document-processing* category alongside Mistral OCR rather than in
+//! the generative-LLM category — the prompt contract does not apply, only
+//! §8.1's acceptance checks and the I/O schema do. `mistral_ocr.rs` is the
+//! shape to follow here, not `bbox_annotation.rs`.
+//!
+//! # Two things Kio gives up by not prompting the model
+//!
+//! `/layout-parsing` takes no `temperature` and no `seed`. Determinism is the
+//! server operator's configuration, not this adapter's request — which matters
+//! because 07 §9's first-instance-wins freezes whatever the first call returned,
+//! permanently. The acceptance check therefore has to *prove* determinism by
+//! sending the same input twice, rather than pinning a sampling parameter and
+//! assuming it.
+//!
+//! For the same reason `prompt_template_id` / `prompt_template_hash` are absent
+//! from this profile. Kio supplies no prompt, so there is no template to hash,
+//! and recording one would make the identity describe an input this adapter
+//! does not produce.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use crate::bbox_annotation::validate_bbox as validate_annotation_bbox;
+use crate::http_policy::{authenticated_agent, read_json_bounded, HttpPolicy};
+use crate::identity::tool_profile_hash;
+use crate::mistral_ocr::{image_hash, OcrImage};
+use crate::traits::MarkdownizeAdapter;
+use crate::types::{
+    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit, MarkdownizeRequest,
+    MarkdownizeResponse, PreparedUnitHint, UnitKind,
+};
+use crate::{AdapterError, Result};
+
+/// The `tool_id` the local OCR target is declared under in `tools.toml`.
+pub const LOCAL_OCR_ADAPTER_ID: &str = "paddleocr_vl_local";
+
+/// 03 §5.1's `model_or_tool_family`. Names the pipeline, not the serving
+/// backend: D5 keeps the runtime out of identity, and the same weights behind
+/// a different server must stay one profile.
+pub const LOCAL_OCR_MODEL_FAMILY: &str = "paddleocr-vl";
+
+/// The model id the pipeline service is expected to be running. Upstream has
+/// moved this name at least once (`PaddleOCR-VL-0.9B` → `PaddleOCR-VL-1.6-0.9B`),
+/// which is exactly why 03 §5.1 pins weights by digest rather than by name —
+/// see [`LOCAL_OCR_MODEL_VERSION_PIN`].
+pub const LOCAL_OCR_DEFAULT_MODEL: &str = "PaddleOCR-VL-0.9B";
+
+/// Response ceiling. `/layout-parsing` inlines page images as base64 by
+/// default, so a multi-page PDF's response is dominated by image bytes rather
+/// than by text and needs a far larger bound than an embedding response.
+pub const LAYOUT_PARSING_RESPONSE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Per-response cap on persisted image bytes, mirroring the online OCR policy.
+pub const LOCAL_OCR_MAX_PERSISTED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound on pages accepted from one response, so a malformed or hostile
+/// reply cannot mint unbounded units.
+pub const LOCAL_OCR_MAX_PAGES: usize = 4096;
+
+/// Which local implementation runs. Same posture as
+/// [`crate::local_embedding::LocalEmbeddingExecution`]: `Copy`, and the url /
+/// model that only `Real` needs are read where the adapter is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalOcrExecution {
+    Mock,
+    Real,
+}
+
+/// What `fileType` the service should be told the bytes are (0 = PDF,
+/// 1 = image, per the `/layout-parsing` request schema).
+///
+/// Kio always sends this explicitly. The field is optional upstream, where an
+/// absent value makes the server infer the type *from the URL* — and Kio sends
+/// base64, which has no URL to infer from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutFileType {
+    Pdf,
+    Image,
+}
+
+impl LayoutFileType {
+    #[must_use]
+    pub fn wire_value(self) -> u8 {
+        match self {
+            Self::Pdf => 0,
+            Self::Image => 1,
+        }
+    }
+
+    /// Media types Kio routes to this adapter. Anything else is a caller error
+    /// rather than something to guess at: sending a PDF as `fileType: 1` makes
+    /// the service parse the first page as an image and silently lose the rest.
+    pub fn from_media_type(media_type: &str) -> Result<Self> {
+        match media_type {
+            "application/pdf" => Ok(Self::Pdf),
+            "image/png" | "image/jpeg" | "image/tiff" | "image/webp" => Ok(Self::Image),
+            other => Err(AdapterError::ContractViolation(format!(
+                "local OCR adapter cannot route media type {other}"
+            ))),
+        }
+    }
+}
+
+/// One document in, one parsed document out.
+///
+/// There is no per-page method and that is deliberate: `/layout-parsing` takes
+/// a whole PDF and returns one element per page, so a page-at-a-time signature
+/// would invite re-uploading the same document once per page.
+pub trait LocalOcrClient: Clone {
+    /// `file_base64` is the base64 of the *verified* raw bytes. The return is
+    /// the service's parsed JSON body, left as `Value` so that parsing and
+    /// transport stay separable — [`parse_layout_parsing`] is what gives it
+    /// meaning, and it is unit-testable without a server.
+    fn layout_parse(&self, file_base64: &str, file_type: LayoutFileType) -> Result<Value>;
+}
+
+/// Talks `POST {base_url}/layout-parsing` to a loopback pipeline service.
+#[derive(Debug, Clone)]
+pub struct EnvLocalOcrClient {
+    base_url: String,
+    http_policy: HttpPolicy,
+}
+
+impl EnvLocalOcrClient {
+    /// `timeout_seconds` is D7's `[adapter.policy.offline_api].timeout_seconds`
+    /// (07 §7); `None` keeps the shared default. A CPU-inference document
+    /// pipeline is the case D7 was written for — a multi-page PDF can occupy
+    /// the server for minutes with nothing on the socket.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, timeout_seconds: Option<u64>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            http_policy: timeout_seconds
+                .map_or_else(HttpPolicy::default, HttpPolicy::with_timeout_seconds),
+        }
+    }
+}
+
+impl LocalOcrClient for EnvLocalOcrClient {
+    fn layout_parse(&self, file_base64: &str, file_type: LayoutFileType) -> Result<Value> {
+        let url = format!("{}/layout-parsing", self.base_url.trim_end_matches('/'));
+        // Same reuse of `authenticated_agent` as the local embedding client:
+        // it is taken for its posture — no redirect following, pinned timeouts
+        // — not for its name. A redirect off a loopback origin is precisely
+        // what D1's literal-loopback check must not be talked out of.
+        let response = authenticated_agent(self.http_policy)
+            .post(&url)
+            .send_json(json!({
+                "file": file_base64,
+                "fileType": file_type.wire_value(),
+                // Asked for explicitly rather than left to the server default:
+                // with layout detection off there are no block bboxes and no
+                // reading order, which is the entire reason this endpoint was
+                // chosen over the VLM-only one.
+                "useLayoutDetection": true,
+            }))
+            .map_err(local_ocr_http_error)?;
+        read_json_bounded(
+            response,
+            LAYOUT_PARSING_RESPONSE_MAX_BYTES,
+            "local OCR layout-parsing response",
+        )
+    }
+}
+
+/// A local pipeline has no credential and no invoice, so `Auth` and
+/// `QuotaExceeded` cannot arise. A full queue can, and that is a retry.
+fn local_ocr_http_error(error: ureq::Error) -> AdapterError {
+    match error {
+        ureq::Error::Status(429, response) => {
+            let retry_after_ms = response
+                .header("Retry-After")
+                .and_then(crate::http_policy::parse_retry_after_ms);
+            AdapterError::RateLimit {
+                message: format!(
+                    "local OCR service queue is full ({})",
+                    response.status_text()
+                ),
+                retry_after_ms,
+            }
+        }
+        ureq::Error::Status(code, _) => {
+            AdapterError::Network(format!("local OCR service returned HTTP {code}"))
+        }
+        ureq::Error::Transport(transport) => {
+            AdapterError::Network(format!("local OCR service unreachable: {transport}"))
+        }
+    }
+}
+
+fn violation(message: impl Into<String>) -> AdapterError {
+    AdapterError::ContractViolation(message.into())
+}
+
+/// `block_label` values whose block carries a figure Kio should persist.
+///
+/// The list is deliberately narrow. `parsing_res_list` also carries a
+/// `block_bbox` for every *text* block, and those boxes have nowhere to go —
+/// 07 §5.2 puts bbox in the metadata of an extracted image, not of prose — so
+/// widening this set would attach figure bboxes to things that are not figures.
+const IMAGE_BLOCK_LABELS: &[&str] = &["image", "figure", "chart", "table", "seal"];
+
+/// One page of `/layout-parsing` output, before it becomes Kio units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutParsedPage {
+    pub index: usize,
+    pub markdown: String,
+    pub images: Vec<OcrImage>,
+}
+
+/// Turn the service's body into pages.
+///
+/// This is where V2's findings are actually enforced, so it is strict on
+/// purpose: a mis-paired bbox is not a cosmetic defect. Image objects are
+/// content-addressed and 07 §9 makes the first instance win, so a bbox attached
+/// to the wrong figure is frozen for the life of the archive and can only be
+/// undone by re-running markdownize over everything.
+pub fn parse_layout_parsing(body: &Value) -> Result<Vec<LayoutParsedPage>> {
+    let results = body
+        .get("layoutParsingResults")
+        .and_then(Value::as_array)
+        .ok_or_else(|| violation("layout-parsing response has no layoutParsingResults array"))?;
+    if results.is_empty() {
+        return Err(violation("layout-parsing returned no pages"));
+    }
+    if results.len() > LOCAL_OCR_MAX_PAGES {
+        return Err(violation(format!(
+            "layout-parsing returned {} pages, over the {LOCAL_OCR_MAX_PAGES} limit",
+            results.len()
+        )));
+    }
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| parse_one_page(index, result))
+        .collect()
+}
+
+fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
+    let markdown_obj = result
+        .get("markdown")
+        .and_then(Value::as_object)
+        .ok_or_else(|| violation(format!("page {index} has no markdown object")))?;
+    let markdown = markdown_obj
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| violation(format!("page {index} has no markdown.text")))?
+        .to_owned();
+
+    // `markdown.images` is a relative-path → bytes map. It is keyed by the path
+    // the Markdown refers to, which is what lets a bbox be matched to a figure
+    // by name instead of by position.
+    let mut image_bytes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    if let Some(images) = markdown_obj.get("images").and_then(Value::as_object) {
+        for (relative_path, encoded) in images {
+            let encoded = encoded.as_str().ok_or_else(|| {
+                violation(format!(
+                    "page {index} image {relative_path} is not a base64 string"
+                ))
+            })?;
+            let bytes = decode_base64(encoded).ok_or_else(|| {
+                violation(format!(
+                    "page {index} image {relative_path} is not valid base64"
+                ))
+            })?;
+            image_bytes.insert(relative_path.clone(), bytes);
+        }
+    }
+
+    let boxes = image_block_boxes(index, result)?;
+    let referenced = markdown_image_paths(&markdown);
+    let images = pair_images_with_boxes(index, &referenced, &image_bytes, &boxes)?;
+    Ok(LayoutParsedPage {
+        index,
+        markdown,
+        images,
+    })
+}
+
+/// `prunedResult.parsing_res_list[]`, filtered to figure-bearing blocks and
+/// ordered by the pipeline's own reading order.
+///
+/// Reading order — not array order. `block_order` is what `PP-DocLayoutV2`'s
+/// pointer network predicts, and it is the order the Markdown was assembled in,
+/// so it is the only ordering that lines up with the image references in the
+/// text.
+fn image_block_boxes(page_index: usize, result: &Value) -> Result<Vec<[i64; 4]>> {
+    let Some(list) = result
+        .get("prunedResult")
+        .and_then(|pruned| pruned.get("parsing_res_list"))
+        .and_then(Value::as_array)
+    else {
+        // A response with Markdown but no parsing_res_list is what the
+        // VLM-only endpoint would produce. Say so, rather than returning zero
+        // boxes and letting the caller conclude the page simply had no
+        // figures.
+        return Err(violation(format!(
+            "page {page_index} has no prunedResult.parsing_res_list — is this the \
+             VLM-only genai_server endpoint rather than /layout-parsing?"
+        )));
+    };
+    let mut ordered = Vec::new();
+    for block in list {
+        let label = block
+            .get("block_label")
+            .and_then(Value::as_str)
+            .ok_or_else(|| violation(format!("page {page_index} block has no block_label")))?;
+        if !IMAGE_BLOCK_LABELS.contains(&label) {
+            continue;
+        }
+        let bbox = parse_block_bbox(page_index, block)?;
+        let order = block
+            .get("block_order")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MAX);
+        ordered.push((order, bbox));
+    }
+    ordered.sort_by_key(|(order, _)| *order);
+    Ok(ordered.into_iter().map(|(_, bbox)| bbox).collect())
+}
+
+/// `block_bbox` is `[x0, y0, x1, y1]` in **absolute pixels**, which is the same
+/// convention Kio's existing `[i64; 4]` already carries from the online OCR
+/// adapter — so this is a direct read, not a conversion.
+///
+/// That is a property of *this* profile only. Sarashina2.2-OCR emits
+/// `<bbox>[(x1,y1),(x2,y2)]</bbox>` normalized to 0–1000 from a top-left
+/// origin, and reading those as pixels would place every box in the top-left
+/// corner of the page. A second profile needs its own mapping, not this one.
+fn parse_block_bbox(page_index: usize, block: &Value) -> Result<[i64; 4]> {
+    let array = block
+        .get("block_bbox")
+        .and_then(Value::as_array)
+        .ok_or_else(|| violation(format!("page {page_index} image block has no block_bbox")))?;
+    if array.len() != 4 {
+        return Err(violation(format!(
+            "page {page_index} block_bbox has {} elements, expected 4",
+            array.len()
+        )));
+    }
+    let mut bbox = [0_i64; 4];
+    for (slot, value) in bbox.iter_mut().zip(array) {
+        // Upstream serializes these from a numpy array, so a whole-valued
+        // float is as likely as an integer.
+        *slot = value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|float| float.round() as i64))
+            .ok_or_else(|| {
+                violation(format!(
+                    "page {page_index} block_bbox has a non-numeric element"
+                ))
+            })?;
+    }
+    // Reuses the online adapter's bound (07 §5.2: 0..=1e9, positive area) so
+    // both OCR routes reject the same degenerate boxes.
+    validate_annotation_bbox(bbox)?;
+    Ok(bbox)
+}
+
+/// Relative image paths in the order the Markdown refers to them.
+///
+/// Order is what pairs a figure with a box, so this walks the text rather than
+/// reading `markdown.images`' keys — a map is sorted by key, and key order has
+/// nothing to do with where a figure sits on the page.
+fn markdown_image_paths(markdown: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let bytes = markdown.as_bytes();
+    let mut cursor = 0;
+    while let Some(found) = markdown[cursor..].find("![") {
+        let open = cursor + found;
+        let Some(alt_end) = markdown[open..].find("](") else {
+            break;
+        };
+        let target_start = open + alt_end + 2;
+        let Some(target_len) = markdown[target_start..].find(')') else {
+            break;
+        };
+        let target = markdown[target_start..target_start + target_len].trim();
+        if !target.is_empty() {
+            paths.push(target.to_owned());
+        }
+        cursor = target_start + target_len + 1;
+        if cursor >= bytes.len() {
+            break;
+        }
+    }
+    paths
+}
+
+/// Attach one box to one figure, or refuse.
+///
+/// The refusal is the point. Guessing here writes a permanently wrong bbox
+/// (07 §9 first-instance-wins over a content-addressed object), and the wrong
+/// value looks exactly as plausible as the right one to every downstream
+/// consumer. A page whose figure count and box count disagree means the two
+/// halves of the response describe different things, and the honest move is to
+/// fail the unit rather than to pick an alignment.
+fn pair_images_with_boxes(
+    page_index: usize,
+    referenced: &[String],
+    image_bytes: &BTreeMap<String, Vec<u8>>,
+    boxes: &[[i64; 4]],
+) -> Result<Vec<OcrImage>> {
+    if referenced.len() != image_bytes.len() {
+        return Err(violation(format!(
+            "page {page_index} Markdown references {} images but markdown.images carries {}",
+            referenced.len(),
+            image_bytes.len()
+        )));
+    }
+    if referenced.is_empty() {
+        return Ok(Vec::new());
+    }
+    if referenced.len() != boxes.len() {
+        return Err(violation(format!(
+            "page {page_index} has {} referenced images but {} figure blocks — refusing to \
+             guess which bbox belongs to which image",
+            referenced.len(),
+            boxes.len()
+        )));
+    }
+    referenced
+        .iter()
+        .zip(boxes)
+        .map(|(relative_path, bbox)| {
+            let bytes = image_bytes.get(relative_path).ok_or_else(|| {
+                violation(format!(
+                    "page {page_index} Markdown references {relative_path}, which markdown.images \
+                     does not carry"
+                ))
+            })?;
+            Ok(OcrImage {
+                bytes: bytes.clone(),
+                media_type: sniff_media_type(bytes, relative_path),
+                bbox: Some(*bbox),
+                confidence: None,
+                // 07 §5.2's bbox_annotation is a Mistral-specific extra prompt
+                // and a +25% charge. There is neither here: this pipeline
+                // returns no figure description, and Kio does not prompt it.
+                annotation: None,
+            })
+        })
+        .collect()
+}
+
+/// Media type from the bytes, falling back to the extension.
+///
+/// Content first because the extension is the service's, not Kio's, and the
+/// stored object is addressed by its bytes.
+fn sniff_media_type(bytes: &[u8], relative_path: &str) -> String {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return "image/png".to_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "image/jpeg".to_owned();
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return "image/webp".to_owned();
+    }
+    match relative_path.rsplit('.').next() {
+        Some(extension) if extension.eq_ignore_ascii_case("png") => "image/png".to_owned(),
+        Some(extension)
+            if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") =>
+        {
+            "image/jpeg".to_owned()
+        }
+        _ => "application/octet-stream".to_owned(),
+    }
+}
+
+/// Minimal standard-alphabet base64 decoder with padding.
+///
+/// Written out rather than pulled in: the crate has no base64 dependency, and
+/// adding one for a 30-line function that only ever reads a service's own
+/// output is not a trade worth making.
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(encoded.len() / 4 * 3);
+    let mut accumulator = 0_u32;
+    let mut bits = 0_u32;
+    let mut padding = 0_usize;
+    for byte in encoded.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            // Data after padding is malformed, not something to skip past.
+            return None;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        accumulator = (accumulator << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((accumulator >> bits) & 0xFF) as u8);
+        }
+    }
+    if padding > 2 {
+        return None;
+    }
+    Some(out)
+}
+
+/// The declared profile for a backend.
+#[must_use]
+pub fn profile_value_for(execution: LocalOcrExecution) -> Value {
+    let mut profile = json!({
+        "adapter_kind": "markdownize",
+        "adapter_role": "multimodal",
+        "model_or_tool_family": LOCAL_OCR_MODEL_FAMILY,
+        "output_schema": "kio-markdown-v1",
+        "runtime_kind": "local",
+        "spec_version": 1
+    });
+    let fields = profile
+        .as_object_mut()
+        .expect("profile literal is an object");
+    match execution {
+        LocalOcrExecution::Mock => {
+            fields.insert(
+                "model_version_pin".to_owned(),
+                json!("kio-local-ocr-mock-1.0.0"),
+            );
+        }
+        LocalOcrExecution::Real => {
+            fields.insert(
+                "model_version_pin".to_owned(),
+                json!(LOCAL_OCR_MODEL_VERSION_PIN),
+            );
+        }
+    }
+    profile
+}
+
+/// 03 §5.1: a weight-bearing local adapter pins the sha256 of the weights.
+///
+/// **Not yet measured.** The value below is a placeholder that names itself as
+/// one so it cannot be mistaken for a digest: adopting this adapter requires
+/// downloading the weights and recording their hash, exactly as V4 did for the
+/// embedding model. Until then only [`LocalOcrExecution::Mock`] is safe to run,
+/// because a `Real` profile built on a fake pin would let two different model
+/// versions claim one identity.
+pub const LOCAL_OCR_MODEL_VERSION_PIN: &str = "unmeasured:paddleocr-vl-weights-not-yet-pinned";
+
+#[must_use]
+pub fn profile_for(execution: LocalOcrExecution) -> AdapterProfile {
+    let profile = profile_value_for(execution);
+    AdapterProfile {
+        adapter_kind: AdapterKind::Markdownize,
+        adapter_id: LOCAL_OCR_ADAPTER_ID.to_owned(),
+        execution_mode: ExecutionMode::OfflineApi,
+        tool_profile_hash: tool_profile_hash(&profile)
+            .expect("built-in local OCR profile is valid"),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        capability_flags: vec!["markdown".to_owned(), "bbox".to_owned()],
+        // 07 §3: an offline_api adapter reaches loopback only, which is what
+        // the §3 consent-gate exemption keys off.
+        allow_network: false,
+        // Nothing to bill: the pipeline runs on hardware the user already has.
+        billable_kinds: Vec::new(),
+        reject_billing: None,
+        provider_idempotency: crate::types::ProviderIdempotency::NotProvided,
+    }
+}
+
+pub struct LocalOcrMarkdownizeAdapter<C = EnvLocalOcrClient> {
+    client: C,
+    execution: LocalOcrExecution,
+    scope_id: String,
+    image_store_dir: Option<PathBuf>,
+    verified_raw_bytes: Option<Vec<u8>>,
+}
+
+impl<C> LocalOcrMarkdownizeAdapter<C> {
+    pub fn new(client: C, execution: LocalOcrExecution, scope_id: impl Into<String>) -> Self {
+        Self {
+            client,
+            execution,
+            scope_id: scope_id.into(),
+            image_store_dir: None,
+            verified_raw_bytes: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_image_store(mut self, kio_dir: impl Into<PathBuf>) -> Self {
+        self.image_store_dir = Some(kio_dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_verified_raw_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.verified_raw_bytes = Some(bytes.into());
+        self
+    }
+
+    #[must_use]
+    pub fn execution(&self) -> LocalOcrExecution {
+        self.execution
+    }
+}
+
+impl<C: LocalOcrClient> MarkdownizeAdapter for LocalOcrMarkdownizeAdapter<C> {
+    fn profile(&self) -> AdapterProfile {
+        profile_for(self.execution)
+    }
+
+    fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse> {
+        // 07 §5.2's bbox_annotation is a Mistral-only prompt-and-charge feature.
+        // Accepting the flag here and ignoring it would report annotations that
+        // were never produced, so it is refused instead.
+        if request.bbox_annotation_enabled {
+            return Err(violation(
+                "local OCR adapter does not implement bbox_annotation (07 §5.2 is Mistral-specific)",
+            ));
+        }
+        let raw_bytes = self
+            .verified_raw_bytes
+            .as_deref()
+            .ok_or_else(|| violation("local OCR adapter requires verified raw bytes"))?;
+        let file_type = LayoutFileType::from_media_type(&request.media_type)?;
+        let body = self
+            .client
+            .layout_parse(&encode_base64(raw_bytes), file_type)?;
+        let pages = parse_layout_parsing(&body)?;
+
+        let hints = match request
+            .prepared_unit_hint
+            .as_ref()
+            .filter(|hints| !hints.is_empty())
+        {
+            Some(hints) => hints.clone(),
+            None => discovered_page_hints(&request.raw.raw_hash, &pages),
+        };
+
+        if let Some(kio_dir) = &self.image_store_dir {
+            persist_pages_images(kio_dir, &pages)?;
+        }
+
+        let updated_units = hints
+            .iter()
+            .map(|hint| unit_from_hint(hint, &pages, &self.scope_id))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(MarkdownizeResponse {
+            mode_used: request.mode,
+            updated_units,
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: Vec::new(),
+            fallback_to_full: false,
+            reason: None,
+            // No ledger charge exists for a local run, so reporting usage would
+            // only invite a settlement against a price that is not there.
+            usage: None,
+        })
+    }
+}
+
+fn unit_from_hint(
+    hint: &PreparedUnitHint,
+    pages: &[LayoutParsedPage],
+    scope_id: &str,
+) -> Result<MarkdownUnit> {
+    let page_index = usize::try_from(hint.order)
+        .map_err(|_| violation("prepared page order exceeds platform range"))?;
+    let page = pages
+        .iter()
+        .find(|page| page.index == page_index)
+        .ok_or_else(|| violation(format!("layout-parsing response missing page {page_index}")))?;
+    let markdown = crate::mistral_ocr::replace_image_placeholders(
+        &page.markdown,
+        scope_id,
+        page.images.as_slice(),
+    );
+    Ok(MarkdownUnit {
+        unit_key: hint.unit_key.clone(),
+        unit_type: hint.unit_kind,
+        markdown,
+        metadata: page_metadata(&page.images),
+    })
+}
+
+fn page_metadata(images: &[OcrImage]) -> BTreeMap<String, Value> {
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "model_version_pin".to_owned(),
+        json!(LOCAL_OCR_MODEL_VERSION_PIN),
+    );
+    if !images.is_empty() {
+        let values = images
+            .iter()
+            .map(|image| {
+                json!({
+                    "hash": image_hash(&image.bytes),
+                    "media_type": image.media_type,
+                    "bbox": image.bbox,
+                    "confidence": image.confidence,
+                })
+            })
+            .collect::<Vec<_>>();
+        metadata.insert("images".to_owned(), json!(values));
+    }
+    metadata
+}
+
+/// Mint one unit per returned page when the caller supplied no hints.
+///
+/// Local Prepare returns no units for a scanned PDF, so the service's page set
+/// is the first trusted unit boundary available — the same reasoning the online
+/// adapter's `discovered_unit_hints` records. `parse_layout_parsing` already
+/// enumerated the pages contiguously from zero, so there is no gap to check
+/// for here.
+fn discovered_page_hints(raw_hash: &str, pages: &[LayoutParsedPage]) -> Vec<PreparedUnitHint> {
+    pages
+        .iter()
+        .map(|page| PreparedUnitHint {
+            unit_key: format!("page:{}", page.index + 1),
+            prepared_hash: raw_hash.to_owned(),
+            unit_kind: UnitKind::Page,
+            order: page.index as u64,
+        })
+        .collect()
+}
+
+fn persist_pages_images(kio_dir: &Path, pages: &[LayoutParsedPage]) -> Result<()> {
+    let images = pages
+        .iter()
+        .flat_map(|page| page.images.iter())
+        .collect::<Vec<_>>();
+    // The returned hashes are the caller's own inputs re-derived, so they are
+    // dropped here; what this call is wanted for is the bounded, verified write.
+    crate::mistral_ocr::persist_image_refs_bounded(
+        kio_dir,
+        &images,
+        LOCAL_OCR_MAX_PERSISTED_IMAGE_BYTES,
+    )
+    .map(|_hashes| ())
+}
+
+/// Standard-alphabet base64 with padding, matching [`decode_base64`].
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map_or(0, u32::from);
+        let b2 = chunk.get(2).copied().map_or(0, u32::from);
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// The CI backend. Returns a fixed, well-formed `/layout-parsing` body so the
+/// offline Markdownize *semantics* — no consent gate, no ledger charge, no
+/// batch lane — can be exercised on a runner that has no GPU and never will.
+#[derive(Debug, Clone, Default)]
+pub struct MockLocalOcrClient;
+
+impl LocalOcrClient for MockLocalOcrClient {
+    fn layout_parse(&self, _file_base64: &str, _file_type: LayoutFileType) -> Result<Value> {
+        Ok(json!({
+            "layoutParsingResults": [{
+                "prunedResult": {
+                    "parsing_res_list": [
+                        {"block_label": "text", "block_content": "Kio local OCR mock page.",
+                         "block_bbox": [10, 10, 500, 40], "block_id": 0, "block_order": 0}
+                    ]
+                },
+                "markdown": {"text": "Kio local OCR mock page.\n", "images": {}}
+            }],
+            "dataInfo": {}
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page_body(markdown: &str, images: Value, blocks: Value) -> Value {
+        json!({
+            "layoutParsingResults": [{
+                "prunedResult": {"parsing_res_list": blocks},
+                "markdown": {"text": markdown, "images": images}
+            }]
+        })
+    }
+
+    fn png_base64() -> String {
+        // 8-byte PNG signature is enough for the sniffing path.
+        encode_base64(b"\x89PNG\r\n\x1a\nrest")
+    }
+
+    #[test]
+    fn base64_round_trips() {
+        for case in [
+            b"".as_slice(),
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            b"\x00\xFF\x10binary\x00",
+        ] {
+            let encoded = encode_base64(case);
+            assert_eq!(decode_base64(&encoded).as_deref(), Some(case), "{encoded}");
+        }
+    }
+
+    #[test]
+    fn base64_rejects_data_after_padding() {
+        assert!(decode_base64("QQ==QQ").is_none());
+    }
+
+    #[test]
+    fn markdown_image_paths_follow_document_order_not_key_order() {
+        // Deliberately named so that alphabetical order is the REVERSE of the
+        // order they appear in: this is exactly the mistake the pairing code
+        // must not make.
+        let markdown = "intro\n\n![](z-first.png)\n\ntext\n\n![](a-second.png)\n";
+        assert_eq!(
+            markdown_image_paths(markdown),
+            vec!["z-first.png".to_owned(), "a-second.png".to_owned()]
+        );
+    }
+
+    #[test]
+    fn figures_pair_with_boxes_in_reading_order() {
+        let body = page_body(
+            "![](z-first.png)\n\n![](a-second.png)\n",
+            json!({"z-first.png": png_base64(), "a-second.png": png_base64()}),
+            json!([
+                // Deliberately out of array order: block_order is what counts.
+                {"block_label": "image", "block_bbox": [0, 200, 50, 250], "block_order": 7},
+                {"block_label": "text", "block_bbox": [0, 0, 10, 10], "block_order": 1},
+                {"block_label": "image", "block_bbox": [0, 100, 50, 150], "block_order": 3},
+            ]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        let images = &pages[0].images;
+        assert_eq!(images.len(), 2);
+        // block_order 3 is the earlier figure, so it belongs to the first
+        // reference in the Markdown.
+        assert_eq!(images[0].bbox, Some([0, 100, 50, 150]));
+        assert_eq!(images[1].bbox, Some([0, 200, 50, 250]));
+        assert_eq!(images[0].media_type, "image/png");
+    }
+
+    #[test]
+    fn a_figure_count_mismatch_fails_rather_than_guessing() {
+        // Two references, one figure block. Any pairing here would be a guess,
+        // and 07 §9 would freeze it permanently.
+        let body = page_body(
+            "![](one.png)\n\n![](two.png)\n",
+            json!({"one.png": png_base64(), "two.png": png_base64()}),
+            json!([{"block_label": "image", "block_bbox": [0, 0, 10, 10], "block_order": 0}]),
+        );
+        let error = parse_layout_parsing(&body).unwrap_err().to_string();
+        assert!(error.contains("refusing to"), "{error}");
+    }
+
+    #[test]
+    fn a_reference_without_bytes_fails() {
+        let body = page_body(
+            "![](present.png)\n",
+            json!({"absent.png": png_base64()}),
+            json!([{"block_label": "image", "block_bbox": [0, 0, 10, 10], "block_order": 0}]),
+        );
+        assert!(parse_layout_parsing(&body).is_err());
+    }
+
+    #[test]
+    fn text_block_boxes_are_not_treated_as_figures() {
+        // A page of prose with no figures must yield no images — not one image
+        // per paragraph.
+        let body = page_body(
+            "just prose\n",
+            json!({}),
+            json!([
+                {"block_label": "text", "block_bbox": [0, 0, 100, 20], "block_order": 0},
+                {"block_label": "title", "block_bbox": [0, 30, 100, 50], "block_order": 1},
+            ]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        assert!(pages[0].images.is_empty());
+    }
+
+    #[test]
+    fn a_vlm_only_response_is_named_as_such() {
+        // This is the shape genai_server returns after the pipeline's own
+        // post-processing is skipped: Markdown, no parsing_res_list. The error
+        // has to point at the endpoint, because "no bboxes" is otherwise
+        // indistinguishable from "a page with no figures".
+        let body = json!({
+            "layoutParsingResults": [{"markdown": {"text": "recognized text\n"}}]
+        });
+        let error = parse_layout_parsing(&body).unwrap_err().to_string();
+        assert!(error.contains("genai_server"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_result_array_is_rejected() {
+        let body = json!({"layoutParsingResults": []});
+        assert!(parse_layout_parsing(&body).is_err());
+    }
+
+    #[test]
+    fn a_degenerate_bbox_is_rejected() {
+        // Zero area. The online route already refuses these (07 §5.2); both
+        // OCR routes must agree, or the same document parses differently
+        // depending on which adapter ran.
+        let body = page_body(
+            "![](one.png)\n",
+            json!({"one.png": png_base64()}),
+            json!([{"block_label": "image", "block_bbox": [10, 10, 10, 10], "block_order": 0}]),
+        );
+        assert!(parse_layout_parsing(&body).is_err());
+    }
+
+    #[test]
+    fn float_bboxes_from_numpy_are_accepted() {
+        let body = page_body(
+            "![](one.png)\n",
+            json!({"one.png": png_base64()}),
+            json!([{
+                "block_label": "image",
+                "block_bbox": [10.0, 20.4, 110.0, 220.6],
+                "block_order": 0
+            }]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        assert_eq!(pages[0].images[0].bbox, Some([10, 20, 110, 221]));
+    }
+
+    #[test]
+    fn pdf_and_image_media_types_map_to_the_documented_file_type() {
+        assert_eq!(
+            LayoutFileType::from_media_type("application/pdf")
+                .unwrap()
+                .wire_value(),
+            0
+        );
+        assert_eq!(
+            LayoutFileType::from_media_type("image/png")
+                .unwrap()
+                .wire_value(),
+            1
+        );
+        assert!(LayoutFileType::from_media_type("text/plain").is_err());
+    }
+
+    #[test]
+    fn mock_and_real_hash_to_different_profiles() {
+        // Same reason as the embedding adapter: a mock page and a real one are
+        // not interchangeable, and 03 §7 has only the profile hash to tell them
+        // apart with.
+        assert_ne!(
+            profile_for(LocalOcrExecution::Mock).tool_profile_hash,
+            profile_for(LocalOcrExecution::Real).tool_profile_hash
+        );
+    }
+
+    #[test]
+    fn the_profile_is_offline_and_unbillable() {
+        let profile = profile_for(LocalOcrExecution::Mock);
+        assert_eq!(profile.execution_mode, ExecutionMode::OfflineApi);
+        assert!(!profile.allow_network);
+        assert!(profile.billable_kinds.is_empty());
+    }
+
+    #[test]
+    fn the_profile_records_no_prompt_template() {
+        // Kio supplies no prompt to this pipeline, so hashing one would make
+        // the identity describe an input the adapter never sends.
+        let profile = profile_value_for(LocalOcrExecution::Real);
+        assert!(profile.get("prompt_template_hash").is_none());
+        assert!(profile.get("prompt_template_id").is_none());
+    }
+
+    #[test]
+    fn the_real_weight_pin_names_itself_unmeasured() {
+        // Guards against the placeholder being mistaken for a measured digest
+        // and adopted. 03 §5.1 requires a sha256 of the weights.
+        assert!(LOCAL_OCR_MODEL_VERSION_PIN.starts_with("unmeasured:"));
+        assert!(!LOCAL_OCR_MODEL_VERSION_PIN.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn the_mock_client_body_parses() {
+        let body = MockLocalOcrClient
+            .layout_parse("", LayoutFileType::Image)
+            .unwrap();
+        let pages = parse_layout_parsing(&body).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].markdown.contains("mock page"));
+    }
+
+    /// A client that records what it was handed, so the request side can be
+    /// asserted on rather than only the response side.
+    #[derive(Clone)]
+    struct RecordingClient {
+        body: Value,
+        seen: std::sync::Arc<std::sync::Mutex<Option<(String, LayoutFileType)>>>,
+    }
+
+    impl LocalOcrClient for RecordingClient {
+        fn layout_parse(&self, file_base64: &str, file_type: LayoutFileType) -> Result<Value> {
+            *self.seen.lock().unwrap() = Some((file_base64.to_owned(), file_type));
+            Ok(self.body.clone())
+        }
+    }
+
+    fn request(media_type: &str) -> MarkdownizeRequest {
+        MarkdownizeRequest {
+            raw: crate::types::RawInput {
+                raw_hash: "sha256:raw".to_owned(),
+                path: None,
+            },
+            media_type: media_type.to_owned(),
+            prepared_unit_hint: None,
+            mode: crate::types::MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
+            tool_profile_hash: "sha256:profile".to_owned(),
+            spec_version: 1,
+            idempotency_token: None,
+        }
+    }
+
+    #[test]
+    fn the_adapter_mints_one_unit_per_page_and_rewrites_image_references() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let client = RecordingClient {
+            body: page_body(
+                "before\n\n![](fig-1.png)\n\nafter\n",
+                json!({"fig-1.png": png_base64()}),
+                json!([{"block_label": "image", "block_bbox": [4, 8, 40, 80], "block_order": 0}]),
+            ),
+            seen: std::sync::Arc::clone(&seen),
+        };
+        let adapter = LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+            .with_verified_raw_bytes(b"%PDF-1.7 bytes".to_vec());
+
+        let response = adapter.markdownize(request("application/pdf")).unwrap();
+
+        // The service was told these are PDF bytes, base64 of exactly what was
+        // verified — not a re-read of a path.
+        let (sent, file_type) = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(file_type, LayoutFileType::Pdf);
+        assert_eq!(decode_base64(&sent).unwrap(), b"%PDF-1.7 bytes");
+
+        assert_eq!(response.updated_units.len(), 1);
+        let unit = &response.updated_units[0];
+        assert_eq!(unit.unit_key, "page:1");
+        // The relative path the service invented must not survive into the
+        // normalized Markdown: Stage 1.5's related_images[] reads kio:// URIs,
+        // and a leftover fig-1.png would make it silently empty.
+        assert!(!unit.markdown.contains("fig-1.png"), "{}", unit.markdown);
+        assert!(unit.markdown.contains("kio://"), "{}", unit.markdown);
+        assert_eq!(unit.metadata["images"][0]["bbox"], json!([4, 8, 40, 80]));
+        // A local run has no invoice, so there is nothing for the ledger to
+        // settle against.
+        assert!(response.usage.is_none());
+    }
+
+    #[test]
+    fn the_adapter_refuses_bbox_annotation_rather_than_ignoring_it() {
+        let mut request = request("image/png");
+        request.bbox_annotation_enabled = true;
+        let adapter =
+            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, "scope-1")
+                .with_verified_raw_bytes(b"png".to_vec());
+        let error = adapter.markdownize(request).unwrap_err().to_string();
+        assert!(error.contains("bbox_annotation"), "{error}");
+    }
+
+    #[test]
+    fn the_adapter_will_not_run_without_verified_bytes() {
+        // Re-reading a path here would re-open bytes the caller already
+        // verified, which is the hole the verified-bytes API exists to close.
+        let adapter =
+            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, "scope-1");
+        assert!(adapter.markdownize(request("image/png")).is_err());
+    }
+
+    #[test]
+    fn supplied_hints_select_pages_instead_of_minting_new_ones() {
+        let client = RecordingClient {
+            body: json!({"layoutParsingResults": [
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "one\n"}},
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "two\n"}},
+            ]}),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let mut request = request("application/pdf");
+        request.prepared_unit_hint = Some(vec![PreparedUnitHint {
+            unit_key: "page:2".to_owned(),
+            prepared_hash: "sha256:p2".to_owned(),
+            unit_kind: UnitKind::Page,
+            order: 1,
+        }]);
+        let adapter = LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+            .with_verified_raw_bytes(b"pdf".to_vec());
+
+        let response = adapter.markdownize(request).unwrap();
+        assert_eq!(response.updated_units.len(), 1);
+        assert_eq!(response.updated_units[0].unit_key, "page:2");
+        assert_eq!(response.updated_units[0].markdown, "two\n");
+    }
+
+    #[test]
+    fn a_hint_naming_a_page_the_service_did_not_return_fails() {
+        let client = RecordingClient {
+            body: MockLocalOcrClient
+                .layout_parse("", LayoutFileType::Image)
+                .unwrap(),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let mut request = request("application/pdf");
+        request.prepared_unit_hint = Some(vec![PreparedUnitHint {
+            unit_key: "page:9".to_owned(),
+            prepared_hash: "sha256:p9".to_owned(),
+            unit_kind: UnitKind::Page,
+            order: 8,
+        }]);
+        let adapter = LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Mock, "scope-1")
+            .with_verified_raw_bytes(b"pdf".to_vec());
+        assert!(adapter.markdownize(request).is_err());
+    }
+}

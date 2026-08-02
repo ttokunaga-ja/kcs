@@ -10,6 +10,7 @@ mod gemini_embedding;
 mod http_policy;
 pub mod identity;
 mod local_embedding;
+pub mod local_ocr_markdownize;
 mod mistral_ocr;
 pub mod office_convert;
 pub mod pdf_decode;

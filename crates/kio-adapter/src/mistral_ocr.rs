@@ -1532,7 +1532,13 @@ fn verify_existing_image_object(path: &Path, hash: &str, max_bytes: usize) -> Re
     Ok(())
 }
 
-fn persist_image_refs_bounded(
+/// `pub(crate)` so the local OCR adapter reuses this rather than growing a
+/// second image-persistence path. The bounded write, the
+/// content-address-and-verify, and the "an existing object must match" check
+/// are provider-independent — they belong to Kio's object store, not to
+/// Mistral — and two implementations of them would be two chances to diverge
+/// on a rule that is permanent once an object is written (07 §9).
+pub(crate) fn persist_image_refs_bounded(
     kio_dir: impl AsRef<Path>,
     images: &[&OcrImage],
     max_new_bytes: usize,
