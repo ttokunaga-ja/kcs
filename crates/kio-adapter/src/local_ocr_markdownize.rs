@@ -785,13 +785,25 @@ pub fn profile_value_for(execution: LocalOcrExecution) -> Value {
 
 /// 03 §5.1: a weight-bearing local adapter pins the sha256 of the weights.
 ///
-/// **Not yet measured.** The value below is a placeholder that names itself as
-/// one so it cannot be mistaken for a digest: adopting this adapter requires
-/// downloading the weights and recording their hash, exactly as V4 did for the
-/// embedding model. Until then only [`LocalOcrExecution::Mock`] is safe to run,
-/// because a `Real` profile built on a fake pin would let two different model
-/// versions claim one identity.
-pub const LOCAL_OCR_MODEL_VERSION_PIN: &str = "unmeasured:paddleocr-vl-weights-not-yet-pinned";
+/// Measured 2026-08-03 over the single `model.safetensors` (1,917,255,968 B) of
+/// the model the pipeline actually loads, at
+/// `/home/paddleocr/.paddlex/official_models/PaddleOCR-VL-1.6` inside
+/// `paddleocr-genai-vllm-server:latest-nvidia-gpu-offline`
+/// (image digest `sha256:d0d32c04…`). One file, so 03 §5.1's shard aggregation
+/// does not apply.
+///
+/// **The weights are `PaddleOCR-VL-1.6`, while [`LOCAL_OCR_DEFAULT_MODEL`] still
+/// says `PaddleOCR-VL-0.9B`.** That is not a mismatch to fix: the model *name*
+/// is what upstream keeps moving, and the digest is what identity rests on —
+/// which is the reason 03 §5.1 pins by hash. The name is only used to check
+/// what the server reports, by prefix.
+///
+/// Changing this value changes `tool_profile_hash`, and for markdownize that is
+/// survivable where it would not be for embedding: 07 §9's first-instance-wins
+/// plus 03 §2.1's gen+1 leave existing instances and their Evidence Pointers
+/// alone, and 03 §7's cross-scope compatibility gate is embedding-only.
+pub const LOCAL_OCR_MODEL_VERSION_PIN: &str =
+    "sha256:85a479d506a11e724e7285d395c551be69f41dbc16b6342d3cacfb189aed71db";
 
 #[must_use]
 pub fn profile_for(execution: LocalOcrExecution) -> AdapterProfile {
@@ -1514,11 +1526,19 @@ mod tests {
     }
 
     #[test]
-    fn the_real_weight_pin_names_itself_unmeasured() {
-        // Guards against the placeholder being mistaken for a measured digest
-        // and adopted. 03 §5.1 requires a sha256 of the weights.
-        assert!(LOCAL_OCR_MODEL_VERSION_PIN.starts_with("unmeasured:"));
-        assert!(!LOCAL_OCR_MODEL_VERSION_PIN.starts_with("sha256:"));
+    fn the_real_weight_pin_is_the_measured_digest() {
+        // Frozen on purpose. 03 §5.1 requires a sha256 of the weights, and this
+        // is the one taken from the model.safetensors the pipeline loads
+        // (2026-08-03). If it moves, the weights moved, and that is a profile
+        // change to make deliberately rather than by editing a constant.
+        assert_eq!(
+            LOCAL_OCR_MODEL_VERSION_PIN,
+            "sha256:85a479d506a11e724e7285d395c551be69f41dbc16b6342d3cacfb189aed71db"
+        );
+        // The placeholder shape must never come back: an `unmeasured:` value
+        // reaching a Real profile would let two model versions claim one
+        // identity, which is what the pin exists to prevent.
+        assert!(!LOCAL_OCR_MODEL_VERSION_PIN.starts_with("unmeasured:"));
     }
 
     #[test]
