@@ -340,21 +340,25 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
 /// pointer network predicts, and it is the order the Markdown was assembled in,
 /// so it is the ordering that lines up with the image references in the text.
 ///
-/// **Except that the service does not send it.** Measured 2026-08-02 against
-/// paddleocr-vl:latest-nvidia-gpu-offline: every block came back with
-/// `block_order: null`, so in practice the `unwrap_or` below gives every block
-/// the same key and the stable sort leaves them in array order. Array order was
-/// top-to-bottom in that capture (block y0 91 → 240 → 567 → 1103), which is why
-/// the single-figure case is right, but one single-column page is not evidence
-/// that array order *is* reading order.
+/// **Except that the service does not send it for the blocks this function
+/// keeps.** Measured 2026-08-03 against paddleocr-vl:latest-nvidia-gpu-offline:
+/// prose blocks are numbered 1, 2, 3, 4, but `header`, `chart`, `figure_title`
+/// and `vision_footnote` all come back `null` — and `chart` is a figure label.
+/// (An earlier note here said *every* block was null. That was wrong, and it
+/// does not change the conclusion: the figure blocks are the null ones.)
 ///
-/// That matters only when a page has two or more figures: the list this returns
-/// is zipped against the Markdown's references, so if array order ever differs
-/// from reading order there, two bboxes swap — and 07 §9's first-instance-wins
-/// freezes the swap for the life of the archive. Deciding whether to refuse that
-/// case needs a measurement nobody has taken yet: a multi-figure page against a
-/// real server. Until then this is a known silent degradation, written down
-/// rather than left to be rediscovered from a wrong bbox.
+/// So for figures the `unwrap_or` below gives every kept block the same key and
+/// the stable sort leaves them in array order. Whether array order *is* reading
+/// order is the open question, and it decides bboxes that 07 §9 freezes for the
+/// life of the archive.
+///
+/// A two-figure page was run on real hardware on 2026-08-03 and came out right:
+/// the upper figure paired with the upper bbox. That is one page, and it is
+/// array order that earned the result rather than anything the service told us,
+/// so a page whose array order departs from reading order would still swap two
+/// bboxes silently. Left as is deliberately — refusing every multi-figure page
+/// to guard a case never observed would cost more than it protects — but this is
+/// the thing to suspect first if a figure ever carries the wrong box.
 fn image_block_boxes(page_index: usize, result: &Value) -> Result<Vec<[i64; 4]>> {
     let Some(list) = result
         .get("prunedResult")
