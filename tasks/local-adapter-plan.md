@@ -122,7 +122,7 @@ first-instance-wins で永続化されるので、**誤った空間の画像ベ�
 | 言語 | **109 言語** (日本語含む) | **日本語・英語のみ** |
 | 出力 | Markdown / JSON、layout 座標・bbox | Markdown、表→HTML、数式→LaTeX、`<bbox>[(x1,y1),(x2,y2)]</bbox>` |
 | 実績 | OmniDocBench v1.5 / v1.0 で SOTA | **VJRODa (縦書き日本語) CER 22.6 / BLEU 79.9 で最良** (GPT-4o-mini 72.4、Qwen2.5-VL-4B 86.1)。olmOCR-bench 0.683 |
-| 配信 | **公式 vLLM 対応** (`paddleocr genai_server`) | transformers (`trust_remote_code`)。vLLM 化は裁定 5 により許容 |
+| 配信 | **`POST /layout-parsing` (end-to-end)。** `paddleocr genai_server` の OpenAI 互換 `/v1` は**段 2 の VLM だけ**で Kio からは使えない (§11 の V1 / V2) | ❌ **vLLM 不可** (2026-08-02 実測)。Transformers backend の 4 条件を 1 つも満たさない。transformers 直呼びのみ |
 
 #### なぜ両方を許すのか — markdownize は embedding と違い identity ロックが緩い
 
@@ -792,15 +792,35 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 ## 9. Stage 3 — ローカル Markdownize Adapter
 
 新規モジュール `crates/kio-adapter/src/local_ocr_markdownize.rs`。
-`/v1/chat/completions` に画像を data URI で渡す標準形 (vLLM)。
 
-- 1 page = 1 unit = 1 呼出
+> **⚠ 2026-08-02 に前提が 1 つ壊れた。**この節は当初
+> 「`/v1/chat/completions` に画像を data URI で渡す標準形 (vLLM)」と書いていたが、
+> **PaddleOCR-VL ではそれが成立しない。**その口は 2 段構成の段 2 (VLM 認識) だけで、
+> bbox もレイアウトも読み順も返らず、公式が OpenAI クライアントでの直接利用を
+> 明示的に非推奨としている。詳細と一次資料は **§11 の V2**。
+
+**Kio は生成 LLM 系ではなく「文書処理 API 系」として実装する** —
+[07 §8](../docs/07-adapter-spec.md) が既に分けている 2 系統のうち後者で、
+プロンプト規約は適用外、§8.1 の受け入れ検査と入出力 schema だけを負う。
+**手本は [mistral_ocr.rs](../crates/kio-adapter/src/mistral_ocr.rs) であって
+`bbox_annotation.rs` の chat 経路ではない。**
+
+- 相手は `POST {url}/layout-parsing` (loopback 限定は D1 のまま)
+- 1 page = 1 unit = 1 呼出。**ただし PDF を直接渡すと 1 呼出で全ページ返る**ので、
+  unit 分割は Kio 側の既存の粒度に合わせて呼び分ける
 - [07 §8.1](../docs/07-adapter-spec.md) の 6 規約を実装義務として負う
-- **`sampling.temperature = 0` + `seed` 固定** — [07 §9](../docs/07-adapter-spec.md) の
-  first-instance-wins によりブレが永久に凍結されるため
-- `prompt_template_id` / `prompt_template_hash` を profile に固定 (D3 と同じ理由)
-- bbox: PaddleOCR-VL は layout 座標、Sarashina は `<bbox>[(x1,y1),(x2,y2)]</bbox>` タグ。
-  既存の [bbox_annotation.rs](../crates/kio-adapter/src/bbox_annotation.rs) と同型の後処理へ写像する
+- **生成パラメータ (`temperature` / `seed`) は Kio からは渡せない。**
+  `/layout-parsing` の request にその口が無く、サーバ側 config に属する。
+  [07 §9](../docs/07-adapter-spec.md) の first-instance-wins でブレが永久凍結される
+  リスクは変わらないので、**決定性はサーバ設定側の責務であることを profile に明記し、
+  受け入れ検査で同一入力 2 回の一致を確認する**
+- `prompt_template_id` / `prompt_template_hash` は**このモデルでは意味を持たない**
+  (Kio がプロンプトを供給しない)。D3 と同じ理由で profile に固定するのは
+  生成 LLM 系 profile の方だけにする
+- bbox: **PaddleOCR-VL は `prunedResult.parsing_res_list[].block_bbox` に絶対ピクセル、
+  Sarashina は Markdown 内タグで 0–1000 正規化・左上原点。互換ではない**ので
+  写像層は profile ごとに分ける。上流に「PDF crop と `block_bbox` が合わない」報告が
+  あるため、**実画像での検証を受け入れ検査に含める**
 - **画像抽出は Stage 1.5 / 2 の前提**: 抽出画像を `objects/image/` へ persist し、
   normalized Markdown へ `kio://` URI を埋める既存契約
   ([mistral_ocr.rs:1425,1600](../crates/kio-adapter/src/mistral_ocr.rs)) を
@@ -830,14 +850,110 @@ Stage 2 完了後に、段階 A/B の実測をもって着手可否を判断す�
 
 | # | 項目 | 影響 |
 |---|---|---|
-| V1 | Sarashina2.2-OCR の vLLM 対応 (モデルカードは transformers + `trust_remote_code` のみ) | 不可なら Stage 3 の第二 profile は `cmd` dispatcher が必要になりコストが跳ねる (裁定 5 により変更は許容) |
-| V2 | PaddleOCR-VL の bbox 出力形式の詳細 (Markdown 内タグか別 JSON か) | Stage 3 の bbox 写像の実装形 |
+| V1 | ✅ **2026-08-02 確定 — 現時点では不可** — Sarashina2.2-OCR の vLLM 対応 | vLLM の Transformers backend が要求する 4 条件すべてを満たしていない (下記)。**Stage 3 の第二 profile は当面登録できない。** 第一 profile (PaddleOCR-VL) は影響を受けない |
+| V2 | ✅ **2026-08-02 確定** — PaddleOCR-VL の bbox 出力形式 | **bbox は Markdown 内タグではなく JSON 側にしか無い。**加えて **serving 形が 2 つあり、計画書が想定していた方は使えない** — これが V2 の本題になった。下記 |
 | V3 | ✅ **2026-08-01 確定** — Qwen3-VL-Embedding の MRL 768 次元での劣化幅 (V3a 2026-07-28 / V3b 2026-08-01) | **768 で確定。** 24 問 recall@10 は 2048 が 0.5417、768 が 0.5833 で切り詰めの代償が出なかった。`dimensions` / `tool_profile_hash` の**暫定扱いを解除**し、恒久コーパスの埋め込み禁止も解けた。下記 |
 | V4 | ✅ **2026-07-27 確定** — vLLM の chat template 既定値と推奨 instruction の実物 | D3 の `prompt_template_hash` の中身。下記 |
 | V5 | llama.cpp #18665 / #19516 の進捗 | マージされれば Mac が D5 により再埋め込みなしで合流できる |
 | V7 | chunk 境界による URI 分断の発生頻度 | W3。dogfood corpus で計測 |
 | V8 | ✅ **2026-08-01 (a) 実測** — asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**。**ただし採れたとしても得ではなかった** (recall 両幅とも悪化) ので (b) の仕様改訂は実測上の動機を持たない。下記 |
 | V9 | tokenizer / vision preprocessor config が `model_version_pin` の対象外 | 同一 profile を名乗ったまま空間が割れうる。下記 |
+
+### V1 — Sarashina2.2-OCR は現時点で vLLM に載らない [2026-08-02 実測]
+
+vLLM には 2 つの経路がある。**native 実装**と、`trust_remote_code` の HF モデルを
+そのまま動かす **Transformers backend** である。後者はマルチモーダルにも効くので
+「custom arch だから不可」は誤りだが、**受け入れ条件が 4 つあり、公開されている
+`sbintuitions/sarashina2.2-ocr` は 4 つとも満たしていない。**
+
+| vLLM Transformers backend の要件 | `sarashina2.2-ocr` の実測 |
+|---|---|
+| `config.json` に `auto_map.AutoModel` | ❌ `AutoConfig` と `AutoModelForCausalLM` のみ |
+| `kwargs` を `Model` → `Attention` まで伝播 | ❌ 該当実装なし |
+| `Attention` が `ALL_ATTENTION_FUNCTIONS` を使う | ❌ 出現 0 (`modeling_sarashina2_vision.py` 815 行) |
+| `Model` に `_supports_attention_backend = True` | ❌ 出現 0。旧来の `_supports_flash_attn_2` / `_supports_sdpa` のみ |
+
+`architectures` は `Sarashina2VisionForCausalLM`、`model_type` は `sarashina2_vision` で
+vLLM の native 対応リストにも無い。**つまり native も Transformers backend も通らない。**
+
+→ **Stage 3 の第二 profile は当面登録できない。**計画書 §3.2 が想定していた
+「vLLM 化は裁定 5 により許容」は、`cmd` dispatcher の新設 (Stage 1 で両モード拒否と
+決めた外部プロセス起動) か、上流の対応待ちか、こちらで backend 対応を書くかの
+いずれかを意味する。**日本語縦書きの優位は魅力だが、第一 profile が動くまでは
+着手する理由が無い。**
+
+> 上の 4 条件は上流が変えうるので、**再判定は安い** — `config.json` に
+> `auto_map.AutoModel` が生え、`modeling_*.py` に `_supports_attention_backend` が
+> 入れば通る可能性がある。定期的に見るならこの 2 つを grep すればよい。
+
+### V2 — bbox は JSON 側にしか無く、**serving 形の選択が本題だった** [2026-08-02 実測]
+
+当初の問い (Markdown 内タグか別 JSON か) の答えは **別 JSON** である。
+ただし調べる過程で、**計画書が前提にしていた serving 形が使えない**ことが判った。
+そちらの方が影響が大きい。
+
+**PaddleOCR-VL は 2 段構成である。** bbox を出すのは VLM ではない。
+
+| 段 | モデル | 役割 |
+|---|---|---|
+| 1 | **PP-DocLayoutV2** (RT-DETR + pointer network) | レイアウト要素の**位置・分類・読み順**。**bbox はここが出す** |
+| 2 | **PaddleOCR-VL-0.9B** (NaViT + ERNIE-4.5-0.3B) | 1 が切り出した領域の**中身の認識のみ。bbox は出さない** |
+
+したがって serving も 2 形あり、**役割が違う**。
+
+| | `paddleocr genai_server` | **`POST /layout-parsing`** |
+|---|---|---|
+| API 形 | OpenAI 互換 `/v1` | PaddleX 独自 |
+| 範囲 | **段 2 のみ** | **段 1+2+後処理の end-to-end** |
+| bbox | ❌ 出ない | ✅ `prunedResult` に入る |
+| Markdown 組み立て | ❌ しない | ✅ する |
+
+公式ドキュメントは前者について**明示的に警告している**:
+
+> The services launched according to this section are responsible only for the VLM
+> inference stage ... **It is strongly discouraged to directly call such services
+> through plain HTTP requests or OpenAI clients to process document images.**
+
+**計画書 §9 が書いていた「`/v1/chat/completions` に画像を data URI で渡す標準形」は
+まさにこの警告の対象である。**段 1 を欠くので、レイアウトも読み順も bbox も得られない。
+そして段 1 は別モデル (RT-DETR) なので、Kio 側で埋め合わせることはできない。
+
+→ **Kio が話すべき相手は `POST /layout-parsing` である。**
+
+```
+POST /layout-parsing
+  { "file": "<base64 | URL>", "fileType": 0=PDF | 1=image,
+    "useLayoutDetection": true, "useChartRecognition": ... }
+→ { "layoutParsingResults": [ {          // 画像なら 1、PDF ならページ数
+        "prunedResult": { "parsing_res_list": [
+            { "block_bbox": [x0,y0,x1,y1],   // 絶対ピクセル
+              "block_label": "text"|"table"|..., "block_content": "...",
+              "block_id": int, "block_order": int } ] },
+        "markdown": { "text": "...", "images": { "<相対パス>": "<base64>" } },
+        "outputImages": ..., "inputImage": ... } ],
+    "dataInfo": {...} }
+```
+
+**この形は Kio にとって都合が良い。** 理由が 3 つある。
+
+1. **`markdown.images` が「相対パス → 画像バイト」の対応表そのもの**で、
+   §9 が要求する `objects/image/` への persist と `kio://` URI 埋め込みに直接使える。
+   [mistral_ocr.rs:1425,1600](../crates/kio-adapter/src/mistral_ocr.rs) の既存契約と同型
+2. **PDF を直接受け、ページごとに 1 要素返す。**§9 の「1 page = 1 unit = 1 呼出」と整合する
+3. **これは「文書処理 API 系」であって生成 LLM 系ではない。**
+   [07 §8](../docs/07-adapter-spec.md) は既にこの 2 系統を分けており、文書処理 API 系は
+   プロンプト規約の適用外で、§8.1 の受け入れ検査と入出力 schema だけを負う。
+   **仕様側の改訂は要らない。実装の手本は `mistral_ocr.rs` である**
+
+**bbox の座標系に注意** — PaddleOCR-VL は**絶対ピクセル**、Sarashina は
+**0–1000 正規化・左上原点** (`<bbox>[(x1,y1),(x2,y2)]</bbox>`) で、**互換ではない**。
+写像層は profile ごとに分ける。加えて PDF から切り出した crop と `block_bbox` が
+一致しないという報告が上流にあるので、**受け入れ検査で実画像に対して検証すること。**
+
+> **モデル名が動いている。** 公式ドキュメントの例は `PaddleOCR-VL-1.6-0.9B` を
+> 使っており、計画書 §3.2 の `PaddleOCR-VL-0.9B` は世代が古い。
+> D2 の `model_version_pin` は重みの sha256 なので実害は無いが、
+> **採用時にどの revision を pin したかを記録すること。**
 
 ### V3 は 2 段構えで、**両方とも済んだ** (V3a 2026-07-28 / V3b 2026-08-01・GPU 実機)
 
