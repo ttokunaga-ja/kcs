@@ -14389,6 +14389,9 @@ fn execute_offline_markdownize_task(
         profile.tool_profile_hash,
         response,
         &effective_hints,
+        // Nothing was billed and re-running is free, so a unit that fails 07 §5's
+        // acceptance check is refused rather than frozen into the archive.
+        true,
     )
 }
 
@@ -14531,6 +14534,9 @@ fn execute_online_markdownize_task(
         outcome.profile.tool_profile_hash.clone(),
         outcome.response,
         &outcome.effective_prepared_unit_hints,
+        // Unchanged for the online routes: this send was billed, so rejecting it
+        // outright is a separate decision with a refund story attached.
+        false,
     )
 }
 
@@ -14553,6 +14559,9 @@ fn materialize_online_markdownize_response(
     profile_tool_hash: String,
     response: kio_adapter::types::MarkdownizeResponse,
     effective_prepared_unit_hints: &[PreparedUnitHint],
+    // When true, failing acceptance is fatal rather than merely withholding the
+    // Done shortcut. Set by the offline route; see its use below.
+    acceptance_is_fatal: bool,
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     if prepared_units.is_empty() {
         if retry_units.is_some() {
@@ -14585,7 +14594,38 @@ fn materialize_online_markdownize_response(
     // through to the caller's settle call, instead of discarding it here.
     let usage = response.usage.clone();
     let hints = all_changed_hints(&prepared_units);
-    let strict_valid = validate_markdownize_response(&response, &hints, &prepared_units).is_ok();
+    let acceptance = validate_markdownize_response(&response, &hints, &prepared_units);
+    // 07 §5 freezes Normalized Markdown v1 — ATX headings only, GFM tables, image
+    // references as `![...](kio://…)` only, no raw HTML — and says compliance
+    // belongs to this acceptance check. But the online routes only ever used its
+    // result to decide whether to take the Done shortcut, so a unit that violated
+    // v1 still reached the archive; the count-based status returns Done for
+    // "1 unit produced, 0 failed" either way. That is how the local route wrote
+    // raw `<div>` into normalized units for a release without anything saying so.
+    //
+    // The offline route treats it as fatal instead. A local task costs nothing to
+    // re-run, so refusing is cheap — while a non-conforming unit is not, because
+    // 07 §9's first-instance-wins freezes it for the life of the archive. The
+    // online routes are left as they were: changing when a *billed* send is
+    // rejected is a separate decision with a refund story attached.
+    if acceptance_is_fatal {
+        if let Err(reason) = &acceptance {
+            append_event_log(
+                "KIO-E-ADAPTER-CONTRACT-001",
+                "offline markdownize output failed acceptance",
+                json!({ "input_path": task.input_path, "detail": reason.to_string() }),
+            )
+            .map_err(|_| TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
+            })?;
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
+            });
+        }
+    }
+    let strict_valid = acceptance.is_ok();
     let generated_at = now_utc_seconds();
     // R11-6: preserve previously-done units (first-instance-wins). Load the prior
     // instance this run overwrites (same raw_hash + resolved tool_profile_hash +
@@ -22002,6 +22042,8 @@ fn collect_batch_markdownize_output(
         resolved_profile.tool_profile_hash.clone(),
         response,
         &effective_hints,
+        // Unchanged for the online routes; see the sync send's call for why.
+        false,
     );
     let outcome = match materialized {
         Ok(outcome) => outcome,

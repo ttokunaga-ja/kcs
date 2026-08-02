@@ -27,6 +27,7 @@ const CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_TEST_GEMINI_EMBED",
     "KIO_TEST_LOCAL_EMBED",
     "KIO_TEST_LOCAL_OCR",
+    "KIO_TEST_LOCAL_OCR_BODY",
     "KIO_TEST_MISTRAL_OCR",
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
 ];
@@ -250,6 +251,53 @@ fn s3e_the_local_pipelines_figure_is_reachable_from_the_chunk_that_cites_it() {
     let opened = json_success(&dir, &["open", uri], &local);
     assert_eq!(opened["status"], "opened", "{opened}");
     assert_eq!(opened["object_type"], "image", "{opened}");
+}
+
+/// A unit that fails 07 §5's acceptance check must not reach the archive.
+///
+/// The check has always detected raw HTML; what it did not do was stop anything.
+/// Its single production caller used the result only to decide whether to take
+/// the Done shortcut, and the count-based status returns Done for "1 unit
+/// produced, 0 failed" regardless — so the local route wrote raw `<div>` into
+/// normalized units for a release with nothing saying so. 07 §9 then freezes
+/// whatever landed.
+///
+/// The offline route now refuses instead. It can afford to: nothing was billed
+/// and re-running is free, which is not true of the online routes and is why
+/// they are deliberately left as they were.
+#[test]
+fn s3e_a_unit_that_fails_the_v1_acceptance_check_is_refused_not_frozen() {
+    let dir = scanned_pdf_fixture();
+    let local = [
+        ("KIO_TEST_LOCAL_OCR", "mock"),
+        // An HTML table: real enough that upstream may well send it, and
+        // deliberately outside what the adapter rewrites.
+        ("KIO_TEST_LOCAL_OCR_BODY", "nonconforming"),
+    ];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    let tasks = tasks(&dir);
+    let scan = tasks
+        .iter()
+        .find(|task| {
+            task.get("input_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("scan.pdf"))
+        })
+        .unwrap_or_else(|| panic!("no task for scan.pdf: {tasks:?}"));
+    assert_eq!(scan["status"], "failed", "{scan}");
+    assert_eq!(scan["fallback_reason"], "contract_violation", "{scan}");
+
+    // The refusal is only worth anything if nothing was persisted. A unit that
+    // reached the index would be frozen there by 07 §9's first-instance-wins.
+    assert!(
+        !chunk_texts(&dir)
+            .iter()
+            .any(|text| text.contains(MOCK_PAGE_TEXT)),
+        "a refused unit must not be indexed: {:?}",
+        chunk_texts(&dir)
+    );
 }
 
 /// Without the backend, nothing about the online route changes.

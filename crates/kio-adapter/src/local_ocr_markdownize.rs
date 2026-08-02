@@ -301,6 +301,7 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
             .and_then(Value::as_str)
             .ok_or_else(|| violation(format!("page {index} has no markdown.text")))?,
     )?;
+    let markdown = unwrap_presentational_html(&markdown);
 
     // `markdown.images` is a relative-path → bytes map. It is keyed by the path
     // the Markdown refers to, which is what lets a bbox be matched to a figure
@@ -514,6 +515,59 @@ fn normalize_html_image_refs(page_index: usize, markdown: &str) -> Result<String
     }
     output.push_str(&markdown[cursor..]);
     Ok(output)
+}
+
+/// Drop the `<div>` wrappers the service centres figures and captions in,
+/// keeping what is inside them.
+///
+/// Normalized Markdown v1 forbids raw HTML outright (07 §5), and these carry no
+/// content — `<div style="text-align: center;">` is presentation, while the
+/// caption text inside it is body. Unwrapping keeps the second and discards the
+/// first. Measured 2026-08-02: a figure arrives as a centred div around the
+/// `<img>`, and its caption as a second centred div around plain text.
+///
+/// **Only `<div>`, deliberately.** Anything else the service might wrap content
+/// in has not been observed, and inventing a rule for it is how a wrong
+/// transformation gets frozen by 07 §9. Whatever this does not handle stays in
+/// the Markdown and is caught by the v1 acceptance check, which the offline
+/// route treats as fatal — a loud failure that names the rule, and a prompt to
+/// go measure the shape rather than guess at it.
+fn unwrap_presentational_html(markdown: &str) -> String {
+    // ASCII lowercasing preserves byte offsets, so indices into `lower` index
+    // `markdown` too.
+    let lower = markdown.to_ascii_lowercase();
+    let mut output = String::with_capacity(markdown.len());
+    let mut cursor = 0;
+    while let Some(tag) = next_div_tag(&lower, cursor) {
+        output.push_str(&markdown[cursor..tag.start]);
+        cursor = tag.end;
+    }
+    output.push_str(&markdown[cursor..]);
+    output
+}
+
+/// Byte range of the next `<div …>` or `</div>` at or after `cursor`.
+fn next_div_tag(lower: &str, cursor: usize) -> Option<std::ops::Range<usize>> {
+    let mut scan = cursor;
+    while scan < lower.len() {
+        let open = lower[scan..].find('<')? + scan;
+        let rest = &lower[open..];
+        // `<div` must end the name there, so `<divider>` is not a div.
+        let is_div = rest.starts_with("</div>")
+            || (rest.starts_with("<div")
+                && matches!(
+                    rest.as_bytes().get(4),
+                    None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+                ));
+        if is_div {
+            // An unterminated tag is left alone rather than swallowing the rest
+            // of the page; the acceptance check is what judges it.
+            let end = lower[open..].find('>')? + open + 1;
+            return Some(open..end);
+        }
+        scan = open + 1;
+    }
+    None
 }
 
 /// The byte ranges of the next `<img …>` tag and of its `src` value.
@@ -985,6 +1039,15 @@ fn encode_base64(bytes: &[u8]) -> String {
 /// reads the signature, and no consumer of an image object decodes the pixels.
 const MOCK_FIGURE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock figure";
 
+/// Test-only: set to `nonconforming` to make [`MockLocalOcrClient`] answer with
+/// a page this adapter cannot bring into Normalized Markdown v1 — an HTML table,
+/// the shape upstream is most likely to send that `unwrap_presentational_html`
+/// deliberately does not rewrite.
+///
+/// It exists so the *refusal* can be exercised. Wiring a check and never seeing
+/// it fire is how the acceptance check came to be advisory in the first place.
+pub const TEST_LOCAL_OCR_BODY_ENV: &str = "KIO_TEST_LOCAL_OCR_BODY";
+
 /// The CI backend. Returns a fixed, well-formed `/layout-parsing` body so the
 /// offline Markdownize *semantics* — no consent gate, no ledger charge, no
 /// batch lane — can be exercised on a runner that has no GPU and never will.
@@ -993,6 +1056,24 @@ pub struct MockLocalOcrClient;
 
 impl LocalOcrClient for MockLocalOcrClient {
     fn layout_parse(&self, _file_base64: &str, _file_type: LayoutFileType) -> Result<Value> {
+        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("nonconforming") {
+            // Parses fine — the refusal under test is the acceptance check's,
+            // not this module's, so the page has to get all the way through
+            // here to reach it.
+            return Ok(json!({
+                "errorCode": 0,
+                "result": {
+                    "layoutParsingResults": [{
+                        "prunedResult": {"parsing_res_list": []},
+                        "markdown": {
+                            "text": "Kio local OCR mock page.\n\n\
+                                     <table><tr><td>1</td></tr></table>\n",
+                            "images": {}
+                        }
+                    }]
+                }
+            }));
+        }
         // Shaped like the real envelope, measured 2026-08-02. A mock that
         // answers in a shape the service does not send is worse than no mock:
         // it turns CI green over a wire that cannot work, which is how the
@@ -1156,12 +1237,44 @@ mod tests {
             pages[0].markdown
         );
         assert!(!pages[0].markdown.contains("<img"), "{}", pages[0].markdown);
-        // Only the image *reference* is normalized here. The `<div>` the service
-        // wraps figures in still comes through, and Normalized Markdown v1
-        // forbids raw HTML outright (07 §5) — so this page does not yet conform.
-        // Deliberately not asserted either way: pinning the `<div>`'s presence
-        // would freeze a known violation into the test suite, and pinning its
-        // absence would claim a fix that has not been made.
+        // Normalized Markdown v1 forbids raw HTML outright (07 §5), so the
+        // centring divs go too — but their contents stay, because the caption
+        // inside the second one is body text, not presentation.
+        assert!(!pages[0].markdown.contains("<div"), "{}", pages[0].markdown);
+        assert!(
+            pages[0]
+                .markdown
+                .contains("Figure 1: Incident count by month."),
+            "the caption is content, not markup: {}",
+            pages[0].markdown
+        );
+    }
+
+    #[test]
+    fn unwrapping_a_div_keeps_its_contents_and_drops_only_the_tags() {
+        assert_eq!(
+            unwrap_presentational_html(
+                "<div style=\"text-align: center;\">Figure 1: caption.</div>\n"
+            ),
+            "Figure 1: caption.\n"
+        );
+        // Case and self-closing forms the service might use.
+        assert_eq!(unwrap_presentational_html("<DIV>a</DIV>b"), "ab");
+        assert_eq!(unwrap_presentational_html("<div/>text"), "text");
+        // `<divider>` is not a div — the name has to end there.
+        assert_eq!(
+            unwrap_presentational_html("<divider>x</divider>"),
+            "<divider>x</divider>"
+        );
+        // Not a general HTML stripper. Everything else is left for the v1
+        // acceptance check to refuse, so an unmeasured shape fails loudly
+        // instead of being silently rewritten.
+        assert_eq!(
+            unwrap_presentational_html("<table><tr><td>1</td></tr></table>"),
+            "<table><tr><td>1</td></tr></table>"
+        );
+        // An unterminated tag must not swallow the rest of the page.
+        assert_eq!(unwrap_presentational_html("<div rest"), "<div rest");
     }
 
     #[test]

@@ -1007,31 +1007,44 @@ alt="Image" width="82%" /></div>` で、`![](…)` はどこにも無い。
 検査は `kio search` の `related_images[]` と `kio open` へ移し、mock も図を持つ
 実応答の形にした。
 
-### 未解決 — 生 HTML が Normalized Markdown v1 に違反している [2026-08-03]
+### 生 HTML の v1 違反 — 剥がす + 残ったら拒否 [2026-08-03 裁定]
 
 [07 §5](../docs/07-adapter-spec.md) が v1 として凍結しているのは
 **「画像参照は `![...](kio://…)` のみ」**と**「生 HTML / autolink は禁止」**の 2 つ。
-前者は上の正規化で満たしたが、**後者はまだ破っている** — PaddleOCR-VL が図を包む
-`<div style="text-align: center;">` がそのまま normalized Markdown に入る。
-上流は表も HTML で出すので、「表は GFM table 記法」とも食い違う可能性がある。
+前者は上の正規化で満たしたが、後者は破っていた — PaddleOCR-VL が図とキャプションを
+包む `<div style="text-align: center;">` がそのまま normalized Markdown に入っていた。
 
-**なぜ通ってしまうか。**検出器 (`kio-pipeline` の `contains_raw_html_or_autolink`)
+**なぜ通ってしまったか。**検出器 (`kio-pipeline` の `contains_raw_html_or_autolink`)
 はこれを正しく raw HTML と判定する。しかし唯一の本番呼び出し
 (`main.rs` の `let strict_valid = validate_markdownize_response(...).is_ok()`) が
-**助言的**で、Done 判定のショートカットに使うだけなので拒否されない。GPU 機で
-`status: done` になったのは `strict_valid` が false でも件数由来の判定が Done を
-返したためで、違反は表に出なかった。**受入検査が在ることと、効いていることは別。**
+**助言的**で、Done 判定のショートカットに使うだけだった。GPU 機で `status: done` に
+なったのは、`strict_valid` が false でも `task_status_from_unit_counts(1, 0, false)`
+が Done を返すためで、違反はどこにも出なかった。
+**受入検査が在ることと、効いていることは別。**
 
-判断が要る (表の扱いも同時に決めること):
+**裁定は 2 段構え。**
 
-| | |
-|---|---|
-| (a) adapter で `<div>` を剥がす | 検索本文が綺麗になる。剥がす範囲の線引きが要る |
-| (b) 07 §5 の escape 規約どおり実体参照化 | 文言に忠実だが `&lt;div style=…&gt;` が検索本文に残る |
-| (c) 受入検査を助言から拒否へ格上げ | 根本だが既存の Done 判定と過去データに影響する |
+**1. adapter が `<div>` を剥がす** (中身は残す)。`<div style="text-align: center;">` は
+装飾だが、その中の `Figure 1: …` は本文である。剥がすのは**実測された `<div>` だけ**で、
+`<divider>` も `<table>` も触らない — 観測していない形に規則を作るのが、07 §9 で
+誤変換を凍結させる道筋そのものだからである。
 
-いずれも normalized Markdown のバイト列が変わるので、既存の OCR 済み文書は
-作り直しになる。
+**2. offline 経路だけ、受入検査を致命的にする。**剥がしきれなかった生 HTML は
+そこで拒否され、タスクは `failed` / `contract_violation` で止まり、**索引には何も
+入らない**。online 経路は従来どおり助言のまま — あちらは**課金済みの送信**で、
+拒否するかどうかは返金の話が付いてくる別の判断である。ローカルは課金ゼロで
+再実行も無料なので、拒否のコストが違う。
+
+**代償: 表が HTML で来るなら、表を含むページは失敗するようになる。**それは意図した
+挙動である。非適合の unit が 07 §9 で永久凍結されるより、失敗して実測を促すほうが
+安い。なお計画書 §3.2 の「表→HTML」は **Sarashina2.2-OCR** の欄であり、
+**PaddleOCR-VL の表が何で来るかは未実測**。ブリーフの手順 5 に「表を含むページを
+1 枚通して生の `markdown.text` を添付」を追加した。
+
+**テストで実際に発火させている。**`KIO_TEST_LOCAL_OCR_BODY=nonconforming` で mock が
+HTML 表を返し、タスクが `failed` / `contract_violation` で止まり chunk が 1 つも
+できないことを確認する。配線しただけで一度も発火を見ない検査は、まさに今回
+助言のまま放置されていたものと同じである。
 
 ---
 
