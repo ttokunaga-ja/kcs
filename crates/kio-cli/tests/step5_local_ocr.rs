@@ -214,6 +214,44 @@ fn s3e_the_local_task_is_not_addressed_to_the_online_lane() {
     }
 }
 
+/// The figure the local pipeline extracted must be reachable from the search
+/// result that cites it (05 §1.7).
+///
+/// This is the assertion that was missing when Stage 3 first met a real server.
+/// PaddleOCR-VL writes figures as HTML `<img src="…">` and never `![](…)`, and
+/// `kio-search`'s `extract_related_images` — which also decides which images get
+/// embedded, what the scope projection counts, and what purge treats as an
+/// orphan — reads only the CommonMark form. Every check that stopped at "the
+/// normalized Markdown contains a `kio://` URI" passed anyway, because the URI
+/// was there; it was simply written in a spelling nothing downstream could read.
+/// So this asserts the field the contract actually promises, and then opens what
+/// it names.
+#[test]
+fn s3e_the_local_pipelines_figure_is_reachable_from_the_chunk_that_cites_it() {
+    let dir = scanned_pdf_fixture();
+    let local = [("KIO_TEST_LOCAL_OCR", "mock")];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    let search = json_success(&dir, &["search", "mock", "--mode", "text"], &local);
+    let hit = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["result_type"] == "chunk")
+        .unwrap_or_else(|| panic!("no chunk hit for the mock page: {search}"));
+    let images = hit["related_images"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the cited figure must be enumerated: {hit}"));
+    assert_eq!(images.len(), 1, "{hit}");
+    let uri = images[0]["image_uri"].as_str().unwrap();
+    assert!(uri.contains("/object/image/sha256:"), "{uri}");
+
+    let opened = json_success(&dir, &["open", uri], &local);
+    assert_eq!(opened["status"], "opened", "{opened}");
+    assert_eq!(opened["object_type"], "image", "{opened}");
+}
+
 /// Without the backend, nothing about the online route changes.
 #[test]
 fn s3e_an_undeclared_local_backend_leaves_the_online_route_alone() {

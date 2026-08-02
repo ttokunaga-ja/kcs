@@ -182,16 +182,29 @@ kio search "<PDF 中の語>"
 
 - `kio index` **1 回**で完結する (`batch resume` は要らない)
 - `.kio/tasks.jsonl` の当該行が `status: done` / `fallback_reason: local_adapter_done`
-- `output_ref` が **`offline:paddleocr_vl_local`** (`online:` なら配線が誤っている)
+- `output_ref` が **normalized instance のオブジェクトパス**
+  (`offline:paddleocr_vl_local` は実行前のプレースホルダで、成功時に生成物のパスへ
+  置き換わる。失敗時は `offline:` のまま残る。online 経路も同じ挙動 —
+  `main.rs` の `latest_online_instance_for_path` の doc 参照。
+  `online:` が残っていたら配線が誤っている)
 - `kio search` が PDF の本文で引ける
 - ledger に行が増えない: `sqlite3 ~/.local/share/kio/ledger.db 'select count(*) from cost_ledger'` が 0
 
 図を含む PDF なら追加で:
 
 - `.kio/objects/image/` に画像オブジェクトが出来ている
-- normalized Markdown に `kio://` URI が入っている (相対パスが残っていたら W2 が壊れる)
+- **`kio search` の結果に `related_images[]` が載っている**、かつ
+  `kio open <その image_uri>` が `status: opened` を返す。
+  これが W2 の契約そのものなので、ここを見ること。
+  **normalized Markdown に `kio://` が入っていることを代理チェックにしない** —
+  URI が「在る」ことと、それを読む側が「読める」ことは別で、
+  2026-08-02 の検証では前者だけ真になり後者が偽だった
+  (`<img src="kio://…">` を `extract_related_images` が見なかった)
 - unit metadata の `images[].bbox` が**実際の図の位置**と合っている
   (上流に「PDF crop と `block_bbox` が合わない」報告があるため、**目視で 1 つ確認**)
+- 図が **2 つ以上**あるページを 1 枚は通すこと。`block_order` は実測で全 null なので
+  複数図では配列順に縮退する。ここが読み順と食い違うと bbox が入れ替わったまま
+  07 §9 で永久凍結される — 現状これを測ったページが無い
 
 ---
 
@@ -259,8 +272,11 @@ index 1 回で完結: <はい|いいえ>
 task status / fallback_reason / output_ref: <...>
 search がヒット: <はい|いいえ>
 ledger 行数: <n>  (期待 0)
-画像オブジェクト: <n>  / kio:// URI: <あり|なし>
+画像オブジェクト: <n>
+related_images[] の要素数: <n>   ← W2 の契約。ここが 0 なら図は繋がっていない
+kio open <image_uri>: <opened|失敗>
 bbox の目視確認: <合っている|ずれている>
+図が 2 つ以上のページ: <通した (読み順 合っている|入れ替わっている) | 用意できず>
 
 ## 判定
 Stage 3 のローカル OCR 経路は実サーバで成立する: <はい|いいえ>

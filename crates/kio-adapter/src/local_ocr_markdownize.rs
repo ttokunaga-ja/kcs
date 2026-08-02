@@ -290,11 +290,17 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
         .get("markdown")
         .and_then(Value::as_object)
         .ok_or_else(|| violation(format!("page {index} has no markdown object")))?;
-    let markdown = markdown_obj
-        .get("text")
-        .and_then(Value::as_str)
-        .ok_or_else(|| violation(format!("page {index} has no markdown.text")))?
-        .to_owned();
+    // Normalized before anything reads it, so `markdown_image_paths` below, the
+    // URI rewrite in `replace_image_placeholders`, and `extract_related_images`
+    // over in `kio-search` all see one image spelling instead of three chances
+    // to disagree about what an image reference is.
+    let markdown = normalize_html_image_refs(
+        index,
+        markdown_obj
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| violation(format!("page {index} has no markdown.text")))?,
+    )?;
 
     // `markdown.images` is a relative-path → bytes map. It is keyed by the path
     // the Markdown refers to, which is what lets a bbox be matched to a figure
@@ -331,8 +337,23 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
 ///
 /// Reading order — not array order. `block_order` is what `PP-DocLayoutV2`'s
 /// pointer network predicts, and it is the order the Markdown was assembled in,
-/// so it is the only ordering that lines up with the image references in the
-/// text.
+/// so it is the ordering that lines up with the image references in the text.
+///
+/// **Except that the service does not send it.** Measured 2026-08-02 against
+/// paddleocr-vl:latest-nvidia-gpu-offline: every block came back with
+/// `block_order: null`, so in practice the `unwrap_or` below gives every block
+/// the same key and the stable sort leaves them in array order. Array order was
+/// top-to-bottom in that capture (block y0 91 → 240 → 567 → 1103), which is why
+/// the single-figure case is right, but one single-column page is not evidence
+/// that array order *is* reading order.
+///
+/// That matters only when a page has two or more figures: the list this returns
+/// is zipped against the Markdown's references, so if array order ever differs
+/// from reading order there, two bboxes swap — and 07 §9's first-instance-wins
+/// freezes the swap for the life of the archive. Deciding whether to refuse that
+/// case needs a measurement nobody has taken yet: a multi-figure page against a
+/// real server. Until then this is a known silent degradation, written down
+/// rather than left to be rediscovered from a wrong bbox.
 fn image_block_boxes(page_index: usize, result: &Value) -> Result<Vec<[i64; 4]>> {
     let Some(list) = result
         .get("prunedResult")
@@ -412,23 +433,13 @@ fn parse_block_bbox(page_index: usize, block: &Value) -> Result<[i64; 4]> {
 /// reading `markdown.images`' keys — a map is sorted by key, and key order has
 /// nothing to do with where a figure sits on the page.
 fn markdown_image_paths(markdown: &str) -> Vec<String> {
-    // Both spellings are collected with their byte offset and then sorted, so
-    // the result is document order regardless of which form each figure used.
-    // Order is the whole contract here: `pair_images_with_boxes` zips this list
-    // against the boxes, so a list in the wrong order silently mis-pairs bboxes.
-    let mut found: Vec<(usize, String)> = Vec::new();
-    collect_markdown_image_refs(markdown, &mut found);
-    collect_html_image_refs(markdown, &mut found);
-    found.sort_by_key(|(offset, _)| *offset);
-    found.into_iter().map(|(_, path)| path).collect()
-}
-
-/// The CommonMark spelling, `![alt](target)`.
-fn collect_markdown_image_refs(markdown: &str, found: &mut Vec<(usize, String)>) {
+    // CommonMark only, because `normalize_html_image_refs` has already run and
+    // every figure on this page is in that spelling by now.
     let bytes = markdown.as_bytes();
+    let mut paths = Vec::new();
     let mut cursor = 0;
-    while let Some(offset) = markdown[cursor..].find("![") {
-        let open = cursor + offset;
+    while let Some(found) = markdown[cursor..].find("![") {
+        let open = cursor + found;
         let Some(alt_end) = markdown[open..].find("](") else {
             break;
         };
@@ -438,43 +449,129 @@ fn collect_markdown_image_refs(markdown: &str, found: &mut Vec<(usize, String)>)
         };
         let target = markdown[target_start..target_start + target_len].trim();
         if !target.is_empty() {
-            found.push((open, target.to_owned()));
+            paths.push(target.to_owned());
         }
         cursor = target_start + target_len + 1;
         if cursor >= bytes.len() {
             break;
         }
     }
+    paths
 }
 
-/// The spelling PaddleOCR-VL actually emits.
+/// Rewrite PaddleOCR-VL's HTML figure markup into the CommonMark image form,
+/// so that exactly one image spelling ever enters the archive.
 ///
 /// Measured 2026-08-02: a figure comes back as
 /// `<div style="text-align: center;"><img src="imgs/img_in_chart_box_….jpg"
 /// alt="Image" width="82%" /></div>` — there is no `![](…)` anywhere in the
-/// Markdown, so scanning only for the CommonMark form found zero references
-/// while `markdown.images` carried one, and the count check rejected every page
-/// that had a figure on it.
+/// Markdown.
+///
+/// Normalizing here rather than teaching every reader about `<img>` is what
+/// keeps the quirk contained. The URIs written into this Markdown are read back
+/// by `kio-search`'s `extract_related_images`, which drives `related_images[]`,
+/// which images get embedded, the scope projection, and purge's orphan test —
+/// and `kio-search` cannot share code with this crate (neither depends on the
+/// other), so a second spelling in the corpus means a second scanner kept in
+/// step by hand. It was not, and every one of those four read zero images from
+/// a page that had one.
+///
+/// The label is dropped rather than carried over from `alt`. Nothing in Kio
+/// reads it — `extract_related_images` reads the *target* — and an empty label
+/// is exactly what the online route emits, so both adapters produce the same
+/// shape. It also leaves no place for provider text to reach a structural
+/// position: an `alt` of `x](y) [` would otherwise rewrite the reference.
 ///
 /// Deliberately not a general HTML parser: it reads `src` out of `<img …>` and
-/// nothing else. Anything more would be inventing behaviour for inputs that
-/// have not been observed.
-fn collect_html_image_refs(markdown: &str, found: &mut Vec<(usize, String)>) {
-    // The same scan the rewriter uses (`replace_image_placeholders` reaches it
-    // through `next_markdown_image_target`). Sharing it is the point: if
-    // collection and rewriting disagreed about what an image reference is, the
-    // lists would desynchronise and bboxes would pair with the wrong figures.
+/// nothing else. The wrapping `<div>` is left alone — stripping provider HTML
+/// in general is a separate question, and this is only about image references.
+fn normalize_html_image_refs(page_index: usize, markdown: &str) -> Result<String> {
+    // ASCII lowercasing preserves byte offsets, so indices into `lower` index
+    // `markdown` too. Built once per page rather than once per tag.
+    let lower = markdown.to_ascii_lowercase();
+    let mut output = String::with_capacity(markdown.len());
     let mut cursor = 0;
-    while let Some((start, end)) = crate::mistral_ocr::next_html_image_target(markdown, cursor) {
-        let target = markdown[start..end].trim();
-        if !target.is_empty() {
-            found.push((start, target.to_owned()));
+    while let Some(tag) = next_html_image_tag(&lower, cursor) {
+        let src = &markdown[tag.src.clone()];
+        // A target that cannot round-trip through `![](…)` would be read back
+        // truncated, and the truncated path would then miss in `markdown.images`
+        // — a confusing failure two steps from its cause. Refuse it here, where
+        // the reason is still visible.
+        if let Some(bad) = src
+            .chars()
+            .find(|ch| matches!(ch, ')' | '(' | '<' | '>') || ch.is_whitespace())
+        {
+            return Err(violation(format!(
+                "page {page_index} <img src> contains {bad:?}, which cannot be written as a \
+                 Markdown image target: {src}"
+            )));
         }
-        cursor = end.saturating_add(1).min(markdown.len());
-        if cursor >= markdown.len() {
-            break;
-        }
+        output.push_str(&markdown[cursor..tag.tag.start]);
+        output.push_str("![](");
+        output.push_str(src);
+        output.push(')');
+        cursor = tag.tag.end;
     }
+    output.push_str(&markdown[cursor..]);
+    Ok(output)
+}
+
+/// The byte ranges of the next `<img …>` tag and of its `src` value.
+struct HtmlImageTag {
+    tag: std::ops::Range<usize>,
+    src: std::ops::Range<usize>,
+}
+
+/// `lower` must be `markdown.to_ascii_lowercase()`, whose byte offsets are the
+/// same — the caller keeps it so this is not rebuilt for every tag.
+fn next_html_image_tag(lower: &str, cursor: usize) -> Option<HtmlImageTag> {
+    let mut scan = cursor;
+    while scan < lower.len() {
+        let start = lower[scan..].find("<img")? + scan;
+        // An unterminated tag ends at the end of the text rather than swallowing
+        // the scan into a spin.
+        let end = lower[start..]
+            .find('>')
+            .map_or(lower.len(), |offset| start + offset + 1);
+        if let Some(src) = attribute_value(lower, start..end, "src=") {
+            return Some(HtmlImageTag {
+                tag: start..end,
+                src,
+            });
+        }
+        scan = end.max(start + 1);
+    }
+    None
+}
+
+/// Reads `<img>`'s own `src="…"` and not `data-src="…"`, by requiring the name
+/// to start at an attribute boundary.
+fn attribute_value(
+    lower: &str,
+    tag: std::ops::Range<usize>,
+    name: &str,
+) -> Option<std::ops::Range<usize>> {
+    let mut scan = tag.start;
+    while scan < tag.end {
+        let at = lower[scan..tag.end].find(name)? + scan;
+        let after = at + name.len();
+        let boundary = lower[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+        if boundary {
+            if let Some(&quote) = lower.as_bytes().get(after) {
+                if quote == b'"' || quote == b'\'' {
+                    let inner = after + 1;
+                    if let Some(len) = lower[inner..tag.end].find(quote as char) {
+                        return Some(inner..inner + len);
+                    }
+                }
+            }
+        }
+        scan = after;
+    }
+    None
 }
 
 /// Attach one box to one figure, or refuse.
@@ -884,6 +981,10 @@ fn encode_base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The mock's figure. A PNG signature and nothing after it: `sniff_media_type`
+/// reads the signature, and no consumer of an image object decodes the pixels.
+const MOCK_FIGURE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock figure";
+
 /// The CI backend. Returns a fixed, well-formed `/layout-parsing` body so the
 /// offline Markdownize *semantics* — no consent gate, no ledger charge, no
 /// batch lane — can be exercised on a runner that has no GPU and never will.
@@ -897,6 +998,11 @@ impl LocalOcrClient for MockLocalOcrClient {
         // it turns CI green over a wire that cannot work, which is how the
         // top-level `layoutParsingResults` reading survived until a GPU box
         // finally sent a real response.
+        //
+        // It carries a figure for the same reason. The service wraps figures in
+        // a centred div and writes them as HTML `<img>`, never `![](…)`, and a
+        // figureless mock cannot tell whether that spelling survives all the way
+        // to `related_images[]` — which for one release it did not.
         Ok(json!({
             "logId": "00000000-0000-0000-0000-000000000000",
             "errorCode": 0,
@@ -907,10 +1013,21 @@ impl LocalOcrClient for MockLocalOcrClient {
                     "prunedResult": {
                         "parsing_res_list": [
                             {"block_label": "text", "block_content": "Kio local OCR mock page.",
-                             "block_bbox": [10, 10, 500, 40], "block_id": 0, "block_order": null}
+                             "block_bbox": [10, 10, 500, 40], "block_id": 0, "block_order": null},
+                            {"block_label": "chart", "block_bbox": [107, 567, 1130, 1073],
+                             "block_id": 1, "block_order": null}
                         ]
                     },
-                    "markdown": {"text": "Kio local OCR mock page.\n", "images": {}}
+                    "markdown": {
+                        "text": "Kio local OCR mock page.\n\n\
+                                 <div style=\"text-align: center;\">\
+                                 <img src=\"imgs/img_in_chart_box_107_567_1130_1073.jpg\" \
+                                 alt=\"Image\" width=\"82%\" /></div>\n",
+                        "images": {
+                            "imgs/img_in_chart_box_107_567_1130_1073.jpg":
+                                encode_base64(MOCK_FIGURE_PNG)
+                        }
+                    }
                 }]
             }
         }))
@@ -1026,15 +1143,41 @@ mod tests {
         assert_eq!(images[0].bbox, Some([107, 567, 1130, 1073]));
         // `figure_title` is a caption, not a figure — it must not become an image.
         assert_eq!(pages[0].images.len(), 1);
+        // The `<img>` is gone by the time the page leaves the parser. What
+        // replaces it is the form `kio-search`'s `extract_related_images` reads;
+        // leaving the HTML spelling in place is what made `related_images[]`,
+        // image embedding, the scope projection, and purge's orphan test all
+        // see zero images on a page that has one.
+        assert!(
+            pages[0]
+                .markdown
+                .contains("![](imgs/img_in_chart_box_107_567_1130_1073.jpg)"),
+            "{}",
+            pages[0].markdown
+        );
+        assert!(!pages[0].markdown.contains("<img"), "{}", pages[0].markdown);
+        // Only the image *reference* is normalized here. The `<div>` the service
+        // wraps figures in still comes through, and Normalized Markdown v1
+        // forbids raw HTML outright (07 §5) — so this page does not yet conform.
+        // Deliberately not asserted either way: pinning the `<div>`'s presence
+        // would freeze a known violation into the test suite, and pinning its
+        // absence would claim a fix that has not been made.
     }
 
     #[test]
-    fn both_image_spellings_come_back_in_document_order() {
-        // Mixed on purpose: sorting by offset is what keeps the zip in
-        // `pair_images_with_boxes` aligned with the boxes.
+    fn every_img_spelling_the_service_might_use_is_normalized_in_place() {
+        // Upper case, single quotes, self-closing, and an already-CommonMark
+        // reference that must be left exactly as it is. Document order is the
+        // whole contract downstream — `pair_images_with_boxes` zips this list
+        // against the boxes — so it is asserted rather than assumed.
         let markdown = "<img src=\"first.png\">\n\n![](second.png)\n\n<IMG SRC='third.png'/>\n";
+        let normalized = normalize_html_image_refs(0, markdown).unwrap();
         assert_eq!(
-            markdown_image_paths(markdown),
+            normalized,
+            "![](first.png)\n\n![](second.png)\n\n![](third.png)\n"
+        );
+        assert_eq!(
+            markdown_image_paths(&normalized),
             vec![
                 "first.png".to_owned(),
                 "second.png".to_owned(),
@@ -1052,12 +1195,41 @@ mod tests {
             "<img src=\"unterminated",
             "<img src=''>",
             "<img alt=\"no src\">",
+            // `src=` here belongs to `data-src`, not to the tag.
+            "<img data-src=\"x.png\">",
         ] {
+            let normalized = normalize_html_image_refs(0, markdown).unwrap();
             assert!(
-                markdown_image_paths(markdown).is_empty(),
-                "unexpected path from {markdown:?}"
+                markdown_image_paths(&normalized).is_empty(),
+                "unexpected path from {markdown:?} -> {normalized:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_src_that_cannot_be_a_markdown_target_is_refused() {
+        // `)` would be read back truncated, and the truncated path would then
+        // miss in `markdown.images` — a failure two steps from its cause. The
+        // refusal names the character while the reason is still visible.
+        let error = normalize_html_image_refs(3, "<img src=\"a(b).png\">")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("page 3"), "{error}");
+        assert!(error.contains("a(b).png"), "{error}");
+    }
+
+    #[test]
+    fn an_alt_attribute_cannot_rewrite_the_reference_it_labels() {
+        // Provider text in a structural position. Carrying `alt` over verbatim
+        // would emit `![x](evil.png) [](real.png)` and hand the archive an image
+        // reference the service never made.
+        let normalized =
+            normalize_html_image_refs(0, "<img alt=\"x](evil.png) [\" src=\"real.png\">").unwrap();
+        assert_eq!(normalized, "![](real.png)");
+        assert_eq!(
+            markdown_image_paths(&normalized),
+            vec!["real.png".to_owned()]
+        );
     }
 
     #[test]

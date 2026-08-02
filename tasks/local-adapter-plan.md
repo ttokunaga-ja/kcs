@@ -936,7 +936,7 @@ adapter が有効なら、online タスクを作る代わりに**その場で満
 
 | | |
 |---|---|
-| `output_ref` | **`offline:<tool_id>`** (新設の `TaskOutputRef::Offline`) |
+| `output_ref` | enqueue 時は **`offline:<tool_id>`** (新設の `TaskOutputRef::Offline`)。**成功時に normalized instance のパスへ置き換わる** — online 経路と同じで、`offline:` は実行前のプレースホルダ。失敗時は残る |
 | enqueue 時 status | `secrets_hold` なら Paused、それ以外は `ready_for_local_adapter` |
 | ledger | **行を開かない。**解放すべき予約も無いので失敗経路で取り残しが起きない |
 | 実行 | `run_index_pipeline` の末尾 (`execute_pending_offline_markdownize_tasks`) |
@@ -958,6 +958,80 @@ Mistral の model prefix をベタ書きした 3 つ目の判定が残ってお�
 pipeline が config 読込ゲートを通ったあと実行時ゲートで「Mistral OCR runtime では
 未対応」と落ちた。両ゲートの一致を主張するテストが先に落ちたので気付けた。
 **embedding のときと同じ罠が、同じ関数の別の場所に埋まっていた。**
+
+---
+
+### 実サーバで判明した 3 点 [2026-08-03]
+
+GPU 実機 (`paddleocr-vl:latest-nvidia-gpu-offline` / RTX 4070) で初めて実応答に
+当たり、ドキュメント起こしの schema が 2 箇所で誤っていた。
+
+**1. ページは top-level に無い。**応答は `{logId, errorCode, errorMsg, result}` の
+封筒で、`layoutParsingResults` は `result` の下。加えて **`errorCode` は HTTP 200 に
+乗って返る**ので、読み飛ばすとサービス側の失敗が「ページの無い文書」に化ける。
+
+**2. 図は CommonMark で来ない。**`<div style="text-align: center;"><img src="imgs/…jpg"
+alt="Image" width="82%" /></div>` で、`![](…)` はどこにも無い。
+
+**3. `block_order` は全ブロックで `null`。**doc は「読み順を与える唯一の順序」と
+書いていたが、実サービスは送ってこない。`unwrap_or(i64::MAX)` + 安定ソートで
+**配列順へ無言で縮退する**。図 1 つでは無害だが、**図 2 つ以上のページを実測した
+ことがまだ無い** — ここが読み順と食い違えば bbox が入れ替わったまま 07 §9 で
+永久凍結される。ブリーフの手順 5 に「図 2 つ以上のページを 1 枚通す」を追加した。
+
+### W2 は「URI が在る」では閉じない [2026-08-03 実測]
+
+2 の対処として書き換え側を HTML 対応にした時点では、**まだ壊れていた**。
+`kio://` は Markdown に入るが、それを読む
+`kio-search::object_uri::extract_related_images` は**自前の CommonMark 専用
+スキャナ**を持っていて `<img src>` を見ない。実測で `[]` を確認した。
+
+効くのは `related_images[]` だけではない。同じ関数が
+**どの画像を埋め込むか** (`referenced_image_hashes`)、scope projection の画像統計、
+**purge の orphan 判定**も駆動している。つまりローカル経路の画像は 1 枚も
+埋め込まれない状態だった。
+
+**裁定: 綴りはコーパスに入る前に 1 つへ正規化する。**adapter が
+`<img src="X">` を `![](X)` へ書き換えてから URI 置換する。読む側を HTML 対応に
+する案 (B) は、`kio-search` と `kio-adapter` が**互いに依存を持たない**ため
+3 つ目のスキャナを手で同期させることになり、今回のずれを生んだ構図がそのまま残る。
+`alt` は捨てる — Kio は誰も読まず、online 経路も空ラベルで、
+`alt="x](evil) ["` が参照を書き換える余地を消せる。
+
+**このずれを通した検査は 2 つとも proxy だった。**ブリーフの
+「normalized Markdown に `kio://` が入っている」も、adapter の end-to-end テストの
+`markdown.contains("kio://")` も、**URI の存在**を見て**読めること**を見ていない。
+しかも後者の fixture は `![](fig-1.png)` ——**サービスが出さない綴り** —— を使って
+いたので、HTML 経路を 1 度も通っていなかった。S3-D の「profile 一致は provenance
+ではない」と同じ型で、**契約が名指す観測対象そのものを見る**しかない。
+検査は `kio search` の `related_images[]` と `kio open` へ移し、mock も図を持つ
+実応答の形にした。
+
+### 未解決 — 生 HTML が Normalized Markdown v1 に違反している [2026-08-03]
+
+[07 §5](../docs/07-adapter-spec.md) が v1 として凍結しているのは
+**「画像参照は `![...](kio://…)` のみ」**と**「生 HTML / autolink は禁止」**の 2 つ。
+前者は上の正規化で満たしたが、**後者はまだ破っている** — PaddleOCR-VL が図を包む
+`<div style="text-align: center;">` がそのまま normalized Markdown に入る。
+上流は表も HTML で出すので、「表は GFM table 記法」とも食い違う可能性がある。
+
+**なぜ通ってしまうか。**検出器 (`kio-pipeline` の `contains_raw_html_or_autolink`)
+はこれを正しく raw HTML と判定する。しかし唯一の本番呼び出し
+(`main.rs` の `let strict_valid = validate_markdownize_response(...).is_ok()`) が
+**助言的**で、Done 判定のショートカットに使うだけなので拒否されない。GPU 機で
+`status: done` になったのは `strict_valid` が false でも件数由来の判定が Done を
+返したためで、違反は表に出なかった。**受入検査が在ることと、効いていることは別。**
+
+判断が要る (表の扱いも同時に決めること):
+
+| | |
+|---|---|
+| (a) adapter で `<div>` を剥がす | 検索本文が綺麗になる。剥がす範囲の線引きが要る |
+| (b) 07 §5 の escape 規約どおり実体参照化 | 文言に忠実だが `&lt;div style=…&gt;` が検索本文に残る |
+| (c) 受入検査を助言から拒否へ格上げ | 根本だが既存の Done 判定と過去データに影響する |
+
+いずれも normalized Markdown のバイト列が変わるので、既存の OCR 済み文書は
+作り直しになる。
 
 ---
 
