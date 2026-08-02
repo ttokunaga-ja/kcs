@@ -430,7 +430,13 @@ fn markdown_unit_from_hint(
 /// exactly one trailing LF, and Setext heading -> ATX heading conversion
 /// (skipped inside a fenced code block, where a `---`/`===` line is data,
 /// not a heading underline).
-fn normalize_to_markdown_v1(text: &str) -> String {
+///
+/// Shared with the offline OCR adapter rather than reimplemented there: every
+/// adapter owes the same v1 output, and a second partial normalizer would drift
+/// from this one. It deliberately does **not** touch raw HTML — that is a
+/// content question each adapter answers for itself, and the acceptance check
+/// still refuses what neither of them could bring into v1.
+pub(crate) fn normalize_to_markdown_v1(text: &str) -> String {
     let no_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
     let lf_only = no_bom.replace("\r\n", "\n").replace('\r', "\n");
     let nfc: String = lf_only.nfc().collect();

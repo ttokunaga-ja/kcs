@@ -945,6 +945,17 @@ fn unit_from_hint(
         scope_id,
         page.images.as_slice(),
     );
+    // Last step, after the URI rewrite, so nothing downstream of it can put the
+    // unit back out of Normalized Markdown v1.
+    //
+    // The service does not end a page the way v1 requires. Measured 2026-08-03
+    // against paddleocr-vl:latest-nvidia-gpu-offline: a page ending in prose
+    // came back with **no** trailing newline and one ending in a table with
+    // **two** — never the single LF 07 §5.2.1 asks for. Since 86d4508 made the
+    // acceptance check fatal on this route, that alone refused every page,
+    // whatever was on it. It is the same normalizer the deterministic adapter
+    // applies as *its* last step, for the same reason.
+    let markdown = crate::deterministic::normalize_to_markdown_v1(&markdown);
     Ok(MarkdownUnit {
         unit_key: hint.unit_key.clone(),
         unit_type: hint.unit_kind,
@@ -1551,6 +1562,31 @@ mod tests {
             tool_profile_hash: "sha256:profile".to_owned(),
             spec_version: 1,
             idempotency_token: None,
+        }
+    }
+
+    #[test]
+    fn the_page_ending_the_service_sends_is_normalized_to_one_lf() {
+        // Both endings are measured, 2026-08-03: a page ending in prose came
+        // back with no trailing newline, one ending in a table with two.
+        // Normalized Markdown v1 wants exactly one, and since the acceptance
+        // check became fatal on this route either ending refused the page
+        // outright -- whatever else was on it.
+        for (label, text) in [
+            ("no trailing newline", "prose with no final newline"),
+            ("two trailing newlines", "prose then a blank line\n\n"),
+        ] {
+            let client = RecordingClient {
+                body: page_body(text, json!({}), json!([])),
+                seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            };
+            let adapter =
+                LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+                    .with_verified_raw_bytes(b"%PDF-1.7 bytes".to_vec());
+            let response = adapter.markdownize(request("application/pdf")).unwrap();
+            let markdown = &response.updated_units[0].markdown;
+            assert!(markdown.ends_with('\n'), "{label}: {markdown:?}");
+            assert!(!markdown.ends_with("\n\n"), "{label}: {markdown:?}");
         }
     }
 
