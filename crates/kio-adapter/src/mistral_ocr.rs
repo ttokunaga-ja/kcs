@@ -1661,7 +1661,11 @@ fn next_markdown_image_target(markdown: &str, cursor: usize) -> Option<(usize, u
         next_commonmark_image_target(markdown, cursor),
         next_html_image_target(markdown, cursor),
     ) {
-        (Some(commonmark), Some(html)) => Some(if commonmark.0 <= html.0 { commonmark } else { html }),
+        (Some(commonmark), Some(html)) => Some(if commonmark.0 <= html.0 {
+            commonmark
+        } else {
+            html
+        }),
         (found, None) | (None, found) => found,
     }
 }
