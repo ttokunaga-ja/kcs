@@ -218,14 +218,6 @@ fn violation(message: impl Into<String>) -> AdapterError {
     AdapterError::ContractViolation(message.into())
 }
 
-/// `block_label` values whose block carries a figure Kio should persist.
-///
-/// The list is deliberately narrow. `parsing_res_list` also carries a
-/// `block_bbox` for every *text* block, and those boxes have nowhere to go —
-/// 07 §5.2 puts bbox in the metadata of an extracted image, not of prose — so
-/// widening this set would attach figure bboxes to things that are not figures.
-const IMAGE_BLOCK_LABELS: &[&str] = &["image", "figure", "chart", "table", "seal"];
-
 /// One page of `/layout-parsing` output, before it becomes Kio units.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutParsedPage {
@@ -323,9 +315,9 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
         }
     }
 
-    let boxes = image_block_boxes(index, result)?;
+    require_layout_parsing_response(index, result)?;
     let referenced = markdown_image_paths(&markdown);
-    let images = pair_images_with_boxes(index, &referenced, &image_bytes, &boxes)?;
+    let images = images_with_their_own_boxes(index, &referenced, &image_bytes)?;
     Ok(LayoutParsedPage {
         index,
         markdown,
@@ -333,103 +325,32 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
     })
 }
 
-/// `prunedResult.parsing_res_list[]`, filtered to figure-bearing blocks and
-/// ordered by the pipeline's own reading order.
+/// Refuse a response that has Markdown but no `prunedResult.parsing_res_list`.
 ///
-/// Reading order — not array order. `block_order` is what `PP-DocLayoutV2`'s
-/// pointer network predicts, and it is the order the Markdown was assembled in,
-/// so it is the ordering that lines up with the image references in the text.
+/// That shape is what the VLM-only `paddleocr genai_server` endpoint produces:
+/// it recognizes text for a region nobody located, so it returns no layout, no
+/// reading order and no boxes. Saying so beats letting the caller conclude the
+/// page simply had no figures — the wrong endpoint is a configuration mistake
+/// someone can fix, and it is the first thing to suspect when a real document
+/// yields no images at all.
 ///
-/// **Except that the service does not send it for the blocks this function
-/// keeps.** Measured 2026-08-03 against paddleocr-vl:latest-nvidia-gpu-offline:
-/// prose blocks are numbered 1, 2, 3, 4, but `header`, `chart`, `figure_title`
-/// and `vision_footnote` all come back `null` — and `chart` is a figure label.
-/// (An earlier note here said *every* block was null. That was wrong, and it
-/// does not change the conclusion: the figure blocks are the null ones.)
-///
-/// So for figures the `unwrap_or` below gives every kept block the same key and
-/// the stable sort leaves them in array order. Whether array order *is* reading
-/// order is the open question, and it decides bboxes that 07 §9 freezes for the
-/// life of the archive.
-///
-/// A two-figure page was run on real hardware on 2026-08-03 and came out right:
-/// the upper figure paired with the upper bbox. That is one page, and it is
-/// array order that earned the result rather than anything the service told us,
-/// so a page whose array order departs from reading order would still swap two
-/// bboxes silently. Left as is deliberately — refusing every multi-figure page
-/// to guard a case never observed would cost more than it protects — but this is
-/// the thing to suspect first if a figure ever carries the wrong box.
-fn image_block_boxes(page_index: usize, result: &Value) -> Result<Vec<[i64; 4]>> {
-    let Some(list) = result
+/// Nothing else is read from the list. Boxes come from each crop's own file name
+/// (see [`images_with_their_own_boxes`]), which is why `block_order` and the
+/// reading order it was supposed to give no longer matter here: the Markdown's
+/// own reference order is the order, and each reference names its box.
+fn require_layout_parsing_response(page_index: usize, result: &Value) -> Result<()> {
+    if result
         .get("prunedResult")
         .and_then(|pruned| pruned.get("parsing_res_list"))
         .and_then(Value::as_array)
-    else {
-        // A response with Markdown but no parsing_res_list is what the
-        // VLM-only endpoint would produce. Say so, rather than returning zero
-        // boxes and letting the caller conclude the page simply had no
-        // figures.
-        return Err(violation(format!(
-            "page {page_index} has no prunedResult.parsing_res_list — is this the \
-             VLM-only genai_server endpoint rather than /layout-parsing?"
-        )));
-    };
-    let mut ordered = Vec::new();
-    for block in list {
-        let label = block
-            .get("block_label")
-            .and_then(Value::as_str)
-            .ok_or_else(|| violation(format!("page {page_index} block has no block_label")))?;
-        if !IMAGE_BLOCK_LABELS.contains(&label) {
-            continue;
-        }
-        let bbox = parse_block_bbox(page_index, block)?;
-        let order = block
-            .get("block_order")
-            .and_then(Value::as_i64)
-            .unwrap_or(i64::MAX);
-        ordered.push((order, bbox));
+        .is_some()
+    {
+        return Ok(());
     }
-    ordered.sort_by_key(|(order, _)| *order);
-    Ok(ordered.into_iter().map(|(_, bbox)| bbox).collect())
-}
-
-/// `block_bbox` is `[x0, y0, x1, y1]` in **absolute pixels**, which is the same
-/// convention Kio's existing `[i64; 4]` already carries from the online OCR
-/// adapter — so this is a direct read, not a conversion.
-///
-/// That is a property of *this* profile only. Sarashina2.2-OCR emits
-/// `<bbox>[(x1,y1),(x2,y2)]</bbox>` normalized to 0–1000 from a top-left
-/// origin, and reading those as pixels would place every box in the top-left
-/// corner of the page. A second profile needs its own mapping, not this one.
-fn parse_block_bbox(page_index: usize, block: &Value) -> Result<[i64; 4]> {
-    let array = block
-        .get("block_bbox")
-        .and_then(Value::as_array)
-        .ok_or_else(|| violation(format!("page {page_index} image block has no block_bbox")))?;
-    if array.len() != 4 {
-        return Err(violation(format!(
-            "page {page_index} block_bbox has {} elements, expected 4",
-            array.len()
-        )));
-    }
-    let mut bbox = [0_i64; 4];
-    for (slot, value) in bbox.iter_mut().zip(array) {
-        // Upstream serializes these from a numpy array, so a whole-valued
-        // float is as likely as an integer.
-        *slot = value
-            .as_i64()
-            .or_else(|| value.as_f64().map(|float| float.round() as i64))
-            .ok_or_else(|| {
-                violation(format!(
-                    "page {page_index} block_bbox has a non-numeric element"
-                ))
-            })?;
-    }
-    // Reuses the online adapter's bound (07 §5.2: 0..=1e9, positive area) so
-    // both OCR routes reject the same degenerate boxes.
-    validate_annotation_bbox(bbox)?;
-    Ok(bbox)
+    Err(violation(format!(
+        "page {page_index} has no prunedResult.parsing_res_list — is this the \
+         VLM-only genai_server endpoint rather than /layout-parsing?"
+    )))
 }
 
 /// Relative image paths in the order the Markdown refers to them.
@@ -632,52 +553,66 @@ fn attribute_value(
     None
 }
 
-/// Attach one box to one figure, or refuse.
+/// Take each referenced image's box from its own file name, or refuse.
 ///
-/// The refusal is the point. Guessing here writes a permanently wrong bbox
-/// (07 §9 first-instance-wins over a content-addressed object), and the wrong
-/// value looks exactly as plausible as the right one to every downstream
-/// consumer. A page whose figure count and box count disagree means the two
-/// halves of the response describe different things, and the honest move is to
-/// fail the unit rather than to pick an alignment.
-fn pair_images_with_boxes(
+/// The service names every crop after the box it came from —
+/// `imgs/img_in_chart_box_814_626_1634_904.jpg` — so the correspondence never
+/// has to be inferred. That is the whole reason this reads names instead of
+/// pairing by position.
+///
+/// # Why position does not work
+///
+/// This used to zip the referenced images against the figure blocks of
+/// `parsing_res_list`, refusing when the counts disagreed. Measured 2026-08-03
+/// against three real pages (`tests/fixtures/layout-parsing/`), **all three
+/// disagreed**, each in its own way:
+///
+/// - `markdown.images` carries crops the Markdown never references — a
+///   `footer_image` block's crop on the infographic page (19 referenced, 20
+///   carried).
+/// - A `table` block is figure-labelled but renders as an inline `<table>`, not
+///   as an image, so the invoice page had 1 reference against 2 boxes.
+/// - Most crops are **nested inside other blocks** and have no block of their
+///   own at all: 10 of the slide page's 13 images are icons sitting inside table
+///   cells (11 referenced, 3 top-level boxes).
+///
+/// `markdown.images` is a flat bag of every crop the renderer made, at any
+/// depth. It was never a per-figure list, and no count check over it can be
+/// made to hold.
+///
+/// The refusal discipline is unchanged and still the point: a name that does not
+/// parse is refused rather than given a guessed box. A wrong bbox is frozen by
+/// 07 §9's first-instance-wins over a content-addressed object, and it looks
+/// exactly as plausible as the right one to everything downstream.
+///
+/// The box comes from the name, so `parsing_res_list` is no longer read for
+/// figures at all — [`require_layout_parsing_response`] only checks that it is
+/// there, because its absence means the wrong endpoint.
+fn images_with_their_own_boxes(
     page_index: usize,
     referenced: &[String],
     image_bytes: &BTreeMap<String, Vec<u8>>,
-    boxes: &[[i64; 4]],
 ) -> Result<Vec<OcrImage>> {
-    if referenced.len() != image_bytes.len() {
-        return Err(violation(format!(
-            "page {page_index} Markdown references {} images but markdown.images carries {}",
-            referenced.len(),
-            image_bytes.len()
-        )));
-    }
-    if referenced.is_empty() {
-        return Ok(Vec::new());
-    }
-    if referenced.len() != boxes.len() {
-        return Err(violation(format!(
-            "page {page_index} has {} referenced images but {} figure blocks — refusing to \
-             guess which bbox belongs to which image",
-            referenced.len(),
-            boxes.len()
-        )));
-    }
     referenced
         .iter()
-        .zip(boxes)
-        .map(|(relative_path, bbox)| {
+        .map(|relative_path| {
             let bytes = image_bytes.get(relative_path).ok_or_else(|| {
                 violation(format!(
                     "page {page_index} Markdown references {relative_path}, which markdown.images \
                      does not carry"
                 ))
             })?;
+            let bbox = bbox_from_image_name(relative_path).ok_or_else(|| {
+                violation(format!(
+                    "page {page_index} image {relative_path} does not name the box it was cropped \
+                     from — expected `…_box_<x0>_<y0>_<x1>_<y1>.<ext>`"
+                ))
+            })?;
+            validate_annotation_bbox(bbox)?;
             Ok(OcrImage {
                 bytes: bytes.clone(),
                 media_type: sniff_media_type(bytes, relative_path),
-                bbox: Some(*bbox),
+                bbox: Some(bbox),
                 confidence: None,
                 // 07 §5.2's bbox_annotation is a Mistral-specific extra prompt
                 // and a +25% charge. There is neither here: this pipeline
@@ -686,6 +621,28 @@ fn pair_images_with_boxes(
             })
         })
         .collect()
+}
+
+/// The `[x0, y0, x1, y1]` encoded in a crop's file name.
+///
+/// Reads the **last** four underscore-separated integers before the extension,
+/// which is what makes it independent of the label in the middle: the observed
+/// names range from `img_in_chart_box_…` to `img_in_footer_image_box_…`, and the
+/// label carries underscores of its own. Absolute pixels, the same convention
+/// `block_bbox` uses (07 §5.2 / [`parse_block_bbox`]).
+fn bbox_from_image_name(relative_path: &str) -> Option<[i64; 4]> {
+    let stem = relative_path.rsplit('/').next()?;
+    let stem = stem.rsplit_once('.').map_or(stem, |(before, _)| before);
+    let mut tail = stem.rsplitn(5, '_');
+    let mut bbox = [0_i64; 4];
+    // rsplitn yields last-first, so fill the box backwards.
+    for slot in bbox.iter_mut().rev() {
+        *slot = tail.next()?.parse().ok()?;
+    }
+    // The remainder must actually end in `_box`, so an arbitrary name ending in
+    // four numbers is not mistaken for a crop.
+    tail.next()?.strip_suffix("_box").map(|_| ())?;
+    Some(bbox)
 }
 
 /// Media type from the bytes, falling back to the extension.
@@ -1203,25 +1160,45 @@ mod tests {
     }
 
     #[test]
-    fn figures_pair_with_boxes_in_reading_order() {
+    fn each_image_carries_the_box_named_in_its_own_file() {
+        // `parsing_res_list` deliberately disagrees with both images: one box,
+        // in neither position, and a text block besides. None of it is read.
+        // The box comes from the name, so nothing here has to line up.
         let body = page_body(
-            "![](z-first.png)\n\n![](a-second.png)\n",
-            json!({"z-first.png": png_base64(), "a-second.png": png_base64()}),
-            json!([
-                // Deliberately out of array order: block_order is what counts.
-                {"block_label": "image", "block_bbox": [0, 200, 50, 250], "block_order": 7},
-                {"block_label": "text", "block_bbox": [0, 0, 10, 10], "block_order": 1},
-                {"block_label": "image", "block_bbox": [0, 100, 50, 150], "block_order": 3},
-            ]),
+            "![](imgs/img_in_image_box_0_100_50_150.jpg)\n\n\
+             ![](imgs/img_in_chart_box_0_200_50_250.jpg)\n",
+            json!({
+                "imgs/img_in_image_box_0_100_50_150.jpg": png_base64(),
+                "imgs/img_in_chart_box_0_200_50_250.jpg": png_base64(),
+            }),
+            json!([{"block_label": "text", "block_bbox": [0, 0, 10, 10], "block_order": 1}]),
         );
         let pages = parse_layout_parsing(&body).unwrap();
         let images = &pages[0].images;
         assert_eq!(images.len(), 2);
-        // block_order 3 is the earlier figure, so it belongs to the first
-        // reference in the Markdown.
         assert_eq!(images[0].bbox, Some([0, 100, 50, 150]));
         assert_eq!(images[1].bbox, Some([0, 200, 50, 250]));
         assert_eq!(images[0].media_type, "image/png");
+    }
+
+    #[test]
+    fn a_label_with_underscores_still_yields_its_box() {
+        // `footer_image` and `vision_footnote` put underscores in the middle of
+        // the name, which is why the parse reads the last four numbers rather
+        // than counting fields from the left.
+        assert_eq!(
+            bbox_from_image_name("imgs/img_in_footer_image_box_805_1410_911_1499.jpg"),
+            Some([805, 1410, 911, 1499])
+        );
+        assert_eq!(
+            bbox_from_image_name("imgs/img_in_chart_box_814_626_1634_904.jpg"),
+            Some([814, 626, 1634, 904])
+        );
+        // Not a crop name: no `_box` before the numbers.
+        assert_eq!(bbox_from_image_name("imgs/photo_1_2_3_4.jpg"), None);
+        // Too few numbers, and a non-numeric field.
+        assert_eq!(bbox_from_image_name("imgs/img_in_x_box_1_2_3.jpg"), None);
+        assert_eq!(bbox_from_image_name("imgs/img_in_x_box_a_2_3_4.jpg"), None);
     }
 
     #[test]
@@ -1373,16 +1350,37 @@ mod tests {
     }
 
     #[test]
-    fn a_figure_count_mismatch_fails_rather_than_guessing() {
-        // Two references, one figure block. Any pairing here would be a guess,
-        // and 07 §9 would freeze it permanently.
+    fn an_image_that_does_not_name_its_box_is_refused_rather_than_guessed_at() {
+        // The refusal that replaced the count checks. If upstream ever renames
+        // its crops, this fires instead of a plausible-looking wrong bbox that
+        // 07 §9 would freeze for the life of the archive.
         let body = page_body(
-            "![](one.png)\n\n![](two.png)\n",
-            json!({"one.png": png_base64(), "two.png": png_base64()}),
+            "![](one.png)\n",
+            json!({"one.png": png_base64()}),
             json!([{"block_label": "image", "block_bbox": [0, 0, 10, 10], "block_order": 0}]),
         );
         let error = parse_layout_parsing(&body).unwrap_err().to_string();
-        assert!(error.contains("refusing to"), "{error}");
+        assert!(error.contains("does not name the box"), "{error}");
+    }
+
+    #[test]
+    fn images_the_markdown_never_references_are_ignored() {
+        // Measured 2026-08-03: `markdown.images` is a flat bag of every crop the
+        // renderer made, including ones with no reference in the text (a
+        // `footer_image` on the infographic page) and ones nested inside other
+        // blocks (icons in table cells on the slide page). The old count check
+        // treated that as a contract violation and refused every real page.
+        let body = page_body(
+            "![](imgs/img_in_chart_box_0_100_50_150.jpg)\n",
+            json!({
+                "imgs/img_in_chart_box_0_100_50_150.jpg": png_base64(),
+                "imgs/img_in_footer_image_box_9_9_19_19.jpg": png_base64(),
+            }),
+            json!([]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        assert_eq!(pages[0].images.len(), 1);
+        assert_eq!(pages[0].images[0].bbox, Some([0, 100, 50, 150]));
     }
 
     #[test]
@@ -1458,30 +1456,16 @@ mod tests {
 
     #[test]
     fn a_degenerate_bbox_is_rejected() {
-        // Zero area. The online route already refuses these (07 §5.2); both
-        // OCR routes must agree, or the same document parses differently
-        // depending on which adapter ran.
+        // Zero area, now carried by the name rather than by block_bbox. The
+        // online route already refuses these (07 §5.2); both OCR routes must
+        // agree, or the same document parses differently depending on which
+        // adapter ran.
         let body = page_body(
-            "![](one.png)\n",
-            json!({"one.png": png_base64()}),
-            json!([{"block_label": "image", "block_bbox": [10, 10, 10, 10], "block_order": 0}]),
+            "![](imgs/img_in_image_box_10_10_10_10.jpg)\n",
+            json!({"imgs/img_in_image_box_10_10_10_10.jpg": png_base64()}),
+            json!([]),
         );
         assert!(parse_layout_parsing(&body).is_err());
-    }
-
-    #[test]
-    fn float_bboxes_from_numpy_are_accepted() {
-        let body = page_body(
-            "![](one.png)\n",
-            json!({"one.png": png_base64()}),
-            json!([{
-                "block_label": "image",
-                "block_bbox": [10.0, 20.4, 110.0, 220.6],
-                "block_order": 0
-            }]),
-        );
-        let pages = parse_layout_parsing(&body).unwrap();
-        assert_eq!(pages[0].images[0].bbox, Some([10, 20, 110, 221]));
     }
 
     #[test]
@@ -1619,8 +1603,8 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let client = RecordingClient {
             body: page_body(
-                "before\n\n![](fig-1.png)\n\nafter\n",
-                json!({"fig-1.png": png_base64()}),
+                "before\n\n![](imgs/img_in_image_box_4_8_40_80.jpg)\n\nafter\n",
+                json!({"imgs/img_in_image_box_4_8_40_80.jpg": png_base64()}),
                 json!([{"block_label": "image", "block_bbox": [4, 8, 40, 80], "block_order": 0}]),
             ),
             seen: std::sync::Arc::clone(&seen),
@@ -1642,7 +1626,11 @@ mod tests {
         // The relative path the service invented must not survive into the
         // normalized Markdown: Stage 1.5's related_images[] reads kio:// URIs,
         // and a leftover fig-1.png would make it silently empty.
-        assert!(!unit.markdown.contains("fig-1.png"), "{}", unit.markdown);
+        assert!(
+            !unit.markdown.contains("img_in_image_box"),
+            "{}",
+            unit.markdown
+        );
         assert!(unit.markdown.contains("kio://"), "{}", unit.markdown);
         assert_eq!(unit.metadata["images"][0]["bbox"], json!([4, 8, 40, 80]));
         // A local run has no invoice, so there is nothing for the ledger to
