@@ -22,6 +22,8 @@ PaddleOCR-VL が実際に返したバイト列。**整形も切り詰めもし�
 {"file": "<base64>", "fileType": 1, "useLayoutDetection": true}
 ```
 
+`…-as-pdf.json` だけは `"fileType": 0` (PDF)。理由は下の「PDF 入力」を参照。
+
 **可視化オプションは付けていない。** Kio が投げない要求への応答を fixture にすると、
 また「サービスと違う形」を固定することになるため。なお `inputImage` と
 `outputImages.layout_det_res` は**既定で応答に載ってくる**ので入っている
@@ -35,11 +37,37 @@ PaddleOCR-VL が実際に返したバイト列。**整形も切り詰めもし�
 すべて**リポジトリ内の合成画像** (`experiments/ocr-verification/fixtures/generated-images/`)。
 公開済み・再現可能で、社内文書は使っていない。
 
-| ファイル | 入力画像 | サイズ |
-|---|---|---:|
-| `infographic-two-charts.json` | `g5_infographic_high_01.png` | 1,472,174 B |
-| `invoice-table.json` | `g4_invoice_photo_03.png` | 1,117,633 B |
-| `slide-single-figure.json` | `g2_slide_dense_02.png` | 1,285,842 B |
+| ファイル | 入力画像 | `fileType` | サイズ |
+|---|---|---|---:|
+| `infographic-two-charts.json` | `g5_infographic_high_01.png` | 1 (image) | 1,472,174 B |
+| `invoice-table.json` | `g4_invoice_photo_03.png` | 1 (image) | 1,117,633 B |
+| `slide-single-figure.json` | `g2_slide_dense_02.png` | 1 (image) | 1,285,842 B |
+| `infographic-two-charts-as-pdf.json` | 同上を 150 dpi で PDF 化 | **0 (pdf)** | 1,279,343 B |
+
+## PDF 入力 (2026-08-05 追加)
+
+`infographic-two-charts-as-pdf.json` は**同じ画像を PDF に包んで投げた応答**。
+上の 3 本はすべて `fileType: 1` なので、**PDF 応答の形はどれも押さえていなかった**。
+
+`dataInfo` の形が違う。ページ寸法が配列の中へ移り、`numPages` が増える:
+
+```json
+image: {"width":1024,"height":1536,"type":"image"}
+pdf  : {"numPages":1,"pages":[{"width":984,"height":1475}],"type":"pdf"}
+```
+
+**中身も同一ではない。**PDF 経路は 150 dpi でラスタライズし直すため寸法が
+1024×1536 → 984×1475 に変わり、レイアウト検出の結果もわずかにずれる:
+
+| | image 入力 | pdf 入力 |
+|---|---:|---:|
+| block 数 | 48 | **49** |
+| クロップ数 | 20 | **21** |
+| `markdown.text` 中の `<img>` | 19 | **20** |
+| `chart` | 2 | 2 |
+
+同じ文書でも**入れ方が変われば検出数が変わる**。決定性が保証されるのは
+「同じバイト列を同じ経路で投げたとき」までで、それ以上ではない。
 
 ## 中身の要点
 
