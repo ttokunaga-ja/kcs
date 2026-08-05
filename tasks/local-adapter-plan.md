@@ -1229,7 +1229,21 @@ gif と同じ扱いで、local で契約違反になるより正直な行き先�
 名前は付くが routable でない — は安全で、`image/gif` が今それに当たる
 (local が拒否し online lane に残る、正直な拒否)。
 
-### S3-J — `related_images` に装飾が溢れる [2026-08-05・未裁定]
+### S3-J — `related_images` に装飾が溢れる [2026-08-05・裁定済]
+
+> **裁定 (2026-08-05): 検索の提示側で、同一 unit の最大図に対する面積比で絞る。**
+> 既定 0.25、`[search] related_images_min_area_ratio` で変更可。以下は経緯。
+> 実装は [`main.rs`](../crates/kio-cli/src/main.rs) の `significant_related_images`、
+> 契約は [05-runtime §1.7](../docs/05-runtime.md)。
+>
+> **`extract_related_images` は触っていない。**あれは purge の到達性判定にも
+> 使われており、そこで絞ると**装飾が孤児になって回収される**。絞るのは提示だけで、
+> archive の中身は変わらない (回帰テストで object が 2 件残ることを確認)。
+>
+> **索引時に落とす案は採らなかった。**閾値の根拠が 4 ページしかないので、
+> 07 §9 で凍る側に置けない。検索時なら、読み違えていた corpus も
+> **再索引なしで**設定 1 行で直る。
+
 
 第 4 回の実測。infographic 1 ページに 6 クエリを投げて **`related_images` 計 54 本、
 うちチャートは 2 本**。6 クエリ中 5 つはチャートに 1 度も届かない。残る 52 本は

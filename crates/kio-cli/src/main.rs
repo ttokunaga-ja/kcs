@@ -123,7 +123,7 @@ use kio_search::evidence::{
     EvidencePointerIssueRequest, EVIDENCE_POINTER_SCHEMA_VERSION,
 };
 use kio_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
-use kio_search::object_uri::extract_related_images;
+use kio_search::object_uri::{extract_related_images, RelatedImage};
 use kio_search::query::{
     query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
     ScopeSelectionMode, SearchMode, TimeTravelSelector,
@@ -1977,6 +1977,11 @@ struct ChunkMeta {
     byte_start: u64,
     byte_end: u64,
     text: String,
+    /// Which normalized unit this chunk was cut from (03 §8.1). Carried so the
+    /// result assembler can reach that unit's `metadata["images"]`, where the
+    /// figures' boxes live — the chunk text names images but says nothing about
+    /// how big they are.
+    unit_key: String,
 }
 
 /// One final result hit after historical/deleted alias expansion.
@@ -3866,6 +3871,11 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     };
 
     let mut results = Vec::new();
+    // Resolved once for the whole response, and the per-unit figure sizes it
+    // needs are memoized across rows — a page of results is usually a handful
+    // of units, so this is a few reads, not one per row.
+    let min_area_ratio = related_images_min_area_ratio(single_scope_kio_dir.as_deref())?;
+    let mut unit_figures: UnitFigureCache = BTreeMap::new();
     for hit in page {
         let candidate = hit.candidate;
         let binding = hit.binding;
@@ -3933,7 +3943,29 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // the CITING chunk's figures — including this row's own payload, which
         // is already `payload_uri`.
         if candidate.payload == ResultPayload::Chunk {
-            let related_images = extract_related_images(&candidate.meta.text);
+            let mut related_images = extract_related_images(&candidate.meta.text);
+            // Then keep only what is worth opening. The extractor above must
+            // stay exhaustive (it doubles as the liveness scanner), so the
+            // narrowing happens here and only for what this response shows.
+            if min_area_ratio > 0.0 && !related_images.is_empty() {
+                let key = (
+                    candidate.meta.raw_hash.clone(),
+                    candidate.meta.tool_profile_hash.clone(),
+                    candidate.meta.gen,
+                );
+                let instance = unit_figures.entry(key).or_insert_with(|| {
+                    read_instance_figures(
+                        &candidate.scope_path,
+                        &candidate.meta.raw_hash,
+                        &candidate.meta.tool_profile_hash,
+                        candidate.meta.gen,
+                    )
+                });
+                if let Some(figures) = instance.get(&candidate.meta.unit_key) {
+                    related_images =
+                        significant_related_images(related_images, figures, min_area_ratio);
+                }
+            }
             if !related_images.is_empty() {
                 result["related_images"] = json!(related_images);
             }
@@ -5094,7 +5126,7 @@ fn vector_scope_search(
     // repeating the expression — one bind, one evaluation, same order.
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen,
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key,
                 vec_distance_cosine(cv.embedding, ?) AS kio_distance
          FROM chunk_vec cv
          JOIN chunks c ON c.chunk_id = cv.chunk_id
@@ -5146,7 +5178,7 @@ fn vector_scope_search(
     bound.push(&candidate_depth_i64);
     let rows = stmt.query_map(rusqlite::params_from_iter(bound), |row| {
         let (chunk_id, chunk_meta) = chunk_meta_row(row)?;
-        Ok((chunk_id, chunk_meta, row.get::<_, f64>(9)?))
+        Ok((chunk_id, chunk_meta, row.get::<_, f64>(10)?))
     });
     let rows = match rows {
         Ok(rows) => rows,
@@ -5327,7 +5359,7 @@ fn referencing_chunks_for_images(
 ) -> Result<BTreeMap<String, ImageCandidate>> {
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
          FROM chunks c
          WHERE c.first_seen_commit IS NOT NULL
              AND c.rowid <= ?
@@ -5452,7 +5484,10 @@ fn image_vector_scope_search(
     Ok((hits, rows))
 }
 
-/// Parse the shared 9-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
+/// Parse the shared 10-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
+///
+/// Callers that project extra columns append them AFTER these ten — the vector
+/// backend's `kio_distance` is index 10.
 fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> {
     let chunk_id = row.get::<_, String>(0)?;
     let heading_path_raw = row.get::<_, Option<String>>(3)?;
@@ -5470,8 +5505,127 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
             byte_start: row.get::<_, i64>(5)? as u64,
             byte_end: row.get::<_, i64>(6)? as u64,
             text: row.get(7)?,
+            unit_key: row.get(9)?,
         },
     ))
+}
+
+/// The figure sizes one normalized unit recorded, keyed by image object hash.
+struct UnitFigures {
+    /// Area of each figure's bbox, in whatever units the provider's page
+    /// coordinates use. Only the ratios between them are ever read.
+    areas: BTreeMap<String, i64>,
+    /// The largest figure anywhere in the unit — the denominator. Taken over
+    /// the whole page rather than over the citing chunk, because a chunk that
+    /// holds nothing but decoration must come back empty rather than promote
+    /// its biggest sticker.
+    largest: i64,
+}
+
+/// Memo of [`read_instance_figures`] across one search's result rows.
+///
+/// Keyed by the normalized INSTANCE, not by the unit: a page of results from
+/// one scanned PDF is one instance and many units, and the loader validates a
+/// whole instance per call. Keying by unit would re-read and re-validate the
+/// same instance once per page that matched.
+type UnitFigureCache = BTreeMap<(String, String, u64), BTreeMap<String, UnitFigures>>;
+
+/// Read every unit's figure sizes out of one normalized instance.
+///
+/// Both OCR routes write `metadata["images"]` in the same shape (07 §5.2), so
+/// one reader serves the online and offline lanes alike. Anything unreadable is
+/// simply absent from the result and its caller then keeps the unfiltered list:
+/// a purged instance, a unit that predates the metadata, or a provider that
+/// records no boxes are all reasons to know less, not reasons to hand the Agent
+/// less.
+fn read_instance_figures(
+    kio_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> BTreeMap<String, UnitFigures> {
+    let Ok(instance) = kio_pipeline::markdownize::load_validated_normalized_instance(
+        kio_dir,
+        raw_hash,
+        tool_profile_hash,
+        gen,
+    ) else {
+        return BTreeMap::new();
+    };
+    let mut by_unit = BTreeMap::new();
+    for unit in instance.units {
+        let Some(images) = unit.metadata.get("images").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut areas = BTreeMap::new();
+        for image in images {
+            let (Some(hash), Some(bbox)) = (
+                image.get("hash").and_then(Value::as_str),
+                image.get("bbox").and_then(Value::as_array),
+            ) else {
+                continue;
+            };
+            let [x0, y0, x1, y1] = bbox.as_slice() else {
+                continue;
+            };
+            let (Some(x0), Some(y0), Some(x1), Some(y1)) =
+                (x0.as_i64(), y0.as_i64(), x1.as_i64(), y1.as_i64())
+            else {
+                continue;
+            };
+            areas.insert(hash.to_owned(), (x1 - x0).max(0) * (y1 - y0).max(0));
+        }
+        let Some(largest) = areas.values().copied().max().filter(|area| *area > 0) else {
+            continue;
+        };
+        by_unit.insert(unit.unit_key, UnitFigures { areas, largest });
+    }
+    by_unit
+}
+
+/// Drop the `related_images[]` entries too small to be worth an Agent's round
+/// trip (05-runtime §1.7).
+///
+/// A chunk names every image its body references, and on a laid-out page most
+/// of those are stickers next to text that already says the thing. Measured on
+/// one real infographic, six queries returned 54 references of which 52 were
+/// decoration; heading chunking makes this worse by putting half a page into
+/// one chunk, so any hit in that half drags all of its decoration along.
+///
+/// Size is the discriminator that survives inspection. `block_label` does not:
+/// the invoice capture's only figure is spelled `image` and is larger than
+/// either chart on the infographic, and PaddleOCR-VL has no `figure` label for
+/// real figures to land in.
+///
+/// Applied here rather than inside `extract_related_images` on purpose. That
+/// extractor also answers *which objects must stay alive* (`verify_objects`,
+/// purge reachability), and a decoration filtered out of it would become an
+/// orphan and be collected. This is a presentation choice, so it lives at the
+/// presentation site and nothing else observes it.
+fn significant_related_images(
+    images: Vec<RelatedImage>,
+    figures: &UnitFigures,
+    min_area_ratio: f64,
+) -> Vec<RelatedImage> {
+    let floor = (figures.largest as f64 * min_area_ratio).ceil() as i64;
+    images
+        .into_iter()
+        // An image the unit recorded no box for is not judged — being
+        // unmeasured is not the same as being small.
+        .filter(|image| {
+            let area = kio_search::object_uri::parse_object_uri(&image.image_uri)
+                .ok()
+                .and_then(|uri| figures.areas.get(uri.hash()));
+            match area {
+                Some(area) => *area >= floor,
+                None => true,
+            }
+        })
+        // `order` is documented as the position within this list, so it has to
+        // be re-derived after a removal rather than carried through.
+        .enumerate()
+        .map(|(order, image)| RelatedImage { order, ..image })
+        .collect()
 }
 
 /// Per-scope text backend (PC8/PC11): run the single FTS5 MATCH query when
@@ -5534,7 +5688,7 @@ fn execute_fts_tier(
     // invariant ever loosens.
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
          FROM (
              SELECT rowid AS chunk_rowid, bm25(chunk_fts, 1.0, 0.3) AS score
              FROM chunk_fts
@@ -5651,7 +5805,7 @@ fn execute_like_fallback(
     };
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
          FROM chunks c
          WHERE c.first_seen_commit IS NOT NULL
              AND c.rowid <= ?
@@ -9478,6 +9632,83 @@ fn read_bbox_annotation_config(path: &Path) -> Result<Option<bool>> {
         .get("markdownize")
         .and_then(|markdownize| markdownize.get("bbox_annotation"))
         .and_then(toml::Value::as_bool))
+}
+
+/// Smallest share of its page's largest figure that a `related_images[]` entry
+/// must occupy to be worth an Agent's `kio open`.
+///
+/// **Measured, not chosen.** Across the four `/layout-parsing` captures in
+/// `kio-adapter/tests/fixtures/layout-parsing/`, decoration tops out at 10.7%
+/// of the page's largest figure while every real figure sits at 83.6% or above
+/// — a 7.8x gap this lands in the middle of. Four pages is a thin basis, which
+/// is why the value is a knob and why nothing is discarded at index time: raise
+/// it, lower it, or set it to 0 to keep every reference, and the next search
+/// obeys without a re-index.
+///
+/// Relative to the page's own largest figure rather than to the page area, so
+/// it survives a resolution change. Re-rendering the same infographic through
+/// the PDF path resamples it to 96% and moves every absolute area with it.
+const RELATED_IMAGES_MIN_AREA_RATIO_DEFAULT: f64 = 0.25;
+
+/// Effective `[search] related_images_min_area_ratio`, under the same PC49/PC50
+/// layering as every other `[search]` key ([`effective_search_config`]): a
+/// folder value counts only for a single, non-`--descendants` `--scope`, and a
+/// multi-scope search reads the user layer alone. One response cannot hold two
+/// floors, and taking the CWD's would let a scope that merely happens to be
+/// nearby decide how another scope's figures are presented.
+fn related_images_min_area_ratio(single_scope_kio_dir: Option<&Path>) -> Result<f64> {
+    if let Some(kio_dir) = single_scope_kio_dir {
+        if let Some(ratio) = read_related_images_min_area_ratio(&kio_dir.join("config.toml"))? {
+            return Ok(ratio);
+        }
+    }
+    Ok(
+        read_related_images_min_area_ratio(&user_config_toml_path())?
+            .unwrap_or(RELATED_IMAGES_MIN_AREA_RATIO_DEFAULT),
+    )
+}
+
+fn read_related_images_min_area_ratio(path: &Path) -> Result<Option<f64>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(KioError::io(error.to_string(), path.display().to_string()));
+        }
+    }
+    let bytes = read_bounded_regular_file(path, BBOX_ANNOTATION_CONFIG_MAX_BYTES)?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| {
+        KioError::schema(format!(
+            "search config is not valid UTF-8 at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let value: toml::Value = toml::from_str(text).map_err(|error| {
+        KioError::schema(format!(
+            "invalid search config at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let Some(ratio) = value
+        .get("search")
+        .and_then(|search| search.get("related_images_min_area_ratio"))
+    else {
+        return Ok(None);
+    };
+    // An integer `0` or `1` is what a person writes for "keep everything" or
+    // "keep only the biggest", so accept both spellings rather than making the
+    // decimal point load-bearing.
+    let ratio = ratio
+        .as_float()
+        .or_else(|| ratio.as_integer().map(|value| value as f64))
+        .filter(|value| (0.0..=1.0).contains(value))
+        .ok_or_else(|| {
+            KioError::schema(format!(
+                "related_images_min_area_ratio must be a number in 0.0..=1.0 at {}",
+                path.display()
+            ))
+        })?;
+    Ok(Some(ratio))
 }
 
 /// R12-1: effective `[markdownize.incremental]` (docs/10:537, docs/03:595). `enabled`
@@ -24627,6 +24858,7 @@ mod tests {
                     byte_start: 0,
                     byte_end: 1,
                     text: String::new(),
+                    unit_key: "doc:1".to_owned(),
                 },
                 bindings: Vec::new(),
                 embedding: Some(embedding),
@@ -24739,6 +24971,7 @@ mod tests {
                     byte_start: 0,
                     byte_end: 1,
                     text: String::new(),
+                    unit_key: "doc:1".to_owned(),
                 },
             }
         }

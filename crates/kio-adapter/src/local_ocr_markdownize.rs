@@ -1055,7 +1055,16 @@ fn encode_base64(bytes: &[u8]) -> String {
 /// reads the signature, and no consumer of an image object decodes the pixels.
 const MOCK_FIGURE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock figure";
 
-/// Test-only: set to `nonconforming` to make [`MockLocalOcrClient`] answer with
+/// The mock's decoration, for the `decorated` body below. Distinct bytes from
+/// [`MOCK_FIGURE_PNG`] on purpose: identical bytes are one content-addressed
+/// object, and a test about telling two images apart cannot use one image.
+const MOCK_ICON_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock icon";
+
+/// Test-only body selector for [`MockLocalOcrClient`]. `decorated` answers with
+/// a page carrying one real figure and one sticker, so that a consumer which
+/// distinguishes them by size has something to distinguish.
+///
+/// Set to `nonconforming` to make [`MockLocalOcrClient`] answer with
 /// a page this adapter cannot bring into Normalized Markdown v1 — an HTML table,
 /// the shape upstream is most likely to send that `unwrap_presentational_html`
 /// deliberately does not rewrite.
@@ -1085,6 +1094,46 @@ impl LocalOcrClient for MockLocalOcrClient {
                             "text": "Kio local OCR mock page.\n\n\
                                      <table><tr><td>1</td></tr></table>\n",
                             "images": {}
+                        }
+                    }]
+                }
+            }));
+        }
+        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("decorated") {
+            // A figure and a sticker, in the proportions the real service
+            // returns: on the measured infographic the decoration ran to about
+            // a tenth of the largest figure's area, and here it is 1/68th.
+            // Both are cited by the body, so anything downstream that thins
+            // `related_images[]` has to do it by size and not by counting.
+            return Ok(json!({
+                "logId": "00000000-0000-0000-0000-000000000000",
+                "errorCode": 0,
+                "errorMsg": "Success",
+                "result": {
+                    "dataInfo": {"width": 1240, "height": 1754, "type": "image"},
+                    "layoutParsingResults": [{
+                        "prunedResult": {
+                            "parsing_res_list": [
+                                {"block_label": "chart", "block_bbox": [107, 567, 1130, 1073],
+                                 "block_id": 0, "block_order": null},
+                                {"block_label": "image", "block_bbox": [40, 120, 127, 207],
+                                 "block_id": 1, "block_order": null}
+                            ]
+                        },
+                        "markdown": {
+                            "text": "Kio local OCR mock page.\n\n\
+                                     <div style=\"text-align: center;\">\
+                                     <img src=\"imgs/img_in_image_box_40_120_127_207.jpg\" \
+                                     alt=\"Image\" /></div>\n\n\
+                                     <div style=\"text-align: center;\">\
+                                     <img src=\"imgs/img_in_chart_box_107_567_1130_1073.jpg\" \
+                                     alt=\"Image\" width=\"82%\" /></div>\n",
+                            "images": {
+                                "imgs/img_in_chart_box_107_567_1130_1073.jpg":
+                                    encode_base64(MOCK_FIGURE_PNG),
+                                "imgs/img_in_image_box_40_120_127_207.jpg":
+                                    encode_base64(MOCK_ICON_PNG)
+                            }
                         }
                     }]
                 }

@@ -300,6 +300,102 @@ fn s3e_the_local_pipelines_figure_is_reachable_from_the_chunk_that_cites_it() {
     assert_eq!(opened["object_type"], "image", "{opened}");
 }
 
+/// `related_images[]` offers the figure and withholds the sticker.
+///
+/// On a real infographic six queries returned 54 references and two of them
+/// were figures; the rest were decoration sitting next to text that already
+/// said the thing. Every reference costs the Agent a `kio open`, so a list that
+/// is 96% decoration is not a richer answer, it is a more expensive one.
+///
+/// The measurement is what has to be asserted here. A count would pass just as
+/// well against a filter that dropped the last image, or the smallest-indexed
+/// one, or every second one -- so this pins WHICH survives, by opening it and
+/// reading back the bytes the figure was made of.
+#[test]
+fn s3e_a_chunks_related_images_offer_the_figure_and_not_the_decoration() {
+    let dir = scanned_pdf_fixture();
+    let local = [
+        ("KIO_TEST_LOCAL_OCR", "mock"),
+        ("KIO_TEST_LOCAL_OCR_BODY", "decorated"),
+    ];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    let search = json_success(&dir, &["search", "mock", "--mode", "text"], &local);
+    let hit = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["result_type"] == "chunk")
+        .unwrap_or_else(|| panic!("no chunk hit for the mock page: {search}"));
+    let images = hit["related_images"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the cited figure must be enumerated: {hit}"));
+    assert_eq!(images.len(), 1, "only the figure is worth opening: {hit}");
+    assert_eq!(images[0]["order"], 0, "{hit}");
+
+    // Which one survived. The two mock images differ only in their bytes, so
+    // opening the survivor is the only way to tell the figure from the sticker.
+    let uri = images[0]["image_uri"].as_str().unwrap();
+    let opened = json_success(&dir, &["open", uri], &local);
+    assert_eq!(opened["status"], "opened", "{opened}");
+    let bytes = fs::read(opened["path"].as_str().unwrap()).unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("mock figure"),
+        "the surviving image must be the figure, not the icon: {opened}"
+    );
+
+    // Both objects still exist -- this thins what is offered, not what is kept.
+    // Filtering the extractor instead would have made the icon an orphan.
+    let objects = fs::read_dir(dir.path().join(".kio/objects/image"))
+        .unwrap()
+        .count();
+    assert_eq!(objects, 2, "the decoration must remain in the archive");
+}
+
+/// Setting the ratio to zero brings the decoration back.
+///
+/// The threshold is drawn from four captured pages, which is thin, so the point
+/// of the knob is that a corpus it reads wrongly can be corrected without
+/// re-indexing anything. That only holds if the knob is reachable: the schema
+/// rejects unknown keys, so a default that works while the config key is
+/// refused would be a filter nobody could turn off.
+#[test]
+fn s3e_the_related_image_floor_can_be_lowered_without_reindexing() {
+    let dir = scanned_pdf_fixture();
+    let local = [
+        ("KIO_TEST_LOCAL_OCR", "mock"),
+        ("KIO_TEST_LOCAL_OCR_BODY", "decorated"),
+    ];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    // Written after indexing on purpose: nothing was discarded when the page
+    // was archived, so this is a pure read-side change.
+    let config = dir.path().join(".kio/config.toml");
+    fs::write(&config, "[search]\nrelated_images_min_area_ratio = 0.0\n").unwrap();
+
+    // `--scope` because this key layers like every other `[search]` key
+    // (PC49/PC50): a folder value counts only for a single, non-`--descendants`
+    // scope, and the default multi-scope search reads the device layer alone.
+    // A search without it would keep the default floor and pass this test only
+    // if the assertion were the other way round.
+    let scope = dir.path().to_str().unwrap();
+    let search = json_success(
+        &dir,
+        &["search", "mock", "--mode", "text", "--scope", scope],
+        &local,
+    );
+    let hit = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["result_type"] == "chunk")
+        .unwrap();
+    let images = hit["related_images"].as_array().unwrap();
+    assert_eq!(images.len(), 2, "the floor must be lowerable: {hit}");
+}
+
 /// A unit that fails 07 §5's acceptance check must not reach the archive.
 ///
 /// The check has always detected raw HTML; what it did not do was stop anything.

@@ -32,6 +32,11 @@
           "type": "string",
           "enum": ["auto", "text", "vector", "hybrid"]
         },
+        "related_images_min_area_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "fail_behavior": {
           "type": "string",
           "enum": ["fallback", "error", "warn"]
