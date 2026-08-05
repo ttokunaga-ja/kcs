@@ -583,6 +583,10 @@ Evidence Pointer のバイト位置は保存された bytes に対して定義�
 - **見出し**: ATX (`#`〜`######`) のみ (Setext 禁止)。chunk 境界規則 ([04-pipeline.md §4.1](04-pipeline.md))
   の入力
 - **表**: GFM table 記法で inline 保持 (§5.2 規約と同じ — 独立 table object は作らない)
+  - **provider が見出し行を名指ししない場合、先頭行を見出しへ昇格させない。**GFM は
+    見出しの無い表を書けないので**空の見出し行** (`| | |`) を置く。実測した 3 つの表のうち
+    2 つは先頭行が見出しで 1 つは本文であり、応答にはこれを区別する field が無い —
+    昇格させると本文の行を列名として §9 で永久に凍結することになる
 - **画像参照**: `![...](kio://<scope_id>/object/image/<image_hash>)` のみ
   ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))
 - **生 HTML / autolink**: 禁止。**provider 由来の生テキストを Markdown 本文へ埋め込む場合は、由来を

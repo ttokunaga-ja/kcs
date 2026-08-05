@@ -2052,12 +2052,26 @@ mod tests {
                 None,
             ),
             (
-                // 0737422: tables arrive as raw HTML with no div anywhere, so
-                // `unwrap_presentational_html` cannot reach them. Refusing beats
-                // a lossy GFM conversion that 07 §9 would then freeze.
+                // 0737422 refused this shape, because nothing had measured what
+                // the service sends and a conversion guessed at would be frozen
+                // by 07 §9. Three real tables later it is measured, so S3-L
+                // converts it into the GFM notation 07 §5 asks for -- and the
+                // refusal cost two of the three captured documents everything.
                 "html table",
                 "prose\n\n<table border=1 style='margin: auto;'>\
                  <tr><td>Data class</td><td>Count</td></tr></table>\n"
+                    .to_owned(),
+                json!({}),
+                json!([]),
+                None,
+            ),
+            (
+                // What still refuses, and why the row above is not a retreat: a
+                // merged cell has no GFM notation at all, so there is nothing to
+                // convert it into that would not invent structure.
+                "html table with a merged cell",
+                "prose\n\n<table border=1><tr><td rowspan=2>Data class</td>\
+                 <td>Count</td></tr><tr><td>3</td></tr></table>\n"
                     .to_owned(),
                 json!({}),
                 json!([]),

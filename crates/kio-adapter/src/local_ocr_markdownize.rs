@@ -307,6 +307,10 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
             .ok_or_else(|| violation(format!("page {index} has no markdown.text")))?,
     )?;
     let markdown = unwrap_presentational_html(&markdown);
+    // After the two above, so a cell's figure is already `![](…)` and no `<div>`
+    // survives inside one — the only markup left in a cell is markup nobody has
+    // measured, which is exactly what the converter refuses to guess at.
+    let markdown = convert_html_tables_to_gfm(&markdown);
 
     // `markdown.images` is a relative-path → bytes map. It is keyed by the path
     // the Markdown refers to, which is what lets a bbox be matched to a figure
@@ -453,6 +457,202 @@ fn normalize_html_image_refs(page_index: usize, markdown: &str) -> Result<String
     }
     output.push_str(&markdown[cursor..]);
     Ok(output)
+}
+
+/// Rewrite the service's HTML tables into the GFM table notation 07 §5 already
+/// fixes for a table, so that a page containing one can be indexed at all.
+///
+/// Until 2026-08-06 these were left alone and the v1 acceptance check refused
+/// the page. That was decided (S3-F) on two grounds, and only one still holds:
+/// raw HTML is a v1 violation, yes — but the other was that nothing had measured
+/// what PaddleOCR-VL actually sends, and inventing a conversion for an unmeasured
+/// shape is how a wrong transformation gets frozen by 07 §9. Three real tables
+/// are now committed under `tests/fixtures/layout-parsing/`, and the cost of the
+/// refusal turned out to be two of the three real documents indexing nothing.
+///
+/// The measured shape is `<table border=1 style='…'>` / `<tr>` / `<td style='…'>`
+/// and nothing else: no `<th>`, no `<thead>`/`<tbody>`, no `rowspan`/`colspan`,
+/// no nesting. **Anything outside that is left byte-identical** and the page is
+/// refused exactly as before — a loud failure that names the rule, rather than a
+/// guess frozen into the archive.
+///
+/// # The header row is left empty, deliberately
+///
+/// GFM has no way to write a table without a header, so the obvious move is to
+/// promote the first `<tr>`. Two of the three captures would survive that and
+/// the third would not: the slide's left-hand table opens on a data row (an icon
+/// beside "High text density"), while its right-hand table and the invoice both
+/// open on real headers. Nothing in the response distinguishes them — there is no
+/// `<th>` anywhere — so promoting the first row would relabel real data as a
+/// column name on a third of the evidence, permanently.
+///
+/// An empty header asserts only what was observed: that these tables do not say
+/// which row is a header. Every cell still appears verbatim, in its own row.
+/// This is the same trap `block_label` set in S3-J, where a rule that held on one
+/// page did not hold on the next.
+fn convert_html_tables_to_gfm(markdown: &str) -> String {
+    // ASCII lowercasing preserves byte offsets, so indices into `lower` index
+    // `markdown` too.
+    let lower = markdown.to_ascii_lowercase();
+    let mut output = String::with_capacity(markdown.len());
+    let mut cursor = 0;
+    while let Some(span) = next_html_table(&lower, cursor) {
+        output.push_str(&markdown[cursor..span.start]);
+        // A GFM table has to begin a block. Every observed table sits alone
+        // between blank lines; one spliced into a paragraph would render as
+        // pipes rather than as a table, so it is left for the acceptance check.
+        let starts_block = span.start == 0 || markdown[..span.start].ends_with("\n\n");
+        let ends_block = span.end == markdown.len() || markdown[span.end..].starts_with('\n');
+        let converted = (starts_block && ends_block)
+            .then(|| gfm_table(&markdown[span.clone()], &lower[span.clone()]))
+            .flatten();
+        match converted {
+            Some(table) => output.push_str(&table),
+            None => output.push_str(&markdown[span.clone()]),
+        }
+        cursor = span.end;
+    }
+    output.push_str(&markdown[cursor..]);
+    output
+}
+
+/// Byte range of the next `<table …>…</table>` at or after `cursor`, tags
+/// included. An unterminated table is left alone rather than swallowing the rest
+/// of the page, exactly as an unterminated `<div>` is.
+fn next_html_table(lower: &str, cursor: usize) -> Option<std::ops::Range<usize>> {
+    let mut scan = cursor;
+    while scan < lower.len() {
+        let open = lower[scan..].find("<table")? + scan;
+        // `<table` must end the name there, so `<tablet>` is not a table.
+        if matches!(
+            lower.as_bytes().get(open + 6),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+        ) {
+            let close = lower[open..].find("</table>")? + open;
+            return Some(open..close + "</table>".len());
+        }
+        scan = open + 1;
+    }
+    None
+}
+
+/// The GFM rendering of one `<table>…</table>`, or `None` when the table is not
+/// the shape that was measured — in which case the caller leaves it untouched.
+///
+/// `lower` must be `raw.to_ascii_lowercase()`, whose byte offsets are the same.
+fn gfm_table(raw: &str, lower: &str) -> Option<String> {
+    // Every construct the observed tables do not contain. `<th>` and a nested
+    // table would both change what the rows mean; `rowspan`/`colspan` cannot be
+    // written in GFM at all; the section elements were simply never seen.
+    for unmeasured in [
+        "<th", "<thead", "<tbody", "<tfoot", "<caption", "rowspan", "colspan",
+    ] {
+        if lower.contains(unmeasured) {
+            return None;
+        }
+    }
+    // The span above ended at the FIRST `</table>`, so a nested table means the
+    // range describes neither table's real extent.
+    if lower[1..].contains("<table") {
+        return None;
+    }
+
+    let body_start = lower.find('>')? + 1;
+    let body_end = lower.len() - "</table>".len();
+    let (body, body_lower) = (&raw[body_start..body_end], &lower[body_start..body_end]);
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut scan = 0usize;
+    while let Some(open) = next_element(body_lower, scan, "tr") {
+        // Anything between rows other than whitespace is structure this does not
+        // model, so the whole table goes back untouched.
+        if !body[scan..open.start].trim().is_empty() {
+            return None;
+        }
+        let close = body_lower[open.end..].find("</tr>")? + open.end;
+        rows.push(table_row(
+            &body[open.end..close],
+            &body_lower[open.end..close],
+        )?);
+        scan = close + "</tr>".len();
+    }
+    if !body[scan..].trim().is_empty() {
+        return None;
+    }
+
+    let width = rows.first()?.len();
+    // A ragged table would have to be padded or truncated to become GFM, and
+    // both invent content. Refusing keeps the page's failure honest.
+    if width == 0 || rows.iter().any(|row| row.len() != width) {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push('|');
+    out.push_str(&" |".repeat(width));
+    out.push_str("\n|");
+    out.push_str(&" --- |".repeat(width));
+    for row in &rows {
+        out.push_str("\n|");
+        for cell in row {
+            out.push(' ');
+            out.push_str(cell);
+            out.push_str(" |");
+        }
+    }
+    Some(out)
+}
+
+/// One row's cells, or `None` if the row holds anything but `<td>` elements.
+fn table_row(raw: &str, lower: &str) -> Option<Vec<String>> {
+    let mut cells = Vec::new();
+    let mut scan = 0usize;
+    while let Some(open) = next_element(lower, scan, "td") {
+        if !raw[scan..open.start].trim().is_empty() {
+            return None;
+        }
+        let close = lower[open.end..].find("</td>")? + open.end;
+        cells.push(table_cell(&raw[open.end..close])?);
+        scan = close + "</td>".len();
+    }
+    raw[scan..].trim().is_empty().then_some(cells)
+}
+
+/// One cell's text, or `None` when it holds something this cannot carry across.
+fn table_cell(raw: &str) -> Option<String> {
+    // By this point `<img>` is already `![](…)` and `<div>` is gone, so a
+    // remaining angle bracket is markup nobody has measured — or text that
+    // cannot be told apart from it.
+    if raw.contains(['<', '>']) {
+        return None;
+    }
+    // A GFM cell is one line, and a backslash is what makes the pipe escape
+    // below ambiguous. Neither was observed.
+    if raw.contains(['\n', '\r', '\\']) {
+        return None;
+    }
+    // `\|` is GFM's own escape for a pipe inside a cell. Not escaping it would
+    // silently split the row — this is required by the target notation, not a
+    // rule invented for an unobserved shape.
+    Some(raw.trim().replace('|', "\\|"))
+}
+
+/// Byte range of the opening `<name …>` tag at or after `cursor`, requiring the
+/// element name to end where it does so `<trailing>` is not a `<tr>`.
+fn next_element(lower: &str, cursor: usize, name: &str) -> Option<std::ops::Range<usize>> {
+    let mut scan = cursor;
+    while scan < lower.len() {
+        let open = lower[scan..].find(&format!("<{name}"))? + scan;
+        if matches!(
+            lower.as_bytes().get(open + 1 + name.len()),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+        ) {
+            let end = lower[open..].find('>')? + open + 1;
+            return Some(open..end);
+        }
+        scan = open + 1;
+    }
+    None
 }
 
 /// Drop the `<div>` wrappers the service centres figures and captions in,
@@ -1064,13 +1264,20 @@ const MOCK_ICON_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock icon";
 /// a page carrying one real figure and one sticker, so that a consumer which
 /// distinguishes them by size has something to distinguish.
 ///
-/// Set to `nonconforming` to make [`MockLocalOcrClient`] answer with
-/// a page this adapter cannot bring into Normalized Markdown v1 — an HTML table,
-/// the shape upstream is most likely to send that `unwrap_presentational_html`
-/// deliberately does not rewrite.
+/// Set to `table` for a page whose only structure is a table of the shape the
+/// service really sends — the case `convert_html_tables_to_gfm` exists for, and
+/// the one that used to make a page index nothing at all.
+///
+/// Set to `nonconforming` to make [`MockLocalOcrClient`] answer with a page this
+/// adapter cannot bring into Normalized Markdown v1 — a table with a merged
+/// cell, which GFM has no notation for and which the converter therefore leaves
+/// as raw HTML on purpose.
 ///
 /// It exists so the *refusal* can be exercised. Wiring a check and never seeing
 /// it fire is how the acceptance check came to be advisory in the first place.
+/// (Until 2026-08-06 this body was a plain `<table><tr><td>` — which the
+/// converter now rewrites, so it would have stopped testing a refusal while
+/// still passing.)
 pub const TEST_LOCAL_OCR_BODY_ENV: &str = "KIO_TEST_LOCAL_OCR_BODY";
 
 /// The CI backend. Returns a fixed, well-formed `/layout-parsing` body so the
@@ -1092,8 +1299,39 @@ impl LocalOcrClient for MockLocalOcrClient {
                         "prunedResult": {"parsing_res_list": []},
                         "markdown": {
                             "text": "Kio local OCR mock page.\n\n\
-                                     <table><tr><td>1</td></tr></table>\n",
+                                     <table><tr><td rowspan=2>1</td><td>2</td></tr>\
+                                     <tr><td>3</td></tr></table>\n",
                             "images": {}
+                        }
+                    }]
+                }
+            }));
+        }
+        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("table") {
+            // The shape three real captures share: `border=1`, single-quoted
+            // `style` on every cell, no `<th>` anywhere, and a figure sitting
+            // inside a cell. `Handwritten board` appears nowhere but that cell,
+            // so finding it proves the table's text reached the index.
+            return Ok(json!({
+                "errorCode": 0,
+                "result": {
+                    "layoutParsingResults": [{
+                        "prunedResult": {"parsing_res_list": []},
+                        "markdown": {
+                            "text": "Kio local OCR mock page.\n\n\
+                                     <table border=1 style='margin: auto;'>\
+                                     <tr><td style='text-align: center;'>Content Type</td>\
+                                     <td style='text-align: center;'>Overall Risk</td></tr>\
+                                     <tr><td style='text-align: center;'>\
+                                     <img src=\"imgs/img_in_image_box_76_433_134_489.jpg\" \
+                                     alt=\"Image\"\" /> \
+                                     Handwritten board</td>\
+                                     <td style='text-align: center;'>Very High</td></tr>\
+                                     </table>\n",
+                            "images": {
+                                "imgs/img_in_image_box_76_433_134_489.jpg":
+                                    encode_base64(MOCK_FIGURE_PNG),
+                            }
                         }
                     }]
                 }
@@ -1360,6 +1598,121 @@ mod tests {
         );
         // An unterminated tag must not swallow the rest of the page.
         assert_eq!(unwrap_presentational_html("<div rest"), "<div rest");
+    }
+
+    /// The shape all three real captures share, converted.
+    #[test]
+    fn a_table_of_the_measured_shape_becomes_a_gfm_table() {
+        let converted = convert_html_tables_to_gfm(
+            "before\n\n<table border=1 style='margin: auto;'>\
+             <tr><td style='text-align: center;'>項目</td>\
+             <td style='text-align: center;'>数量</td></tr>\
+             <tr><td style='text-align: center;'></td>\
+             <td style='text-align: center;'>3</td></tr></table>\n",
+        );
+        assert_eq!(
+            converted,
+            "before\n\n| | |\n| --- | --- |\n| 項目 | 数量 |\n|  | 3 |\n"
+        );
+    }
+
+    /// The header row stays empty even when the first row obviously is one.
+    ///
+    /// Two of the three captures open on a header and the third opens on data,
+    /// and no field tells them apart. Promoting the first row would be right
+    /// twice and permanently wrong once — 07 §9 does not give the third one back.
+    #[test]
+    fn the_first_row_is_never_promoted_to_the_header() {
+        let converted = convert_html_tables_to_gfm(
+            "<table><tr><td>Content Type</td><td>Overall Risk</td></tr>\
+             <tr><td>Raster chart</td><td>High</td></tr></table>",
+        );
+        assert!(
+            converted.starts_with("| | |\n| --- | --- |\n| Content Type |"),
+            "{converted}"
+        );
+    }
+
+    /// Everything outside the measured shape comes back byte-identical, so the
+    /// v1 acceptance check refuses the page exactly as it did before.
+    #[test]
+    fn a_table_outside_the_measured_shape_is_left_for_the_acceptance_check() {
+        for untouched in [
+            // GFM cannot express a merged cell at all.
+            "<table><tr><td rowspan=2>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
+            "<table><tr><td colspan=2>a</td></tr></table>",
+            // Never observed: a real header cell, the section elements, nesting.
+            "<table><tr><th>a</th></tr></table>",
+            "<table><thead><tr><td>a</td></tr></thead></table>",
+            "<table><tr><td><table><tr><td>a</td></tr></table></td></tr></table>",
+            // Ragged rows would have to be padded or truncated to become GFM.
+            "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>",
+            // Markup in a cell that nothing has measured -- or text that cannot
+            // be told apart from it.
+            "<table><tr><td><span>a</span></td></tr></table>",
+            "<table><tr><td>a < b</td></tr></table>",
+            // A cell is one line in GFM, and a backslash makes the pipe escape
+            // ambiguous.
+            "<table><tr><td>a\nb</td></tr></table>",
+            "<table><tr><td>a\\b</td></tr></table>",
+            // Content between the rows, and an unterminated table.
+            "<table>stray<tr><td>a</td></tr></table>",
+            "<table><tr><td>a</td></tr>",
+            // `<tablet>` is not a table -- the name has to end there.
+            "<tablet><tr><td>a</td></tr></tablet>",
+        ] {
+            assert_eq!(
+                convert_html_tables_to_gfm(untouched),
+                untouched,
+                "must be left untouched"
+            );
+        }
+    }
+
+    /// A table spliced into a paragraph would render as pipes, not as a table.
+    #[test]
+    fn a_table_that_does_not_begin_a_block_is_left_alone() {
+        let inline = "text <table><tr><td>a</td></tr></table>\n";
+        assert_eq!(convert_html_tables_to_gfm(inline), inline);
+        // A single newline is a lazy continuation of the paragraph above it, so
+        // a blank line is what the converter requires.
+        let lazy = "text\n<table><tr><td>a</td></tr></table>\n";
+        assert_eq!(convert_html_tables_to_gfm(lazy), lazy);
+    }
+
+    /// A pipe inside a cell has to be escaped or it silently splits the row.
+    /// This is the target notation's own rule, not a guess about an input shape.
+    #[test]
+    fn a_pipe_in_a_cell_is_escaped_rather_than_splitting_the_row() {
+        let converted =
+            convert_html_tables_to_gfm("<table><tr><td>a|b</td><td>c</td></tr></table>");
+        assert_eq!(converted, "| | |\n| --- | --- |\n| a\\|b | c |");
+    }
+
+    /// A figure inside a cell survives as a reference the rest of Kio can read.
+    ///
+    /// `<img>` is already `![](…)` by the time the table is converted, and the
+    /// URI rewrite runs after both — so a cell's figure ends up in
+    /// `related_images[]` like any other. The slide capture has eight of these.
+    #[test]
+    fn a_figure_inside_a_cell_stays_a_reference() {
+        let crop = "imgs/img_in_image_box_76_433_134_489.jpg";
+        let body = page_body(
+            &format!(
+                "<table><tr><td><img src=\"{crop}\" alt=\"Image\" /> label</td></tr></table>\n"
+            ),
+            json!({crop: png_base64()}),
+            json!([]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        assert!(
+            pages[0]
+                .markdown
+                .contains(&format!("| ![]({crop}) label |")),
+            "{}",
+            pages[0].markdown
+        );
+        assert_eq!(pages[0].images.len(), 1);
     }
 
     #[test]

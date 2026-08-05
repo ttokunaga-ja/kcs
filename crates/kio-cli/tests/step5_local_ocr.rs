@@ -396,6 +396,57 @@ fn s3e_the_related_image_floor_can_be_lowered_without_reindexing() {
     assert_eq!(images.len(), 2, "the floor must be lowerable: {hit}");
 }
 
+/// A page whose content is a table gets indexed, and its cells are searchable.
+///
+/// This one is about the size of the hole, not the mechanism. Two of the three
+/// documents the GPU box ever captured hold a table, and both of them indexed
+/// *nothing* — not a degraded reading, no reading. The unit tests over the real
+/// captures show the notation is right; this shows a table's text actually
+/// reaches the index and comes back out of `kio search`, which is the only claim
+/// that matters to whoever asked why their invoice was not findable.
+#[test]
+fn s3e_a_page_whose_content_is_a_table_is_indexed_and_searchable() {
+    let dir = scanned_pdf_fixture();
+    let local = [
+        ("KIO_TEST_LOCAL_OCR", "mock"),
+        ("KIO_TEST_LOCAL_OCR_BODY", "table"),
+    ];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    let tasks = tasks(&dir);
+    let scan = tasks
+        .iter()
+        .find(|task| {
+            task.get("input_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("scan.pdf"))
+        })
+        .unwrap_or_else(|| panic!("no task for scan.pdf: {tasks:?}"));
+    assert_eq!(scan["status"], "done", "{scan}");
+
+    // `Handwritten board` exists only inside a cell, so a hit on it cannot come
+    // from anywhere but the converted table.
+    let search = json_success(&dir, &["search", "Handwritten", "--mode", "text"], &local);
+    let hit = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["result_type"] == "chunk")
+        .unwrap_or_else(|| panic!("a table cell must be searchable: {search}"));
+    // And the figure that sat inside a cell is offered like any other.
+    let images = hit["related_images"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the cell's figure must be enumerated: {hit}"));
+    assert_eq!(images.len(), 1, "{hit}");
+    let opened = json_success(
+        &dir,
+        &["open", images[0]["image_uri"].as_str().unwrap()],
+        &local,
+    );
+    assert_eq!(opened["status"], "opened", "{opened}");
+}
+
 /// A unit that fails 07 §5's acceptance check must not reach the archive.
 ///
 /// The check has always detected raw HTML; what it did not do was stop anything.
@@ -413,8 +464,9 @@ fn s3e_a_unit_that_fails_the_v1_acceptance_check_is_refused_not_frozen() {
     let dir = scanned_pdf_fixture();
     let local = [
         ("KIO_TEST_LOCAL_OCR", "mock"),
-        // An HTML table: real enough that upstream may well send it, and
-        // deliberately outside what the adapter rewrites.
+        // A table with a merged cell. Plain tables are converted now, so the
+        // refusal has to be exercised by something GFM genuinely cannot write —
+        // otherwise this test would keep passing while testing nothing.
         ("KIO_TEST_LOCAL_OCR_BODY", "nonconforming"),
     ];
     json_success(&dir, &["init"], &local);

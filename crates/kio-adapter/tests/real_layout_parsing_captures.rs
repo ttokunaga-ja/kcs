@@ -62,12 +62,60 @@ fn the_invoice_page_is_not_confused_by_its_table() {
     let images = &pages[0].images;
     assert_eq!(images.len(), 1);
     assert!(images[0].bbox.is_some());
-    // The table stays in the Markdown as raw HTML. Parsing does not judge that
-    // — the v1 acceptance check does, and refuses the page (07 §5, S3-F).
+    // Until 2026-08-06 this asserted the opposite -- that the table stayed raw
+    // HTML and the v1 check refused the whole page (07 §5, S3-F). It is now the
+    // GFM notation 07 §5 asks for, with the row's own text intact and its
+    // header row left empty because nothing in the response says there is one.
+    let markdown = &pages[0].markdown;
+    assert!(!markdown.contains("<table"), "{markdown}");
+    assert!(markdown.contains("| 項目 | 数量 | OCR画像 |"), "{markdown}");
     assert!(
-        pages[0].markdown.contains("<table"),
-        "{}",
-        pages[0].markdown
+        markdown.contains("| | | |\n| --- | --- | --- |"),
+        "{markdown}"
+    );
+}
+
+/// Both capture pages that hold a table now hold a table Kio can index.
+///
+/// The refusal cost two of the three real documents everything -- not a degraded
+/// reading, no reading at all. This is the assertion that says so directly, over
+/// the responses the service really sent rather than over a mock.
+#[test]
+fn no_capture_still_carries_raw_table_markup() {
+    for (name, raw) in [
+        ("infographic", INFOGRAPHIC),
+        ("infographic-as-pdf", INFOGRAPHIC_AS_PDF),
+        ("invoice", INVOICE),
+        ("slide", SLIDE),
+    ] {
+        for page in parse(raw) {
+            for tag in ["<table", "</table", "<tr", "<td"] {
+                assert!(
+                    !page.markdown.contains(tag),
+                    "{name} still carries {tag}: {}",
+                    page.markdown
+                );
+            }
+        }
+    }
+    // The slide's two tables are where the conversion has to hold: one opens on
+    // a data row, the other on a header, and eight figures sit inside cells.
+    let slide = parse(SLIDE).remove(0).markdown;
+    assert!(
+        slide.contains("| ![](imgs/img_in_image_box_76_433_134_489.jpg) | High text density |"),
+        "{slide}"
+    );
+    // Two tables, and the second is the four-column one. A converter that
+    // dropped or merged a column would still satisfy everything above.
+    assert_eq!(
+        slide.matches("\n| --- | --- | --- |\n").count(),
+        1,
+        "{slide}"
+    );
+    assert_eq!(
+        slide.matches("\n| --- | --- | --- | --- |\n").count(),
+        1,
+        "{slide}"
     );
 }
 
@@ -253,9 +301,14 @@ fn no_real_page_holds_a_blank_line_free_run_that_a_chunk_boundary_could_cut() {
     // and a table a few times its size is an ordinary document, not a contrived
     // one. If this margin ever falls under 2x, the fail-empty rule stops being a
     // thing that never fires and W3 needs a louder answer than dropping.
+    //
+    // Converting tables to GFM MOVED this, in the direction nobody predicted:
+    // 2189 -> 995, because the notation it replaces carried a `style` attribute
+    // on every cell. A table crossing 6000 now has to be a genuinely big table
+    // rather than a modest one wrapped in markup.
     assert!(
         worst * 2 < SHIPPED_MAX_CHARS,
-        "measured 2026-08-06 at 2189 characters on the slide (2.7x under 6000); \
+        "measured 2026-08-06 at 995 characters on the slide (6.0x under 6000); \
          now {worst} on {worst_page}"
     );
 }
