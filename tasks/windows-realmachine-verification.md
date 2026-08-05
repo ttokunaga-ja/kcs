@@ -28,6 +28,13 @@ Windows 10.0.26200 / Git 2.53.0 / rustc 1.97.1 (msvc) / `C:\kio` / `core.autocrl
 その過程で見つかった 2 つの落とし穴 (どちらも Kio ではなく PowerShell 側) は
 §4 の後に追記してある。**日本語が化けて見えても Kio の不具合ではない。**
 
+> ⚠ **`cargo build --release` が os error 4551 で落ちる機がある** (2026-08-05 実測)。
+> Windows のアプリケーション制御ポリシーが、署名の無い
+> `target\release\build\sqlite-vec-*\build-script-build` の実行をブロックする。
+> **Kio の不具合ではなく、`--release` に固有**である (上表の `cargo build` は
+> debug で通っている)。同じ機の WSL 側では通るので、**ビルドを目的にしているので
+> ない限り迂回に時間を使わないこと。**ポリシーは管理者にしか変えられない。
+
 ---
 
 # なぜ CI では足りないのか — ここが任務の核心

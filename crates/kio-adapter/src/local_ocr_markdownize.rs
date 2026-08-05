@@ -1535,6 +1535,30 @@ mod tests {
         assert!(error.contains("Internal error"), "{error}");
     }
 
+    /// A rejected input, in the exact bytes the service sent for one.
+    ///
+    /// Measured 2026-08-05 by posting a GIF, which PaddleOCR-VL refuses at input
+    /// validation in about 4ms (S3-K). The shape is worth pinning because it is
+    /// a fourth envelope: `result` is not empty here, it is **absent**, and the
+    /// only other place a body has no `result` is the mistake this parser was
+    /// written wrong against once already. Reaching the `result` read with a
+    /// 422 in hand would report "no layoutParsingResults" -- true, useless, and
+    /// silent about the service having said exactly what was wrong.
+    ///
+    /// Nothing routes a GIF here, so this is not about GIFs. It is about every
+    /// supported input the service can still reject: a truncated PNG, a PDF it
+    /// cannot open.
+    #[test]
+    fn a_refused_input_is_reported_with_what_the_service_said() {
+        let body: Value = serde_json::from_str(
+            r#"{"logId":"5fa5a39b-a40a-4a92-953a-b1961daa58d8","errorCode":422,"errorMsg":"Invalid input file"}"#,
+        )
+        .unwrap();
+        let error = parse_layout_parsing(&body).unwrap_err().to_string();
+        assert!(error.contains("errorCode 422"), "{error}");
+        assert!(error.contains("Invalid input file"), "{error}");
+    }
+
     #[test]
     fn a_degenerate_bbox_is_rejected() {
         // Zero area, now carried by the name rather than by block_bbox. The

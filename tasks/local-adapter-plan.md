@@ -1325,6 +1325,42 @@ PDF 経路の焼き直し (0.96 倍) でも 5.42% → 5.51% としか動かな�
 2 つの問題ではなく 1 つで、**大きなチャンク + 順位付けの無い `related_images`**
 という形をしている。面積で絞ればこの形のまま解ける。
 
+### S3-K — GIF は宣言しない (実測で確定) [2026-08-05]
+
+`LayoutFileType::from_media_type` に gif が無いのは**意図であって漏れではない**、と
+実機で確定した。`scan.rs` は `.gif` → `image/gif` を produce するので、この型は
+S3-I の tiff と違って**実際に到達する**。だから根拠が要る。
+
+`/layout-parsing` へ `fileType: 1` で直接投げた生応答 (全 96 バイト):
+
+```json
+{"logId":"5fa5a39b-a40a-4a92-953a-b1961daa58d8","errorCode":422,"errorMsg":"Invalid input file"}
+```
+
+**「こちらの GIF が壊れている」「大きすぎる」を潰すために対照を取ってある:**
+
+| 入力 | サイズ | http | 結果 |
+|---|---:|---|---|
+| `ctl.jpg` | 257,604 B | **200** | blocks=49 crops=21 |
+| `ctl.webp` | 112,668 B | **200** | blocks=49 crops=21 |
+| `still.gif` (GIF87a, 1 frame) | 578,459 B | **422** | Invalid input file |
+| `anim.gif` (GIF89a, 3 frames) | 1,394,012 B | **422** | Invalid input file |
+| `tiny.gif` (128×192) | 15,345 B | **422** | Invalid input file |
+| `rgb.gif` (別エンコード経路) | 578,459 B | **422** | Invalid input file |
+
+応答は 3.6 ms / 5.3 ms で返る — **モデルに届く前の入力検証で弾かれている。**
+サイズ・エンコーダ・GIF バージョン・フレーム数のいずれとも無関係で、
+JPEG と WebP は同じリクエスト形で通るのでリクエストの作り方の問題でもない。
+
+→ **裁定: 宣言を足さない。**足せば `1869cab` が塞いだのと同じ「routable なのに
+実際は死ぬ」型を作ることになる。GIF が online lane で `network_opt_in_required` に
+なるのは**正直な答え**である。
+
+> **キャプチャは置いていない。**通らなかったので fixture になる応答が無く、
+> 96 バイトのエラー本文は上に全文がある。**新しい応答の形を 1 つ観測した点は
+> 記録に値する** — 拒否時は `result` そのものが無く、
+> `{logId, errorCode, errorMsg}` の 3 キーだけで返る。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image

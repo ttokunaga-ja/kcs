@@ -17,6 +17,11 @@ use kio_adapter::local_ocr_markdownize::parse_layout_parsing;
 const INFOGRAPHIC: &str = include_str!("fixtures/layout-parsing/infographic-two-charts.json");
 const INVOICE: &str = include_str!("fixtures/layout-parsing/invoice-table.json");
 const SLIDE: &str = include_str!("fixtures/layout-parsing/slide-single-figure.json");
+/// The same infographic wrapped in a PDF. Wired in only here: it is the one
+/// capture that shows a ratio surviving a resolution change, which is the
+/// property the floor below depends on.
+const INFOGRAPHIC_AS_PDF: &str =
+    include_str!("fixtures/layout-parsing/infographic-two-charts-as-pdf.json");
 
 fn parse(raw: &str) -> Vec<kio_adapter::local_ocr_markdownize::LayoutParsedPage> {
     let body: serde_json::Value = serde_json::from_str(raw).expect("capture is valid JSON");
@@ -97,4 +102,87 @@ fn the_captures_disagree_about_how_a_page_ends() {
         })
         .collect();
     assert_eq!(endings, vec![1, 0, 1], "measured 2026-08-03");
+}
+
+/// The floor `related_images[]` is filtered at must fall between these pages'
+/// decoration and these pages' figures.
+///
+/// `kio-cli` ships 0.25 as the smallest share of a page's largest figure that
+/// earns an Agent a `kio open`, and the justification for that number is these
+/// captures and nothing else -- four pages, which is thin. Thin is survivable
+/// while it is checkable: if a capture is ever added whose real figure falls
+/// under the floor, or whose decoration rises above it, this fails and says so
+/// instead of the default quietly starting to hide something.
+///
+/// The constant is repeated rather than imported because `kio-cli` depends on
+/// this crate and not the other way round. Changing one without the other is
+/// exactly what this test exists to catch.
+const SHIPPED_MIN_AREA_RATIO: f64 = 0.25;
+
+/// Which crops are the real figures, by the boxes their names carry.
+///
+/// Named explicitly because no field in the response answers this. `block_label`
+/// looked like it did on the infographic, where every non-chart happened to be
+/// an icon -- but the invoice's only figure is spelled `image`, and it is bigger
+/// than either of the infographic's charts.
+const FIGURES: &[(&str, &[[i64; 4]])] = &[
+    (
+        "infographic",
+        &[[60, 1175, 504, 1367], [551, 1190, 947, 1370]],
+    ),
+    (
+        "infographic-as-pdf",
+        &[[57, 1126, 485, 1313], [529, 1143, 911, 1316]],
+    ),
+    ("invoice", &[[386, 0, 1032, 189]]),
+    ("slide", &[[814, 626, 1634, 904]]),
+];
+
+#[test]
+fn the_captures_separate_figures_from_decoration_around_the_shipped_floor() {
+    let captures = [INFOGRAPHIC, INFOGRAPHIC_AS_PDF, INVOICE, SLIDE];
+    let mut smallest_figure = f64::MAX;
+    let mut largest_decoration = 0.0_f64;
+    for ((name, figures), raw) in FIGURES.iter().zip(captures) {
+        let boxes: Vec<[i64; 4]> = parse(raw)[0]
+            .images
+            .iter()
+            .filter_map(|image| image.bbox)
+            .collect();
+        let area = |bbox: &[i64; 4]| (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
+        // The same denominator the filter uses: the largest figure on the page,
+        // not the page itself. A share of the page would move with the render
+        // resolution, and `infographic-as-pdf` is that exact case -- the same
+        // picture resampled to 96%, where every absolute area shifts and this
+        // ratio does not.
+        let largest = boxes.iter().map(area).max().expect("a page with crops");
+        for bbox in &boxes {
+            let ratio = area(bbox) as f64 / largest as f64;
+            if figures.contains(bbox) {
+                smallest_figure = smallest_figure.min(ratio);
+            } else {
+                largest_decoration = largest_decoration.max(ratio);
+            }
+        }
+        for figure in *figures {
+            assert!(boxes.contains(figure), "{name} lost {figure:?}");
+        }
+    }
+    assert!(
+        largest_decoration < SHIPPED_MIN_AREA_RATIO,
+        "decoration reaches {largest_decoration:.4} of its page's largest figure, \
+         at or above the {SHIPPED_MIN_AREA_RATIO} floor -- the floor would keep it"
+    );
+    assert!(
+        smallest_figure > SHIPPED_MIN_AREA_RATIO,
+        "a real figure is only {smallest_figure:.4} of its page's largest, \
+         at or below the {SHIPPED_MIN_AREA_RATIO} floor -- the floor would hide it"
+    );
+    // Sitting between the two groups is not enough; it has to sit between them
+    // with room, or the next page of a kind nobody has captured lands on it.
+    assert!(
+        smallest_figure / largest_decoration > 4.0,
+        "measured 2026-08-05 at 0.8257 vs 0.1070 (7.7x); now {smallest_figure:.4} \
+         vs {largest_decoration:.4}"
+    );
 }
