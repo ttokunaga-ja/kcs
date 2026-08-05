@@ -874,7 +874,7 @@ impl<C: LocalOcrClient> MarkdownizeAdapter for LocalOcrMarkdownizeAdapter<C> {
             .filter(|hints| !hints.is_empty())
         {
             Some(hints) => hints.clone(),
-            None => discovered_page_hints(&request.raw.raw_hash, &pages),
+            None => discovered_page_hints(&request.media_type, &request.raw.raw_hash, &pages)?,
         };
 
         if let Some(kio_dir) = &self.image_store_dir {
@@ -962,21 +962,40 @@ fn page_metadata(images: &[OcrImage]) -> BTreeMap<String, Value> {
 
 /// Mint one unit per returned page when the caller supplied no hints.
 ///
-/// Local Prepare returns no units for a scanned PDF, so the service's page set
-/// is the first trusted unit boundary available — the same reasoning the online
-/// adapter's `discovered_unit_hints` records. `parse_layout_parsing` already
-/// enumerated the pages contiguously from zero, so there is no gap to check
-/// for here.
-fn discovered_page_hints(raw_hash: &str, pages: &[LayoutParsedPage]) -> Vec<PreparedUnitHint> {
-    pages
+/// Local Prepare returns no units for a scanned PDF *or an image*, so the
+/// service's page set is the first trusted unit boundary available — the same
+/// reasoning the online adapter's `discovered_unit_hints` records.
+/// `parse_layout_parsing` already enumerated the pages contiguously from zero,
+/// so there is no gap to check for here.
+///
+/// The kind comes from the media type, not from the fact that the service
+/// answers in pages whatever it was sent. An image unit-izes as `image:0` (04
+/// §2), and the CLI checks the minted kind against the media type before it
+/// will accept these — so calling a PNG's only unit `page:1` does not merely
+/// misname it, it makes the file unindexable.
+fn discovered_page_hints(
+    media_type: &str,
+    raw_hash: &str,
+    pages: &[LayoutParsedPage],
+) -> Result<Vec<PreparedUnitHint>> {
+    let kind = crate::mistral_ocr::discovered_unit_kind(media_type)?;
+    // One image is one unit. More pages than that means the response is not
+    // about what was sent, and saying so here beats letting the CLI report it
+    // as a canonicality problem several layers away.
+    if kind == UnitKind::Image && pages.len() != 1 {
+        return Err(violation(
+            "standalone-image OCR must return exactly one page",
+        ));
+    }
+    Ok(pages
         .iter()
         .map(|page| PreparedUnitHint {
-            unit_key: format!("page:{}", page.index + 1),
+            unit_key: crate::mistral_ocr::discovered_unit_key(kind, page.index),
             prepared_hash: raw_hash.to_owned(),
-            unit_kind: UnitKind::Page,
+            unit_kind: kind,
             order: page.index as u64,
         })
-        .collect()
+        .collect())
 }
 
 fn persist_pages_images(kio_dir: &Path, pages: &[LayoutParsedPage]) -> Result<()> {
@@ -1596,6 +1615,83 @@ mod tests {
             assert!(markdown.ends_with('\n'), "{label}: {markdown:?}");
             assert!(!markdown.ends_with("\n\n"), "{label}: {markdown:?}");
         }
+    }
+
+    /// A standalone image discovers an `image:` unit, not a `page:` one.
+    ///
+    /// Nothing downstream can repair this. Local Prepare returns no units for
+    /// an image (`prepare_units`' first branch), so discovery is the only way
+    /// one ever becomes a unit, and the CLI checks the minted kind against the
+    /// media type before accepting it. Answering `page:1` for a PNG fails that
+    /// check and the file is refused -- with a message about canonical units
+    /// that says nothing about the actual cause.
+    #[test]
+    fn a_standalone_image_discovers_an_image_unit_not_a_page() {
+        for media_type in ["image/png", "image/jpeg", "image/webp"] {
+            let client = RecordingClient {
+                body: page_body("a page of prose\n", json!({}), json!([])),
+                seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            };
+            let adapter =
+                LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+                    .with_verified_raw_bytes(b"\x89PNG\r\n\x1a\n".to_vec());
+
+            let response = adapter.markdownize(request(media_type)).unwrap();
+            assert_eq!(response.updated_units.len(), 1, "{media_type}");
+            assert_eq!(
+                response.updated_units[0].unit_key, "image:0",
+                "{media_type}"
+            );
+            assert_eq!(
+                response.updated_units[0].unit_type,
+                UnitKind::Image,
+                "{media_type}"
+            );
+        }
+    }
+
+    /// A PDF keeps the 1-based `page:` spelling the other tests rely on.
+    #[test]
+    fn a_pdf_still_discovers_one_based_page_units() {
+        let client = RecordingClient {
+            body: json!({"errorCode": 0, "result": {"layoutParsingResults": [
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "one\n"}},
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "two\n"}},
+            ]}}),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let adapter = LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+            .with_verified_raw_bytes(b"%PDF-1.7 bytes".to_vec());
+
+        let response = adapter.markdownize(request("application/pdf")).unwrap();
+        let keys = response
+            .updated_units
+            .iter()
+            .map(|unit| unit.unit_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["page:1", "page:2"]);
+        assert!(response
+            .updated_units
+            .iter()
+            .all(|unit| unit.unit_type == UnitKind::Page));
+    }
+
+    /// The service can only be answering about one image, so more than one
+    /// parsed page means the request and the response disagree about what was
+    /// sent. Refusing here names that; letting it through reaches the CLI's
+    /// own count check, which reports it as a canonicality problem instead.
+    #[test]
+    fn a_standalone_image_answered_with_two_pages_is_refused() {
+        let client = RecordingClient {
+            body: json!({"errorCode": 0, "result": {"layoutParsingResults": [
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "one\n"}},
+                {"prunedResult": {"parsing_res_list": []}, "markdown": {"text": "two\n"}},
+            ]}}),
+            seen: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let adapter = LocalOcrMarkdownizeAdapter::new(client, LocalOcrExecution::Real, "scope-1")
+            .with_verified_raw_bytes(b"\x89PNG\r\n\x1a\n".to_vec());
+        assert!(adapter.markdownize(request("image/png")).is_err());
     }
 
     #[test]

@@ -1169,6 +1169,48 @@ v1 検証器を通ること (または、決められた理由で拒否される
 「拒否される」という結論自体は合っていて、**理由が違う**という形で。
 手書きの body は、書いた人が既に信じていたことしか表現できない。
 
+### S3-I — 画像ファイルは、この経路で一度も索引できていなかった [2026-08-05]
+
+実機 3 回目で見つけた。**同じ図を PDF に包めば通り、PNG のまま渡すと拒否される。**
+
+```
+page.pdf → status=done   / local_adapter_done   prepared object 1 / unit 2
+page.png → status=failed / contract_violation   prepared object 0 / unit 0
+```
+
+サービスの応答は両者で等価 (キャプチャとバイト一致)、パーサも通る。
+壊れていたのは**その手前で unit の名前を決める所**だった。
+
+`discovered_page_hints` は `unit_kind` を **`Page` に固定**し、キーを
+`page:{index+1}` と綴っていた。ところが CLI 側の
+`prepared_units_from_ocr_discovery` は media type から期待する型を導き、
+画像なら `image:0` (04 §2) を要求する。**両者が食い違うので hint は棄却され、
+prepared unit が 1 つも立たない。**
+
+これが致命的なのは、画像には**他に unit になる道が無い**ためである。
+`prepare_units` は画像を最初の分岐で `empty_prepare_output()` に落とす
+(認識済みバイナリを text として evidence しないため)。discovery が唯一の経路であり、
+そこが塞がっていた。→ **`offline_api` 経路で画像ファイルは索引できない。**
+
+| | |
+|---|---|
+| 影響範囲 | local (`offline_api`) 経路のみ。online (Mistral) は `discovered_unit_kind(media_type)` を持っており、**最初から正しかった** |
+| 症状 | `contract_violation` のみ。メッセージは「canonical で contiguous でない」で、**原因を指していない** |
+| なぜ CI が緑だったか | [`step5_local_ocr.rs`](../crates/kio-cli/tests/step5_local_ocr.rs) の fixture が**全部 scanned PDF** だった。この経路の画像入力を通すテストが 1 つも無かった |
+
+→ **裁定: online 側の判定を共有する。**`discovered_unit_kind` /
+`discovered_unit_key` を `pub(crate)` にして local から呼ぶ。
+どちらの型になるかは**入力の性質であってプロバイダの性質ではない**ので、
+2 つの経路が別々に意見を持てること自体が欠陥だった。
+併せて「画像なら 1 ページのみ」の検査も online と揃える。
+
+回帰は 2 段で置いた。adapter の unit test (png/jpeg/webp が `image:0` を名乗る) と、
+`step5_local_ocr.rs` の**画像 fixture による end-to-end**。後者は修正前に
+実機と同じ `status=failed` / `contract_violation` で落ちることを確認済み。
+
+> **S3-G の表と同じ穴だった。**あの表は「サービスが送る応答の形」を並べたもので、
+> **Kio が送る入力の形**は並べていない。今回落ちたのは後者である。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image

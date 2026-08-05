@@ -798,7 +798,11 @@ fn discovered_unit_hints(
         .collect()
 }
 
-fn discovered_unit_kind(media_type: &str) -> Result<crate::types::UnitKind> {
+/// Shared with the local adapter. Which kind a discovered unit takes is a
+/// property of the input, not of the provider, so both routes must answer this
+/// the same way — the local one having its own opinion is what made images
+/// unindexable there while they worked online.
+pub(crate) fn discovered_unit_kind(media_type: &str) -> Result<crate::types::UnitKind> {
     use crate::types::UnitKind;
     match media_type {
         "application/pdf" => Ok(UnitKind::Page),
@@ -809,7 +813,7 @@ fn discovered_unit_kind(media_type: &str) -> Result<crate::types::UnitKind> {
     }
 }
 
-fn discovered_unit_key(kind: crate::types::UnitKind, index: usize) -> String {
+pub(crate) fn discovered_unit_key(kind: crate::types::UnitKind, index: usize) -> String {
     use crate::types::UnitKind;
     match kind {
         UnitKind::Page => format!("page:{}", index + 1),

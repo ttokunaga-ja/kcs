@@ -136,6 +136,53 @@ fn scanned_pdf_fixture() -> TempDir {
     dir
 }
 
+/// A standalone image, which reaches the OCR route for a different reason.
+///
+/// A scanned PDF gets there by having no text layer; an image gets there by
+/// being a recognized binary Prepare will not parse at all. Both end with no
+/// prepared units, so both depend on the adapter discovering them -- and until
+/// this fixture existed every test on this route was a PDF, so the discovery
+/// code only ever had to be right about pages.
+fn scanned_image_fixture() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // A real PNG signature and IHDR. The mock backend ignores the bytes, but
+    // the scanner's media-type routing should not be the thing under test.
+    let png: [u8; 33] = [
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde,
+    ];
+    fs::write(dir.path().join("scan.png"), png).unwrap();
+    dir
+}
+
+/// The same one-command flow, for an image instead of a PDF.
+#[test]
+fn s3e_one_index_enriches_a_standalone_image_through_the_local_pipeline() {
+    let dir = scanned_image_fixture();
+    let local = [("KIO_TEST_LOCAL_OCR", "mock")];
+    json_success(&dir, &["init"], &local);
+    json_success(&dir, &["index", "--approve", "--offline"], &local);
+
+    let tasks = tasks(&dir);
+    let scan = tasks
+        .iter()
+        .find(|task| {
+            task.get("input_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("scan.png"))
+        })
+        .unwrap_or_else(|| panic!("no task for scan.png: {tasks:?}"));
+    assert_eq!(scan["status"], "done", "{scan}");
+    assert_eq!(scan["fallback_reason"], "local_adapter_done", "{scan}");
+
+    let texts = chunk_texts(&dir);
+    assert!(
+        texts.iter().any(|text| text.contains(MOCK_PAGE_TEXT)),
+        "the local pipeline must have produced the image's body: {texts:?}"
+    );
+}
+
 /// One `kio index` is the whole flow.
 ///
 /// The online lane splits enqueue from send because sending needs approval and
