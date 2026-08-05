@@ -186,3 +186,76 @@ fn the_captures_separate_figures_from_decoration_around_the_shipped_floor() {
          vs {largest_decoration:.4}"
     );
 }
+
+/// V7 (W3): how close a real page comes to a chunk boundary that cuts an image
+/// reference in half.
+///
+/// A chunk is a byte span of a unit (03 §8.1), so `[chunking].max_chars` can sever
+/// a `kio://` reference -- and a severed one is dropped rather than guessed at,
+/// which costs the Agent that image in `related_images[]` and costs it its
+/// embedding, silently. `kio-index`'s
+/// `v7_a_blank_line_free_run_lets_a_split_cut_an_image_reference` pins WHEN that
+/// can happen: only inside a blank-line-free run longer than `max_chars`, because
+/// rule 5 prefers the last blank line in the window and hard-cuts only when there
+/// is none. So the frequency question is this one measurement, and these captures
+/// are where it can be taken.
+///
+/// Measured rather than eyeballed, because the reference the chunker sees is not
+/// the one the service sent: `imgs/img_in_….jpg` becomes a 123-character URI by
+/// the time the body is normalized (07 §5.2). A full URI is added per reference
+/// WITHOUT subtracting the short name it replaces, so every run below is
+/// over-stated and the reported margin is a floor, not an estimate.
+const SHIPPED_MAX_CHARS: usize = 6000;
+const KIO_IMAGE_URI_CHARS: usize = 123;
+
+#[test]
+fn no_real_page_holds_a_blank_line_free_run_that_a_chunk_boundary_could_cut() {
+    let mut worst = 0usize;
+    let mut worst_page = "";
+    for (name, raw) in [
+        ("infographic", INFOGRAPHIC),
+        ("infographic-as-pdf", INFOGRAPHIC_AS_PDF),
+        ("invoice", INVOICE),
+        ("slide", SLIDE),
+    ] {
+        for page in parse(raw) {
+            // Splitting on `\n\n` alone under-counts the blank lines the chunker
+            // recognizes (it tolerates whitespace between the two newlines), which
+            // makes these runs longer than the real ones -- again the safe side.
+            for run in page.markdown.split("\n\n") {
+                let references = run.matches("![](").count();
+                // Only a run that holds a reference can sever one.
+                if references == 0 {
+                    continue;
+                }
+                let projected = run.chars().count() + references * KIO_IMAGE_URI_CHARS;
+                if projected > worst {
+                    worst = projected;
+                    worst_page = name;
+                }
+            }
+        }
+    }
+    // A measurement that stopped finding anything to measure would pass both
+    // assertions below while telling nobody that it had stopped.
+    assert!(
+        worst > 0,
+        "no run in any capture holds an image reference -- this stopped measuring"
+    );
+    assert!(
+        worst < SHIPPED_MAX_CHARS,
+        "{worst_page} holds a {worst}-character run of references with no blank line \
+         in it, at or over max_chars {SHIPPED_MAX_CHARS} -- a boundary can now land \
+         inside one of its URIs, and the image it names drops out of search silently"
+    );
+    // The margin, not just the verdict. The shape that closes it is a table: the
+    // slide's icon table is one blank-line-free run holding several references,
+    // and a table a few times its size is an ordinary document, not a contrived
+    // one. If this margin ever falls under 2x, the fail-empty rule stops being a
+    // thing that never fires and W3 needs a louder answer than dropping.
+    assert!(
+        worst * 2 < SHIPPED_MAX_CHARS,
+        "measured 2026-08-06 at 2189 characters on the slide (2.7x under 6000); \
+         now {worst} on {worst_page}"
+    );
+}

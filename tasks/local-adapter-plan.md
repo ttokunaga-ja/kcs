@@ -487,7 +487,7 @@ Agent は `kio open <image_uri>` でバイト列を得る (§4.4 のとおり ba
 chunk は normalized unit 本文の byte span である ([03 §8.1](../docs/03-data-model.md))。
 `[chunking].max_chars` (既定 6000) の切断が画像参照の途中に落ちると URI が分断され得る。
 **分断された断片は抽出しない** (fail-empty) — 誤った hash を持つ URI を返すより安全側。
-発生頻度は W1 実装時に dogfood corpus で計測して記録する。
+発生頻度は **V7 で確定した** (下記 §11)。
 
 ### W4 purge / tombstone との整合 [P1]
 purge 済み画像の URI が chunk 本文に残る場合がある。`related_images[]` は
@@ -828,11 +828,11 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 - 採用ゲート: [experiments/ocr-verification](../experiments/ocr-verification) の fixture で
   Mistral OCR ベースラインと突き合わせる
 
-### 進捗 — S3-A / S3-B は 2026-08-02 に実装済み
+### 進捗 — S3-A 〜 S3-K は完了 (2026-08-02 着手 / 2026-08-05 実機 4 回目で決着)
 
 [local_ocr_markdownize.rs](../crates/kio-adapter/src/local_ocr_markdownize.rs) に
 `LocalOcrClient` seam・`/layout-parsing` 実クライアント・応答写像・`MarkdownizeAdapter`
-実装・CI 用 mock が入り、**単体 22 件**が回っている。
+実装・CI 用 mock が入り、**単体 37 件**が回っている (2026-08-06 時点)。
 
 | | 状態 |
 |---|---|
@@ -841,8 +841,8 @@ V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれ
 | S3-C tool_lock ゲートへの tool_id 登録 | ✅ |
 | S3-D resolver (`active_local_ocr_execution` / `local_ocr_markdownize_adapter`) | ✅ |
 | **S3-E enrichment 経路への配線** | ✅ **2026-08-02**。`kio index` 1 回で完結 |
-| 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ⬜ **未測定** |
-| 実サーバでの受け入れ検査 | ⬜ GPU 実機が要る |
+| 重み sha256 の実測 (`LOCAL_OCR_MODEL_VERSION_PIN`) | ✅ **2026-08-03**。`sha256:85a479d5…71db` (下記) |
+| 実サーバでの受け入れ検査 | ✅ **2026-08-05 までに 4 回**。決定性・重み pin とも再実測済み ([GPU ブリーフ](gpu-local-ocr-verification.md)) |
 
 **設計上いちばん効いている判断**: 図と bbox の対応が付かないページは、
 **推測せずエラーにする**。画像オブジェクトは content-addressed で 07 §9 の
@@ -1361,6 +1361,45 @@ JPEG と WebP は同じリクエスト形で通るのでリクエストの作り
 > 記録に値する** — 拒否時は `result` そのものが無く、
 > `{logId, errorCode, errorMsg}` の 3 キーだけで返る。
 
+### S3-L — 表を拒否し続ける理由が、1 つ消えた [2026-08-06・要裁定]
+
+**裁定を求めるもの。**ここでは実測だけ置く。
+
+S3-F は「表が HTML で来るならそのページは失敗する。これは意図した挙動」と決めた。
+その根拠は 2 つあった。(1) 生 HTML は 07 §5 の v1 違反であり、非適合の unit が
+07 §9 で永久凍結されるより失敗させるほうが安い。(2) **PaddleOCR-VL の表が
+何で来るかは未実測**なので、観測していない形に変換規則を作れない。
+
+**(2) は 2026-08-06 時点でもう成り立たない。**コミット済みキャプチャ 2 本が表を持つ:
+
+| capture | 表 | 行 | セル | rowspan / colspan | `<th>` | 入れ子 | セル内の図 | 属性 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| invoice | 1 | 2 | 6 | **0 / 0** | **0** | **0** | 0 | `table@border`, `td@style` |
+| slide | 2 | 9 | 32 | **0 / 0** | **0** | **0** | 8 | 同上 |
+
+**結合セルも見出しセルも入れ子も無い。**`<table border="1">` / `<tr>` /
+`<td style="…">` の 3 要素だけで、セル内の `<img>` は parser が既に `![](…)` へ
+正規化し終えている。
+
+**変換先も未確定ではない。**[07 §5](../docs/07-adapter-spec.md) は
+**「表: GFM table 記法で inline 保持」**と既に固定している。つまりこれは
+「新しい規則を作るか」ではなく、**adapter が仕様どおりの形を出していない**という話に
+なる。`<div>` を剥がし `<img>` を `![](…)` へ直したのと同じ層の、同じ種類の作業である。
+
+**代償の実測。**実文書 3 つ (infographic / invoice / slide) のうち **2 つが表を持ち、
+2 つとも今は索引に何も入らない。**§10 が段階 C の動機として引く「表・チャート・複雑
+レイアウト」は、まさにこの 2 つである。
+
+**安全側の作り方は既にある。**`<div>` と同じ規律を当てる — **上表で観測した形だけを
+変換し**、`rowspan` / `colspan` / `<th>` / 入れ子 / それ以外の属性が 1 つでも現れたら
+**変換せず、v1 受入検査がこれまでどおり拒否する**。壊れる方向は「黙って誤変換」ではなく
+「今までどおり失敗」になる。
+
+**先に見えている副作用が 1 つ。**GFM の表は**空行を 1 つも含まない連続領域**なので、
+表を通すようになると V7 (上記 §11) が測った量が直接伸びる。slide の 2 つの表は
+今の最長 2,189 文字の出どころそのものである。6000 に対して 2.7 倍の余裕は、
+**表がもっと大きい文書では詰まる**。同時に見ておく必要がある。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image
@@ -1388,7 +1427,7 @@ Stage 2 完了後に、段階 A/B の実測をもって着手可否を判断す�
 | V3 | ✅ **2026-08-01 確定** — Qwen3-VL-Embedding の MRL 768 次元での劣化幅 (V3a 2026-07-28 / V3b 2026-08-01) | **768 で確定。** 24 問 recall@10 は 2048 が 0.5417、768 が 0.5833 で切り詰めの代償が出なかった。`dimensions` / `tool_profile_hash` の**暫定扱いを解除**し、恒久コーパスの埋め込み禁止も解けた。下記 |
 | V4 | ✅ **2026-07-27 確定** — vLLM の chat template 既定値と推奨 instruction の実物 | D3 の `prompt_template_hash` の中身。下記 |
 | V5 | llama.cpp #18665 / #19516 の進捗 | マージされれば Mac が D5 により再埋め込みなしで合流できる |
-| V7 | chunk 境界による URI 分断の発生頻度 | W3。dogfood corpus で計測 |
+| V7 | ✅ **2026-08-06 確定** — chunk 境界による URI 分断の発生頻度 | 「頻度」ではなく**条件**で答えが出た。`max_chars` より長い**空行を含まない連続領域**の内側でしか起きない。実キャプチャの最大は 2,189 文字 (6000 の 2.7 分の 1)。下記 |
 | V8 | ✅ **2026-08-01 (a) 実測** — asymmetric instruction (query 側にのみ instruct prefix) を採れるか | D3 の帰結として**構造的に採れない**。**ただし採れたとしても得ではなかった** (recall 両幅とも悪化) ので (b) の仕様改訂は実測上の動機を持たない。下記 |
 | V9 | tokenizer / vision preprocessor config が `model_version_pin` の対象外 | 同一 profile を名乗ったまま空間が割れうる。下記 |
 
@@ -1586,6 +1625,54 @@ system message を送らないので、供給する instruction は無い。
 含む template を恒久凍結する**。今回は token id 一致まで取って確定した。
 
 **これで U2 (実 vLLM の `messages` 配線) が unblock された。**
+
+### V7 — 「頻度」を聞いたが、答えは**条件**だった [2026-08-06 確定]
+
+W3 は「`max_chars` の切断が `kio://` 参照の途中に落ちたら断片は捨てる (fail-empty)」と
+決めたうえで、**発生頻度を dogfood corpus で測る**と書いて置いてあった。測る前に
+分割規則そのものを読んだところ、頻度を測る問いではなかった。
+
+[04 §4.1](../docs/04-pipeline.md) の規則 5 ([`chunking.rs`](../crates/kio-index/src/chunking.rs)
+の `split_range_by_max_chars`) は、**window 内の最後の空行**で切る。文字位置で切るのは
+**window に空行が 1 つも無かったときだけ**の後退経路である。したがって参照が分断されるのは
+
+> **`max_chars` (既定 6000) より長い「空行を含まない連続領域」の内側**
+
+に限られる。コーパスの平均的な性質ではなく、**1 つの塊の形**が決める。
+
+**両側をテストで留めた** ([`chunking.rs`](../crates/kio-index/src/chunking.rs)):
+`v7_a_blank_line_free_run_lets_a_split_cut_an_image_reference` は、既定 6000 のまま
+空行の無い 60 行のギャラリーが**実際に URI の途中で切られる**ことを示す (47 本目の URI の
+62 文字目)。`v7_the_same_references_separated_by_blank_lines_are_never_cut` は、
+**同じ参照を空行で区切っただけ**で 1 本も切られないことを示す。片方だけでは
+「起きない」も「必ず起きる」も言えないので、対にしてある。
+
+**実キャプチャでの実測**
+([`real_layout_parsing_captures.rs`](../crates/kio-adapter/tests/real_layout_parsing_captures.rs)
+の `no_real_page_holds_a_blank_line_free_run_that_a_chunk_boundary_could_cut`):
+
+| capture | 参照を含む最長の「空行なし連続領域」 |
+|---|---:|
+| infographic / infographic-as-pdf | 172 |
+| invoice | 168 |
+| **slide** | **2,189** |
+
+6000 に対して **2.7 分の 1**。数え方は安全側に倒してある — 各参照に 123 文字の
+`kio://` URI を**足す**だけで元の短いファイル名を引いていないので、上の値は
+実際の領域より必ず長い。**参照を 1 つも含まない領域は数えない** — 切られる URI が
+無いため。invoice の 462 文字の `<table>` が 168 に落ちるのはこれである。
+
+**それでも「起きない」とは書かない。**最長を作っているのは slide のアイコン表で、
+**表は 1 つの空行なし連続領域**である。この表の 3 倍程度の表は珍しい文書ではない。
+テストは 2 倍を切ったら落ちるようにしてあり、そのときは fail-empty のままでよいかを
+考え直す合図になる。
+
+**分断が起きたときに失われるものは、当初の記述より 1 つ多い。**同じ抽出器が
+**どの画像を埋め込むか** (`referenced_image_hashes`) も決めているので、分断された画像は
+`related_images[]` から消えるだけでなく**埋め込みも受けず、検索から完全に落ちる**。
+一方 archive は無傷である — 到達性判定 (purge の CAS 側・`verify-objects`) は
+chunk ではなく **normalized unit 本文**を読むので、object は正しく残る。
+**壊れるのではなく静かに見えなくなる**型で、[05 §1.7](../docs/05-runtime.md) に明記した。
 
 ### V8 — asymmetric instruction は構造的に採れない疑い [新規・2026-07-27]
 

@@ -730,6 +730,98 @@ mod tests {
         }
     }
 
+    // V7 (W3): a chunk is a byte span of a unit (03 §8.1), so `max_chars` can cut
+    // a Markdown image reference in half. `kio-search`'s extractor then drops the
+    // fragment rather than guess a hash (fail-empty) — which silently costs the
+    // Agent that image in `related_images[]` AND costs it its embedding, since
+    // `referenced_image_hashes` reads the same chunk bodies. Nothing reports it.
+    //
+    // The plan left "how often" open. It is not a matter of luck: rule 5 splits at
+    // the last blank line inside the window and falls back to a hard character cut
+    // only when the window holds none, so a reference can be severed ONLY inside a
+    // blank-line-free run longer than `max_chars`. These two pin both halves of
+    // that at the shipped 6000 — a gallery with no blank line IS cut, and the very
+    // same references with blank lines between them are not. That is what makes
+    // the measurement over the real captures (`kio-adapter`'s
+    // `no_real_page_holds_a_blank_line_free_run_that_a_chunk_boundary_could_cut`)
+    // mean anything: it measures the one quantity this rule depends on.
+
+    /// `lines` image references, joined by `separator` and nothing else. Each URI
+    /// is a real 123-character one, so the char arithmetic here is the arithmetic
+    /// the chunker actually does.
+    fn image_gallery(lines: usize, separator: &str) -> String {
+        (0..lines)
+            .map(|index| {
+                format!(
+                    "![](kio://scope_01J8ZQ00000000000000000000/object/image/sha256:{index:064x})"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    /// True when the body's last image reference never closes — the signature of
+    /// a span that ends mid-URI.
+    ///
+    /// Stated here rather than by calling `extract_related_images`: kio-index does
+    /// not depend on kio-search, and the property being pinned is the chunker's,
+    /// not the extractor's.
+    fn ends_mid_reference(text: &str) -> bool {
+        text.rfind("![](")
+            .is_some_and(|start| !text[start..].contains(')'))
+    }
+
+    fn chunk_body(markdown: &str, config: ChunkingConfig) -> Vec<ChunkRow> {
+        chunk_normalized_instance(ChunkingInput {
+            raw_path: "gallery.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "page:1".to_owned(),
+                markdown: markdown.to_owned(),
+            }],
+            config,
+            created_at: "2026-08-06T00:00:00Z".to_owned(),
+        })
+        .expect("chunking must succeed")
+    }
+
+    #[test]
+    fn v7_a_blank_line_free_run_lets_a_split_cut_an_image_reference() {
+        let config = default_chunking_config().unwrap();
+        assert_eq!(config.max_chars, 6000, "the shipped default this measures");
+        // 129 characters per line (a 128-character reference plus its newline):
+        // 46 lines fill 5934 of the first window, so the hard cut at 6000 lands 62
+        // characters into the 47th URI, well inside its hash.
+        let markdown = image_gallery(60, "\n");
+        assert!(markdown.chars().count() > config.max_chars as usize);
+
+        let rows = chunk_body(&markdown, config);
+        assert!(rows.len() > 1, "the body is over max_chars, so it splits");
+        assert!(
+            rows.iter().any(|row| ends_mid_reference(&row.text)),
+            "a gallery with no blank line must be cut inside a URI — if this stops \
+             being true the rule the capture measurement rests on has changed"
+        );
+    }
+
+    #[test]
+    fn v7_the_same_references_separated_by_blank_lines_are_never_cut() {
+        let config = default_chunking_config().unwrap();
+        let markdown = image_gallery(60, "\n\n");
+        let rows = chunk_body(&markdown, config);
+        assert!(rows.len() > 1, "still well over max_chars");
+        for row in &rows {
+            assert!(
+                !ends_mid_reference(&row.text),
+                "a blank line inside the window is always preferred to a hard cut, \
+                 so no span may end mid-URI: {:?}",
+                row.text.chars().rev().take(40).collect::<String>()
+            );
+        }
+    }
+
     fn time_chunk(n: usize) -> std::time::Duration {
         // A single large unit with no paragraph boundaries forces one hard split
         // every `max_chars`; the old `slice_chars` rescanned from the unit head on

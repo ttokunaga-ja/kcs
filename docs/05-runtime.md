@@ -486,6 +486,15 @@ Kio の主たる消費者は LLM Agent であり ([06-cli-spec.md §9](06-cli-sp
   ([03-data-model.md §8.1](03-data-model.md))、`[chunking].max_chars` の切断が参照の途中に
   落ちると URI が分断され得る。閉じ括弧を欠く断片・64 桁に満たない hash などは抽出しない —
   誤った hash を持つ URI を返すより安全側である
+  - **分断された画像は `related_images[]` から消えるだけでなく、埋め込みも受けない。**
+    どの画像を埋め込むかを決めるのが同じ抽出器であるため、その画像は
+    (chunk 本文からは) 検索に一切現れなくなる。archive 側は無傷で、
+    正規化 unit 本文と CAS object はどちらも完全なまま残る — 到達性判定は
+    chunk ではなく unit を読むからである
+  - **起こる条件は運ではない。**[04-pipeline.md §4.1](04-pipeline.md) の分割規則 5 は
+    window 内の最後の空行で切り、空行が 1 つも無いときだけ文字位置で切る。
+    したがって参照が分断されるのは **`max_chars` より長い「空行を含まない連続領域」の
+    内側だけ**である (実測は `tasks/local-adapter-plan.md` の V7)
 
 - **面積が下限に満たない画像は列挙から外す。** 同一 unit が記録した最大の図
   ([07-adapter-spec.md §5.2](07-adapter-spec.md) の `metadata["images"][].bbox`) に対する
