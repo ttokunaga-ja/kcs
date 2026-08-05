@@ -116,10 +116,23 @@ impl LayoutFileType {
     /// Media types Kio routes to this adapter. Anything else is a caller error
     /// rather than something to guess at: sending a PDF as `fileType: 1` makes
     /// the service parse the first page as an image and silently lose the rest.
+    ///
+    /// **Every type listed here must also be nameable by
+    /// [`crate::mistral_ocr::discovered_unit_kind`]**, because routing a file
+    /// to this adapter commits to minting its units — a type this answers `Ok`
+    /// for and that one refuses is routed here only to die at hint time
+    /// (S3-I). The reverse gap is fine and is what `image/gif` is today:
+    /// nameable but not routed, so it stays on the online lane instead.
+    ///
+    /// `image/tiff` was listed until 2026-08-05. Nothing produced it — the
+    /// scanner's extension table has no `tif` — so it was dead, and once
+    /// discovery started asking the media type it was dead *and* self-
+    /// contradictory. The rest of the codebase already treats `.tiff` as an
+    /// unsupported input to disclose, so claiming it here was the outlier.
     pub fn from_media_type(media_type: &str) -> Result<Self> {
         match media_type {
             "application/pdf" => Ok(Self::Pdf),
-            "image/png" | "image/jpeg" | "image/tiff" | "image/webp" => Ok(Self::Image),
+            "image/png" | "image/jpeg" | "image/webp" => Ok(Self::Image),
             other => Err(AdapterError::ContractViolation(format!(
                 "local OCR adapter cannot route media type {other}"
             ))),
@@ -1502,6 +1515,36 @@ mod tests {
             1
         );
         assert!(LayoutFileType::from_media_type("text/plain").is_err());
+    }
+
+    /// Routing a type here commits to minting its units, so this adapter must
+    /// not accept anything discovery cannot name.
+    ///
+    /// S3-I was the two tables disagreeing about *which kind* a unit takes.
+    /// They can also disagree about *whether the type exists at all*, and that
+    /// failure looks identical from the outside: a `contract_violation` with no
+    /// prepared units. `image/tiff` sat in exactly that state, saved only by
+    /// being unreachable. Comparing the tables directly is what makes the
+    /// disagreement visible without a file of that type to run through.
+    #[test]
+    fn every_routable_media_type_can_be_named_by_discovery() {
+        for media_type in [
+            "application/pdf",
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/tiff",
+            "image/gif",
+            "text/plain",
+        ] {
+            if LayoutFileType::from_media_type(media_type).is_ok() {
+                assert!(
+                    crate::mistral_ocr::discovered_unit_kind(media_type).is_ok(),
+                    "{media_type} is routed to the local adapter but discovery \
+                     cannot name its units, so it can only fail at hint time"
+                );
+            }
+        }
     }
 
     #[test]

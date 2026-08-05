@@ -1211,6 +1211,24 @@ prepared unit が 1 つも立たない。**
 > **S3-G の表と同じ穴だった。**あの表は「サービスが送る応答の形」を並べたもので、
 > **Kio が送る入力の形**は並べていない。今回落ちたのは後者である。
 
+**後続 — `image/tiff` を落とした [2026-08-05]。**同じ 2 つの表が、もう 1 か所で
+食い違っていた。`LayoutFileType::from_media_type` は tiff を routable と宣言する
+一方、`discovered_unit_kind` は tiff を知らない。`scan.rs` の拡張子表に `tif` が
+無いので到達せず実害は出ていなかったが、**S3-I と同じ壊れ方が、たまたま届かない
+場所で待っている**状態だった (`.tif` を 1 行足せば発火する)。
+
+tiff を produce する経路が存在しない以上、宣言は単に嘘である。リポジトリの他の
+場所は `.tiff` を**開示すべき未対応入力**として扱っており、ここだけが例外だった。
+→ **裁定: `from_media_type` から落とす。**復活させるのは PaddleOCR-VL の tiff
+対応を実測してからでよい。落とした結果、仮に tiff が到達しても
+`local_ocr_handles_media_type` が false を返して**online lane に回る** —
+gif と同じ扱いで、local で契約違反になるより正直な行き先である。
+
+不変条件をテストで固定した (`every_routable_media_type_can_be_named_by_discovery`):
+**routable な型は必ず discovery が名前を付けられること。**逆向きの隙間 —
+名前は付くが routable でない — は安全で、`image/gif` が今それに当たる
+(local が拒否し online lane に残る、正直な拒否)。
+
 ---
 
 ## 10. 段階 C (将来) — page-as-image

@@ -69,6 +69,32 @@ pdf  : {"numPages":1,"pages":[{"width":984,"height":1475}],"type":"pdf"}
 同じ文書でも**入れ方が変われば検出数が変わる**。決定性が保証されるのは
 「同じバイト列を同じ経路で投げたとき」までで、それ以上ではない。
 
+### ずれるのは座標だけではない — 可視テキストも変わる
+
+上の表は件数だけを並べているが、**読める文字列そのものが変わる**。
+`Risk: medium` は image 経路では見出しに 1 回だけ現れるのに対し、
+**pdf 経路では見出しと本文の両方に現れて 2 回になる**:
+
+```
+image: ('paragraph_title', 'Risk: medium')  ('text', 'Potential text loss in images')
+pdf  : ('paragraph_title', 'Risk: medium')  ('text', 'Risk: medium\nPotential text loss\nin images')
+```
+
+別の `footer` では改行位置が変わる (image は `...detected.\nOCR output`、
+pdf は `...detected. OCR output`)。
+
+**これは chunk の中身が変わるということである。**箱がずれるだけなら
+`related_images` の当たり所の話で済むが、テキストが変われば検索の対象と
+埋め込みの入力が変わる。同じ 1 枚の絵でも、**PNG で入れたか PDF に包んだかで
+索引の中身が違う**ものになり、しかもどちらも「正しい OCR 結果」である。
+
+> **07 §9 の first-instance-wins は、ここでは助けにならない。**あれは同じ
+> content-addressed object に対する規則であり、PNG とそれを包んだ PDF は
+> raw hash が違うので**別の object になる**。したがって片方が凍結されるのでは
+> なく、**両方が索引に入り、同じ文書について食い違う読み方が 2 つ並ぶ**。
+> 「PDF に包んでから入れる」といった前処理は、体裁の問題ではなく索引の
+> 中身を決める選択になる。
+
 ## 中身の要点
 
 | | infographic | invoice | slide |
