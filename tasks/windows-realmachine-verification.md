@@ -35,6 +35,79 @@ Windows 10.0.26200 / Git 2.53.0 / rustc 1.97.1 (msvc) / `C:\kio` / `core.autocrl
 > debug で通っている)。同じ機の WSL 側では通るので、**ビルドを目的にしているので
 > ない限り迂回に時間を使わないこと。**ポリシーは管理者にしか変えられない。
 
+## ⏸ 2026-08-06 — バイト検査は再合格、ビルド / テストは未了
+
+`a282165` で `crates/kio-adapter/tests/fixtures/layout-parsing/` に実キャプチャ 4 本が
+入った。下記「なぜ CI では足りないのか」の但し書き —**改行に敏感な fixture を足した
+ときは CI が緑でも実機で回すこと**— に該当するので回帰確認を始め、**バイト検査までを
+終えた**。ビルドとテストは環境が足りず未了で、そこから先を引き継ぐ。
+
+実機は 8/2 とは**別の機械**である。Git 2.55.0.windows.3 / `core.autocrlf=true`
+(既定のまま、触っていない) / リポジトリは `%USERPROFILE%\dev\github.com\ttokunaga-ja\kio`
+(実長 45 文字で、§0 の 84 文字の予算内)。`C:\kio` は存在しない。
+
+### 済み — バイト検査 PASS。再実行不要
+
+計測用に **Git for Windows で別クローンを作った** (`%USERPROFILE%\Desktop\kio-verify`)。
+既存チェックアウトの作業ツリーは WSL の git が pull で書いたので、**そのまま測っても
+Git for Windows の変換を検査したことにならない**。別クローンはそのための措置である。
+
+| 検査 | 結果 |
+|---|---|
+| `git ls-files --eol` (layout-parsing) | `README.md` = `i/lf w/lf attr/-text`、JSON 4 本 = `i/none w/none attr/-text`。**`w/crlf` は無し** |
+| `git check-attr text -- …/invoice-table.json` | `text: unset` |
+| `.gitattributes` SHA-256 | `f8cf7112…6989f347` — §2 の参照表と**一致** |
+| `Cargo.toml` SHA-256 | `d067b665…16b4f15e` — **一致** |
+| `docs/README.md` SHA-256 | `53d80dbe…6ae69977` — **一致** |
+| Windows clone と WSL 作業ツリーのバイト比較 | 3 ファイルとも**同一ハッシュ** |
+
+`.gitattributes` の `* -text` は `a282165` でも効いている。
+
+### 未了 — ここから引き継ぐ
+
+この機には **Rust が入っていなかった**ので入れた。
+
+- `winget install --id rustlang.rustup --source winget --accept-package-agreements`
+  → rustup 1.29.0 / **rustc・cargo 1.97.1 (c980f4866 2026-06-30)** / 既定 `stable-x86_64-pc-windows-msvc`
+- `winget install --id microsoft.visualstudio.2022.buildtools --source winget --accept-package-agreements`
+  → **Build Tools 2022 17.14.37 (July 2026)。ワークロードは未選択のまま**
+
+rustup が `warn: installing msvc toolchain without its prerequisites` を出している。
+**`link.exe` と Windows SDK がまだ無いので、この状態の `cargo build` はリンクで落ちる。**
+`ring` / `sqlite-vec` / `libsqlite3-sys` が C をビルドするため避けて通れない。
+VS Code が入っていることは関係しない — あれはエディタで、リンカも SDK も持たない。
+
+> `winget` は初回に msstore ソースの規約同意を求め、断ると全体が止まる。
+> `--source winget` を明示すれば同意なしで通る。
+
+**1. C++ ワークロードを足す** (数 GB のダウンロード)
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart
+```
+
+完了判定:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+```
+
+**2. ビルドとテスト** — `%USERPROFILE%\Desktop\kio-verify` (Git for Windows が作った方) で回す
+
+```powershell
+cargo build --workspace --locked
+cargo test --workspace --all-targets --locked
+```
+
+合否は **`0 failed`**。参照値 1,418 passed は 8/2 の `c29ecac` のもので、`a282165` は
+Stage 3 のテストが乗って**増えているはず**である。passed がそれより多いのは正常。
+数が合わないときに見るのは差ではなく**名前** (§3 の但し書き)。`--release` は使わない。
+
+**3. smoke** — §4 をそのまま。`--offline` を外さないこと。
+**PowerShell 5.1 の日本語化けは Kio の欠陥ではない** — §4 直後の 2 項を先に読むこと。
+
+**4. 報告** — §「報告フォーマット」に従い、バイト検査の欄には上表を転記する。
+
 ---
 
 # なぜ CI では足りないのか — ここが任務の核心
