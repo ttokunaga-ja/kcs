@@ -28,19 +28,32 @@ Windows 10.0.26200 / Git 2.53.0 / rustc 1.97.1 (msvc) / `C:\kio` / `core.autocrl
 その過程で見つかった 2 つの落とし穴 (どちらも Kio ではなく PowerShell 側) は
 §4 の後に追記してある。**日本語が化けて見えても Kio の不具合ではない。**
 
-> ⚠ **`cargo build --release` が os error 4551 で落ちる機がある** (2026-08-05 実測)。
-> Windows のアプリケーション制御ポリシーが、署名の無い
-> `target\release\build\sqlite-vec-*\build-script-build` の実行をブロックする。
-> **Kio の不具合ではなく、`--release` に固有**である (上表の `cargo build` は
-> debug で通っている)。同じ機の WSL 側では通るので、**ビルドを目的にしているので
-> ない限り迂回に時間を使わないこと。**ポリシーは管理者にしか変えられない。
+> ⚠ **os error 4551 でビルドが落ちる機がある。**Windows のアプリケーション制御
+> ポリシーが、`target\` 配下に生成された**署名の無い `build-script-build` の実行**を
+> ブロックする。cargo はビルドスクリプトを*コンパイル*できていて*実行*だけが拒否される
+> ので、`could not execute process ... (never executed)` という形で出る。
+>
+> | 実測 | プロファイル | 落ちた crate |
+> |---|---|---|
+> | 2026-08-05 | `--release` | `sqlite-vec-*` |
+> | 2026-08-09 (別機) | **debug** | `ref-cast` / `windows_x86_64_gnu` |
+>
+> **ここには以前「`--release` に固有」と書いてあったが、それは誤りだった。**
+> 8/9 の機は debug でも落ちる。固有なのはプロファイルではなく**その機のポリシー**で、
+> msvc でも gnu でも変わらない。8/2 の実績機が debug で通っているのは、その機に
+> ポリシーが掛かっていないというだけである。
+>
+> **Kio の不具合ではない。**同じ機の WSL 側では通る。ポリシーは管理者にしか変えられず、
+> Smart App Control は Windows 11 では**一度切ると再インストールなしには戻せない**ので、
+> **ビルドを目的にしているのでない限り迂回に時間を使わないこと。**
 
-## ⏸ 2026-08-06 — バイト検査は再合格、ビルド / テストは未了
+## ⏸ 2026-08-06 → 08-09 — バイト検査は再合格。ビルドはこの機では不可
 
 `a282165` で `crates/kio-adapter/tests/fixtures/layout-parsing/` に実キャプチャ 4 本が
 入った。下記「なぜ CI では足りないのか」の但し書き —**改行に敏感な fixture を足した
 ときは CI が緑でも実機で回すこと**— に該当するので回帰確認を始め、**バイト検査までを
-終えた**。ビルドとテストは環境が足りず未了で、そこから先を引き継ぐ。
+終えた**。ビルドとテストはこの機のアプリケーション制御ポリシーに阻まれて完走できず、
+**8/2 の実績機へ差し戻した**。
 
 実機は 8/2 とは**別の機械**である。Git 2.55.0.windows.3 / `core.autocrlf=true`
 (既定のまま、触っていない) / リポジトリは `%USERPROFILE%\dev\github.com\ttokunaga-ja\kio`
@@ -63,7 +76,7 @@ Git for Windows の変換を検査したことにならない**。別クロー�
 
 `.gitattributes` の `* -text` は `a282165` でも効いている。
 
-### 未了 — ここから引き継ぐ
+### 2026-08-09 — この機では完走できなかった
 
 この機には **Rust が入っていなかった**ので入れた。
 
@@ -72,41 +85,88 @@ Git for Windows の変換を検査したことにならない**。別クロー�
 - `winget install --id microsoft.visualstudio.2022.buildtools --source winget --accept-package-agreements`
   → **Build Tools 2022 17.14.37 (July 2026)。ワークロードは未選択のまま**
 
-rustup が `warn: installing msvc toolchain without its prerequisites` を出している。
-**`link.exe` と Windows SDK がまだ無いので、この状態の `cargo build` はリンクで落ちる。**
+rustup が `warn: installing msvc toolchain without its prerequisites` を出す。
+**`link.exe` と Windows SDK が無いので、この状態の `cargo build` はリンクで落ちる。**
 `ring` / `sqlite-vec` / `libsqlite3-sys` が C をビルドするため避けて通れない。
 VS Code が入っていることは関係しない — あれはエディタで、リンカも SDK も持たない。
 
 > `winget` は初回に msstore ソースの規約同意を求め、断ると全体が止まる。
 > `--source winget` を明示すれば同意なしで通る。
 
-**1. C++ ワークロードを足す** (数 GB のダウンロード)
+ここで C++ ワークロード (数 GB) を入れる代わりに **GNU ツールチェーンで迂回**しようと
+して 3 つ踏んだ。**1 と 2 は解決し、3 で止まった。**
 
-```powershell
-& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart
+**(1) `rustup default …-gnu` が効かない — 犯人は `rust-toolchain.toml`**
+
+リポジトリ直下の `rust-toolchain.toml` はホストトリプルを書いていない。
+
+```toml
+[toolchain]
+channel = "stable"
 ```
 
-完了判定:
+この形は **rustup の default-host 経由で解決される**。だから
+`rustup default stable-x86_64-pc-windows-gnu` を打ってもリポジトリ内では上書きされ、
+`cargo build` は msvc のまま `error: linker link.exe not found` で落ち続ける。効くのは
 
 ```powershell
-& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+rustup set default-host x86_64-pc-windows-gnu
 ```
 
-**2. ビルドとテスト** — `%USERPROFILE%\Desktop\kio-verify` (Git for Windows が作った方) で回す
+だけである。`rustup show` が
+`active because: overridden by '...\rust-toolchain.toml'` かつ
+`name: stable-x86_64-pc-windows-gnu` になれば正しい。**msvc で行くなら無関係だが、
+GNU に振ろうとした人は必ずここで時間を溶かす。**
+
+**(2) `error: error calling dlltool 'dlltool.exe': program not found`**
+
+`windows-sys` / `getrandom` の `raw-dylib` が windows-gnu では `dlltool` を要求する。
+rustup の `rust-mingw` コンポーネントはリンカを持つが **`dlltool` も `gcc` も持たない**。
+MSYS2 で解決した。
+
+```powershell
+winget install --id MSYS2.MSYS2 --source winget --accept-package-agreements
+C:\msys64\usr\bin\pacman.exe --sync --refresh --noconfirm mingw-w64-ucrt-x86_64-toolchain
+```
+
+→ `gcc 16.1.0` / `GNU Binutils 2.47.20260726`。**リンカ側の問題はこれで全部消えた。**
+
+**(3) os error 4551 — ここで打ち切った**
+
+`C:\msys64\ucrt64.exe` のシェルから `cargo build --workspace --locked` を回すと、
+`quote` / `syn` / `ring` / `windows-sys` など多数が通った先で止まる。
+
+```
+error: failed to run custom build command for `ref-cast v1.0.25`
+Caused by:
+  could not execute process ...\target\debug\build\ref-cast-*\build-script-build (never executed)
+Caused by:
+  アクセスが拒否されました。 (os error 4551)
+```
+
+**ツールチェーンの問題ではない** — 冒頭の 4551 の但し書きを参照。**debug でも起きる。**
+回避はポリシーの無効化か管理者による除外設定で、どちらも Kio の検証のために踏み込む
+話ではない。
+
+### ここから引き継ぐ — 実績機 (`C:\kio`) で §3 と §4 だけ
+
+バイト検査は上表のとおり **PASS 済みで再実行は必須ではない**が、実績機のチェックアウトは
+`c29ecac` で止まっていて **`layout-parsing` の 4 本が入る前**である。pull 直後に §2 を
+回せば、その 4 本が入った木での `w/crlf` を数秒で実測できるので**やる価値はある**。
 
 ```powershell
 cargo build --workspace --locked
 cargo test --workspace --all-targets --locked
 ```
 
-合否は **`0 failed`**。参照値 1,418 passed は 8/2 の `c29ecac` のもので、`a282165` は
+合否は **`0 failed`**。参照値 1,418 passed は 8/2 の `c29ecac` のもので、`a282165` 以降は
 Stage 3 のテストが乗って**増えているはず**である。passed がそれより多いのは正常。
-数が合わないときに見るのは差ではなく**名前** (§3 の但し書き)。`--release` は使わない。
+数が合わないときに見るのは差ではなく**名前** (§3 の但し書き)。**`--release` は使わない。**
 
-**3. smoke** — §4 をそのまま。`--offline` を外さないこと。
+smoke は §4 をそのまま。**`--offline` を外さないこと。**
 **PowerShell 5.1 の日本語化けは Kio の欠陥ではない** — §4 直後の 2 項を先に読むこと。
 
-**4. 報告** — §「報告フォーマット」に従い、バイト検査の欄には上表を転記する。
+報告は §「報告フォーマット」に従い、バイト検査の欄には上表を転記する。
 
 ---
 
@@ -195,6 +255,7 @@ git ls-files --eol | ForEach-Object { ($_ -split '\s+')[1] } | Group-Object | Se
 Get-FileHash .gitattributes -Algorithm SHA256
 Get-FileHash Cargo.toml     -Algorithm SHA256
 Get-FileHash docs\README.md -Algorithm SHA256
+Get-FileHash (Get-ChildItem crates\kio-adapter\tests\fixtures\layout-parsing\*.json) -Algorithm SHA256
 ```
 
 | ファイル | bytes | SHA-256 (小文字で表記。`Get-FileHash` は大文字で出る) |
@@ -202,6 +263,15 @@ Get-FileHash docs\README.md -Algorithm SHA256
 | `.gitattributes` | 1054 | `f8cf711268dedf72c95c04edd86fe884e4048903fbff42a97d4980836989f347` |
 | `Cargo.toml` | 1933 | `d067b66599158b448f4ee534d32bc64fae33fe366d89ae2befb95bf416b4f15e` |
 | `docs/README.md` | 10546 | `53d80dbee92b3295129c6a4c6c469da2ac4f025ddf8041f6aa08e3826ae69977` |
+| `…/layout-parsing/invoice-table.json` | 1117633 | `1ebec4b66a8fdf439cf3fb5307673dc4a3bdf56aec171258aa320d336cca0b8f` |
+| `…/layout-parsing/slide-single-figure.json` | 1285842 | `1013ea29ebf0713f63cf76dfd1a8662cee8767c61370ccce7d7f71b8ae0c6023` |
+| `…/layout-parsing/infographic-two-charts.json` | 1472174 | `337a12b90833642c8f3015c408edafbdff6d1a5d5e9f3fa87ef0037ad45ad2a1` |
+| `…/layout-parsing/infographic-two-charts-as-pdf.json` | 1279343 | `2a635f3dbc3540a38e2adbcfd0a5304e295dbb75545465630a7f5201ef157ee2` |
+
+> **上 3 ファイルは汎用のカナリアで、下 4 本が今の検証対象そのものである。**
+> `layout-parsing` の JSON は `a282165` で入った実キャプチャで、**改行に敏感である**
+> がゆえにこの回帰確認の引き金になった。参照値は `1074644` 時点の macOS 実測。
+> 上 3 ファイルの hash は `028b7f7` の値だが `1074644` でも変わっていない。
 
 > **`git status` は検出器にならない。** 変換が起きていても status はクリーンに見える
 > (Git が比較時に正規化して戻すため)。作業ツリーの実バイトを見る (a)(c) が要る。
@@ -399,3 +469,6 @@ Windows 実機で clone・ビルド・動作が成立する: <はい|いいえ>
 - 失敗を「環境のせい」で片付ける。**再現手順と実際の出力を書く**こと。
   2026-07-31 の 4 件は「Windows だから仕方ない」ではなく 1 関数の欠陥だった
 - smoke で `--offline` を外す (外部 adapter を呼ぶと承認と課金の話が混ざる)
+- **os error 4551 を通すためにアプリケーション制御ポリシーを切る** — 管理者の領分であり、
+  Smart App Control は Windows 11 では**一度切ると再インストールなしには戻せない**。
+  4551 に当たったら**その機を諦めて別の実機に移る**のが正しい (2026-08-09 はそうした)
