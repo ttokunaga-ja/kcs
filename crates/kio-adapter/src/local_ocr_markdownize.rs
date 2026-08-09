@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::bbox_annotation::validate_bbox as validate_annotation_bbox;
+use crate::bbox_annotation::{canonical_source_escape, validate_bbox as validate_annotation_bbox};
 use crate::http_policy::{authenticated_agent, read_json_bounded, HttpPolicy};
 use crate::identity::tool_profile_hash;
 use crate::mistral_ocr::{image_hash, OcrImage};
@@ -237,7 +237,45 @@ pub struct LayoutParsedPage {
     pub index: usize,
     pub markdown: String,
     pub images: Vec<OcrImage>,
+    /// Every block of `prunedResult.parsing_res_list`, as the provider spelled it.
+    pub blocks: Vec<LayoutBlock>,
 }
+
+/// One entry of `prunedResult.parsing_res_list`, kept verbatim.
+///
+/// **This is an observation, never a judgment.** "The provider labelled this span
+/// `footer`" can be measured; "this span is furniture" cannot — see
+/// `tasks/furniture-text-recovery-design.md` §2, where the label, the position and
+/// the size were each measured against the nine captures and each failed to
+/// separate the twelve dropped blocks into furniture and body. One `footer` holds
+/// `Type a message...` and another holds `All critical tokens detected…`.
+///
+/// So the whole list is recorded rather than the subset something decided was
+/// noise, and the naming stays the provider's. Whoever eventually has a corpus to
+/// judge by will find the measurement here instead of a conclusion drawn without
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutBlock {
+    pub label: String,
+    pub bbox: Option<Vec<i64>>,
+    pub content: String,
+}
+
+/// Labels whose `block_content` the service recognises and then leaves out of
+/// `markdown.text`.
+///
+/// Measured over the nine captures in `tests/fixtures/layout-parsing/`: twelve
+/// blocks hold content that never reaches the Markdown, and all twelve wear one of
+/// these three labels. Four of the twelve are plainly body text — a routing slip's
+/// title and its deadline, and an infographic's closing summary — which is why
+/// they are recovered at all.
+///
+/// The list is the measurement and not a theory, so it stays at what was measured.
+/// Widening it to "anything recognised but absent from the Markdown" reads better
+/// and is wrong: a table's raw HTML is absent too, because
+/// [`convert_html_tables_to_gfm`] already put its content there in GFM, and
+/// recovering it would insert every table twice.
+const RECOVERED_BLOCK_LABELS: [&str; 3] = ["header", "footer", "number"];
 
 /// Turn the service's body into pages.
 ///
@@ -333,13 +371,102 @@ fn parse_one_page(index: usize, result: &Value) -> Result<LayoutParsedPage> {
     }
 
     require_layout_parsing_response(index, result)?;
+    let blocks = page_blocks(result);
+    let markdown = append_recovered_blocks(&markdown, &blocks);
     let referenced = markdown_image_paths(&markdown);
     let images = images_with_their_own_boxes(index, &referenced, &image_bytes)?;
     Ok(LayoutParsedPage {
         index,
         markdown,
         images,
+        blocks,
     })
+}
+
+/// Read `prunedResult.parsing_res_list` into [`LayoutBlock`]s.
+///
+/// Lossy only where the response is: a block with no `block_label` is skipped
+/// because there is nothing to record it as, and a malformed `block_bbox` becomes
+/// `None` rather than a guess. [`require_layout_parsing_response`] has already
+/// established that the list is present, so its absence here means an empty page
+/// and not a wrong endpoint.
+fn page_blocks(result: &Value) -> Vec<LayoutBlock> {
+    let Some(list) = result
+        .get("prunedResult")
+        .and_then(|pruned| pruned.get("parsing_res_list"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|block| {
+            let label = block.get("block_label").and_then(Value::as_str)?;
+            let bbox = block
+                .get("block_bbox")
+                .and_then(Value::as_array)
+                .map(|corners| corners.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+                .filter(|corners| corners.len() == 4);
+            Some(LayoutBlock {
+                label: label.to_owned(),
+                bbox,
+                content: block
+                    .get("block_content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Put the text the service recognised and then dropped back into the page.
+///
+/// Appended rather than interleaved, and that is a limitation worth naming. The
+/// Markdown arrives already assembled by the service, and nothing maps a position
+/// inside that string back to the block that produced it — a table's cells reach
+/// it through [`convert_html_tables_to_gfm`], so even exact-matching a block's
+/// content against the Markdown finds nothing for them. Appending is the option
+/// that stays deterministic, and byte determinism is the property 07 §5.2.1
+/// actually freezes. Within the appended run the order is the page's own, by box,
+/// top to bottom and then left to right, so a reader gets reading order even
+/// though the run as a whole sits at the end.
+///
+/// The content is escaped on the way in. 07 §5.2.1 requires it of provider raw
+/// text embedded in Markdown body **whatever its origin** — the same
+/// [`canonical_source_escape`] `bbox_annotation` applies — so a status bar reading
+/// `<div>` cannot smuggle raw HTML past the acceptance check.
+fn append_recovered_blocks(markdown: &str, blocks: &[LayoutBlock]) -> String {
+    let mut recovered: Vec<&LayoutBlock> = blocks
+        .iter()
+        .filter(|block| RECOVERED_BLOCK_LABELS.contains(&block.label.as_str()))
+        .filter(|block| !block.content.trim().is_empty())
+        .collect();
+    if recovered.is_empty() {
+        return markdown.to_owned();
+    }
+    // Top to bottom, then left to right. Blocks without a box keep the response's
+    // own order behind those that have one, rather than being dropped or sorted
+    // against a coordinate that does not exist.
+    recovered.sort_by_key(|block| {
+        block
+            .bbox
+            .as_ref()
+            .map(|corners| (0, corners[1], corners[0]))
+            .unwrap_or((1, 0, 0))
+    });
+
+    let mut out = markdown.to_owned();
+    for block in recovered {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&canonical_source_escape(block.content.trim()));
+        out.push('\n');
+    }
+    out
 }
 
 /// Refuse a response that has Markdown but no `prunedResult.parsing_res_list`.
@@ -1146,11 +1273,11 @@ fn unit_from_hint(
         unit_key: hint.unit_key.clone(),
         unit_type: hint.unit_kind,
         markdown,
-        metadata: page_metadata(&page.images),
+        metadata: page_metadata(&page.images, &page.blocks),
     })
 }
 
-fn page_metadata(images: &[OcrImage]) -> BTreeMap<String, Value> {
+fn page_metadata(images: &[OcrImage], blocks: &[LayoutBlock]) -> BTreeMap<String, Value> {
     let mut metadata = BTreeMap::new();
     metadata.insert(
         "model_version_pin".to_owned(),
@@ -1169,6 +1296,27 @@ fn page_metadata(images: &[OcrImage]) -> BTreeMap<String, Value> {
             })
             .collect::<Vec<_>>();
         metadata.insert("images".to_owned(), json!(values));
+    }
+    if !blocks.is_empty() {
+        // Every block, not the three that were recovered. Recording only those
+        // would freeze "dropped or not" into the archive, and that split is
+        // exactly the one the evidence cannot justify. `recovered` marks what this
+        // adapter appended so a reader can tell the two apart without re-deriving
+        // the label list, and `content` is the post-escape string, matching what
+        // `bbox_annotation` persists (07 §5.2).
+        let values = blocks
+            .iter()
+            .map(|block| {
+                json!({
+                    "label": block.label,
+                    "bbox": block.bbox,
+                    "content": canonical_source_escape(block.content.trim()),
+                    "recovered": RECOVERED_BLOCK_LABELS.contains(&block.label.as_str())
+                        && !block.content.trim().is_empty(),
+                })
+            })
+            .collect::<Vec<_>>();
+        metadata.insert("blocks".to_owned(), json!(values));
     }
     metadata
 }
@@ -1476,6 +1624,62 @@ mod tests {
             markdown_image_paths(markdown),
             vec!["z-first.png".to_owned(), "a-second.png".to_owned()]
         );
+    }
+
+    /// Text the service recognised and left out of its own Markdown reaches the
+    /// unit, and every block reaches the metadata.
+    ///
+    /// The shape is the one measured on 2026-08-09 across the nine captures in
+    /// `tests/fixtures/layout-parsing/`: twelve blocks hold `block_content` that
+    /// never appears in `markdown.text`, all of them labelled `header`, `footer`
+    /// or `number`. Eight are furniture and four are plainly body — a routing
+    /// slip's title and deadline, an infographic's closing summary — and no
+    /// measurable property separates the two groups, so dropping the class to be
+    /// rid of the status bars takes the body with it. See
+    /// `tasks/furniture-text-recovery-design.md`.
+    #[test]
+    fn text_the_service_recognised_and_omitted_is_recovered_into_the_unit() {
+        let body = page_body(
+            "Body the service did include.\n",
+            json!({}),
+            json!([
+                {"block_label": "text", "block_bbox": [10, 200, 900, 300],
+                 "block_content": "Body the service did include."},
+                {"block_label": "footer", "block_bbox": [10, 1700, 900, 1740],
+                 "block_content": "Deadline 7/10"},
+                {"block_label": "header", "block_bbox": [10, 20, 900, 60],
+                 "block_content": "Routing"},
+            ]),
+        );
+        let pages = parse_layout_parsing(&body).unwrap();
+        let markdown = &pages[0].markdown;
+
+        // Reading order, not response order: the header sits last in the list and
+        // highest on the page, so it comes back above the footer.
+        let header_at = markdown.find("Routing").expect("header recovered");
+        let footer_at = markdown.find("Deadline").expect("footer recovered");
+        assert!(header_at < footer_at, "{markdown}");
+
+        // 07 §5.2.1 asks for the CommonMark source escape on provider raw text
+        // embedded in the body whatever its origin, so the slash arrives
+        // backslashed rather than as a stray Markdown character.
+        assert!(markdown.contains(r"Deadline 7\/10"), "{markdown}");
+
+        // Every block is recorded, not the two that were recovered. Keeping only
+        // the recovered ones would freeze "dropped or not" into the archive, and
+        // that is the split the evidence cannot justify.
+        let labels: Vec<&str> = pages[0]
+            .blocks
+            .iter()
+            .map(|block| block.label.as_str())
+            .collect();
+        assert_eq!(labels, ["text", "footer", "header"]);
+
+        let metadata = page_metadata(&pages[0].images, &pages[0].blocks);
+        assert_eq!(metadata["blocks"][0]["recovered"], json!(false));
+        assert_eq!(metadata["blocks"][1]["label"], json!("footer"));
+        assert_eq!(metadata["blocks"][1]["recovered"], json!(true));
+        assert_eq!(metadata["blocks"][2]["bbox"], json!([10, 20, 900, 60]));
     }
 
     #[test]

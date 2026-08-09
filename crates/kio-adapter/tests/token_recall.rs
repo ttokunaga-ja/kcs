@@ -40,6 +40,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kio_adapter::local_ocr_markdownize::parse_layout_parsing;
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
@@ -142,17 +143,51 @@ fn declared_fragments(ground_truth: &Value, source_image: &str) -> Vec<String> {
         .collect()
 }
 
-/// NFKC, whitespace dropped, case folded.
+/// Markdown escapes undone, then NFKC, whitespace dropped, case folded.
 ///
 /// NFKC because the service returns full-width forms where the ground truth
 /// writes ASCII (`再実行？` against `再実行?`), and counting that as a miss would
 /// describe the encoding rather than the OCR. Whitespace because a line break
 /// inside a token is a rendering detail, not a lost token.
+///
+/// The escapes go for exactly that reason too. 07 §5.2.1 requires provider text
+/// embedded in the Markdown body to carry the CommonMark source escape, so
+/// `期限 7/10` is archived as `期限 7\/10` and `&` as `&amp;`. Both render back to
+/// what the page said. A comparison that scored them as misses would be reporting
+/// the escape, not the OCR — and would have declared the whole furniture recovery
+/// ineffective on the day it started working.
 fn squeeze(text: &str) -> String {
-    text.nfkc()
+    unescape_markdown(text)
+        .nfkc()
         .filter(|character| !character.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// The inverse of `canonical_source_escape`, for comparison only.
+///
+/// Backslashes first, then the three entity references: the escape writes `&` as
+/// `&amp;` rather than `\&`, so its output holds no backslash that belongs to an
+/// entity, and undoing them in this order cannot turn `\&amp;` into an ampersand
+/// that was never there.
+fn unescape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            if let Some(&next) = characters.peek() {
+                if next.is_ascii_punctuation() {
+                    out.push(next);
+                    characters.next();
+                    continue;
+                }
+            }
+        }
+        out.push(character);
+    }
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn pages(capture: &Value) -> &[Value] {
@@ -162,12 +197,20 @@ fn pages(capture: &Value) -> &[Value] {
         .expect("a /layout-parsing response carries result.layoutParsingResults")
 }
 
-/// Everything Kio would index. `markdown.text` is the only field the adapter
-/// reads, so a string absent from here is absent from the archive.
+/// Everything Kio would index — taken from the adapter, not from the field.
+///
+/// This read `markdown.text` straight out of the capture and called it what Kio
+/// indexes. That held until the adapter began recovering the `header`, `footer`
+/// and `number` blocks the service leaves out of that field
+/// (`tasks/furniture-text-recovery-design.md`). The raw field and the archived
+/// text are now different strings, and reading the field would report text as lost
+/// while it sits in the index — the exact inverse of the failure this file exists
+/// to catch.
 fn markdown_text(capture: &Value) -> String {
-    pages(capture)
+    parse_layout_parsing(capture)
+        .expect("a real capture parses")
         .iter()
-        .filter_map(|page| page["markdown"]["text"].as_str())
+        .map(|page| page.markdown.clone())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -223,6 +266,30 @@ fn page_extents(capture: &Value) -> Vec<(f64, f64)> {
 /// same as the code editor, and keeps its token — its widest block covers 4% of
 /// the page against the editor's 91%. Anyone reaching for "few blocks means the
 /// window collapsed" is refuted by the row directly above it.
+/// Blocks the adapter lifts back into the Markdown — `header`, `footer` and
+/// `number` carrying text the service recognised and its own Markdown omitted.
+///
+/// Counted from the response rather than asked of the adapter, so the column says
+/// what was there to recover rather than what the recovery reports about itself.
+fn recovered_blocks(capture: &Value) -> usize {
+    pages(capture)
+        .iter()
+        .filter_map(|page| page["prunedResult"]["parsing_res_list"].as_array())
+        .flatten()
+        .filter(|block| {
+            matches!(
+                block["block_label"].as_str(),
+                Some("header" | "footer" | "number")
+            )
+        })
+        .filter(|block| {
+            block["block_content"]
+                .as_str()
+                .is_some_and(|content| !content.trim().is_empty())
+        })
+        .count()
+}
+
 fn block_spread(capture: &Value) -> (usize, Option<f64>) {
     let extents = page_extents(capture);
     let mut blocks = 0;
@@ -297,8 +364,8 @@ fn every_capture_in_this_directory_is_read_by_this_test() {
 fn every_declared_token_comes_back_exactly_as_the_manifest_measured() {
     let ground_truth = read_json(&ground_truth_file());
     let mut table = String::from(
-        "\n  token   recall  blocks  widest  capture                             declared token\n\
-           \x20 ------  ------  ------  ------  ----------------------------------  --------------------\n",
+        "\n  token   recall  blocks  widest  recov  capture                             declared token\n\
+           \x20 ------  ------  ------  ------  -----  ----------------------------------  --------------------\n",
     );
 
     for row in rows() {
@@ -324,12 +391,13 @@ fn every_declared_token_comes_back_exactly_as_the_manifest_measured() {
 
         let (blocks, widest) = block_spread(&capture);
         table.push_str(&format!(
-            "  {:<6}  {:>2}/{:<3}  {:>6}  {:>6}  {:<34}  {}\n",
+            "  {:<6}  {:>2}/{:<3}  {:>6}  {:>6}  {:>5}  {:<34}  {}\n",
             if in_markdown { "yes" } else { "NO" },
             recovered,
             fragments.len(),
             blocks,
             widest.map_or_else(|| "-".to_owned(), |share| format!("{:.0}%", share * 100.0)),
+            recovered_blocks(&capture),
             row.capture,
             token
         ));
