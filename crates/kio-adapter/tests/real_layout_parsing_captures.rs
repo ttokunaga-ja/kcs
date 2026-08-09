@@ -162,6 +162,20 @@ fn the_captures_disagree_about_how_a_page_ends() {
 /// under the floor, or whose decoration rises above it, this fails and says so
 /// instead of the default quietly starting to hide something.
 ///
+/// # The lower bound is still unsupported [2026-08-09]
+///
+/// Round 5 went looking for evidence beneath the floor and came back with none.
+/// That is worth stating rather than leaving as an absence: four of the five
+/// captures it took cite no image at all, so no ratio exists on them, and they
+/// are not in `captures` below. Every figure in the table above sits far above
+/// 0.25 and every piece of decoration far below, so the floor is held up from
+/// one side only -- nothing here shows what a real figure just under it would
+/// look like, and nothing here would notice if one existed.
+///
+/// The gap is known and cheap to live with: `[search]
+/// related_images_min_area_ratio` is one line and needs no reindex. It is not
+/// closed by widening this test.
+///
 /// The constant is repeated rather than imported because `kio-cli` depends on
 /// this crate and not the other way round. Changing one without the other is
 /// exactly what this test exists to catch.
@@ -203,7 +217,19 @@ fn the_captures_separate_figures_from_decoration_around_the_shipped_floor() {
         // resolution, and `infographic-as-pdf` is that exact case -- the same
         // picture resampled to 96%, where every absolute area shifts and this
         // ratio does not.
-        let largest = boxes.iter().map(area).max().expect("a page with crops");
+        let largest = boxes.iter().map(area).max().unwrap_or_else(|| {
+            panic!(
+                "{name} cites no images, and this test only describes pages that have at \
+                 least one figure -- the ratio's denominator is the page's largest crop, \
+                 which a page without figures does not have.\n\n\
+                 Four of the captures in this directory are like that (the code editor, \
+                 the terminal, the whiteboard, and the sealed circular, whose one crop the \
+                 Markdown never cites). They are deliberately not in `captures` above. Do \
+                 not add them and do not give the empty case a default: the floor's lower \
+                 bound really is unsupported by evidence, and making this test swallow such \
+                 a page would hide that instead of fixing it. See README.md."
+            )
+        });
         for bbox in &boxes {
             let ratio = area(bbox) as f64 / largest as f64;
             if figures.contains(bbox) {
