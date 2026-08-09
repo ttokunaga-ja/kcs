@@ -258,13 +258,26 @@ fn section_ranges(markdown: &str) -> Vec<SectionRange> {
     ranges
 }
 
+/// A line that toggles fenced-code state.
+///
+/// Deliberately the simple form — the first non-space content is three
+/// backticks or three tildes — rather than full CommonMark fence matching
+/// (opening length, matching closer, info string). It is shared with
+/// [`crate::search_projection`] so that the chunker and the search projection
+/// cannot disagree about where code starts: a `#` the chunker declines to read
+/// as a heading and a `\/` the projection declines to unescape have to be
+/// inside the same fence, or one of the two is wrong about the document.
+pub(crate) fn is_fence_delimiter(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
 fn heading_events(markdown: &str) -> Vec<HeadingEvent> {
     let mut events = Vec::new();
     let mut char_offset = 0usize;
     let mut in_fence = false;
     for line in markdown.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        if is_fence_delimiter(line) {
             in_fence = !in_fence;
         }
         if !in_fence {

@@ -2100,3 +2100,68 @@ fn r_addendum_feedback2_mixed_query_slash_joined_unit_and_short_particle() {
         "the scope-kinds document itself must be among the results: {search}"
     );
 }
+
+/// F3 (kio-index `search_projection`): 07 §5.2.1 has provider raw text escaped
+/// maximally on the way in — a backslash before every ASCII punctuation
+/// character — so a deadline the OCR service read as `期限 7/10` is stored as
+/// `期限 7\/10`. The search projection resolves those escapes, so the plain
+/// query finds the document and the Agent is shown what the page said rather
+/// than what the storage layer needed.
+///
+/// The path that answers here is PC11's bounded LIKE scan, not FTS: `7/10`
+/// script-segments into `7` / `10` (the `/` is `Other`, a separator), both
+/// short, so there is no MATCH expression at all and `execute_like_fallback`'s
+/// `instr(c.text, ?)` is what has to see the unescaped text.
+#[test]
+fn f3_escaped_punctuation_is_findable_by_the_plain_query_and_shown_unescaped() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("slip.md"), "# 回覧\n\n期限 7\\/10 まで\n").unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(&dir, &["search", "7/10", "--mode", "text"]);
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "an escaped `7\\/10` must be findable by the plain query `7/10`: {search}"
+    );
+    let snippet = results[0]["snippet"].as_str().unwrap_or_default();
+    assert!(
+        snippet.contains("7/10"),
+        "the snippet must show the deadline as the page spells it: {search}"
+    );
+    assert!(
+        !snippet.contains("7\\/10"),
+        "the snippet must not leak the storage-layer escape: {search}"
+    );
+}
+
+/// The other half of F3, and the reason the projection exempts code instead of
+/// unescaping everything: inside a fence a backslash is content, not escaping.
+/// Counted across this repository's tracked Markdown, 439 of the 478
+/// `\`-before-punctuation sequences are inside fences (416 of those in
+/// `eval/fixtures/normalized-corpus/`, the corpus the eval suite searches), so
+/// a blanket unescape would rewrite the corpus to repair 23 body-text escapes.
+#[test]
+fn f3_fenced_code_keeps_the_backslashes_the_corpus_actually_contains() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("gather.md"),
+        "# gather\n\n```sh\nfind . -type f -exec shasum -a 256 {} \\;\n```\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(&dir, &["search", "shasum", "--mode", "text"]);
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "the fenced command must stay findable: {search}"
+    );
+    let snippet = results[0]["snippet"].as_str().unwrap_or_default();
+    assert!(
+        snippet.contains("{} \\;"),
+        "a shell escape inside a fence must survive the projection intact: {search}"
+    );
+}

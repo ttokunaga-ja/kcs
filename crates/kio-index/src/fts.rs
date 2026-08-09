@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::search_projection::resolve_markdown_escapes;
 use crate::{ChunkRow, IndexError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,7 +146,17 @@ impl SqliteFtsIndex {
         // canonically-equivalent content and queries match regardless of input
         // form. This is a derived-index projection only; the char offsets that
         // evidence resolves against remain over the original `row.text`.
-        let indexed_text = row.text.nfc().collect::<String>().replace('\u{0}', "");
+        //
+        // F3: resolve Markdown escapes last, over text that is already NFC and
+        // already free of NULs so that neither can sit between a backslash and
+        // the character it escapes. 07 §5.2.1 has provider raw text escaped
+        // maximally on the way in, which puts a backslash in front of every
+        // ASCII punctuation character, so a recovered `期限 7/10` is stored as
+        // `期限 7\/10` and the query `7/10` never even becomes a candidate. See
+        // `search_projection` for why code is exempted rather than unescaped
+        // along with everything else.
+        let indexed_text =
+            resolve_markdown_escapes(&row.text.nfc().collect::<String>().replace('\u{0}', ""));
         with_savepoint(&self.conn, "kio_index_chunk", || {
             let requested_chunk_rowid = chunk_rowid.map(sql_rowid).transpose()?;
             let existing_chunk_rowid = self
@@ -1594,6 +1605,57 @@ mod tests {
         // Composed (NFC) query "café" must hit the NFD-stored content.
         let hits = fts.search("caf\u{e9}", 10).unwrap();
         assert_eq!(hits.len(), 1, "NFC query must match NFD-stored content");
+        assert_eq!(hits[0].chunk_id, "c1");
+    }
+
+    fn indexed_text_of(fts: &SqliteFtsIndex, chunk_id: &str) -> String {
+        fts.conn
+            .query_row(
+                "SELECT text FROM chunks WHERE chunk_id = ?1",
+                params![chunk_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn f3_escaped_punctuation_is_searchable_by_the_plain_query() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        // What a recovered `number` block actually looks like once 07 §5.2.1's
+        // escaping has been applied to the text the service read as `期限 7/10`.
+        fts.index_chunk(&row("c1", "\u{671f}\u{9650} 7\\/10"))
+            .unwrap();
+        let hits = fts.search("\"7/10\"", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the plain query must match escaped content");
+        assert_eq!(hits[0].chunk_id, "c1");
+        // The same column is what `snippet` is taken from, so the Agent is shown
+        // `期限 7/10` rather than the backslash the storage layer needed.
+        assert_eq!(indexed_text_of(&fts, "c1"), "\u{671f}\u{9650} 7/10");
+        // And the escaped spelling is deliberately no longer in the index: the
+        // projection holds one rendering of the text, the one a reader sees.
+        assert!(
+            fts.search("\"7\\/10\"", 10).unwrap().is_empty(),
+            "the escaped spelling must not survive in the projection"
+        );
+    }
+
+    #[test]
+    fn f3_fenced_code_keeps_the_backslashes_a_reader_sees() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        // The shape that dominates the eval corpus: a shell fence whose
+        // backslashes are content, not escaping. Unescaping these would rewrite
+        // the corpus the eval suite searches.
+        let fenced = "```sh\nfind . -type f -exec shasum {} \\;\n```\n";
+        fts.index_chunk(&row("c1", fenced)).unwrap();
+        assert_eq!(indexed_text_of(&fts, "c1"), fenced);
+        let hits = fts.search("\"shasum {} \\;\"", 10).unwrap();
+        assert_eq!(hits.len(), 1, "code must stay searchable as written");
         assert_eq!(hits[0].chunk_id, "c1");
     }
 }

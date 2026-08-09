@@ -9,6 +9,7 @@ pub mod embedding_store;
 pub mod fts;
 pub mod registry;
 pub mod rows;
+mod search_projection;
 pub mod vec;
 
 use rusqlite::Error as SqliteError;
