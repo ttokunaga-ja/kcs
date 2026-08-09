@@ -321,6 +321,12 @@ cargo test --workspace --all-targets --locked
 0 failed / 0 ignored は 3 回とも同じ。バイナリ数は 7/31・8/2 が 31、8/9 は **34**
 (下記の新規 `tests/*.rs` 3 本ぶん) で、Windows と macOS で常に同数である。
 
+> **Linux は macOS より 1 多い。**`s6_non_utf8_filename_is_skipped_with_warning`
+> (`crates/kio-cli/tests/contract_cli.rs`) が `#[cfg(target_os = "linux")]` で、
+> macOS/APFS は非 UTF-8 のファイル名をファイルシステムが拒むため**そのバイト列を
+> 作ることすらできない**からである。2026-08-09 実測: macOS 1,516 / Linux 1,517。
+> GPU 機 (WSL2) の報告はこちらの系列なので、**macOS と 1 ずれるのが正常**である。
+
 **差 26 は 3 点で動いていない。**これが効くのは、Windows 側の数が正しいかを
 macOS から独立に言えるからである。8/9 は Windows 1,488 を測ったあと macOS を回して
 1,514 — 予測 (1,488 + 26) と一致した。**片側だけ測って「増えたから正常」と
