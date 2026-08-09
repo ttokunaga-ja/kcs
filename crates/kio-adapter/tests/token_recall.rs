@@ -209,7 +209,10 @@ fn every_capture_in_this_directory_is_read_by_this_test() {
         "{MANIFEST} lists captures that are not in the directory: {missing:?}"
     );
 
-    println!("{} captures on disk, all listed in {MANIFEST}", on_disk.len());
+    println!(
+        "{} captures on disk, all listed in {MANIFEST}",
+        on_disk.len()
+    );
 }
 
 #[test]
