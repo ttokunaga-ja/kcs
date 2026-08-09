@@ -29,6 +29,12 @@
 //! 18 fragments that are all chart-internal text, which is correct behaviour and
 //! the reason `related_images[]` and `kio open` exist. A pinned rate would fail
 //! on healthy variation and teach everyone to edit the number.
+//!
+//! `blocks` and `widest` are printed on the same terms, and for a sharper
+//! reason: they describe the *cause* the token column only sees the effect of.
+//! The one capture that loses its token is also the one whose page came back as
+//! a single block covering nearly all of it — but that is one page, and one page
+//! is exactly how S3-J's refuted rule got written. See [`block_spread`].
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -180,6 +186,78 @@ fn recognised_text(capture: &Value) -> String {
         .join("\n")
 }
 
+/// The page's pixel extent, from `result.dataInfo`. An image carries `width` and
+/// `height` directly; a PDF moves them into `pages[]`, because a PDF can hold
+/// more than one. Both shapes are in this directory — see the README's note on
+/// `infographic-two-charts-as-pdf.json`.
+fn page_extents(capture: &Value) -> Vec<(f64, f64)> {
+    let info = &capture["result"]["dataInfo"];
+    if let Some(pages) = info["pages"].as_array() {
+        return pages
+            .iter()
+            .filter_map(|page| Some((page["width"].as_f64()?, page["height"].as_f64()?)))
+            .collect();
+    }
+    match (info["width"].as_f64(), info["height"].as_f64()) {
+        (Some(width), Some(height)) => vec![(width, height)],
+        _ => Vec::new(),
+    }
+}
+
+/// How many blocks the page was cut into, and how much of the page the largest
+/// single block covers.
+///
+/// **Printed, never asserted, and deliberately not a rule.** The code editor is
+/// the only capture whose window came back as one `content` block spanning
+/// almost the entire page, and it is also the only one that lost its token. That
+/// is one page. S3-J generalised from one page — keep `block_label == "chart"`,
+/// drop the rest — and the very next capture refuted it. Writing the same shape
+/// of rule here from the same amount of evidence would be the same mistake.
+///
+/// So these are numbers, not a threshold. When a second collapsed page is ever
+/// captured, the comparison is already on screen instead of nine captures
+/// needing re-measurement to find out whether the pattern was real.
+///
+/// One thing they settle immediately: **the block count alone does not separate
+/// these pages.** `whiteboard-no-crops.json` is cut into four blocks too, the
+/// same as the code editor, and keeps its token — its widest block covers 4% of
+/// the page against the editor's 91%. Anyone reaching for "few blocks means the
+/// window collapsed" is refuted by the row directly above it.
+fn block_spread(capture: &Value) -> (usize, Option<f64>) {
+    let extents = page_extents(capture);
+    let mut blocks = 0;
+    let mut widest: Option<f64> = None;
+
+    for (index, page) in pages(capture).iter().enumerate() {
+        let Some(list) = page["prunedResult"]["parsing_res_list"].as_array() else {
+            continue;
+        };
+        blocks += list.len();
+
+        let Some(&(width, height)) = extents.get(index) else {
+            continue;
+        };
+        let page_area = width * height;
+        if page_area <= 0.0 {
+            continue;
+        }
+
+        for block in list {
+            let Some(bbox) = block["block_bbox"].as_array() else {
+                continue;
+            };
+            let corners: Vec<f64> = bbox.iter().filter_map(Value::as_f64).collect();
+            let [x0, y0, x1, y1] = corners[..] else {
+                continue;
+            };
+            let share = ((x1 - x0) * (y1 - y0)).abs() / page_area;
+            widest = Some(widest.map_or(share, |current: f64| current.max(share)));
+        }
+    }
+
+    (blocks, widest)
+}
+
 /// A capture placed here and named nowhere is a capture nothing reads. That is
 /// not hypothetical: it is what happened to five of these for a day, and what
 /// this directory's README describes happening three times before that.
@@ -219,8 +297,8 @@ fn every_capture_in_this_directory_is_read_by_this_test() {
 fn every_declared_token_comes_back_exactly_as_the_manifest_measured() {
     let ground_truth = read_json(&ground_truth_file());
     let mut table = String::from(
-        "\n  token   recall  capture                             declared token\n\
-           \x20 ------  ------  ----------------------------------  --------------------\n",
+        "\n  token   recall  blocks  widest  capture                             declared token\n\
+           \x20 ------  ------  ------  ------  ----------------------------------  --------------------\n",
     );
 
     for row in rows() {
@@ -244,11 +322,14 @@ fn every_declared_token_comes_back_exactly_as_the_manifest_measured() {
             .filter(|fragment| indexed.contains(&squeeze(fragment)))
             .count();
 
+        let (blocks, widest) = block_spread(&capture);
         table.push_str(&format!(
-            "  {:<6}  {:>2}/{:<3}  {:<34}  {}\n",
+            "  {:<6}  {:>2}/{:<3}  {:>6}  {:>6}  {:<34}  {}\n",
             if in_markdown { "yes" } else { "NO" },
             recovered,
             fragments.len(),
+            blocks,
+            widest.map_or_else(|| "-".to_owned(), |share| format!("{:.0}%", share * 100.0)),
             row.capture,
             token
         ));
