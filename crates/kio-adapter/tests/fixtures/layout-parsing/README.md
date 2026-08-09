@@ -223,6 +223,26 @@ pdf は `...detected. OCR output`)。
 > 書いている「mock とコードが同意して CI が緑のまま」と同じ形が、
 > ここでも成立している。テストの形は切り分けの結果で決める。
 
+## キャプチャを足すときは `capture-manifest.json` に 1 行足す
+
+**置くだけでは読まれない**問題は、`token_recall.rs` が塞いだ [2026-08-09]。
+このディレクトリの `capture-manifest.json` が
+「キャプチャ → 元画像 → 宣言トークンが戻るか」を機械可読で持ち、テストは
+`include_str!` を使わず**実行時にディレクトリを走査**する。
+
+- **行を足し忘れると落ちる。**`.json` がディレクトリに在って manifest に無ければ
+  `every_capture_in_this_directory_is_read_by_this_test` が名前を挙げて失敗する
+- **`token_in_markdown` は測定値であって目標ではない。**`false` は欠陥の記録である。
+  サービスが改善して `true` になったら、テストは「良くなった。表を更新せよ」と
+  落ちる。両方向の変化検出器で、どちらかを黙認する形にはしていない
+- **`visible_text` の回収率は表示するが assert しない。**infographic が落とす 18 断片は
+  すべてチャート内部の文字で、落ちるのが正常だからである
+
+`real_layout_parsing_captures.rs` の方は今も手書き 3 箇所 (`include_str!` の const・
+`captures`・`FIGURES`) のままである。あちらは**図が 1 つ以上あるページ専用**なので、
+第 5 回の 4 本は入らない。入れると分母が無く panic する — その旨は panic
+メッセージに書いてある。
+
 ## トークン照合 — `ground-truth.json` の宣言トークンは戻るか
 
 **この検査は今まで 1 度もやっていなかった。**`experiments/ocr-verification/fixtures/generated-images/ground-truth.json`
