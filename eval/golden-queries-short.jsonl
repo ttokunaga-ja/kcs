@@ -1,0 +1,24 @@
+{"scenario": "M3-1", "query": "Osprey の精度", "flags": [], "expected": [{"scope": "research", "file": "embedding-benchmark.md", "section": "recall"}]}
+{"scenario": "M3-1", "query": "常駐メモリと次元数", "flags": [], "expected": [{"scope": "research", "file": "embedding-benchmark.md", "section": "throughput"}]}
+{"scenario": "M3-1", "query": "ハイブリッドの p99", "flags": [], "expected": [{"scope": "research", "file": "latency-report.md", "section": "tail"}]}
+{"scenario": "M3-1", "query": "キャッシュのヒット率", "flags": [], "expected": [{"scope": "research", "file": "latency-report.md", "section": "cache"}]}
+{"scenario": "M3-1", "query": "初年度予算と専任", "flags": [], "expected": [{"scope": "notes", "file": "kickoff-2026-04.md", "section": "budget"}]}
+{"scenario": "M3-1", "query": "マイルストーンとベータ", "flags": [], "expected": [{"scope": "notes", "file": "kickoff-2026-04.md", "section": "schedule"}]}
+{"scenario": "M3-1", "query": "スプリントのベロシティ", "flags": [], "expected": [{"scope": "notes", "file": "retrospective-q1.md", "section": "velocity"}]}
+{"scenario": "M3-1", "query": "障害の平均復旧時間", "flags": [], "expected": [{"scope": "notes", "file": "retrospective-q1.md", "section": "incidents"}]}
+{"scenario": "M3-1", "query": "Komodo の QPS", "flags": [], "expected": [{"scope": "downloads", "file": "vector-db-comparison.md", "section": "qps"}]}
+{"scenario": "M3-1", "query": "マネージド価格", "flags": [], "expected": [{"scope": "downloads", "file": "vector-db-comparison.md", "section": "pricing"}]}
+{"scenario": "M3-1", "query": "シャード構成とレプリカ", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-architecture.md", "section": "sharding"}]}
+{"scenario": "M3-1", "query": "トークンの TTL", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-architecture.md", "section": "auth"}]}
+{"scenario": "M3-1", "query": "可用性 SLO の目標", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-slo.md", "section": "availability"}]}
+{"scenario": "M3-1", "query": "API の p95 目標", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-slo.md", "section": "latency"}]}
+{"scenario": "M3-1", "query": "現行スキーマの規模", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-datamodel.md", "section": "schema"}]}
+{"scenario": "M3-1", "query": "監査ログの保持期間", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-datamodel.md", "section": "retention"}]}
+{"scenario": "M3-1", "query": "レート制限とバースト", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-api.md", "section": "ratelimit"}]}
+{"scenario": "M3-1", "query": "ページングの方式", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-api.md", "section": "pagination"}]}
+{"scenario": "M3-1", "query": "RRF の定数 k", "flags": [], "expected": [{"scope": "specs", "file": "search-ranking-spec.md", "section": "rrf"}]}
+{"scenario": "M3-1", "query": "MMR の係数", "flags": [], "expected": [{"scope": "specs", "file": "search-ranking-spec.md", "section": "mmr"}]}
+{"scenario": "M3-1", "query": "チャンクサイズの上限", "flags": [], "expected": [{"scope": "specs", "file": "chunking-spec.md", "section": "size"}]}
+{"scenario": "M3-1", "query": "chunk の同一性", "flags": [], "expected": [{"scope": "specs", "file": "chunking-spec.md", "section": "identity"}]}
+{"scenario": "M3-1", "query": "HNSW の推奨", "flags": [], "expected": [{"scope": "journal", "file": "reading-2026-05.md", "section": "hnsw"}]}
+{"scenario": "M3-1", "query": "再ランクの費用対効果", "flags": [], "expected": [{"scope": "journal", "file": "reading-2026-05.md", "section": "rerank"}]}
