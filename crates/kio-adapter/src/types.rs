@@ -364,6 +364,58 @@ pub struct EmbeddingVector {
     pub vector: Vec<f32>,
 }
 
+/// One candidate offered to a Rerank Adapter (07 §5.6's `candidate_result_ids`
+/// paired with the `candidate_features` the model actually reads).
+///
+/// `result_id` is opaque here on purpose: the adapter reorders identifiers it
+/// never interprets, which is what keeps 07 §5.6's "must not conceal
+/// searched_scopes / fallback_reason" enforceable by the caller rather than
+/// trusted to the adapter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RerankCandidate {
+    pub result_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RerankRequest {
+    pub query: String,
+    pub candidates: Vec<RerankCandidate>,
+    /// How many ranked candidates to return. `None` means all of them.
+    ///
+    /// Worth setting: the measured server echoes each candidate's full text
+    /// back in the response, so an unbounded rerank of 05 §1.3's
+    /// `candidate_depth` = 200 pays for 200 document bodies on the wire it
+    /// already holds in memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RerankedCandidate {
+    pub result_id: String,
+    /// The model's relevance score.
+    ///
+    /// **Not comparable across models, and not a probability.** Measured
+    /// 2026-08-10 (`tasks/gpu-reranker-verification.md` §5.7): `bge-reranker-v2-m3`,
+    /// `ruri-v3-reranker-310m` and `japanese-reranker-cross-encoder-large-v1`
+    /// return values in (0,1), while `japanese-reranker-base-v2` returns an
+    /// unbounded −11.2 … +4.5 and stays unbounded even with `use_activation`
+    /// set. Rank order is preserved in every case. Use this to order; do not
+    /// write an absolute cutoff against it without pinning the model.
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RerankResponse {
+    /// Descending by [`RerankedCandidate::score`].
+    pub ranking: Vec<RerankedCandidate>,
+    /// 07 §5.6's `profile_hash`: the adapter's `tool_profile_hash` at response
+    /// time, so a caller can record which reranker produced an order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_profile_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
     pub vectors: Vec<EmbeddingVector>,

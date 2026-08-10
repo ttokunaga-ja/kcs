@@ -2,7 +2,7 @@
 
 use crate::types::{
     AdapterProfile, EmbeddingRequest, EmbeddingResponse, MarkdownizeRequest, MarkdownizeResponse,
-    PrepareRequest, PrepareResponse,
+    PrepareRequest, PrepareResponse, RerankRequest, RerankResponse,
 };
 use crate::Result;
 
@@ -53,6 +53,26 @@ pub trait EmbeddingAdapter {
     fn preferred_request_kind(&self) -> PreferredRequestKind {
         PreferredRequestKind::Sync
     }
+}
+
+/// 07 §5.6 (optional). Reorders search results and nothing else.
+///
+/// There is no batch method and no lane selector, because the unit of work is
+/// already a batch: one query against one candidate pool. Splitting a pool
+/// across calls would ask a cross-encoder to compare candidates it never saw
+/// together, which is the one thing it exists to do.
+pub trait RerankAdapter {
+    fn profile(&self) -> AdapterProfile;
+
+    /// Returns the candidates in descending relevance.
+    ///
+    /// **Reordering only.** 07 §5.6 forbids a reranker from concealing
+    /// `searched_scopes` / `fallback_reason`, and the trait keeps that
+    /// enforceable by never handing those fields to the adapter: it sees
+    /// opaque `result_id`s, so it has nothing to conceal them with. A caller
+    /// that cannot map every returned id back to a result it supplied should
+    /// treat that as a contract violation rather than reconcile it.
+    fn rerank(&self, request: RerankRequest) -> Result<RerankResponse>;
 }
 
 #[cfg(test)]

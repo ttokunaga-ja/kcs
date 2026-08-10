@@ -11,6 +11,7 @@ mod http_policy;
 pub mod identity;
 mod local_embedding;
 pub mod local_ocr_markdownize;
+pub mod local_rerank;
 mod mistral_ocr;
 pub mod office_convert;
 pub mod pdf_decode;
