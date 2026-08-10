@@ -181,6 +181,25 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                 let byte_start = char_byte_offsets[start];
                 let byte_end = char_byte_offsets[end];
                 let text = unit.markdown[byte_start..byte_end].to_owned();
+                // A span can be non-empty and still carry nothing: a document
+                // that opens with blank lines yields a leading pre-heading
+                // section of `\n\n\n`, which `start >= end` above does not
+                // catch. Measured over the 1,015-document fixture corpus, 20
+                // of 3,004 chunks were exactly that, every one `byte_start` 0
+                // to `byte_end` 3.
+                //
+                // They are not harmless. Such a chunk is indexed, occupies one
+                // of 05 §1.3's `candidate_depth` slots, can never legitimately
+                // match a query, and collects a meaningless score from anything
+                // that ranks it — a reranker scored 36 of them across 24
+                // queries (`tasks/rerank-differential-plan.md` §2.9.3).
+                //
+                // Dropping one shifts nothing: spans come from section ranges
+                // computed independently, and `section_id` numbering is
+                // assigned per section before this loop.
+                if text.trim().is_empty() {
+                    continue;
+                }
                 let mut row = ChunkRow {
                     chunk_id: String::new(),
                     raw_hash: unit.raw_hash.clone(),
@@ -502,6 +521,39 @@ mod tests {
         assert!(!rows
             .iter()
             .any(|row| row.section_id.as_deref() == Some("not-heading")));
+    }
+
+    /// A document that opens with blank lines must not index the blank run.
+    ///
+    /// Measured on the fixture corpus before this guard: 20 of 3,004 chunks
+    /// were exactly `\n\n\n` at span 0-3, and a reranker was handed 36 of
+    /// them across 24 queries. The chunk after them must keep its own span, so
+    /// this also pins that dropping one shifts nothing.
+    #[test]
+    fn a_leading_blank_run_is_not_a_chunk() {
+        let config = default_chunking_config().unwrap();
+        let input = ChunkingInput {
+            raw_path: "a.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "doc:1".to_owned(),
+                markdown: "\n\n\n# H\nbody".to_owned(),
+            }],
+            config,
+            created_at: "2026-07-03T00:00:00Z".to_owned(),
+        };
+        let rows = chunk_normalized_instance(input).unwrap();
+        assert!(
+            rows.iter().all(|row| !row.text.trim().is_empty()),
+            "a content-free chunk was indexed: {:?}",
+            rows.iter()
+                .map(|r| (r.byte_start, r.byte_end, &r.text))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(rows.len(), 1, "only the heading section survives");
+        assert_eq!(rows[0].byte_start, 3, "the surviving span is unshifted");
     }
 
     #[test]
