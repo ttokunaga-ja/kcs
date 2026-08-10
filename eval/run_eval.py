@@ -1002,9 +1002,9 @@ def verify_deleted_restore(bin_path, corpus_dir, history_manifest, deleted_resul
 
 
 def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
-                  out_path, report_path, active):
+                  out_path, report_path, active, recall_target=RECALL_TARGET):
     print("=== eval: kio search 実行 + Recall@10 集計 ===")
-    results = {"target_recall_at_10": RECALL_TARGET, "scenarios": {}, "queries": []}
+    results = {"target_recall_at_10": recall_target, "scenarios": {}, "queries": []}
     per_scenario_scores = {s: [] for s in active}
     per_scenario_latencies = {s: [] for s in active}
     responses_by_scenario = {s: [] for s in active}
@@ -1101,7 +1101,7 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
             "n_queries": sum(1 for q in queries if q["scenario"] == s),
             "n_scored": len(scores),
             "recall_at_10": avg,
-            "passes_target": (avg is not None and avg >= RECALL_TARGET),
+            "passes_target": (avg is not None and avg >= recall_target),
             "p95_ms": p95_ms,
             "latency_target_ms": latency_target_ms,
             "passes_latency": passes_latency_target(s, p95_ms),
@@ -1167,7 +1167,9 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
 def _write_report(path, results, active):
     counts = results.get("counts", {})
     lines = ["# Kio 検索評価レポート (synthetic)", ""]
-    lines.append(f"- 目標: 各シナリオ Recall@10 >= {RECALL_TARGET} (docs/09 §4.3)")
+    lines.append(
+        f"- 目標: 各シナリオ Recall@10 >= "
+        f"{results.get('target_recall_at_10', RECALL_TARGET)} (docs/09 §4.3)")
     lines.append(f"- クエリ数: {counts.get('n_queries', 0)} "
                  f"(scored={counts.get('n_scored', 0)} / "
                  f"failed={counts.get('n_failed', 0)} / "
@@ -1222,6 +1224,8 @@ def main(argv=None):
     ap.add_argument("--report", default=os.path.join(HERE, "report.md"))
     ap.add_argument("--scenario", action="append", choices=SCENARIOS, default=None,
                     help="対象シナリオ (複数指定可。既定は全シナリオ)")
+    ap.add_argument("--min-recall", type=float, default=RECALL_TARGET,
+                    help="Recall@10 の下限 (既定 0.8)。短問ゲートは 22/24 を指定する。")
     ap.add_argument("--dry-run", action="store_true",
                     help="search を叩かず expected の実在 + 解決を検証")
     args = ap.parse_args(argv)
@@ -1275,8 +1279,10 @@ def main(argv=None):
         for problem in replay_problems:
             print(f"[error] {problem}", file=sys.stderr)
         return 1
+    if not 0.0 <= args.min_recall <= 1.0:
+        raise SystemExit("[error] --min-recall は 0.0 から 1.0 の範囲で指定すること。")
     return run_full_eval(queries, resolver, history_manifest, corpus_dir,
-                         bin_path, args.out, args.report, active)
+                         bin_path, args.out, args.report, active, args.min_recall)
 
 
 if __name__ == "__main__":

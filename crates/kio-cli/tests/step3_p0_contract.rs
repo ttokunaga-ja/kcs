@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use assert_cmd::Command;
 use kio_adapter::catalog::{
@@ -127,6 +128,152 @@ fn indexed_scope() -> TempDir {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--approve"]);
     dir
+}
+
+// Ranking needs alternatives. Keep this corpus in the test binary and index it
+// exactly once: the contract is about the order of a realistic candidate pool,
+// not about repeatedly measuring `kio index`.
+struct RankingFixture {
+    dir: TempDir,
+}
+
+static RANKING_FIXTURE: OnceLock<RankingFixture> = OnceLock::new();
+
+fn ranking_fixture() -> &'static RankingFixture {
+    RANKING_FIXTURE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let documents = [
+            ("target-short.md", "# 廃止手続き\n\n管理画面で承認して完了します。\n"),
+            ("target-japanese.md", "# 認証トークンの期限\n\n認証トークンの有効期限は 3,600 秒です。認証トークンの有効期限は 3,600 秒です。\n"),
+            ("target-path.md", "# Token cache\n\n`src/auth/token.rs` `src/auth/token.rs` で TokenCache を更新します。\n"),
+            ("target-mixed.md", "# API v2 認証\n\nAPI v2 認証 API v2 認証は service-token ヘッダーを使います。\n"),
+            ("target-number.md", "# 請求上限\n\n請求上限は 3,600 件です。請求上限は 3,600 件です。\n"),
+            ("legacy-format-v0.md", "# 旧フォーマット v0 仕様\n\n## 廃止バージョン\n\nv0.1.0 は廃止済み。kio_format_version に統一された。\n\n## 廃止フィールド\n\n旧フィールド tree_id / commit_id は廃止された。\n"),
+            ("deprecated-approach.md", "# 廃止した検索手法\n\n## 旧手法\n\n旧手法は TF-IDF、語彙次元は 30,000 だった。\n\n## 結果\n\n旧手法の Recall@10 は 0.52 に留まった。\n"),
+            ("vendor-eval.md", "# ベンダー評価メモ\n\n## コスト評価\n\nベンダー A の年間見積は 320万円 だった。\n\n## SLA 評価\n\n提示 SLA は 99.9%、クレジットは 10%。\n"),
+            ("leaked-draft-pricing.md", "# 価格改定ドラフト (誤取込)\n\n## 旧価格\n\n旧価格は 1,000 トークンあたり 0.30 USD だった。\n\n## 割引\n\n年契約割引は 40% を提示していた。\n"),
+            ("falcon-old-schema.md", "# Falcon 旧スキーマ\n\n## 旧テーブル\n\n旧スキーマは 28 テーブル構成だった。\n\n## 旧インデックス\n\n旧インデックスは B-tree のみで 9 本。\n"),
+            ("kestrel-poc-metrics.md", "# Kestrel PoC 計測\n\n## PoC レイテンシ\n\nPoC の p95 は 1,900ms と遅かった。\n\n## PoC コスト\n\nPoC 期間の月額コストは 68万円 だった。\n"),
+        ];
+        for (name, body) in documents {
+            fs::write(dir.path().join(name), body).unwrap();
+        }
+        for n in 0..30 {
+            let body = format!(
+                "# Filler {n}\n\narchive lantern meadow quartz river signal tapestry umbrella.\n"
+            );
+            fs::write(dir.path().join(format!("filler-{n:02}.md")), body).unwrap();
+        }
+        kio(&dir, &["init"]).assert().success();
+        json_success(&dir, &["index", "--approve"]);
+        RankingFixture { dir }
+    })
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            fs::create_dir(&destination_path).unwrap();
+            fs::set_permissions(
+                &destination_path,
+                fs::metadata(&source_path).unwrap().permissions(),
+            )
+            .unwrap();
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(source_path, destination_path).unwrap();
+        }
+    }
+}
+
+fn ranking_search(query: &str) -> Value {
+    let fixture = ranking_fixture();
+    // Search creates a cursor-signing key in XDG data. Each test gets a copy
+    // of the once-indexed corpus so parallel test threads cannot race on it.
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(fixture.dir.path(), copy.path());
+    json_success(&copy, &["search", query, "--mode", "text", "--limit", "10"])
+}
+
+fn assert_ranked_first(search: &Value, target: &str) {
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        results[0]["evidence_pointer"]["path_at_commit"] == target,
+        "{target} must outrank every distractor: {search}"
+    );
+}
+
+fn result_path(result: &Value) -> &str {
+    result["evidence_pointer"]["path_at_commit"]
+        .as_str()
+        .unwrap()
+}
+
+// Ranking contract layer: each query has deliberately constructed distractors
+// that share its words but do not answer it. These assertions are intentionally
+// top-1 assertions; a mere non-empty result would recreate the old blind spot.
+#[test]
+fn ranking_short_japanese_query_beats_abolition_distractors() {
+    assert_ranked_first(&ranking_search("廃止"), "target-short.md");
+}
+
+#[test]
+fn ranking_natural_japanese_query_beats_token_distractors() {
+    assert_ranked_first(
+        &ranking_search("認証トークンの有効期限は何秒ですか"),
+        "target-japanese.md",
+    );
+}
+
+#[test]
+fn ranking_identifier_path_query_beats_neighboring_source_paths() {
+    assert_ranked_first(&ranking_search("src/auth/token.rs"), "target-path.md");
+}
+
+#[test]
+fn ranking_mixed_script_query_beats_api_operation_distractors() {
+    assert_ranked_first(&ranking_search("API v2 認証"), "target-mixed.md");
+}
+
+#[test]
+fn ranking_grouped_and_ungrouped_numbers_choose_the_same_answer() {
+    let grouped = ranking_search("3,600");
+    let plain = ranking_search("3600");
+    assert_ranked_first(&grouped, "target-number.md");
+    assert_ranked_first(&plain, "target-number.md");
+    assert_eq!(
+        result_path(&grouped["results"][0]),
+        result_path(&plain["results"][0]),
+        "3,600 and 3600 must not select different answers"
+    );
+}
+
+#[test]
+fn ranking_long_legacy_format_query_beats_heterogeneous_one_word_distractors() {
+    let search = ranking_search("廃止した旧フォーマット v0.1.0 の仕様書");
+    // Top-1 alone did not expose the measured word-lane regression: its noisy
+    // candidates could enter below the target. Precision is the contract here.
+    assert_ranked_first(&search, "legacy-format-v0.md");
+    let mut paths = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(result_path)
+        .collect::<Vec<_>>();
+    assert!(
+        paths.iter().all(|path| !path.starts_with("filler-")),
+        "a filler has no query term and must never be retrieved: {search}"
+    );
+    paths.sort_unstable();
+    paths.dedup();
+    assert_eq!(
+        paths.as_slice(),
+        ["legacy-format-v0.md"],
+        "this query's result set must contain only its legacy-format document: {search}"
+    );
 }
 
 // K4 embedding seam helpers: run `kio` with the deterministic adapter mock.
