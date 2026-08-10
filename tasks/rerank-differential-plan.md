@@ -72,6 +72,46 @@ reranker が並べ替える対象が存在しない。reranker は
 
 ---
 
+# 2.5 fixture-B でも落ちた。理由は器ではなく**構成**だった [2026-08-10]
+
+§3 の手順どおり fixture-B を作って密度を数えた。**420 scope、失敗 0、約 30 秒、無料**
+(正規化済みコーパスは支払い済み OCR の出力なので、再度払う必要が無い)。
+
+fixture-B 24 問の候補数:
+
+```
+0 0 0 0 0 0 1 1 2 2 2 4 4 4 6 6 11 13 16 18 18 18 42 100
+```
+
+**10 件を超えるのは 8/24。6 問は 0 件。ゲート不合格。**
+
+## 本当の原因 — offline は text lane しか無い
+
+合成コーパスが特異だから、ではなかった。**offline 実行では
+`fuse_rrf(text_ranks, vector_ranks)` の `vector_ranks` が空**で
+(`fallback_reason: embedding_endpoint_not_configured`)、候補プールは
+FTS が MATCH した分がすべてになる。FTS の MATCH は本質的に疎である。
+
+05 §1.3 の `candidate_depth` = 200 は**ハイブリッド前提の数**であって、
+200 件を用意しているのは vector lane である。ベクトル検索は語彙一致に関係なく
+上位 K 件を返すので、プールを必ず埋める。
+
+したがって:
+
+**reranker は text-only 構成では原理的に評価できない。コーパスを替えても無駄で、
+これは fixture-B と合成コーパスの差ではない。**reranker は「意味的にもっともらしい
+候補が多数あるプール」を精密に並べ替える道具で、そのプールを作るのが vector lane
+だからである。
+
+## 費用の見積り
+
+fixture-B の全 chunk は **3,004 件** (420 scope 合計、実測)。
+1 chunk 400 字とすると約 60 万トークン。`register_fixture.py` が記録している
+**$1.07 は OCR 1,112 行**のぶんで、こちらは OCR 不要 (正規化済みを使うため)、
+**embedding だけ**なので桁がひとつ以上小さい。
+
+---
+
 # 3. 次の一手
 
 **器を fixture-B に替える。**`eval/fixtures/normalized-corpus/corpus/`
