@@ -248,6 +248,24 @@ impl SqliteFtsIndex {
                     }
                 }
             };
+            // The word lane's projection, written as an UPDATE rather than as
+            // another column on the INSERTs above. Two reasons: the INSERT is
+            // shared by the requested-rowid and assigned-rowid branches and
+            // would have to be duplicated under `cfg`, and the UPDATE also
+            // backfills a row that an earlier baseline build inserted, so
+            // turning the feature on and reindexing is enough to fill the lane.
+            // `chunks_word_au` is scoped to `UPDATE OF text_words` so this
+            // never disturbs `chunk_fts`, exactly as `chunks_au`'s
+            // `UPDATE OF text, heading_path` keeps `first_seen_commit` from
+            // disturbing it (04 §4.2).
+            #[cfg(feature = "word-lane")]
+            {
+                let words = crate::word_lane::WordSegmenter::shared()?.project(&indexed_text)?;
+                self.conn.execute(
+                    "UPDATE chunks SET text_words = ?1 WHERE rowid = ?2",
+                    params![words, actual_chunk_rowid],
+                )?;
+            }
             let association_rowid = record_chunk_config_association(
                 &self.conn,
                 &row.chunk_id,
@@ -724,6 +742,58 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
     ))?;
     if migrated_legacy_chunks || !fts_existed {
         conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')", [])?;
+    }
+
+    // 日本語の語レーン (tasks/japanese-word-lane-design.md). The column and the
+    // table exist only in a build that can fill them, and neither direction
+    // needs a schema version to cope: a `word-lane` binary opening an older
+    // database adds both here and leaves `text_words` NULL until the reindex
+    // that a new lane requires anyway, and a baseline binary opening a
+    // `word-lane` database simply never looks at them.
+    //
+    // `unicode61` rather than `trigram` on purpose. The morphological analyzer
+    // has already decided where the words are, so the tokenizer's only job left
+    // is to split on the spaces the projection put there; running trigram over
+    // segmented text would just rebuild the sliding window this lane exists to
+    // avoid. Substring and typo matching stay with `chunk_fts`, which is why
+    // this is a table beside it and not a replacement for it.
+    #[cfg(feature = "word-lane")]
+    {
+        if !table_has_column(conn, "chunks", "text_words")? {
+            conn.execute_batch("ALTER TABLE chunks ADD COLUMN text_words TEXT;")?;
+        }
+        let word_fts_existed = table_exists(conn, "chunk_word_fts")?;
+        conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_word_fts
+            USING fts5(text_words, content='chunks', content_rowid='rowid',
+                       tokenize='unicode61 remove_diacritics 2');
+
+            CREATE TRIGGER IF NOT EXISTS chunks_word_ai AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunk_word_fts(rowid, text_words)
+                VALUES (new.rowid, new.text_words);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_word_ad AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunk_word_fts(chunk_word_fts, rowid, text_words)
+                VALUES ('delete', old.rowid, old.text_words);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS chunks_word_au
+            AFTER UPDATE OF text_words ON chunks BEGIN
+                INSERT INTO chunk_word_fts(chunk_word_fts, rowid, text_words)
+                VALUES ('delete', old.rowid, old.text_words);
+                INSERT INTO chunk_word_fts(rowid, text_words)
+                VALUES (new.rowid, new.text_words);
+            END;
+            "#,
+        )?;
+        if migrated_legacy_chunks || !word_fts_existed {
+            conn.execute(
+                "INSERT INTO chunk_word_fts(chunk_word_fts) VALUES('rebuild')",
+                [],
+            )?;
+        }
     }
 
     // `chunk_vec` is a sqlite-vec `vec0` virtual table (04 §4.3): the KNN
@@ -1656,6 +1726,73 @@ mod tests {
         assert_eq!(indexed_text_of(&fts, "c1"), fenced);
         let hits = fts.search("\"shasum {} \\;\"", 10).unwrap();
         assert_eq!(hits.len(), 1, "code must stay searchable as written");
+        assert_eq!(hits[0].chunk_id, "c1");
+    }
+
+    #[cfg(feature = "word-lane")]
+    fn word_lane_hits(fts: &SqliteFtsIndex, query: &str) -> Vec<String> {
+        let mut statement = fts
+            .conn
+            .prepare(
+                "SELECT c.chunk_id
+                 FROM chunk_word_fts f
+                 JOIN chunks c ON c.rowid = f.rowid
+                 WHERE chunk_word_fts MATCH ?1
+                 ORDER BY rank, c.chunk_id",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map(params![query], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    #[cfg(feature = "word-lane")]
+    #[test]
+    fn w1_the_word_lane_retrieves_by_a_content_word_the_length_rule_discards() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        fts.index_chunk(&row("c1", "\u{671f}\u{9650}\u{306e}\u{78ba}\u{8a8d}\u{3092}\u{3057}\u{305f}\u{8b70}\u{4e8b}\u{9332}"))
+            .unwrap();
+        // The stored projection, recorded rather than endorsed: IPADIC keeps the
+        // two content words the 3-scalar rule discards and drops the particles
+        // it keeps.
+        let projected: String = fts
+            .conn
+            .query_row(
+                "SELECT text_words FROM chunks WHERE chunk_id = 'c1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            projected,
+            "\u{671f}\u{9650} \u{78ba}\u{8a8d} \u{3057} \u{8b70}\u{4e8b} \u{9332}"
+        );
+        // `期限` is two scalars, so `build_query_plan` drops it from a mixed
+        // query outright. In this lane it is a word, and it retrieves.
+        assert_eq!(word_lane_hits(&fts, "\u{671f}\u{9650}"), vec!["c1"]);
+        assert_eq!(word_lane_hits(&fts, "\u{78ba}\u{8a8d}"), vec!["c1"]);
+        // And the particle the length rule keeps is simply not in the lane.
+        assert!(word_lane_hits(&fts, "\u{3092}").is_empty());
+    }
+
+    #[cfg(feature = "word-lane")]
+    #[test]
+    fn w1_the_word_lane_leaves_the_trigram_lane_alone() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        fts.index_chunk(&row("c1", "related_images_min_area_ratio"))
+            .unwrap();
+        // The identifier is one word to a morphological analyzer and a substring
+        // to trigram. The lane split must not cost the substring match, which is
+        // the reason trigram stays rather than being replaced.
+        let hits = fts.search("\"min_area\"", 10).unwrap();
+        assert_eq!(hits.len(), 1, "substring matching must survive the split");
         assert_eq!(hits[0].chunk_id, "c1");
     }
 }

@@ -11,6 +11,9 @@ pub mod registry;
 pub mod rows;
 mod search_projection;
 pub mod vec;
+/// 日本語の語レーン。既定 off の理由はワークスペースの `Cargo.toml` を参照。
+#[cfg(feature = "word-lane")]
+pub mod word_lane;
 
 use rusqlite::Error as SqliteError;
 use thiserror::Error;

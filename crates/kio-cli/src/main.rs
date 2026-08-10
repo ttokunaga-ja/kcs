@@ -3166,6 +3166,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                 idx,
                 ScopeSearchRequest {
                     match_expr: query_plan.match_expr.as_deref(),
+                    word_match_expr: query_plan.word_match_expr.as_deref(),
                     short_tokens: &query_plan.short_tokens,
                     resolved_mode: mode.resolved,
                     query_embedding: scope_query_embedding,
@@ -4142,6 +4143,11 @@ struct ScopeSearchRequest<'a> {
     /// `build_query_plan`), or `None` when every unit is short (PC11's
     /// bounded-LIKE-only fallback, a pure-short query).
     match_expr: Option<&'a str>,
+    /// The word lane's MATCH expression over `chunk_word_fts`, or `None` when
+    /// the lane is compiled out or the query has no content word. Independent
+    /// of `match_expr` in both directions: either may be `Some` while the other
+    /// is `None` (`tasks/japanese-word-lane-design.md`).
+    word_match_expr: Option<&'a str>,
     /// PC11/PC14 (05 §1.3 L95-97, L107-109): applied as
     /// `instr(text, token) > 0` eligibility conditions common to both the
     /// text and vector backends, and to the LIKE fallback's own ORDER BY
@@ -4321,6 +4327,7 @@ fn search_one_scope_inner(
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
     let ScopeSearchRequest {
         match_expr,
+        word_match_expr,
         short_tokens,
         resolved_mode,
         query_embedding,
@@ -4659,6 +4666,7 @@ fn search_one_scope_inner(
         max_association_rowid,
         since_cutoff: history_plan.since_cutoff.as_deref(),
         candidate_depth: rrf_config.candidate_depth,
+        rrf_k: rrf_config.k,
         ancestor_gated,
         short_tokens,
     };
@@ -4668,7 +4676,8 @@ fn search_one_scope_inner(
     let (mut text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
         (Vec::new(), BTreeMap::new())
     } else {
-        fts_scope_search(&conn, match_expr, filter).map_err(ScopeSearchError::Fatal)?
+        fts_scope_search(&conn, match_expr, word_match_expr, filter)
+            .map_err(ScopeSearchError::Fatal)?
     };
     scope_deadline_check(deadline)?;
 
@@ -4875,6 +4884,10 @@ struct ScopeQueryFilter<'a> {
     /// PC15/PC16/PC17: `[search.rrf].candidate_depth`, threaded all the way
     /// to the SQL `LIMIT` instead of a literal `200`.
     candidate_depth: u64,
+    /// `[search.rrf].k`, carried here so [`merge_text_lanes`] can fuse the two
+    /// text lanes with the same constant the outer text/vector fusion uses
+    /// rather than inventing a second knob nobody has measured.
+    rrf_k: u64,
     ancestor_gated: bool,
     /// PC11/PC14: short (< 3 Unicode scalar) tokens, applied as
     /// `instr(text, token) > 0` AND conditions common to both backends —
@@ -5640,12 +5653,101 @@ fn significant_related_images(
 fn fts_scope_search(
     conn: &Connection,
     match_expr: Option<&str>,
+    word_match_expr: Option<&str>,
     filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    match match_expr {
-        Some(match_expr) => execute_fts_tier(conn, match_expr, filter),
-        None => execute_like_fallback(conn, filter),
+    // The trigram lane, or the bounded LIKE scan when no unit reached three
+    // scalars. Unchanged from before the word lane existed, and it stays the
+    // whole answer whenever the word lane has nothing to add — which, with the
+    // feature compiled out, is always.
+    let primary = match match_expr {
+        Some(match_expr) => execute_fts_tier(conn, match_expr, TextLane::Trigram, filter)?,
+        None => execute_like_fallback(conn, filter)?,
+    };
+    let Some(word_match_expr) = word_match_expr else {
+        return Ok(primary);
+    };
+    let (word_ranks, word_meta) = execute_fts_tier(conn, word_match_expr, TextLane::Word, filter)?;
+    if word_ranks.is_empty() {
+        return Ok(primary);
     }
+    let (primary_ranks, mut meta) = primary;
+    meta.extend(word_meta);
+    Ok((merge_text_lanes(&primary_ranks, &word_ranks, filter)?, meta))
+}
+
+/// Which FTS table a text tier ranks over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextLane {
+    /// `chunk_fts` — trigram over the chunk body and its heading path.
+    Trigram,
+    /// `chunk_word_fts` — `unicode61` over the morphologically segmented
+    /// projection (`tasks/japanese-word-lane-design.md`).
+    Word,
+}
+
+impl TextLane {
+    fn table(self) -> &'static str {
+        match self {
+            TextLane::Trigram => "chunk_fts",
+            TextLane::Word => "chunk_word_fts",
+        }
+    }
+
+    /// The BM25 expression, column weights included. `chunk_fts` down-weights
+    /// `heading_path` so a parent heading that propagates to every child chunk
+    /// cannot dominate the body (the K2 ruling); `chunk_word_fts` has a single
+    /// column and so takes no weights at all.
+    fn bm25(self) -> &'static str {
+        match self {
+            TextLane::Trigram => "bm25(chunk_fts, 1.0, 0.3)",
+            TextLane::Word => "bm25(chunk_word_fts, 1.0)",
+        }
+    }
+}
+
+/// Fuse the two text lanes into the single `text_ranks` list the rest of the
+/// pipeline expects.
+///
+/// [`fuse_rrf`]'s parameters are named for the text and vector backends because
+/// those are the two it was written for, but the arithmetic is just reciprocal
+/// rank over two lists, and this is that same operation one level down. Reusing
+/// it here rather than widening it to N lanes keeps 05 §1.3's "text + vector"
+/// contract literally true, and leaves `regrade_vector_rank_globally` and
+/// `give_images_their_chunks_text_rank` — both written against one `text_ranks`
+/// — working unchanged.
+fn merge_text_lanes(
+    primary: &[BackendRank],
+    word: &[BackendRank],
+    filter: ScopeQueryFilter<'_>,
+) -> Result<Vec<BackendRank>> {
+    if primary.is_empty() {
+        return Ok(word.to_vec());
+    }
+    let fused = fuse_rrf(
+        primary,
+        word,
+        RrfConfig {
+            k: filter.rrf_k,
+            // Neither lane is the senior one. Trigram carries substrings,
+            // identifiers and typos; the word lane carries the content words
+            // that are too short to survive the length rule. A weight here
+            // would be a claim about which matters more, and nothing has been
+            // measured that would support one.
+            w_text: 1.0,
+            w_vector: 1.0,
+            candidate_depth: filter.candidate_depth,
+        },
+    )
+    .map_err(|err| KioError::schema(err.to_string()))?;
+    Ok(fused
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| BackendRank {
+            chunk_hash: candidate.chunk_hash.clone(),
+            rank: index as u64 + 1,
+        })
+        .collect())
 }
 
 /// One FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the
@@ -5672,6 +5774,7 @@ fn fts_scope_search(
 fn execute_fts_tier(
     conn: &Connection,
     match_expr: &str,
+    lane: TextLane,
     filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     // PC12/PC13: short-token `instr` eligibility (`short_token_clause`) is
@@ -5690,9 +5793,9 @@ fn execute_fts_tier(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                 c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
          FROM (
-             SELECT rowid AS chunk_rowid, bm25(chunk_fts, 1.0, 0.3) AS score
-             FROM chunk_fts
-             WHERE chunk_fts MATCH ?
+             SELECT rowid AS chunk_rowid, {bm25_expr} AS score
+             FROM {fts_table}
+             WHERE {fts_table} MATCH ?
              ORDER BY score
              LIMIT ?
          ) AS ranked
@@ -5716,6 +5819,8 @@ fn execute_fts_tier(
              {ancestor_clause}
              {short_token_clause}
          ORDER BY ranked.score, c.chunk_id",
+        bm25_expr = lane.bm25(),
+        fts_table = lane.table(),
         config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
         ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
         short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
@@ -6504,6 +6609,13 @@ struct QueryPlan {
     /// construction means every original token was short too, since no
     /// segmented piece can be longer than its own token).
     match_expr: Option<String>,
+    /// The word lane's OR-joined MATCH expression over `chunk_word_fts`
+    /// (`tasks/japanese-word-lane-design.md`), or `None` when the lane is
+    /// compiled out or nothing survives part-of-speech filtering. Independent
+    /// of `match_expr`: it is built for a pure-short query too, because the
+    /// two-scalar content words the length rule discards are exactly what this
+    /// lane can rank. See [`build_word_match_expr`].
+    word_match_expr: Option<String>,
     /// The bounded-LIKE `instr` eligibility set (PC11/PC14). **Empty** for a
     /// MIXED query (>= 1 long unit): 05 §1.3's 2026-07-22 feedback #2 drops
     /// every short unit outright rather than AND-filtering candidates on it
@@ -6828,6 +6940,7 @@ fn token_equivalence_forms(token: &str) -> Vec<String> {
 ///   ordering is unaffected).
 fn build_query_plan(query_nfc: &str) -> QueryPlan {
     let tokens = query_tokens(query_nfc);
+    let word_match_expr = build_word_match_expr(query_nfc);
 
     let mut units: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -6867,6 +6980,7 @@ fn build_query_plan(query_nfc: &str) -> QueryPlan {
         }
         return QueryPlan {
             match_expr: None,
+            word_match_expr,
             short_tokens: deduped_tokens,
         };
     }
@@ -6881,10 +6995,39 @@ fn build_query_plan(query_nfc: &str) -> QueryPlan {
     );
     QueryPlan {
         match_expr,
+        word_match_expr,
         // Mixed query: short units are fully discarded (see doc comment
         // above) — never fed to the AND-instr eligibility predicate.
         short_tokens: Vec::new(),
     }
+}
+
+/// The word lane's MATCH expression, or `None` when the lane is compiled out or
+/// nothing survives part-of-speech filtering.
+///
+/// Built for a PURE-SHORT query too, and deliberately so. `期限` is two Unicode
+/// scalars, so `match_expr` above is `None` for it and the trigram side can only
+/// answer through PC11's bounded LIKE scan. To a morphological analyzer it is a
+/// word, and this lane can rank it — which is the same inversion the lane exists
+/// for, showing up at the other end of the length rule.
+#[cfg(feature = "word-lane")]
+fn build_word_match_expr(query_nfc: &str) -> Option<String> {
+    // A dictionary that fails to load must not fail the search: the lane is an
+    // addition to retrieval, so its absence is a reason to rank with one lane
+    // instead of two, never a reason to refuse the query.
+    let segmenter = kio_index::word_lane::WordSegmenter::shared().ok()?;
+    let projected = segmenter.project(query_nfc).ok()?;
+    let units: Vec<String> = projected
+        .split(' ')
+        .filter(|unit| !unit.is_empty())
+        .map(quote_fts_phrase)
+        .collect();
+    (!units.is_empty()).then(|| units.join(" OR "))
+}
+
+#[cfg(not(feature = "word-lane"))]
+fn build_word_match_expr(_query_nfc: &str) -> Option<String> {
+    None
 }
 
 fn scope_selection_from_cursor(mode: ScopeMode) -> ScopeSelectionMode {

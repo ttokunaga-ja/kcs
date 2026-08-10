@@ -9,6 +9,12 @@ license-file.workspace = true
 name = "kio"
 path = "src/main.rs"
 
+[features]
+# 日本語の語レーン。既定 off の理由はワークスペースの Cargo.toml を参照。
+# 索引側と query 側は同じ分割でなければ何も引けないので、片方だけを有効に
+# できないよう kio-index の同名 feature へ素通しにする。
+word-lane = ["kio-index/word-lane"]
+
 [dependencies]
 cap-primitives = "3.4.5"
 clap.workspace = true
