@@ -105,11 +105,51 @@ POST 先の URL とパス
 
 ---
 
-# 3. 環境メモ
+# 3. 環境メモ (2026-08-06 / 08-09 実測)
 
-- **Chrome Remote Desktop 経由だと修飾キーが落ちる。**コピー & ペーストが効かない場面が
-  あるので、長いコマンドはファイルに書いてから実行するほうが速い
-- WSL2 の場合、`nvidia-smi` が WSL 側から見えることを先に確認する
+**この機の状態は判っている。探し直さないこと。**
+
+| | |
+|---|---|
+| GPU | RTX 4060、**8188 MiB**。idle (P8) で ~894 MiB 使用済み → **空きは ~7.3 GB** |
+| OS | Windows 11 + WSL2、user `RM2C` |
+| CUDA | driver KMD 610.88 / WSL 610.57.01、UMD 13.3。`/usr/lib/wsl/lib` に `libcuda.so` 一式あり、WSL からの CUDA compute は動く |
+
+## リポジトリの場所
+
+**`/mnt/c/users/rm2c/dev/github.com/ttokunaga-ja/kio`** — Windows 側の
+ファイルシステムにあり、WSL からは `/mnt/c` 越しに見える。
+
+**`/home/rm2c` は空である。**そこだけ見て「リポジトリが無い」と判断しないこと。
+`origin` は SSH で、WSL からの pull は動く (鍵は配置済み)。
+
+## 入っていないもの
+
+- **`pip3` が無い** (`python3` / `git` / `curl` はある)
+- **Docker Desktop は動いているが WSL integration が off**
+- vLLM も PaddleOCR-VL も未インストール
+
+serving を立てる前に、この 3 つのどれを使うかを先に決めること。
+
+## Rust はビルドできない
+
+application control policy が、cargo が `target\` に書く未署名の
+`build-script-build` の**実行**を拒否する (**os error 4551**)。`--release` だけでなく
+debug でも、msvc でも gnu でも同じ。コンパイル自体は通り、実行だけが止まる。
+解除は管理者権限が要る。詳細は `tasks/windows-realmachine-verification.md`。
+
+**したがってこの機で `kio` バイナリは動かせない。**候補 chunk を `kio search` で
+作ることはできないので、**§1.3 の入力は `eval/fixtures/normalized-corpus/corpus/`
+のテキストを直接読んで作ること** (p01〜p20 に 1,015 文書ぶんの正規化済み本文がある)。
+**コンパイルを伴う手順を計画しないこと。**
+
+## 操作経路
+
+この機は **Claude Code がネイティブに動いている**ので、実行はそのエージェントが行う。
+人が Chrome Remote Desktop で介入する場合のみ注意: **CRD は修飾キーを一切送らない。**
+Shift が落ちるので `_` は `-` になり、大文字と `|` `:` `"` `~` が打てない。Ctrl も
+落ちるので **Ctrl+C で止められない** (`nvidia-smi -L` が `-l` になり、ウィンドウを
+閉じるしか止める手が無かった実績がある)。長いコマンドはファイルに書いてから実行する。
 
 ---
 
@@ -124,3 +164,14 @@ POST 先の URL とパス
 
 揃わなかった項目は「揃わなかった」と書いてよい。**推測で埋めないこと** —
 埋まっていない項目があるほうが、間違った値が入っているより遥かに扱いやすい。
+
+## 報告の経路
+
+**この機と Mac の間にネットワーク経路は無い** (ping 100% loss、TCP 22/445 とも
+*No route to host*。SSH も CRD のクリップボードも経路にならない)。**受け渡しは git だけ。**
+
+このファイルの末尾に `# 5. 実測結果` を足して書き、commit して push すること。
+JSON は要約せず**実物をそのまま**貼る。Adapter を書くのはそれを読んでからで、
+書くのは Mac 側である。
+
+冒頭の **状態** 行を `実施済み [日付]` に更新すること。
