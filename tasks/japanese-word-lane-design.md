@@ -1,17 +1,31 @@
 # 日本語の語レーン — 設計
 
-**状態: 実装済み (`word-lane` feature、既定 off)。** [2026-08-10]
+> **状態: 実装は revert 済み。この文書は設計の記録として残す。** [2026-08-10]
+>
+> 実装 (`57850f0`) は測定の結果、席に値しないと判断して差し戻した。短いクエリでの
+> 効果は**測定上ゼロ** (0.9167 → 0.9167、外した 2 問も同一) で、既存 50 問では
+> **M3-2 / M3-3 が 1.000 → 0.938 に悪化**した (改善は 0 件)。数字と原因は
+> **[tasks/word-lane-measurement.md](word-lane-measurement.md)** にある。
+>
+> **下の設計が誤りだと示されたわけではない。**示されたのは、合成コーパスでは
+> 真偽を問えないということ (anchor が固有名詞を必ず持ち、length rule は
+> カタカナも ASCII も落とさないので、漢字の内容語が落ちても文書が一意に決まる)。
+> 再考するなら実文書コーパスに移った後で、そこで短問 recall の伸びしろが
+> 実測できたときに限る。実装は `git show 57850f0` から復元できる。
+>
+> ただし §4.1 の「RRF の継ぎ目が既にある」を**利点として数えた判断は誤りだった**。
+> 等重み RRF は、精度の低いレーンに精度の高いレーンを引きずり下ろす権利を与える。
 
 trigram は**廃止しない**。語単位の第 2 レーンを**足す**。この文書は、どの実装を採るか
 と、なぜ他を落としたかを、実測とともに記録する。
 
-| | |
+| | 差し戻し前の位置 |
 |---|---|
 | 分かち書き | `crates/kio-index/src/word_lane.rs` |
 | schema | `chunks.text_words` + `chunk_word_fts` (`fts.rs` の `ensure_schema_on_connection`) |
 | query 側 | `build_word_match_expr` / `merge_text_lanes` / `TextLane` (`kio-cli/src/main.rs`) |
 | 契約 | `crates/kio-cli/tests/word_lane_contract.rs` |
-| 正本 | [docs/04-pipeline.md §4.2.1](../docs/04-pipeline.md) |
+| 正本 | docs/04-pipeline.md §4.2.1 |
 
 ---
 

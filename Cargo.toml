@@ -45,15 +45,3 @@ windows-sys = { version = "0.61.2", features = ["Wdk_Storage_FileSystem", "Win32
 # crate, so cc-rs fails). 0.1.6 compiles cleanly against bundled rusqlite 0.32
 # and provides the `vec0` module used by `chunk_vec` (04 §4.3).
 sqlite-vec = "=0.1.6"
-# 日本語の語レーン (tasks/japanese-word-lane-design.md): 05 §1.3 の「3 文字未満は
-# 落とす」は機能語を長さで代理しており、日本語では `期限` / `確認` (内容語 2 文字) を
-# 落として `をした` (助詞+助動詞 3 文字) を残す。品詞で落とせばこれが直る。
-# `lindera` core だけを使う — `lindera-analysis` の YAML チェーンも `lindera-sqlite`
-# の C ABI / LINDERA_CONFIG_PATH も要らず、`Segmenter::segment` と `Token::details`
-# で足りる。`embed-ipadic` は辞書をバイナリに埋め込むので実行時 DL はなく、09 §1 の
-# 「API キーなしで init→index→search→open が成立」は保たれる。
-#
-# 既定 off の feature 越しにのみ有効にする: `lindera-ipadic` の build.rs は辞書を
-# ビルド時に第三者ホスト (Lindera.dev) から取得し md5 で照合する。この blob は
-# Cargo.lock の整合性集合の外にあるので、ベースラインのビルドをその信頼境界には載せない。
-lindera = { version = "5.0.2", default-features = false, features = ["embed-ipadic"] }

@@ -523,37 +523,6 @@ END;
 
 **Tokenizer**: デフォルト `trigram` (CJK 対応)。英文中心の場合のみ `unicode61 remove_diacritics 2` を選択可。`.kio/config.toml [search.fts]` で切替 (tokenizer は上記のとおり CREATE 文に固定で埋まるため、切替は FTS の再構築を伴う)。
 
-### 4.2.1 語レーン `chunk_word_fts` (`word-lane` feature、既定 off)
-
-形態素解析で分かち書きした派生列に対する **第 2 の text レーン**。trigram の
-**代替ではなく併走**であり、部分一致・typo・識別子 (`related_images_min_area_ratio`) は
-trigram の担当のまま。設計と採否の根拠は
-[tasks/japanese-word-lane-design.md](../tasks/japanese-word-lane-design.md)。
-
-```sql
-ALTER TABLE chunks ADD COLUMN text_words TEXT;   -- 分かち書き済みの派生投影
-
-CREATE VIRTUAL TABLE chunk_word_fts USING fts5(
-  text_words,
-  content='chunks',
-  content_rowid='rowid',
-  tokenize='unicode61 remove_diacritics 2'       -- 語境界は解析器が決めた。
-);                                               -- ここは空白で割るだけでよい
-```
-
-trigger は `chunk_fts` と同型で、`chunks_word_au` は **`UPDATE OF text_words`** に限定する
-(`chunks_au` が `UPDATE OF text, heading_path` に限定されているのと同じ理由 — 一方の
-レーンの書き込みが他方の FTS を書き直さないため)。
-
-**この列は派生投影であり、同一性には決して入らない。**分かち書きは辞書のバージョンに
-依存するので、`chunk_hash` / `text_hash` / `byte_start`/`byte_end` に混ぜると、辞書更新が
-07 §9 の first-instance-wins が凍結した同一性を静かに変えてしまう。辞書が変わったときの
-答えは **再索引**であって、同一性の変更ではない。
-
-**融合は 2 レーンのまま。**trigram と語はどちらも text バックエンドなので、先に RRF で
-束ねて 1 本の `text_ranks` にしてから vector と融合する ([05 §1.3](05-runtime.md) の
-「text + vector」はそのまま)。`fuse_rrf` の署名は変えない。
-
 ## 4.3 embeddings (sqlite-vec + metadata)
 
 本節が `embeddings` / `chunk_vec` の **schema 正本** である ([07-adapter-spec.md §5.3](07-adapter-spec.md) は profile — モデル / 次元 / 距離 / modality — の正本)。
