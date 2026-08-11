@@ -331,7 +331,7 @@ schema 変更規約に従う)。
 ### 不変条件 (cache vs truth)
 
 ```text
-1. scope_registry / aggregator のみを更新して `.kio` の状態が変わる実装は禁止。
+1. scope_registry / aggregator のみを更新して `.kio` の状態が変わる実装は禁止。**反映順序は「各 scope の索引 → aggregator」** — 逆順は検索に出るのに開けない結果を作る (2026-08-11、05-runtime.md §1.8)。
 2. scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。**「欠損中も動作」は要求しない** — 正しい挙動は次の検索が全射影をやり直すことである (03-data-model.md §4 不変条件 2)。
 3. `.kio` 喪失は復旧不能 (registry・aggregator には正本データがない)。
 4. 検索結果メタには「正本の `.kio` パス」を必ず含める。

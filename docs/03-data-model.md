@@ -285,7 +285,11 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
 不変条件:
 
 ```
-1. scope_registry / aggregator のみで .kio の状態を変える実装は禁止
+1. scope_registry / aggregator のみで .kio の状態を変える実装は禁止。
+   **反映順序は必ず「各 scope の索引 → aggregator」とする (2026-08-11)** —
+   逆順は「検索に出るのに開けない結果」を作る。検索は aggregator しか
+   読まないので、replica の先行はそのまま利用者に見える (05 §1.8
+   「書き込み順序」)
 2. scope_registry / aggregator 喪失は再構築可能 (各 .kio を rescan)。
    **「再構築可能」であって「欠損中も動作」ではない** (2026-08-11 明確化) —
    aggregator を失った検索の正しい挙動は、次の検索が全射影をやり直して
