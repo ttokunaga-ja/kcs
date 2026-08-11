@@ -974,6 +974,25 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 ## 12.5 semver / 互換性 promise
 
+### 未公開の間は後方互換の分岐を書かない (2026-08-11 確定)
+
+**Kio は未リリースであり、外部に既存 store は存在しない。**したがって
+「本規則の導入以前に作られたデータ」を特別扱いする分岐を、仕様にも実装にも**置かない**。
+該当するのは開発機の store だけであり、それは `kio reindex --regenerate` か作り直しで足りる。
+
+この規約が禁じるのは**後方**互換の分岐だけである。次は禁止対象ではない:
+
+- **前方**互換 — 自己の対応上限より新しい `kio_format_version` の store を read-only で縮退させる規則。
+  これは未来の版が書いた store を今の binary が読む話であり、公開前後を問わず必要
+- **移植性** — Windows で物理化できない名前、digest-only 物理名など。旧データではなく OS 差の吸収
+- **Unicode 正規化** — NFC / case folding。世代とは無関係
+
+除去対象の一覧と進捗は [tasks/pre-release-legacy-removal.md](../tasks/pre-release-legacy-removal.md)。
+**公開後に初めて後方互換を設計する** — 存在しないユーザーのために分岐を先に書くと、
+resolver・fsck・restore の 3 箇所に恒久的な条件分岐が残り、そのどれもテストされない。
+
+---
+
 Kio が公開する識別子は次のいずれかの semver 軸を持つ。
 
 ```text
