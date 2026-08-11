@@ -84,6 +84,28 @@ fn json_failure(dir: &TempDir, args: &[&str], code: i32) -> Value {
     serde_json::from_slice(&output).unwrap()
 }
 
+/// 05 §1.7.2 / §4.2 (2026-08-11): `kio view --json` stopped returning a
+/// `text` field -- it resolves to a full-text normalized view path plus a
+/// view-local byte span instead. This is the only way left to recover
+/// chunk-adjacent text from `view`'s JSON, and exercising it (read the file,
+/// slice by the reported offsets) is what actually proves the unit-local ->
+/// view-local offset translation is correct, unlike a plain field-content
+/// assertion on the old `text` field ever did.
+fn view_slice(viewed: &Value) -> String {
+    let view_path = viewed["view_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("view_path must be a resolvable path: {viewed}"));
+    let start = viewed["view_byte_start"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}")) as usize;
+    let end = viewed["view_byte_end"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}")) as usize;
+    let bytes = fs::read(view_path)
+        .unwrap_or_else(|err| panic!("failed to read view_path {view_path}: {err}"));
+    String::from_utf8(bytes[start..end].to_vec()).unwrap()
+}
+
 fn json_success_path(path: &Path, data_home: &Path, args: &[&str]) -> Value {
     let output = hermetic_kio_command()
         .current_dir(path)
@@ -665,7 +687,7 @@ fn ct3_open_004_view_returns_chunk_text_without_regeneration() {
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let uri = first_result(&search)["evidence_uri"].as_str().unwrap();
     let viewed = json_success(&dir, &["view", uri]);
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 }
 
 // R11-9: `view --json` must expose the same `temporary` field as `open --json`,
@@ -686,6 +708,131 @@ fn r11_9_view_json_exposes_temporary_field() {
     fs::remove_file(dir.path().join("auth.md")).unwrap();
     let viewed_temp = json_success(&dir, &["view", &uri]);
     assert_eq!(viewed_temp["temporary"], true);
+}
+
+// 05 §1.7.2 / §4.2 (2026-08-11) acceptance requirement: a chunk sitting in the
+// FIRST unit of a view can pass its offset translation even with the header
+// length forgotten entirely, or the "\n\n" join width miscounted, purely by
+// accident -- there is nothing accumulated before it for such a bug to get
+// wrong. A chunk in a LATER unit is the only fixture shape that actually
+// forces `view`'s offset math to accumulate across a prior unit's content, so
+// this indexes a two-page PDF (each page becomes its own normalized unit,
+// `ct2_pdf_001` in step2_p0_contract.rs) and resolves a chunk that only
+// exists on page 2.
+#[test]
+fn view_offset_translation_is_correct_for_a_chunk_past_the_first_unit() {
+    use kio_core::cas::ObjectStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&[
+            "pageonefirstunique filler content, not the search target",
+            "pagetwosecondunique marker content for view offset translation",
+        ]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    let search = json_success(&dir, &["search", "pagetwosecondunique"]);
+    let result = first_result(&search);
+    let chunk_hash = result["chunk_hash"].as_str().unwrap().to_owned();
+    let uri = result["evidence_uri"].as_str().unwrap().to_owned();
+
+    // Confirm the fixture actually landed the hit on the SECOND unit -- the
+    // precondition this test exists to cover -- checked directly against the
+    // chunk's own CAS object rather than merely inferred from ranking.
+    let kio_dir = dir.path().join(".kio");
+    let chunk = ObjectStore::new(&kio_dir).read_chunk(&chunk_hash).unwrap();
+    assert_eq!(
+        chunk.unit_key, "page:2",
+        "fixture must resolve to the second unit for this test to mean anything: {chunk:?}"
+    );
+
+    let viewed = json_success(&dir, &["view", &uri]);
+    let view_path = viewed["view_path"].as_str().unwrap();
+    let start = viewed["view_byte_start"].as_u64().unwrap() as usize;
+    let end = viewed["view_byte_end"].as_u64().unwrap() as usize;
+    let text = fs::read_to_string(view_path).unwrap();
+
+    assert!(
+        text[start..end].contains("pagetwosecondunique"),
+        "chunk did not slice to its own content: {:?}",
+        &text[start..end]
+    );
+    // The discriminating check: everything BEFORE the resolved span must
+    // contain page 1's ENTIRE content. A layout bug that reports every
+    // unit's start as just the header length (correct only for the FIRST
+    // unit) would place `start` too early here and truncate page 1 out of
+    // this prefix.
+    assert!(
+        text[..start].contains("pageonefirstunique filler content, not the search target"),
+        "view_byte_start did not skip over the first unit's full content: {:?}",
+        &text[..start]
+    );
+    // And the page-2 marker must not itself leak into the prefix -- otherwise
+    // `start` could be sitting anywhere inside page 1 and still pass the
+    // loose "contains" check above.
+    assert!(!text[..start].contains("pagetwosecondunique"));
+}
+
+// 05 §1.7.2 / §4.2 (2026-08-11): when the normalized instance a chunk's view
+// is assembled from cannot be read (GC'd, purged, or otherwise gone), `view`
+// must still resolve the pointer -- the chunk and the raw document are
+// independent CAS objects -- but degrade `view_path`/`view_byte_start`/
+// `view_byte_end` to null, the same posture as `commit_shallow`/
+// `manifest_missing`. There is no Step 3 GC command to drive this through, so
+// this hand-places the precondition directly (removing the normalized
+// instance directory `load_validated_normalized_instance` reads), the same
+// style `ct3_evidence_005_shallow_commit_resolves_directly` already uses to
+// simulate a GC'd tree object.
+#[test]
+fn view_degrades_view_fields_to_null_when_the_normalized_instance_is_unreadable() {
+    use kio_core::cas::ObjectStore;
+    use kio_pipeline::markdownize::normalized_instance_dir;
+
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let result = first_result(&search);
+    let pointer = result["evidence_pointer"].clone();
+    let chunk_hash = result["chunk_hash"].as_str().unwrap().to_owned();
+    let kio_dir = dir.path().join(".kio");
+
+    let chunk = ObjectStore::new(&kio_dir).read_chunk(&chunk_hash).unwrap();
+    let instance_dir = normalized_instance_dir(
+        &kio_dir,
+        &chunk.raw_hash,
+        &chunk.tool_profile_hash,
+        chunk.gen,
+    );
+    assert!(
+        instance_dir.is_dir(),
+        "fixture precondition: {instance_dir:?}"
+    );
+    fs::remove_dir_all(&instance_dir).unwrap();
+
+    let ptr = pointer.to_string();
+    let viewed = json_success(&dir, &["view", &ptr]);
+    assert_eq!(viewed["status"], "viewed", "{viewed}");
+    assert!(
+        viewed["path"].as_str().is_some(),
+        "the raw document must still resolve independently of the view cache: {viewed}"
+    );
+    assert!(viewed["view_path"].is_null(), "{viewed}");
+    assert!(viewed["view_byte_start"].is_null(), "{viewed}");
+    assert!(viewed["view_byte_end"].is_null(), "{viewed}");
+    // Not conflated with the pre-existing degradation axes: this scope's
+    // commit still has its tree, and the tree-entry manifest binding is
+    // untouched by deleting the *working* normalized instance directory.
+    assert_eq!(viewed["commit_shallow"], false, "{viewed}");
+    assert_eq!(viewed["manifest_missing"], false, "{viewed}");
+
+    // open shares `resolve_pointer_for_cli` but never touches the view --
+    // 08 §3.1's raw resolution must be completely unaffected.
+    let opened = json_success(&dir, &["open", &ptr]);
+    assert_eq!(opened["status"], "opened", "{opened}");
+    assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
 }
 
 #[test]
@@ -892,7 +1039,7 @@ fn ct3_uri_003_inline_json_pointer_is_accepted_by_view() {
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let pointer = first_result(&search)["evidence_pointer"].to_string();
     let viewed = json_success(&dir, &["view", &pointer]);
-    assert!(viewed["text"].as_str().unwrap().contains("3600"));
+    assert!(view_slice(&viewed).contains("3600"));
 }
 
 // CT3-URI-003 (gap fill): the `<pointer>` receiver has 5 prefix branches
@@ -916,7 +1063,7 @@ fn ct3_uri_003_stdin_dash_prefix_is_accepted_by_view() {
         .stdout
         .clone();
     let viewed: Value = serde_json::from_slice(&output).unwrap();
-    assert!(viewed["text"].as_str().unwrap().contains("3600"));
+    assert!(view_slice(&viewed).contains("3600"));
 }
 
 #[test]
@@ -947,7 +1094,7 @@ fn ct3_reindex_002_existing_pointer_still_resolves_old_chunk_after_reindex() {
         .to_owned();
     json_success(&dir, &["reindex", "--regenerate", "--yes"]);
     let viewed = json_success(&dir, &["view", &uri]);
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 }
 
 #[test]
@@ -2862,7 +3009,7 @@ fn ct3_evidence_003_scope_resolves_via_path_then_registry() {
     //     cwd with an empty registry so *only* stage 1a (scope_path) can succeed.
     let (code, viewed) = run_json(&elsewhere, &data_home, &["view", &pointer.to_string()]);
     assert_eq!(code, 0, "scope_path stage failed: {viewed}");
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 
     // (b) broken scope_path -> registry lookup by scope_id resolves. Register the
     //     scope directly (index-time registry wiring is Agent A's; §3.1 permits
@@ -2882,7 +3029,7 @@ fn ct3_evidence_003_scope_resolves_via_path_then_registry() {
     broken["scope_path"] = serde_json::json!(parent.path().join("gone/.kio").display().to_string());
     let (code, viewed) = run_json(&elsewhere, &data_home, &["view", &broken.to_string()]);
     assert_eq!(code, 0, "registry stage failed: {viewed}");
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 
     // (c) broken scope_path + unknown scope_id + registry miss -> scope_unreachable.
     // QB1: scope_unreachable is retryable, exit 3 (not the dead-pointer exit 4).
@@ -2927,7 +3074,7 @@ fn ct3_evidence_004_resolves_through_pointer_commit_tree() {
     // walks pointer.commit's tree, not HEAD's.
     let (code, viewed) = run_json(&scope, &data_home, &["view", &p_auth.to_string()]);
     assert_eq!(code, 0, "old-commit pointer stopped resolving: {viewed}");
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 
     // Discriminator: ranking.md's raw_hash exists in the working tree, in CAS,
     // and in commit2's tree — but NOT in commit1's tree. Pointing p_rank at
@@ -2991,7 +3138,7 @@ fn ct3_evidence_005_shallow_commit_resolves_directly() {
     let ptr = pointer.to_string();
     let viewed = json_success(&dir, &["view", &ptr]);
     assert_eq!(viewed["commit_shallow"], true);
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 
     let opened = json_success(&dir, &["open", &ptr]);
     assert_eq!(opened["commit_shallow"], true);
@@ -3585,10 +3732,8 @@ fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
         .unwrap()
         .to_owned();
     // Sanity: resolves before the snapshot.
-    assert!(json_success(&dir, &["view", &chunk_hash])["text"]
-        .as_str()
-        .unwrap()
-        .contains("3600"));
+    let sanity = json_success(&dir, &["view", &chunk_hash]);
+    assert!(view_slice(&sanity).contains("3600"));
     // Advance HEAD via a bare snapshot (proves it is not a no-op).
     let snap = json_success(&dir, &["snapshot", "-m", "advance"]);
     assert_eq!(
@@ -3598,7 +3743,7 @@ fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
     // L3: the same short-hash view still resolves.
     let viewed = json_success(&dir, &["view", &chunk_hash]);
     assert!(
-        viewed["text"].as_str().unwrap().contains("3600"),
+        view_slice(&viewed).contains("3600"),
         "short-hash view must survive a bare snapshot (L3): {viewed}"
     );
 }
@@ -3645,10 +3790,14 @@ fn ct3_l4_embedding_without_own_optin_is_enqueue_only() {
 // + acceptance scenarios (b)-(f) and the two previously-untested error codes).
 // ===========================================================================
 
-// M2 + acceptance (b): `kio view` without --json prints the chunk BODY, not just
-// the "viewed" status line.
+// M2, superseded by 05 §1.7.2 (2026-08-11): `kio view` stopped returning chunk
+// body text altogether -- JSON or not -- in favor of a full-text view path +
+// span (the caller reads the body itself, from the path). Non --json `view`
+// therefore has no body left to print and falls through to the same bare
+// status line `open` already prints (`print_output` has no `text` field to
+// special-case for a pointer resolution anymore); it must NOT leak the body.
 #[test]
-fn m2_view_non_json_prints_chunk_body() {
+fn m2_view_non_json_no_longer_prints_chunk_body() {
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let uri = first_result(&search)["evidence_uri"]
@@ -3663,10 +3812,21 @@ fn m2_view_non_json_prints_chunk_body() {
         .clone();
     let text = String::from_utf8(stdout).unwrap();
     assert!(
-        text.contains("トークン TTL"),
-        "view (non --json) must print the body, got: {text}"
+        !text.contains("トークン TTL"),
+        "view (non --json) must no longer leak the body, got: {text}"
     );
-    assert_ne!(text.trim(), "viewed");
+    // The path IS the output (05 §1.7.2): a bare "viewed" would leave a
+    // non --json caller with nothing to open, so the printed line must be a
+    // readable full-text view path.
+    let printed = text.trim();
+    assert_ne!(
+        printed, "viewed",
+        "non --json view must print the view path, not a bare status: {text}"
+    );
+    assert!(
+        printed.ends_with(".md") && fs::read_to_string(printed).is_ok(),
+        "non --json view must print a readable normalized-view path, got: {text}"
+    );
 }
 
 // M3 + acceptance (c): a raw_hash short form for a normal multi-heading file
@@ -3698,7 +3858,7 @@ fn m3_short_chunk_hash_view_resolves_chunk() {
         .unwrap()
         .to_owned();
     let viewed = json_success(&dir, &["view", &chunk_hash]);
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
 }
 
 // M4 + acceptance (d): a scope whose sqlite.db is corrupt (garbage bytes, which
@@ -3786,10 +3946,10 @@ fn m5_repeated_view_via_cas_cache_is_idempotent() {
     fs::remove_file(dir.path().join("auth.md")).unwrap();
 
     let first = json_success(&dir, &["view", &uri]);
-    assert!(first["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&first).contains("トークン TTL"));
     // The second view previously failed with EACCES (fs::copy onto read-only cache).
     let second = json_success(&dir, &["view", &uri]);
-    assert!(second["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&second).contains("トークン TTL"));
     // open twice as well.
     let opened1 = json_success(&dir, &["open", &uri]);
     assert_eq!(opened1["temporary"], true);
@@ -3820,7 +3980,7 @@ fn m6_tampered_pointer_identity_mismatch_is_rejected() {
     assert_eq!(err["error_code"], "KIO-E-EVIDENCE-POINTER-INVALID-001");
     // The unmodified pointer still resolves (no over-rejection of valid pointers).
     let ok = json_success(&dir, &["view", &pointer_a.to_string()]);
-    assert!(ok["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&ok).contains("トークン TTL"));
 }
 
 // M7: an `object` URI dispatches to the CORRECT CAS type directory. An image
@@ -4219,7 +4379,7 @@ fn n5_pointer_rejects_generation_mixing_after_reindex() {
         "generation-mixing pointer must be rejected (N5)"
     );
     let ok = json_success(&dir, &["view", &old_pointer.to_string()]);
-    assert!(ok["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&ok).contains("トークン TTL"));
 }
 
 // (f) / N7: a single-shot `--online` drives embedding enrichment (previously only
@@ -7191,7 +7351,7 @@ fn r17_1_forged_commit_pointer_rejected_while_true_shallow_resolves() {
         viewed["commit_shallow"], true,
         "a genuine shallow commit must still resolve directly: {viewed}"
     );
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    assert!(view_slice(&viewed).contains("トークン TTL"));
     let opened = json_success(&dir2, &["open", &pointer2.to_string()]);
     assert_eq!(
         opened["commit_shallow"], true,

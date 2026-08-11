@@ -1555,6 +1555,19 @@ kio view <path> --at <commit>
 
 過去 commit 時点の Markdown を再生成せず、当該 commit の object をそのまま返す (re-Markdownize しない)。unit の完成状態・列挙は、当該 commit の tree entry `normalize.manifest_hash` が指す **manifest object** ([03-data-model.md §2.1](03-data-model.md)) で確定する — same-gen partial retry で作業コピー manifest.json が進んでいても、表示は commit 時点の manifest に従う。
 
+**過去版に専用の経路は無い (2026-08-11 確定)。**全文 view のパスは
+`(raw_hash, tool_profile_hash, gen)` だけで決まり ([03-data-model.md §2.1](03-data-model.md))、
+**commit は入らない**。過去版は内容が違うので別の `raw_hash` を持ち、したがって
+別の view パスを持つ — それだけである。`--at` の役割は「**どの `raw_hash` のことか**」を
+指す解決手段にすぎず、解決した後の出力は §1.7.2 と同一である:
+
+| 指定 | 解決 | 出力 |
+|---|---|---|
+| `kio view <pointer>` | pointer が `raw_hash` を持つ | 全文 view のパス + view-local span |
+| `kio view <path> --at <commit>` | path@commit → manifest object → `raw_hash` | 同上 |
+
+したがって「過去版閲覧」という別モードを実装しない。`--at` は前段の解決に閉じる。
+
 # 5. プロセスモデル (常駐なし)
 
 Kio は **常駐 daemon を持たない**。すべての処理は CLI コマンドのプロセス内で完結する。

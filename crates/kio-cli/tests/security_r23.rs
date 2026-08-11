@@ -80,6 +80,24 @@ fn json_failure(cwd: &Path, xdg: &Path, args: &[&str], code: i32) -> Value {
     serde_json::from_slice(&output).unwrap()
 }
 
+/// 05 §1.7.2 / §4.2 (2026-08-11): `kio view --json` no longer returns a
+/// `text` field -- recover chunk-adjacent text the same way any other caller
+/// must: read `view_path` and slice it to `[view_byte_start, view_byte_end)`.
+fn view_slice(viewed: &Value) -> String {
+    let view_path = viewed["view_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("view_path must be a resolvable path: {viewed}"));
+    let start = viewed["view_byte_start"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}")) as usize;
+    let end = viewed["view_byte_end"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}")) as usize;
+    let bytes = fs::read(view_path)
+        .unwrap_or_else(|err| panic!("failed to read view_path {view_path}: {err}"));
+    String::from_utf8(bytes[start..end].to_vec()).unwrap()
+}
+
 fn init_scope(root: &Path, xdg: &Path) {
     json_success(root, xdg, &["init"]);
 }
@@ -116,10 +134,7 @@ fn cand_069_inline_pointer_rejects_malformed_hash_before_resolution() {
 
     let control = json_success(&scope, &xdg, &["view", &pointer.to_string()]);
     assert!(
-        control["text"]
-            .as_str()
-            .unwrap()
-            .contains("alphaunique evidence text"),
+        view_slice(&control).contains("alphaunique evidence text"),
         "valid inline pointer must still resolve: {control}"
     );
 

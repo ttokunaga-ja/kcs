@@ -469,7 +469,7 @@ Agent は `evidence_pointer` を保存し、後続のセッションで以下を
 
 ```
 - kio evidence verify <pointer>     生存確認
-- kio view <pointer>                該当 chunk の Markdown 取得
+- kio view <pointer>                全文 view のパス + view-local span (05 §1.7.2)
 - kio open <pointer>                原本ファイルを OS で開く
 - kio evidence retarget <pointer>   最新版への切り替え (要承認)
 ```

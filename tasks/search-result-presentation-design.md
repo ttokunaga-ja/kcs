@@ -134,16 +134,31 @@
 - **初期スクロール位置は該当チャンクが画面中央**
 - ハイライトなし、フラット表示
 
-## 3.2 いま無いもの
+## 3.2 いま無いもの [2026-08-11 訂正]
 
-**全文を返す口が存在しない。**
+> **初版は「全文を返す口が存在しない。ここが実装の最初の対象」と書いた。誤り。**
+> 全文 view は `objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md` に
+> **既に実体があり**、`normalized_view_path` / `read_normalized_view_at` も既にある。
+> **本文を返す新 API は作らない** — パスを返し、リンク先を表示する。
 
-- `kio open <pointer>` → **元ファイルのパスだけ**
+不足しているのは口ではなく**オフセットの変換**である。
+
+- `kio open <pointer>` → **原本**のパス (これは正しい。変更しない)
 - `kio view <pointer>` → **チャンク本文だけ**
-  (`crates/kio-cli/src/main.rs` の `let text = chunk.text;`)
+  (`crates/kio-cli/src/main.rs` の `let text = chunk.text;`) — **ここを削除**し、
+  全文 view のパス + view-local span を返す
 
-チャンク分割の入力になった markdown は存在するので取り出せるはずだが、
-**経路が無い。ここが実装の最初の対象。**
+**罠:** chunk の `byte_start` / `byte_end` は unit-local であり
+([03-data-model.md §2.1](../docs/03-data-model.md) 組み立て規則 5)、
+view にはヘッダコメントと unit 間の `"\n\n"` 結合が入る。
+**pointer の span をそのまま view のオフセットに使うとずれる。**
+変換は `kio view` が行い、クライアントに組み立て規則を再実装させない
+([05-runtime.md §1.7.2](../docs/05-runtime.md))。
+
+**過去版 (`--at`) に専用経路は要らない。**view のパスは
+`(raw_hash, tool_profile_hash, gen)` だけで決まり commit は入らないので、
+`--at` は「どの `raw_hash` か」を指す解決手段にすぎない
+([05-runtime.md §4.2](../docs/05-runtime.md))。
 
 ## 3.3 検索応答に全文を載せない理由 (決定事項)
 
@@ -255,7 +270,7 @@ rrf_score = w_text/(k+text_rank) + w_vector/(k+vector_rank) + w_rerank/(k+rerank
 
 # 6. 実装順序と、決まっていないことの一覧
 
-1. **正規化済み markdown 全体を返す口** (§3.2) — 他の全部の前提
+1. **`kio view` が view のパス + view-local span を返す** (§3.2) — 他の全部の前提
 2. **結果の文書単位集約** (§1.2) — `--limit` の意味が「チャンク N 件」から
    「文書 N 件」に変わる。`--offset` / `--cursor` の境界も文書単位になる。
    `max_per_raw_hash = 3` は意味が変わる (削除ではなく、変わったことを記録)

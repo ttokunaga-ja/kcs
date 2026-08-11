@@ -74,7 +74,7 @@ kio log [--at <commit>] [--since <dur>]
 kio diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kio search "<query>" [options]          # 詳細 §3
 kio open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く。解決規則は §1.1
-kio view <pointer|path> [--at <commit>]
+kio view <pointer|path> [--at <commit>]  # 全文 view のパス + view-local span を返す (05 §1.7.2)。本文は返さない
 kio inspect <hash>                      # object を JSON で表示
 kio restore <evidence|path|commit> --to <dir> [--force] # 詳細 §5
 kio export <scope> --to <bundle.kioz>   # Phase 4+ (§10)

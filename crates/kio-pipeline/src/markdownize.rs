@@ -1243,39 +1243,82 @@ fn atomic_overwrite_store_file(kio_dir: &Path, relative: &Path, bytes: &[u8]) ->
     Ok(())
 }
 
+/// The full-text normalized view (03 §2.1), plus a byte-accurate map of where
+/// each unit's content landed inside it. `kio view` (05 §1.7.2 / §4.2) needs
+/// this to translate a chunk's unit-local `byte_start`/`byte_end` into a
+/// view-local span: the view prefixes a header comment and joins units with
+/// `"\n\n"`, so the unit-local offset alone is never the right offset into
+/// `text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedViewLayout {
+    pub text: String,
+    /// Byte offset of each unit's content within `text`, keyed by unit_key.
+    pub unit_starts: BTreeMap<String, usize>,
+    /// Byte length of each unit's content as it appears in `text` (post-trim
+    /// for a `Done` unit; the fixed `KIO-MISSING-UNIT` comment length for a
+    /// `Failed` one).
+    pub unit_lens: BTreeMap<String, usize>,
+}
+
+/// Single source of truth for the view assembly rule (03 §2.1 rule 1-5): both
+/// the assembled text and the per-unit offsets into it come from this one
+/// pass, so they cannot drift apart the way two independent implementations
+/// of the same rule could.
 #[must_use]
-pub fn build_normalized_view(
+pub fn build_normalized_view_layout(
     manifest: &NormalizedInstanceManifest,
     units: &[NormalizedUnitObject],
-) -> String {
+) -> NormalizedViewLayout {
     let by_key = units
         .iter()
         .map(|unit| (unit.unit_key.as_str(), unit))
         .collect::<BTreeMap<_, _>>();
     let mut parts = Vec::new();
     for entry in &manifest.units {
-        match entry.status {
-            UnitStatus::Done => {
-                let markdown = by_key
-                    .get(entry.unit_key.as_str())
-                    .map(|unit| unit.markdown.trim_end_matches('\n').to_owned())
-                    .unwrap_or_default();
-                parts.push(markdown);
-            }
-            UnitStatus::Failed => parts.push(format!(
+        let part = match entry.status {
+            UnitStatus::Done => by_key
+                .get(entry.unit_key.as_str())
+                .map(|unit| unit.markdown.trim_end_matches('\n').to_owned())
+                .unwrap_or_default(),
+            UnitStatus::Failed => format!(
                 "<!-- KIO-MISSING-UNIT {} {} -->",
                 entry.unit_key,
                 entry.error_kind.as_deref().unwrap_or("unknown")
-            )),
-        }
+            ),
+        };
+        parts.push((entry.unit_key.as_str(), part));
     }
-    format!(
-        "<!-- KIO-NORMALIZED-VIEW raw_hash={} tool_profile_hash={} gen={} -->\n{}\n",
-        manifest.raw_hash,
-        manifest.tool_profile_hash,
-        manifest.gen,
-        parts.join("\n\n")
-    )
+
+    let mut text = format!(
+        "<!-- KIO-NORMALIZED-VIEW raw_hash={} tool_profile_hash={} gen={} -->\n",
+        manifest.raw_hash, manifest.tool_profile_hash, manifest.gen,
+    );
+    let mut unit_starts = BTreeMap::new();
+    let mut unit_lens = BTreeMap::new();
+    for (index, (unit_key, part)) in parts.iter().enumerate() {
+        if index > 0 {
+            text.push_str("\n\n");
+        }
+        let start = text.len();
+        text.push_str(part);
+        unit_starts.insert((*unit_key).to_owned(), start);
+        unit_lens.insert((*unit_key).to_owned(), part.len());
+    }
+    text.push('\n');
+
+    NormalizedViewLayout {
+        text,
+        unit_starts,
+        unit_lens,
+    }
+}
+
+#[must_use]
+pub fn build_normalized_view(
+    manifest: &NormalizedInstanceManifest,
+    units: &[NormalizedUnitObject],
+) -> String {
+    build_normalized_view_layout(manifest, units).text
 }
 
 #[must_use]
@@ -1618,6 +1661,112 @@ mod tests {
         assert!(!dir.to_string_lossy().contains(':'));
         let view = normalized_view_path(".kio", "sha256:ab", "sha256:tool", 0);
         assert!(!view.to_string_lossy().contains(':'));
+    }
+
+    /// 05 §1.7.2 / §4.2 (2026-08-11): `kio view` translates a chunk's
+    /// unit-local `byte_start`/`byte_end` into a view-local span using
+    /// `unit_starts`/`unit_lens`. This is the regression lock on that offset
+    /// math: three units (the 2nd `Failed`, so both view-assembly branches of
+    /// 03 §2.1 rule 2/3 are exercised), one of them carrying trailing
+    /// newlines that must be trimmed out of both the assembled text AND the
+    /// reported length. Slicing `text` at each reported `(start, len)` must
+    /// land exactly on that unit's own content — get the header length wrong,
+    /// or the `"\n\n"` join width wrong, or forget the trim, and at least one
+    /// of these slices stops matching, so this goes RED.
+    #[test]
+    fn build_normalized_view_layout_offsets_locate_each_units_content() {
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_profile_hash = format!("sha256:{}", "b".repeat(64));
+        let prepared_hash = format!("sha256:{}", "c".repeat(64));
+        let manifest = NormalizedInstanceManifest {
+            raw_hash: raw_hash.clone(),
+            tool_profile_hash: tool_profile_hash.clone(),
+            gen: 3,
+            parent_gen: None,
+            run_id: "run_layout_test".to_owned(),
+            units: vec![
+                NormalizedUnitManifestEntry {
+                    order: 0,
+                    unit_key: "page:1".to_owned(),
+                    unit_ref: prepared_unit_ref("page:1"),
+                    unit_type: UnitType::Page,
+                    status: UnitStatus::Done,
+                    prepared_hash: prepared_hash.clone(),
+                    error_kind: None,
+                },
+                NormalizedUnitManifestEntry {
+                    order: 1,
+                    unit_key: "page:2".to_owned(),
+                    unit_ref: prepared_unit_ref("page:2"),
+                    unit_type: UnitType::Page,
+                    status: UnitStatus::Failed,
+                    prepared_hash: prepared_hash.clone(),
+                    error_kind: Some("invalid_input".to_owned()),
+                },
+                NormalizedUnitManifestEntry {
+                    order: 2,
+                    unit_key: "page:3".to_owned(),
+                    unit_ref: prepared_unit_ref("page:3"),
+                    unit_type: UnitType::Page,
+                    status: UnitStatus::Done,
+                    prepared_hash: prepared_hash.clone(),
+                    error_kind: None,
+                },
+            ],
+            generated_at: "2026-08-11T00:00:00Z".to_owned(),
+        };
+        // page:1's markdown carries trailing newlines on purpose (03 §2.1 rule 2
+        // trims them); page:2 has no unit object at all (status = Failed, so its
+        // part comes entirely from the manifest's error_kind, rule 3).
+        let units = vec![
+            NormalizedUnitObject {
+                unit_key: "page:1".to_owned(),
+                unit_type: UnitType::Page,
+                raw_hash: raw_hash.clone(),
+                prepared_hash: prepared_hash.clone(),
+                tool_profile_hash: tool_profile_hash.clone(),
+                gen: 3,
+                mode: MarkdownizeMode::Full,
+                markdown: "first unit body\n\n".to_owned(),
+                metadata: BTreeMap::new(),
+                reused_from: None,
+                generated_at: "2026-08-11T00:00:00Z".to_owned(),
+            },
+            NormalizedUnitObject {
+                unit_key: "page:3".to_owned(),
+                unit_type: UnitType::Page,
+                raw_hash: raw_hash.clone(),
+                prepared_hash: prepared_hash.clone(),
+                tool_profile_hash: tool_profile_hash.clone(),
+                gen: 3,
+                mode: MarkdownizeMode::Full,
+                markdown: "third unit body".to_owned(),
+                metadata: BTreeMap::new(),
+                reused_from: None,
+                generated_at: "2026-08-11T00:00:00Z".to_owned(),
+            },
+        ];
+
+        let layout = build_normalized_view_layout(&manifest, &units);
+
+        // One assembly rule, not two: the layout's own text must be
+        // byte-identical to the plain string builder's output.
+        assert_eq!(layout.text, build_normalized_view(&manifest, &units));
+
+        for (unit_key, expected) in [
+            ("page:1", "first unit body"),
+            ("page:2", "<!-- KIO-MISSING-UNIT page:2 invalid_input -->"),
+            ("page:3", "third unit body"),
+        ] {
+            let start = layout.unit_starts[unit_key];
+            let len = layout.unit_lens[unit_key];
+            assert_eq!(
+                &layout.text[start..start + len],
+                expected,
+                "unit {unit_key} did not slice back to its own content: {:?}",
+                layout.text
+            );
+        }
     }
 
     #[test]

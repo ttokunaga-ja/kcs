@@ -90,10 +90,11 @@ use kio_pipeline::ledger::{
     TaskKey as LedgerTaskKey,
 };
 use kio_pipeline::markdownize::{
-    choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
-    validate_markdownize_response, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
-    MarkdownizeMode, NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject,
-    UnitStatus, ValidatedNormalizedInstance,
+    build_normalized_view_layout, choose_markdownize_mode, load_validated_normalized_instance,
+    normalized_view_path, persist_normalized_instance, validate_markdownize_response,
+    IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
+    NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
+    ValidatedNormalizedInstance,
 };
 use kio_pipeline::prepare::{
     hash_bytes, map_units, pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
@@ -7006,7 +7007,12 @@ fn run_view(args: PointerArgs) -> Result<Value> {
         "status": "viewed",
         "raw_hash": pointer.raw_hash,
         "chunk_hash": pointer.chunk_hash,
-        "text": resolved.text.unwrap_or_default(),
+        // 05 §1.7.2 / §4.2 (2026-08-11): `view` returns the full-text
+        // normalized view's path plus the chunk's view-local span, not the
+        // chunk body — null when the view's backing cache cannot be read.
+        "view_path": resolved.view_path,
+        "view_byte_start": resolved.view_byte_start,
+        "view_byte_end": resolved.view_byte_end,
         "path": resolved.path,
         // R11-9: mirror `kio open --json`, which exposes `temporary` from the same
         // resolved pointer — `view` resolves identically and Agents branch on it.
@@ -9810,7 +9816,15 @@ fn atomic_overwrite_file(path: &Path, bytes: &[u8]) -> Result<()> {
 /// with the exit-4 codes from 08 §3.2 / §4.
 struct PointerResolution {
     path: Option<PathBuf>,
-    text: Option<String>,
+    /// 05 §1.7.2 / §4.2 (2026-08-11): the full-text normalized view's path
+    /// and the chunk's span translated into that view's byte offsets. `None`
+    /// when the backing normalized instance cannot be read (GC'd, purged,
+    /// or otherwise unavailable) — a cache-read failure degrades the view
+    /// fields to null rather than failing the whole pointer resolution, the
+    /// same posture as `commit_shallow`/`manifest_missing` below.
+    view_path: Option<PathBuf>,
+    view_byte_start: Option<u64>,
+    view_byte_end: Option<u64>,
     temporary: bool,
     commit_shallow: bool,
     /// PB48/50 (08 §3.1 procedure 6b): set only on a non-shallow resolution
@@ -9995,7 +10009,10 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
                     "status": "viewed",
                     "raw_hash": pointer.raw_hash,
                     "chunk_hash": pointer.chunk_hash,
-                    "text": resolved.text.unwrap_or_default(),
+                    // 05 §1.7.2 / §4.2 (2026-08-11): see `run_view`'s matching fields.
+                    "view_path": resolved.view_path,
+                    "view_byte_start": resolved.view_byte_start,
+                    "view_byte_end": resolved.view_byte_end,
                     "path": resolved.path,
                     "commit_shallow": resolved.commit_shallow,
                     "manifest_missing": resolved.manifest_missing,
@@ -10393,6 +10410,44 @@ fn point_in_time_index_rebuilding_error() -> KioError {
     )
 }
 
+/// 05 §1.7.2 / §4.2 (2026-08-11): translate a resolved chunk's unit-local
+/// `byte_start`/`byte_end` (03 §8.1) into a byte span within the full-text
+/// normalized view assembled from `(chunk.raw_hash, chunk.tool_profile_hash,
+/// chunk.gen)`. Returns `None` when that normalized instance cannot be read
+/// (GC'd, purged, or otherwise unavailable) so the caller can degrade the
+/// view fields to null instead of failing pointer resolution outright — the
+/// chunk and its raw document are independently resolvable CAS objects, and
+/// the view is only a rebuildable cache over them (03 §2.1).
+fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u64, u64)> {
+    let instance = load_validated_normalized_instance(
+        kio_dir,
+        &chunk.raw_hash,
+        &chunk.tool_profile_hash,
+        chunk.gen,
+    )
+    .ok()?;
+    let layout = build_normalized_view_layout(&instance.manifest, &instance.units);
+    let unit_start = *layout.unit_starts.get(chunk.unit_key.as_str())?;
+    let unit_len = *layout.unit_lens.get(chunk.unit_key.as_str())?;
+    // The chunk's byte_end can run past the trimmed unit length: chunk spans
+    // are cut from the untrimmed `unit.markdown` (03 §8.1) and can include the
+    // trailing newlines the view assembly trims off (03 §2.1 rule 2) — clamp
+    // so the view span never reaches past the unit's actual content in `text`.
+    // Clamp BOTH ends, not just `byte_end`: a chunk indexed before the
+    // content-free-chunk guard can start inside the trailing newline run the
+    // view assembly trims away, and an unclamped `byte_start` would then
+    // report `start > end` — an out-of-order span a client would slice with.
+    let view_start = unit_start as u64 + chunk.byte_start.min(unit_len as u64);
+    let view_end = unit_start as u64 + chunk.byte_end.min(unit_len as u64);
+    let view_path = normalized_view_path(
+        kio_dir,
+        &chunk.raw_hash,
+        &chunk.tool_profile_hash,
+        chunk.gen,
+    );
+    Some((view_path, view_start, view_end))
+}
+
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
     // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
@@ -10599,7 +10654,11 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             }
         }
     }
-    let text = chunk.text;
+    let (view_path, view_byte_start, view_byte_end) =
+        match resolve_chunk_view(&target.kio_dir, &chunk) {
+            Some((path, start, end)) => (Some(path), Some(start), Some(end)),
+            None => (None, None, None),
+        };
 
     // Raw object resolution: working tree first (rename-tolerant), else CAS
     // read-only expansion. Absent from both with no tombstone -> not_found.
@@ -10623,7 +10682,9 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             }
             Ok(PointerResolution {
                 path: Some(path),
-                text: Some(text),
+                view_path,
+                view_byte_start,
+                view_byte_end,
                 temporary,
                 commit_shallow,
                 manifest_missing,
@@ -24073,11 +24134,20 @@ fn print_output(value: Value, json_mode: bool) {
         return;
     }
 
-    // M2: `kio view` (non --json) must print the chunk body, not just the
-    // "viewed" status. When the payload carries a `text` field (view / chunk
-    // object resolution), print the body — that is the point of `view`.
+    // M2, narrowed by 05 §1.7.2 (2026-08-11): an Evidence Pointer `view`
+    // resolution no longer carries a `text` field at all — it resolves to a
+    // view path + span instead of the chunk body. This branch still fires for
+    // the `object/chunk/<hash>` URI resolution path (`resolve_object_uri`),
+    // which returns the CAS chunk object's own `text` verbatim — that case
+    // still prints the body.
     if let Some(text) = value.get("text").and_then(Value::as_str) {
         println!("{}", terminal_safe_text(text, true));
+    } else if let Some(view_path) = value.get("view_path").and_then(Value::as_str) {
+        // 05 §1.7.2: the path IS `view`'s output, so print it. Falling through
+        // to the bare "viewed" status would leave a non-`--json` caller with
+        // nothing to open. `open` legitimately prints only its status because
+        // it has already acted on the file; `view` has no such side effect.
+        println!("{}", terminal_safe_text(view_path, false));
     } else if let Some(status) = value.get("status").and_then(Value::as_str) {
         println!("{}", terminal_safe_text(status, false));
     } else if let Some(commits) = value.get("commits").and_then(Value::as_array) {
