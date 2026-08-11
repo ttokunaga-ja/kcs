@@ -974,10 +974,25 @@ folder ごとが再び別 collection になり、この replica が消した per
 | replica への射影 (refresh) | 各 scope の `.kio/index/sqlite.db` |
 | scope 内の索引構築・`kio repair` 等の保守 | 同上 |
 
-**`.kio/index/sqlite.db` は検索面ではない。**[03-data-model.md §4.1](03-data-model.md) が
-これを **cache** に分類しているとおり、それは当該 scope が自分のために維持する派生索引であり、
-chunk の正本は `chunks.jsonl` と object store の側にある。**同じ問いに答える派生索引を
-2 つ持てば、答えが経路によって変わる。**scope が 1 つでも 2 つでも、検索が読む索引は 1 つとする。
+**`.kio/index/sqlite.db` は検索面ではない。****同じ問いに答える派生索引を 2 つ持てば、
+答えが経路によって変わる。**scope が 1 つでも 2 つでも、検索が読む索引は 1 つとする。
+
+#### では per-scope の索引は何のためにあるか — replication の複製元である
+
+検索が読まないからといって不要ではない。**aggregator から見れば、per-scope の
+`.kio/index/sqlite.db` が複製元 (正本) である。**射影 (refresh) はこれを読む。
+
+**そしてこれが `.kio` の中にあることが、フォルダの可搬性を成立させている (2026-08-11 記録)。**
+フォルダごと別の場所・別の device へ移すと索引も一緒に動くので、移動先の aggregator は
+**`chunks.jsonl` と object store からの再導出ではなく、射影だけ**で当該 scope を取り込める。
+`.kio` が自己完結していることの実利がここに出る — [01-positioning.md §7](01-positioning.md) の
+「データ・所有権・権限の正本は各フォルダ直下の `.kio` に閉じる」を、検索索引の側から支えている。
+
+**区分は `cache` のままである** ([03-data-model.md §4.1](03-data-model.md))。
+`kio repair rebuild-db` が `chunks.jsonl` + object store から再構築できるためで、
+**「aggregator にとっての複製元」と「`.kio` の中では再構築可能な派生物」は両立する。**
+移動時に索引が失われても復旧不能にはならず、移動先で rebuild が要るだけである
+(射影より遅いが、失敗ではない)。
 
 1 scope を例外にしない理由は 3 つある:
 
