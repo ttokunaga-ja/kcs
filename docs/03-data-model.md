@@ -286,7 +286,11 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
 
 ```
 1. scope_registry / aggregator のみで .kio の状態を変える実装は禁止
-2. scope_registry / aggregator 喪失は再構築可能 (各 .kio を rescan)
+2. scope_registry / aggregator 喪失は再構築可能 (各 .kio を rescan)。
+   **「再構築可能」であって「欠損中も動作」ではない** (2026-08-11 明確化) —
+   aggregator を失った検索の正しい挙動は、次の検索が全射影をやり直して
+   数秒かかること (実測 428 scope で 2.3 秒) であり、第 2 の検索実装を
+   持つことではない。この読み違えが scatter-gather 経路を存置させていた
 3. .kio 喪失は復旧不能 (検証とバックアップの運用は 10-operations.md §7.5)
 4. 検索結果メタには「正本の .kio パス」を必ず含める
 5. raw object の所有権・dedup は scope_registry でグローバル化しない

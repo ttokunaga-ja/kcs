@@ -332,13 +332,13 @@ schema 変更規約に従う)。
 
 ```text
 1. scope_registry / aggregator のみを更新して `.kio` の状態が変わる実装は禁止。
-2. scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。
+2. scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。**「欠損中も動作」は要求しない** — 正しい挙動は次の検索が全射影をやり直すことである (03-data-model.md §4 不変条件 2)。
 3. `.kio` 喪失は復旧不能 (registry・aggregator には正本データがない)。
 4. 検索結果メタには「正本の `.kio` パス」を必ず含める。
 5. raw object の所有権・dedup は scope_registry でグローバル化しない。
    各 `.kio/objects` 内に閉じる (横断 dedup を諦めた帰結。03-data-model.md §3)。
 6. aggregator は安全性判定の最終権限を持たない (05-runtime.md §1.8 手順 3)。
-7. aggregator は liveness 判定を再実装しない (解決済みの集合だけを複製する)。
+7. aggregator は liveness 判定を再実装しない (解決済みの答えだけを複製する)。**射影の範囲は live + 過去の全 chunk** であり、生存で絞るのは `WHERE` 句である (2026-08-11 — 03-data-model.md §4 不変条件 7)。
 8. 権限の書き込みは常に `.kio` へ。aggregator は投影のみ。
 ```
 

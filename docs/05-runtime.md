@@ -433,7 +433,8 @@ commit/evidence restore は ancestry walk を必要としない。
 
 `aggregator` は §1.8 の replica 経路がどう解決されたかを示す (`applied` / `fallback_reason` /
 `collection_generation`)。どの段が採点したかが機械可読でないと順位品質の劣化を検出できないため、
-scatter-gather へ委譲した場合も含めて常に返す (正本 §1.8)。
+1 scope 検索 (`applied = false`) も含めて常に返す (正本 §1.8)。**`fallback_reason` は 2026-08-11 に
+`aggregator` object から削除した** — 多 scope 検索は必ず replica が採点するため、委譲の理由が存在しない。
 
 **成功応答 (exit 0) の `error_code` は縮退原因の機械可読分類であり、失敗判定には使わない** — 失敗判定は exit code (非 0) が正 ([06-cli-spec.md §7](06-cli-spec.md)。上例は vector 未承認の text fallback で、`results` は有効な結果である)。`evidence_pointer` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の schema を **そのまま** 埋め込む。root (`.kio`) の信頼は `evidence_pointer.scope_id` を正とし、`results[].scope_path` は解決を高速化する表示・ヒント用の絶対パスである (truth vs cache の不変条件。解決手順は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
@@ -650,7 +651,9 @@ Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 
 **実行モデルは replication である (2026-07-25 変更)。** 全 scope の chunk (live + 過去 — 2026-08-11) を device-level の
 read replica (`aggregator.sqlite` — [03-data-model.md §4](03-data-model.md)) へ複製し、**単一コーパスの上で
 1 回採点する**。従前の scatter-gather (scope ごとに独立クエリ → per-scope 順位で RRF マージ) は
-**fallback として残す**が既定経路ではない。
+**2026-08-11 に廃止した** (下記「aggregator が答える条件」)。多 scope 検索の経路は replica 1 本である。
+1 scope 検索は replica を通さず当該 scope の `sqlite.db` を直接引く — コーパスが 1 つしかないので
+replication する対象が無く、これは委譲ではない。
 
 変更理由は採点の正しさである。`.kio` ごとに独立した index は `.kio` ごとに独立した BM25 コーパスを
 意味し、コーパス統計 (N / df / avgdl) が index ごとに異なるため **text 順位は scope 間で比較不能**である。
@@ -850,25 +853,35 @@ replay 中の cursor を退役させなければならない。そして **repli
    かといって毎回全 scope を開けば replication の意味が無い。**候補を出した scope だけ検証する**ので、
    コストは `O(結果ページの distinct scope 数)` であり scope 総数に依存しない
 
-#### 候補選択の所在 — 段階的移行 (2026-07-25 時点)
+#### 候補選択の所在 — replica (未実装、2026-08-11 に方針確定)
 
-**現行実装では、候補の選択と materialize は依然 per-scope 経路が行う。** replica は手順 2 の採点と
-手順 1 の統計だけを担い、候補を返さない。手順 3 (purge barrier の返却直前再確認) は per-scope 経路が
-`ReadBarrierCheckpoint` として**既に独立に実装している** — open / scope 返却直前の recheck /
-全 scope マージ後の第 3 バリアの 3 点。版検査 (`Repository::open_for_search`) と `INDEX_REBUILDING`
-判定は、手順 3 ではなく**候補生成前の入口ガード**である (2026-08-11 に手順 3 を 1 点へ縮小した際に
-用語を整理した。それ以前は 3 者を手順 3 の (a)(b)(c) として並べていたが、**返却直前に 3 点を
-確認する実装は存在したことがない**)。
+**多 scope 検索の候補選択・materialize・採点はすべて replica が行う** ([03-data-model.md §4](03-data-model.md)
+不変条件 7)。per-scope 経路を多 scope 検索から呼んではならない。
 
-replica が候補選択を担う次段階では、手順 3 を **replica 経路の側に持たせる**必要がある — 現在の
-実装は per-scope 経路のコードパスに埋まっており、aggregator が候補を返す仕組み自体がまだ無い
-(`crates/kio-index/src/aggregator.rs` — `agg_chunks` は順位に要る列しか持たず、raw_hash や
-byte span を持たない)。同時に、
-per-scope の `candidate_depth` 打ち切りが解消される — 現行は各 scope の上位 candidate_depth 件しか
-融合に届かず、その打ち切りは**per-scope 順位で**行われるため、chunk 数が candidate_depth を超える scope
-では corpus 全体では上位に来る chunk が自 scope 内順位で落ちうる。**scope 数に比例する検索レイテンシ
+**この節は仕様であって現状ではない。**2026-08-11 時点の実装は候補の選択と materialize を
+依然 per-scope 経路が行っており、replica は手順 2 の採点と手順 1 の統計だけを担って候補を返さない。
+**未実装であることを、この見出しに明記し続けること** — 01/03/10/docs README は目標像を
+無条件に書いており、実装状況を留保しているのはこの節だけである。実装が追いついた時点で
+この段落ごと削除する。
+
+実装に必要なもの (この 5 つが揃うまで per-scope 経路は消せない):
+
+| # | 内容 |
+|---|---|
+| 1 | `agg_chunks` に**生存区間**の列 (`first_seen_commit` / 失効 commit) を足し、射影を全 chunk に広げる |
+| 2 | `agg_chunks` に **`raw_hash` / byte span / `section_id`** を足す — 無いと Evidence Pointer を組み立てられず、候補を返せない (`crates/kio-index/src/aggregator.rs` は順位に要る列しか持たない) |
+| 3 | replica 側の**短語レーン** — `agg_chunks.text` への bounded LIKE。per-scope と同じ述語を用いる |
+| 4 | replica が候補を返す経路。これが入った時点で多 scope の per-scope 呼び出しを削除する |
+| 5 | **手順 3 (purge barrier) を replica 経路側に持たせる。**現在は per-scope 経路のコードパス (`ReadBarrierCheckpoint`) に埋まっており、replica が候補を返すようになると誰も呼ばなくなる |
+
+5 を落とすと**検査が消えたことに誰も気付かない** — per-scope 経路の削除と同じ変更で、
+その副作用として満たされていた barrier が外れるためである。**4 と 5 は同一の変更で行うこと。**
+
+移行が完了すると、per-scope の `candidate_depth` 打ち切りも解消される — 現行は各 scope の上位
+candidate_depth 件しか融合に届かず、その打ち切りは**per-scope 順位で**行われるため、chunk 数が
+candidate_depth を超える scope では corpus 全体では上位に来る chunk が自 scope 内順位で落ちうる。**scope 数に比例する検索レイテンシ
 (実測 428 scope で 1.2 秒、ほぼ全部が `.kio` を開くコスト) が縮むのもこの段階である。**
-4. 統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。**text 項・vector 項はいずれも単一コーパス上の GLOBAL rank である (2026-07-25)** — replica が 1 つの collection なので、per-scope 順位という概念自体が存在しない。text は `agg_fts` 全体に対する 1 回の `bm25()`、vector は `agg_embeddings` 全体に対する cosine 順位で、両者は同一の母集団に対する順位なので RRF で直接加算できる。**「BM25 の raw スコアを scope 間で比較・正規化してはならない」という旧規範 (CT3-MULTI-002) は撤回する** — 複数コーパスが存在しなくなったので前提が消えた。raw スコアの正規化を行わない点は変わらない (rank へ落としてから融合する)。fallback の scatter-gather 経路に限り旧規範が引き続き適用される。
+4. 統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。**text 項・vector 項はいずれも単一コーパス上の GLOBAL rank である (2026-07-25)** — replica が 1 つの collection なので、per-scope 順位という概念自体が存在しない。text は `agg_fts` 全体に対する 1 回の `bm25()`、vector は `agg_embeddings` 全体に対する cosine 順位で、両者は同一の母集団に対する順位なので RRF で直接加算できる。**「BM25 の raw スコアを scope 間で比較・正規化してはならない」という旧規範 (CT3-MULTI-002) は撤回する** — 複数コーパスが存在しなくなったので前提が消えた。raw スコアの正規化を行わない点は変わらない (rank へ落としてから融合する)。**2026-08-11: 「fallback の scatter-gather 経路に限り旧規範が引き続き適用される」という但し書きを削除した** — 多 scope の scatter-gather 経路が無くなり、1 scope 検索には比較すべき他コーパスが存在しないため、旧規範の適用先が消えた。
 5. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
    `[search]` 実効値 (**default_mode** / rrf / diversify / candidate_depth / fail_behavior) は
    user config (device 層) を用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で
@@ -883,7 +896,9 @@ aggregator は既定検索 — 次を**すべて**満たすもの — を答え�
 `aggregator_decline_reason` が実装する** (R25-1/R25-2 — 2026-07-25 まで規範のみ存在し実装が無かった)。
 
 - 参加 scope が 2 つ以上ある (1 つならその scope 自身が collection であり、再採点は tie-flip の
-  risk しか生まない。`fallback_reason = single_scope`)
+  risk しか生まない。応答は `aggregator.applied = false` で示す — **理由列は持たない**
+  (2026-08-11、下記「`aggregator.fallback_reason` を削除する」)。これは委譲ではなく、
+  1 scope の検索がそのスコープの `sqlite.db` を直接引く正規の経路である)
 - ~~時間選択子が無い (`fallback_reason = time_selector`)~~ — **2026-08-11 に撤回。**
   replica が live 限定をやめ、生存区間の列を持つ全 chunk を射影するようになったので
   (上記「replica の内容」)、履歴検索が探す chunk は replica にある。撤回前の理由は
@@ -893,21 +908,32 @@ aggregator は既定検索 — 次を**すべて**満たすもの — を答え�
   むしろ委譲した先の scatter-gather では per-scope 順位で融合されるため、
   §1.8 が消したはずの scope 間比較不能性が**履歴検索にだけ残っていた**。
   (`--at` は PC59/PC60 により単一 scope 必須なので、この撤回が効くのは残る 3 選択子である。)
-- **融合に加算されるレーンをすべて replica が採点できる** (`fallback_reason =
-  text_lane_not_rankable` / `vector_lane_not_rankable`)。片方だけを global に置き換えると
-  per-scope 順位と global 順位を足すことになり、§1.8 が消すために作られた欠陥自体が復活する。
-  text レーンは **pure-short query** (全 unit が trigram 下限の 3 文字未満 — `build_query_plan` が
-  `match_expr = None` を返す) で採点不能になる。日本語では 2 文字語 (認証・設計・課金・障害・監査) が
-  最も普通のクエリ長であり、これは辺縁事例ではない。
+- ~~融合に加算されるレーンをすべて replica が採点できる (`fallback_reason =
+  text_lane_not_rankable` / `vector_lane_not_rankable`)~~ — **2026-08-11 に撤回。
+  条件ではなく replica 側の要件とする。**
+
+  撤回前は、**pure-short query** (全 unit が trigram 下限の 3 文字未満 — `build_query_plan` が
+  `match_expr = None` を返す) で text レーンが採点不能になり、scatter-gather へ委譲していた。
+  **日本語では 2 文字語 (認証・設計・課金・障害・監査) が最も普通のクエリ長である。**
+  すなわち**最も普通のクエリ形が常に委譲側を通っており、フォールバックとして機能していなかった。**
+  委譲先では per-scope 順位で融合されるため、§1.8 が消すために作られた欠陥が
+  そこで復活していた — 「片方だけを global に置き換えると欠陥が復活する」という
+  撤回前の理由は正しいが、**その帰結は委譲ではなく、両レーンを replica で採点可能にすること**である。
+
+  **要件: `agg_chunks.text` に対する bounded LIKE 走査を replica 側に持つ。**
+  per-scope 側の短語経路 (§1.1 の `instr` ベース、`candidate_depth` 上限) と**同じ述語**を用いる —
+  2 つの実装を持てば短語検索の結果が経路によって変わる。
 - cursor が凍結済み commit を再生しているのではない (page 1、または replica 世代が cursor と一致する
   page N)。**cursor は `collection_generation` — replica が保持する全 scope とその `index_generation`
   の hash — を凍結する**。per-scope の `index_generation` は各 scope の**行**を固定するが、global BM25 は
   collection 全体の df/`N`/`avgdl` も読むため、**誰も検索していない folder を index しただけで検索した
   scope の順位が動く**一方で per-scope stamp は一致したままになる。不一致は
   `KIO-E-SEARCH-CURSOR-001` / `reason = collection_generation_mismatch` (PC19/PC21 の per-scope
-  不一致と同じ救済 — cursor 無しで再実行する)。page 1 が replica を使わなかった場合は
-  `collection_generation` を持たず、page N も使ってはならない (`fallback_reason =
-  cursor_pinned_scatter_gather`) — 途中でレーンが切り替われば同じ stream を 2 つの順序で綴じることになる。
+  不一致と同じ救済 — cursor 無しで再実行する)。**多 scope 検索は必ず replica が採点するので
+  (`fallback_reason` の廃止、下記)、`collection_generation` を持たない多 scope cursor は存在しない。**
+  撤回前は page 1 が委譲側で応答しえたため `cursor_pinned_scatter_gather` で page N 以降を
+  委譲側に固定していたが、**受け皿ごと不要になった。**1 scope 検索は replica を通さないので
+  `collection_generation` を持たず、これは page 1 から一貫している (途中で経路が変わらない)。
 
 **cursor replay は collection を再定義しない。** `--scope`/`--descendants` が replica を prune しないのと
 同じ理由で、replay の scope 集合は page 1 が凍結した古い一覧であり、それを権威として page 1 以降に登録
@@ -923,16 +949,40 @@ device 全体で取ると、device 全体では下位に沈む subtree は 1 行
 統計であり、join 側の `WHERE` では絞れない — 絞る必要も無い。**部分集合ごとに統計を取り直せば
 folder ごとが再び別 collection になり、この replica が消した per-corpus IDF が戻る。**
 
-満たさないものは **scatter-gather 経路へ委譲する**。aggregator が開けない・読めない・採点できない場合も
-同様に委譲し、`fallback_reason` に理由を記録する。**この理由は検索応答の `aggregator` object
-(`applied` / `fallback_reason` / `collection_generation`) として出力する** — どの段が採点したかが
-機械可読でないと、順位品質が落ちた検索を検出できない。scatter-gather 経路は削除せず reference 実装かつ
-fallback として存置する — [03-data-model.md §4](03-data-model.md) 不変条件 2 が「aggregator 喪失は
-再構築可能」を要求する以上、**aggregator を失っても検索が成立しなければならない**ためである。
+**多 scope の scatter-gather 経路は廃止する (2026-08-11 確定)。**残る decline 条件は
+`single_scope` の 1 つだけであり、それは委譲ではない — **1 scope の検索は、そのスコープの
+`sqlite.db` を直接引くのが正しい。**コーパスが 1 つしかないので replica を通す意味が無く、
+再採点は tie-flip の risk しか生まない。
 
-fallback 経路では旧規範がそのまま適用される (text 項は per-scope 順位・BM25 raw スコアの scope 間比較は
-禁止)。したがって **fallback 中は §1.8 変更前の順位品質に戻る**。これは意図した縮退であり、
-`fallback_reason` で観測可能である。
+したがって経路は 2 本になる:
+
+| 検索対象 | 採点主体 |
+|---|---|
+| **1 scope** | そのスコープの `sqlite.db` |
+| **2 scope 以上** | **replica のみ。**per-scope 経路は呼ばない |
+
+**`aggregator.fallback_reason` を削除する** (§1.1 の text fallback が使う**トップレベルの**
+`fallback_reason` とは別のフィールドであり、そちらは残る)。委譲先が無いので理由も無い。
+検索応答の `aggregator` object は `applied` / `collection_generation` を残す —
+どの段が採点したかは依然として機械可読である必要がある。**`applied = false` は
+1 scope 検索でしか起こらず、それは `searched_scopes` の長さから自明である**ため、
+理由列を 1 値のためだけに残さない。`cursor_pinned_scatter_gather` も同時に消える。
+
+### 撤回した理由 — 不変条件 2 は「無くても動く」を要求していない
+
+撤回前は「scatter-gather 経路は削除せず reference 実装かつ fallback として存置する —
+[03-data-model.md §4](03-data-model.md) 不変条件 2 が『aggregator 喪失は再構築可能』を要求する以上、
+aggregator を失っても検索が成立しなければならない」と書いていた。**この推論は成り立たない。**
+
+不変条件 2 の文言は「**再構築可能** (各 `.kio` を rescan)」であって「欠損中も動作」ではない。
+再構築の経路は既にあり (上記「実行とマージ」手順 1 の修復経路)、**実測で 428 scope の全射影が
+2.3 秒**である。aggregator を失った場合の正しい挙動は「次の検索が全射影をやり直して数秒かかる」で
+あって、「別実装の検索が動く」ではない。**不変条件 2 は再構築で満たされる。**
+
+第 2 の実装を持つ代償は、この節が自ら記録していたとおりである — 委譲経路では per-scope 順位が
+使われるため、**そこへ落ちた検索は §1.8 が消したはずの欠陥をそのまま踏む**。
+そして pure-short query という**最も普通のクエリ形が常にそこへ落ちていた** (上記)。
+「意図した縮退」と書いていたものは、実際には既定の挙動だった。
 
 既知の限界: RRF は**片方のレーンでしか到達できない文書に 1 項しか与えない**。語彙の重なりが無い文書
 (raster PDF の OCR 結果に対する言い換えクエリ等) は text 項を構造的に得られず、vector 単独より
@@ -944,7 +994,7 @@ enrichment 済み device での既定モード、Cross-Encoder 再ランク) は
 ```toml
 [search.multi_scope]
 parallelism = 4                 # refresh で同時に射影する scope 数の上限
-                                # (fallback の scatter-gather では同時クエリ数の上限)
+                                # 2026-08-11: scatter-gather 廃止に伴い、refresh 専用の値になった
 per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeout)
 ```
 
@@ -1024,7 +1074,7 @@ binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否す�
   `active_scope_unavailable`、shallow は `KIO-E-COMMIT-SHALLOW-001`、store damage は
   `KIO-E-STORE-CORRUPT-001`)。cursor なしの fresh search を案内する。scope move は同じ `scope_id` として
   継続し、config drift も cursor error とする
-- 次ページは replica を cursor が記録した replica 世代に固定して再クエリし、global MMR → alias 展開まで 再計算した**最終 stream 上で** scope ごとの consumed 件を skip して継続する (per-scope の事前 skip は global 選択を変えるため行わない — §1.5 の consumed 定義が正本)。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能。**fallback の scatter-gather 経路では**従来どおり各 scope を `snapshot_commit` に固定して再クエリし、cross-scope merge から再計算する
+- 次ページは replica を cursor が記録した replica 世代に固定して再クエリし、global MMR → alias 展開まで 再計算した**最終 stream 上で** scope ごとの consumed 件を skip して継続する (per-scope の事前 skip は global 選択を変えるため行わない — §1.5 の consumed 定義が正本)。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能。**1 scope 検索**は当該 scope を `snapshot_commit` に固定して再クエリする (多 scope の scatter-gather 経路は 2026-08-11 に廃止)
 - cursor 中の `snapshot_commit` が shallow 化済み (tree 破棄) の場合、cursor の再計算は `KIO-E-COMMIT-SHALLOW-001` で失敗する (§2.2)。この場合は cursor なしの再検索を案内する
 
 ### 性能目標の前提
@@ -1033,13 +1083,16 @@ M3-1 の p95 < 5 秒 ([09-mvp-scope.md §4.1](09-mvp-scope.md)) は **20 scopes 
 
 replication の**採点**は scope 数に依存しない (単一 replica への 1 クエリ)。scope 数に比例して残るのは
 (a) refresh 時の `index_generation` 比較 (差分ゼロなら no-op)、(b) 差分のあった scope の再射影、そして
-**(c) 候補選択の per-scope 経路** — (c) は候補選択が replica へ移る段階まで残る (§1.8 「候補選択の所在」)。
+**(c) 候補選択の per-scope 経路** — (c) は**未実装の移行が完了するまで残る** (§1.8 「候補選択の所在」)。
 
 実測 (428 scope / 3,851 chunk / 3,851 vector / 24.6 MB): 全 scope 初回射影 2.3 秒、以後の差分ゼロ検索 **1.20 秒**。
-scatter-gather fallback も **1.20 秒**でほぼ同じであり、**この時間はほぼ全部 (c) の `.kio` を開くコスト**
-である。候補選択が replica へ移れば桁で縮む見込みだが、現時点では縮んでいない。
+廃止前の scatter-gather も **1.20 秒**でほぼ同じであり、**この時間はほぼ全部 (c) の `.kio` を開くコスト**
+である。**すなわち 2026-08-11 時点では、replica が採点した検索も scatter-gather と同じ費用を払っている** —
+replica は候補選択を担っておらず、per-scope 経路が先に全 scope を開いてしまうためである。
+候補選択が replica へ移れば桁で縮む見込みだが、**現時点では縮んでいない。この数字は移行後に測り直すこと。**
 
-したがって `--scope` での絞り込みや `participates_in_global_search = false` は**引き続き性能上の意味を持つ**。
+したがって `--scope` での絞り込みや `participates_in_global_search = false` は**移行が完了するまで
+性能上の意味を持つ**。移行後は (c) が消えるので、絞り込みの意味は性能ではなく対象範囲の指定に戻る。
 
 ## 1.9 権限の横断管理 (未実装 — replica が候補選択を担う段階で追加する)
 
