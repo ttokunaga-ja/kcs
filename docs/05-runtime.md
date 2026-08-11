@@ -527,6 +527,32 @@ up-to-date 判定が外れてリネームだけで**再 OCR が走り**、(b) `c
 `kio evidence verify` を成立させている。**リストは span、実体は別途取得**の二段。
 `snippet` の廃止も同じ理由による。
 
+### 1.7.2 選択したときに表示するもの (2026-08-11 確定)
+
+**リストはパスを返し、選択したらそのリンク先を表示する。**本文を返す API は作らない。
+
+リンク先は **全文 view** `objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md`
+([03-data-model.md §2.1](03-data-model.md))。既に実体があり
+(`kio_pipeline::markdownize::normalized_view_path`)、再生成可能な cache である。
+
+- 表示は**正規化 Markdown 全体**
+- 初期スクロール位置は**該当 chunk が画面中央**
+- **ハイライトしない。**フラットに見せる (図の閲覧 UI として適切という判断)
+
+**`kio view` はチャンク本文を返すのをやめ、この view のパスを返す。**
+`kio open` は従来どおり**原本**のパスを返す。役割が名前どおりに分かれる:
+
+| | 返すもの |
+|---|---|
+| `kio open` | **原本**のパス (PDF などをそのまま開く) |
+| `kio view` | **全文 view** のパス + view-local span (下記) |
+
+**view-local span を返すこと。**[03-data-model.md §2.1](03-data-model.md) の組み立て規則 5 の
+とおり、chunk の `byte_start` / `byte_end` は **unit-local** であり、全文 view には
+ヘッダコメントと unit 間の `"\n\n"` 結合が入る。**pointer の span をそのまま view の
+オフセットとして使うと位置がずれる。**変換は unit の view 内開始位置を知る側 —
+すなわち `kio view` — が行う。クライアントに組み立て規則を再実装させない。
+
 `related_images[]` の抽出規則 (決定論。推論も追加索引も行わない):
 
 - 対象は chunk 本文中の **Markdown 画像参照** `![alt](kio://<scope_id>/object/image/<hash>)` —
