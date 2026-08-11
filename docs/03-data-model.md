@@ -290,18 +290,24 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
 3. .kio 喪失は復旧不能 (検証とバックアップの運用は 10-operations.md §7.5)
 4. 検索結果メタには「正本の .kio パス」を必ず含める
 5. raw object の所有権・dedup は scope_registry でグローバル化しない
-6. aggregator は安全性判定の最終権限を持たない — purge journal /
-   kio_format_version / index_generation は、結果を返す scope について
-   live .kio で再確認する (05 §1.8 の手順 3)
+6. aggregator は安全性判定の最終権限を持たない — purge journal は、
+   結果を返す scope について live .kio で再確認する (05 §1.8 の手順 3)。
+   kio_format_version / index_generation は scope を開く時点の入口ガードで
+   あり、返却直前には取り直さない (2026-08-11 に 3 点から 1 点へ縮小)
 7. aggregator は候補の「選択と採点」を担い、liveness 判定を再実装しない。
    refresh 時に scope 側で解決済みの live chunk 集合だけを持つ
 8. 権限の書き込みは常に .kio へ行う。aggregator は投影のみで、
    送信 gate の可否を aggregator の行で判定してはならない
 ```
 
-不変条件 6-8 の理由。**6**: replica の staleness をそのまま信じると「消えたはずの chunk を返す」
-「purge 中の scope を読む」に化ける。かといって毎回全 scope を開けば replication の意味が無い。
-結果を出した scope だけ検証すればコストは `O(結果ページの distinct scope 数)` で scope 総数に依存しない。
+不変条件 6-8 の理由。**6**: replica の staleness をそのまま信じると「purge 中の scope を読む」に化ける。
+かといって毎回全 scope を開けば replication の意味が無い。結果を出した scope だけ検証すれば
+コストは `O(結果ページの distinct scope 数)` で scope 総数に依存しない。
+**初版は「消えたはずの chunk を返す」も理由に挙げ、`kio_format_version` と `index_generation` の
+再確認まで求めていた。2026-08-11 に取り下げた** — 両者は入口ガードで足り、返却直前の再確認が
+守るのは検索 1 回分の窓にすぎない。その窓で古い行が残っても、pointer は参照解決時に完全な
+安全確認を通り、結果行は本文を持たない ([05-runtime.md §1.8](05-runtime.md) 手順 3)。
+purge を残すのは法務・秘匿の操作であり**文書名だけでも意味を持つ**ためである。
 **7**: eligibility 述語 (`chunk_config_generations` / `tree_entries` / `first_seen_commit` /
 `kio_eligible_identity`) を aggregator 側で組み直すと liveness 判定が 2 箇所になり、必ず乖離する。
 生テーブルではなく **scope 側の既存コードが解決した答え**を複製する。**8**: aggregator が古くても

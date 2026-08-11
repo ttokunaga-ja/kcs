@@ -808,9 +808,22 @@ replay 中の cursor を退役させなければならない。そして **repli
 2. **単一コーパスで採点**: text 項は `agg_fts` 全体に対する 1 回の `bm25()`、vector 項は
    `agg_embeddings` 全体に対する cosine。いずれも candidate_depth 件まで。**両者は同一母集団に対する
    順位**なので RRF で直接加算できる (手順 4)
-3. **安全性の再確認 (結果件数に比例)**: 候補を出した scope についてのみ live `.kio` を開き、
-   (a) `kio_format_version` 互換、(b) purge journal 非活性 (§3.5)、(c) `index_generation` が射影時と同一 —
-   を確認する。いずれかに失敗した scope の候補は捨て、`excluded_scopes` に理由を記録し、次順位から補充する。
+3. **purge barrier の再確認 (結果件数に比例、2026-08-11 に 3 点から 1 点へ縮小)**:
+   候補を出した scope についてのみ live `.kio` を開き、**purge journal 非活性 (§3.5)** を確認する。
+   失敗した scope の候補は捨て、`excluded_scopes` に理由を記録し、次順位から補充する。
+
+   **`kio_format_version` と `index_generation` はここで再確認しない。**両者は scope を
+   開く時点の**入口ガード**であり、返却の直前に取り直す価値が無い — refresh (手順 1) が
+   既に見ており、再確認が捕まえるのは「**この検索の実行中に**変わった」窓だけである。
+   その窓で負けたときに起きるのは古い行が 1 つ残ることで、**その行の pointer は
+   参照解決の時点で完全な安全確認を通る** ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+   結果行は本文を持たない (§1.7.1) ので、内容が漏れる経路も無い。
+   **purge だけを残すのは、purge が法務・秘匿の操作であり、文書名だけでも意味を持つため**である。
+
+   **実装はこの縮小後の形で既に書かれている** (2026-08-11 確認)。purge barrier は
+   `ReadBarrierCheckpoint` の open / scope 返却直前の recheck / 全 scope マージ後の
+   第 3 バリアの 3 点を持つ一方、版検査と `INDEX_REBUILDING` 判定はいずれも候補生成前の
+   一回きりのガードである。**3 点を返却直前に確認する実装は存在したことがない。**
    **replica に安全性判定を委ねてはならない** ([03-data-model.md §4](03-data-model.md) 不変条件 6) —
    staleness がそのまま「死んだ Evidence Pointer を返す」「purge 中の scope を読む」に化けるためである。
    かといって毎回全 scope を開けば replication の意味が無い。**候補を出した scope だけ検証する**ので、
@@ -819,11 +832,17 @@ replay 中の cursor を退役させなければならない。そして **repli
 #### 候補選択の所在 — 段階的移行 (2026-07-25 時点)
 
 **現行実装では、候補の選択と materialize は依然 per-scope 経路が行う。** replica は手順 2 の採点と
-手順 1 の統計だけを担い、候補を返さない。したがって手順 3 の再確認は per-scope 経路が候補を出す過程で
-**すでに満たされている** (`Repository::open_for_search` の版検査・`ReadBarrierCheckpoint` の purge 検査・
-`INDEX_REBUILDING` 判定がそれぞれ (a)(b)(c) に対応する)。
+手順 1 の統計だけを担い、候補を返さない。手順 3 (purge barrier の返却直前再確認) は per-scope 経路が
+`ReadBarrierCheckpoint` として**既に独立に実装している** — open / scope 返却直前の recheck /
+全 scope マージ後の第 3 バリアの 3 点。版検査 (`Repository::open_for_search`) と `INDEX_REBUILDING`
+判定は、手順 3 ではなく**候補生成前の入口ガード**である (2026-08-11 に手順 3 を 1 点へ縮小した際に
+用語を整理した。それ以前は 3 者を手順 3 の (a)(b)(c) として並べていたが、**返却直前に 3 点を
+確認する実装は存在したことがない**)。
 
-replica が候補選択を担うのは次段階であり、そのとき手順 3 は**独立した実装として必須**になる。同時に、
+replica が候補選択を担う次段階では、手順 3 を **replica 経路の側に持たせる**必要がある — 現在の
+実装は per-scope 経路のコードパスに埋まっており、aggregator が候補を返す仕組み自体がまだ無い
+(`crates/kio-index/src/aggregator.rs` — `agg_chunks` は順位に要る列しか持たず、raw_hash や
+byte span を持たない)。同時に、
 per-scope の `candidate_depth` 打ち切りが解消される — 現行は各 scope の上位 candidate_depth 件しか
 融合に届かず、その打ち切りは**per-scope 順位で**行われるため、chunk 数が candidate_depth を超える scope
 では corpus 全体では上位に来る chunk が自 scope 内順位で落ちうる。**scope 数に比例する検索レイテンシ
