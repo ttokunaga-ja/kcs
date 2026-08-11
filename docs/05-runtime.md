@@ -399,9 +399,7 @@ commit/evidence restore は ancestry walk を必要としない。
     "budget_paused": true
   },
   "aggregator": {
-    "applied": false,
-    "fallback_reason": "replica_stale",
-    "collection_generation": 41
+    "applied": false
   },
   "results": [
     {
@@ -646,6 +644,11 @@ Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 
 
 ## 1.8 複数 scope 横断検索 (multi-scope search)
 
+> **この節は目標像を書いている。2026-08-11 時点の実装は追いついていない。**
+> 差分の一覧は本節「[候補選択の所在](#候補選択の所在--replica-未実装2026-08-11-に方針確定)」にまとめてあり、
+> **そこに挙がっていない記述は実装済みと読んでよい**。本節の他の箇所で「〜した」「〜やめた」と
+> 完了形で書いているのは**仕様上の決定**であって実装状況ではない。
+
 デフォルトの `kio search` は scope_registry に登録された全 indexed scope を対象とする ([06-cli-spec.md §3](06-cli-spec.md))。
 
 **実行モデルは replication である (2026-07-25 変更)。** 全 scope の chunk (live + 過去 — 2026-08-11) を device-level の
@@ -873,6 +876,14 @@ replay 中の cursor を退役させなければならない。そして **repli
 | 3 | replica 側の**短語レーン** — `agg_chunks.text` への bounded LIKE。per-scope と同じ述語を用いる |
 | 4 | replica が候補を返す経路。これが入った時点で多 scope の per-scope 呼び出しを削除する |
 | 5 | **手順 3 (purge barrier) を replica 経路側に持たせる。**現在は per-scope 経路のコードパス (`ReadBarrierCheckpoint`) に埋まっており、replica が候補を返すようになると誰も呼ばなくなる |
+| 6 | **撤回した decline 条件を `aggregator_decline_reason` から削除する。**実装は今も `time_selector` / `text_lane_not_rankable` / `vector_lane_not_rankable` / `cursor_pinned_scatter_gather` を返す |
+| 7 | **`aggregator.fallback_reason` を応答から削除する。**§1.7 の応答契約と、それを固定している契約テスト (`ct3_multi_014` / `ct3_multi_015` が撤回済みの値を期待値にしている) を同時に直す |
+
+さらに、**撤回済みの規範を実装が明示的に適用し続けている箇所がある** — `regrade_vector_rank_globally`
+の doc comment が「撤回された CT3-MULTI-002 がこの経路では引き続き支配する」と書いている。
+経路ごと消えるので、コメントと関数の両方が落ちる。
+契約テスト `ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row` は
+**不変条件 7 が禁じた「live だけを持つ」状態を固定している** — 項目 1 と同時に書き換えること。
 
 5 を落とすと**検査が消えたことに誰も気付かない** — per-scope 経路の削除と同じ変更で、
 その副作用として満たされていた barrier が外れるためである。**4 と 5 は同一の変更で行うこと。**
