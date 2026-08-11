@@ -44,7 +44,7 @@ kio open <検索結果の pointer>
 ```
 truth = folder-local .kio                正本: raw object / normalized / chunks / commits / refs
 cache = scope_registry                   探索対象一覧 / stale 検出
-cache = aggregator                       全 scope の live chunk 集合の read replica
+cache = aggregator                       全 scope の chunk (live + 過去) の read replica
                                          (横断検索の採点・候補選択 / 権限状態の横断投影)
 ```
 

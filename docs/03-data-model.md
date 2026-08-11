@@ -295,7 +295,12 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
    kio_format_version / index_generation は scope を開く時点の入口ガードで
    あり、返却直前には取り直さない (2026-08-11 に 3 点から 1 点へ縮小)
 7. aggregator は候補の「選択と採点」を担い、liveness 判定を再実装しない。
-   refresh 時に scope 側で解決済みの live chunk 集合だけを持つ
+   refresh 時に scope 側で解決済みの答えを持つ — live 集合と過去の chunk の
+   双方を、生存区間の列を付けて 1 表に持つ (2026-08-11)。規範は「解決済みの
+   答えを持つ」ことであって「live だけを持つ」ことではない。生存で絞るのは
+   WHERE 句であり、BM25 統計はコーパス全体のままとする (05 §1.8) —
+   分表にすると live と過去が別コーパスになり、--include-deleted が
+   比較不能な 2 群を 1 つの順位に混ぜることになる
 8. 権限の書き込みは常に .kio へ行う。aggregator は投影のみで、
    送信 gate の可否を aggregator の行で判定してはならない
 ```

@@ -647,7 +647,7 @@ Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 
 
 デフォルトの `kio search` は scope_registry に登録された全 indexed scope を対象とする ([06-cli-spec.md §3](06-cli-spec.md))。
 
-**実行モデルは replication である (2026-07-25 変更)。** 全 scope の live chunk 集合を device-level の
+**実行モデルは replication である (2026-07-25 変更)。** 全 scope の chunk (live + 過去 — 2026-08-11) を device-level の
 read replica (`aggregator.sqlite` — [03-data-model.md §4](03-data-model.md)) へ複製し、**単一コーパスの上で
 1 回採点する**。従前の scatter-gather (scope ごとに独立クエリ → per-scope 順位で RRF マージ) は
 **fallback として残す**が既定経路ではない。
@@ -670,14 +670,15 @@ read replica (`aggregator.sqlite` — [03-data-model.md §4](03-data-model.md)) 
 
 aggregator は **生テーブルを複製しない**。`chunks` / `chunk_config_generations` / `tree_entries` /
 `kio_eligible_identity` / `first_seen_commit` を全部複製して replica 側で eligibility 述語を組み直すと
-**liveness 判定が 2 箇所になり、必ず乖離する**。代わりに、refresh 時に **scope 側の既存コードで live chunk
-集合を解決し、その答えだけ**を持つ ([03-data-model.md §4](03-data-model.md) 不変条件 7)。
+**liveness 判定が 2 箇所になり、必ず乖離する**。代わりに、refresh 時に **scope 側の既存コードが
+解決した答え**を持つ ([03-data-model.md §4](03-data-model.md) 不変条件 7)。
 
-これは**答えをどこから得るか**の規範であり、問いを省いてよいという意味ではない (R25-9)。初版は
-`first_seen_commit IS NOT NULL` の全行、すなわち**これまでに commit された全 chunk** を射影しており、
-削除済みファイルの chunk も旧 chunking 世代の chunk もそこに入っていた。どの検索も返せない行が
-コーパスの `N` と document frequency を押し上げて**生存 chunk の IDF を歪め**、depth 打ち切りの枠も
-奪っていた (3 ファイル中 1 つを削除した実測で replica 6 chunk / live 4 chunk)。射影は
+これは**答えをどこから得るか**の規範であり、問いを省いてよいという意味ではない (R25-9)。
+**射影の範囲は全 chunk (live + 過去) であり、生存は列として持って `WHERE` で絞る** (2026-08-11)。
+初版は `first_seen_commit IS NOT NULL` の全行を射影したうえで**生存で絞らずに通常検索を当てており**、
+どの検索も返せない行がコーパスの `N` と document frequency を押し上げて生存 chunk の IDF を歪め、
+depth 打ち切りの枠も奪っていた (3 ファイル中 1 つを削除した実測で replica 6 chunk / live 4 chunk)。
+**この差し戻しで是正すべきだったのは射影の範囲ではなく、絞りの欠落である** — 詳細は下表の後の議論。射影は
 per-scope 検索と**同じ関数** (`current_history_plan_from_cache` + `install_eligible_identities`) を呼び、
 同じ述語を使う — ただし liveness でない部分は除く: cursor の `rowid`/`association_rowid` 上限は
 **ページ**の凍結であり、ancestor gate は `--at` のものである。
@@ -688,9 +689,29 @@ per-scope 検索と**同じ関数** (`current_history_plan_from_cache` + `instal
 | 表 | 内容 |
 | --- | --- |
 | `agg_scopes` | `scope_id` PK / `index_generation` / `refreshed_at` |
-| `agg_chunks` | 解決済み live 集合: `scope_id` / `chunk_id` / `text` / `heading_path` |
+| `agg_chunks` | 解決済みの**全 chunk (2026-08-11 に live 限定をやめた)**: `scope_id` / `chunk_id` / `text` / `heading_path` + **生存区間** (`first_seen_commit` / 失効 commit) |
 | `agg_fts` | `agg_chunks` を external content とする **全 scope 単一の FTS5** — `bm25()` がコーパス全体で計算される |
-| `agg_embeddings` | live 集合分の chunk vector: `chunk_rowid` / `scope_id` / `vector` / `dimensions` |
+| `agg_embeddings` | 全 chunk 分の chunk vector: `chunk_rowid` / `scope_id` / `vector` / `dimensions` |
+
+**live と過去を 1 表に持ち、生存で絞るのは `WHERE` 句とする (2026-08-11 確定)。**
+`bm25()` の `N` / df / avgdl は表全体の統計であり `WHERE` では絞れないが、**絞る必要が無い** —
+下記「絞り込み検索」で folder 部分集合について述べているのと同じ規範を、生存部分集合にも当てる。
+行は `WHERE` が落とし、`LIMIT` はその後に効くので、**candidate_depth の枠を過去版が奪うことはない。**
+
+**分表にしてはならない。**`--include-deleted` は生存と削除済みを 1 つの順位に混ぜて返す選択子であり、
+2 表に分ければその 2 群が別コーパスで採点され、**互いに比較不能な順位を 1 列に並べる**ことになる。
+これは §1.8 が per-scope について消した欠陥そのものを、live/history へ場所を移して作り直すに等しい。
+
+IDF の歪みについて。初版を差し戻した実測 (上記、replica 6 chunk / live 4 chunk) は
+**N=6 対 N=4 で測ったもの**であり、比が乱高下する最小規模の値である。過去版は同じ文書の別版なので
+語彙分布が生存 chunk とほぼ等しく、`N` と df がほぼ比例して増えるため、**規模が増すほど IDF への
+影響は縮む**。初版の誤りは「全部射影したこと」ではなく、**生存で絞る `WHERE` を持たずに
+通常検索をそのコーパスへ当てたこと**だった。
+
+その結果、**履歴検索も単一コーパスで採点される**ようになる。従前は履歴が
+`fallback_reason = time_selector` で scatter-gather に委譲され、per-scope 順位で融合されていた —
+すなわち §1.8 が消したはずの「scope 間で比較不能な text 順位」が履歴検索にだけ残っていた。
+これはその解消でもある。
 
 **順位を出すのに必要な列しか持たない。** chunk メタ (raw_hash・byte span 等) と `index_generation`
 以外の scope メタは、replica が**候補選択と安全性再確認も担う段階**で必要になるものであり、読み手が
@@ -863,11 +884,15 @@ aggregator は既定検索 — 次を**すべて**満たすもの — を答え�
 
 - 参加 scope が 2 つ以上ある (1 つならその scope 自身が collection であり、再採点は tie-flip の
   risk しか生まない。`fallback_reason = single_scope`)
-- 時間選択子が無い (`--at` / `--all-history` / `--since` / `--include-deleted` のいずれも未指定 —
-  `fallback_reason = time_selector`)。replica は各 scope の **live chunk のみ**を保持するので、履歴検索が
-  探している chunk は定義上そこに無い。`apply_global_ranks` はその不在を「順位なし」と読んで項を 0 に
-  落とすため、**削除された答えが「まだ存在するだけの chunk」より下に沈む** — 北極星 M3-3 そのもの。
-  (`--at` は PC59/PC60 により単一 scope 必須なので、実際に到達するのは残る 3 選択子である。)
+- ~~時間選択子が無い (`fallback_reason = time_selector`)~~ — **2026-08-11 に撤回。**
+  replica が live 限定をやめ、生存区間の列を持つ全 chunk を射影するようになったので
+  (上記「replica の内容」)、履歴検索が探す chunk は replica にある。撤回前の理由は
+  「replica は live chunk のみを保持するので、`apply_global_ranks` が不在を『順位なし』と読んで
+  項を 0 に落とし、**削除された答えが「まだ存在するだけの chunk」より下に沈む** (北極星 M3-3)」
+  であり、**それは live 限定射影の帰結であって時間選択子の性質ではなかった。**
+  むしろ委譲した先の scatter-gather では per-scope 順位で融合されるため、
+  §1.8 が消したはずの scope 間比較不能性が**履歴検索にだけ残っていた**。
+  (`--at` は PC59/PC60 により単一 scope 必須なので、この撤回が効くのは残る 3 選択子である。)
 - **融合に加算されるレーンをすべて replica が採点できる** (`fallback_reason =
   text_lane_not_rankable` / `vector_lane_not_rankable`)。片方だけを global に置き換えると
   per-scope 順位と global 順位を足すことになり、§1.8 が消すために作られた欠陥自体が復活する。

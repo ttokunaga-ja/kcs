@@ -262,7 +262,7 @@ truth = folder-local .kio
 cache = scope_registry
   - 検索の探索対象一覧 / stale 検出
 cache = aggregator
-  - 全 scope の live chunk 集合を複製した device-level read replica
+  - 全 scope の chunk (live + 過去) を複製した device-level read replica
   - 横断検索の採点・候補選択、権限状態の横断投影
 ```
 
