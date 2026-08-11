@@ -227,8 +227,10 @@ kio search "..." --all-scopes
 
 # モード
 kio search "..."              # 実効 [search].default_mode (既定 auto = hybrid → text fallback — 05 §1.8)
-kio search "..." --mode <auto|text|vector|hybrid>   # 当該実行の上書き。config の同名 enum と 1 対 1。
+kio search "..." --mode <auto|text|image|vector|hybrid>   # 当該実行の上書き。config の同名 enum と 1 対 1。
                               #   text   = text only
+                              #   image  = 候補を画像に限定 (2026-08-11 追加、05 §1.1)。
+                              #            text と対になる軸。ベクトル不可時は error
                               #   vector = vector only。失敗時は error
                               #   hybrid = hybrid 強制。失敗時は fail_behavior 設定に従う
                               # (承認なし (embedding_not_authorized)・--offline は対象外 — 常に text

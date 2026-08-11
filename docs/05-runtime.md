@@ -10,15 +10,32 @@
 
 ```
 text   FTS5 (BM25)         常に利用可能
+image  候補を画像に限定      embedding 互換性あり時に利用可能 (2026-08-11 追加)
 vector sqlite-vec          embedding 互換性あり時に利用可能
 hybrid RRF(text, vector)   両方利用可能時のみ。auto モードがデフォルト
 ```
+
+**画像に順位が付くのは、そのモードがベクトルレーンを持つときに限る** (2026-08-11 確定)。
+政策ではなく**能力の制約**である — `text` にはベクトルレーンが無く、
+画像を評価する手段が存在しない。
+
+| mode | 画像に順位が付くか |
+|---|---|
+| `text` | **不可** |
+| `image` | 画像のみ |
+| `vector` / `hybrid` | **可** (同一マルチモーダル空間 — [07-adapter-spec.md §5.3](07-adapter-spec.md)) |
+| `auto` | hybrid に解決したときは可 / text fallback 時は不可 |
+
+`--mode image` は**候補クラスを画像に限定する軸**であって、リンク先を選ぶ軸ではない。
+**単体の画像ファイル**がヒットした行はその画像を指すが、**文書中の図**がヒットした行は
+引用元 chunk へ解決して**文書を指す** (裸の画像行を返さない)。したがって
+`--mode image` の結果には画像名と文書名が混在しうる。
 
 `.kio/config.toml`:
 
 ```toml
 [search]
-default_mode = "auto"            # "auto" | "text" | "vector" | "hybrid"
+default_mode = "auto"            # "auto" | "text" | "image" | "vector" | "hybrid"
 fail_behavior = "fallback"       # "fallback" | "error" | "warn"
 ```
 
@@ -467,8 +484,48 @@ Kio の主たる消費者は LLM Agent であり ([06-cli-spec.md §9](06-cli-sp
 | `evidence_pointer` | **引用の不変固定**。time-travel と `kio evidence verify` が成立する | 常に必須 (従来どおり) |
 | `payload_uri` | **Agent が `kio open` して実体を得るハンドル** | `result_type: "chunk"` では省略 (実体は chunk 自身であり `evidence_uri` が既にそれを指す) |
 | `related_images[]` | この chunk 本文が参照している画像の列挙。`{image_uri, order}` の配列 | **空なら field ごと省略**。かつ `result_type: "chunk"` の行のみ (image 行では列挙対象が「参照元 chunk の図」になり、その先頭は自分自身の `payload_uri` である) |
-| `snippet` | **この行の chunk 本文**の冒頭 | `result_type: "image"` では省略。image 行は chunk ではなく、参照元 chunk の本文を載せると field の意味が行の型で変わる。参照元の本文は同じ pointer を持つ chunk 行から取れる |
-| `title` | pointer が解決する path (`path_at_commit`) | 常に必須。意味は型に依らない (どちらの行も同じ chunk pointer を指す) |
+| ~~`snippet`~~ | **廃止 (2026-08-11、§1.7.1)。**クリックで正規化 Markdown 全体を表示するため、リストに抜粋を載せる意味が無い | 返さない |
+| `title` | **検索している時点の文書名** (§1.7.1 の時点規則)。従来は `path_at_commit` の字面 | 常に必須。意味は型に依らない (どちらの行も同じ chunk pointer を指す) |
+| `changed_at` | **内容が最後に変わった commit の日時** (§1.7.1)。`chunks.first_seen_commit` の解決結果。リネームでは動かない | 常に必須 |
+
+### 1.7.1 結果は文書単位 (2026-08-11 確定)
+
+設計の全文と経緯は
+[tasks/search-result-presentation-design.md](../tasks/search-result-presentation-design.md)。
+
+**(1) 集約 — 1 文書 1 行。**キーは **`(scope_id, raw_hash)`**。
+
+- **リネーム (内容不変)** は `raw_hash` が同じなので **1 行に畳む。**同じ内容を
+  複数行見せる意味は無い
+- **編集**は `raw_hash` が変わるので**自然に別行**。特別扱いではない
+- **同一内容が複数 scope にある場合は畳まない。**バイト列が同一でも
+  **階層が違えばアクセス権が違いうる**ため、1 行に畳むと到達できない経路を
+  到達できるように見せるか、逆に隠す。**内容の同一性は権限の同一性を含意しない**
+
+`--limit` / `--offset` / cursor の単位も**文書**になる (従来は chunk)。
+§1.4 の `max_per_raw_hash` は、集約後は「同一内容が複数 scope にある場合」にのみ
+効く上限として意味が変わる。
+
+**(2) 文書名 — 検索している時点の名前を返す。**
+
+| 検索 | `title` |
+|---|---|
+| 現行ツリー | 現在の名前 |
+| `--at C` | **C 時点の名前** |
+| `--all-history` | その内容が存在した**最後の commit 時点の名前** |
+
+**`raw_hash` に path を混ぜない** ([03-data-model.md §5](03-data-model.md) の
+`sha256(原本バイト列)` を変えない)。混ぜると (a) `(raw_hash, tool_profile_hash)` の
+up-to-date 判定が外れてリネームだけで**再 OCR が走り**、(b) `chunk_hash` が
+`raw_hash` を入力に持つため**発行済み Evidence Pointer が全て切れ**、
+(c) content-addressed store の dedup 前提が崩れる。**path は commit の tree が
+持っており失われていない** — 足りなかったのは「どの時点の視点で名前を出すか」の
+規則だけだった。
+
+**(3) 本文はリストに載せない。**`--limit` は最大 100 で、全文を載せると応答が
+桁違いになる。加えて result 行が**検証可能な span** を指すことが
+`kio evidence verify` を成立させている。**リストは span、実体は別途取得**の二段。
+`snippet` の廃止も同じ理由による。
 
 `related_images[]` の抽出規則 (決定論。推論も追加索引も行わない):
 
