@@ -338,7 +338,7 @@ schema 変更規約に従う)。
 5. raw object の所有権・dedup は scope_registry でグローバル化しない。
    各 `.kio/objects` 内に閉じる (横断 dedup を諦めた帰結。03-data-model.md §3)。
 6. aggregator は安全性判定の最終権限を持たない (05-runtime.md §1.8 手順 3)。
-7. aggregator は liveness 判定を再実装しない (解決済みの答えだけを複製する)。**射影の範囲は live + 過去の全 chunk** であり、生存で絞るのは `WHERE` 句である (2026-08-11 — 03-data-model.md §4 不変条件 7)。
+7. aggregator は liveness 判定を再実装しない (解決済みの答えだけを複製する)。**検索が読む索引は aggregator ただ 1 つ** — scope 数によらず各フォルダの `.kio/index/sqlite.db` を `kio search` が引くことはない (2026-08-11)。**射影の範囲は live + 過去の全 chunk** であり、生存で絞るのは `WHERE` 句である (2026-08-11 — 03-data-model.md §4 不変条件 7)。
 8. 権限の書き込みは常に `.kio` へ。aggregator は投影のみ。
 ```
 

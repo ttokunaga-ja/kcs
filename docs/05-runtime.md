@@ -399,7 +399,7 @@ commit/evidence restore は ancestry walk を必要としない。
     "budget_paused": true
   },
   "aggregator": {
-    "applied": false
+    "collection_generation": 41
   },
   "results": [
     {
@@ -429,10 +429,10 @@ commit/evidence restore は ancestry walk を必要としない。
 }
 ```
 
-`aggregator` は §1.8 の replica 経路がどう解決されたかを示す (`applied` / `fallback_reason` /
-`collection_generation`)。どの段が採点したかが機械可読でないと順位品質の劣化を検出できないため、
-1 scope 検索 (`applied = false`) も含めて常に返す (正本 §1.8)。**`fallback_reason` は 2026-08-11 に
-`aggregator` object から削除した** — 多 scope 検索は必ず replica が採点するため、委譲の理由が存在しない。
+`aggregator` は cursor が凍結する `collection_generation` を返す (§1.8)。
+**2026-08-11: `applied` と `fallback_reason` を `aggregator` object から削除した** — 検索は
+scope 数によらず必ず replica が採点するため、「適用されたか」も「なぜ適用されなかったか」も
+存在しない。残るのは `collection_generation` だけである (cursor の凍結対象 — §1.8)。
 
 **成功応答 (exit 0) の `error_code` は縮退原因の機械可読分類であり、失敗判定には使わない** — 失敗判定は exit code (非 0) が正 ([06-cli-spec.md §7](06-cli-spec.md)。上例は vector 未承認の text fallback で、`results` は有効な結果である)。`evidence_pointer` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の schema を **そのまま** 埋め込む。root (`.kio`) の信頼は `evidence_pointer.scope_id` を正とし、`results[].scope_path` は解決を高速化する表示・ヒント用の絶対パスである (truth vs cache の不変条件。解決手順は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
@@ -655,8 +655,8 @@ Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 
 read replica (`aggregator.sqlite` — [03-data-model.md §4](03-data-model.md)) へ複製し、**単一コーパスの上で
 1 回採点する**。従前の scatter-gather (scope ごとに独立クエリ → per-scope 順位で RRF マージ) は
 **2026-08-11 に廃止した** (下記「aggregator が答える条件」)。多 scope 検索の経路は replica 1 本である。
-1 scope 検索は replica を通さず当該 scope の `sqlite.db` を直接引く — コーパスが 1 つしかないので
-replication する対象が無く、これは委譲ではない。
+**scope 数によらず、検索は replica だけを引く** — 1 scope でも同じである (下記「検索は
+`.kio/index/sqlite.db` を引かない」)。
 
 変更理由は採点の正しさである。`.kio` ごとに独立した index は `.kio` ごとに独立した BM25 コーパスを
 意味し、コーパス統計 (N / df / avgdl) が index ごとに異なるため **text 順位は scope 間で比較不能**である。
@@ -874,10 +874,10 @@ replay 中の cursor を退役させなければならない。そして **repli
 | 1 | `agg_chunks` に**生存区間**の列 (`first_seen_commit` / 失効 commit) を足し、射影を全 chunk に広げる |
 | 2 | `agg_chunks` に **`raw_hash` / byte span / `section_id`** を足す — 無いと Evidence Pointer を組み立てられず、候補を返せない (`crates/kio-index/src/aggregator.rs` は順位に要る列しか持たない) |
 | 3 | replica 側の**短語レーン** — `agg_chunks.text` への bounded LIKE。per-scope と同じ述語を用いる |
-| 4 | replica が候補を返す経路。これが入った時点で多 scope の per-scope 呼び出しを削除する |
+| 4 | replica が候補を返す経路。これが入った時点で **scope 数によらず** per-scope 呼び出しを検索から削除する (`.kio/index/sqlite.db` は検索面ではない) |
 | 5 | **手順 3 (purge barrier) を replica 経路側に持たせる。**現在は per-scope 経路のコードパス (`ReadBarrierCheckpoint`) に埋まっており、replica が候補を返すようになると誰も呼ばなくなる |
-| 6 | **撤回した decline 条件を `aggregator_decline_reason` から削除する。**実装は今も `time_selector` / `text_lane_not_rankable` / `vector_lane_not_rankable` / `cursor_pinned_scatter_gather` を返す |
-| 7 | **`aggregator.fallback_reason` を応答から削除する。**§1.7 の応答契約と、それを固定している契約テスト (`ct3_multi_014` / `ct3_multi_015` が撤回済みの値を期待値にしている) を同時に直す |
+| 6 | **`aggregator_decline_reason` を関数ごと削除する。**条件がゼロになった (`single_scope` も 2026-08-11 に撤回)。実装は今も 4 条件を返す |
+| 7 | **`aggregator` object から `applied` / `fallback_reason` を削除する** (`collection_generation` だけ残す)。§1.7 の応答契約と、それを固定している契約テスト (`ct3_multi_014` / `ct3_multi_015` が撤回済みの値を期待値にしている) を同時に直す |
 
 さらに、**撤回済みの規範を実装が明示的に適用し続けている箇所がある** — `regrade_vector_rank_globally`
 の doc comment が「撤回された CT3-MULTI-002 がこの経路では引き続き支配する」と書いている。
@@ -892,7 +892,7 @@ replay 中の cursor を退役させなければならない。そして **repli
 candidate_depth 件しか融合に届かず、その打ち切りは**per-scope 順位で**行われるため、chunk 数が
 candidate_depth を超える scope では corpus 全体では上位に来る chunk が自 scope 内順位で落ちうる。**scope 数に比例する検索レイテンシ
 (実測 428 scope で 1.2 秒、ほぼ全部が `.kio` を開くコスト) が縮むのもこの段階である。**
-4. 統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。**text 項・vector 項はいずれも単一コーパス上の GLOBAL rank である (2026-07-25)** — replica が 1 つの collection なので、per-scope 順位という概念自体が存在しない。text は `agg_fts` 全体に対する 1 回の `bm25()`、vector は `agg_embeddings` 全体に対する cosine 順位で、両者は同一の母集団に対する順位なので RRF で直接加算できる。**「BM25 の raw スコアを scope 間で比較・正規化してはならない」という旧規範 (CT3-MULTI-002) は撤回する** — 複数コーパスが存在しなくなったので前提が消えた。raw スコアの正規化を行わない点は変わらない (rank へ落としてから融合する)。**2026-08-11: 「fallback の scatter-gather 経路に限り旧規範が引き続き適用される」という但し書きを削除した** — 多 scope の scatter-gather 経路が無くなり、1 scope 検索には比較すべき他コーパスが存在しないため、旧規範の適用先が消えた。
+4. 統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。**text 項・vector 項はいずれも単一コーパス上の GLOBAL rank である (2026-07-25)** — replica が 1 つの collection なので、per-scope 順位という概念自体が存在しない。text は `agg_fts` 全体に対する 1 回の `bm25()`、vector は `agg_embeddings` 全体に対する cosine 順位で、両者は同一の母集団に対する順位なので RRF で直接加算できる。**「BM25 の raw スコアを scope 間で比較・正規化してはならない」という旧規範 (CT3-MULTI-002) は撤回する** — 複数コーパスが存在しなくなったので前提が消えた。raw スコアの正規化を行わない点は変わらない (rank へ落としてから融合する)。**2026-08-11: 「fallback の scatter-gather 経路に限り旧規範が引き続き適用される」という但し書きを削除した** — 多 scope の scatter-gather 経路が無くなり、検索は scope 数によらず単一コーパス (`agg_fts`) を引くため、旧規範の適用先が消えた。
 5. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
    `[search]` 実効値 (**default_mode** / rrf / diversify / candidate_depth / fail_behavior) は
    user config (device 層) を用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で
@@ -907,9 +907,9 @@ aggregator は既定検索 — 次を**すべて**満たすもの — を答え�
 `aggregator_decline_reason` が実装する** (R25-1/R25-2 — 2026-07-25 まで規範のみ存在し実装が無かった)。
 
 - 参加 scope が 2 つ以上ある (1 つならその scope 自身が collection であり、再採点は tie-flip の
-  risk しか生まない。応答は `aggregator.applied = false` で示す — **理由列は持たない**
-  (2026-08-11、下記「`aggregator.fallback_reason` を削除する」)。これは委譲ではなく、
-  1 scope の検索がそのスコープの `sqlite.db` を直接引く正規の経路である)
+  risk しか生まない、というのがその理由だった。**2026-08-11 に撤回** — 再採点という概念が
+  無くなったためである。replica が唯一の採点主体になった以上、そこに flip する相手の順位が
+  存在しない。`aggregator_decline_reason` は**条件がゼロになったので関数ごと消える**)
 - ~~時間選択子が無い (`fallback_reason = time_selector`)~~ — **2026-08-11 に撤回。**
   replica が live 限定をやめ、生存区間の列を持つ全 chunk を射影するようになったので
   (上記「replica の内容」)、履歴検索が探す chunk は replica にある。撤回前の理由は
@@ -943,8 +943,8 @@ aggregator は既定検索 — 次を**すべて**満たすもの — を答え�
   不一致と同じ救済 — cursor 無しで再実行する)。**多 scope 検索は必ず replica が採点するので
   (`fallback_reason` の廃止、下記)、`collection_generation` を持たない多 scope cursor は存在しない。**
   撤回前は page 1 が委譲側で応答しえたため `cursor_pinned_scatter_gather` で page N 以降を
-  委譲側に固定していたが、**受け皿ごと不要になった。**1 scope 検索は replica を通さないので
-  `collection_generation` を持たず、これは page 1 から一貫している (途中で経路が変わらない)。
+  委譲側に固定していたが、**受け皿ごと不要になった。**検索は scope 数によらず replica を引くので、
+  `collection_generation` は常に存在し、page 1 から一貫している (途中で経路が変わらない)。
 
 **cursor replay は collection を再定義しない。** `--scope`/`--descendants` が replica を prune しないのと
 同じ理由で、replay の scope 集合は page 1 が凍結した古い一覧であり、それを権威として page 1 以降に登録
@@ -961,23 +961,42 @@ device 全体で取ると、device 全体では下位に沈む subtree は 1 行
 folder ごとが再び別 collection になり、この replica が消した per-corpus IDF が戻る。**
 
 **多 scope の scatter-gather 経路は廃止する (2026-08-11 確定)。**残る decline 条件は
-`single_scope` の 1 つだけであり、それは委譲ではない — **1 scope の検索は、そのスコープの
-`sqlite.db` を直接引くのが正しい。**コーパスが 1 つしかないので replica を通す意味が無く、
-再採点は tie-flip の risk しか生まない。
+`single_scope` も含めて**ゼロ**である。`aggregator_decline_reason` は関数ごと消える。
 
-したがって経路は 2 本になる:
+### 検索は `.kio/index/sqlite.db` を引かない (2026-08-11 確定)
 
-| 検索対象 | 採点主体 |
+**経路は 1 本だけである。scope 数によらず、検索はアプリ配下の統一 SQLite
+(`aggregator.sqlite`) を引く。**
+
+| 用途 | 読む先 |
 |---|---|
-| **1 scope** | そのスコープの `sqlite.db` |
-| **2 scope 以上** | **replica のみ。**per-scope 経路は呼ばない |
+| **検索 (`kio search`)** | **`aggregator.sqlite` のみ** |
+| replica への射影 (refresh) | 各 scope の `.kio/index/sqlite.db` |
+| scope 内の索引構築・`kio repair` 等の保守 | 同上 |
+
+**`.kio/index/sqlite.db` は検索面ではない。**[03-data-model.md §4.1](03-data-model.md) が
+これを **cache** に分類しているとおり、それは当該 scope が自分のために維持する派生索引であり、
+chunk の正本は `chunks.jsonl` と object store の側にある。**同じ問いに答える派生索引を
+2 つ持てば、答えが経路によって変わる。**scope が 1 つでも 2 つでも、検索が読む索引は 1 つとする。
+
+1 scope を例外にしない理由は 3 つある:
+
+1. **経路が 1 本なら、経路差による挙動の違いが原理的に発生しない。**2 本あれば、
+   短語の扱い・tie-break・`candidate_depth` の効き方が経路ごとに分岐しうる
+2. **権限と purge barrier の確認箇所が 1 つで済む。**2 本あれば両方に置く必要があり、
+   片方に入れ忘れても気付かない (この失敗の実例が本節の「候補選択の所在」項目 5)
+3. **撤回前の `single_scope` の理由 (再採点は tie-flip の risk しか生まない) は、
+   2 経路を前提にした議論だった。**replica が唯一の採点主体になれば、flip する相手が存在しない
 
 **`aggregator.fallback_reason` を削除する** (§1.1 の text fallback が使う**トップレベルの**
 `fallback_reason` とは別のフィールドであり、そちらは残る)。委譲先が無いので理由も無い。
-検索応答の `aggregator` object は `applied` / `collection_generation` を残す —
-どの段が採点したかは依然として機械可読である必要がある。**`applied = false` は
-1 scope 検索でしか起こらず、それは `searched_scopes` の長さから自明である**ため、
-理由列を 1 値のためだけに残さない。`cursor_pinned_scatter_gather` も同時に消える。
+検索応答の `aggregator` object は **`collection_generation` だけ**を残す — cursor が凍結する
+対象であり、ページ間で collection が動いたことの検出に要る (§1.5)。`applied` は**常に真**、
+`fallback_reason` は**取りうる値がゼロ**になったので、どちらも列として残さない。
+`cursor_pinned_scatter_gather` も同時に消える。
+
+**「どの段が採点したか」を機械可読にする必要も消えた** — 段が 1 つしかないためである。
+これは撤回前、順位品質が落ちた検索 (委譲側へ落ちた検索) を検出するために要る、という理由だった。
 
 ### 撤回した理由 — 不変条件 2 は「無くても動く」を要求していない
 
@@ -1085,7 +1104,7 @@ binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否す�
   `active_scope_unavailable`、shallow は `KIO-E-COMMIT-SHALLOW-001`、store damage は
   `KIO-E-STORE-CORRUPT-001`)。cursor なしの fresh search を案内する。scope move は同じ `scope_id` として
   継続し、config drift も cursor error とする
-- 次ページは replica を cursor が記録した replica 世代に固定して再クエリし、global MMR → alias 展開まで 再計算した**最終 stream 上で** scope ごとの consumed 件を skip して継続する (per-scope の事前 skip は global 選択を変えるため行わない — §1.5 の consumed 定義が正本)。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能。**1 scope 検索**は当該 scope を `snapshot_commit` に固定して再クエリする (多 scope の scatter-gather 経路は 2026-08-11 に廃止)
+- 次ページは replica を cursor が記録した replica 世代に固定して再クエリし、global MMR → alias 展開まで 再計算した**最終 stream 上で** scope ごとの consumed 件を skip して継続する (per-scope の事前 skip は global 選択を変えるため行わない — §1.5 の consumed 定義が正本)。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能。(2026-08-11: scope 数による経路の分岐は無い — 検索は常に replica を引く)
 - cursor 中の `snapshot_commit` が shallow 化済み (tree 破棄) の場合、cursor の再計算は `KIO-E-COMMIT-SHALLOW-001` で失敗する (§2.2)。この場合は cursor なしの再検索を案内する
 
 ### 性能目標の前提

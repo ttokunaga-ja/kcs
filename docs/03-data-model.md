@@ -304,7 +304,11 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
    答えを持つ」ことであって「live だけを持つ」ことではない。生存で絞るのは
    WHERE 句であり、BM25 統計はコーパス全体のままとする (05 §1.8) —
    分表にすると live と過去が別コーパスになり、--include-deleted が
-   比較不能な 2 群を 1 つの順位に混ぜることになる
+   比較不能な 2 群を 1 つの順位に混ぜることになる。
+   **検索が読む索引は aggregator ただ 1 つとする (2026-08-11)** — scope 数に
+   よらず .kio/index/sqlite.db は検索面ではない。同じ問いに答える派生索引を
+   2 つ持てば、答えが経路によって変わる (05 §1.8「検索は
+   .kio/index/sqlite.db を引かない」)
 8. 権限の書き込みは常に .kio へ行う。aggregator は投影のみで、
    送信 gate の可否を aggregator の行で判定してはならない
 ```
@@ -339,7 +343,7 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 | `.kio/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kio/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
-| `.kio/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
+| `.kio/index/sqlite.db` (**検索面ではない** — 2026-08-11。`kio search` は引かない。読むのは replica への射影と scope 内保守だけ。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kio/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kio` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.cache/kio/aggregator.sqlite` | **SQLite** (`agg_scopes` / `agg_chunks` / `agg_fts` / `agg_embeddings` の 4 表) | cache | 各 `.kio` の再射影 (`index_generation` 比較で自動) | [05-runtime.md §1.8](05-runtime.md) |
 | `~/.local/share/kio/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` / `schema_migrations` の 3 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
