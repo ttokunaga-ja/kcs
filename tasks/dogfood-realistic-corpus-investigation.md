@@ -126,8 +126,8 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
 2. **Do NOT drop a real code repo with a `.git`** into an indexed area (it will be
    skipped) — use plain `repos/<name>/docs/` folders instead, matching the existing
    topology.
-3. Reuse the **20 leaf folders/persona** already defined (`eval/persona_fixture_spec.py`,
-   `persona_v2_topology_data.py`): e.g. SRE = `desktop/active-incident`,
+3. Reuse the **20 leaf folders/persona** already defined in
+   `eval/persona_fixture_spec.py`: e.g. SRE = `desktop/active-incident`,
    `changes/deployments/production`, `infrastructure/terraform/environments`,
    `downloads/inbox/diagnostic-bundles`; legal = `matters/matter-alpha/correspondence`,
    `mail/outlook/legal-hold/recent`, `archive/legal/matters/…`. These are excellent —

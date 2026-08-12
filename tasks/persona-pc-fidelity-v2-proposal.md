@@ -228,9 +228,10 @@ recursive topologyとformat/extension mixはいずれも境界を広く踏むaut
 - `planned_max_depth == realized_max_depth`を人物ごとに検証
 - scope同士の重複、祖先・子孫関係、casefold衝突を禁止
 
-400 rowのliteral入力は
-[`eval/persona_v2_topology_data.py`](../eval/persona_v2_topology_data.py)、正規化・検証契約は
-[`eval/persona_v2_topology.py`](../eval/persona_v2_topology.py)を正とする。人物内path制約はroot安全条件、
+この提案を検証した当時、400 row の literal 入力は
+`eval/persona_v2_topology_data.py`、正規化・検証契約は
+`eval/persona_v2_topology.py` を正としていた。これらの非承認実験コードは現在 Git 履歴へ退役している。
+人物内path制約はroot安全条件、
 人物間のglobal uniquenessは共通templateの量産を防ぐdiversity条件であり、意味を混同しない。
 
 ### 3.2 人物別の代表構造

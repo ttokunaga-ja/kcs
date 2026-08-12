@@ -4,9 +4,8 @@ on:
   push:
   pull_request:
 
-# Keep only product-connected gates on every push and pull request. The
-# non-authorizing persona-v2 design audit is isolated in the manual
-# persona-v2-experimental.yml workflow.
+# Keep only product-connected gates on every push and pull request. Retired
+# non-authorizing design experiments remain recoverable from Git history.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
