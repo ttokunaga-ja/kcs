@@ -1032,7 +1032,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 `time_travel` は query hash に入る canonical selector object (default のみ field 省略)、`since_cutoff` は
 `--since` のときだけ存在する。cursor はこの JSON の JCS と認証 tag を含む signed
 base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
-binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
+binding を持たない obsolete `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではなく、これは旧 cursor を受理する後方互換 branch ではない)。
 
 - `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, query_vector_digest: <実効 mode が vector|hybrid のときのみ — page 1 の device-local query vector の canonical float32 little-endian bytes に対する sha256。text mode ではキー省略>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KIO-E-SEARCH-CURSOR-001` で拒否、§1.5)
 - page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。

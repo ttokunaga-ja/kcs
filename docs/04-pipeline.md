@@ -409,8 +409,8 @@ CREATE TABLE chunks (
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
 
 CREATE TABLE chunk_publications (      -- publication relation (cache — rebuild 正本は chunks.jsonl の
-                                       -- publication event 行 (03 §2)。event 行を欠く旧 store は
-                                       -- 親先行 topological walk で再導出: §7 rebuild)
+                                       -- current publication event 行 (03 §2)。欠落は current
+                                       -- schema violation / corruption であり commit walk で補わない)
   chunk_id            TEXT NOT NULL,
   introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。単一の first_seen_commit では
                                        -- incomparable な複数導入 (merge の side 枝等) を表現できないため多対多
@@ -536,7 +536,8 @@ CREATE TABLE embeddings (
   vector BLOB NOT NULL,
   dimensions INTEGER NOT NULL,
   distance TEXT NOT NULL,
-  profile_hash TEXT NOT NULL
+  profile_hash TEXT NOT NULL,
+  context_key TEXT                 -- chunk_filename_context_v1。非 contextual chunk / image は NULL
 );
 CREATE INDEX idx_embeddings_type ON embeddings(target_type);
 -- target_type ごとの再構築・検証が corpus 全 embeddings を SCAN しないための index
@@ -560,12 +561,21 @@ CREATE VIRTUAL TABLE image_vec USING vec0(
 
 `embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` / `image_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。これらの間では **`embeddings` テーブルを正** とし、`chunk_vec` / `image_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kio repair rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` → `image_vec` の順に再構築する。**`objects/embeddings/` への書き出しは vector を persist する経路が行い、SQLite 行より先に書く** (2026-07-26、R25-6)
 — 両者の間で crash した場合、object があって行が無い状態は次の rebuild が復元できるが、行があって object が無い状態は
-`rebuild-db` が復元できない vector になる。**object から `embeddings` への replay は `chunks.text_hash` との結合で行う**
+`rebuild-db` が復元できない vector になる。**object から `embeddings` への replay は complete predicate で `chunks` と結合する**
 (object は「この vector が何の vector か」を持つが、その本文を今どの chunk 行が担っているかは持たない —
-それこそ rebuild が再導出している部分である)。結合には **`context_key` も含める** (07 §5.3 の addendum 以降、vector は
-`(text_hash, context, profile)` の関数であり、同一本文・別ファイル名の 2 chunk を交差させてはならない)。
-**旧 DB からの snapshot は第 2 の source として残す** — object 導入前に書かれた store を運ぶのはこれだけであり、
-snapshot 由来の行はその場で object を書き出すので、1 回の rebuild で object 側が正になり fallback は空になる。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — 他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
+それこそ rebuild が再導出している部分である)。chunk 行 `c` と embedding 行 `e` の候補条件は、
+`e.target_type='chunk'`、`e.target_id = c.text_hash`、および現行 tool-lock と
+`(e.profile_hash, e.dimensions, e.distance, e.modality)` が一致することに加え、`c.raw_path` の basename stem から
+`chunk_filename_context_v1`（`-` / `_` の空白化、ASCII camelCase 境界、空白畳み込み。英数字を含まない stem は
+NULL）を**再導出**し、`e.context_key` と **NULL-safe equality** で一致すること、とする。SQL では
+`e.context_key IS canonical_context(c.raw_path)` 相当（両方 NULL も一致）であり、通常の `=` で NULL を落としてはならない。
+これは 07 §5.3 の addendum 以降 vector が `(text_hash, context, profile)` の関数であり、同一本文・別ファイル名の
+2 chunk を交差させてはならないためである。rebuild の source は current objects/CAS のみであり、pre-object SQLite
+snapshot を読み、そこから object を backfill する fallback は置かない。同一 `text_hash` を持つ複数 chunk には、
+この predicate に一致する embedding をそれぞれの `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。
+**0 件または 1 件の candidate 判定はこの complete predicate の適用後に行う** (0 件 = 未 enrichment — chunk_vec 行を
+作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild
+で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
 
 `image_vec` の導出は同型だが**結合が要らない**点だけが異なる — 結合対象は **`target_type='image'` の行のみ**で、`embeddings.target_id` がそのまま `image_vec.image_id` (= `objects/image/` の `image_hash`) になる。chunk 側の `chunks.text_hash` 結合は「その本文を今どの chunk 行が担っているか」を再導出するためのものだが、画像は content-addressed object そのものが target であり、担い手を探す必要が無いためである (`context_key` も画像には適用しない — 入力構築 ([07-adapter-spec.md §5.3](07-adapter-spec.md) の `chunk_filename_context_v1`) は chunk 本文に対する規約であり画像には掛からない)。**現行 tool-lock の embedding profile への限定は chunk 側と同一**に適用し、`image_hash` ごとに候補が 0 件または 1 件であることを検証する (0 件 = 未 enrichment で行を作らない。2 件以上は corruption)。
 
@@ -575,8 +585,11 @@ Kio は Text/Image を分けず **単一マルチモーダル Embedding Adapter*
 
 ## 4.4 その他のテーブル / ストアの正本
 
-sqlite.db に存在するのは §4.1〜§4.5 の 8 表 (chunks / chunk_config_generations / chunk_publications /
-chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata) のみ (ストア全体の一覧は [03-data-model.md §4.1](03-data-model.md))。
+sqlite.db の current public logical object は §4.1〜§4.5 の **9 表 / virtual table**
+(chunks / chunk_config_generations / chunk_publications / embeddings / tree_entries / index_metadata /
+chunk_fts / chunk_vec / image_vec) のみ (ストア全体の一覧は [03-data-model.md §4.1](03-data-model.md))。
+FTS5 / sqlite-vec が SQLite 内部に作る shadow table は実装詳細であり、この 9 個にも schema 契約の
+table 数にも数えない。
 
 ```text
 chunks / tree / commit object                         03-data-model.md §8
@@ -607,8 +620,8 @@ CREATE TABLE tree_entries (
   path TEXT NOT NULL,
   raw_hash TEXT NOT NULL,
   tool_profile_hash TEXT,
-  gen INTEGER NOT NULL DEFAULT 0,
-  manifest_hash TEXT NOT NULL,         -- tree schema v2 (03 §8) の射影
+  gen INTEGER,
+  manifest_hash TEXT,                  -- normalize がある entry では required (tree schema v2, 03 §8)
   PRIMARY KEY (commit_hash, path)
 );
 CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_profile_hash, gen);
@@ -616,10 +629,10 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 
 規範:
 
-- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` は tree entry の `normalize.gen` ([03-data-model.md §8](03-data-model.md)) の射影で、tree entry に `gen` 欠落時は 0 と読む。`manifest_hash` は v2 tree entry の射影 (時点条件は `chunk_publications` の introduction の ancestry — [05-runtime.md §1.6](05-runtime.md)。`first_seen_commit` は便宜列)
+- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` と `manifest_hash` は tree entry の `normalize.gen` / `normalize.manifest_hash` ([03-data-model.md §8](03-data-model.md)) の射影であり、`normalize` がある current entry ではともに必須、`normalize` 自体が無い raw-only entry ではともに NULL である。`normalize.gen` / `normalize.manifest_hash` の欠落を既定値で補う既存 store reader は置かず corruption / incompatible format として fail-closed にする。時点条件は `chunk_publications` の introduction の ancestry ([05-runtime.md §1.6](05-runtime.md)。`first_seen_commit` は便宜列)
 - **常駐必須は HEAD commit 分のみ**。commit 作成時に新 HEAD 分を挿入する。旧 HEAD 分は cache として残してよい。残る historical row は、HEAD から外れた tag-only / disconnected commit を含め、writer が replica の exact `--at` binding を publish する対象にもなる
 - `kio search --at <commit>` はこの表を展開・挿入しない。CAS で target を検証した上で、既に writer が `aggregator.sqlite` に publish した exact binding と交差する。marker / binding が無ければ source SQLite へ fallback せず fail-closed とする ([05-runtime.md §1.8](05-runtime.md))。tree を展開してこの表へ入れるのは writer / repair / local Evidence Pointer 解決だけである。`kio reindex --at <commit>` は選択 target を完全射影へ明示的に渡すため、空 tree でも completed marker を publish する
-- `kio repair rebuild-db` は利用可能な既存 historical row を保持して source index を再構築し、その後に完全 replica 射影を行う。旧 HEAD 分の掃除は GC (実行系は Phase 4+、[05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
+- `kio repair rebuild-db` は source index を DDL ごと再生成し、current commit / tree / CAS object だけから historical row を再導出した後に完全 replica 射影を行う。既存 SQLite row は source にも保持対象にもならない。必要 object が無いか current schema を満たさなければ fail-closed とする。旧 HEAD 分の掃除は GC (実行系は Phase 4+、[05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
 
 ## 4.6 chunk 世代と chunking 設定変更
 
@@ -792,8 +805,8 @@ monthly_usd_cap = 10.0
 - cap は二層で判定する。**device cap** (`~/.config/kio/config.toml`、デバイス上の全 `.kio` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kio/config.toml`、その `.kio` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
 - 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。**candidate = 0 のタスク (単価 0 のローカル LLM — 下記) は cap 判定の対象外として起動できる** (cap は外部支出の上限であり、超過状態でも無償タスクは封鎖しない)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request を直列化し、request ごとに新しい相 1 (submission_seq = MAX+1) → 終端を完了してから次の request を開始する (request 単位の冪等記帳 — 並行 request は作らない。課金済み call の盲目再試行を禁止)。**provider request id は応答受信直後・終端 Tx より前に行の `batch_job_id` へ耐久記録する** (下記 DDL — sync 行の照会キー)。**crash 回収** (書き込み系コマンド冒頭 — §5.8 の回復と同時): 残った state 0/1 の `request_kind='sync'` 行は、`batch_job_id` (provider request id) が記録済みで照会可能なら結果を確定し、未記録・照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)。**照会で得た応答が §3.2 の正常な制御応答 (`fallback_to_full=true`) だった場合も同節の規則を適用し `outcome='fallback_to_full'` で確定記帳する** (task 非終端 — 通常規則どおり)。なお sync 行の「照会」は provider が request id による結果照会を提供する場合の**任意経路**であり、[07-adapter-spec.md §5.7](07-adapter-spec.md) の Batch trait 契約には含めない — 提供の無い Adapter では常に「照会不能」(unknown 精算) 側で回収する。**`mode=full` の新 request の開始が crash で失われても義務は失われない** — task は非終端のまま残るため、次回の書き込み系実行の task 再検出 (§5.2 末尾 — task テーブル喪失許容と同じ再検出) が §3.1 の mode 選択から再実行する (制御応答は発動条件 5 に不算入のため再び incremental → 再び制御応答となり得るが、その受領は冪等な正常終端であり追加コストは実測 usage 分のみ)。sync 行は §5.8 の job / upload 照合・可視化猶予・回復期限の対象外 (job / upload 相が無い) だが、abandon (同じ intent_token / 4 組指定) は適用できる。**sync 行は provider 側に残骸 (upload / job) を作らないため、全ての終端 Tx (成功・reject・unknown 精算・abandon・fallback_to_full — §3.2) で同一 Tx 内に `intent_token` を NULL 化する** — 「NULL 化は残骸掃除の完了時のみ」(§5.8) は batch 行の規則であり、sync では終端 = 掃除完了である (これが無いと「旧 token の消し込み完了後にのみ再投入可」の順序規範と衝突し、同一タスクキーの再投入が恒久停止する)。複数 request の途中 (前 request 終端済み・次 request 未開始) で crash した場合は、終端済み行 (token NULL) への通常の相 1 (新 token・MAX+1) で次の request から再開する。**crash 回収が確定するのは記帳と state のみ** — 照会で得た出力は persist しない (出力が必要なら新しい相 1 で再実行する。出力を persist する経路は相 3 と同じく persist 直前の tombstone 再検査に従う — [05-runtime.md §3.5](05-runtime.md))
 - **query embedding request** (vector|hybrid 検索の page 1 — [05-runtime.md §1](05-runtime.md)) は `scope_id = 'device'` (予約値 — scope_id は ULID のため実 scope と衝突しない) の `request_kind='sync'` 行として上記縮退 2 相に載せる。`adapter_kind = 'embedding'`・`input_hash = NFC 正規化した query 文字列の sha256` (query 本文は保存しない — [05-runtime.md §1.5](05-runtime.md) と同じ方針)。folder cap 判定 (scope 別集計) には現れず、device cap / `per_adapter` (embedding) の合算には通常どおり含まれる — 判定式は不変。送信可否の consent gate は [05-runtime.md §1.1](05-runtime.md) / [07-adapter-spec.md §3](07-adapter-spec.md)。**回収と並行 claim**: `kio search` は読み取り系だが ([05-runtime.md §6](05-runtime.md))、vector|hybrid の page 1 に限り device 行の書込主体である。**sync 行は相 1 で `job_create_started_at` に開始時刻を記録し** (batch 行の猶予起点と同じ既存列 — sync では staleness 判定にのみ使う)、**回収の対象は `stale_after_at` (下記 DDL — 相 1 で耐久保存する絶対期限) を過ぎた stale 行に限る**。`stale_after_at` は相 1 Tx で「当該 request に適用する実効 `timeout_seconds` ([07-adapter-spec.md §7](07-adapter-spec.md) `[adapter.policy]` — **device 行では参加 scope の実効値の最大値**) + 60 秒マージン (下限 600 秒)」から算出して保存し、**回収は保存値のみを参照する** — config を後から変更しても、rate_limit の Retry-After 追従 (§5.3 max_attempts=∞) で呼出が長引いても、生存中の呼出を stale と誤認しない (Retry-After を受信した保持プロセスは自 token の CAS UPDATE で `stale_after_at` を **`max(現行値, 現在 + Retry-After + timeout + 60 秒)`** へ延長する — **単調**: 短い Retry-After で期限を縮めない。Retry-After は有限・非負を検証する (**不正値のみ 3600 秒の代替値とし、有効な実値は clamp しない** — 実待機より短い保護期限を作ると、待機中の stale 回収と覚醒後の provider 再呼出という二重呼出窓が再発する)。**延長 UPDATE が 0 行 (= 他プロセスが回収済み) なら claim 喪失として以後の待機・provider 再呼出・記帳を全て中止する** — 下記の状態遷移 CAS 敗者規則と同じ非記帳。累積延長に上限は設けない (§5.3 max_attempts=∞ / Retry-After 追従の設計意図 — 解放の脱出路は `kio batch abandon`))。§5.8 の可視化猶予 (既定 10 分) とは独立の機構である。猶予内の crash 残骸が device cap 予約 (`estimated_usd`) を最大猶予時間保持することは既知の有界挙動として許容する。相 1 の claim に先立ち、**`scope_id='device'` の全 sync stale 行を回収する (同一 4 組 key に限らない — 別 query の crash 残骸も search-only 運用で回収されるように)**。回収は上記 crash 回収と同じ規則で行う (`BEGIN IMMEDIATE` Tx 下。下記剪定と合わせて **1 回の実行あたり合計 256 行を上限とする bounded 処理**とし、**配分と順序を固定する: (1) 自 key (今回 claim する 4 組 key) の stale 行は上限枠外で常に最優先に回収する / (2) 剪定に最低 128 行を保証する / (3) 残余枠を一般 stale 回収に充てる (対象不足の側の未使用枠は相互融通)。各集合の処理・持ち越しの選択順は (sync stale 行 = `job_create_started_at`、terminal 行 = `completed_at`) の昇順 + 4 組 PK の byte 順で完全に決定的とする。残余は次回実行へ持ち越す**。`.kio/.lock` は不要 — device 行はどの scope にも属さず、直列化は cost-ledger 側の Tx が担う。**inline 回収では provider 照会を行わない** — 常に unknown 精算とする (検索応答性の保護。照会つき回収は書き込み系冒頭の crash 回収のみ))。同一 key が stale でない in-flight (他プロセスの生存 claim) のときは当該実行を text fallback (`fallback_reason="embedding_in_flight"` — mode 別の扱いは [05-runtime.md §1.1](05-runtime.md)) に落とし、送信しない (同一 query の並行 claim・token 上書きを作らない)。**device 行の全ての状態遷移 UPDATE (request id 記録・終端) は `WHERE intent_token = <自 token>` の条件付き (CAS) で行う** — 0 行更新 = 他プロセスに回収済みであり、自プロセスは応答・課金のどちらも記帳しない (回収側の unknown 精算が既に確定記帳されており二重計上を作らない。受信済み vector を当該検索の結果に使うことは課金と独立に可)。**terminal device 行の剪定**: `scope_id='device'` ∧ **`state IN (2, 3)`** (成功終端 = state 2 を含む — 含めないと成功 query 行が恒久蓄積する) ∧ `intent_token IS NULL` ∧ **`contract_violation_count = 0`** (「1 回のみ」の durable 判定源を消さない) ∧ `completed_at` が前月以前 (**UTC 暦月** — 当月 UTC 月初の epoch ms 未満。`cost_ledger.month` も `recorded_at` の UTC 暦月から導出する) の行は、書き込み系コマンド冒頭の掃除 (§5.8 の回復と同時) **および `kio search` の inline 回収と同一 Tx** で DELETE してよい (device 行の唯一の作成者は search — search-only の定常運用でも剪定が発火するための併設。**上記 bounded 上限 256 行/回を回収と共有し、超過分は次回へ持ち越す** — 月替わり直後の一括削除で検索応答性 (M3-1) を損なわないための上限)。当月の cap 判定は cost_ledger 合算 + state 0/1 予約のみを参照するため影響せず、確定課金の台帳は cost_ledger 側が恒久保持する (**恒久保持は監査台帳としての既定** — 行数は request 数に比例して増えるが、当月 cap 判定は月次 index (下記 DDL) で有界。台帳の月次 archive / compaction は Phase 4+ の論点であり MVP では定義しない)。剪定は `submission_seq` の直列化と両立する (通算連番の高水位の正本は cost_ledger — 行の再作成は ledger の MAX から継承するため衝突しない。下記 DDL コメント)。剪定・確定済みの 4 組 key への `kio batch abandon` は**対象なしの冪等成功** (exit 0 + 「対象なし」表示 — [06-cli-spec.md §1](06-cli-spec.md))
-- 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kio/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kio` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kio` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
-- store は 3 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
+- 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kio/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kio` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kio` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)。schema が current DDL と不一致の既存 ledger は bytes を保全して fail-closed とする ([10-operations.md §7.5.3](10-operations.md)))
+- store は 3 表で構成し、**以下の DDL を SQL 正本とする**。2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。`schema_migrations` は current operational marker 用であり、旧 JSONL + lock 構成の importer / cutover marker は持たない ([10-operations.md §7.5.3](10-operations.md)):
 
 ```sql
 CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳 (行の UPDATE / DELETE 禁止)
@@ -858,8 +871,8 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
     stale_after_at    INTEGER,           -- UTC ミリ秒。sync 行のみ: 相 1 で耐久保存する回収期限 (§5.4 —
                                          --  実効 timeout の最大値 + 60 秒、下限 600 秒。Retry-After 受信で
                                          --  自 token CAS により延長)。batch 行は NULL (§5.8 の期限が担う)。
-                                         --  列追加の migration は既存の未終端 sync 行へ backfill が必須
-                                         --  (10 §7.5.3 の例外規範 — NULL 残置は回収から恒久に漏れる)
+                                         -- NULL は batch 行だけに許可する。既存不一致 ledger を startup で
+                                         -- backfill する互換 migration は持たない (10 §7.5.3)
     submission_seq    INTEGER NOT NULL DEFAULT 0,
                                          -- 行 (再) 作成時は cost_ledger 同キーの MAX(submission_seq)
                                          --  から継承する (通算連番の高水位の正本は ledger — 0 から
@@ -889,10 +902,11 @@ CREATE INDEX idx_batch_requests_inflight ON batch_requests(state) WHERE state IN
                                          -- cap 判定の in-flight 予約合算 (state 0/1 の estimated_usd)
                                          --  を生涯 task 数に依存させない partial index
 
-CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 §7.5.3 — JSONL cutover 等)
-    name        TEXT NOT NULL PRIMARY KEY, -- 例: 'jsonl-cutover' (rowid 表の TEXT PRIMARY KEY は NULL を拒否しないため NOT NULL 必須)
+CREATE TABLE schema_migrations (         -- current operational marker のみ（例: restore-reconcile）
+    name        TEXT NOT NULL PRIMARY KEY,
     applied_at  INTEGER NOT NULL         -- UTC ミリ秒
 );
+-- 旧 JSONL cutover/import の marker は置かない。
 ```
 - いずれかの cap 超過時、走行中タスクは完了させ、新規タスクは `paused` 状態へ。`kio status` は超過した cap の種別 (`device` | `folder`) と scope を表示する
 - `kio batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kio batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
@@ -935,7 +949,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kio batch resume`: 中断状態 (running stale, pending) を再開
-- `kio repair rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**(publication event 行の) backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する。cost-ledger.sqlite の列追加 migration backfill ([10-operations.md §7.5.3](10-operations.md)) とは対象が別)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — commit object は削除されない ([05-runtime.md §2.2](05-runtime.md) の append-only・GC 対象外) ため、この publication 行は恒久に保持される (`--at` / `--all-history` の解決対象であり続ける)。
+- `kio repair rebuild-db`: SQLite を current objects/ から再構築する (SQLite の current public logical object は §4.1〜§4.5 の 9 表 / virtual table のみ。FTS5 / sqlite-vec shadow table は数えない。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**historical cache の再導出元は current commit / tree / CAS object** である。`chunks.jsonl` の current creation/publication record は補助的な association input として照合してよいが、pre-object-store SQLite row、旧 DB snapshot、欠落 event の commit-walk fallback、又はその backfill を source にしてはならない。必要な commit/tree/CAS object が欠落又は current schema を満たさない場合は、履歴を黙って落とさず corruption / shallow state を明示して fail-closed にする。これにより再構築後も `--at`、`--all-history`、time travel、historical Evidence Pointer resolution は current object のみから同じ可視性を保つ。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 

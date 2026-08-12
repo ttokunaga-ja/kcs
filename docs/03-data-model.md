@@ -118,11 +118,11 @@ object identity と hash 算出規約は変わらない。
 
 tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
 leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
-NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要。**実装同梱の UCD 版で未割当の code point を含む tag 名は `KIO-E-CONFIG-USAGE-001` で拒否する** — 未割当→割当の版間遷移は folding を変え得るため、拒否により「割当済みのみ」の安定性前提を全域で成立させる)。正規化規則自体の改訂 (旧「Unicode lowercase」実装を含む) は digest の非互換変更であり、`kio_format_version` の migration 経路 (§2 末尾・[10-operations.md §12.5](10-operations.md)) で names.jsonl の論理名から canonical ref を再導出する — fsck は digest 再計算の不一致を corruption ではなく migration 誘導として報告する。
+NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要。**実装同梱の UCD 版で未割当の code point を含む tag 名は `KIO-E-CONFIG-USAGE-001` で拒否する** — 未割当→割当の版間遷移は folding を変え得るため、拒否により「割当済みのみ」の安定性前提を全域で成立させる)。正規化規則を変える場合は `kio_format_version` の非互換変更として扱う。未公開期間に旧規則の names.jsonl から ref を再導出する reader/migration は置かない。不一致は current store の corruption ではなく **incompatible format** として、store bytes を変更せず fail-closed で報告する ([10-operations.md §12.5](10-operations.md))。
 `HEAD` の case variant は論理 tag 名として予約する。tag ref は `refs/tags-v1/tag-<digest64>` の
-1 表現のみであり、第二の tag namespace は存在しない。履歴 tree 内の `path` は論理名なので、
-Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能とし、restore 等の物理化直前に
-対象 OS の規則を別途検証する。
+1 表現のみであり、第二の tag namespace は存在しない。論理 tag 名と tree entry は current schema の
+portable-name 規則を満たす。対象 OS で物理化できない名前を例外的に読取専用で受理する旧 tree/path
+分岐は持たない。
 
 **論理名の truth**: digest は一方向であり、canonical ref (leaf + commit_hash 値) からは論理 tag 名を
 復元できない。tag 作成時に `refs/tags-v1/names.jsonl` (append-only JSONL) へ
@@ -138,7 +138,7 @@ names.jsonl で digest を解決する。対応行の無い canonical ref は fs
 names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複数行は最終行を表示名とする
 (NFC + simple case folding が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
 
-**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kio.md) は `kio_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kio/scope.json` の `kio_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。**互換判定は scope.json の schema validation より先に評価する** — 自己の対応上限より新しい version の store は未知 key の schema error に入らず **read-only + 新版誘導** で縮退する (前方互換の定義された降着点。公開後の scope.schema.json への key 追加は MINOR bump を伴う — [10-operations.md §12.5](10-operations.md))。縮退の具体挙動 (コマンド別の許否・`KIO-E-STORE-VERSION-001`・exit 8) は [10-operations.md §12.5](10-operations.md) が正本。
+**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kio.md) は `kio_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kio/scope.json` の必須 `kio_format_version` フィールド** (init 時に current version を記録する)。欠落・非 parseable・自己の対応下限未満の値は current schema ではなく **incompatible format** として、store bytes を変更せず fail-closed にする。**互換判定は scope.json の schema validation より先に評価する** — 自己の対応上限より新しい version の store だけは未知 key の schema error に入らず **read-only + 新版誘導** で縮退する (前方互換の定義された降着点。公開後の scope.schema.json への key 追加は MINOR bump を伴う — [10-operations.md §12.5](10-operations.md))。縮退の具体挙動 (コマンド別の許否・`KIO-E-STORE-VERSION-001`・exit 8) は [10-operations.md §12.5](10-operations.md) が正本。
 
 ## 2.1 normalized instance と全文 view
 
@@ -204,9 +204,10 @@ unit object schema (`<unit_ref>.json`):
 `reused_from` は unit_mapping ([04-pipeline.md §2.2](04-pipeline.md)) による再利用の provenance:
 `{ "raw_hash": "sha256:old...", "gen": 0, "unit_key": "page:11" }`。再利用時は unit object 本体を
 新 instance へ **複製** する (per-.kio 重複容認、§9)。
-`metadata` は optional (旧 object は `{}` と読む) で、page/bbox/confidence と Step 4 の bounded
-`bbox_annotations` を保持する。検索用 annotation block は同じ unit の `markdown` にも決定論的に
-materialize されるため、chunk span と Evidence 解決元がずれない。
+`metadata` は current schema の **required object** であり、page/bbox/confidence と Step 4 の bounded
+`bbox_annotations` を保持する。内容が無い場合は空 object `{}` を明示する。field 全体の欠落を `{}` に
+読み替える旧 reader / default は置かず reject する。検索用 annotation block は同じ unit の `markdown` にも
+決定論的に materialize されるため、chunk span と Evidence 解決元がずれない。
 
 不変条件:
 
@@ -251,8 +252,8 @@ view の存在は使わない。
 各 `.kio` が管理するのは **その `.kio` が配置されたフォルダ直下のファイルのみ** である。この規則は次の 3 点で一意に定まる:
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kio` が存在するか否かに関わらず、親 `.kio` の管理対象に **ならない** (再帰包含は行わない)。
-2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kio index` が子 `.kio` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kio` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kio` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kio` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。**本既定の導入以前に生成済みの既存子 `.kio` は grandfathered** — 引き続き有効な scope として index・検索の対象に残る (skip が適用されるのは新規生成の判断のみ)。
-3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KIO-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path、および **well-formed UTF-8 でない byte 列の path** も拒否する (tag の portable leaf 規則と同水準 — §2。JCS 直列化と UTF-8 バイト列昇順ソート (§8.1・§8) は well-formed UTF-8 を前提とするため、不正 byte 列は可逆に表現できない)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。**この拒否は新規 ingest・新規 tree 作成時の forward 規則である** — 本規則以前の既存 tree entry に該当 path が残る場合、read / inspect / search は可能とし (§2 の「Windows で物理 leaf にできない既存 Unix 名」の legacy 読取と同型)、物理化は既存の対象 OS 検査で拒否または安全名 mapping、fsck は corruption ではなく legacy 警告として報告する (immutable tree は書き換えられないため)。pointer 入力の受理も同様 — 検証済み legacy tree 由来 pointer の `path_at_commit` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の例外に従い本規則で拒否せず受理する (表示専用 field であり resolver には入らない)。
+2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kio index` が子 `.kio` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kio` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kio` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kio` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。既存子 scope を grandfather する分岐は置かない。
+3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KIO-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path、および **well-formed UTF-8 でない byte 列の path** も拒否する (tag の portable leaf 規則と同水準 — §2。JCS 直列化と UTF-8 バイト列昇順ソート (§8.1・§8) は well-formed UTF-8 を前提とするため、不正 byte 列は可逆に表現できない)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。この検証は read/write を問わず current canonical object に適用する。区切りを含む旧 tree/path や raw-name pointer を読取専用で受理・安全名 mapping・legacy warning に落とす分岐は持たない。
 
 ファイルの位置は `scope_path` (正本 `.kio` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kio` の再帰包含ではなく、scope_registry が列挙し aggregator が採点する横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
 
@@ -362,13 +363,13 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 | `.kio/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kio/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
-| `.kio/index/sqlite.db` (**検索面ではないが aggregator の複製元である** — 2026-08-12。`kio search` は引かず、読むのは writer / repair による完全射影と scope 内保守。`.kio` 内にあることでフォルダごと移動しても移動先で再導出でなく射影で済む。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | 単一 scope は `kio repair rebuild-db`、device 全体は `kio repair all` (`-a`) | [04-pipeline.md §4](04-pipeline.md) |
+| `.kio/index/sqlite.db` (**検索面ではないが aggregator の複製元である** — 2026-08-12。`kio search` は引かず、読むのは writer / repair による完全射影と scope 内保守。`.kio` 内にあることでフォルダごと移動しても移動先で再導出でなく射影で済む。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (public logical object は chunks / chunk_config_generations / chunk_publications / embeddings / tree_entries / index_metadata の 6 表、および chunk_fts / chunk_vec / image_vec の 3 virtual table、計 9。FTS5 / sqlite-vec の shadow table は含めない) | cache | 単一 scope は `kio repair rebuild-db`、device 全体は `kio repair all` (`-a`) | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kio/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kio` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.cache/kio/aggregator.sqlite` | **SQLite** (`agg_scopes` / `agg_chunks` / `agg_fts` / `agg_embeddings` / `agg_image_embeddings` / `agg_image_refs` / `agg_bindings` / `agg_projection_markers` の 8 表) | cache | writer の完全再射影、または device-global の `kio repair replica` (`-r`)。source SQLite も含めて検証・再構築する場合は `kio repair all` (`-a`)。欠落・不完全時は `kio search` が source index を読まず fail-closed | [05-runtime.md §1.8](05-runtime.md) |
 | `${XDG_CACHE_HOME:-$HOME/.cache}/kio/search-query-cache/<query_vector_digest>` | file (canonical float32 little-endian vector) | device-local cursor replay cache（query 本文は保存しない） | 欠落・digest 不一致は当該 cursor を `KIO-E-SEARCH-CURSOR-001` で拒否。再 embedding や source SQLite 読みには戻らない | [05-runtime.md §1.5](05-runtime.md) |
 | `~/.local/share/kio/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` / `schema_migrations` の 3 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
-**SQLite を使うのはこの表の 4 ファイル (計 20 テーブル)**。うち index/sqlite.db・scope-registry.sqlite・aggregator.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。cursor replay の query vector は source の `embeddings` 表ではなく上記の device-local file cache に置くため、破棄・欠落の影響は cursor 拒否だけである。**SQLite ファイルとして cache root (`$XDG_CACHE_HOME`) に置かれるのは aggregator.sqlite だけ**だが、query-vector replay cache も同じ cache root の file である — 他の 3 SQLite は data root。区別の基準は「ユーザーが知る情報を失うか」であり、aggregator は各 `.kio` の射影に過ぎず何も失わない (§4 不変条件 2)。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
+**SQLite を使うのはこの表の 4 ファイル (public logical object は計 21 表 / virtual table)**。内訳は index/sqlite.db 9、scope-registry.sqlite 1、aggregator.sqlite 8、cost-ledger.sqlite 3 である。FTS5 / sqlite-vec の shadow table は SQLite の内部実装であり、この logical-object 数にも public schema 契約にも含めない。うち index/sqlite.db・scope-registry.sqlite・aggregator.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — current schema と不一致な既存 bytes は fail-closed、[10-operations.md §7.5.3](10-operations.md))。cursor replay の query vector は source の `embeddings` 表ではなく上記の device-local file cache に置くため、破棄・欠落の影響は cursor 拒否だけである。**SQLite ファイルとして cache root (`$XDG_CACHE_HOME`) に置かれるのは aggregator.sqlite だけ**だが、query-vector replay cache も同じ cache root の file である — 他の 3 SQLite は data root。区別の基準は「ユーザーが知る情報を失うか」であり、aggregator は各 `.kio` の射影に過ぎず何も失わない (§4 不変条件 2)。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。`schema_migrations` は current operational marker 専用であり、旧 JSONL cutover の importer marker は置かない。課金 + in-flight intent の current SQLite record は UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とする ([04-pipeline.md §5.4](04-pipeline.md))。
 
 # 5. Identity — hash と semantic_fingerprint の分離
 
@@ -450,7 +451,7 @@ null フィールドは hash 入力に含めない (省略と null を識別し�
 
 手順 1-2 の対象文字集合と単独 CR の扱いは 2026-07-03 に確定 (契約テスト設計 step2a §C-4 の決定性論点解消)。
 
-`spec_version` の bump は breaking change 扱い (migration plan 必須)。
+`spec_version` の bump は breaking change 扱い。公開後は migration / old-version read-only を release 計画に明記する。未公開期間に旧 development object を読む migration reader は置かない。
 
 ## 5.2 tool_lock_hash 計算規約
 
@@ -496,7 +497,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する。**キー不変のまま境界を変える分割意味論の改訂 ([04-pipeline.md §4.1](04-pipeline.md) の決定規則の変更) も bump の対象** — hash 変化が §4.6 の再 chunk を発火する (2026-07 の決定規則明文化は実装・store 公開前の定義確定であり bump しない — 08 の schema_version 規約と同型)
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
-- `unicode_version` は **`kio init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨。これを欠く旧 config の読み込み救済 (同梱版として読み次回補完) も §12.3 側)
+- `unicode_version` は **`kio init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨)。これを欠く config は schema error / fail-closed とし、同梱版で読み替えたり次回書込みで補完したりしない
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
 - これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
@@ -643,7 +644,7 @@ object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を
   chunk object 内の `chunk_hash` フィールドは廃止)。raw / prepared / image は保存 byte の content key、
   tree / commit は canonical JSON の content key、chunk は保存 path の key と §8.1 identity tuple を照合する。
 - 人間向け表示は先頭 12 hex への短縮可 (`sha256:9f2c1a7b04de…`)。`--json` は完全 hash ([06-cli-spec.md §4](06-cli-spec.md))。
-- hash 算出または論理 identity 規約の変更は `kio_format_version` の MAJOR bump (migration plan 必須)。§2 の digest-only 物理名は、論理 hash を変えず Windows を含む filesystem で同じ object を表現する portability correction であり、identity の変更ではない。旧物理名は §2 の検証付き fallback で読み取る。
+- hash 算出または論理 identity 規約の変更は `kio_format_version` の MAJOR bump。§2 の digest-only 物理名は、論理 hash を変えず Windows を含む filesystem で同じ object を表現する portability correction であり、identity の変更ではない。旧物理名を読む fallback は置かず、canonical digest-only physical name だけを解決する。
 
 **raw / prepared / image** — content hash:
 
@@ -765,15 +766,14 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 
 JCS ではキー順は canonical 化時に自動決定されるため、上記の記載順は可読性のためのもの。
 
-`commit_type=purged` の commit は **`purged_raws` (当該 purge の対象 raw_hash の昇順配列 — prepared 相の closure から確定、[05-runtime.md §3.5](05-runtime.md) の planned_commit) を必須 field に持つ**。marker 検証 ([10-operations.md §7.5.1](10-operations.md)) は tombstone / receipt の raw_hash がこの配列に含まれることを対照する — 他 raw の正当な purge commit を `in_commit` に流用した偽 marker が genuine missing を隠せない。他の commit_type は本 field を持たない。**本 field は store format の初版から必須であり、これを欠く `commit_type=purged` commit は存在しない** (欠落 = corruption。2026-07 の field 追加は実装・store 公開前の定義確定。v1 flat marker の変換規範 ([05-runtime.md §3.5](05-runtime.md)) は marker 表現の互換であって、参照先 commit の形式は初版から一定)。
+`commit_type=purged` の commit は **`purged_raws` (当該 purge の対象 raw_hash の昇順配列 — prepared 相の closure から確定、[05-runtime.md §3.5](05-runtime.md) の planned_commit) を必須 field に持つ**。marker 検証 ([10-operations.md §7.5.1](10-operations.md)) は tombstone / receipt の raw_hash がこの配列に含まれることを対照する — 他 raw の正当な purge commit を `in_commit` に流用した偽 marker が genuine missing を隠せない。他の commit_type は本 field を持たない。**本 field は store format の初版から必須であり、これを欠く `commit_type=purged` commit は存在しない** (欠落 = corruption。2026-07 の field 追加は実装・store 公開前の定義確定)。
 
 tree entry の `normalize` ブロックは **optional**。normalized instance が存在しないファイル (未 Markdownize) の
 entry では `normalize` を**省略**する (省略 = 当該ファイルの normalized / chunk は存在しない。`null` は書かない —
 §5.1 の「省略と null を識別しない」に従う)。Step 1 (pipeline 未実装) では全 entry が `normalize` 省略形になり、
 Step 2 で Markdownize されたファイルから順に `normalize` 付き entry へ移行する。
 
-`normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1)。フィールド欠落は `gen = 0`
-と読む (forward compatible)。`kio reindex --regenerate` 後も過去 commit の tree entry は旧 gen を
+`normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1) であり必須である。欠落は schema violation として拒否する。`kio reindex --regenerate` 後も過去 commit の tree entry はその記録済み gen を
 指し続けるため、`kio view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
 不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は gen 保全により成立する。
 
