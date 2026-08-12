@@ -5324,7 +5324,7 @@ fn purge_blocks_rebuild_raw(kio_dir: &Path, raw_hash: &str) -> Result<bool> {
     let receipt_tail = state
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
-    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?;
     Ok(canonical.is_some_and(|canonical| canonical.event.kind != EventKind::Retired))
 }
 
@@ -5357,7 +5357,7 @@ fn purge_blocks_historical_reindex_raw(kio_dir: &Path, raw_hash: &str) -> Result
     let receipt_tail = state
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
-    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?;
     Ok(canonical.is_some_and(|canonical| canonical.event.kind == EventKind::Purged))
 }
 
@@ -10205,7 +10205,8 @@ fn resolve_manifest_missing(
     let Some(canonical) = canonical_final_event(
         tombstone.as_ref().map(|record| record.tail()),
         receipt.as_ref().map(|record| record.tail()),
-    ) else {
+    )?
+    else {
         // No marker at all explains a missing manifest -- corruption.
         return Ok(PointInTimeAttribution::StoreCorrupt);
     };
@@ -11644,7 +11645,7 @@ fn enforce_canonical_marker_barrier(
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
     let canonical_event =
-        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()).map(|c| c.event);
+        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?.map(|c| c.event);
     match canonical_event {
         Some(event) if event.kind == EventKind::Purged => Err(tombstone_error(json!({
             "raw_hash": raw_hash,

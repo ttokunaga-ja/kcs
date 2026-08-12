@@ -139,8 +139,8 @@ pub struct LifecycleEvent {
 }
 
 impl LifecycleEvent {
-    /// Build a new (non-legacy) `purged` event. `lifecycle_epoch` is left
-    /// unset; [`PurgeState::append_tombstone_event`] stamps it from the
+    /// Build a new `purged` event. `lifecycle_epoch` is left unset;
+    /// [`PurgeState::append_tombstone_event`] stamps it from the
     /// pre-incremented counter (LC26).
     #[must_use]
     pub fn purged(
@@ -162,7 +162,7 @@ impl LifecycleEvent {
         }
     }
 
-    /// Build a new (non-legacy) `erased` event. See [`Self::purged`].
+    /// Build a new `erased` event. See [`Self::purged`].
     #[must_use]
     pub fn erased(
         at: impl Into<String>,
@@ -408,38 +408,55 @@ pub struct CanonicalFinalEvent {
 }
 
 /// LC8: canonical final event = the tail event with the greatest
-/// `lifecycle_epoch` (legacy-missing treated as 0); on a tie (including
-/// 0==0 between two all-legacy markers) the tombstone wins deterministically.
+/// `lifecycle_epoch`; on a tie the tombstone wins deterministically. A tail
+/// missing its required lifecycle epoch is rejected fail-closed, even if a
+/// caller bypasses marker-record structural validation.
 #[must_use]
 pub fn canonical_final_event(
     tombstone_tail: Option<&LifecycleEvent>,
     receipt_tail: Option<&LifecycleEvent>,
-) -> Option<CanonicalFinalEvent> {
+) -> Result<Option<CanonicalFinalEvent>> {
+    // Durable-marker reads reject this during structural validation. Keep the
+    // pure resolver defensive as well: callers cannot accidentally authorize
+    // a malformed event by supplying it directly.
+    if tombstone_tail.is_some_and(|event| event.lifecycle_epoch.is_none())
+        || receipt_tail.is_some_and(|event| event.lifecycle_epoch.is_none())
+    {
+        return Err(corrupt_state(
+            "canonical lifecycle event is missing its lifecycle_epoch",
+        ));
+    }
+
     match (tombstone_tail, receipt_tail) {
         (Some(tombstone), Some(receipt)) => {
-            let tombstone_epoch = tombstone.lifecycle_epoch.unwrap_or(0);
-            let receipt_epoch = receipt.lifecycle_epoch.unwrap_or(0);
+            let (Some(tombstone_epoch), Some(receipt_epoch)) =
+                (tombstone.lifecycle_epoch, receipt.lifecycle_epoch)
+            else {
+                return Err(corrupt_state(
+                    "canonical lifecycle event is missing its lifecycle_epoch",
+                ));
+            };
             if receipt_epoch > tombstone_epoch {
-                Some(CanonicalFinalEvent {
+                Ok(Some(CanonicalFinalEvent {
                     marker_kind: TombstoneMode::Erase,
                     event: receipt.clone(),
-                })
+                }))
             } else {
-                Some(CanonicalFinalEvent {
+                Ok(Some(CanonicalFinalEvent {
                     marker_kind: TombstoneMode::Default,
                     event: tombstone.clone(),
-                })
+                }))
             }
         }
-        (Some(tombstone), None) => Some(CanonicalFinalEvent {
+        (Some(tombstone), None) => Ok(Some(CanonicalFinalEvent {
             marker_kind: TombstoneMode::Default,
             event: tombstone.clone(),
-        }),
-        (None, Some(receipt)) => Some(CanonicalFinalEvent {
+        })),
+        (None, Some(receipt)) => Ok(Some(CanonicalFinalEvent {
             marker_kind: TombstoneMode::Erase,
             event: receipt.clone(),
-        }),
-        (None, None) => None,
+        })),
+        (None, None) => Ok(None),
     }
 }
 
@@ -1283,7 +1300,7 @@ impl PurgeState {
     }
 
     /// LC43(b): scan every tombstone/erase-receipt event for the greatest
-    /// recorded `lifecycle_epoch` (0 if none recorded at all).
+    /// recorded `lifecycle_epoch` (0 if no marker has any event at all).
     pub fn max_recorded_lifecycle_epoch(&self) -> Result<u64> {
         let mut max_value = 0_u64;
         self.scan_all_events(|event| {
@@ -2234,6 +2251,47 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_marker_reads_reject_events_missing_required_epochs() {
+        let (_dir, state) = setup();
+        let raw_hash = raw();
+        let path = state.tombstone_path(&raw_hash).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // Older records that omit `lifecycle_epoch` are malformed rather than
+        // being ordered as epoch zero by the resolver.
+        let missing_lifecycle_epoch = TombstoneRecord {
+            raw_hash: raw_hash.clone(),
+            events: vec![LifecycleEvent::purged(
+                NOW,
+                commit(),
+                PurgeReason::Legal,
+                "user",
+                1,
+            )],
+        };
+        fs::write(&path, record_bytes(&missing_lifecycle_epoch).unwrap()).unwrap();
+        assert_eq!(
+            state.read_tombstone(&raw_hash).unwrap_err().error_code(),
+            "KIO-E-STORE-CORRUPT-001"
+        );
+
+        // The purge event's own epoch is independently required.
+        let missing_purge_epoch = TombstoneRecord {
+            raw_hash: raw_hash.clone(),
+            events: vec![LifecycleEvent {
+                epoch: None,
+                lifecycle_epoch: Some(1),
+                ..LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1)
+            }],
+        };
+        fs::write(&path, record_bytes(&missing_purge_epoch).unwrap()).unwrap();
+        assert_eq!(
+            state.read_tombstone(&raw_hash).unwrap_err().error_code(),
+            "KIO-E-STORE-CORRUPT-001"
+        );
+    }
+
+    #[test]
     fn lc4_torn_json_is_store_corrupt_fail_closed() {
         let (_dir, state) = setup();
         let event = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
@@ -2258,18 +2316,46 @@ mod tests {
             lifecycle_epoch: Some(11),
             ..LifecycleEvent::retired(LATER, other_commit(), "user")
         };
-        let canonical = canonical_final_event(Some(&purged10), Some(&retired11)).unwrap();
+        let canonical = canonical_final_event(Some(&purged10), Some(&retired11))
+            .unwrap()
+            .unwrap();
         assert_eq!(canonical.marker_kind, TombstoneMode::Erase);
         assert_eq!(canonical.event.kind, EventKind::Retired);
 
-        // Tie (including legacy 0==0) -> tombstone wins.
-        let legacy_tombstone = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
-        let legacy_receipt = LifecycleEvent::erased(NOW, commit(), PurgeReason::Legal, "user", 1);
-        let canonical =
-            canonical_final_event(Some(&legacy_tombstone), Some(&legacy_receipt)).unwrap();
+        // Equal valid lifecycle epochs deterministically choose the tombstone.
+        let tied_tombstone = LifecycleEvent {
+            lifecycle_epoch: Some(12),
+            ..LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1)
+        };
+        let tied_receipt = LifecycleEvent {
+            lifecycle_epoch: Some(12),
+            ..LifecycleEvent::erased(NOW, commit(), PurgeReason::Legal, "user", 1)
+        };
+        let canonical = canonical_final_event(Some(&tied_tombstone), Some(&tied_receipt))
+            .unwrap()
+            .unwrap();
         assert_eq!(canonical.marker_kind, TombstoneMode::Default);
 
-        assert!(canonical_final_event(None, None).is_none());
+        // Direct callers cannot authorize a malformed tail either: the
+        // resolver fail-closes before considering one-marker or two-marker
+        // ordering.
+        let missing_tombstone_epoch =
+            LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
+        assert!(canonical_final_event(Some(&missing_tombstone_epoch), None).is_err());
+
+        let missing_receipt_epoch =
+            LifecycleEvent::erased(NOW, commit(), PurgeReason::Legal, "user", 1);
+        assert!(canonical_final_event(None, Some(&missing_receipt_epoch)).is_err());
+
+        let valid_receipt = LifecycleEvent {
+            lifecycle_epoch: Some(13),
+            ..LifecycleEvent::erased(NOW, commit(), PurgeReason::Legal, "user", 1)
+        };
+        assert!(
+            canonical_final_event(Some(&missing_tombstone_epoch), Some(&valid_receipt)).is_err()
+        );
+
+        assert!(canonical_final_event(None, None).unwrap().is_none());
     }
 
     #[test]

@@ -1447,7 +1447,7 @@ fn check_purge_state(target: &ScopeTarget, raw_hash: &str, raw_present: bool) ->
         .flatten()
         .map(|receipt| receipt.tail().clone());
     let canonical_event =
-        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()).map(|c| c.event);
+        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?.map(|c| c.event);
     match canonical_event {
         Some(event) if event.kind == EventKind::Purged => {
             return Err(super::tombstone_error(json!({

@@ -2443,8 +2443,23 @@ fn canonical_lookup(
         Ok(None) => {}
         Err(error) => receipt_error = Some(error.to_string()),
     }
+    let canonical = match canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            // Keep malformed tails out of ordering and report them through
+            // the existing per-marker corruption findings.
+            let reason = error.to_string();
+            if tombstone_tail.is_some_and(|event| event.lifecycle_epoch.is_none()) {
+                tombstone_error = Some(reason.clone());
+            }
+            if receipt_tail.is_some_and(|event| event.lifecycle_epoch.is_none()) {
+                receipt_error = Some(reason);
+            }
+            None
+        }
+    };
     CanonicalLookup {
-        canonical: canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()),
+        canonical,
         tombstone_error,
         receipt_error,
     }
