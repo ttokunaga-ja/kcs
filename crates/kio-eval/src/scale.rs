@@ -125,6 +125,11 @@ const MAX_SNAPSHOT_ENTRIES: usize = 250_000;
 const MAX_WARMUPS: usize = 5;
 const MAX_SAMPLES: usize = 100;
 const RESULT_LIMIT: usize = 10;
+const SCENARIOS: [(&str, Option<&str>, f64); 3] = [
+    ("M3-1", None, 5_000.0),
+    ("M3-2", Some("--all-history"), 7_000.0),
+    ("M3-3", Some("--include-deleted"), 7_000.0),
+];
 static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn expected_shape(profile: &str) -> Option<(u64, u64, u64, u64, u64)> {
@@ -173,7 +178,8 @@ pub struct ScaleReport {
     benchmark: &'static str,
     measurement_class: &'static str,
     acceptance_eligible: bool,
-    passed_p95_under_5s: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passed_p95_thresholds: Option<bool>,
     fixture: FixtureBinding,
     binary: FileBinding,
     platform: Platform,
@@ -183,7 +189,7 @@ pub struct ScaleReport {
 
 impl ScaleReport {
     pub fn acceptance_failed(&self) -> bool {
-        self.acceptance_eligible && !self.passed_p95_under_5s
+        self.acceptance_eligible && self.passed_p95_thresholds != Some(true)
     }
 }
 
@@ -221,7 +227,9 @@ struct ScenarioReport {
     process_wall_statistics_ms: Statistics,
     metric_statistics_ms: Option<Statistics>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    p95_under_5s: Option<bool>,
+    p95_threshold_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passed_p95_threshold: Option<bool>,
 }
 #[derive(Debug, Serialize)]
 struct Sample {
@@ -1984,6 +1992,15 @@ fn acceptance_eligible(profile: &str, chunks: u64, warmups: usize, samples: usiz
     profile == "full" && chunks >= 100_001 && warmups == MAX_WARMUPS && samples == MAX_SAMPLES
 }
 
+fn acceptance_passed(acceptance_eligible: bool, reports: &[ScenarioReport]) -> Option<bool> {
+    acceptance_eligible.then(|| {
+        reports.len() == SCENARIOS.len()
+            && reports
+                .iter()
+                .all(|report| report.passed_p95_threshold == Some(true))
+    })
+}
+
 fn parse_response(
     stdout: &str,
     query: &str,
@@ -2091,11 +2108,6 @@ pub fn run(options: ScaleOptions) -> Result<ScaleReport, ScaleError> {
         ("XDG_RUNTIME_DIR", device.join("runtime").into_os_string()),
     ];
     let needles = fixture.manifest["needles"].as_array().expect("validated");
-    let scenarios = [
-        ("M3-1", None),
-        ("M3-2", Some("--all-history")),
-        ("M3-3", Some("--include-deleted")),
-    ];
     let mut raw_samples = [Vec::new(), Vec::new(), Vec::new()];
     let mut walls = [Vec::new(), Vec::new(), Vec::new()];
     let mut metrics = [Vec::new(), Vec::new(), Vec::new()];
@@ -2106,7 +2118,7 @@ pub fn run(options: ScaleOptions) -> Result<ScaleReport, ScaleError> {
                 .expect("validated");
             let query = needle["query"].as_str().expect("validated");
             let needle_index = sequence % needles.len();
-            for (scenario_index, (name, flag)) in scenarios.iter().enumerate() {
+            for (scenario_index, (name, flag, _)) in SCENARIOS.iter().enumerate() {
                 let metrics_snapshot = snapshot_metrics_log(&logs_handle)?;
                 let mut command = Command::new(&snapshot.bin);
                 command.args(["--json", "search", query, "--limit", "10"]);
@@ -2151,20 +2163,21 @@ pub fn run(options: ScaleOptions) -> Result<ScaleReport, ScaleError> {
         }
     }
     let mut reports = Vec::new();
-    for (index, (name, flag)) in scenarios.iter().enumerate() {
+    let acceptance_eligible = acceptance_eligible(
+        &fixture.profile,
+        fixture.chunks,
+        options.warmups,
+        options.samples,
+    );
+    for (index, (name, flag, threshold_ms)) in SCENARIOS.iter().enumerate() {
         let wall_stats = stats(&walls[index])?;
         let metric_stats = stats(&metrics[index])?;
         reports.push(ScenarioReport {
             name,
             selector_flag: *flag,
             raw_samples: std::mem::take(&mut raw_samples[index]),
-            p95_under_5s: acceptance_eligible(
-                &fixture.profile,
-                fixture.chunks,
-                options.warmups,
-                options.samples,
-            )
-            .then_some(metric_stats.p95 < 5_000.0),
+            p95_threshold_ms: acceptance_eligible.then_some(*threshold_ms),
+            passed_p95_threshold: acceptance_eligible.then_some(metric_stats.p95 < *threshold_ms),
             process_wall_statistics_ms: wall_stats,
             metric_statistics_ms: Some(metric_stats),
         });
@@ -2205,13 +2218,7 @@ pub fn run(options: ScaleOptions) -> Result<ScaleReport, ScaleError> {
     }
     recheck_bound_binary(&binary)?;
     attest_live_corpus(&corpus, &_lock.root, &fixture)?;
-    let acceptance_eligible = acceptance_eligible(
-        &fixture.profile,
-        fixture.chunks,
-        options.warmups,
-        options.samples,
-    );
-    let passed = acceptance_eligible && reports[0].p95_under_5s == Some(true);
+    let passed = acceptance_passed(acceptance_eligible, &reports);
     Ok(ScaleReport {
         schema_version: 1,
         benchmark: "kio-scale-search",
@@ -2221,7 +2228,7 @@ pub fn run(options: ScaleOptions) -> Result<ScaleReport, ScaleError> {
             "tiny_smoke"
         },
         acceptance_eligible,
-        passed_p95_under_5s: passed,
+        passed_p95_thresholds: passed,
         fixture: FixtureBinding {
             manifest: fixture.manifest_binding,
             attestation: fixture.attestation_binding,
@@ -2348,6 +2355,60 @@ pub fn write_report(path: &Path, corpus: &Path, report: &ScaleReport) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scenario(name: &'static str, passed_p95_threshold: Option<bool>) -> ScenarioReport {
+        ScenarioReport {
+            name,
+            selector_flag: None,
+            raw_samples: Vec::new(),
+            process_wall_statistics_ms: stats(&[1.0]).unwrap(),
+            metric_statistics_ms: Some(stats(&[1.0]).unwrap()),
+            p95_threshold_ms: passed_p95_threshold.map(|_| 5_000.0),
+            passed_p95_threshold,
+        }
+    }
+
+    fn test_report(acceptance_eligible: bool, passed_p95_thresholds: Option<bool>) -> ScaleReport {
+        ScaleReport {
+            schema_version: 1,
+            benchmark: "test",
+            measurement_class: "test",
+            acceptance_eligible,
+            passed_p95_thresholds,
+            fixture: FixtureBinding {
+                manifest: FileBinding {
+                    path: "test".into(),
+                    sha256: "test".into(),
+                    bytes: 0,
+                },
+                attestation: FileBinding {
+                    path: "test".into(),
+                    sha256: "test".into(),
+                    bytes: 0,
+                },
+                profile: "test".into(),
+                current_eligible_chunks: 0,
+            },
+            binary: FileBinding {
+                path: "test".into(),
+                sha256: "test".into(),
+                bytes: 0,
+            },
+            platform: Platform {
+                os: "test".into(),
+                arch: "test".into(),
+                family: "test".into(),
+            },
+            configuration: Configuration {
+                warmups: 1,
+                samples: 1,
+                query_schedule: "test",
+                result_limit: 1,
+            },
+            scenarios: Vec::new(),
+        }
+    }
+
     #[test]
     fn nearest_rank_statistics_are_stable() {
         let s = stats(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
@@ -2383,6 +2444,43 @@ mod tests {
         assert!(!acceptance_eligible("full", 100_000, 5, 100));
         assert!(!acceptance_eligible("full", 120_000, 1, 1));
         assert!(acceptance_eligible("full", 120_000, 5, 100));
+    }
+
+    #[test]
+    fn acceptance_aggregates_each_scenario_threshold_result() {
+        let passing = SCENARIOS
+            .iter()
+            .map(|(name, _, _)| scenario(name, Some(true)))
+            .collect::<Vec<_>>();
+        assert_eq!(acceptance_passed(true, &passing), Some(true));
+
+        let failing = vec![
+            scenario("M3-1", Some(true)),
+            scenario("M3-2", Some(false)),
+            scenario("M3-3", Some(true)),
+        ];
+        assert_eq!(acceptance_passed(true, &failing), Some(false));
+        assert_eq!(acceptance_passed(false, &failing), None);
+        assert_eq!(acceptance_passed(true, &passing[..2]), Some(false));
+    }
+
+    #[test]
+    fn tiny_scenario_omits_performance_threshold_fields() {
+        let value = serde_json::to_value(scenario("M3-1", None)).unwrap();
+        assert!(value.get("p95_threshold_ms").is_none());
+        assert!(value.get("passed_p95_threshold").is_none());
+    }
+
+    #[test]
+    fn acceptance_failure_follows_the_aggregate_and_tiny_omits_it() {
+        assert!(test_report(true, Some(false)).acceptance_failed());
+        assert!(!test_report(true, Some(true)).acceptance_failed());
+        let tiny = test_report(false, None);
+        assert!(!tiny.acceptance_failed());
+        assert!(serde_json::to_value(tiny)
+            .unwrap()
+            .get("passed_p95_thresholds")
+            .is_none());
     }
 
     #[test]
@@ -2503,7 +2601,7 @@ mod tests {
             benchmark: "x",
             measurement_class: "tiny_smoke",
             acceptance_eligible: false,
-            passed_p95_under_5s: false,
+            passed_p95_thresholds: None,
             fixture: FixtureBinding {
                 manifest: FileBinding {
                     path: "x".into(),
@@ -2559,7 +2657,7 @@ mod tests {
             benchmark: "x",
             measurement_class: "tiny_smoke",
             acceptance_eligible: false,
-            passed_p95_under_5s: false,
+            passed_p95_thresholds: None,
             fixture: FixtureBinding {
                 manifest: FileBinding {
                     path: "x".into(),
