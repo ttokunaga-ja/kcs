@@ -125,16 +125,30 @@ fn ct_tree_001_002_003_sort_duplicate_and_path_validation() {
 }
 
 #[test]
-fn ct_tree_004_gen_missing_defaults_to_zero() {
-    let entry: TreeEntry = serde_json::from_value(json!({
+fn ct_tree_004_normalized_entry_requires_gen() {
+    let missing_gen = serde_json::from_value::<TreeEntry>(json!({
         "path": "notes.md",
         "type": "file",
         "raw_hash": RAW_NOTES,
         "normalize": { "tool_profile_hash": TOOL_PROFILE, "manifest_hash": MANIFEST_HASH }
+    }));
+    assert!(missing_gen.is_err());
+
+    let missing_manifest = serde_json::from_value::<TreeEntry>(json!({
+        "path": "notes.md",
+        "type": "file",
+        "raw_hash": RAW_NOTES,
+        "normalize": { "tool_profile_hash": TOOL_PROFILE, "gen": 0 }
+    }));
+    assert!(missing_manifest.is_err());
+
+    let raw_only: TreeEntry = serde_json::from_value(json!({
+        "path": "notes.md",
+        "type": "file",
+        "raw_hash": RAW_NOTES
     }))
     .unwrap();
-
-    assert_eq!(entry.normalize.unwrap().gen, 0);
+    assert!(raw_only.normalize.is_none());
 }
 
 #[test]
