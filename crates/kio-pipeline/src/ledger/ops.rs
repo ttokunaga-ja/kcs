@@ -2446,7 +2446,7 @@ mod tests {
     fn qa14_phase1_intent_refuses_a_new_submission_while_restore_marker_present() {
         let (_dir, db) = open_temp_ledger_for_gate_tests();
         let conn = db.connection();
-        crate::ledger::migrate::record_marker(
+        crate::ledger::schema::record_marker(
             conn,
             crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
         )
@@ -2474,7 +2474,7 @@ mod tests {
     fn qa14_device_claim_refuses_a_new_submission_while_restore_marker_present() {
         let (_dir, db) = open_temp_ledger_for_gate_tests();
         let conn = db.connection();
-        crate::ledger::migrate::record_marker(
+        crate::ledger::schema::record_marker(
             conn,
             crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
         )
@@ -2511,7 +2511,7 @@ mod tests {
         let key = TaskKey::new("scope-a", "markdownize", "hash-a", "profile-a");
         let outcome = phase1_intent(conn, &key, RequestKind::Batch, 1.0, None).unwrap();
 
-        crate::ledger::migrate::record_marker(
+        crate::ledger::schema::record_marker(
             conn,
             crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
         )

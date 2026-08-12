@@ -3,8 +3,8 @@
 //! Source of record (in priority order): `tasks/step4b-contract-tests-ledger.md`
 //! (CL01-CL71 + §M rulings) > `docs/04-pipeline.md` §5.4/§5.8 > implementation.
 //!
-//! Coverage note: CL09-CL12 (JSONL→SQLite migration), and the pure-computation
-//! half of CL13/CL21/CL27/CL28/CL29/CL30/CL48/CL49/CL50/CL52/CL61, are covered
+//! Coverage note: the pure-computation half of
+//! CL13/CL21/CL27/CL28/CL29/CL30/CL48/CL49/CL50/CL52/CL61 is covered
 //! as inline `#[cfg(test)]` tests inside `crates/kio-pipeline/src/ledger/` (the
 //! instructions explicitly allow pure-core-logic contracts to live there). This
 //! file carries every contract that needs a live SQLite connection, a multi-step
@@ -2964,9 +2964,8 @@ fn cl70_device_global_path_and_wal_busy_timeout() {
     assert!(timeout > 0);
 }
 
-/// CL71: the old JSONL-3-file names must not appear anywhere in `crates/`
-/// outside the migration module itself (which legitimately references them as
-/// strings to rename `.migrated`).
+/// CL71: the retired JSONL ledger names must appear only in the fail-closed
+/// detector and this regression test.
 ///
 /// 2026-07-21: the JSONL rip-out is complete — `budget::CostLedger`/
 /// `ReservationLedger` (the old JSONL read-write path) and every one of their
@@ -2976,21 +2975,22 @@ fn cl70_device_global_path_and_wal_busy_timeout() {
 /// the ledger-storage-independent config/decision pieces. This contract is no
 /// longer `#[ignore]`d — it is a live regression guard from here on.
 #[test]
-fn cl71_legacy_jsonl_names_absent_outside_the_migration_module() {
+fn cl71_legacy_jsonl_names_are_limited_to_rejection_detector_and_tests() {
     let legacy_names = [
         "cost-ledger.jsonl",
         "cost-ledger-reservations.jsonl",
         "cost-ledger-reclaimed.jsonl",
         "cost-ledger.lock",
+        "cost-ledger.jsonl.migrated",
+        "cost-ledger-reservations.jsonl.migrated",
+        "cost-ledger-reclaimed.jsonl.migrated",
+        "cost-ledger.lock.migrated",
     ];
-    // `migrate.rs` legitimately references the legacy names as strings to rename
-    // `.migrated`; this test file itself legitimately references them too, in the
-    // `legacy_names` array literal directly below (self-exclusion — without it this
-    // scan would always find itself, regardless of whether the rest of `crates/` is
-    // clean).
+    // The rejection detector must retain the names in order to preserve the old
+    // files byte-for-byte and report them. This test references them for the same
+    // reason; no migration path may retain them.
     let allowed_files = [
-        "ledger/migrate.rs",
-        "ledger/migrate.rs.bak",
+        "ledger/schema.rs",
         "kio-cli/tests/step4b_ledger_contract.rs",
     ];
     let crates_dir = workspace_root().join("crates");
@@ -3015,8 +3015,220 @@ fn cl71_legacy_jsonl_names_absent_outside_the_migration_module() {
     });
     assert!(
         offending.is_empty(),
-        "legacy JSONL ledger names must not appear outside the migration module: {offending:?}"
+        "legacy JSONL ledger names must not appear outside the rejection detector/test: {offending:?}"
     );
+}
+
+#[test]
+fn retired_jsonl_files_fail_closed_without_modification() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kio");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    for name in [
+        "cost-ledger.jsonl",
+        "cost-ledger-reservations.jsonl",
+        "cost-ledger-reclaimed.jsonl",
+        "cost-ledger.lock",
+        "cost-ledger.jsonl.migrated",
+        "cost-ledger-reservations.jsonl.migrated",
+        "cost-ledger-reclaimed.jsonl.migrated",
+        "cost-ledger.lock.migrated",
+    ] {
+        let path = data_dir.join(name);
+        let original = [
+            b"non-rebuildable bytes for ".as_slice(),
+            name.as_bytes(),
+            b":\0\xff",
+        ]
+        .concat();
+        std::fs::write(&path, &original).unwrap();
+
+        let err = match LedgerDb::open(data_dir.join("cost-ledger.sqlite")) {
+            Ok(_) => panic!("{name} must make ledger startup fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"),
+            "got {err}"
+        );
+        assert!(
+            !data_dir.join("cost-ledger.sqlite").exists(),
+            "detection must happen before SQLite is created"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original, "{name} changed");
+        assert!(
+            !data_dir.join(format!("{name}.migrated")).exists(),
+            "startup must not rename {name}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    let legacy_names = [
+        "cost-ledger.jsonl",
+        "cost-ledger-reservations.jsonl",
+        "cost-ledger-reclaimed.jsonl",
+        "cost-ledger.lock",
+        "cost-ledger.jsonl.migrated",
+        "cost-ledger-reservations.jsonl.migrated",
+        "cost-ledger-reclaimed.jsonl.migrated",
+        "cost-ledger.lock.migrated",
+    ];
+    let originals = legacy_names
+        .iter()
+        .map(|name| {
+            let bytes = [
+                b"independent truth bytes: ".as_slice(),
+                name.as_bytes(),
+                b":\0\xff",
+            ]
+            .concat();
+            let path = data_dir.join(name);
+            std::fs::write(&path, &bytes).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let err = match LedgerDb::open(data_dir.join("cost-ledger.sqlite")) {
+        Ok(_) => panic!("multiple legacy files must make ledger startup fail closed"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"));
+    assert!(!data_dir.join("cost-ledger.sqlite").exists());
+    for (path, original) in originals {
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "{} changed",
+            path.display()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let target = data_dir.join("legacy-symlink-target");
+        std::fs::write(&target, b"non-rebuildable symlink target\0\xff").unwrap();
+        let symlinked = data_dir.join("cost-ledger.jsonl");
+        symlink(&target, &symlinked).unwrap();
+        let err = match LedgerDb::open(data_dir.join("cost-ledger.sqlite")) {
+            Ok(_) => panic!("a retired-ledger symlink must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"non-rebuildable symlink target\0\xff"
+        );
+        std::fs::remove_file(symlinked).unwrap();
+
+        let dangling = data_dir.join("cost-ledger.jsonl.migrated");
+        symlink(data_dir.join("missing-legacy-target"), &dangling).unwrap();
+        let err = match LedgerDb::open(data_dir.join("cost-ledger.sqlite")) {
+            Ok(_) => panic!("a dangling retired-ledger symlink must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"));
+        assert!(std::fs::symlink_metadata(&dangling).is_ok());
+    }
+}
+
+#[test]
+fn ledger_opens_normally_when_no_retired_jsonl_files_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kio/cost-ledger.sqlite");
+    let db = LedgerDb::open(&path).unwrap();
+    let tables: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cost_ledger'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 1);
+}
+
+#[test]
+fn legacy_rejection_does_not_change_existing_sqlite_bytes_or_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("kio");
+    let path = data_dir.join("cost-ledger.sqlite");
+    {
+        let db = LedgerDb::open(&path).unwrap();
+        let task_key = key("scope-a", "markdownize", "hash-a");
+        phase1_intent(db.connection(), &task_key, RequestKind::Batch, 1.0, None).unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let retired_names = [
+        "cost-ledger.jsonl",
+        "cost-ledger-reservations.jsonl",
+        "cost-ledger-reclaimed.jsonl",
+        "cost-ledger.lock",
+        "cost-ledger.jsonl.migrated",
+        "cost-ledger-reservations.jsonl.migrated",
+        "cost-ledger-reclaimed.jsonl.migrated",
+        "cost-ledger.lock.migrated",
+    ];
+    for name in retired_names {
+        let legacy_path = data_dir.join(name);
+        let legacy_bytes = [
+            b"opaque legacy ledger bytes: ".as_slice(),
+            name.as_bytes(),
+            b"\0\xff",
+        ]
+        .concat();
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+        let err = match LedgerDb::open(&path) {
+            Ok(_) => panic!("{name} must make ledger startup fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "{name} changed SQLite"
+        );
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+        std::fs::remove_file(legacy_path).unwrap();
+    }
+
+    let mixed = retired_names
+        .iter()
+        .map(|name| {
+            let path = data_dir.join(name);
+            let bytes = [
+                b"mixed truth bytes: ".as_slice(),
+                name.as_bytes(),
+                b"\0\xff",
+            ]
+            .concat();
+            std::fs::write(&path, &bytes).unwrap();
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    let err = match LedgerDb::open(&path) {
+        Ok(_) => panic!("mixed retired files must make ledger startup fail closed"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("KIO-E-LEDGER-LEGACY-JSONL-001"));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "mixed files changed SQLite"
+    );
+    for (legacy_path, legacy_bytes) in mixed {
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+        std::fs::remove_file(legacy_path).unwrap();
+    }
+
+    let db = LedgerDb::open(&path).unwrap();
+    let rows: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM batch_requests", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "legacy rejection must not change existing rows");
 }
 
 fn workspace_root() -> PathBuf {

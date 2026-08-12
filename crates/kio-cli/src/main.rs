@@ -86,8 +86,7 @@ use kio_pipeline::ledger::ops::{
 };
 use kio_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kio_pipeline::ledger::{
-    migrate_jsonl_if_needed, BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind,
-    TaskKey as LedgerTaskKey,
+    BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
 };
 use kio_pipeline::markdownize::{
     build_normalized_view_layout, choose_markdownize_mode, load_validated_normalized_instance,
@@ -12749,27 +12748,18 @@ fn job_is_accounted_for(
 }
 
 /// `$XDG_DATA_HOME/kio/cost-ledger.sqlite` (04 §5.4 / CL70) — the device-global
-/// ledger, sole store for every reservation/charge this CLI records (2026-07-21:
-/// the JSONL `budget::CostLedger`/`ReservationLedger` design this replaces is
-/// fully retired; see the implementation report for the migration's scope).
+/// ledger, sole store for every reservation/charge this CLI records.
 fn ledger_db_path() -> PathBuf {
     data_home().join("kio/cost-ledger.sqlite")
 }
 
-/// Open the device-global `cost-ledger.sqlite`, running the one-time JSONL
-/// cutover (10-operations.md §7.5.3 / CL09-CL12) first if it has not already
-/// happened on this device. Every ledger-touching command (`kio status`,
+/// Open the device-global `cost-ledger.sqlite`. Every ledger-touching command (`kio status`,
 /// `kio batch *`, `kio index`, `kio search --vector`/`--hybrid` page 1, `kio
-/// purge`) opens the ledger through this one function, so the cutover is
-/// guaranteed to run before any of them reads or writes it — there is no
-/// remaining code path that reads or writes the legacy JSONL files directly
-/// (CL71), so running the cutover here can never race a still-active old
-/// reader/writer.
+/// purge`) opens the ledger through this one function, so every command uses
+/// the current SQLite store. `LedgerDb::open` fails closed
+/// if retired JSONL ledger files are present, leaving their bytes untouched.
 fn open_ledger_db() -> Result<LedgerDb> {
-    let ledger = LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kio)?;
-    migrate_jsonl_if_needed(ledger.connection(), &data_home().join("kio"))
-        .map_err(pipeline_to_kio)?;
-    Ok(ledger)
+    LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kio)
 }
 
 /// CL45/§5.4 sync crash recovery — the write-command-entry pass 04 §5.8's
