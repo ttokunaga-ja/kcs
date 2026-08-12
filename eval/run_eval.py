@@ -94,6 +94,12 @@ KIO_SUBPROCESS_TEXT = {"text": True, "encoding": "utf-8", "errors": "strict"}
 # 非 raw 文字列にして \u を Python 側で実文字へ展開する (末尾 "-" は literal)。
 _DISALLOWED_RE = re.compile(
     "[^0-9A-Za-z_぀-ゟ゠-ヿ一-鿿-]")
+# Rust's `char::is_whitespace` follows Unicode White_Space. Python's `\s`
+# additionally treats U+001C..U+001F as whitespace, so use the Rust set
+# explicitly for cross-language slug vectors.
+_RUST_WHITESPACE_RE = re.compile(
+    r"[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+"
+)
 
 
 def slugify(text):
@@ -110,7 +116,7 @@ def slugify(text):
     s = unicodedata.normalize("NFC", text)
     # ASCII 英字のみ小文字化 (日本語などケースを持たない文字はそのまま)。
     s = "".join(c.lower() if "A" <= c <= "Z" else c for c in s)
-    s = re.sub(r"\s+", "-", s)
+    s = _RUST_WHITESPACE_RE.sub("-", s)
     s = _DISALLOWED_RE.sub("", s)
     s = re.sub(r"-+", "-", s)
     return s.strip("-")
@@ -653,7 +659,11 @@ def _chunk_identity_hash(chunk):
         "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
         "unit_content_hash", "heading_path", "section_id", "byte_start", "byte_end",
     )
-    identity = {field: chunk[field] for field in identity_fields if field in chunk}
+    identity = {
+        field: chunk[field]
+        for field in identity_fields
+        if field in chunk and not (field == "section_id" and not chunk[field])
+    }
     return _hash_bytes(_canonical_json_bytes(identity))
 
 
@@ -843,6 +853,10 @@ def pointer_attestation_problems(response, attestor, k=MAX_POINTER_ATTESTATIONS_
 
 
 def percentile_nearest_rank(values, percentile):
+    if (type(percentile) not in (int, float)
+            or (type(percentile) is float and not math.isfinite(percentile))
+            or not 0 < percentile <= 1):
+        raise ValueError("percentile must be in the interval (0, 1]")
     if not values:
         return None
     ordered = sorted(values)

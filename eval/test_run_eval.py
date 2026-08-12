@@ -15,6 +15,7 @@
 import hashlib
 import copy
 import json
+import math
 import os
 import sys
 import tempfile
@@ -26,6 +27,213 @@ import corpus_spec as spec  # noqa: E402
 import generate_corpus  # noqa: E402
 import replay_history  # noqa: E402
 import run_eval  # noqa: E402
+
+
+def _strict_object(value, required, optional=()):
+    if type(value) is not dict:
+        raise ValueError("golden vector object must be a JSON object")
+    actual = set(value)
+    allowed = set(required) | set(optional)
+    if not set(required) <= actual or actual - allowed:
+        raise ValueError("golden vector object has missing or unknown fields")
+
+
+def _strict_string(value):
+    if type(value) is not str:
+        raise ValueError("golden vector string field must be a string")
+
+
+def _strict_u64(value, label):
+    if type(value) is not int or not 0 <= value <= 2**64 - 1:
+        raise ValueError(f"{label} must be a u64")
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _validate_finite_json(value):
+    if type(value) is float and not math.isfinite(value):
+        raise ValueError("golden vectors may only contain finite JSON numbers")
+    if type(value) is list:
+        for item in value:
+            _validate_finite_json(item)
+    elif type(value) is dict:
+        for item in value.values():
+            _validate_finite_json(item)
+
+
+def _validate_golden_vectors(vectors):
+    """Mirror the Rust vector structs' `deny_unknown_fields` boundary."""
+    _strict_object(vectors, {
+        "schema_version", "canonical_json", "slugs", "chunk_identity",
+        "recall", "percentiles",
+    })
+    _validate_finite_json(vectors)
+    if type(vectors["schema_version"]) is not int or vectors["schema_version"] != 1:
+        raise ValueError("unsupported golden vector schema_version")
+    collections = ("canonical_json", "slugs", "chunk_identity", "recall", "percentiles")
+    if any(type(vectors[name]) is not list for name in collections):
+        raise ValueError("golden vector collections must be arrays")
+
+    for case in vectors["canonical_json"]:
+        _strict_object(case, {"name", "value", "canonical_utf8", "sha256", "python_compatible"})
+        for name in ("name", "canonical_utf8", "sha256"):
+            _strict_string(case[name])
+        if type(case["python_compatible"]) is not bool:
+            raise ValueError("python_compatible must be a boolean")
+    for case in vectors["slugs"]:
+        _strict_object(case, {"name", "input", "expected"})
+        for value in case.values():
+            _strict_string(value)
+    chunk_required = {
+        "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
+        "unit_content_hash", "heading_path", "byte_start", "byte_end", "text_hash", "text",
+    }
+    for case in vectors["chunk_identity"]:
+        _strict_object(case, {"name", "chunk", "expected_hash"})
+        _strict_string(case["name"])
+        _strict_string(case["expected_hash"])
+        _strict_object(case["chunk"], chunk_required, {"section_id"})
+        for name in ("raw_hash", "tool_profile_hash", "unit_key", "unit_content_hash", "text_hash", "text"):
+            _strict_string(case["chunk"][name])
+        for name in ("spec_version", "gen", "byte_start", "byte_end"):
+            _strict_u64(case["chunk"][name], f"chunk {name}")
+        if "section_id" in case["chunk"] and case["chunk"]["section_id"] is not None:
+            _strict_string(case["chunk"]["section_id"])
+        if case["chunk"]["spec_version"] != 1:
+            raise ValueError("chunk spec_version must be exactly 1")
+        for name in ("raw_hash", "tool_profile_hash", "unit_content_hash", "text_hash"):
+            if not run_eval.HASH_RE.fullmatch(case["chunk"][name]):
+                raise ValueError(f"chunk {name} must be canonical sha256")
+        if not case["chunk"]["unit_key"]:
+            raise ValueError("chunk unit_key must not be empty")
+        if case["chunk"]["byte_start"] > case["chunk"]["byte_end"]:
+            raise ValueError("chunk byte span must be ordered")
+        if run_eval._hash_bytes(case["chunk"]["text"].encode("utf-8")) != case["chunk"]["text_hash"]:
+            raise ValueError("chunk text_hash must match exact text")
+        if type(case["chunk"]["heading_path"]) is not list or not all(
+                type(value) is str for value in case["chunk"]["heading_path"]):
+            raise ValueError("chunk heading_path must be an array of strings")
+    for case in vectors["recall"]:
+        _strict_object(case, {"name", "expected", "results", "k", "expected_recall"})
+        _strict_string(case["name"])
+        if type(case["expected"]) is not list or type(case["results"]) is not list:
+            raise ValueError("recall expected and results must be arrays")
+        if (type(case["k"]) is not int or case["k"] < 0
+                or type(case["expected_recall"]) not in (int, float)
+                or (type(case["expected_recall"]) is float
+                    and not math.isfinite(case["expected_recall"]))):
+            raise ValueError("recall k and expected_recall have invalid types")
+        for key in case["expected"]:
+            if type(key) is not list or len(key) != 3 or type(key[0]) is not str or any(
+                    value is not None and type(value) is not str for value in key[1:]):
+                raise ValueError("recall expected key must be a 3-tuple")
+        for result in case["results"]:
+            _strict_object(result, {"raw_hash"}, {"section_id", "heading_path", "path_at_commit"})
+            _strict_string(result["raw_hash"])
+            for name in ("section_id", "path_at_commit"):
+                if name in result and result[name] is not None:
+                    _strict_string(result[name])
+            if "heading_path" in result and (
+                    result["heading_path"] is not None and (
+                        type(result["heading_path"]) is not list or not all(
+                            type(value) is str for value in result["heading_path"]))):
+                raise ValueError("recall heading_path must be an array of strings or null")
+    for case in vectors["percentiles"]:
+        _strict_object(case, {"name", "values", "percentile", "expected"})
+        _strict_string(case["name"])
+        if type(case["values"]) is not list:
+            raise ValueError("percentile values must be integer array")
+        for value in case["values"]:
+            _strict_u64(value, "percentile value")
+        if (type(case["percentile"]) not in (int, float)
+                or (type(case["percentile"]) is float and not math.isfinite(case["percentile"]))
+                or not 0 < case["percentile"] <= 1):
+            raise ValueError("percentile must be in the interval (0, 1]")
+        if type(case["expected"]) not in (int, type(None)):
+            raise ValueError("percentile case has invalid numeric fields")
+        if case["expected"] is not None:
+            _strict_u64(case["expected"], "percentile expected")
+
+
+class TestGoldenVectors(unittest.TestCase):
+    """Shared Rust/Python evaluation vectors; Python is only a differential oracle."""
+
+    def test_shared_vectors_match_python_compatible_contracts(self):
+        path = os.path.join(os.path.dirname(__file__), "golden-vectors.json")
+        with open(path, encoding="utf-8") as fh:
+            vectors = json.load(fh, parse_constant=_reject_json_constant)
+        _validate_golden_vectors(vectors)
+
+        for case in vectors["canonical_json"]:
+            self.assertEqual(
+                "sha256:" + hashlib.sha256(case["canonical_utf8"].encode("utf-8")).hexdigest(),
+                case["sha256"], case["name"])
+            # stdlib JSON differs from JCS for floats, so only explicitly
+            # compatible shapes compare serializer output.
+            if case["python_compatible"]:
+                self.assertEqual(
+                    run_eval._canonical_json_bytes(case["value"]),
+                    case["canonical_utf8"].encode("utf-8"), case["name"])
+
+        for case in vectors["slugs"]:
+            self.assertEqual(run_eval.slugify(case["input"]), case["expected"], case["name"])
+        for case in vectors["chunk_identity"]:
+            self.assertEqual(
+                run_eval._chunk_identity_hash(case["chunk"]), case["expected_hash"], case["name"])
+
+        for case in vectors["recall"]:
+            response = {"results": [{"evidence_pointer": result} for result in case["results"]]}
+            expected = {tuple(value) for value in case["expected"]}
+            self.assertEqual(
+                run_eval.recall_at_k(response, expected, case["k"]),
+                case["expected_recall"], case["name"])
+        for case in vectors["percentiles"]:
+            self.assertEqual(
+                run_eval.percentile_nearest_rank(case["values"], case["percentile"]),
+                case["expected"], case["name"])
+
+    def test_vector_schema_rejects_unknown_nested_field(self):
+        with self.assertRaises(ValueError):
+            _validate_golden_vectors({
+                "schema_version": 1,
+                "canonical_json": [], "slugs": [], "chunk_identity": [], "recall": [],
+                "percentiles": [{"name": "bad", "values": [], "percentile": .95,
+                                 "expected": None, "unexpected": True}],
+            })
+
+    def test_vector_schema_rejects_invalid_chunk_contract(self):
+        path = os.path.join(os.path.dirname(__file__), "golden-vectors.json")
+        with open(path, encoding="utf-8") as fh:
+            vectors = json.load(fh, parse_constant=_reject_json_constant)
+        for field, value in (
+                ("spec_version", 2),
+                ("raw_hash", "sha256:not-a-hash"),
+                ("unit_key", ""),
+                ("byte_start", 6),
+                ("text_hash", "sha256:" + "0" * 64)):
+            invalid = copy.deepcopy(vectors)
+            invalid["chunk_identity"][0]["chunk"][field] = value
+            with self.assertRaises(ValueError, msg=field):
+                _validate_golden_vectors(invalid)
+
+    def test_non_finite_json_constants_are_rejected(self):
+        with self.assertRaises(ValueError):
+            json.loads('{"number": NaN}', parse_constant=_reject_json_constant)
+        vectors = {
+            "schema_version": 1,
+            "canonical_json": [{"name": "nonfinite", "value": float("nan"),
+                                "canonical_utf8": "", "sha256": "", "python_compatible": False}],
+            "slugs": [], "chunk_identity": [], "recall": [], "percentiles": [],
+        }
+        with self.assertRaises(ValueError):
+            _validate_golden_vectors(vectors)
+
+    def test_percentile_rejects_out_of_range_values(self):
+        for percentile in (0, -.1, 1.1, float("nan")):
+            with self.assertRaises(ValueError):
+                run_eval.percentile_nearest_rank([1], percentile)
 
 
 class TestSlugify(unittest.TestCase):

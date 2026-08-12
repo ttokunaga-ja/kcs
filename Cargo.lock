@@ -743,6 +743,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kio-eval"
+version = "0.1.0"
+dependencies = [
+ "kio-core",
+ "kio-index",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "kio-index"
 version = "0.1.0"
 dependencies = [

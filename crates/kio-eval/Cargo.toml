@@ -1,0 +1,20 @@
+[package]
+name = "kio-eval"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "kio-eval"
+path = "src/main.rs"
+
+[dependencies]
+kio-core.workspace = true
+kio-index.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
