@@ -13,8 +13,18 @@ name = "kio-eval"
 path = "src/main.rs"
 
 [dependencies]
+cap-primitives = "3.4.5"
+clap.workspace = true
 kio-core.workspace = true
 kio-index.workspace = true
+kio-search.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

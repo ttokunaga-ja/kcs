@@ -1,5 +1,11 @@
 //! Deterministic primitives owned by Kio's internal evaluation binary.
 
+pub mod attestation;
+pub mod boundary;
+pub mod manifest;
+pub mod resolver;
+pub mod runner;
+
 use std::collections::HashSet;
 
 use kio_index::chunking::slugify_heading;

@@ -1,6 +1,18 @@
-//! Internal evaluator entry point. Evaluation commands are added in the next milestone.
+mod app;
+
+use clap::Parser;
+use kio_core::ExitCode;
 
 fn main() {
-    eprintln!("kio-eval: internal evaluator; no runtime command is available yet");
-    std::process::exit(2);
+    let args = app::Args::parse();
+    let code = match app::run(args) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("kio-eval: {error}");
+            ExitCode::Failure
+        }
+    };
+    // Evaluator policy intentionally reserves 2 for NOT-IMPLEMENTED, while
+    // Kio's product ExitCode::InvalidUsage also happens to be 2.
+    std::process::exit(code.code());
 }

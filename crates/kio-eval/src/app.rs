@@ -1,0 +1,693 @@
+//! Command-line boundary for the internal evaluator.
+//!
+//! All fixture parsing and scoring remains in the library.  This module owns
+//! only CLI defaults, the fixed synthetic-device process environment, and the
+//! small amount of live-CAS orchestration that cannot be expressed as a pure
+//! metric.
+
+use std::{
+    collections::HashMap,
+    env,
+    ffi::OsString,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use cap_primitives::fs as cap_fs;
+use clap::Parser;
+use kio_core::{
+    cas::{hash_bytes, read_bounded_regular_file, MAX_RAW_OBJECT_BYTES},
+    ExitCode,
+};
+use kio_eval::{
+    attestation::{PointerAttestor, MAX_POINTER_ATTESTATIONS_PER_QUERY},
+    boundary::{BoundCorpus, BoundDevice, BoundScope},
+    manifest::{
+        load_corpus_manifest, load_golden_queries, load_history_manifest, Scenario, SCOPES,
+    },
+    resolver::{validate_query, CorpusModel, Resolver},
+    runner::{
+        assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
+        run_bounded_command, write_report, write_results, BoundedProcessOptions, HistoryEntryRef,
+        HistoryManifestRef, RenameEntryRef, ResolvedQuery, ScoredRecord,
+    },
+};
+use thiserror::Error;
+
+const DEFAULT_BIN: &str = "target/release/kio";
+
+#[derive(Debug, Parser)]
+#[command(name = "kio-eval", about = "Kio synthetic search evaluator")]
+pub struct Args {
+    #[arg(long)]
+    golden: Option<PathBuf>,
+    #[arg(long)]
+    corpus: Option<PathBuf>,
+    #[arg(long)]
+    corpus_manifest: Option<PathBuf>,
+    #[arg(long)]
+    history_manifest: Option<PathBuf>,
+    /// Trusted local Kio executable under test. Resource bounds contain
+    /// accidental hangs/output floods; they do not sandbox hostile code.
+    #[arg(long, default_value = DEFAULT_BIN)]
+    bin: PathBuf,
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long)]
+    report: Option<PathBuf>,
+    #[arg(long, value_parser = parse_scenario)]
+    scenario: Vec<String>,
+    #[arg(long, default_value_t = 0.8, value_parser = parse_recall)]
+    min_recall: f64,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum AppError {
+    #[error("{0}")]
+    Input(String),
+    #[error(transparent)]
+    Manifest(#[from] kio_eval::manifest::ManifestError),
+    #[error(transparent)]
+    Runner(#[from] kio_eval::runner::RunnerError),
+}
+
+fn parse_scenario(value: &str) -> Result<String, String> {
+    match value {
+        "M3-1" | "M3-2" | "M3-3" => Ok(value.to_owned()),
+        _ => Err("must be M3-1, M3-2, or M3-3".to_owned()),
+    }
+}
+
+fn parse_recall(value: &str) -> Result<f64, String> {
+    let value: f64 = value.parse().map_err(|_| "must be a number".to_owned())?;
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be finite and in [0, 1]".to_owned())
+    }
+}
+
+/// The hermetic fixture-only environment used by every evaluator subprocess.
+///
+/// Do not inherit a general ambient environment: credentials, agent sockets,
+/// and adapter configuration are all evaluator inputs unless explicitly
+/// excluded.  `PATH` is required for platform command helpers; the remaining
+/// entries are fixed so output decoding and timestamps are deterministic.
+fn device_env(device: &BoundDevice) -> Result<Vec<(OsString, OsString)>, AppError> {
+    let path = env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+    Ok(vec![
+        (OsString::from("PATH"), path),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (OsString::from("TZ"), OsString::from("UTC")),
+        (OsString::from("HOME"), device.home().as_os_str().to_owned()),
+        (
+            OsString::from("XDG_CONFIG_HOME"),
+            device.config().as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("XDG_CACHE_HOME"),
+            device.cache().as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("XDG_DATA_HOME"),
+            device.data().as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("XDG_STATE_HOME"),
+            device.state().as_os_str().to_owned(),
+        ),
+        (
+            OsString::from("XDG_RUNTIME_DIR"),
+            device.runtime().as_os_str().to_owned(),
+        ),
+    ])
+}
+
+fn bundled_eval_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../eval")
+        .join(name)
+}
+
+fn scenario_name(value: Scenario) -> &'static str {
+    match value {
+        Scenario::M3_1 => "M3-1",
+        Scenario::M3_2 => "M3-2",
+        Scenario::M3_3 => "M3-3",
+    }
+}
+
+fn expected_flags(query: &kio_eval::manifest::GoldenQuery) -> Vec<String> {
+    let mut flags = query.flags.clone();
+    if let Some(required) = query.scenario.required_flag() {
+        if !flags.iter().any(|flag| flag == required) {
+            flags.push(required.to_owned());
+        }
+    }
+    flags
+}
+
+fn verify_logs(
+    bin: &Path,
+    corpus: &BoundCorpus,
+    history: &kio_eval::manifest::HistoryManifest,
+    environment: &[(OsString, OsString)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for scope in SCOPES {
+        let Some(bound_scope) = corpus.scope(scope) else {
+            problems.push(format!("history log unavailable: {scope}"));
+            continue;
+        };
+        let mut command = Command::new(bin);
+        command
+            .arg("--json")
+            .arg("log")
+            .env_clear()
+            .envs(environment.iter().cloned());
+        if bound_scope.configure_command_cwd(&mut command).is_err() {
+            problems.push(format!("history log unavailable: {scope}"));
+            continue;
+        }
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default());
+        let Ok(output) = output else {
+            problems.push(format!("history log unavailable: {scope}"));
+            continue;
+        };
+        let response: Option<serde_json::Value> = serde_json::from_str(output.stdout.trim()).ok();
+        let commits = response
+            .as_ref()
+            .and_then(|value| value.get("commits"))
+            .and_then(serde_json::Value::as_array);
+        let Some(commits) = commits else {
+            problems.push(format!("history log unavailable: {scope}"));
+            continue;
+        };
+        let messages = commits
+            .iter()
+            .map(|commit| commit.get("message").and_then(serde_json::Value::as_str))
+            .collect::<Option<Vec<_>>>();
+        let expected = &history.verified[scope];
+        let expected_messages = expected
+            .messages
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !output.status.success()
+            || commits.len() != expected.commit_count
+            || messages.as_deref() != Some(expected_messages.as_slice())
+        {
+            problems.push(format!("history log is stale: {scope}"));
+        }
+    }
+    problems
+}
+
+fn history_ref(history: &kio_eval::manifest::HistoryManifest) -> HistoryManifestRef {
+    HistoryManifestRef {
+        edited: history
+            .edited
+            .iter()
+            .map(|entry| HistoryEntryRef {
+                scope: entry.scope.clone(),
+                file: entry.file.clone(),
+                raw_sha256: entry.raw_sha256.clone(),
+            })
+            .collect(),
+        renamed: history
+            .renamed
+            .iter()
+            .map(|entry| RenameEntryRef {
+                scope: entry.scope.clone(),
+                old_file: entry.old_file.clone(),
+                new_file: entry.new_file.clone(),
+                raw_sha256: entry.raw_sha256.clone(),
+            })
+            .collect(),
+        deleted: history
+            .deleted
+            .iter()
+            .map(|entry| HistoryEntryRef {
+                scope: entry.scope.clone(),
+                file: entry.file.clone(),
+                raw_sha256: entry.raw_sha256.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn read_bound_regular(scope: &BoundScope, name: &std::ffi::OsStr) -> Result<Vec<u8>, AppError> {
+    let handle = scope
+        .try_clone_handle()
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut file = cap_fs::open(&handle, Path::new(name), &options)
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    if !metadata.is_file() || metadata.len() > MAX_RAW_OBJECT_BYTES {
+        return Err(AppError::Input(format!(
+            "unsafe or oversized corpus file: {}/{}",
+            scope.name(),
+            name.to_string_lossy()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(AppError::Input(format!(
+                "multiply-linked corpus file: {}/{}",
+                scope.name(),
+                name.to_string_lossy()
+            )));
+        }
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_RAW_OBJECT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    if bytes.len() as u64 > MAX_RAW_OBJECT_BYTES {
+        return Err(AppError::Input(format!(
+            "oversized corpus file: {}/{}",
+            scope.name(),
+            name.to_string_lossy()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn tree_fingerprint(corpus: &BoundCorpus) -> Result<Vec<(String, String, String)>, AppError> {
+    let mut rows = Vec::new();
+    for scope in corpus.scopes() {
+        let handle = scope
+            .try_clone_handle()
+            .map_err(|error| AppError::Input(error.to_string()))?;
+        let entries = cap_fs::read_base_dir(&handle)
+            .map_err(|error| AppError::Input(format!("cannot list {}: {error}", scope.name())))?;
+        let mut entries = entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::Input(format!("cannot list {}: {error}", scope.name())))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if entry.file_name() == ".kio"
+                || !entry
+                    .file_type()
+                    .map_err(|error| AppError::Input(error.to_string()))?
+                    .is_file()
+            {
+                continue;
+            }
+            let name = entry.file_name();
+            let bytes = read_bound_regular(scope, &name)?;
+            rows.push((
+                scope.name().to_owned(),
+                name.to_string_lossy().into_owned(),
+                hash_bytes(&bytes),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+fn verify_restore(
+    bin: &Path,
+    corpus: &BoundCorpus,
+    history: &kio_eval::manifest::HistoryManifest,
+    records: &[ScoredRecord],
+    environment: &[(OsString, OsString)],
+) -> Vec<String> {
+    let before = match tree_fingerprint(corpus) {
+        Ok(value) => value,
+        Err(error) => return vec![error.to_string()],
+    };
+    let mut pointers = HashMap::new();
+    for record in records.iter().filter(|record| record.scenario == "M3-3") {
+        for hit in record.response.results.iter().take(10) {
+            if record.expected.contains(
+                &kio_eval::RecallResult {
+                    raw_hash: hit.pointer.raw_hash.clone(),
+                    section_id: hit.pointer.section_id.clone(),
+                    heading_path: hit.pointer.heading_path.clone(),
+                    path_at_commit: hit.pointer.path_at_commit.clone(),
+                }
+                .key(),
+            ) {
+                pointers
+                    .entry(hit.pointer.raw_hash.clone())
+                    .or_insert_with(|| hit.pointer_value.clone());
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    for entry in &history.deleted {
+        let raw = format!("sha256:{}", entry.raw_sha256);
+        let Some(pointer) = pointers.get(&raw) else {
+            problems.push(format!(
+                "deleted result absent for restore: {}/{}",
+                entry.scope, entry.file
+            ));
+            continue;
+        };
+        let destination = tempfile::tempdir();
+        let Ok(destination) = destination else {
+            problems.push("could not create restore destination".to_owned());
+            continue;
+        };
+        let pointer = serde_json::to_string(pointer).expect("JSON value serializes");
+        let Some(research) = corpus.scope("research") else {
+            problems.push("research scope is unavailable for restore".to_owned());
+            break;
+        };
+        let mut command = Command::new(bin);
+        command
+            .arg("--json")
+            .arg("restore")
+            .arg(pointer)
+            .arg("--to")
+            .arg(destination.path())
+            .env_clear()
+            .envs(environment.iter().cloned());
+        if let Err(error) = research.configure_command_cwd(&mut command) {
+            problems.push(format!(
+                "restore failed for {}/{}: {error}",
+                entry.scope, entry.file
+            ));
+            continue;
+        }
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default());
+        let Ok(output) = output else {
+            problems.push(format!(
+                "restore failed for {}/{}: {}",
+                entry.scope,
+                entry.file,
+                output.unwrap_err()
+            ));
+            continue;
+        };
+        if !output.status.success() {
+            problems.push(format!(
+                "restore failed for {}/{}: {}",
+                entry.scope,
+                entry.file,
+                output.stderr.trim()
+            ));
+            continue;
+        }
+        let files = walk_regular_files(destination.path());
+        if files.len() != 1 {
+            problems.push(format!(
+                "restore count mismatch for {}/{}",
+                entry.scope, entry.file
+            ));
+            continue;
+        }
+        match read_bounded_regular_file(&files[0], MAX_RAW_OBJECT_BYTES)
+            .map(|bytes| hash_bytes(&bytes))
+        {
+            Ok(actual) if actual == raw => {}
+            _ => problems.push(format!(
+                "restore hash mismatch for {}/{}",
+                entry.scope, entry.file
+            )),
+        }
+    }
+    match tree_fingerprint(corpus) {
+        Ok(after) if after == before => {}
+        Ok(_) => problems.push("restore mutated the source corpus working tree".to_owned()),
+        Err(error) => problems.push(error.to_string()),
+    }
+    problems
+}
+
+fn walk_regular_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            files.push(entry.path());
+        } else if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            files.extend(walk_regular_files(&entry.path()));
+        }
+    }
+    files
+}
+
+pub fn run(args: Args) -> Result<ExitCode, AppError> {
+    let golden = args
+        .golden
+        .unwrap_or_else(|| bundled_eval_path("golden-queries.jsonl"));
+    let out = args
+        .out
+        .unwrap_or_else(|| bundled_eval_path("results.json"));
+    let report = args
+        .report
+        .unwrap_or_else(|| bundled_eval_path("report.md"));
+    let mut queries = load_golden_queries(&golden)?;
+    if !args.scenario.is_empty() {
+        queries.retain(|query| {
+            args.scenario
+                .iter()
+                .any(|scenario| scenario == scenario_name(query.scenario))
+        });
+        if queries.is_empty() {
+            return Err(AppError::Input(
+                "--scenario に該当するクエリが無い".to_owned(),
+            ));
+        }
+    }
+    let corpus_manifest = args
+        .corpus_manifest
+        .clone()
+        .or_else(|| {
+            args.corpus
+                .as_ref()
+                .map(|path| path.join("corpus-manifest.json"))
+        })
+        .ok_or_else(|| {
+            AppError::Input("--corpus か --corpus-manifest を指定すること".to_owned())
+        })?;
+    let history_manifest = args
+        .history_manifest
+        .clone()
+        .or_else(|| {
+            args.corpus
+                .as_ref()
+                .map(|path| path.join("history-manifest.json"))
+        })
+        .ok_or_else(|| {
+            AppError::Input("--corpus か --history-manifest を指定すること".to_owned())
+        })?;
+    let corpus = load_corpus_manifest(&corpus_manifest)?;
+    let history = load_history_manifest(&history_manifest, &corpus)?;
+    let model = CorpusModel::new(&corpus, &history);
+    let resolver = Resolver::new(&corpus, &history);
+    let active = ["M3-1", "M3-2", "M3-3"]
+        .iter()
+        .filter(|scenario| {
+            queries
+                .iter()
+                .any(|query| scenario_name(query.scenario) == **scenario)
+        })
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    let problems = queries
+        .iter()
+        .flat_map(|query| validate_query(query, &model, &resolver))
+        .collect::<Vec<_>>();
+    if args.dry_run {
+        return Ok(if problems.is_empty() {
+            ExitCode::Success
+        } else {
+            ExitCode::Failure
+        });
+    }
+    let corpus_dir = args
+        .corpus
+        .as_ref()
+        .ok_or_else(|| AppError::Input("実行モードには --corpus が必要".to_owned()))?
+        .canonicalize()
+        .map_err(|error| AppError::Input(format!("corpus を開けない: {error}")))?;
+    if !corpus_dir.is_dir() {
+        return Err(AppError::Input(format!(
+            "corpus がディレクトリではない: {}",
+            corpus_dir.display()
+        )));
+    }
+    let bound_corpus = BoundCorpus::bind(&corpus_dir, &corpus.scopes)
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    let bin = args
+        .bin
+        .canonicalize()
+        .map_err(|_| AppError::Input(format!("kio バイナリ不在: {}", args.bin.display())))?;
+    if !bin.is_file() {
+        return Err(AppError::Input(format!(
+            "kio バイナリ不在: {}",
+            bin.display()
+        )));
+    }
+    let environment = device_env(bound_corpus.device())?;
+    let log_problems = verify_logs(&bin, &bound_corpus, &history, &environment);
+    if !log_problems.is_empty() {
+        return Err(AppError::Input(log_problems.join("; ")));
+    }
+    let resolved = queries
+        .iter()
+        .map(|query| {
+            let (expected, _) = resolver.resolve_expected(&query.expected);
+            let problems = validate_query(query, &model, &resolver);
+            ResolvedQuery {
+                scenario: scenario_name(query.scenario).to_owned(),
+                query: query.query.clone(),
+                expected,
+                resolution_error: (!problems.is_empty()).then(|| problems.join("; ")),
+            }
+        })
+        .collect::<Vec<_>>();
+    let flags = queries.iter().map(expected_flags).collect::<Vec<_>>();
+    let mut next = 0usize;
+    let mut attestation_failures = 0usize;
+    let mut attestor = active
+        .iter()
+        .any(|scenario| scenario == "M3-2")
+        .then(|| PointerAttestor::from_bound_corpus(&bound_corpus))
+        .transpose()
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    let (mut results, records) = evaluate_queries_with_validator(
+        &resolved,
+        args.min_recall,
+        |query| {
+            let flags = flags.get(next).ok_or_else(|| {
+                kio_eval::runner::RunnerError::Input("query/flags mismatch".to_owned())
+            })?;
+            next += 1;
+            let research = bound_corpus.scope("research").ok_or_else(|| {
+                kio_eval::runner::RunnerError::Input("research scope is unavailable".to_owned())
+            })?;
+            let mut command = Command::new(&bin);
+            command
+                .arg("--json")
+                .arg("search")
+                .arg(&query.query)
+                .arg("--all-scopes")
+                .args(flags)
+                .env_clear()
+                .envs(environment.iter().cloned());
+            research
+                .configure_command_cwd(&mut command)
+                .map_err(|error| kio_eval::runner::RunnerError::Input(error.to_string()))?;
+            let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+            Ok(kio_eval::runner::SearchOutcome {
+                returncode: output.status.code().unwrap_or(-1),
+                stdout: output.stdout,
+                stderr: output.stderr,
+                duration_ms: output.duration.as_secs_f64() * 1_000.0,
+            })
+        },
+        |query, response| {
+            if query.scenario != "M3-2" {
+                return Ok(None);
+            }
+            let attestor = attestor.as_mut().expect("M3-2 created an attestor");
+            let mut problems = Vec::new();
+            let mut attested = 0usize;
+            for (index, hit) in response
+                .results
+                .iter()
+                .take(MAX_POINTER_ATTESTATIONS_PER_QUERY)
+                .enumerate()
+            {
+                match attestor.attest(&hit.pointer_value) {
+                    Ok(()) => attested += 1,
+                    Err(error) => problems.push(format!(
+                        "result[{index}] pointer attestation failed: {error}"
+                    )),
+                }
+            }
+            if problems.is_empty() {
+                Ok(Some(attested))
+            } else {
+                attestation_failures += 1;
+                Err(problems.join("; "))
+            }
+        },
+    )?;
+    let mut coverage = assess_history_coverage(&records, &history_ref(&history));
+    if active.iter().any(|scenario| scenario == "M3-2") {
+        coverage.pointer_attested = results.counts.n_pointer_attested;
+        coverage.pointer_attestation_failures = attestation_failures;
+        coverage.passes_pointer_attestation = attestation_failures == 0;
+    }
+    if active.iter().any(|scenario| scenario == "M3-3") && coverage.passes_m3_3 {
+        coverage.set_restore_problems(verify_restore(
+            &bin,
+            &bound_corpus,
+            &history,
+            &records,
+            &environment,
+        ));
+    }
+    results.history_coverage = coverage;
+    write_results(&out, &results)?;
+    write_report(&report, &results, &active)?;
+    Ok(match final_exit_code(&results, &active) {
+        0 => ExitCode::Success,
+        2 => ExitCode::InvalidUsage,
+        _ => ExitCode::Failure,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsString, fs, path::Path};
+
+    use kio_eval::boundary::BoundCorpus;
+
+    use super::{bundled_eval_path, device_env, parse_recall, parse_scenario};
+
+    #[test]
+    fn cli_value_parsers_are_strict() {
+        assert_eq!(parse_scenario("M3-2").unwrap(), "M3-2");
+        assert!(parse_scenario("m3-2").is_err());
+        assert_eq!(parse_recall("0").unwrap(), 0.0);
+        assert!(parse_recall("NaN").is_err());
+        assert!(parse_recall("1.01").is_err());
+    }
+
+    #[test]
+    fn bundled_artifacts_do_not_depend_on_the_current_directory() {
+        let golden = bundled_eval_path("golden-queries.jsonl");
+        assert!(golden.ends_with(Path::new("eval/golden-queries.jsonl")));
+        assert!(golden.is_absolute());
+    }
+
+    #[test]
+    fn device_environment_is_an_explicit_allowlist() {
+        let corpus = tempfile::tempdir().unwrap();
+        fs::create_dir(corpus.path().join("research")).unwrap();
+        fs::create_dir(corpus.path().join("research/.kio")).unwrap();
+        let bound = BoundCorpus::bind(corpus.path(), &["research".to_owned()]).unwrap();
+        let values = device_env(bound.device()).unwrap();
+        assert!(values.iter().any(|(key, _)| key == "PATH"));
+        assert!(values
+            .iter()
+            .any(|(key, value)| key == "TZ" && value == "UTC"));
+        assert!(values.iter().any(|(key, value)| {
+            key == "HOME" && value == &OsString::from(bound.device().home())
+        }));
+        assert!(!values.iter().any(|(key, _)| key == "SSH_AUTH_SOCK"));
+        assert!(!values.iter().any(|(key, _)| key == "GEMINI_API_KEY"));
+    }
+}
