@@ -152,8 +152,6 @@ def main(argv=None):
             "recall_at_10": recall, "duration_ms": duration_ms,
             "scopes": sorted({e["scope"] for e in q["expected"]}),
             "worst_expected_rank": worst_expected_rank(response, expected_set),
-            # どの段が採点したか。fallback していれば横断ランキングを測れていない。
-            "aggregator": response.get("aggregator"),
         })
 
     results = {"target_recall_at_10": run_eval.RECALL_TARGET,
@@ -174,14 +172,15 @@ def main(argv=None):
         if not (passes_target and passes_latency):
             all_pass = False
 
-    # 増補固有の観測: replica が実際に採点したか。fallback していれば数字は
-    # 横断ランキングではなく scatter-gather の縮退を測っている。
-    applied = sum(1 for row in rows
-                  if isinstance(row.get("aggregator"), dict)
-                  and row["aggregator"].get("applied") is True)
-    results["counts"]["aggregator_applied"] = applied
+    ranks = [row["worst_expected_rank"] for row in rows
+             if row.get("worst_expected_rank") is not None]
+    results["counts"]["worst_expected_rank_mean"] = (
+        sum(ranks) / len(ranks) if ranks else None)
+    results["counts"]["worst_expected_rank_max"] = max(ranks) if ranks else None
 
-    with open(args.out, "w", encoding="utf-8") as handle:
+    # Keep the checked-in result artifact byte-stable across Windows and POSIX.
+    # The rank diagnostics are part of the artifact, not merely terminal output.
+    with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(results, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
 
@@ -190,12 +189,6 @@ def main(argv=None):
         print(f"  {scenario}: Recall@10={summary['recall_at_10']:.3f} "
               f"n={summary['n_queries']} p95={summary['p95_ms']:.1f}ms "
               f"{'PASS' if summary['passes_target'] and summary['passes_latency'] else 'FAIL'}")
-    ranks = [row["worst_expected_rank"] for row in rows
-             if row.get("worst_expected_rank") is not None]
-    results["counts"]["worst_expected_rank_mean"] = (
-        sum(ranks) / len(ranks) if ranks else None)
-    results["counts"]["worst_expected_rank_max"] = max(ranks) if ranks else None
-    print(f"  aggregator applied: {applied}/{len(rows)}")
     if ranks:
         print(f"  worst-expected rank: mean={sum(ranks) / len(ranks):.2f} "
               f"max={max(ranks)} (診断値・ゲートではない)")

@@ -393,6 +393,7 @@ jobs:
           eval.test_persona_manifest
           eval.test_generate_persona_corpus
           eval.test_run_eval
+          eval.test_run_crossscope
           eval.test_scale_corpus
           eval.test_scale_attest_bounds
           eval.test_scale_prepare

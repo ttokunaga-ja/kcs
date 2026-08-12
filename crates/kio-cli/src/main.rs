@@ -50,7 +50,7 @@ use kio_core::cas::{
     ChunkObject, ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitType, NormalizeRef, TreeObject};
-use kio_core::history::{HistoryReader, TreeBinding};
+use kio_core::history::HistoryReader;
 use kio_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
 use kio_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMode};
 use kio_core::schema::{validate_json_schema, SchemaKind};
@@ -129,7 +129,9 @@ use kio_search::query::{
     query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
     ScopeSelectionMode, SearchMode, TimeTravelSelector,
 };
-use kio_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
+use kio_search::rrf::RrfConfig;
+#[cfg(test)]
+use kio_search::rrf::BackendRank;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -142,9 +144,9 @@ use crate::promotion::{
     recover_pending_online_promotion,
 };
 use crate::search_history::{
-    at_target_ancestors, current_history_plan_from_cache, exact_project_snapshot,
-    install_eligible_identities, install_target_ancestors, plan_search_history, SearchContentKey,
-    SearchHistoryBinding,
+    at_target_ancestors, current_history_plan_from_cache, install_eligible_identities,
+    install_target_ancestors, plan_search_history, SearchContentKey, SearchHistoryBinding,
+    SearchHistoryPlan,
 };
 use crate::search_time::{
     reconcile_cursor_selector, since_cutoff_seconds, since_cutoff_utc, validate_cursor_cutoff,
@@ -901,6 +903,11 @@ fn run(cli: Cli) -> Result<Value> {
                 .map(|candidate| candidate.input_path.clone())
                 .collect::<BTreeSet<_>>();
             let explicitly_allowed_tier_a = explicitly_allowed_tier_a_paths(&preview);
+            // Keep the source HEAD, its ready replica header, and the optional
+            // same-content projection reuse in one writer critical section.
+            // `snapshot_filtered_with_policy` takes this lock reentrantly.
+            let _lock = repo.lock_store()?;
+            let ready_replica_before_snapshot = capture_ready_replica_snapshot(&repo);
             let outcome = repo.snapshot_filtered_with_policy(
                 args.message.as_deref(),
                 None,
@@ -916,6 +923,25 @@ fn run(cli: Cli) -> Result<Value> {
                         "tree_hash": outcome.tree_hash,
                     }),
                 )?;
+            }
+            if let Some(commit_hash) = outcome.commit_hash.as_deref() {
+                // Never leave the old Ready projection certified once HEAD has
+                // advanced.  A narrow writer-side reuse path below may make the
+                // new snapshot Ready again, but only after proving that it merely
+                // removed no source content or normalization identity.
+                mark_replica_rebuilding_or_log(repo.kio_dir(), commit_hash);
+                match ready_replica_before_snapshot.as_ref() {
+                    Some(before) => {
+                        match republish_equivalent_manual_snapshot(&repo, before, commit_hash) {
+                            Ok(true) => {}
+                            Ok(false) => {}
+                            Err(reason) => log_aggregator_degraded(&format!(
+                                "manual snapshot replica reuse {commit_hash} failed: {reason}"
+                            )),
+                        }
+                    }
+                    None => {}
+                }
             }
             Ok(json!({
                 "status": if outcome.noop { "noop" } else { "created" },
@@ -1164,6 +1190,13 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         &explicitly_allowed_tier_a,
     )?;
     if let Some(commit_hash) = &outcome.commit_hash {
+        maybe_inject_replica_after_head_fault("index_before_marker")?;
+        // HEAD now names content the old source index and replica projection do
+        // not describe.  Mark it before the potentially long source rebuild,
+        // rather than only at the final SQLite swap, so direct replica-only
+        // search cannot serve the prior Ready snapshot in that interval.
+        mark_replica_rebuilding_or_log(repo.kio_dir(), commit_hash);
+        maybe_inject_replica_after_head_fault("index")?;
         append_event_log(
             "KIO-I-COMMIT-CREATED-001",
             "auto commit created",
@@ -1254,8 +1287,9 @@ struct ScopeTarget {
 }
 
 /// A live chunk plus its scope/snapshot metadata. Used by the Evidence Pointer
-/// resolution path (short-hash lookup). Search itself no longer materializes
-/// these — it reads ranked chunks directly from `sqlite.db` (K2).
+/// resolution path (short-hash lookup). Direct `kio search` never materializes
+/// these; its ranked candidates and Evidence Pointer metadata come from
+/// `aggregator.sqlite`.
 #[derive(Debug, Clone)]
 struct SearchableChunk {
     row: ChunkRow,
@@ -1336,6 +1370,30 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
     validate_repo_tool_lock(&repo)?;
     if mode == RepairMode::VerifyObjects || mode == RepairMode::VerifyObjectsPruneOrphans {
         let report = verify_objects::verify_objects(&repo)?;
+        let projection_ready = if let Some(repaired_head) = report.repaired_commit_hash.as_deref()
+        {
+            // A repaired commit keeps the tree but advances HEAD. Mark the old
+            // replica corpus unavailable first; only publish Ready after the
+            // source cache gains bindings for the new commit identity.
+            mark_replica_rebuilding_or_log(repo.kio_dir(), repaired_head);
+            match materialize_repaired_snapshot_entries(&repo, repaired_head) {
+                Ok(()) => true,
+                Err(error) => {
+                    log_aggregator_degraded(&format!(
+                        "repair projection materialize {repaired_head} failed: {error}"
+                    ));
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if projection_ready {
+            // Verification can recover a raw object and record a repaired
+            // commit, which advances HEAD without taking the rebuild path
+            // below. The replica write remains a non-fatal cache operation.
+            write_through_projection_or_log(repo.kio_dir());
+        }
         let has_findings = report.has_remaining_findings();
         let purge_incomplete = report
             .remaining_findings
@@ -1577,6 +1635,7 @@ enum VectorAvailability {
 }
 
 /// One scope's chunk-embedding disposition (03 §7 compat).
+#[derive(Clone, Copy)]
 enum ScopeEmbedState {
     Compatible,
     Incompatible,
@@ -1618,25 +1677,24 @@ fn active_embedding_profile_summary() -> embedding_store::EmbeddingProfileSummar
     }
 }
 
-/// Inspect a scope's `sqlite.db` for compatible chunk embeddings (03 §7). A read
-/// failure or missing DB is treated as `Absent` (never a vector-search error —
-/// text is always available). The extension is registered in `main`.
-fn scope_embedding_state(kio_dir: &Path) -> ScopeEmbedState {
-    let db = sqlite_path(kio_dir);
-    if !db.exists() {
-        return ScopeEmbedState::Absent;
-    }
-    let Ok(conn) = Connection::open(&db) else {
-        return ScopeEmbedState::Absent;
-    };
-    let Ok(profiles) = embedding_store::chunk_embedding_profiles(&conn) else {
+/// Read the already-projected embedding profile summary rather than reopening a
+/// scope's source index.  A replica header is written atomically with its
+/// searchable rows, so this is the same compatibility fact a direct search
+/// needs for vector-mode resolution.
+fn replica_embedding_state(
+    header: Option<&kio_index::aggregator::AggScopeHeader>,
+) -> ScopeEmbedState {
+    let Some(header) = header else {
         return ScopeEmbedState::Absent;
     };
-    if profiles.is_empty() {
+    if header.index_status != kio_index::aggregator::AggIndexStatus::Ready
+        || header.embedding_profiles.is_empty()
+    {
         return ScopeEmbedState::Absent;
     }
     let expected = active_embedding_profile_summary();
-    if profiles
+    if header
+        .embedding_profiles
         .iter()
         .all(|profile| profile.matches_profile(&expected))
     {
@@ -1657,7 +1715,7 @@ fn scope_embedding_state(kio_dir: &Path) -> ScopeEmbedState {
 /// `embedding_opt_in_for_scopes`); AND a query embedding is obtainable.
 fn resolve_vector_availability(
     requested: SearchMode,
-    exec_scopes: &[ExecScope],
+    scope_embedding_states: &[ScopeEmbedState],
     offline: bool,
     endpoint_configured: bool,
     embedding_opt_in: bool,
@@ -1676,8 +1734,8 @@ fn resolve_vector_availability(
     let mut any_compatible = false;
     let mut any_incompatible = false;
     let mut any_absent = false;
-    for exec in exec_scopes {
-        match scope_embedding_state(&exec.target.kio_dir) {
+    for state in scope_embedding_states {
+        match state {
             ScopeEmbedState::Compatible => any_compatible = true,
             ScopeEmbedState::Incompatible => any_incompatible = true,
             ScopeEmbedState::Absent => any_absent = true,
@@ -1687,7 +1745,7 @@ fn resolve_vector_availability(
     // profile mismatch into this device-wide aggregate the way auto/
     // `--hybrid` do (PC1 line (b), unchanged below) — as long as at least
     // one scope IS compatible, resolution proceeds past the `Incompatible`
-    // branch here, and `search_one_scope_inner`'s own per-scope compat gate
+    // branch here, and replica-header preparation's own per-scope compat gate
     // excludes just the mismatched scope(s) instead of this function
     // forcing a device-wide `Incompatible` that would hard-error the WHOLE
     // command (PC30's existing single-scope `--vector` + incompatible hard
@@ -1934,7 +1992,7 @@ impl ResultPayload {
     }
 }
 
-/// A candidate that survived per-scope RRF, carried into the cross-scope merge.
+/// A candidate materialized by the device-level replica.
 struct ScoredCandidate {
     scope_index: usize,
     scope_id: String,
@@ -1948,14 +2006,6 @@ struct ScoredCandidate {
     /// `chunk_hash` alone.
     payload: ResultPayload,
     rrf_score: f64,
-    /// This candidate's per-scope text/vector backend ranks (from `fuse_rrf`),
-    /// carried up so the cross-scope merge can re-fuse the VECTOR backend by a
-    /// GLOBAL cosine rank (05 §1.8, 2026-07-24). `text_rank` stays per-scope
-    /// (BM25 is not cross-corpus comparable — CT3-MULTI-002); `vector_rank`'s
-    /// presence marks a per-scope vector candidate, whose rank VALUE the merge
-    /// replaces with its global cosine standing. `None`/`None` in text mode.
-    text_rank: Option<u64>,
-    vector_rank: Option<u64>,
     meta: ChunkMeta,
     /// Deterministic path/commit aliases expanded only after global diversify.
     bindings: Vec<SearchHistoryBinding>,
@@ -2007,10 +2057,24 @@ struct SearchedScopeInfo {
     /// PC19/PC21: this scope's `index_metadata.index_generation` ULID at the
     /// moment it was searched — frozen into the next page's cursor.
     index_generation: String,
+    #[cfg(test)]
+    #[allow(dead_code)]
+    has_image_vec: bool,
+    /// An active purge journal was observed only while admitting this scope's
+    /// last coherent Ready header across a HEAD/header mismatch.  Candidate
+    /// selection may use that older projection solely to reach the narrow
+    /// candidate barrier; it must reject the scope even if the journal finishes
+    /// before that barrier opens.
+    journal_active_at_prepare: bool,
     /// PC45/PC46 (§R note-3 ruling): shallow ancestors this scope's history
     /// walk skipped rather than hard-failing on, for `--all-history` /
     /// `--since` / `--include-deleted`. Zero for every other selector.
     shallow_skipped: u64,
+    /// CAS-preflighted aliases for a historical selector (or any cursor
+    /// replay). `None` preserves fresh current-search shallow-cache behavior;
+    /// `Some`, including `Some(vec![])`, is the complete relation the replica
+    /// must apply before ranking candidates.
+    runtime_binding_filter: Option<Vec<kio_index::aggregator::AggBindingFilter>>,
 }
 
 /// `$XDG_CACHE_HOME/kio/aggregator.sqlite` — the device-level read replica both
@@ -2020,339 +2084,453 @@ fn aggregator_path() -> PathBuf {
     cache_home().join("kio/aggregator.sqlite")
 }
 
-/// Both lanes' ranks over the whole collection, plus what the collection held
-/// when they were computed.
+/// The replica collection frozen into a cursor page.
 struct GlobalRanks {
-    text: BTreeMap<(String, String), u64>,
-    vector: BTreeMap<(String, String), u64>,
-    /// True once a lane actually scored, so a caller can tell "the replica
-    /// declined" from "the replica ran and this candidate simply has no term".
-    scored_text: bool,
-    scored_vector: bool,
-    /// The collection these ranks were computed over, frozen into the next
-    /// page's cursor so a later page can tell it is replaying against the same
-    /// one (05 §1.8).
+    /// The collection that selected candidates, frozen into the next page's
+    /// cursor so replay can reject a changed global corpus (05 §1.8).
     collection_generation: String,
 }
 
-/// Why the replica is not answering this search — `None` means it may.
-///
-/// 05 §1.8 states the conditions in prose ("aggregator は既定検索 — 次を
-/// すべて満たすもの — を答える"); until R25 nothing evaluated them, and the
-/// replica re-ranked every search including the ones the prose excludes. The
-/// values are the strings reported in `aggregator.fallback_reason`, so a
-/// search that quietly reverted to scatter-gather ranks says so in its own
-/// output rather than only on stderr.
-fn aggregator_decline_reason(
-    searched: &[SearchedScopeInfo],
-    time_selector: &TimeSelector,
-    mode: SearchMode,
-    match_expr: Option<&str>,
-    query_vec: Option<&[f32]>,
-) -> Option<&'static str> {
-    if searched.len() <= 1 {
-        // One scope IS the collection; its own ranks are already global, and
-        // re-ranking through the replica would only risk a float tie-flip
-        // against the order the per-scope tier already pinned.
-        return Some("single_scope");
+fn aggregator_selector(time_selector: &TimeSelector) -> kio_index::aggregator::AggSelector {
+    match time_selector {
+        TimeSelector::Current => kio_index::aggregator::AggSelector::Current,
+        TimeSelector::At(_) => kio_index::aggregator::AggSelector::At,
+        TimeSelector::AllHistory | TimeSelector::Since(_) => {
+            kio_index::aggregator::AggSelector::AllHistory
+        }
+        TimeSelector::IncludeDeleted => kio_index::aggregator::AggSelector::IncludeDeleted,
     }
-    if !matches!(time_selector, TimeSelector::Current) {
-        // The replica holds each scope's LIVE chunks and nothing else, so a
-        // chunk that exists only in history is absent from it. `apply_global_
-        // ranks` reads that absence as "no rank" and drops the candidate's term
-        // to zero — the deleted-and-rediscovered answer `--at` exists to return
-        // would be ranked below every chunk that merely still exists. A history
-        // search must be ranked by the per-scope tier, which read that history.
-        return Some("time_selector");
-    }
-    // Every lane the fusion will ADD has to be re-based, or the sum mixes
-    // scales again — the exact defect the replica was built to remove. The
-    // text lane is unrankable here whenever the query is pure-short
-    // (`build_query_plan` yields no MATCH expression below the trigram
-    // minimum), which in Japanese is the most ordinary query length there is:
-    // 認証, 設計, 課金, 障害, 監査. Vector-only and text-only searches are fine
-    // — a single addend has no scale to disagree with.
-    let text_lane_fuses = matches!(mode, SearchMode::Text | SearchMode::Hybrid);
-    let vector_lane_fuses = matches!(mode, SearchMode::Vector | SearchMode::Hybrid);
-    if text_lane_fuses && match_expr.is_none() {
-        return Some("text_lane_not_rankable");
-    }
-    if vector_lane_fuses && query_vec.is_none() {
-        return Some("vector_lane_not_rankable");
-    }
-    None
 }
 
-/// Bring the replica level with the scopes this search just read, then rank the
-/// query against the whole collection on both lanes (05 §1.8).
-///
-/// Refresh is lazy and driven by `index_generation`, which rotates on any
-/// change to a scope's index — so an unchanged scope costs one string compare
-/// and a device with nothing new costs none at all. The first search after this
-/// lands pays a full projection (428 scopes / 3851 chunks measured at 2.3 s);
-/// later ones pay only for the scopes that moved.
-///
-/// Every failure here returns `Err(reason)` and leaves the scatter-gather ranks
-/// alone. A cache is not allowed to break a search: the worst it may do is
-/// decline to improve one (05 §1.8, "aggregator が答える条件と fallback").
-/// Callers must have cleared `aggregator_decline_reason` first — this function
-/// covers only the failures that cannot be predicted from the request.
-fn global_ranks_for(
+/// Ask the already-open device replica for the only candidate pool used by
+/// `kio search`.  All source-index projection happens on writer paths; this
+/// function never falls back to a per-scope SQLite read.
+fn replica_candidates_for(
+    replica: &mut kio_index::aggregator::Aggregator,
     searched: &[SearchedScopeInfo],
+    exec_scopes: &[ExecScope],
+    retainable_all_scopes: &BTreeSet<String>,
+    authoritative_all_scope_registry: bool,
     scope_mode: ScopeSelectionMode,
     is_cursor_replay: bool,
-    settings: multi_scope::MultiScopeSettings,
+    time_selector: &TimeSelector,
+    since_cutoff: Option<&str>,
     match_expr: Option<&str>,
+    short_tokens: &[String],
+    mode: SearchMode,
     query_vec: Option<&[f32]>,
     config: RrfConfig,
-) -> std::result::Result<GlobalRanks, String> {
-    let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
-        Ok(replica) => replica,
-        Err(error) => {
-            log_aggregator_degraded(&format!("open failed: {error}"));
-            return Err("open_failed".to_owned());
-        }
-    };
-    // A scope that left the registry must stop contributing document frequency
-    // and cosine candidates immediately, not at some later rebuild — a deleted
-    // folder otherwise keeps depressing every surviving chunk's IDF.
-    //
-    // Only an all-scopes search may prune: under `--scope`/`--descendants`,
-    // `searched` is a deliberate SUBSET of the device, and pruning to it would
-    // evict every scope the user did not ask about — silently destroying the
-    // replica and forcing a full re-projection on the next default search.
-    // A narrowed search reads the collection; it does not redefine it.
-    //
-    // A cursor replay may not prune either, for the same reason one step
-    // removed: its scope set is the one page 1 FROZE, not the one the device
-    // has now, so pruning to it evicts every scope registered since page 1 on
-    // the authority of a stale list — and hides the very collection change the
-    // frozen `collection_generation` exists to detect.
-    let participating: BTreeSet<String> = searched
+) -> std::result::Result<(GlobalRanks, Vec<ScoredCandidate>), String> {
+    let participating = searched
         .iter()
         .map(|scope| scope.scope_id.clone())
-        .collect();
-    if scope_mode == ScopeSelectionMode::All && !is_cursor_replay {
-        if let Err(error) = replica.retain_scopes(&participating) {
-            log_aggregator_degraded(&format!("retain failed: {error}"));
-            return Err("retain_failed".to_owned());
-        }
+        .collect::<BTreeSet<_>>();
+    // `searched` is intentionally only the set that passed this request's
+    // readiness/mode checks.  It must constrain candidate rows, but it is not
+    // the live device registry: a temporarily rebuilding or vector-incompatible
+    // registered scope still owns a coherent replica projection.  The caller
+    // instead passes every registry target whose scope store was reachable;
+    // only a proven-unreachable target is eligible for eviction.
+    if scope_mode == ScopeSelectionMode::All
+        && !is_cursor_replay
+        && authoritative_all_scope_registry
+    {
+        replica
+            // Only a fresh all-scopes enumeration defines the whole registry
+            // collection. Cursor/narrowed queries, and an all-scopes request
+            // that fell back because the registry was unavailable, operate on
+            // subsets and must never evict their siblings.
+            .retain_scopes(retainable_all_scopes)
+            .map_err(|error| format!("retain failed: {error}"))?;
     }
-    let now_ms = replica_now_ms();
-    // Only the scopes whose stamp actually moved. With write-through in place
-    // this is normally empty — the writer already told the replica — so what
-    // remains here is the repair path and the first-ever projection.
-    let stale = searched
+    let selector = aggregator_selector(time_selector);
+    let replica_snapshots = searched
         .iter()
-        .filter(|scope| {
-            replica
-                .scope_generation(&scope.scope_id)
-                .ok()
-                .flatten()
-                .as_deref()
-                != Some(scope.index_generation.as_str())
-        })
+        .map(|scope| (scope.scope_id.clone(), scope.snapshot_at.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let collection_generation = replica
+        .collection_generation()
+        .map_err(|error| format!("collection generation failed: {error}"))?;
+    let short_forms = short_tokens
+        .iter()
+        .map(|token| token_equivalence_forms(token))
         .collect::<Vec<_>>();
-    // R25-8: reads run on the bounded pool the per-scope search already uses —
-    // `min(4, 差分 scope 数)` with a per-scope timeout — because the cost here is
-    // opening one `.kio` per scope (the first-ever projection measured 2.3 s over
-    // 428 of them), and because an unreadable scope on a disconnected drive must
-    // not hold a search open indefinitely.
-    //
-    // Reads only. The writes below stay serial: `Aggregator` owns one SQLite
-    // connection, and a second one would be contending for the same file rather
-    // than doing anything in parallel.
-    let projections = multi_scope::run_ordered(stale.len(), settings, |index, _deadline| {
-        collect_scope_projection(&stale[index].scope_path)
-    });
-    for (scope, execution) in stale.iter().zip(projections) {
-        let projection = match execution {
-            multi_scope::ScopeExecution::Completed(Ok(projection)) => projection,
-            multi_scope::ScopeExecution::Completed(Err(error)) => {
-                // A scope we cannot read is one we cannot account for in the
-                // collection statistics, so the collection is not the corpus
-                // and its ranks are not global. Decline rather than rank
-                // against a corpus with a hole in it.
-                log_aggregator_degraded(&format!("read {} failed: {error}", scope.scope_id));
-                return Err("scope_read_failed".to_owned());
+    let mut runtime_binding_filters = Vec::new();
+    let mut has_runtime_binding_filter = false;
+    let mut missing_runtime_binding_filter = false;
+    for scope in searched {
+        match &scope.runtime_binding_filter {
+            Some(filters) => {
+                has_runtime_binding_filter = true;
+                runtime_binding_filters.extend(filters.iter().cloned());
             }
-            multi_scope::ScopeExecution::TimedOut => {
-                log_aggregator_degraded(&format!("read {} timed out", scope.scope_id));
-                return Err("scope_read_timeout".to_owned());
-            }
+            None => missing_runtime_binding_filter = true,
+        }
+    }
+    if has_runtime_binding_filter && missing_runtime_binding_filter {
+        return Err("mixed runtime CAS eligibility across one replica query".to_owned());
+    }
+    // Keep `Some(&[])`: an empty CAS plan is a verified empty historical
+    // answer, not permission to use every durable replica alias.
+    let binding_filter =
+        has_runtime_binding_filter.then_some(runtime_binding_filters.as_slice());
+    let rows = replica
+        .search_candidates(&kio_index::aggregator::AggSearchRequest {
+            scopes: &participating,
+            snapshots: &replica_snapshots,
+            selector,
+            binding_filter,
+            since_cutoff,
+            match_expr,
+            short_token_forms: &short_forms,
+            query_embedding: query_vec,
+            search_text: mode != SearchMode::Vector,
+            search_vector: matches!(mode, SearchMode::Hybrid | SearchMode::Vector),
+            candidate_depth: config.candidate_depth.max(1),
+        })
+        .map_err(|error| format!("candidate query failed: {error}"))?;
+    let scope_by_id = exec_scopes
+        .iter()
+        .enumerate()
+        .map(|(index, scope)| (scope.target.scope_id.as_str(), (index, scope)))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some((scope_index, exec)) = scope_by_id.get(row.scope_id.as_str()).copied() else {
+            continue;
         };
-        if let Err(error) = replica.refresh_scope(
-            &scope.scope_id,
-            &scope.index_generation,
-            &projection.chunks,
-            &projection.images,
-            now_ms,
-        ) {
-            log_aggregator_degraded(&format!("refresh {} failed: {error}", scope.scope_id));
-            return Err("refresh_failed".to_owned());
-        }
-    }
-    // Read AFTER every refresh: the stamp has to describe the collection these
-    // ranks are actually computed over, not the one that existed on entry.
-    let collection_generation = match replica.collection_generation() {
-        Ok(generation) => generation,
-        Err(error) => {
-            log_aggregator_degraded(&format!("collection generation failed: {error}"));
-            return Err("collection_generation_failed".to_owned());
-        }
-    };
-    // Depth matches the per-scope candidate depth on BOTH lanes: a chunk that
-    // cannot reach the fusion cannot be helped by a better rank inside it, and
-    // an asymmetric depth would make one lane's terms systematically denser.
-    let depth = config.candidate_depth.max(1);
-    let mut ranks = GlobalRanks {
-        text: BTreeMap::new(),
-        vector: BTreeMap::new(),
-        scored_text: false,
-        scored_vector: false,
-        collection_generation,
-    };
-    if let Some(expr) = match_expr {
-        match replica.text_scores(expr, &participating, depth) {
-            Ok(scores) => {
-                ranks.text = kio_index::aggregator::text_ranks(&scores);
-                ranks.scored_text = true;
-            }
-            Err(error) => {
-                log_aggregator_degraded(&format!("text score failed: {error}"));
-                return Err("text_score_failed".to_owned());
-            }
-        }
-    }
-    if let Some(query_vec) = query_vec {
-        // Chunk and image scores are ranked as ONE sequence, the same merge the
-        // per-scope lane does (`merge_vector_lane`) and for the same reason:
-        // 03 §7 fixes one multimodal space, so two rank sequences would give
-        // each its own rank 1 and reintroduce, between the two tables, the
-        // scale mixture the replica exists to remove (05 §1.8).
-        let mut scores = match replica.vector_scores(query_vec, &participating, depth) {
-            Ok(scores) => scores,
-            Err(error) => {
-                log_aggregator_degraded(&format!("vector score failed: {error}"));
-                return Err("vector_score_failed".to_owned());
-            }
+        let payload = match (row.image_id, row.image_uri) {
+            (Some(image_hash), Some(image_uri)) => ResultPayload::Image {
+                image_hash,
+                image_uri,
+            },
+            _ => ResultPayload::Chunk,
         };
-        match replica.image_vector_scores(query_vec, &participating, depth) {
-            Ok(images) => scores.extend(images),
-            Err(error) => {
-                log_aggregator_degraded(&format!("image vector score failed: {error}"));
-                return Err("image_vector_score_failed".to_owned());
-            }
-        }
-        ranks.vector = kio_index::aggregator::vector_ranks(&scores);
-        ranks.scored_vector = true;
+        let text_term = row
+            .text_rank
+            .map(|rank| config.w_text / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        let vector_term = row
+            .vector_rank
+            .map(|rank| config.w_vector / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        candidates.push(ScoredCandidate {
+            scope_index,
+            scope_id: row.scope_id,
+            scope_path: exec.target.kio_dir.clone(),
+            chunk_hash: row.chunk_id,
+            payload,
+            rrf_score: text_term + vector_term,
+            meta: ChunkMeta {
+                raw_hash: row.raw_hash,
+                tool_profile_hash: row.tool_profile_hash,
+                gen: row.gen,
+                heading_path: row
+                    .heading_path
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
+                section_id: row.section_id.filter(|value| !value.is_empty()),
+                byte_start: row.byte_start,
+                byte_end: row.byte_end,
+                text: row.text,
+                unit_key: row.unit_key,
+            },
+            bindings: row
+                .bindings
+                .into_iter()
+                .map(|binding| SearchHistoryBinding {
+                    raw_hash: binding.raw_hash,
+                    tool_profile_hash: binding.tool_profile_hash,
+                    gen: binding.gen,
+                    path_at_commit: binding.path_at_commit,
+                    pointer_commit: binding.pointer_commit,
+                    current_paths: binding.current_paths,
+                    is_live: binding.is_live,
+                })
+                .collect(),
+            embedding: row.embedding,
+        });
     }
-    if !ranks.scored_text && !ranks.scored_vector {
-        // Unreachable while `aggregator_decline_reason` gates the call — it
-        // rejects a request with no rankable lane before we get here — but a
-        // rank set with nothing in it must never reach `apply_global_ranks`,
-        // which would zero every candidate's terms.
-        return Err("no_lane_scored".to_owned());
-    }
-    Ok(ranks)
+    Ok((
+        GlobalRanks {
+            collection_generation,
+        },
+        candidates,
+    ))
 }
 
-/// One scope's live rows for the replica: the text collection and the image
-/// vectors that hang off it.
+/// One scope's complete replica projection.
 ///
-/// Two lists rather than one because they are not the same kind of row. Every
-/// chunk counts toward BM25's `N`/`df`/`avgdl` whether or not it has a vector;
-/// an image counts toward nothing and exists here only to be cosine-ranked
-/// (05 §1.7 / U5 — an image's text-lane standing is inherited from the chunk
-/// that cites it, never indexed as a document of its own).
+/// Chunks, their image vectors, and the resolver's answer are deliberately
+/// separate lists. Every committed chunk remains in the one FTS corpus, while
+/// `bindings` decides which rows a particular selector may return.
 struct ScopeProjection {
     chunks: Vec<kio_index::aggregator::AggChunk>,
     images: Vec<kio_index::aggregator::AggImage>,
+    bindings: Vec<kio_index::aggregator::AggBinding>,
+    /// Header facts which direct search must read from the replica instead of
+    /// reopening this source index.
+    current_snapshot_commit: Option<String>,
+    current_chunking_config_hash: Option<String>,
+    embedding_profiles: Vec<embedding_store::EmbeddingProfileSummary>,
+    /// Every selector/snapshot the source resolver actually completed.  This
+    /// includes valid empty answers so search can distinguish them from a
+    /// missing projection without a lazy source read.
+    completions: Vec<kio_index::aggregator::AggProjectionCompletion>,
+    max_rowid: u64,
+    max_association_rowid: u64,
+    has_image_vec: bool,
 }
 
-/// Project one scope's live chunks into the replica.
+/// Project one scope's committed chunks and resolved visibility bindings into
+/// the replica.
 ///
-/// Membership is `first_seen_commit IS NOT NULL` — the chunk is committed
-/// rather than mid-write. The query-time liveness filters (cursor bound,
-/// config-generation association, eligible identity, ancestor gate) are
-/// deliberately NOT re-derived here: they decide what a search may RETURN, and
-/// the replica returns nothing — it supplies collection statistics and ranks,
-/// while the per-scope tier remains the sole gate on candidates. Re-deriving
-/// those predicates here would put the liveness rules in two places, which is
-/// how they drift apart (03 §4 invariant 7).
+/// The replica does not copy source liveness tables and reconstruct their SQL
+/// predicates. Instead, the existing scope-side history planner resolves every
+/// selector and this function persists that answer against the materialized
+/// chunk. `agg_chunks` can therefore remain one corpus for current and
+/// historical rows without treating every committed row as current.
 ///
-/// The vector comes from `chunk_vec`, not from `embeddings`, for the same
-/// reason: `rebuild_chunk_vec` has already resolved which of several rows
-/// sharing a `text_hash` is this chunk's (07 §5.3 contextual embedding), and
-/// re-running that choice here would be the same duplication one level over.
-fn collect_scope_projection(kio_dir: &Path) -> Result<ScopeProjection> {
+/// `requested_at_snapshots` is writer-only input from an explicit historical
+/// operation. It lets that writer publish a completed `--at` marker for a
+/// valid empty, disconnected tree, which has no source `tree_entries` row to
+/// discover during the ordinary projection scan. Readers never supply this
+/// relation and never reopen source SQLite to make it up.
+fn collect_scope_projection(
+    kio_dir: &Path,
+    requested_at_snapshots: &[&str],
+) -> Result<ScopeProjection> {
     let db = kio_dir.join("index/sqlite.db");
     // `chunk_vec` is a vec0 virtual table, so the extension must be live on
     // this connection before the table can be opened.
     kio_index::vec::ensure_registered();
-    // Read-write so the eligible-identity TEMP table below can be created. It
-    // lives in this connection's temp schema and never touches the store; the
-    // per-scope search path installs the same table the same way.
+    // Read-write so the resolver's TEMP identity tables can be created. They
+    // live only in this connection's temp schema and never touch the source
+    // store.
     let conn = Connection::open(&db)
         .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
-    // R25-9: liveness is asked for, not re-derived.
-    //
-    // The projection used to be every row with `first_seen_commit IS NOT NULL`
-    // — every chunk ever committed. That is not the live set: a deleted file's
-    // chunks and a superseded chunking generation's chunks both satisfy it.
-    // Measured on a 3-file fixture, deleting one file left the replica holding
-    // 6 chunks for 4 live ones, so a third of the collection's `N` and document
-    // frequency described text no search can return, and those rows also
-    // consumed slots in the depth cut ahead of chunks that can.
-    //
-    // The bindings come from the SAME functions the per-scope search calls
-    // (`current_history_plan_from_cache` + `install_eligible_identities`) and
-    // the predicate is the one its own SQL uses, minus the parts that are not
-    // liveness: the cursor's `rowid`/`association_rowid` bounds freeze a PAGE,
-    // and the ancestor gate belongs to `--at`. Calling rather than copying is
-    // what keeps 03 §4 invariant 7 true — this file still states no liveness
-    // rule of its own.
     let repo = Repository::open(kio_dir.parent().unwrap_or(kio_dir))?;
+    let embedding_profiles = embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(ScopeProjection {
             chunks: Vec::new(),
             images: Vec::new(),
+            bindings: Vec::new(),
+            current_snapshot_commit: None,
+            current_chunking_config_hash: None,
+            embedding_profiles,
+            completions: Vec::new(),
+            max_rowid: 0,
+            max_association_rowid: 0,
+            has_image_vec: false,
         });
     };
-    let plan = current_history_plan_from_cache(&conn, &head)?;
-    install_eligible_identities(&conn, &plan)?;
-    let chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
+
+    // A writer captures the source's current append boundaries. Cursor replay
+    // never refreshes this replica; it validates its signed generation and uses
+    // the already-published binding relation.
+    let max_rowid = current_max_rowid(&conn)?;
+    let max_association_rowid = kio_index::fts::max_chunk_config_association_rowid(&conn)
+        .map_err(index_to_kio)?;
+    let live_chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
+    let current_plan = current_history_plan_from_cache(&conn, &head)?;
+    let mut completions = vec![kio_index::aggregator::AggProjectionCompletion {
+        selector: kio_index::aggregator::AggSelector::Current,
+        snapshot_commit: head.clone(),
+        chunking_config_hash: Some(live_chunking_config_hash.clone()),
+        shallow_skipped: current_plan.shallow_skipped.len() as u64,
+    }];
+    let mut bindings = projection_bindings_for_plan(
+        &conn,
+        &current_plan,
+        "current",
+        &live_chunking_config_hash,
+        max_rowid,
+        max_association_rowid,
+        false,
+    )?;
+
+    // `--all-history` and `--since` share one visibility relation; the latter
+    // applies its timestamp cutoff at query time. `--include-deleted` has a
+    // distinct resolver policy, so it receives its own binding set.
+    // A writer's current projection tolerates a shallow older ancestor: its
+    // current resolver answer remains usable while optional historical
+    // snapshots are omitted. Direct readers never perform this refresh;
+    // explicit history selectors are rejected during scope preparation.
+    match plan_search_history(&repo, &head, &TimeSelector::AllHistory, None) {
+        Ok(all_history_plan) => {
+            let shallow_skipped = all_history_plan.shallow_skipped.len() as u64;
+            bindings.extend(projection_bindings_for_plan(
+                &conn,
+                &all_history_plan,
+                "all_history",
+                &live_chunking_config_hash,
+                max_rowid,
+                max_association_rowid,
+                false,
+            )?);
+            completions.push(kio_index::aggregator::AggProjectionCompletion {
+                selector: kio_index::aggregator::AggSelector::AllHistory,
+                snapshot_commit: all_history_plan.snapshot_commit,
+                chunking_config_hash: Some(live_chunking_config_hash.clone()),
+                shallow_skipped,
+            });
+        }
+        Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {}
+        Err(error) => return Err(error),
+    }
+    match plan_search_history(&repo, &head, &TimeSelector::IncludeDeleted, None) {
+        Ok(include_deleted_plan) => {
+            let shallow_skipped = include_deleted_plan.shallow_skipped.len() as u64;
+            bindings.extend(projection_bindings_for_plan(
+                &conn,
+                &include_deleted_plan,
+                "include_deleted",
+                &live_chunking_config_hash,
+                max_rowid,
+                max_association_rowid,
+                false,
+            )?);
+            completions.push(kio_index::aggregator::AggProjectionCompletion {
+                selector: kio_index::aggregator::AggSelector::IncludeDeleted,
+                snapshot_commit: include_deleted_plan.snapshot_commit,
+                chunking_config_hash: Some(live_chunking_config_hash.clone()),
+                shallow_skipped,
+            });
+        }
+        Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {}
+        Err(error) => return Err(error),
+    }
+
+    // An `--at` lookup is exact to its target commit. Persist an answer for
+    // every snapshot reachable from the scope's current HEAD, every commit
+    // retained by the source tree-entry cache, and explicit target snapshots a
+    // writer just reindexed. The cache set preserves tag-only/orphan side
+    // commits when a later HEAD moves to another branch; the explicit set is
+    // necessary for an otherwise invisible empty tree. Direct search must not
+    // reopen this source index on demand. The scope planner, including its
+    // target-ancestor gate and target config resolution, remains the authority
+    // for each row.
+    let mut at_snapshots = match HistoryReader::new(repo.kio_dir()).all_parents_tolerant(&head) {
+        Ok((history, _)) => history
+            .nodes_in_visit_order()
+            .into_iter()
+            .map(|node| node.commit_hash.clone())
+            .collect::<BTreeSet<_>>(),
+        // Do not turn a current search with a cached shallow snapshot into a
+        // replica-refresh failure just to precompute optional `--at` rows.
+        // Requested `--at` snapshots remain below and are still resolved
+        // exactly by their own planner invocation.
+        Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => BTreeSet::new(),
+        Err(error) => return Err(error),
+    };
+    at_snapshots.extend(source_tree_entry_snapshot_commits(&conn)?);
+    at_snapshots.extend(
+        requested_at_snapshots
+            .iter()
+            .map(|snapshot_commit| (*snapshot_commit).to_owned()),
+    );
+    for snapshot_commit in at_snapshots {
+        let selector = TimeSelector::At(snapshot_commit.clone());
+        let plan = match plan_search_history(&repo, &snapshot_commit, &selector, None) {
+            Ok(plan) => plan,
+            // A retained source row can outlive a discarded CAS commit/tree.
+            // It cannot form a valid replica marker, and direct `--at` will
+            // report the same shallow/not-found condition from CAS.
+            Err(error)
+                if matches!(
+                    error.error_code(),
+                    "KIO-E-COMMIT-SHALLOW-001" | "KIO-E-STORE-NOT-FOUND-001"
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        // `resolve_target_chunking_config_hash` consults the planner's TEMP
+        // identity relation.  Install it before resolving the target config,
+        // including for a valid but empty snapshot where no previous planner
+        // call happened to create the table.
+        install_eligible_identities(&conn, &plan)?;
+        let (ancestors, _) = at_target_ancestors(&repo, &snapshot_commit)?;
+        install_target_ancestors(&conn, &ancestors)?;
+        let target_config = resolve_target_chunking_config_hash(
+            &conn,
+            &live_chunking_config_hash,
+            true,
+            max_rowid,
+            max_association_rowid,
+        )?;
+        bindings.extend(projection_bindings_for_plan(
+            &conn,
+            &plan,
+            "at",
+            &target_config,
+            max_rowid,
+            max_association_rowid,
+            true,
+        )?);
+        completions.push(kio_index::aggregator::AggProjectionCompletion {
+            selector: kio_index::aggregator::AggSelector::At,
+            snapshot_commit: plan.snapshot_commit,
+            chunking_config_hash: Some(target_config),
+            shallow_skipped: plan.shallow_skipped.len() as u64,
+        });
+    }
+
+    // A refresh can visit a merge through more than one planner route. The
+    // replica table has the same semantic key, so remove exact duplicates
+    // before the transaction rather than relying on insertion order.
+    bindings.sort_by(|left, right| {
+        (
+            &left.selector_kind,
+            &left.snapshot_commit,
+            &left.chunk_id,
+            &left.path_at_commit,
+            &left.pointer_commit,
+        )
+            .cmp(&(
+                &right.selector_kind,
+                &right.snapshot_commit,
+                &right.chunk_id,
+                &right.path_at_commit,
+                &right.pointer_commit,
+            ))
+    });
+    bindings.dedup_by(|left, right| left == right);
+
+    // All committed chunks belong to the one corpus. `invalidated_commit` is
+    // the refresh snapshot that first observed a row outside the current
+    // resolver answer; exact historical eligibility comes from `bindings`.
     let mut stmt = conn
         .prepare(
-            // `chunk_id` is what `ScoredCandidate.chunk_hash` carries (the merge
-            // names the field after the identity it is, not after the table's
-            // column), so the key stored here lines up with the key the merge
-            // looks up. LEFT JOIN: a chunk with no vector is still part of the
-            // text collection and must count toward N and avgdl.
-            "SELECT c.chunk_id, c.text, c.heading_path, v.embedding
+            "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.gen,
+                    c.text, c.heading_path, c.section_id, c.byte_start,
+                    c.byte_end, c.unit_key, c.created_at, c.first_seen_commit,
+                    v.embedding
              FROM chunks c
              LEFT JOIN chunk_vec v ON v.chunk_id = c.chunk_id
              WHERE c.first_seen_commit IS NOT NULL
-                 AND EXISTS (
-                     SELECT 1 FROM chunk_config_generations cg
-                     WHERE cg.chunk_id = c.chunk_id
-                       AND cg.chunking_config_hash = ?1
-                 )
-                 AND EXISTS (
-                     SELECT 1 FROM kio_eligible_identity eligible
-                     WHERE eligible.raw_hash = c.raw_hash
-                       AND eligible.tool_profile_hash = c.tool_profile_hash
-                       AND eligible.gen = c.gen
-                 )",
+               AND c.rowid <= ?1
+             ORDER BY c.chunk_id",
         )
         .map_err(|error| KioError::schema(format!("aggregator query: {error}")))?;
     let rows = stmt
-        .query_map(rusqlite::params![chunking_config_hash], |row| {
-            let blob: Option<Vec<u8>> = row.get(3)?;
+        .query_map(rusqlite::params![max_rowid as i64], |row| {
+            let blob: Option<Vec<u8>> = row.get(12)?;
             Ok(kio_index::aggregator::AggChunk {
                 chunk_id: row.get(0)?,
-                text: row.get(1)?,
-                heading_path: row.get(2)?,
+                raw_hash: row.get(1)?,
+                tool_profile_hash: row.get(2)?,
+                gen: row.get::<_, i64>(3)? as u64,
+                text: row.get(4)?,
+                heading_path: row.get(5)?,
+                section_id: row.get(6)?,
+                byte_start: row.get::<_, i64>(7)? as u64,
+                byte_end: row.get::<_, i64>(8)? as u64,
+                unit_key: row.get(9)?,
+                created_at: row.get(10)?,
+                first_seen_commit: row.get(11)?,
+                invalidated_commit: None,
                 embedding: blob
                     .as_deref()
                     .map(kio_index::embedding_store::f32_from_le_bytes),
@@ -2365,43 +2543,176 @@ fn collect_scope_projection(kio_dir: &Path) -> Result<ScopeProjection> {
     }
     drop(stmt);
 
-    // The image half. Liveness is not re-derived here either: an image is live
-    // exactly when some live chunk still cites it, and `chunks` above IS the
-    // live set — so the work is reading their bodies with the same parser the
-    // per-scope reverse lookup uses, not writing a second rule.
-    //
-    // Skipped outright when the scope predates `image_vec`: every read would
-    // fail on the missing table, once per cited figure, for a projection that
-    // could only ever be empty.
+    let current_chunk_ids = bindings
+        .iter()
+        .filter(|binding| {
+            binding.selector_kind == "current"
+                && binding.snapshot_commit == head
+                && binding.is_live
+        })
+        .map(|binding| binding.chunk_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for chunk in &mut chunks {
+        if !current_chunk_ids.contains(chunk.chunk_id.as_str()) {
+            chunk.invalidated_commit = Some(head.clone());
+        }
+    }
+
+    // Image vectors remain attached to every committed citing chunk. At query
+    // time the same eligible chunk binding gates the image reference, so a
+    // historical image never needs a second visibility rule.
     if !table_exists(&conn, "image_vec")? {
         return Ok(ScopeProjection {
             chunks,
             images: Vec::new(),
+            bindings,
+            current_snapshot_commit: Some(head),
+            current_chunking_config_hash: Some(live_chunking_config_hash),
+            embedding_profiles,
+            completions,
+            max_rowid,
+            max_association_rowid,
+            has_image_vec: false,
         });
     }
-    let referenced = chunks
-        .iter()
-        .flat_map(|chunk| extract_related_images(&chunk.text))
-        .filter_map(|image| {
-            kio_search::object_uri::parse_object_uri(&image.image_uri)
-                .ok()
-                .filter(|object| object.is_image())
-                .map(|object| object.hash().to_owned())
-        })
-        .collect::<BTreeSet<_>>();
+
+    let mut image_vectors = BTreeMap::<String, Option<Vec<f32>>>::new();
+    let mut seen_references = BTreeSet::<(String, String)>::new();
     let mut images = Vec::new();
-    for image_hash in referenced {
-        // A cited image with no vector yet contributes nothing to either lane —
-        // unlike a chunk, which still counts toward the text statistics.
-        if let Ok(Some(vector)) = kio_index::embedding_store::read_image_vector(&conn, &image_hash)
-        {
-            images.push(kio_index::aggregator::AggImage {
-                image_id: image_hash,
-                embedding: vector,
+    for chunk in &chunks {
+        for image in extract_related_images(&chunk.text) {
+            let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) else {
+                continue;
+            };
+            if !object.is_image() {
+                continue;
+            }
+            let image_id = object.hash().to_owned();
+            // `agg_image_refs` has one reference per image/chunk pair. Keep
+            // the first URI deterministically if malformed legacy content
+            // happens to name the same image twice with different authorities.
+            if !seen_references.insert((image_id.clone(), chunk.chunk_id.clone())) {
+                continue;
+            }
+            let vector = image_vectors
+                .entry(image_id.clone())
+                .or_insert_with(|| {
+                    kio_index::embedding_store::read_image_vector(&conn, &image_id)
+                        .ok()
+                        .flatten()
+                })
+                .clone();
+            if let Some(embedding) = vector {
+                images.push(kio_index::aggregator::AggImage {
+                    image_id,
+                    chunk_id: chunk.chunk_id.clone(),
+                    image_uri: image.image_uri,
+                    embedding,
+                });
+            }
+        }
+    }
+    Ok(ScopeProjection {
+        chunks,
+        images,
+        bindings,
+        current_snapshot_commit: Some(head),
+        current_chunking_config_hash: Some(live_chunking_config_hash),
+        embedding_profiles,
+        completions,
+        max_rowid,
+        max_association_rowid,
+        has_image_vec: true,
+    })
+}
+
+/// Materialize one planner answer into `(selector, snapshot, chunk)` rows.
+///
+/// The SQL only maps resolved normalized identities to their already-indexed
+/// chunk rows and config association. It never decides which identity is live:
+/// that decision stays in `SearchHistoryPlan`.
+fn projection_bindings_for_plan(
+    conn: &Connection,
+    plan: &SearchHistoryPlan,
+    selector_kind: &str,
+    chunking_config_hash: &str,
+    max_rowid: u64,
+    max_association_rowid: u64,
+    ancestor_gated: bool,
+) -> Result<Vec<kio_index::aggregator::AggBinding>> {
+    let grouped = plan.grouped_bindings();
+    if grouped.is_empty() {
+        return Ok(Vec::new());
+    }
+    install_eligible_identities(conn, plan)?;
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.gen
+         FROM chunks c
+         WHERE c.first_seen_commit IS NOT NULL
+           AND c.rowid <= ?2
+           AND EXISTS (
+               SELECT 1 FROM chunk_config_generations cg
+               WHERE cg.chunk_id = c.chunk_id
+                 AND cg.chunking_config_hash = ?1
+                 AND cg.association_rowid <= ?3
+                 {config_ancestor_clause}
+           )
+           AND EXISTS (
+               SELECT 1 FROM kio_eligible_identity eligible
+               WHERE eligible.raw_hash = c.raw_hash
+                 AND eligible.tool_profile_hash = c.tool_profile_hash
+                 AND eligible.gen = c.gen
+           )
+           {ancestor_clause}
+         ORDER BY c.chunk_id",
+        config_ancestor_clause = config_association_ancestor_sql(ancestor_gated),
+        ancestor_clause = ancestor_gate_sql(ancestor_gated),
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| KioError::schema(format!("aggregator binding query: {error}")))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                chunking_config_hash,
+                max_rowid as i64,
+                max_association_rowid as i64,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    SearchContentKey {
+                        raw_hash: row.get(1)?,
+                        tool_profile_hash: row.get(2)?,
+                        gen: row.get::<_, i64>(3)? as u64,
+                    },
+                ))
+            },
+        )
+        .map_err(|error| KioError::schema(format!("aggregator binding rows: {error}")))?;
+    let mut projected = Vec::new();
+    for row in rows {
+        let (chunk_id, key) =
+            row.map_err(|error| KioError::schema(format!("aggregator binding row: {error}")))?;
+        let Some(resolved) = grouped.get(&key) else {
+            continue;
+        };
+        for binding in resolved {
+            projected.push(kio_index::aggregator::AggBinding {
+                selector_kind: selector_kind.to_owned(),
+                snapshot_commit: plan.snapshot_commit.clone(),
+                chunk_id: chunk_id.clone(),
+                raw_hash: binding.raw_hash.clone(),
+                tool_profile_hash: binding.tool_profile_hash.clone(),
+                gen: binding.gen,
+                path_at_commit: binding.path_at_commit.clone(),
+                pointer_commit: binding.pointer_commit.clone(),
+                current_paths: binding.current_paths.clone(),
+                is_live: binding.is_live,
             });
         }
     }
-    Ok(ScopeProjection { chunks, images })
+    Ok(projected)
 }
 
 /// Bookkeeping only — `index_generation` decides staleness, so a clock that
@@ -2415,7 +2726,9 @@ fn replica_now_ms() -> i64 {
 
 /// `(scope_id, index_generation)` as this scope's live index reports them right
 /// now. `None` when either is unavailable — a scope with no index yet, or one
-/// whose `scope.json` cannot be read. Neither is an error for a cache write.
+/// whose `scope.json` cannot be read. Probe callers may treat that as an
+/// ineligible optimization; a writer-side projection must turn it into an
+/// error so an older Ready header cannot be certified as current.
 ///
 /// The generation is read here rather than passed in so that a write-through
 /// always stamps the state the index is actually in, whatever rotations the
@@ -2438,10 +2751,9 @@ fn replica_scope_stamp(kio_dir: &Path) -> Option<(String, String)> {
 /// Project this scope into the replica now that its index has been replaced
 /// (05 §1.8 write-through).
 ///
-/// The search path can still repair a scope lazily, but it only knows to when
-/// `index_generation` moved, and that stamp is rotated by whichever command
-/// happens to remember. Writing here makes the replica track the index because
-/// the writer told it, not because a later reader noticed.
+/// Readers never repair a scope lazily. Writing here makes the replica track
+/// the index because the writer told it, and leaves the header `Rebuilding`
+/// (rather than falling back to the source index) if that projection fails.
 ///
 /// A full projection rather than a delta: a rebuild builds a fresh temp db and
 /// renames it over `sqlite.db` (P5), so every rowid is new and the live chunk
@@ -2449,24 +2761,65 @@ fn replica_scope_stamp(kio_dir: &Path) -> Option<(String, String)> {
 ///
 /// Returns the reason it could not, so a caller that must not report success
 /// without it (purge — 05 §3.5) can refuse, while every other caller logs and
-/// carries on: losing this write leaves the replica's stamp behind the index
-/// and the next search re-projects the scope — the same repair path that
-/// carried the whole design before write-through existed (03 §4: the replica is
-/// a cache, and a cache may not break a write).
+/// carries on: losing this write leaves the scope marked Rebuilding, so direct
+/// search fails closed until a later writer completes the projection. The
+/// replica remains a cache and must never make a write fail (03 §4).
 fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
+    match write_through_projection_with_requested_at(kio_dir, &[]) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            // This variant is used by purge, which needs the original error to
+            // reject the command.  It still shares the writer-wide fail-closed
+            // invariant: a failed source -> replica publication must never
+            // leave an older Ready header readable by a direct search.
+            mark_replica_unavailable_or_log(kio_dir);
+            Err(reason)
+        }
+    }
+}
+
+/// Writer-side variant for an operation that explicitly resolved one or more
+/// historical `--at` snapshots. Ordinary writers pass no extra snapshots: all
+/// discoverable history still comes from HEAD reachability or source cache
+/// rows. An explicitly selected empty tree has neither, so its writer must
+/// carry that fact through to the completed replica projection.
+fn write_through_projection_with_requested_at(
+    kio_dir: &Path,
+    requested_at_snapshots: &[&str],
+) -> std::result::Result<(), String> {
     let Some((scope_id, generation)) = replica_scope_stamp(kio_dir) else {
-        return Ok(());
+        // A caller reaches this after changing (or attempting to publish) the
+        // source index. Treat a missing/unreadable stamp as a failed
+        // projection, not as a harmless no-op: the wrapper marks any existing
+        // Ready replica header Rebuilding so direct search cannot certify its
+        // old rows as the new source state.
+        return Err(format!(
+            "write-through source index stamp is unavailable for {}",
+            kio_dir.display()
+        ));
     };
-    let projection = collect_scope_projection(kio_dir)
+    let projection = collect_scope_projection(kio_dir, requested_at_snapshots)
         .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
+    let header = kio_index::aggregator::AggScopeHeader {
+        current_snapshot_commit: projection.current_snapshot_commit,
+        current_chunking_config_hash: projection.current_chunking_config_hash,
+        index_generation: generation,
+        max_rowid: projection.max_rowid,
+        max_association_rowid: projection.max_association_rowid,
+        has_image_vec: projection.has_image_vec,
+        embedding_profiles: projection.embedding_profiles,
+        index_status: kio_index::aggregator::AggIndexStatus::Ready,
+    };
     let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
         .map_err(|error| format!("write-through open failed: {error}"))?;
     replica
-        .refresh_scope(
+        .refresh_scope_with_projection(
             &scope_id,
-            &generation,
+            &header,
             &projection.chunks,
             &projection.images,
+            &projection.bindings,
+            &projection.completions,
             replica_now_ms(),
         )
         .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
@@ -2475,35 +2828,397 @@ fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
 /// [`write_through_projection`] for the callers that treat a lost cache write
 /// as survivable — every one except purge.
 fn write_through_projection_or_log(kio_dir: &Path) {
-    if let Err(reason) = write_through_projection(kio_dir) {
+    write_through_projection_or_log_with_requested_at(kio_dir, &[]);
+}
+
+fn write_through_projection_or_log_with_requested_at(
+    kio_dir: &Path,
+    requested_at_snapshots: &[&str],
+) {
+    if let Err(reason) =
+        write_through_projection_with_requested_at(kio_dir, requested_at_snapshots)
+    {
         log_aggregator_degraded(&reason);
+        // A direct reader deliberately has no source-index fallback.  Once a
+        // writer has changed its source state, leaving the last Ready header in
+        // place would certify stale corpus rows indefinitely.  Retain the rows
+        // for diagnosis/recovery, but make the scope fail closed until a later
+        // writer publishes a complete projection.
+        mark_replica_unavailable_or_log(kio_dir);
     }
+}
+
+/// Publish the explicitly selected historical snapshot as part of a
+/// writer-side reindex. In particular, this preserves a completion marker for
+/// a valid empty disconnected tree without inventing a source-cache row.
+pub(crate) fn write_through_projection_or_log_for_at_snapshot(
+    kio_dir: &Path,
+    snapshot_commit: &str,
+) {
+    write_through_projection_or_log_with_requested_at(kio_dir, &[snapshot_commit]);
+}
+
+/// A repaired commit preserves its parent's tree, but it has a distinct commit
+/// identity. Populate the derived source cache for that new identity before a
+/// full replica projection asks `current_history_plan_from_cache` for it.
+///
+/// This runs only after `verify-objects` has durably recovered bytes and
+/// advanced HEAD. It is deliberately separate from manual `snapshot`: that
+/// path may introduce unindexed content and must remain `Rebuilding` until a
+/// real index pass replaces sqlite.db.
+fn materialize_repaired_snapshot_entries(repo: &Repository, repaired_head: &str) -> Result<()> {
+    let db = sqlite_path(repo.kio_dir());
+    if !db.is_file() {
+        return Err(KioError::schema(format!(
+            "repair projection source index is unavailable: {}",
+            db.display()
+        )));
+    }
+    kio_index::vec::ensure_registered();
+    let conn = Connection::open(&db)
+        .map_err(|error| KioError::schema(format!("repair projection open {}: {error}", db.display())))?;
+    match ensure_snapshot_tree_entries(repo, &conn, repaired_head)? {
+        SnapshotTreeEntries::Projected => Ok(()),
+        SnapshotTreeEntries::ShallowCachedRows | SnapshotTreeEntries::ShallowNoRows => {
+            Err(KioError::schema(
+                "repair projection cannot materialize the repaired snapshot tree",
+            ))
+        }
+    }
+}
+
+/// Prevent strict replica-only reads from serving a projection whose source
+/// HEAD advanced before its next index rebuild. This is cache-only state: a
+/// cache write failure remains non-fatal and the missing/stale header will make
+/// the reader fail closed.
+fn mark_replica_rebuilding_or_log(kio_dir: &Path, snapshot_commit: &str) {
+    let Ok(scope_id) = scope_id(kio_dir) else {
+        return;
+    };
+    let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
+        Ok(replica) => replica,
+        Err(error) => {
+            log_aggregator_degraded(&format!("rebuilding header open failed: {error}"));
+            return;
+        }
+    };
+    let header = match replica.scope_header(&scope_id) {
+        Ok(Some(mut header)) => {
+            header.current_snapshot_commit = Some(snapshot_commit.to_owned());
+            header.index_status = kio_index::aggregator::AggIndexStatus::Rebuilding;
+            header
+        }
+        Ok(None) => return,
+        Err(error) => {
+            log_aggregator_degraded(&format!("rebuilding header read {scope_id} failed: {error}"));
+            return;
+        }
+    };
+    if let Err(error) = replica.update_scope_header(&scope_id, &header, replica_now_ms()) {
+        log_aggregator_degraded(&format!("rebuilding header {scope_id} failed: {error}"));
+    }
+}
+
+/// Test-only fault seams around the durability boundary immediately after HEAD
+/// advances. `*_before_marker` proves readers reject a stale Ready header in
+/// the narrow cross-store interval; the phase name without that suffix proves
+/// the marker itself remains fail-closed before the source rebuild begins.
+fn maybe_inject_replica_after_head_fault(phase: &str) -> Result<()> {
+    if std::env::var("KIO_TEST_REPLICA_AFTER_HEAD_FAULT").as_deref() == Ok(phase) {
+        return Err(KioError::new(
+            "KIO-E-REPLICA-AFTER-HEAD-FAULT-001",
+            "injected replica post-HEAD publication fault",
+            json!({ "phase": phase }),
+            ExitCode::Failure,
+        ));
+    }
+    Ok(())
+}
+
+/// Fail closed without guessing a replacement snapshot.  This is used after a
+/// write-through failure, when the source may already have advanced but the
+/// replica could not observe enough of it to state an exact commit safely.
+fn mark_replica_unavailable_or_log(kio_dir: &Path) {
+    let Ok(scope_id) = scope_id(kio_dir) else {
+        return;
+    };
+    let mut replica = match kio_index::aggregator::Aggregator::open(&aggregator_path()) {
+        Ok(replica) => replica,
+        Err(error) => {
+            log_aggregator_degraded(&format!("unavailable header open failed: {error}"));
+            return;
+        }
+    };
+    let header = match replica.scope_header(&scope_id) {
+        Ok(Some(mut header)) => {
+            header.index_status = kio_index::aggregator::AggIndexStatus::Rebuilding;
+            header
+        }
+        Ok(None) => return,
+        Err(error) => {
+            log_aggregator_degraded(&format!("unavailable header read {scope_id} failed: {error}"));
+            return;
+        }
+    };
+    if let Err(error) = replica.update_scope_header(&scope_id, &header, replica_now_ms()) {
+        log_aggregator_degraded(&format!("unavailable header {scope_id} failed: {error}"));
+    }
+}
+
+/// The exact Ready projection that existed immediately before a manual
+/// snapshot.  A manual snapshot normally has to leave it Rebuilding: it can
+/// publish new raw bytes without a matching source-index update.  This saved
+/// state is only used for the narrower no-content-change proof below.
+#[derive(Debug, Clone)]
+struct ReadyReplicaSnapshot {
+    scope_id: String,
+    snapshot_commit: String,
+    header: kio_index::aggregator::AggScopeHeader,
+}
+
+/// Capture a reusable projection before a manual snapshot moves HEAD.  A
+/// missing/corrupt cache is deliberately just ineligible for reuse: the
+/// snapshot itself must remain a successful source write and will mark any
+/// existing cache fail-closed afterward.
+fn capture_ready_replica_snapshot(repo: &Repository) -> Option<ReadyReplicaSnapshot> {
+    let snapshot_commit = repo.head_commit_hash().ok().flatten()?;
+    let scope_id = scope_id(repo.kio_dir()).ok()?;
+    let replica = kio_index::aggregator::Aggregator::open(&aggregator_path()).ok()?;
+    let header = replica.scope_header(&scope_id).ok().flatten()?;
+    if !matches!(
+        header.index_status,
+        kio_index::aggregator::AggIndexStatus::Ready
+    ) || header.current_snapshot_commit.as_deref() != Some(snapshot_commit.as_str())
+    {
+        return None;
+    }
+    Some(ReadyReplicaSnapshot {
+        scope_id,
+        snapshot_commit,
+        header,
+    })
+}
+
+/// A manual snapshot commonly produces a new tree object solely because it
+/// omits normalization references that the preceding `kio index` auto
+/// snapshot recorded.  It is safe to reuse the ready projection only when
+/// every path/raw/type is unchanged and a target reference is either absent
+/// (the normal manual form) or byte-for-byte the prior reference.  Any new or
+/// changed normalization identity remains a normal unindexed snapshot and
+/// therefore stays Rebuilding.
+fn manual_snapshot_tree_matches_ready_projection(
+    prior: &TreeObject,
+    target: &TreeObject,
+) -> bool {
+    prior.entries.len() == target.entries.len()
+        && prior
+            .entries
+            .iter()
+            .zip(&target.entries)
+            .all(|(prior, target)| {
+                prior.path == target.path
+                    && prior.entry_type == target.entry_type
+                    && prior.raw_hash == target.raw_hash
+                    && (target.normalize.is_none() || target.normalize == prior.normalize)
+            })
+}
+
+/// Read the exact current-tree relation a Ready source projection uses.  This
+/// is intentionally a writer-only helper: direct search must never open the
+/// per-scope index to obtain or repair candidates.
+fn source_tree_entry_projections(
+    conn: &Connection,
+    commit_hash: &str,
+) -> Result<Vec<TreeEntryProjection>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT path, raw_hash, tool_profile_hash, gen
+             FROM tree_entries
+             WHERE commit_hash = ?1
+             ORDER BY path",
+        )
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    let rows = statement
+        .query_map(rusqlite::params![commit_hash], |row| {
+            Ok(TreeEntryProjection {
+                path: row.get(0)?,
+                raw_hash: row.get(1)?,
+                tool_profile_hash: row.get(2)?,
+                gen: row.get::<_, i64>(3)? as u64,
+            })
+        })
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    let mut projections = Vec::new();
+    for row in rows {
+        projections.push(row.map_err(|error| KioError::schema(error.to_string()))?);
+    }
+    Ok(projections)
+}
+
+/// The part of a tree whose normalization identity is immutable in CAS.  A
+/// Ready predecessor is reusable only when its source cache says exactly this
+/// relation; a legacy/fallback row inferred from mutable latest-normalize state
+/// is deliberately not promoted through a new snapshot.
+fn normalized_tree_entry_projections(tree: &TreeObject) -> Vec<TreeEntryProjection> {
+    tree.entries
+        .iter()
+        .filter_map(|entry| {
+            entry.normalize.as_ref().map(|normalize| TreeEntryProjection {
+                path: entry.path.clone(),
+                raw_hash: entry.raw_hash.clone(),
+                tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
+                gen: normalize.gen,
+            })
+        })
+        .collect()
+}
+
+/// Reuse a just-prior Ready projection after a semantically unchanged manual
+/// snapshot.  This is a writer-side materialization of `tree_entries`, followed
+/// by the normal full replica write-through; it never creates a reader-side
+/// source-index fallback.
+///
+/// Returning `false` is an expected, safe rejection of the fast path.  An
+/// actual I/O/SQLite/CAS failure returns `Err` so the caller can log it while
+/// retaining the Rebuilding marker already written before this function runs.
+fn republish_equivalent_manual_snapshot(
+    repo: &Repository,
+    before: &ReadyReplicaSnapshot,
+    target_snapshot: &str,
+) -> std::result::Result<bool, String> {
+    let head = repo
+        .head_commit_hash()
+        .map_err(|error| format!("read HEAD: {error}"))?;
+    if head.as_deref() != Some(target_snapshot) {
+        return Ok(false);
+    }
+    let Some((scope_id, generation)) = replica_scope_stamp(repo.kio_dir()) else {
+        return Ok(false);
+    };
+    if scope_id != before.scope_id || generation != before.header.index_generation {
+        return Ok(false);
+    }
+    let live_config = read_chunking_config(repo)
+        .map_err(|error| format!("read chunking config: {error}"))?
+        .chunking_config_hash;
+    if before.header.current_chunking_config_hash.as_deref() != Some(live_config.as_str()) {
+        return Ok(false);
+    }
+
+    // Confirm the earlier mark actually took the scope out of service before
+    // touching source cache rows.  A competing writer or failed marker write
+    // must leave this optimization disabled rather than silently re-certify a
+    // projection we no longer own.
+    let replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
+        .map_err(|error| format!("open replica after snapshot: {error}"))?;
+    let marked = replica
+        .scope_header(&before.scope_id)
+        .map_err(|error| format!("read replica after snapshot: {error}"))?;
+    let Some(marked) = marked else {
+        return Ok(false);
+    };
+    if !matches!(
+        marked.index_status,
+        kio_index::aggregator::AggIndexStatus::Rebuilding
+    ) || marked.current_snapshot_commit.as_deref() != Some(target_snapshot)
+    {
+        return Ok(false);
+    }
+    drop(replica);
+
+    let target_commit = repo
+        .read_commit(target_snapshot)
+        .map_err(|error| format!("read target commit: {error}"))?;
+    if target_commit.commit_type != CommitType::Manual
+        || target_commit.parents.len() != 1
+        || target_commit.parents[0] != before.snapshot_commit
+    {
+        return Ok(false);
+    }
+    let prior_commit = repo
+        .read_commit(&before.snapshot_commit)
+        .map_err(|error| format!("read prior commit: {error}"))?;
+    let prior_tree = repo
+        .read_tree(&prior_commit.tree)
+        .map_err(|error| format!("read prior tree: {error}"))?;
+    let target_tree = repo
+        .read_tree(&target_commit.tree)
+        .map_err(|error| format!("read target tree: {error}"))?;
+    if !manual_snapshot_tree_matches_ready_projection(&prior_tree, &target_tree) {
+        return Ok(false);
+    }
+
+    let db = sqlite_path(repo.kio_dir());
+    let mut conn = Connection::open(&db)
+        .map_err(|error| format!("open source index {}: {error}", db.display()))?;
+    let max_rowid = current_max_rowid(&conn)
+        .map_err(|error| format!("read source chunk bound: {error}"))?;
+    let max_association_rowid = kio_index::fts::max_chunk_config_association_rowid(&conn)
+        .map_err(|error| format!("read source association bound: {error}"))?;
+    if before.header.max_rowid != max_rowid
+        || before.header.max_association_rowid != max_association_rowid
+    {
+        return Ok(false);
+    }
+
+    let expected = normalized_tree_entry_projections(&prior_tree);
+    let source_rows = source_tree_entry_projections(&conn, &before.snapshot_commit)
+        .map_err(|error| format!("read prior source tree entries: {error}"))?;
+    if source_rows != expected {
+        return Ok(false);
+    }
+    if !source_tree_entry_projections(&conn, target_snapshot)
+        .map_err(|error| format!("read target source tree entries: {error}"))?
+        .is_empty()
+    {
+        return Ok(false);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("begin target tree materialization: {error}"))?;
+    let copied = tx
+        .execute(
+            "INSERT INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
+             SELECT ?1, path, raw_hash, tool_profile_hash, gen
+             FROM tree_entries
+             WHERE commit_hash = ?2",
+            rusqlite::params![target_snapshot, before.snapshot_commit],
+        )
+        .map_err(|error| format!("materialize target tree entries: {error}"))?;
+    if copied != expected.len() {
+        return Err(format!(
+            "target tree materialization copied {copied} rows; expected {}",
+            expected.len()
+        ));
+    }
+    tx.commit()
+        .map_err(|error| format!("commit target tree materialization: {error}"))?;
+
+    write_through_projection(repo.kio_dir()).map(|()| true)
 }
 
 /// Publish an in-place index change: rotate the scope's `index_generation`,
 /// then tell the replica what changed (05 §1.8 write-through, LC25 rotation).
 ///
 /// This is the path for writers that mutate `sqlite.db` directly instead of
-/// rebuilding it — the two embedding lanes. They differ from a rebuild in both
-/// directions: they know exactly which chunks they touched, so they send that
-/// instead of a re-projection; and they do not mint a new generation on their
-/// own, which is exactly why a reader-driven refresh cannot be relied on to
-/// notice them.
+/// rebuilding it — the two embedding lanes. They may apply their known vector
+/// delta as an internal fast path, but that delta is never a complete replica
+/// publication: the function always follows it with a full projection carrying
+/// the current header and selector markers.
 ///
 /// Both halves belong to one function because doing either without the other is
 /// a defect that has now been found twice:
 ///
-/// - Rotating without replicating retires cursors and then makes the next
-///   search re-project for nothing.
-/// - Replicating without rotating (R25-4) leaves NOTHING able to notice a
-///   failed write-through: the stamp never moves, so the lazy refresh that is
-///   supposed to be the safety net never fires and the replica stays wrong
-///   forever. A rebuild path self-heals precisely because its stamp moved.
+/// - Rotating without completing the projection retires cursors and leaves the
+///   scope Rebuilding, so direct search correctly fails closed.
+/// - Replicating without rotating (R25-4) leaves no durable change marker for
+///   cursor replay or a subsequent writer to validate. A rebuild path repairs
+///   this by publishing a fresh generation together with a complete projection.
 ///
 /// `before` is the generation the index carried when the delta was computed. If
-/// the replica is not exactly there, the delta cannot be trusted to complete it
-/// (`apply_delta` refuses) and a full projection is taken instead — the same
-/// answer, at the cost of re-reading the scope.
+/// the replica is not exactly there, the delta is not trusted; either result
+/// still reaches the same full writer-side projection.
 fn publish_in_place_delta(
     kio_dir: &Path,
     before: Option<&str>,
@@ -2515,6 +3230,9 @@ fn publish_in_place_delta(
     // Rotate FIRST, so the stamp the replica is about to receive is the one the
     // index now carries rather than one this function is about to invalidate.
     rotate_index_generation_unconditionally(kio_dir)?;
+    // The source vector links have already changed.  Do not leave an old Ready
+    // header observable while the writer finishes its full projection.
+    mark_replica_unavailable_or_log(kio_dir);
     let (Some((scope_id, generation)), Some(before)) = (replica_scope_stamp(kio_dir), before)
     else {
         return Ok(());
@@ -2527,11 +3245,12 @@ fn publish_in_place_delta(
         }
     };
     match replica.apply_delta(&scope_id, before, &generation, delta, replica_now_ms()) {
-        Ok(true) => {}
-        Ok(false) => {
-            // The replica is not where this delta assumed. Falling back to a
-            // projection is what keeps the refusal cheap instead of leaving the
-            // scope stale until someone searches it.
+        Ok(true) | Ok(false) => {
+            // `ScopeDelta` only carries chunk vectors. Its fast path cannot
+            // certify the current HEAD/config/embedding-profile header or
+            // selector markers, and a direct search may no longer consult the
+            // source sqlite database to fill those gaps. Publish the complete
+            // projection before returning to a reader.
             drop(replica);
             write_through_projection_or_log(kio_dir);
         }
@@ -2542,158 +3261,9 @@ fn publish_in_place_delta(
     Ok(())
 }
 
-/// Replace each candidate's per-scope ranks with its ranks over the whole
-/// collection, then recompute `rrf_score` from them.
-///
-/// A candidate the collection has no rank for loses that lane's term rather
-/// than keeping the per-scope one: mixing the two scales back together is the
-/// defect this replaces. Losing a term costs that candidate a contribution;
-/// keeping a per-scope rank-1 would hand it the largest term available, which
-/// is precisely how a 6-chunk folder's best hit used to tie a corpus-wide best
-/// hit.
-///
-/// A lane the replica did not score (text-only mode has no query vector; a
-/// pure-short query has no MATCH expression) keeps whatever rank it already
-/// carried — that lane was never re-based, so there are no two scales to mix.
-fn apply_global_ranks(candidates: &mut [ScoredCandidate], ranks: &GlobalRanks, config: RrfConfig) {
-    for candidate in candidates.iter_mut() {
-        // The two lanes key differently on purpose. The text lane is keyed by
-        // the CITING chunk, which for an image row is U5's inheritance rule
-        // restated at collection scale — an image has no text of its own and
-        // deliberately contributes none to the corpus. The vector lane is keyed
-        // by the row's OWN identity, because an image is ranked by ITS vector.
-        // Keying both the same way would have made an image inherit its chunk's
-        // cosine standing and rank identically to it forever.
-        let text_key = (candidate.scope_id.clone(), candidate.chunk_hash.clone());
-        let vector_key = (
-            candidate.scope_id.clone(),
-            candidate.payload.row_id(&candidate.chunk_hash).to_owned(),
-        );
-        if ranks.scored_text && candidate.text_rank.is_some() {
-            candidate.text_rank = ranks.text.get(&text_key).copied();
-        }
-        if ranks.scored_vector && candidate.vector_rank.is_some() {
-            candidate.vector_rank = ranks.vector.get(&vector_key).copied();
-        }
-        let text_term = candidate
-            .text_rank
-            .map(|rank| config.w_text / (config.k + rank) as f64)
-            .unwrap_or(0.0);
-        let vector_term = candidate
-            .vector_rank
-            .map(|rank| config.w_vector / (config.k + rank) as f64)
-            .unwrap_or(0.0);
-        candidate.rrf_score = text_term + vector_term;
-    }
-}
-
-/// One stderr line when the replica steps aside, so a search that silently
-/// reverted to scatter-gather ranks is still explicable.
+/// One stderr line for a non-fatal replica write-through failure.
 fn log_aggregator_degraded(detail: &str) {
-    eprintln!("kio: aggregator unavailable, using per-scope ranks ({detail})");
-}
-
-/// SCATTER-GATHER FALLBACK ONLY (05 §1.8). The replica ranks both lanes over
-/// the collection; this runs when the replica declined — it cannot open, cannot
-/// read a scope, or the search is single-scope.
-///
-/// It re-fuses `rrf_score` with a vector rank taken over the CANDIDATE POOL,
-/// not the collection: only chunks some scope already returned can be ranked
-/// here, so a chunk absent from every scope's local top-N has no rank and
-/// silently shifts everyone else's. That limitation is why the replica exists.
-///
-/// The TEXT term is preserved exactly (per-scope `text_rank`, never a raw-BM25
-/// cross-corpus comparison — the withdrawn CT3-MULTI-002 rule still governs
-/// this path, because on it there really are several corpora). The VECTOR term
-/// is rebuilt: among the per-scope vector candidates (`vector_rank.is_some()`),
-/// rank every one by its cosine to the query — a quantity that IS comparable
-/// across scopes because all scopes share one embedding profile (03 §7). Cosine
-/// order is deterministic and the query vector is replayed byte-identically on
-/// later pages (R23-01), so the merge order is stable across pagination.
-///
-/// A single-scope pool's global vector rank already equals its per-scope one,
-/// so re-fusing there would only risk a float tie-flip against the pinned
-/// per-scope order; this function checks that itself and returns early.
-fn regrade_vector_rank_globally(
-    candidates: &mut [ScoredCandidate],
-    query_vec: &[f32],
-    config: RrfConfig,
-) {
-    let distinct_scopes = candidates
-        .iter()
-        .map(|candidate| candidate.scope_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    if distinct_scopes <= 1 {
-        return;
-    }
-    // Global vector ranking over the per-scope vector candidates, by cosine desc,
-    // tie-broken (scope_id, chunk_hash) to match the merge's own deterministic
-    // tie-break.
-    let mut vector_members: Vec<usize> = candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidate)| candidate.vector_rank.is_some() && candidate.embedding.is_some())
-        .map(|(index, _)| index)
-        .collect();
-    let cosine_of = |index: usize| -> f64 {
-        candidates[index]
-            .embedding
-            .as_deref()
-            .map(|embedding| cosine_similarity(query_vec, embedding))
-            .unwrap_or(f64::NEG_INFINITY)
-    };
-    vector_members.sort_by(|&a, &b| {
-        cosine_of(b)
-            .total_cmp(&cosine_of(a))
-            .then_with(|| {
-                candidates[a]
-                    .scope_id
-                    .as_bytes()
-                    .cmp(candidates[b].scope_id.as_bytes())
-            })
-            .then_with(|| candidates[a].chunk_hash.cmp(&candidates[b].chunk_hash))
-    });
-    let mut global_vector_rank = vec![None; candidates.len()];
-    for (rank0, &index) in vector_members.iter().enumerate() {
-        global_vector_rank[index] = Some(rank0 as u64 + 1);
-    }
-    for (index, candidate) in candidates.iter_mut().enumerate() {
-        let text_term = candidate
-            .text_rank
-            .map(|rank| config.w_text / (config.k + rank) as f64)
-            .unwrap_or(0.0);
-        let vector_term = global_vector_rank[index]
-            .map(|rank| config.w_vector / (config.k + rank) as f64)
-            .unwrap_or(0.0);
-        candidate.rrf_score = text_term + vector_term;
-    }
-}
-
-/// Exact cosine similarity of two equal-length vectors (f64 accumulation). The
-/// stored/query embeddings are L2-normalized (07 §5.3), so in the ideal case
-/// this equals their dot product; dividing by the norms keeps it exact under any
-/// residual denormalization and matches `vec_distance_cosine`'s own metric.
-/// Returns `NEG_INFINITY` for a length mismatch or a zero-norm vector (neither
-/// occurs for accepted embeddings) so such a candidate sorts last rather than
-/// poisoning the order with a NaN.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() {
-        return f64::NEG_INFINITY;
-    }
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-    for (x, y) in a.iter().zip(b) {
-        let (x, y) = (f64::from(*x), f64::from(*y));
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
-    }
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    dot / (norm_a.sqrt() * norm_b.sqrt())
+    eprintln!("kio: aggregator write-through degraded ({detail})");
 }
 
 fn run_search(args: SearchArgs) -> Result<Value> {
@@ -2765,7 +3335,8 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             (selector, cutoff)
         }
     };
-    let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
+    let (scope_mode, exec_scopes, cursor_excluded, authoritative_all_scope_registry) =
+        match &decoded_cursor {
         Some(cursor) => {
             // R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP → exit 3"): a live
             // registry scope_id duplicate discovered while re-resolving a
@@ -2798,7 +3369,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             // outside the allowed set is excluded (scope_restriction_mismatch),
             // never searched. For a plain page-2 replay (no --scope) the allowed
             // set is every registered scope, so this is a no-op.
-            let (_allowed_mode, allowed_targets) = enumerate_scope_targets(&repo, &parsed)?;
+            let (_allowed_mode, allowed_targets, _) = enumerate_scope_targets(&repo, &parsed)?;
             let allowed_ids: BTreeSet<String> = allowed_targets
                 .iter()
                 .map(|target| target.scope_id.clone())
@@ -2821,10 +3392,12 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                 scope_selection_from_cursor(cursor.scope_mode),
                 exec,
                 excluded,
+                false,
             )
         }
         None => {
-            let (scope_mode, targets) = enumerate_scope_targets(&repo, &parsed)?;
+            let (scope_mode, targets, authoritative_all_scope_registry) =
+                enumerate_scope_targets(&repo, &parsed)?;
             let exec = targets
                 .into_iter()
                 .map(|target| ExecScope {
@@ -2868,7 +3441,12 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             } else {
                 Vec::new()
             };
-            (scope_mode, exec, dup_excluded)
+            (
+                scope_mode,
+                exec,
+                dup_excluded,
+                authoritative_all_scope_registry,
+            )
         }
     };
 
@@ -2899,6 +3477,56 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         config_default_mode.unwrap_or(parsed.requested_mode)
     };
     let fail_behavior = config_fail_behavior.unwrap_or(SearchFailBehavior::Fallback);
+
+    // Direct search opens the device replica once and keeps that connection for
+    // both scope preparation and candidate selection.  In particular, do not
+    // probe every `.kio/index/sqlite.db` merely to learn vector profiles or a
+    // current snapshot: those facts are committed with the replica corpus.
+    let mut replica = if exec_scopes.is_empty() {
+        None
+    } else {
+        Some(
+            kio_index::aggregator::Aggregator::open(&aggregator_path()).map_err(|error| {
+                KioError::new(
+                    "KIO-E-AGGREGATOR-001",
+                    "the device search replica could not be opened; retry after indexing",
+                    json!({ "reason": error.to_string() }),
+                    ExitCode::PartialFailure,
+                )
+            })?,
+        )
+    };
+    let replica_headers = if let Some(replica) = replica.as_ref() {
+        exec_scopes
+            .iter()
+            .map(|exec| {
+                replica
+                    .scope_header(&exec.target.scope_id)
+                    .map(|header| (exec.target.scope_id.clone(), header))
+                    .map_err(|error| {
+                        KioError::new(
+                            "KIO-E-AGGREGATOR-001",
+                            "the device search replica could not read a scope header; retry after indexing",
+                            json!({
+                                "scope_id": exec.target.scope_id,
+                                "reason": error.to_string(),
+                            }),
+                            ExitCode::PartialFailure,
+                        )
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?
+    } else {
+        BTreeMap::new()
+    };
+    let replica_embedding_states = exec_scopes
+        .iter()
+        .map(|exec| replica_embedding_state(
+            replica_headers
+                .get(&exec.target.scope_id)
+                .and_then(Option::as_ref),
+        ))
+        .collect::<Vec<_>>();
 
     // Mode resolution (05 §1.1). O2: the query embedding is SENT to the online
     // embedding endpoint, so it must not be computed until the resolved mode
@@ -2934,7 +3562,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     let query_embeddable = parsed.query.chars().count() >= 2;
     let vector_precheck = resolve_vector_availability(
         requested_mode,
-        &exec_scopes,
+        &replica_embedding_states,
         // `--offline` forbids new transmission for the duration of one run
         // (07 §3). A local adapter has none to forbid, so the flag must not
         // degrade it to text — that would leave a local-only user unable to
@@ -3141,42 +3769,38 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         }
     }
 
-    // Per-scope: FTS5 text ranks + chunk_vec KNN vector ranks -> RRF -> candidate
-    // pool. Vector ranks are supplied only in hybrid/vector mode (K4). F2/PC8/PC9:
-    // build the query plan from the NFC-normalized query to match the NFC index
-    // projection.
+    // Resolve and validate each scope before querying the replica. This is
+    // deliberately NOT a per-scope candidate search: the single device
+    // replica below is the only candidate source.
     let query_plan = build_query_plan(&query_nfc);
-    // Only feed vectors into the KNN when the resolved mode actually uses them;
-    // a text fallback (incompatible/absent) must stay pure text.
-    let scope_query_embedding = matches!(mode.resolved, SearchMode::Hybrid | SearchMode::Vector)
-        .then_some(query_embedding.as_deref())
-        .flatten();
     let mut searched = Vec::<SearchedScopeInfo>::new();
+    // A fresh all-scopes query may reconcile registry departures, but a
+    // request-local readiness/mode exclusion must not make a still-reachable
+    // scope disappear from the device replica.  Start with the complete
+    // enumerated registry set and remove only scopes whose store cannot be
+    // opened at all below; no source search index is consulted for this.
+    let mut retainable_all_scopes = exec_scopes
+        .iter()
+        .map(|exec| exec.target.scope_id.clone())
+        .collect::<BTreeSet<_>>();
     // Scopes the cursor froze but the registry can no longer resolve are already
     // excluded (reason "unreachable") before per-scope execution starts.
     let mut excluded = cursor_excluded;
-    let mut candidates = Vec::<ScoredCandidate>::new();
-    // R23-12: (scope_index, position in `searched`, checkpoint) per completed
-    // scope — consumed by the response-time barrier recheck below.
+    // Candidate-scope barriers are opened only after the replica has selected
+    // rows; unselected scopes do not participate in the purge read barrier.
     let mut late_barriers = Vec::<(usize, usize, ReadBarrierCheckpoint)>::new();
 
+    let replica_selector = aggregator_selector(&time_selector);
     let scope_executions =
         multi_scope::run_ordered(exec_scopes.len(), multi_scope_settings, |idx, deadline| {
-            search_one_scope(
+            prepare_scope_from_replica_header(
                 &exec_scopes[idx],
-                idx,
-                ScopeSearchRequest {
-                    match_expr: query_plan.match_expr.as_deref(),
-                    short_tokens: &query_plan.short_tokens,
-                    resolved_mode: mode.resolved,
-                    query_embedding: scope_query_embedding,
-                    rrf_config,
-                    time: ScopeTimeRequest {
-                        selector: &time_selector,
-                        since_cutoff: since_cutoff.as_deref(),
-                    },
-                    deadline,
-                },
+                replica_headers
+                    .get(&exec_scopes[idx].target.scope_id)
+                    .and_then(Option::as_ref),
+                &time_selector,
+                since_cutoff.as_deref(),
+                deadline,
             )
         });
     for (idx, execution) in scope_executions.into_iter().enumerate() {
@@ -3186,7 +3810,74 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             multi_scope::ScopeExecution::TimedOut => {
                 Err(ScopeSearchError::Excluded("timeout".to_owned()))
             }
-        };
+        }
+        .and_then(|resolution| {
+            let replica = replica
+                .as_ref()
+                .expect("a nonempty direct search opens its replica once");
+            let marker = replica
+                .projection_marker(
+                    &exec.target.scope_id,
+                    replica_selector,
+                    &resolution.snapshot_commit,
+                )
+                .map_err(|error| {
+                    ScopeSearchError::Fatal(KioError::new(
+                        "KIO-E-AGGREGATOR-001",
+                        "the device search replica could not read a scope projection; retry after indexing",
+                        json!({
+                            "scope_id": exec.target.scope_id,
+                            "reason": error.to_string(),
+                        }),
+                        ExitCode::PartialFailure,
+                    ))
+                })?
+                .ok_or_else(|| ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned()))?;
+            if mode.resolved == SearchMode::Vector {
+                match replica_embedding_state(Some(&resolution.header)) {
+                    ScopeEmbedState::Compatible => {}
+                    ScopeEmbedState::Incompatible => {
+                        return Err(ScopeSearchError::Excluded(
+                            VEC_PROFILE_INCOMPATIBLE_REASON.to_owned(),
+                        ));
+                    }
+                    ScopeEmbedState::Absent => {
+                        return Err(ScopeSearchError::Excluded(
+                            VEC_PROFILE_ABSENT_REASON.to_owned(),
+                        ));
+                    }
+                }
+            }
+            let chunking_config_hash = marker
+                .chunking_config_hash
+                .clone()
+                .or_else(|| resolution.header.current_chunking_config_hash.clone())
+                .ok_or_else(|| ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned()))?;
+            if exec
+                .chunking_config_hash
+                .as_deref()
+                .is_some_and(|frozen| frozen != chunking_config_hash)
+            {
+                return Err(ScopeSearchError::Fatal(KioError::new(
+                    "KIO-E-SEARCH-CURSOR-001",
+                    "search cursor chunking config changed",
+                    json!({ "scope_id": exec.target.scope_id }),
+                    ExitCode::InvalidUsage,
+                )));
+            }
+            Ok(ScopeOutcome {
+                snapshot_commit: resolution.snapshot_commit,
+                max_rowid: exec.max_rowid.unwrap_or(resolution.header.max_rowid),
+                max_association_rowid: exec
+                    .max_association_rowid
+                    .unwrap_or(resolution.header.max_association_rowid),
+                chunking_config_hash,
+                index_generation: resolution.header.index_generation,
+                shallow_skipped: resolution.shallow_skipped,
+                runtime_binding_filter: resolution.runtime_binding_filter,
+                journal_active_at_prepare: resolution.journal_active_at_prepare,
+            })
+        });
         match result {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
@@ -3201,23 +3892,33 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     max_association_rowid: outcome.max_association_rowid,
                     chunking_config_hash: outcome.chunking_config_hash.clone(),
                     index_generation: outcome.index_generation.clone(),
+                    #[cfg(test)]
+                    has_image_vec: false,
+                    journal_active_at_prepare: outcome.journal_active_at_prepare,
                     shallow_skipped: outcome.shallow_skipped,
+                    runtime_binding_filter: outcome.runtime_binding_filter,
                 });
-                late_barriers.push((idx, searched.len() - 1, outcome.checkpoint));
-                candidates.extend(outcome.candidates);
             }
             Err(ScopeSearchError::Shallow) => {
-                // Any shallow snapshot on a cursor replay is a hard failure
-                // (05 §2.2 / CT3-CURSOR-005): the tree needed to reproduce the
-                // page is gone. Only reachable on the cursor path.
+                // A selected `--at` target, history start, or cursor snapshot
+                // is never partially served from a durable projection: its
+                // whole tree is required by 05 §2.2.
                 return Err(KioError::new(
                     "KIO-E-COMMIT-SHALLOW-001",
-                    "cursor snapshot commit is shallow (tree discarded); re-run the search without a cursor",
+                    "selected search snapshot is shallow (tree discarded); re-run with an available snapshot",
                     json!({ "scope_id": exec.target.scope_id }),
                     ExitCode::Failure,
                 ));
             }
             Err(ScopeSearchError::Excluded(reason)) => {
+                // A reachable scope can be transiently excluded for its replica
+                // status, embedding profile, timeout, or a selector condition.
+                // Preserve its projection for the next eligible request.  An
+                // actual store-open failure proves the registered scope has
+                // departed, so fresh all-scopes reconciliation may evict it.
+                if reason == "unreachable" {
+                    retainable_all_scopes.remove(&exec.target.scope_id);
+                }
                 if exec.from_cursor {
                     return Err(KioError::new(
                         "KIO-E-SEARCH-CURSOR-001",
@@ -3305,7 +4006,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // PC52/PC54/PC55(c) (05 §1.8 L390-391 / §R note-4 ruling: VERSION →
         // INCOMPAT → journal → DUP → REBUILDING): every enumerated scope was
         // excluded by explicit `--vector`'s own per-scope profile-compat gate
-        // (`search_one_scope_inner`'s `VEC_PROFILE_INCOMPATIBLE_REASON` /
+        // (replica-header preparation's `VEC_PROFILE_INCOMPATIBLE_REASON` /
         // `VEC_PROFILE_ABSENT_REASON`, checked only when `resolved_mode ==
         // Vector`). Checked second, right after STORE-VERSION and ahead of
         // journal/DUP/REBUILDING — same exit-8 family as STORE-VERSION
@@ -3403,7 +4104,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         }
         // R23-15 (06 §8 L403 "単独操作 exit 4" / 05 §1.6 L307-310): every
         // enumerated scope hit the bounded history-walk aggregate cap
-        // (`--all-history`/`--since`, `history_plan_error`'s non-cursor
+        // (`--all-history`/`--since`, the history planner's non-cursor
         // `Excluded("history_limit_exceeded")` arm) — promote to the
         // canonical KIO-E-COMMIT-HISTORY-LIMIT-001 at its own single-
         // operation exit (4, PermanentFailure) instead of losing the code
@@ -3574,54 +4275,134 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // rejects the genuine zero-token case at the very top of this function
     // (before any repo/registry/index access), and PC11 gives every
     // remaining short (1-2 Unicode scalar) query real candidates via the
-    // bounded LIKE fallback (`execute_like_fallback`) instead of a forced
+    // bounded replica short-query path instead of a forced
     // empty result. `searched`/`candidates` above already reflect that.
 
-    // Cross-scope merge (05 §1.8): sort by RRF score desc, tie-break (scope_id,
-    // chunk_hash). BOTH backend terms are re-ranked globally first, because RRF
-    // adds them and a sum is only meaningful when its addends share a scale.
-    //
-    // VECTOR was made global in 2026-07-24: every scope shares one embedding
-    // profile (03 §7), so a chunk's cosine to the query is comparable across
-    // scopes, and `regrade_vector_rank_globally` re-fuses with a global cosine
-    // rank rather than leaving a within-scope rank-2 answer buried under every
-    // other scope's rank-1.
-    //
-    // TEXT was left per-scope in that round, on the correct observation that
-    // raw BM25 is not comparable across corpora (CT3-MULTI-002: per-corpus IDF
-    // and length statistics). Correct — and it then summed that per-scope rank
-    // with the global vector rank anyway, which is the same error one step
-    // later. Phase 3 measured what it costs: on the dogfood corpus a raster-PDF
-    // answer that `--mode vector` ranks 1st came back 38th under hybrid, behind
-    // 37 chunks whose only merit was being rank-1 inside their own small folder
-    // (`1/61 + 1/130` beating a bare `1/61`). Across the 32 acceptance
-    // contracts hybrid scored strictly worse than vector alone — rank1 6 vs 14,
-    // top5 21 vs 30 — with the gap concentrated exactly on the classes OCR and
-    // embeddings were bought to reach.
-    //
-    // The premise is what had to go, not the fusion: BM25 is incomparable
-    // across corpora only while there are several corpora. Since 2026-07-25 the
-    // device keeps ONE collection — `aggregator.sqlite`, a replica of every
-    // scope's live chunks (05 §1.8) — and both terms are ranks over it. That is
-    // the answer `dfs_query_then_fetch` gives a sharded Elasticsearch, which
-    // reports the same distortion for the same reason (tiny shards see too
-    // little of the corpus to score it). No normalization function, no tuned
-    // constant: one collection, one BM25 and one cosine ordering.
-    //
-    // The replica also fixes what the in-memory vector re-rank could not: that
-    // pass ranked only among candidates the fan-out happened to return, so a
-    // chunk missing from every scope's local top-N simply had no rank and
-    // shifted everyone else's. Ranking against the collection is a true global
-    // rank.
-    //
-    // None of that licenses the replica to answer EVERY search, which is what
-    // it did until R25: the conditions 05 §1.8 states in prose went
-    // unevaluated, so a `--at` history search — whose answer is by definition
-    // not in a replica of live chunks — was re-ranked against live chunks.
-    // `aggregator_decline_reason` is those conditions.
-    let query_vec_for_ranks = matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid)
+    // The replica is the sole candidate selector and has already assigned
+    // global text/vector ranks before this merge and diversify stage.
+    let query_vec_for_replica = matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid)
         .then(|| query_embedding.as_deref())
         .flatten();
+    let (global_ranks, replica_candidates) = replica_candidates_for(
+        replica
+            .as_mut()
+            .expect("a nonempty direct search opens its replica once"),
+        &searched,
+        &exec_scopes,
+        &retainable_all_scopes,
+        authoritative_all_scope_registry,
+        scope_mode,
+        decoded_cursor.is_some(),
+        &time_selector,
+        since_cutoff.as_deref(),
+        query_plan.match_expr.as_deref(),
+        &query_plan.short_tokens,
+        mode.resolved,
+        query_vec_for_replica,
+        rrf_config,
+    )
+    .map_err(|reason| {
+        KioError::new(
+            "KIO-E-AGGREGATOR-001",
+            "the device search replica could not select candidates; retry after indexing",
+            json!({ "reason": reason }),
+            ExitCode::PartialFailure,
+        )
+    })?;
+    let mut candidates = replica_candidates;
+    // The purge barrier is deliberately opened only for scopes the replica
+    // actually selected.  It is the direct-route visibility gate: disabling
+    // this block makes the active-journal regression leak a replica hit.
+    let searched_positions = searched
+        .iter()
+        .enumerate()
+        .map(|(position, scope)| (scope.scope_id.as_str(), position))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_scope_indexes = candidates
+        .iter()
+        .map(|candidate| candidate.scope_index)
+        .collect::<BTreeSet<_>>();
+    let mut blocked_candidate_scopes = BTreeSet::new();
+    for scope_index in candidate_scope_indexes {
+        let exec = &exec_scopes[scope_index];
+        // A stale Ready header is normally rejected before candidate selection.
+        // The sole exception is an already-active purge journal: its older
+        // header is the last coherent projection we can inspect without reading
+        // source SQLite, and the candidate barrier below must own the rejection.
+        // Keep the observation durable for this request, because a purge can
+        // complete after preparation but before `ReadBarrierCheckpoint::open`;
+        // accepting that stale row after the journal disappears would leak it.
+        let journal_active_at_prepare = searched_positions
+            .get(exec.target.scope_id.as_str())
+            .and_then(|position| searched.get(*position))
+            .is_some_and(|scope| scope.journal_active_at_prepare);
+        if journal_active_at_prepare {
+            if exec.from_cursor {
+                return Err(KioError::new(
+                    "KIO-E-SEARCH-CURSOR-001",
+                    "search cursor active scope is no longer available; re-run without a cursor",
+                    json!({
+                        "reason": "active_scope_unavailable",
+                        "cause": "purge_journal_active",
+                        "scope_id": exec.target.scope_id,
+                    }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
+            blocked_candidate_scopes.insert(scope_index);
+            excluded.push(json!({
+                "scope_id": exec.target.scope_id,
+                "scope_path": exec.target.kio_dir,
+                "reason": "purge_journal_active",
+            }));
+            continue;
+        }
+        match ReadBarrierCheckpoint::open(&exec.target.kio_dir) {
+            Ok(checkpoint) => {
+                if let Some(&searched_pos) = searched_positions.get(exec.target.scope_id.as_str()) {
+                    late_barriers.push((scope_index, searched_pos, checkpoint));
+                }
+            }
+            Err(error) if error.error_code() == "KIO-E-PURGE-JOURNAL-ACTIVE-001" => {
+                if exec.from_cursor {
+                    return Err(KioError::new(
+                        "KIO-E-SEARCH-CURSOR-001",
+                        "search cursor active scope is no longer available; re-run without a cursor",
+                        json!({
+                            "reason": "active_scope_unavailable",
+                            "cause": "purge_journal_active",
+                            "scope_id": exec.target.scope_id,
+                        }),
+                        ExitCode::InvalidUsage,
+                    ));
+                }
+                blocked_candidate_scopes.insert(scope_index);
+                excluded.push(json!({
+                    "scope_id": exec.target.scope_id,
+                    "scope_path": exec.target.kio_dir,
+                    "reason": "purge_journal_active",
+                }));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !blocked_candidate_scopes.is_empty() {
+        candidates.retain(|candidate| !blocked_candidate_scopes.contains(&candidate.scope_index));
+        searched.retain(|scope| {
+            exec_scopes
+                .iter()
+                .position(|exec| exec.target.scope_id == scope.scope_id)
+                .is_none_or(|index| !blocked_candidate_scopes.contains(&index))
+        });
+        if searched.is_empty() {
+            return Err(KioError::new(
+                "KIO-E-PURGE-JOURNAL-ACTIVE-001",
+                "an incomplete purge transaction is active in every scope selected by the replica; retry",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::PartialFailure,
+            ));
+        }
+    }
     // A cursor replay must reproduce page 1's ordering, so page 1's DECISION is
     // part of the frozen state, not just its inputs: a page 1 that ranked
     // without the replica (a transient open failure, say) must not have page 2
@@ -3629,57 +4410,21 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     let cursor_collection_generation = decoded_cursor
         .as_ref()
         .map(|cursor| cursor.collection_generation.clone());
-    let global_ranks = match aggregator_decline_reason(
-        &searched,
-        &time_selector,
-        mode.resolved,
-        query_plan.match_expr.as_deref(),
-        query_vec_for_ranks,
-    ) {
-        Some(reason) => Err(reason.to_owned()),
-        None if cursor_collection_generation == Some(None) => {
-            Err("cursor_pinned_scatter_gather".to_owned())
-        }
-        None => global_ranks_for(
-            &searched,
-            scope_mode,
-            decoded_cursor.is_some(),
-            multi_scope_settings,
-            query_plan.match_expr.as_deref(),
-            query_vec_for_ranks,
-            rrf_config,
-        ),
-    };
     // PC19/PC21's per-scope `index_generation` check has the same shape and the
     // same remedy: the state this page is replaying against moved, so the page
     // cannot be served and the caller re-runs without a cursor.
     if let Some(Some(frozen)) = &cursor_collection_generation {
-        let current = global_ranks
-            .as_ref()
-            .map(|ranks| &ranks.collection_generation);
-        if current != Ok(frozen) {
+        if global_ranks.collection_generation != *frozen {
             return Err(KioError::new(
                 "KIO-E-SEARCH-CURSOR-001",
                 "search cursor aggregator collection generation changed",
                 json!({
                     "reason": "collection_generation_mismatch",
                     "expected": frozen,
-                    "actual": current.ok(),
+                    "actual": global_ranks.collection_generation,
                 }),
                 ExitCode::InvalidUsage,
             ));
-        }
-    }
-    match global_ranks.as_ref() {
-        Ok(ranks) => apply_global_ranks(&mut candidates, ranks, rrf_config),
-        Err(_) => {
-            // Scatter-gather fallback (05 §1.8): the old regime applies
-            // unchanged — text stays per-scope, and only the vector lane is
-            // re-ranked globally, over the candidate pool rather than the
-            // collection.
-            if let Some(query_vec) = query_vec_for_ranks {
-                regrade_vector_rank_globally(&mut candidates, query_vec, rrf_config);
-            }
         }
     }
     candidates.sort_by(|a, b| {
@@ -3769,6 +4514,11 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     }
     if !late_failed.is_empty() {
         expanded.retain(|hit| !late_failed.contains(&hit.candidate.scope_index));
+        // These checkpoints have already failed and their rows were discarded
+        // above.  Do not let the response-boundary check below turn the
+        // remaining healthy scopes into a whole-command failure merely because
+        // this intentionally excluded scope is still mid-purge.
+        late_barriers.retain(|(scope_index, _, _)| !late_failed.contains(scope_index));
         searched_drop.sort_unstable_by(|left, right| right.cmp(left));
         for position in searched_drop {
             searched.remove(position);
@@ -3854,10 +4604,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     // replayed cursor: the two are equal by the mismatch check
                     // above, and re-deriving keeps the field describing the
                     // collection that actually ranked THIS page.
-                    collection_generation: global_ranks
-                        .as_ref()
-                        .ok()
-                        .map(|ranks| ranks.collection_generation.clone()),
+                    collection_generation: Some(global_ranks.collection_generation.clone()),
                     time_travel: selector_for_search(&time_selector),
                     since_cutoff: since_cutoff.clone(),
                     excluded_scopes: signed_exclusions,
@@ -4012,17 +4759,8 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // [search].fail_behavior = "warn" text fallback.
         "warnings": mode.warnings.clone(),
         "diversify": diversify_summary,
-        // 05 §1.8: which tier ranked this search, and when it was not the
-        // replica, why. A silent revert to scatter-gather ranks is a real
-        // quality change (per-scope text ranks, a candidate-pool vector rank)
-        // and used to be visible only as a stderr line, which nothing
-        // machine-readable could see.
-        "aggregator": match &global_ranks {
-            Ok(ranks) => json!({
-                "applied": true,
-                "collection_generation": ranks.collection_generation,
-            }),
-            Err(reason) => json!({ "applied": false, "fallback_reason": reason }),
+        "aggregator": {
+            "collection_generation": global_ranks.collection_generation,
         },
         "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
         "searched_scopes": searched_scopes,
@@ -4039,12 +4777,25 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             object.insert("__exit_code".to_owned(), json!(3));
         }
     }
+
+    // The earlier candidate-time recheck preserves per-scope isolation before
+    // pagination.  Response assembly can still take long enough for a purge
+    // to start after that check, however (pointer signing, related-image
+    // materialization, cursor construction, and log preparation all happen
+    // above).  Recheck the same frozen checkpoints at the actual response
+    // boundary so no selected scope's snippet, title, or pointer can escape
+    // through that final TOCTOU window.  On a failure the fully assembled
+    // response is deliberately dropped rather than trying to mutate a signed
+    // cursor or partially built JSON body after the fact.
+    maybe_wait_at_test_search_response_barrier();
+    recheck_search_response_barriers(&late_barriers, &exec_scopes)?;
     Ok(response)
 }
 
 /// Per-scope search failure disposition.
 enum ScopeSearchError {
-    /// Cursor snapshot's tree is gone (shallow) — hard fail the whole search.
+    /// The selected history start (`--at`, fresh history HEAD, or cursor
+    /// snapshot) is gone (shallow), so the whole search must hard-fail.
     Shallow,
     /// Recorded in `excluded_scopes`; the overall search may still succeed.
     Excluded(String),
@@ -4087,28 +4838,6 @@ const VEC_PROFILE_INCOMPATIBLE_REASON: &str = "embedding_profile_incompatible";
 /// reason string for the device-wide equivalent of this per-scope cause.
 const VEC_PROFILE_ABSENT_REASON: &str = "embedding_index_missing";
 
-/// PC19/PC21: the `index_generation` sentinel for a store that predates
-/// `index_metadata` (Phase 1c). Never equal to a real ULID, so a cursor
-/// frozen against the sentinel is correctly invalidated once the scope gains
-/// a real row (any of PC20's 6 rotation triggers).
-const LEGACY_INDEX_GENERATION: &str = "legacy-no-index-metadata";
-
-/// Convert a `ReadBarrierCheckpoint` failure into the right `ScopeSearchError`
-/// variant: the expected `KIO-E-PURGE-JOURNAL-ACTIVE-001` becomes a per-scope
-/// `Excluded` (05-runtime.md §3.5 / 10-operations.md §3's multi-scope
-/// `excluded_scopes.reason` treatment — search isolates a purge barrier hit to
-/// the one scope instead of aborting the whole command); any other error (a
-/// genuinely corrupt journal/epoch file, `KIO-E-STORE-CORRUPT-001`/`-IO-001`)
-/// stays `Fatal` so the existing `is_store_corrupt_class` per-scope-isolation
-/// downgrade in `run_search_inner`'s dispatch loop still applies uniformly.
-fn checkpoint_scope_error(error: KioError) -> ScopeSearchError {
-    if error.error_code() == "KIO-E-PURGE-JOURNAL-ACTIVE-001" {
-        ScopeSearchError::Excluded(PURGE_JOURNAL_ACTIVE_REASON.to_owned())
-    } else {
-        ScopeSearchError::Fatal(error)
-    }
-}
-
 struct ScopeOutcome {
     snapshot_commit: String,
     max_rowid: u64,
@@ -4119,62 +4848,19 @@ struct ScopeOutcome {
     index_generation: String,
     /// PC45/PC46: shallow ancestors skipped during this scope's history walk.
     shallow_skipped: u64,
-    candidates: Vec<ScoredCandidate>,
-    /// R23-12 (05 §3.5 L841-855 「本文・存在情報を返す直前」): this scope's §I
-    /// read-barrier checkpoint, kept alive past scope completion so the
-    /// response assembler can run one final recheck immediately before the
-    /// scope's candidates cross the response boundary.
-    checkpoint: ReadBarrierCheckpoint,
+    runtime_binding_filter: Option<Vec<kio_index::aggregator::AggBindingFilter>>,
+    journal_active_at_prepare: bool,
 }
 
-#[derive(Clone, Copy)]
-struct ScopeTimeRequest<'a> {
-    selector: &'a TimeSelector,
-    since_cutoff: Option<&'a str>,
-}
-
-#[derive(Clone, Copy)]
-struct ScopeSearchRequest<'a> {
-    /// PC8/PC9 (05 §1.3 L110-115, L120-134): the single OR-joined FTS5 MATCH
-    /// expression over every UNIT (an original token or one of its
-    /// script-boundary sub-pieces, 2026-07-22 feedback #2 —
-    /// `segment_script_runs`) with >= 3 Unicode scalars (each contributing
-    /// its own deterministic equivalence forms too, 05 §1.3 L116-123 —
-    /// `build_query_plan`), or `None` when every unit is short (PC11's
-    /// bounded-LIKE-only fallback, a pure-short query).
-    match_expr: Option<&'a str>,
-    /// PC11/PC14 (05 §1.3 L95-97, L107-109): applied as
-    /// `instr(text, token) > 0` eligibility conditions common to both the
-    /// text and vector backends, and to the LIKE fallback's own ORDER BY
-    /// when `match_expr` is `None`. `short_token_instr_sql` expands each
-    /// token's own equivalence forms here too. **Always empty when
-    /// `match_expr` is `Some`** (2026-07-22 feedback #2 — a mixed query's
-    /// short units are dropped outright, not AND-filtered; see
-    /// `build_query_plan`'s doc comment) — the raw token list only when
-    /// `match_expr` is `None` (pure-short query, every token short).
-    short_tokens: &'a [String],
-    resolved_mode: SearchMode,
-    query_embedding: Option<&'a [f32]>,
-    rrf_config: RrfConfig,
-    time: ScopeTimeRequest<'a>,
-    deadline: multi_scope::ScopeDeadline,
-}
-
-fn history_plan_error(error: KioError, from_cursor: bool) -> ScopeSearchError {
-    match error.error_code() {
-        "KIO-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
-        "KIO-E-COMMIT-HISTORY-LIMIT-001" if !from_cursor => {
-            ScopeSearchError::Excluded("history_limit_exceeded".to_owned())
-        }
-        _ => ScopeSearchError::Fatal(error),
-    }
-}
-
-fn purge_blocks_raw(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
-    // Public tombstones and an in-progress transaction after its visibility
-    // barrier hide content. Fsck-only erase receipts intentionally do not.
-    Ok(read_tombstone(target, raw_hash)?.is_some()
-        || PurgeState::new(&target.kio_dir).barrier_blocks(raw_hash)?)
+/// Source-independent preparation result for the direct replica route.  It
+/// deliberately contains only facts captured in `aggregator.sqlite` plus the
+/// resolved `--at` commit; it never holds a source SQLite connection.
+struct ReplicaScopeResolution {
+    snapshot_commit: String,
+    header: kio_index::aggregator::AggScopeHeader,
+    runtime_binding_filter: Option<Vec<kio_index::aggregator::AggBindingFilter>>,
+    shallow_skipped: u64,
+    journal_active_at_prepare: bool,
 }
 
 /// Mutation-side purge gate. U19/LC22: a public tombstone (active or
@@ -4288,23 +4974,6 @@ fn purge_blocks_historical_reindex_raw(kio_dir: &Path, raw_hash: &str) -> Result
     Ok(canonical.is_some_and(|canonical| canonical.event.kind == EventKind::Purged))
 }
 
-fn search_one_scope(
-    exec: &ExecScope,
-    scope_index: usize,
-    request: ScopeSearchRequest<'_>,
-) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
-    multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, request.deadline);
-    scope_deadline_check(request.deadline)?;
-    let result = search_one_scope_inner(exec, scope_index, request);
-    // Convert both a progress-handler interruption and work that completed just
-    // after its budget into the same stable exclusion reason.
-    if request.deadline.is_expired() {
-        Err(ScopeSearchError::Excluded("timeout".to_owned()))
-    } else {
-        result
-    }
-}
-
 fn scope_deadline_check(
     deadline: multi_scope::ScopeDeadline,
 ) -> std::result::Result<(), ScopeSearchError> {
@@ -4315,34 +4984,24 @@ fn scope_deadline_check(
     }
 }
 
-fn search_one_scope_inner(
+/// Resolve a scope for direct search without opening `.kio/index/sqlite.db`.
+///
+/// The registry/scope store is still used for scope-format validation and
+/// `--at` operand resolution, but index facts (HEAD snapshot, configuration,
+/// append bounds, vector profiles, and readiness) are immutable facts from
+/// the device replica header.  A missing or incomplete header fails closed;
+/// search must never repair it by querying the source index.
+fn prepare_scope_from_replica_header(
     exec: &ExecScope,
-    scope_index: usize,
-    request: ScopeSearchRequest<'_>,
-) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
-    let ScopeSearchRequest {
-        match_expr,
-        short_tokens,
-        resolved_mode,
-        query_embedding,
-        rrf_config,
-        time,
-        deadline,
-    } = request;
-    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
-    // kio_format_version compatibility is checked before (1) the purge read
-    // barrier below — this used to open the checkpoint first, so a scope
-    // that was both format-incompatible and mid-purge-journal excluded with
-    // the lower-priority `purge_journal_active` reason instead of
-    // `store_version_incompatible`. PC53 (05 §1.8 / 10 §12.5):
-    // `Repository::open_for_search`'s `scope.json` validation (QB8: version
-    // checked before schema validation, scope.json is the sole authority per
-    // §Z2/裁定2) raises `KIO-E-STORE-VERSION-001` for it
-    // (`validate_format_version`); surface that as its own exclusion reason
-    // so PC54/PC55's all-scope-STORE-VERSION promotion (in
-    // `run_search_inner`) can recognize it. No query_cache or any other write
-    // happens on this path (open failed before any write), satisfying the
-    // write-zero rule.
+    header: Option<&kio_index::aggregator::AggScopeHeader>,
+    time_selector: &TimeSelector,
+    since_cutoff: Option<&str>,
+    deadline: multi_scope::ScopeDeadline,
+) -> std::result::Result<ReplicaScopeResolution, ScopeSearchError> {
+    scope_deadline_check(deadline)?;
+    // Preserve the format-version priority and the existing cursor scope
+    // availability contract.  `Repository::open_for_search` validates only
+    // the scope store; it does not open the per-scope search index.
     let repo = Repository::open_for_search(&exec.target.repo_root).map_err(|error| {
         if error.error_code() == "KIO-E-STORE-VERSION-001" {
             ScopeSearchError::Excluded(STORE_VERSION_INCOMPATIBLE_REASON.to_owned())
@@ -4350,49 +5009,87 @@ fn search_one_scope_inner(
             ScopeSearchError::Excluded("unreachable".to_owned())
         }
     })?;
-    // §I checkpoint 1 (LC53). Opened before the remaining index reads below
-    // so this scope's linearization point precedes the work it gates (see
-    // `checkpoint_scope_error`'s doc comment for the per-scope isolation
-    // rationale). `check_index_generation_current` ((3)) is intentionally
-    // NOT folded in here — search's per-scope (3) equivalent is its own
-    // bespoke `INDEX_REBUILDING_REASON` exclusion further below (already
-    // contracted, PC19-PC44 in step4b-contract-tests-p2c.md), not this
-    // shared helper.
-    let checkpoint =
-        ReadBarrierCheckpoint::open(&exec.target.kio_dir).map_err(checkpoint_scope_error)?;
-    scope_deadline_check(deadline)?;
-
-    // PC52 (05 §1.8 L390): explicit `--vector` never falls back — a scope
-    // whose embedding profile is incompatible (or has no embedding index at
-    // all) is excluded individually instead of degrading the WHOLE search to
-    // text (that degrade-the-whole-search behavior is auto/`--hybrid`'s own,
-    // governed by the device-wide `resolve_vector_availability` aggregate
-    // upstream of every scope's execution — untouched here). Only checked
-    // for the resolved mode actually being `Vector`; hybrid/auto never reach
-    // this per-scope gate since PC1's own aggregate already decided their
-    // fallback before any scope started.
-    if resolved_mode == SearchMode::Vector {
-        match scope_embedding_state(&exec.target.kio_dir) {
-            ScopeEmbedState::Compatible => {}
-            ScopeEmbedState::Incompatible => {
-                return Err(ScopeSearchError::Excluded(
-                    VEC_PROFILE_INCOMPATIBLE_REASON.to_owned(),
-                ));
+    let header = header
+        .cloned()
+        .ok_or_else(|| ScopeSearchError::Excluded("index_missing".to_owned()))?;
+    // A fresh current query is served by the replica, but it must still inspect
+    // the selected CAS snapshot before trusting that projection.  This catches
+    // a hash-mismatched commit/tree as per-scope `store_corrupt` without opening
+    // `.kio/index/sqlite.db`.  A Ready header is itself the durable replacement
+    // for the old source-db "cached tree_entries" proof, so a deliberately
+    // shallow current snapshot remains serviceable from that projection.  If a
+    // bare snapshot advanced HEAD and the writer marked its replica Rebuilding,
+    // however, a shallow selected tree has no certified projection and must be
+    // reported as `snapshot_shallow`, not the less-specific rebuilding state.
+    if matches!(time_selector, TimeSelector::Current) && !exec.from_cursor {
+        if let Some(snapshot_commit) = header.current_snapshot_commit.as_deref() {
+            match HistoryReader::new(repo.kio_dir()).snapshot(snapshot_commit) {
+                Ok(_) => {}
+                Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {
+                    if !matches!(
+                        header.index_status,
+                        kio_index::aggregator::AggIndexStatus::Ready
+                    ) {
+                        return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
+                    }
+                }
+                Err(error) => return Err(ScopeSearchError::Fatal(error)),
             }
-            ScopeEmbedState::Absent => {
+        }
+    }
+    // HEAD and the device replica are separate durable stores. A writer marks
+    // the prior Ready projection Rebuilding immediately after it advances
+    // HEAD, but a reader can observe the tiny cross-store interval in between.
+    // For every selector anchored in the current HEAD (including a replayed
+    // current/history cursor), reject a Ready header whose certified snapshot
+    // is not the actual CAS HEAD. An explicit `--at` is intentionally
+    // independent: its own completed marker and CAS binding plan certify its
+    // selected historical target instead.
+    let mut journal_active_at_prepare = false;
+    if !matches!(time_selector, TimeSelector::At(_))
+        && matches!(
+            header.index_status,
+            kio_index::aggregator::AggIndexStatus::Ready
+        )
+    {
+        let head = repo.head_commit_hash().map_err(ScopeSearchError::Fatal)?;
+        if head.is_none() || header.current_snapshot_commit.as_deref() != head.as_deref() {
+            // Do not install a command-wide purge preflight: only a replica
+            // header which would otherwise be rejected for this exact
+            // HEAD/header mismatch gets this narrow look.  A visible journal
+            // means the old Ready header is the last coherent binding snapshot;
+            // pass it to replica candidate selection so its existing
+            // candidate-scope barrier owns the purge error and body discard.
+            // Record the observation as well: the journal can finish between
+            // here and the candidate barrier, but that must not make stale rows
+            // eligible to cross the response boundary.
+            journal_active_at_prepare = PurgeState::new(&exec.target.kio_dir)
+                .read_barrier_active()
+                .map_err(ScopeSearchError::Fatal)?;
+            if !journal_active_at_prepare {
                 return Err(ScopeSearchError::Excluded(
-                    VEC_PROFILE_ABSENT_REASON.to_owned(),
+                    INDEX_REBUILDING_REASON.to_owned(),
                 ));
             }
         }
     }
-
-    // Resolve the search snapshot independently per scope. Cursor replay always
-    // uses the signed commit; a fresh `--at` resolves its operand in this scope;
-    // every other selector freezes the scope's current HEAD.
+    match header.index_status {
+        kio_index::aggregator::AggIndexStatus::Ready => {}
+        kio_index::aggregator::AggIndexStatus::Missing => {
+            return Err(ScopeSearchError::Excluded("index_missing".to_owned()));
+        }
+        kio_index::aggregator::AggIndexStatus::Corrupt => {
+            return Err(ScopeSearchError::Excluded("index_corrupt".to_owned()));
+        }
+        kio_index::aggregator::AggIndexStatus::Rebuilding => {
+            return Err(ScopeSearchError::Excluded(
+                INDEX_REBUILDING_REASON.to_owned(),
+            ));
+        }
+    }
     let snapshot_commit = match &exec.snapshot_commit {
         Some(commit) => commit.clone(),
-        None => match time.selector.at() {
+        None => match time_selector.at() {
             Some(operand) => match repo.resolve_commit(operand) {
                 Ok(commit) => commit,
                 Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {
@@ -4403,80 +5100,51 @@ fn search_one_scope_inner(
                 }
                 Err(error) => return Err(ScopeSearchError::Fatal(error)),
             },
-            // PC34/PC36 (05 §1.6 L241): HEAD unset (bare scope — no
-            // successful auto snapshot yet) is index-not-yet-complete, the
-            // same user-facing situation `INDEX_REBUILDING_REASON` already
-            // names (P10's mid-reindex window) — reusing it lets this reason
-            // participate in the SAME homogeneous exit-3 promotion below
-            // instead of falling through to the generic permanent
-            // SCOPE-ALL-FAILED (exit 4) a bare/never-indexed scope is not.
-            None => repo
-                .head_commit_hash()
-                .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?
-                .ok_or_else(|| ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned()))?,
+            None => header.current_snapshot_commit.clone().ok_or_else(|| {
+                ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned())
+            })?,
         },
     };
-    scope_deadline_check(deadline)?;
-
-    let db_path = sqlite_path(&exec.target.kio_dir);
-    if !db_path.exists() {
-        return Err(ScopeSearchError::Excluded("index_missing".to_owned()));
-    }
-    let conn = Connection::open(&db_path)
-        .map_err(|_| ScopeSearchError::Excluded("index_corrupt".to_owned()))?;
-    deadline.install_sqlite_progress_handler(&conn);
-    scope_deadline_check(deadline)?;
-
-    // M4: `Connection::open` is lazy — it succeeds on an empty or garbage file and
-    // only fails when the DB is first read. Probe the index eagerly so a corrupt
-    // sqlite.db is classified as Excluded("index_corrupt") here (partial failure)
-    // instead of exploding into a Fatal later that would exit 2 and drop the
-    // healthy scopes' results too (05 §1.8 part-failure contract). An empty but
-    // structurally-valid table (no rows) is healthy.
-    match conn.query_row("SELECT 1 FROM tree_entries LIMIT 1", [], |_| Ok(())) {
-        Ok(()) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
-        Err(_) => return Err(ScopeSearchError::Excluded("index_corrupt".to_owned())),
-    }
-    scope_deadline_check(deadline)?;
-
-    // LC45 (item 2): a separate check from §I's checkpoint above — folded
-    // into the existing `INDEX_REBUILDING_REASON` exclusion/aggregation
-    // (P10's HEAD-generation check below uses the same reason for the same
-    // underlying user-facing situation: "the index is between generations,
-    // retry"). Reuses `conn` (already validated corruption-free by the probe
-    // just above) instead of `check_index_generation_current`'s own
-    // freshly-opened connection, so a corrupt sqlite.db is classified
-    // Excluded("index_corrupt") by that probe, not raised as a Fatal
-    // KIO-E-CONFIG-SCHEMA-001 from a second, unvalidated open of the same
-    // file.
-    let index_metadata = kio_index::fts::read_index_metadata(&conn)
-        .map_err(index_to_kio)
-        .map_err(ScopeSearchError::Fatal)?;
-    if let Some(metadata) = &index_metadata {
-        let current = PurgeState::new(&exec.target.kio_dir)
-            .read_lifecycle_epoch()
-            .map_err(ScopeSearchError::Fatal)?;
-        if current != metadata.last_lifecycle_epoch {
-            return Err(ScopeSearchError::Excluded(
-                INDEX_REBUILDING_REASON.to_owned(),
-            ));
-        }
-    }
-    // PC19/PC21 (05 §1.5): this scope's `index_generation` as of this search
-    // (§R note-2 ruling: coexists with, does not replace, the
-    // `last_lifecycle_epoch` check just above). A pre-Phase-1c store with no
-    // `index_metadata` row is pinned to a stable sentinel rather than left
-    // empty (`ScopeCursor.index_generation` must be non-empty) — a real
-    // `index_metadata` row later appearing correctly reads as a change and
-    // invalidates any cursor issued against the sentinel.
-    let current_index_generation = index_metadata
-        .as_ref()
-        .map(|metadata| metadata.index_generation.clone())
-        .unwrap_or_else(|| LEGACY_INDEX_GENERATION.to_owned());
+    // Fresh current search deliberately retains its established shallow-cache
+    // behavior. Every historical selector, plus any cursor replay, instead
+    // derives the exact binding relation from source CAS at request time. This
+    // validates a selected shallow tree and removes aliases from a tree that
+    // became shallow after the writer published the replica projection,
+    // without reading `.kio/index/sqlite.db`.
+    let (runtime_binding_filter, shallow_skipped) =
+        if matches!(time_selector, TimeSelector::Current) && !exec.from_cursor {
+            (None, 0)
+        } else {
+            let plan =
+                plan_search_history(&repo, &snapshot_commit, time_selector, since_cutoff)
+                    .map_err(|error| match error.error_code() {
+                        "KIO-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
+                        "KIO-E-COMMIT-HISTORY-LIMIT-001" if !exec.from_cursor => {
+                            ScopeSearchError::Excluded("history_limit_exceeded".to_owned())
+                        }
+                        _ => ScopeSearchError::Fatal(error),
+                    })?;
+            let shallow_skipped = plan.shallow_skipped.len() as u64;
+            let filters = plan
+                .bindings
+                .into_iter()
+                .map(|binding| kio_index::aggregator::AggBindingFilter {
+                    scope_id: exec.target.scope_id.clone(),
+                    raw_hash: binding.raw_hash,
+                    tool_profile_hash: binding.tool_profile_hash,
+                    gen: binding.gen,
+                    path_at_commit: binding.path_at_commit,
+                    pointer_commit: binding.pointer_commit,
+                    current_paths: binding.current_paths,
+                    is_live: binding.is_live,
+                })
+                .collect();
+            (Some(filters), shallow_skipped)
+        };
     if exec
         .index_generation
         .as_deref()
-        .is_some_and(|frozen| frozen != current_index_generation.as_str())
+        .is_some_and(|frozen| frozen != header.index_generation)
     {
         return Err(ScopeSearchError::Fatal(KioError::new(
             "KIO-E-SEARCH-CURSOR-001",
@@ -4488,407 +5156,23 @@ fn search_one_scope_inner(
             ExitCode::InvalidUsage,
         )));
     }
-
-    // PC38/PC39: whether the eligibility SQL below must additionally check
-    // `kio_target_ancestors` (only `--at`, installed inside the match below).
-    let mut ancestor_gated = false;
-    let mut at_shallow_skipped = 0u64;
-    // Build the immutable eligible binding relation. Default search retains the
-    // established shallow-cache read degradation; every explicit historical mode
-    // reads verified commit/tree CAS and therefore rejects incomplete ancestry.
-    let mut history_plan = match time.selector {
-        TimeSelector::Current => {
-            match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
-                Ok(SnapshotTreeEntries::Projected) => {}
-                Ok(SnapshotTreeEntries::ShallowCachedRows) if exec.from_cursor => {
-                    return Err(ScopeSearchError::Shallow);
-                }
-                Ok(SnapshotTreeEntries::ShallowCachedRows) => {}
-                Ok(SnapshotTreeEntries::ShallowNoRows) if exec.from_cursor => {
-                    return Err(ScopeSearchError::Shallow);
-                }
-                Ok(SnapshotTreeEntries::ShallowNoRows) => {
-                    return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
-                }
-                Err(error) => return Err(ScopeSearchError::Fatal(error)),
-            }
-            current_history_plan_from_cache(&conn, &snapshot_commit)
-                .map_err(ScopeSearchError::Fatal)?
-        }
-        TimeSelector::At(_) => {
-            exact_project_snapshot(&repo, &conn, &snapshot_commit).map_err(|error| {
-                if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" {
-                    ScopeSearchError::Shallow
-                } else {
-                    ScopeSearchError::Fatal(error)
-                }
-            })?;
-            // PC38/PC39 (05 §1.6): install the target commit's ancestor-or-
-            // equal set — `execute_fts_tier`/the vector query below gate
-            // eligibility on it (`ancestor_gated = true`) so a chunk whose
-            // introduction postdates `snapshot_commit` (a descendant-only
-            // publication) is excluded, instead of the current bare
-            // `first_seen_commit IS NOT NULL` check that ignores ancestry
-            // entirely. Tolerant of a shallow ancestor beyond the target
-            // itself (PC45's same policy) — see `at_target_ancestors`.
-            let (ancestors, skipped) =
-                at_target_ancestors(&repo, &snapshot_commit).map_err(ScopeSearchError::Fatal)?;
-            install_target_ancestors(&conn, &ancestors).map_err(ScopeSearchError::Fatal)?;
-            ancestor_gated = true;
-            at_shallow_skipped = skipped.len() as u64;
-            plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
-                .map_err(|error| history_plan_error(error, exec.from_cursor))?
-        }
-        // PC33/PC44 (05 §1.6 L266 "`--all-history` は binding ごとに同判定を
-        // 行う" / "`--include-deleted` の補完 binding にも同条件を適用する"):
-        // NOT applied here. `ancestor_gated` stays false, so every binding's
-        // chunk is accepted regardless of whether its `chunk_publications`
-        // introduction is ancestor-or-equal of THAT binding's own
-        // `pointer_commit` (as opposed to `--at`'s single shared
-        // `kio_target_ancestors` target). A single shared ancestor set
-        // cannot express this — every binding in an all-history/
-        // include-deleted plan can have a DIFFERENT `pointer_commit`, so the
-        // gate would need a per-binding ancestor check (e.g. against the
-        // `HistoryGraph` `plan_search_history` already walks) threaded all
-        // the way to the SQL eligibility layer, not a single temp-table
-        // install like PC38's. Left unimplemented given the P2-C task's
-        // priority ordering (this sub-item ships after PC22/23/31/32/40) and
-        // completion gate; PC38's chunk-level `chunk_publications` gate
-        // (`ancestor_gate_sql`) and PC40's config-association gate
-        // (`config_association_ancestor_sql`) are otherwise fully wired and
-        // ready for a future per-binding caller.
-        TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted => {
-            plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
-                .map_err(|error| history_plan_error(error, exec.from_cursor))?
-        }
-    };
     scope_deadline_check(deadline)?;
-    // A purge barrier becomes the universal visibility boundary before any
-    // destructive deletion. Filter CAS-derived historical bindings as well as
-    // current ones so stale SQLite rows cannot leak through text/vector/history
-    // search or a signed cursor replay.
-    let mut blocked_raws = BTreeMap::<String, bool>::new();
-    for binding in &history_plan.bindings {
-        scope_deadline_check(deadline)?;
-        if !blocked_raws.contains_key(&binding.raw_hash) {
-            blocked_raws.insert(
-                binding.raw_hash.clone(),
-                purge_blocks_raw(&exec.target, &binding.raw_hash)
-                    .map_err(ScopeSearchError::Fatal)?,
-            );
-        }
-    }
-    history_plan.bindings.retain(|binding| {
-        !blocked_raws
-            .get(&binding.raw_hash)
-            .copied()
-            .unwrap_or(false)
-    });
-    install_eligible_identities(&conn, &history_plan).map_err(ScopeSearchError::Fatal)?;
-    scope_deadline_check(deadline)?;
-
-    // P10: `run_reindex` advances HEAD to a new generation and only afterwards
-    // swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search in that
-    // window reads HEAD=C_new against the pre-swap db, whose chunks are all the
-    // previous generation and join to none of C_new's freshly projected
-    // `tree_entries` — every backend returns empty and the search would emit a
-    // silent exit-0 no-hit indistinguishable from a genuine miss. Detect that
-    // precise state and exclude the scope with `KIO-E-INDEX-REBUILDING-001`
-    // (docs/05:564) so the honest transient surfaces instead. `kio index` re-gens
-    // only the changed docs (unchanged docs stay live → never fires); an empty or
-    // text-less scope has no chunks (never fires); a genuine miss still has live
-    // chunks (never fires) — see `index_is_rebuilding`. 05 §1.8 part-failure keeps
-    // the other, healthy scopes' results.
-    if matches!(time.selector, TimeSelector::Current)
-        && index_is_rebuilding(&conn, &snapshot_commit).map_err(ScopeSearchError::Fatal)?
-    {
-        return Err(ScopeSearchError::Excluded(
-            INDEX_REBUILDING_REASON.to_owned(),
-        ));
-    }
-
-    let max_rowid = match exec.max_rowid {
-        Some(value) => value,
-        None => current_max_rowid(&conn).map_err(ScopeSearchError::Fatal)?,
-    };
-
-    let max_association_rowid = match exec.max_association_rowid {
-        Some(value) => value,
-        None => kio_index::fts::max_chunk_config_association_rowid(&conn)
-            .map_err(index_to_kio)
-            .map_err(ScopeSearchError::Fatal)?,
-    };
-    scope_deadline_check(deadline)?;
-
-    // PC22/PC23/PC31/PC32: the live config.toml value is always the DEFAULT
-    // candidate, but `--at` (ancestor_gated) resolves the target TREE's own
-    // value empirically rather than assuming HEAD's current config applies —
-    // see `resolve_target_chunking_config_hash`'s doc comment.
-    let live_chunking_config_hash = read_chunking_config(&repo)
-        .map(|config| config.chunking_config_hash)
-        .map_err(ScopeSearchError::Fatal)?;
-    let chunking_config_hash = resolve_target_chunking_config_hash(
-        &conn,
-        &live_chunking_config_hash,
-        ancestor_gated,
-        max_rowid,
-        max_association_rowid,
-    )
-    .map_err(ScopeSearchError::Fatal)?;
-    scope_deadline_check(deadline)?;
-    if exec
-        .chunking_config_hash
-        .as_deref()
-        .is_some_and(|frozen| frozen != chunking_config_hash.as_str())
-    {
-        return Err(ScopeSearchError::Fatal(KioError::new(
-            "KIO-E-SEARCH-CURSOR-001",
-            "search cursor chunking config changed",
-            json!({ "scope_id": exec.target.scope_id }),
-            ExitCode::InvalidUsage,
-        )));
-    }
-
-    let want_vector = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector);
-    // PC15/PC16/PC38: the shared eligibility + ranking-depth bundle. PC17's
-    // combined regression (candidate_depth actually reaching both backends)
-    // follows directly from both `execute_fts_tier` and `vector_scope_search`
-    // reading `candidate_depth` from the same `filter` value.
-    let filter = ScopeQueryFilter {
-        chunking_config_hash: &chunking_config_hash,
-        max_rowid,
-        max_association_rowid,
-        since_cutoff: history_plan.since_cutoff.as_deref(),
-        candidate_depth: rrf_config.candidate_depth,
-        ancestor_gated,
-        short_tokens,
-    };
-
-    // FTS5 text ranks (empty when the query has no indexable token). Vector-only
-    // mode skips the text backend entirely (05 §1.3: no fusion, use vector order).
-    let (mut text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
-        (Vec::new(), BTreeMap::new())
-    } else {
-        fts_scope_search(&conn, match_expr, filter).map_err(ScopeSearchError::Fatal)?
-    };
-    scope_deadline_check(deadline)?;
-
-    // Vector lane: `chunk_vec` and `image_vec` KNN merged into ONE rank order
-    // (hybrid/vector mode with a query embedding).
-    let mut image_rows = BTreeMap::<String, ImageCandidate>::new();
-    let vector_ranks = if want_vector {
-        if let Some(query_vec) = query_embedding {
-            let (chunk_hits, vmeta) = match vector_scope_search(&conn, query_vec, filter) {
-                Ok(result) => result,
-                // R10-1(a): a sqlite-vec capacity limit degrades THIS scope's vector
-                // backend to text-only (05 §1.8 per-scope isolation) instead of a
-                // device-wide Fatal misreported as CONFIG-SCHEMA. The text ranks
-                // computed above still stand; pure-vector mode simply contributes
-                // nothing from this scope rather than aborting the whole search.
-                Err(error) if error.error_code() == VECTOR_CAPACITY_ERROR_CODE => {
-                    (Vec::new(), BTreeMap::new())
-                }
-                Err(error) => return Err(ScopeSearchError::Fatal(error)),
-            };
-            for (chunk_id, chunk_meta) in vmeta {
-                meta.entry(chunk_id).or_insert(chunk_meta);
-            }
-            let (image_hits, rows) = image_vector_scope_search(&conn, query_vec, filter)
-                .map_err(ScopeSearchError::Fatal)?;
-            image_rows = rows;
-            merge_vector_lane(chunk_hits, image_hits, rrf_config.candidate_depth)
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    scope_deadline_check(deadline)?;
-
-    // U5 / 問題 A: give every image candidate the text-lane standing of the
-    // chunk that cites it, so RRF stops adding two reciprocal terms for a chunk
-    // and one for an image.
-    give_images_their_chunks_text_rank(&mut text_ranks, &image_rows);
-
-    // R12-1: fuse with the effective `[search.rrf]` (was hardcoded 60/1/1/200).
-    let mut fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
-        .map_err(search_to_kio)
-        .map_err(ScopeSearchError::Fatal)?;
-    // R23-21 (05 §1.8 L416-417 "RRF 済み unique semantic chunk 上位
-    // candidate_depth 件を候補として返す"): `fuse_rrf` unions each backend's
-    // OWN top-`candidate_depth` (05 §1.3's candidate pool step), which is not
-    // yet bounded by `candidate_depth` itself -- when the text and vector
-    // top-N barely overlap, the union can carry up to 2x `candidate_depth`
-    // candidates into the cross-scope merge/global MMR below, exceeding the
-    // per-scope contract this scope's caller returns. `fused` is already
-    // sorted by descending `rrf_score` with the documented chunk_id
-    // tie-break (`fuse_rrf`'s own sort), so truncating here keeps exactly the
-    // top `candidate_depth` by that same order.
-    fused.truncate(rrf_config.candidate_depth as usize);
-
-    let grouped_bindings = history_plan.grouped_bindings();
-    let mut candidates = Vec::new();
-    for candidate in fused {
-        scope_deadline_check(deadline)?;
-        // `fuse_rrf` keyed this row by its OWN identity, which for an image is
-        // the object hash and not a chunk hash — so the image map is consulted
-        // first, and only a miss means "this is a chunk".
-        let (payload, chunk_hash, chunk_meta) = match image_rows.get(&candidate.chunk_hash) {
-            Some(image) => (
-                ResultPayload::Image {
-                    image_hash: image.image_hash.clone(),
-                    image_uri: image.image_uri.clone(),
-                },
-                image.chunk_hash.clone(),
-                image.meta.clone(),
-            ),
-            None => match meta.get(&candidate.chunk_hash) {
-                Some(chunk_meta) => (
-                    ResultPayload::Chunk,
-                    candidate.chunk_hash.clone(),
-                    chunk_meta.clone(),
-                ),
-                None => continue,
-            },
-        };
-        // In hybrid/vector mode, carry the row's OWN embedding so MMR can run
-        // (05 §1.4). Text mode leaves this `None` (MMR skips, dedup only). An
-        // image reads `image_vec`: 03 §7 fixes one multimodal space, so the two
-        // are directly comparable and MMR needs no type branch (05 §1.4).
-        let embedding = if want_vector {
-            match &payload {
-                ResultPayload::Chunk => embedding_store::read_chunk_vector(&conn, &chunk_hash),
-                ResultPayload::Image { image_hash, .. } => {
-                    embedding_store::read_image_vector(&conn, image_hash)
-                }
-            }
-            .ok()
-            .flatten()
-        } else {
-            None
-        };
-        candidates.push(ScoredCandidate {
-            scope_index,
-            scope_id: exec.target.scope_id.clone(),
-            // R23-20 (03 §4 L296 "検索結果メタには「正本の .kio パス」を必ず含める"):
-            // the canonical `.kio` directory, not its parent `repo_root` --
-            // relayed unchanged into both `results[].scope_path` and the
-            // Evidence Pointer issue request's `scope_path` hint below.
-            scope_path: exec.target.kio_dir.clone(),
-            chunk_hash,
-            payload,
-            rrf_score: candidate.rrf_score,
-            text_rank: candidate.text_rank,
-            vector_rank: candidate.vector_rank,
-            meta: chunk_meta.clone(),
-            bindings: grouped_bindings
-                .get(&SearchContentKey {
-                    raw_hash: chunk_meta.raw_hash.clone(),
-                    tool_profile_hash: chunk_meta.tool_profile_hash.clone(),
-                    gen: chunk_meta.gen,
-                })
-                .cloned()
-                .unwrap_or_default(),
-            embedding,
-        });
-    }
-
-    // Linearize the lock-free read after SQLite/vector metadata access. A purge
-    // may publish its barrier while the query is running; candidates blocked in
-    // that window must not cross the response boundary.
-    let mut blocked_after_query = BTreeMap::<String, bool>::new();
-    for candidate in &candidates {
-        scope_deadline_check(deadline)?;
-        if !blocked_after_query.contains_key(&candidate.meta.raw_hash) {
-            blocked_after_query.insert(
-                candidate.meta.raw_hash.clone(),
-                purge_blocks_raw(&exec.target, &candidate.meta.raw_hash)
-                    .map_err(ScopeSearchError::Fatal)?,
-            );
-        }
-    }
-    candidates.retain(|candidate| {
-        !blocked_after_query
-            .get(&candidate.meta.raw_hash)
-            .copied()
-            .unwrap_or(false)
-    });
-    scope_deadline_check(deadline)?;
-
-    // §I checkpoint 2 (LC54/LC55): the last gate before this scope's
-    // candidates cross the response boundary.
-    checkpoint.recheck().map_err(checkpoint_scope_error)?;
-
-    Ok(ScopeOutcome {
+    Ok(ReplicaScopeResolution {
         snapshot_commit,
-        max_rowid,
-        max_association_rowid,
-        chunking_config_hash,
-        index_generation: current_index_generation,
-        // PC45/PC46: shallow ancestors skipped during this scope's history
-        // walk (`--all-history`/`--since`/`--include-deleted`) plus the
-        // `--at` ancestor-set walk's own tolerant skips (PC38/39's ancestor
-        // computation, which also never hard-fails on a boundary shallow
-        // commit).
-        shallow_skipped: history_plan.shallow_skipped.len() as u64 + at_shallow_skipped,
-        candidates,
-        checkpoint,
+        header,
+        runtime_binding_filter,
+        shallow_skipped,
+        journal_active_at_prepare,
     })
 }
 
-/// Error code for a per-scope vector-backend capacity limit (R10-1(a)). Never
-/// surfaced to the user: `search_one_scope` intercepts it and degrades that scope
-/// to text-only so one scope's limit can't abort the device-wide search.
-const VECTOR_CAPACITY_ERROR_CODE: &str = "KIO-E-SEARCH-VEC-CAPACITY-001";
-
-/// Message classifier for a sqlite-vec / SQLite capacity-limit failure message
-/// (kept even though this exact query shape no longer has an unbounded
-/// per-chunk placeholder list or a `vec0` `k=` ceiling to hit — a defensive,
-/// unit-tested backstop against a future capacity mode).
+#[cfg(test)]
 fn is_vector_capacity_message(message: &str) -> bool {
-    // sqlite-vec: "k value in knn query too large, provided N and the limit is 4096".
-    // SQLite:     "too many SQL variables".
     message.contains("knn query too large") || message.contains("too many SQL variables")
 }
-
-/// Internal marker error the vector backend returns on a capacity limit so the
-/// caller can degrade the scope (R10-1(a)); its exit code is irrelevant because it
-/// is always intercepted before it can surface.
-fn vector_capacity_error() -> KioError {
-    KioError::new(
-        VECTOR_CAPACITY_ERROR_CODE,
-        "vector backend capacity limit exceeded for this scope",
-        json!({}),
-        ExitCode::Failure,
-    )
-}
-
-/// The shared per-scope eligibility + ranking-depth bundle both backends read
-/// (05 §1.3/§1.6). `ancestor_gated` toggles PC38's correlated `EXISTS` against
-/// the `kio_target_ancestors` temp table the caller installs before running
-/// any query with this set — today only `--at` (`search_one_scope_inner`).
-#[derive(Debug, Clone, Copy)]
-struct ScopeQueryFilter<'a> {
-    chunking_config_hash: &'a str,
-    max_rowid: u64,
-    max_association_rowid: u64,
-    since_cutoff: Option<&'a str>,
-    /// PC15/PC16/PC17: `[search.rrf].candidate_depth`, threaded all the way
-    /// to the SQL `LIMIT` instead of a literal `200`.
-    candidate_depth: u64,
-    ancestor_gated: bool,
-    /// PC11/PC14: short (< 3 Unicode scalar) tokens, applied as
-    /// `instr(text, token) > 0` AND conditions common to both backends —
-    /// equivalence-form-expanded per token by `short_token_instr_sql` (05
-    /// §1.3 L116-123). **Always empty for a mixed query** (>= 1 long unit,
-    /// 2026-07-22 feedback #2 — `build_query_plan`'s doc comment); non-empty
-    /// only for a pure-short query, where it carries the raw token list.
-    short_tokens: &'a [String],
-}
-
 /// PC38/PC41/PC42 (05 §1.6 L265-266): the ancestor-or-equal introduction gate
 /// for a CHUNK, appended to the eligibility `WHERE` only when `ancestor_gated`
-/// (today only `--at` — `search_one_scope_inner`). Prefers `chunk_publications`
+/// (today only `--at` during writer-side projection). Prefers `chunk_publications`
 /// (potentially several introduction rows per chunk — merge side branches,
 /// independent imports, PC37/43) via a correlated `EXISTS` rather than a
 /// plain `JOIN`, so a chunk with several publication rows still matches this
@@ -4944,66 +5228,9 @@ fn config_association_ancestor_sql(ancestor_gated: bool) -> &'static str {
     }
 }
 
-/// PC12/PC13 (05 §1.3 L97-106) + deterministic query normalization (L116-123,
-/// 2026-07-22 spec feedback #1): one `AND (instr(<column>, ?) > 0 [OR
-/// instr(<column>, ?) > 0 ...])` clause per short (< 3 Unicode scalar) token
-/// — a bounded-query eligibility predicate common to the text and vector
-/// backends (and the LIKE-only fallback's own `WHERE`), applied before
-/// `candidate_depth` confirms the candidate set. Each token's own
-/// `token_equivalence_forms` are OR'd inside that token's own clause — the
-/// SAME equivalence forms the MATCH side gets (`build_query_plan`) — so a
-/// short token's AND-eligibility still passes when a chunk contains an
-/// equivalent spelling instead of the literal token (today this is a no-op:
-/// every numeral/dictionary equivalence form is itself >= 3 Unicode scalars,
-/// so no short token actually has one — kept general rather than assuming
-/// that never changes). A token with no extra forms emits the exact
-/// single-clause text this produced before (`AND instr(<column>, ?) > 0`,
-/// no wrapping parens), so the common case's generated SQL is unchanged
-/// byte-for-byte. Every `?` is anonymous; the caller must push
-/// `short_token_bind_values(short_tokens)` (same flattened per-token order)
-/// onto its bound-parameter list at the position matching where this
-/// fragment lands in the surrounding SQL text.
-///
-/// 2026-07-22 spec feedback #2 narrowed WHEN a caller ever passes a
-/// non-empty `short_tokens` here: `build_query_plan` now empties it outright
-/// for a mixed query (>= 1 long unit) instead of carrying its short leftover
-/// units, so in practice this only ever renders a real clause for a
-/// pure-short query (every token short) — this function itself is unchanged
-/// and stays agnostic to that; it just renders whatever it is given (`""`
-/// for an empty slice).
-fn short_token_instr_sql(column: &str, short_tokens: &[String]) -> String {
-    short_tokens
-        .iter()
-        .map(|token| {
-            let forms = token_equivalence_forms(token);
-            if forms.len() == 1 {
-                format!("AND instr({column}, ?) > 0")
-            } else {
-                let arms = forms
-                    .iter()
-                    .map(|_| format!("instr({column}, ?) > 0"))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                format!("AND ({arms})")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n             ")
-}
-
-/// The bound values for [`short_token_instr_sql`]'s generated placeholders,
-/// flattened in the same per-token order (each token's own
-/// `token_equivalence_forms`, in that order).
-fn short_token_bind_values(short_tokens: &[String]) -> Vec<String> {
-    short_tokens
-        .iter()
-        .flat_map(|token| token_equivalence_forms(token))
-        .collect()
-}
-
 /// PC22/PC23/PC31/PC32 (05 §1.5 L200, §1.6 L237-239): resolve "the target
 /// tree's `chunking_config_hash`" — the single equality-filter value
-/// `ScopeQueryFilter::chunking_config_hash` binds into both eligibility
+/// target `chunking_config_hash` binding feeds both eligibility
 /// queries. Default/HEAD search (`ancestor_gated=false`) always uses the
 /// live `config.toml` value directly, unconditionally — a HEAD auto-snapshot
 /// always (re-)chunks under it, so no empirical lookup is needed (PC31:
@@ -5070,140 +5297,8 @@ fn resolve_target_chunking_config_hash(
     Ok(resolved.unwrap_or_else(|| live_chunking_config_hash.to_owned()))
 }
 
-/// One vector backend's hits as `(row identity, cosine distance)`, nearest
-/// first — the row identity being a `chunk_id` from `chunk_vec` or an image
-/// object hash from `image_vec`.
-///
-/// Distances rather than ranks, because the two backends are merged into one
-/// rank sequence before anything downstream sees them ([`merge_vector_lane`]).
+#[cfg(test)]
 type VectorLaneHits = Vec<(String, f64)>;
-
-/// Per-scope vector backend: brute-force cosine distance over `chunk_vec`,
-/// joined to `chunks` and filtered by the SAME eligibility predicate the text
-/// backend uses (PC16 — eligibility applies BEFORE the distance ordering and
-/// `candidate_depth` LIMIT, never via `vec0`'s own `MATCH ... k=` internal
-/// top-k, which would let a distance-unfavorable-but-eligible tail starve
-/// out). `chunk_vec` has no ANN index configured (04 §4.3's plain
-/// `float[dim] distance_metric=cosine` vec0 declaration), so `vec0`'s own KNN
-/// query is *already* an unindexed linear scan under the hood — routing
-/// through the `vec_distance_cosine` scalar function directly instead costs
-/// nothing extra and lets the eligibility `WHERE` run first.
-///
-/// It returns DISTANCES rather than 1-based ranks, because the vector lane has
-/// two physical tables now (`chunk_vec` and `image_vec`) and exactly one vector
-/// space (03 §7 / 04 §4.3 — "物理分割は sqlite-vec の制約であって意味的分離では
-/// ない"). Ranking each table separately would let an image at cosine distance
-/// 0.4 tie the best chunk in the corpus for rank 1; [`merge_vector_lane`]
-/// assigns the ranks over the union of the two, which is the one lane the spec
-/// describes. The `(distance, chunk_id)` order this returns is unchanged.
-fn vector_scope_search(
-    conn: &Connection,
-    query_embedding: &[f32],
-    filter: ScopeQueryFilter<'_>,
-) -> Result<(VectorLaneHits, BTreeMap<String, ChunkMeta>)> {
-    if query_embedding.len() != CHUNK_VEC_DIMENSIONS {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    let total = embedding_store::chunk_vec_count(conn).map_err(index_to_kio)?;
-    if total == 0 {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    let query_bytes = f32_to_le_bytes(query_embedding);
-    // PC13 (05 §1.3 L101-106): short-token `instr` eligibility is common to
-    // both backends — applied here too, before `ORDER BY`/`LIMIT
-    // candidate_depth` confirms the vector candidate set, exactly like the
-    // text backend (`execute_fts_tier`). Since 2026-07-22 feedback #2,
-    // `filter.short_tokens` is only ever non-empty for a PURE-SHORT query
-    // (`build_query_plan` empties it outright for a mixed query instead), so
-    // this predicate now only ever fires there — still correct as written,
-    // since it is a pure pass-through of whatever `short_tokens` it is
-    // given. Every placeholder below is
-    // anonymous (`?`, not `?N`) so the dynamic `short_token_clause` can carry
-    // a variable number of its own without renumbering the fixed ones —
-    // `bound` (below) supplies values in the SAME order they appear in the
-    // text. That is why the query vector now binds FIRST: its
-    // `vec_distance_cosine` moved into the SELECT list so the caller can read
-    // the distance, and `ORDER BY` refers to the output alias rather than
-    // repeating the expression — one bind, one evaluation, same order.
-    let sql = format!(
-        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key,
-                vec_distance_cosine(cv.embedding, ?) AS kio_distance
-         FROM chunk_vec cv
-         JOIN chunks c ON c.chunk_id = cv.chunk_id
-         WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?
-             AND EXISTS (
-                 SELECT 1 FROM chunk_config_generations cg
-                 WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?
-                   AND cg.association_rowid <= ?
-                   {config_ancestor_clause}
-             )
-             AND EXISTS (
-                 SELECT 1 FROM kio_eligible_identity eligible
-                 WHERE eligible.raw_hash = c.raw_hash
-                   AND eligible.tool_profile_hash = c.tool_profile_hash
-                   AND eligible.gen = c.gen
-             )
-             AND (? IS NULL OR c.created_at >= ?)
-             {ancestor_clause}
-             {short_token_clause}
-         ORDER BY kio_distance, c.chunk_id
-         LIMIT ?",
-        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
-        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
-        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    let max_rowid_i64 = filter.max_rowid as i64;
-    let max_association_rowid_i64 = filter.max_association_rowid as i64;
-    let candidate_depth_i64 = filter.candidate_depth as i64;
-    // Query-normalization (05 §1.3 L116-123): each short token's own
-    // equivalence forms, flattened in the exact order `short_token_clause`
-    // (above) expects — see `short_token_bind_values`.
-    let short_token_forms = short_token_bind_values(filter.short_tokens);
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
-        &query_bytes,
-        &max_rowid_i64,
-        &filter.chunking_config_hash,
-        &max_association_rowid_i64,
-        &filter.since_cutoff,
-        &filter.since_cutoff,
-    ];
-    for form in &short_token_forms {
-        bound.push(form);
-    }
-    bound.push(&candidate_depth_i64);
-    let rows = stmt.query_map(rusqlite::params_from_iter(bound), |row| {
-        let (chunk_id, chunk_meta) = chunk_meta_row(row)?;
-        Ok((chunk_id, chunk_meta, row.get::<_, f64>(10)?))
-    });
-    let rows = match rows {
-        Ok(rows) => rows,
-        Err(err) if is_vector_capacity_message(&err.to_string()) => {
-            return Err(vector_capacity_error())
-        }
-        Err(err) => return Err(KioError::schema(err.to_string())),
-    };
-
-    let mut hits = Vec::new();
-    let mut meta = BTreeMap::new();
-    for row in rows {
-        let (chunk_id, chunk_meta, distance) = match row {
-            Ok(value) => value,
-            Err(err) if is_vector_capacity_message(&err.to_string()) => {
-                return Err(vector_capacity_error())
-            }
-            Err(err) => return Err(KioError::schema(err.to_string())),
-        };
-        hits.push((chunk_id.clone(), distance));
-        meta.insert(chunk_id, chunk_meta);
-    }
-    Ok((hits, meta))
-}
 
 /// Rank `chunk_vec` and `image_vec` hits as the single vector lane they are.
 ///
@@ -5218,6 +5313,7 @@ fn vector_scope_search(
 /// `ORDER BY`, which keeps a chunk-only corpus byte-identical to what it
 /// produced before images existed. Ids are content hashes from different byte
 /// streams, so the second key is a total order in practice as well as in form.
+#[cfg(test)]
 fn merge_vector_lane(
     chunk_hits: VectorLaneHits,
     image_hits: VectorLaneHits,
@@ -5272,6 +5368,7 @@ fn merge_vector_lane(
 /// The entry is inserted immediately AFTER its chunk so the list stays in rank
 /// order for `fuse_rrf`'s `take(candidate_depth)` window — appending at the end
 /// would drop every image's text term as soon as the text lane was full.
+#[cfg(test)]
 fn give_images_their_chunks_text_rank(
     text_ranks: &mut Vec<BackendRank>,
     image_rows: &BTreeMap<String, ImageCandidate>,
@@ -5316,6 +5413,8 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
 }
 
 /// One image object that can be returned as a search result (05 §1.7).
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone)]
 struct ImageCandidate {
     /// The `image_vec` key — this row's own identity.
@@ -5325,190 +5424,6 @@ struct ImageCandidate {
     /// V6's choice of referencing chunk, whose pointer this row will carry.
     chunk_hash: String,
     meta: ChunkMeta,
-}
-
-/// V6 (05 §1.7): for every image object referenced by a chunk this search can
-/// return, the referencing chunk with the **lowest `chunk_hash` in UTF-8 byte
-/// order**.
-///
-/// # Why the search's own filter and not a bare table scan
-///
-/// "逆引きの探索範囲は検索対象 commit に限る" — `chunks` rows are never deleted
-/// except by purge, so an unrestricted lookup would happily anchor an image to
-/// a chunk of a superseded chunking generation or of a file deleted three
-/// commits ago. [`ScopeQueryFilter`] is the same predicate bundle both backends
-/// use, so the reverse lookup inherits whatever the search is scoped to
-/// (`--at`, `--since`, the cursor's frozen rowid bounds) rather than restating
-/// it and drifting.
-///
-/// # Why one scan rather than one query per image
-///
-/// The narrowing predicate is a single `instr` for the marker every image URI
-/// contains, so a corpus with no figures pays one cheap pass over the eligible
-/// rows and parses nothing. Per-image queries would each be a full scan — a
-/// vector lane returning `candidate_depth` images would run 200 of them.
-///
-/// `ORDER BY c.chunk_id` is what makes the FIRST writer the V6 winner:
-/// `chunk_id` is the chunk object's `chunk_hash` (04 §4.1) and SQLite's default
-/// TEXT collation is BINARY, i.e. UTF-8 byte order. The rejected alternative was
-/// rowid order — `index/sqlite.db` is a rebuildable cache (04 §4.3), so a
-/// citation an Agent stored would point somewhere else after `repair
-/// rebuild-db`.
-fn referencing_chunks_for_images(
-    conn: &Connection,
-    filter: ScopeQueryFilter<'_>,
-) -> Result<BTreeMap<String, ImageCandidate>> {
-    let sql = format!(
-        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
-         FROM chunks c
-         WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?
-             AND EXISTS (
-                 SELECT 1 FROM chunk_config_generations cg
-                 WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?
-                   AND cg.association_rowid <= ?
-                   {config_ancestor_clause}
-             )
-             AND EXISTS (
-                 SELECT 1 FROM kio_eligible_identity eligible
-                 WHERE eligible.raw_hash = c.raw_hash
-                   AND eligible.tool_profile_hash = c.tool_profile_hash
-                   AND eligible.gen = c.gen
-             )
-             AND (? IS NULL OR c.created_at >= ?)
-             AND instr(c.text, ?) > 0
-             {ancestor_clause}
-         ORDER BY c.chunk_id",
-        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
-        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    let max_rowid_i64 = filter.max_rowid as i64;
-    let max_association_rowid_i64 = filter.max_association_rowid as i64;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                max_rowid_i64,
-                filter.chunking_config_hash,
-                max_association_rowid_i64,
-                filter.since_cutoff,
-                filter.since_cutoff,
-                kio_search::object_uri::IMAGE_OBJECT_URI_MARKER,
-            ],
-            chunk_meta_row,
-        )
-        .map_err(|err| KioError::schema(err.to_string()))?;
-
-    let mut by_image = BTreeMap::<String, ImageCandidate>::new();
-    for row in rows {
-        let (chunk_id, chunk_meta) = row.map_err(|err| KioError::schema(err.to_string()))?;
-        // `instr` only says the bytes are in there somewhere; the parser is what
-        // decides a reference is real. A doc quoting an example URI in prose
-        // matches the marker and yields nothing here, which is the whole reason
-        // `extract_related_images` is stricter than the liveness scanner.
-        for image in extract_related_images(&chunk_meta.text) {
-            let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) else {
-                continue;
-            };
-            if !object.is_image() {
-                continue;
-            }
-            by_image
-                .entry(object.hash().to_owned())
-                .or_insert_with(|| ImageCandidate {
-                    image_hash: object.hash().to_owned(),
-                    image_uri: image.image_uri.clone(),
-                    chunk_hash: chunk_id.clone(),
-                    meta: chunk_meta.clone(),
-                });
-        }
-    }
-    Ok(by_image)
-}
-
-/// `image_vec` KNN, nearest first, paired with the referencing chunk each hit
-/// needs before it can be a result row.
-///
-/// An image with no referencing chunk **this search can return** is dropped
-/// rather than anchored to something out of scope: 05 §1.7 requires an image
-/// row to carry a real `evidence_pointer`, and there is no pointer without a
-/// chunk. That is also the whole of the eligibility gate images need — a live
-/// citation is what makes an image live.
-fn image_vector_scope_search(
-    conn: &Connection,
-    query_embedding: &[f32],
-    filter: ScopeQueryFilter<'_>,
-) -> Result<(VectorLaneHits, BTreeMap<String, ImageCandidate>)> {
-    if query_embedding.len() != CHUNK_VEC_DIMENSIONS {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    // A scope last indexed before `image_vec` existed simply has no table. The
-    // search path opens the database directly and never runs `ensure_schema`
-    // (creating tables on a read would be the read path writing to the store),
-    // so this has to be asked rather than assumed — otherwise every search over
-    // an older index dies on "no such table". An absent table means no image
-    // vectors, which is exactly what an empty one means; the next `kio index`
-    // creates it.
-    if !table_exists(conn, "image_vec")? {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    if embedding_store::image_vec_count(conn).map_err(index_to_kio)? == 0 {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    let query_bytes = f32_to_le_bytes(query_embedding);
-    let knn = match embedding_store::knn_image_distances(conn, &query_bytes, filter.candidate_depth)
-    {
-        Ok(knn) => knn,
-        // Same per-scope degradation the chunk lane takes (R10-1(a)): a
-        // sqlite-vec capacity limit costs this scope its image candidates,
-        // never the whole search.
-        Err(error) if is_vector_capacity_message(&error.to_string()) => Vec::new(),
-        Err(error) => return Err(index_to_kio(error)),
-    };
-    if knn.is_empty() {
-        return Ok((Vec::new(), BTreeMap::new()));
-    }
-    let referencing = referencing_chunks_for_images(conn, filter)?;
-    let mut hits = Vec::new();
-    let mut rows = BTreeMap::new();
-    for (image_hash, distance) in knn {
-        let Some(candidate) = referencing.get(&image_hash) else {
-            continue;
-        };
-        hits.push((image_hash.clone(), distance));
-        rows.insert(image_hash, candidate.clone());
-    }
-    Ok((hits, rows))
-}
-
-/// Parse the shared 10-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
-///
-/// Callers that project extra columns append them AFTER these ten — the vector
-/// backend's `kio_distance` is index 10.
-fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> {
-    let chunk_id = row.get::<_, String>(0)?;
-    let heading_path_raw = row.get::<_, Option<String>>(3)?;
-    Ok((
-        chunk_id,
-        ChunkMeta {
-            raw_hash: row.get(1)?,
-            tool_profile_hash: row.get(2)?,
-            gen: row.get::<_, i64>(8)? as u64,
-            heading_path: heading_path_raw
-                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
-            section_id: row
-                .get::<_, Option<String>>(4)?
-                .filter(|value| !value.is_empty()),
-            byte_start: row.get::<_, i64>(5)? as u64,
-            byte_end: row.get::<_, i64>(6)? as u64,
-            text: row.get(7)?,
-            unit_key: row.get(9)?,
-        },
-    ))
 }
 
 /// The figure sizes one normalized unit recorded, keyed by image object hash.
@@ -5629,254 +5544,6 @@ fn significant_related_images(
         .collect()
 }
 
-/// Per-scope text backend (PC8/PC11): run the single FTS5 MATCH query when
-/// `match_expr` is `Some` (>= 1 unit — an original token or one of its
-/// script-boundary sub-pieces, 2026-07-22 feedback #2 — had >= 3 Unicode
-/// scalars), else fall back entirely to the bounded LIKE (`instr`) scan
-/// (every unit was short — trigram MATCH cannot carry them at all, a
-/// pure-short query). The candidate list handed to RRF comes from exactly
-/// one executed query — BM25 order for the MATCH path, deterministic
-/// `instr`/`chunk_id` order for the fallback (05 §1.3 / K2 ruling — no
-/// post-hoc re-ordering by hand-computed features).
-fn fts_scope_search(
-    conn: &Connection,
-    match_expr: Option<&str>,
-    filter: ScopeQueryFilter<'_>,
-) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    match match_expr {
-        Some(match_expr) => execute_fts_tier(conn, match_expr, filter),
-        None => execute_like_fallback(conn, filter),
-    }
-}
-
-/// One FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the
-/// current `chunking_config_hash` (04 §4.6, K8b) joined to `tree_entries`
-/// (05 §1.6) and frozen by `rowid <= max_rowid` (CT3-CURSOR-002). Rank order is
-/// BM25 with column weighting `bm25(chunk_fts, 1.0, 0.3)` — `heading_path` is
-/// down-weighted so a parent heading that propagates to every child chunk does
-/// not dominate the chunk body (legitimate BM25 configuration per the K2 ruling).
-/// Ties break on chunk_id.
-///
-/// PC15/PC17: `candidate_depth` bounds the INNER subquery — a plain FTS5
-/// `MATCH ... ORDER BY score LIMIT` scan with no join/eligibility filter
-/// mixed in, so it stays eligible for fts5's own top-k early-termination path
-/// (the previous single-query shape forced bm25 scoring + the
-/// `chunk_config_generations`/`kio_eligible_identity` correlated `EXISTS`
-/// checks across *every* matching row before the literal `LIMIT 200` could
-/// apply, regardless of how many of those matches were ever eligible — 05
-/// §1.3's "VM step 1,074 → 70,374" cost). The eligibility predicate (including
-/// PC38's ancestor gate) is applied in the OUTER query, over at most
-/// `candidate_depth` rows. R23-17: when non-eligible rows dominate the inner
-/// LIMIT window and starve eligible ones out of it, the inner LIMIT
-/// escalates x4 (bounded, up to 2 extra attempts) — see the bounded-escalation
-/// comment inside the function body.
-fn execute_fts_tier(
-    conn: &Connection,
-    match_expr: &str,
-    filter: ScopeQueryFilter<'_>,
-) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    // PC12/PC13: short-token `instr` eligibility (`short_token_clause`) is
-    // ANDed into this same outer `WHERE`, over at most `candidate_depth` rows
-    // — every placeholder is anonymous so its variable arity does not
-    // renumber the fixed ones (`bound`, below, supplies values in the same
-    // order they appear in this text). Since 2026-07-22 feedback #2,
-    // `execute_fts_tier` only ever runs with `filter.short_tokens` empty
-    // (`fts_scope_search` only reaches here when `build_query_plan` produced
-    // a `match_expr`, which by construction means a mixed query, whose
-    // short units it drops entirely) — `short_token_clause` below is
-    // therefore always `""` in practice today. Left as a live pass-through
-    // (not special-cased away) so this stays correct unchanged if that
-    // invariant ever loosens.
-    let sql = format!(
-        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
-         FROM (
-             SELECT rowid AS chunk_rowid, bm25(chunk_fts, 1.0, 0.3) AS score
-             FROM chunk_fts
-             WHERE chunk_fts MATCH ?
-             ORDER BY score
-             LIMIT ?
-         ) AS ranked
-         JOIN chunks c ON c.rowid = ranked.chunk_rowid
-         WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?
-             AND EXISTS (
-                 SELECT 1 FROM chunk_config_generations cg
-                 WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?
-                   AND cg.association_rowid <= ?
-                   {config_ancestor_clause}
-             )
-             AND EXISTS (
-                 SELECT 1 FROM kio_eligible_identity eligible
-                 WHERE eligible.raw_hash = c.raw_hash
-                   AND eligible.tool_profile_hash = c.tool_profile_hash
-                   AND eligible.gen = c.gen
-             )
-             AND (? IS NULL OR c.created_at >= ?)
-             {ancestor_clause}
-             {short_token_clause}
-         ORDER BY ranked.score, c.chunk_id",
-        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
-        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
-        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    let candidate_depth_i64 = filter.candidate_depth as i64;
-    let max_rowid_i64 = filter.max_rowid as i64;
-    let max_association_rowid_i64 = filter.max_association_rowid as i64;
-    // Query-normalization (05 §1.3 L116-123): see `vector_scope_search`'s
-    // identical comment — same flattened order `short_token_clause` expects.
-    let short_token_forms = short_token_bind_values(filter.short_tokens);
-
-    // R23-17 (05 §1.3 L146-157, 2026-07-22 feedback #3 "有界エスカレーション"):
-    // the inner subquery's LIMIT bounds cost (PC15/PC17 above) but excludes
-    // eligibility (config generation / identity / time / ancestor), so a
-    // MATCH whose bm25-top rows are mostly non-eligible can starve eligible
-    // rows out of that LIMIT window entirely — the L83-84 contract promises
-    // "検索対象集合内の上位 candidate_depth 件", not "raw MATCH top
-    // candidate_depth, eligibility be damned". When the eligible count after
-    // the outer WHERE is still short of `candidate_depth`, re-execute with
-    // the inner LIMIT x4, deterministically, up to 2 extra times (3 attempts
-    // total; worst-case cost <= 1x + 4x + 16x = 21x candidate_depth — still
-    // bounded, per PC15's own cost concern). The common case (>=
-    // candidate_depth eligible on attempt 1) stays exactly one execution.
-    // Row ORDER (bm25 -> chunk_id) is unchanged by escalation; only the
-    // candidate SET's completeness does.
-    let mut inner_limit = candidate_depth_i64;
-    let (ranks, meta) = loop {
-        let mut ranks = Vec::new();
-        let mut meta = BTreeMap::new();
-        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
-            &match_expr,
-            &inner_limit,
-            &max_rowid_i64,
-            &filter.chunking_config_hash,
-            &max_association_rowid_i64,
-            &filter.since_cutoff,
-            &filter.since_cutoff,
-        ];
-        for form in &short_token_forms {
-            bound.push(form);
-        }
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
-            .map_err(|err| KioError::schema(err.to_string()))?;
-        for (index, row) in rows.enumerate() {
-            let (chunk_id, chunk_meta) = row.map_err(|err| KioError::schema(err.to_string()))?;
-            ranks.push(BackendRank {
-                chunk_hash: chunk_id.clone(),
-                rank: index as u64 + 1,
-            });
-            meta.insert(chunk_id, chunk_meta);
-        }
-        let short_of_depth = (ranks.len() as u64) < filter.candidate_depth;
-        if !short_of_depth || inner_limit >= candidate_depth_i64.saturating_mul(16) {
-            break (ranks, meta);
-        }
-        inner_limit = inner_limit.saturating_mul(4);
-    };
-    Ok((ranks, meta))
-}
-
-/// PC11/PC14 (05 §1.3 L95-97, L107-109): the bounded LIKE (`instr`) fallback
-/// — every query token was short (< 3 Unicode scalars), so trigram MATCH
-/// cannot carry any of them (it silently drops sub-3-char phrases) and the
-/// text backend degrades to a full `instr` scan instead. Order is
-/// deterministic and fixed by spec: the FIRST token's match position
-/// ascending, ties broken by `chunk_id` ascending — `ORDER BY` is written
-/// BEFORE `LIMIT candidate_depth` in the SQL text (never the reverse) so the
-/// candidate set itself cannot become LIMIT-order-dependent/non-deterministic
-/// (05 §1.3 L107-109's explicit prohibition).
-fn execute_like_fallback(
-    conn: &Connection,
-    filter: ScopeQueryFilter<'_>,
-) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    let Some(first_token) = filter.short_tokens.first() else {
-        // PC10 already rejects a zero-token query before any scope is ever
-        // reached, so `execute_like_fallback` is only ever called with
-        // `match_expr = None`, which — by construction (`build_query_plan`'s
-        // pure-short branch, 2026-07-22 feedback #2) — sets `short_tokens`
-        // to the query's own (non-empty) raw token list. Kept as a
-        // defensive empty-result rather than a panic in case a future
-        // caller reaches this some other way.
-        return Ok((Vec::new(), BTreeMap::new()));
-    };
-    let sql = format!(
-        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.byte_start, c.byte_end, c.text, c.gen, c.unit_key
-         FROM chunks c
-         WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?
-             AND EXISTS (
-                 SELECT 1 FROM chunk_config_generations cg
-                 WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?
-                   AND cg.association_rowid <= ?
-                   {config_ancestor_clause}
-             )
-             AND EXISTS (
-                 SELECT 1 FROM kio_eligible_identity eligible
-                 WHERE eligible.raw_hash = c.raw_hash
-                   AND eligible.tool_profile_hash = c.tool_profile_hash
-                   AND eligible.gen = c.gen
-             )
-             AND (? IS NULL OR c.created_at >= ?)
-             {ancestor_clause}
-             {short_token_clause}
-         ORDER BY instr(c.text, ?) ASC, c.chunk_id ASC
-         LIMIT ?",
-        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
-        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
-        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    let max_rowid_i64 = filter.max_rowid as i64;
-    let max_association_rowid_i64 = filter.max_association_rowid as i64;
-    let candidate_depth_i64 = filter.candidate_depth as i64;
-    // Query-normalization (05 §1.3 L116-123): the AND-eligibility side gets
-    // every short token's equivalence forms (same as `execute_fts_tier`'s
-    // and `vector_scope_search`'s identical comment). The ORDER BY tie-break
-    // below stays keyed on the literal `first_token` — PC14's "first token's
-    // match position" is a deterministic ordering contract over the query's
-    // OWN tokens, not over whichever equivalence form happened to match, and
-    // no equivalence form is ever a short token in practice (every numeral/
-    // dictionary form is itself >= 3 Unicode scalars), so this is a no-op
-    // simplification, not a behavior gap.
-    let short_token_forms = short_token_bind_values(filter.short_tokens);
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
-        &max_rowid_i64,
-        &filter.chunking_config_hash,
-        &max_association_rowid_i64,
-        &filter.since_cutoff,
-        &filter.since_cutoff,
-    ];
-    for form in &short_token_forms {
-        bound.push(form);
-    }
-    bound.push(first_token);
-    bound.push(&candidate_depth_i64);
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
-        .map_err(|err| KioError::schema(err.to_string()))?;
-
-    let mut ranks = Vec::new();
-    let mut meta = BTreeMap::new();
-    for (index, row) in rows.enumerate() {
-        let (chunk_id, chunk_meta) = row.map_err(|err| KioError::schema(err.to_string()))?;
-        ranks.push(BackendRank {
-            chunk_hash: chunk_id.clone(),
-            rank: index as u64 + 1,
-        });
-        meta.insert(chunk_id, chunk_meta);
-    }
-    Ok((ranks, meta))
-}
-
 fn current_max_rowid(conn: &Connection) -> Result<u64> {
     let value: i64 = conn
         .query_row("SELECT COALESCE(MAX(rowid), 0) FROM chunks", [], |row| {
@@ -5886,28 +5553,41 @@ fn current_max_rowid(conn: &Connection) -> Result<u64> {
     Ok(value as u64)
 }
 
-/// R16-3: the tri-state disposition of a commit's `tree_entries` availability for a
-/// search. Distinguishing "shallow but serviceable from cache" from "shallow with
-/// nothing to serve" is what turns the former `bool` (which silently swallowed a
-/// missing tree on the fresh path into an exit-0 empty page) into a loud, honest
-/// exclusion. "Shallow" here covers BOTH a missing tree object AND a missing commit
-/// object (R16-1): a *deleted* object (KIO-E-STORE-NOT-FOUND-001). A *corrupt*
-/// object (hash mismatch, KIO-E-STORE-CORRUPT-001) is NOT folded in here — it
-/// propagates as `Err` so the search loop's R16-2 per-scope isolation records it as
-/// `store_corrupt` instead.
+/// Every commit for which the writer has retained a source tree projection.
+///
+/// These include commits no longer reachable from HEAD: a user can retain one
+/// under a tag (or leave it disconnected after changing branches) and later
+/// select it with `kio search --at`.  The writer materializes its replica
+/// binding while source SQLite is available; readers must not recreate it.
+fn source_tree_entry_snapshot_commits(conn: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = conn
+        .prepare("SELECT DISTINCT commit_hash FROM tree_entries ORDER BY commit_hash")
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|error| KioError::schema(error.to_string()))
+}
+
+/// R16-3: the tri-state disposition of a commit's source-cache `tree_entries`
+/// availability. Distinguishing "shallow but serviceable from cache" from
+/// "shallow with nothing to materialize" lets source-cache consumers report the
+/// correct command-specific result. "Shallow" here covers BOTH a missing tree
+/// object AND a missing commit object (R16-1): a *deleted* object
+/// (KIO-E-STORE-NOT-FOUND-001). A *corrupt* object (hash mismatch,
+/// KIO-E-STORE-CORRUPT-001) is NOT folded in here and propagates as `Err`.
 enum SnapshotTreeEntries {
-    /// Rows are present (freshly projected or already cached) AND the backing commit
-    /// and tree objects are present. A normal, healthy search proceeds.
+    /// Rows are present (freshly projected or already cached) AND the backing
+    /// commit and tree objects are present.
     Projected,
     /// The commit or tree object is gone, BUT `tree_entries` rows are already cached
-    /// in sqlite. A fresh search can still run against those rows — results are real
-    /// and Evidence resolves via raw_hash/chunk_hash direct resolution (docs/05 §3.6:
-    /// resolving a shallow-commit pointer never fails). A cursor replay still hard-fails.
+    /// in source SQLite. A local source-cache command may still use those rows;
+    /// direct search instead applies its CAS-derived binding filter to the replica.
     ShallowCachedRows,
-    /// The commit or tree object is gone AND no `tree_entries` rows are cached — there
-    /// is nothing to search. A fresh search excludes the scope (`snapshot_shallow`)
-    /// rather than emitting a silent exit-0 empty page (R16-3); a cursor replay
-    /// hard-fails (05 §2.2).
+    /// The commit or tree object is gone AND no `tree_entries` rows are cached, so
+    /// this source relation cannot be materialized. The caller decides its command-
+    /// specific error or partial-result policy.
     ShallowNoRows,
 }
 
@@ -5986,6 +5666,7 @@ fn ensure_snapshot_tree_entries(
 }
 
 /// One projected `tree_entries` row for [`insert_snapshot_tree_entries`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeEntryProjection {
     path: String,
     raw_hash: String,
@@ -5993,13 +5674,12 @@ struct TreeEntryProjection {
     gen: u64,
 }
 
-/// R10-8: insert a commit's projected `tree_entries` rows in ONE transaction. The
-/// lazy projection is read-triggered (search/cursor/short-hash), and the caller
-/// short-circuits when `existing > 0`; a non-transactional loop that crashed
-/// mid-way left a partial row set that `existing > 0` then refused to complete, so
-/// some paths of that commit stayed unresolvable until the next full reindex.
-/// Wrapping the inserts makes the projection all-or-nothing: an interruption rolls
-/// every row back, keeping `existing = 0` so the next read reprojects cleanly.
+/// R10-8: insert a commit's projected `tree_entries` rows in ONE transaction.
+/// Writer-side snapshot materialization short-circuits when `existing > 0`; a
+/// non-transactional loop that crashed mid-way left a partial row set that
+/// `existing > 0` then refused to complete. Wrapping the inserts makes the
+/// projection all-or-nothing, so an interruption keeps `existing = 0` for the
+/// next writer-side materialization attempt.
 fn insert_snapshot_tree_entries(
     conn: &Connection,
     commit_hash: &str,
@@ -6025,58 +5705,6 @@ fn insert_snapshot_tree_entries(
     tx.commit()
         .map_err(|err| KioError::schema(err.to_string()))?;
     Ok(())
-}
-
-/// P10: is the search index caught in the reindex HEAD-advance window? `run_reindex`
-/// advances HEAD to a new generation and only afterwards rebuilds sqlite (temp+
-/// rename, P5). In that window a concurrent search reads HEAD=C_new against the
-/// pre-swap db, whose chunks are all the *previous* generation and so join to none
-/// of C_new's projected `tree_entries` — the search would return an exit-0 empty
-/// page indistinguishable from a genuine no-hit. Detect it precisely: HEAD has
-/// `tree_entries`, not one chunk is live for HEAD, yet the db still holds chunks (an
-/// older generation). Three cases stay false, by construction:
-/// - a genuine miss / any healthy search has a live chunk (fast-path return);
-/// - an empty / text-less scope has no `tree_entries` for HEAD (or no chunks);
-/// - `kio index` re-gens only changed docs, so the unchanged docs' chunks stay live.
-///
-/// Only the all-docs re-gen of `reindex` empties the live set while chunks remain.
-fn index_is_rebuilding(conn: &Connection, snapshot_commit: &str) -> Result<bool> {
-    // Fast path (the common, healthy case): any chunk live for HEAD means the index
-    // is serviceable, so it is not rebuilding — one EXISTS and we are done.
-    let live_exists: i64 = conn
-        .query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM chunks c
-                 JOIN tree_entries te ON te.commit_hash = ?1
-                     AND te.raw_hash = c.raw_hash
-                     AND te.tool_profile_hash = c.tool_profile_hash
-                     AND te.gen = c.gen)",
-            rusqlite::params![snapshot_commit],
-            |row| row.get(0),
-        )
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    if live_exists != 0 {
-        return Ok(false);
-    }
-    // No live chunk. A legitimately empty or text-less scope has no `tree_entries`
-    // for HEAD; an exit-0 empty page is correct there, not rebuilding.
-    let head_has_tree_entries: i64 = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM tree_entries WHERE commit_hash = ?1)",
-            rusqlite::params![snapshot_commit],
-            |row| row.get(0),
-        )
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    if head_has_tree_entries == 0 {
-        return Ok(false);
-    }
-    // HEAD has `tree_entries` yet not one live chunk. If the db still holds chunks
-    // of an older generation, reindex advanced HEAD before swapping in the rebuilt
-    // sqlite — the exact HEAD-vs-sqlite window. (A never-chunked scope has none.)
-    let any_chunk: i64 = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM chunks)", [], |row| row.get(0))
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    Ok(any_chunk != 0)
 }
 
 /// Apply diversify (05 §1.4/§1.8) to the merged candidate pool and report the
@@ -6766,7 +6394,7 @@ fn bilingual_equivalents(token: &str) -> Vec<&'static str> {
 /// iteration order) so a caller can treat "one form" and "several forms"
 /// uniformly. These are the SAME forms injected on both sides the spec
 /// names: the FTS5 MATCH expression (`build_query_plan`, below) and the
-/// short-token `instr` eligibility predicate (`short_token_instr_sql`) — one
+/// short-token eligibility predicate — one
 /// rule, two call sites. A token can match at most one of the two rules in
 /// practice (a numeral is never a `BILINGUAL_TERMS` key), but the function
 /// stays generic rather than assuming that.
@@ -6815,7 +6443,7 @@ fn token_equivalence_forms(token: &str) -> Vec<String> {
 ///   and simpler than, wrapping each unit's own forms in their own
 ///   parenthesized group). Every short unit is dropped OUTRIGHT:
 ///   `short_tokens` comes back empty, so the caller's bounded `instr`
-///   eligibility predicate (`short_token_instr_sql`) never fires for this
+///   eligibility predicate never fires for this
 ///   query at all (05 §1.3 2026-07-22 feedback #2 — the AND-filter this
 ///   superseded excluded documents that never spelled a natural-sentence
 ///   particle/function word, eval M3-2/M3-3's dominant Recall@10 failure
@@ -6854,8 +6482,7 @@ fn build_query_plan(query_nfc: &str) -> QueryPlan {
         // applies here too — a pure-short query was never exempted, but the
         // pre-feedback-#2 code never deduped this branch). A query repeating
         // one short token thousands of times used to generate one SQLite bind
-        // parameter per repetition (`short_token_instr_sql`/
-        // `short_token_bind_values` iterate `short_tokens` once per element),
+        // parameter per repetition in the replica's short-token predicate,
         // risking the SQLite bound-variable limit. Dedup preserves
         // first-occurrence order, so PC14's "first token" ORDER BY tie-break
         // rule is unaffected — the first token survives dedup unchanged.
@@ -7178,6 +6805,14 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
         &normalize_by_path,
         &explicitly_allowed_tier_a,
     )?;
+    if let Some(commit_hash) = &outcome.commit_hash {
+        maybe_inject_replica_after_head_fault("reindex_before_marker")?;
+        // `--regenerate` has the same HEAD-before-rebuild window as `kio index`.
+        // The old replica must fail closed until the replacement source index
+        // and its full projection have been published.
+        mark_replica_rebuilding_or_log(repo.kio_dir(), commit_hash);
+        maybe_inject_replica_after_head_fault("reindex")?;
+    }
     let mut report = rebuild_step3_index(&repo)?;
     // LC42-LC44 (item 2), same ordering rationale as `run_index`'s call.
     recover_index_generation(repo.kio_dir())?;
@@ -7486,10 +7121,10 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     }
 
     append_stored_chunks(repo.kio_dir(), &appended)?;
-    // The SQLite `tree_entries` table (below) is the single source of truth for
-    // live-chunk resolution (search and short-hash resolution both read it via
-    // `ensure_snapshot_tree_entries`). The former JSON projection went stale after
-    // a bare snapshot and is no longer written (L3).
+    // The source SQLite `tree_entries` table (below) is the writer-side cache for
+    // live-chunk resolution and local short-hash resolution. Direct
+    // search uses only replica corpus rows and bindings. The former JSON projection
+    // went stale after a bare snapshot and is no longer written (L3).
     rebuild_sqlite_index(
         repo.kio_dir(),
         &tree_entries,
@@ -8250,13 +7885,12 @@ fn rebuild_sqlite_index(
     } else {
         (Vec::new(), Vec::new())
     };
-    // P5 (docs/05:564): build the new index in a unique temp db and atomically
-    // rename it over sqlite.db. `kio search` takes no store lock and opens
-    // sqlite.db by path, so it must always see a complete db — the old one until
-    // the rename, the new one after. The previous remove_file + in-place rebuild
-    // exposed an empty/half-built window in which a concurrent search returned
-    // exit 0 with 0 results (a silent false negative). The unique temp name also
-    // stops two rebuilders from clobbering one shared `sqlite.db.tmp`.
+    // P5 (docs/05:564): build the new source index in a unique temp db and atomically
+    // rename it over sqlite.db. Writer and local source-cache commands must see a
+    // complete database — the old one until the rename, the new one after. Direct
+    // search does not open this file; it sees only the writer-published replica.
+    // The unique temp name also stops two rebuilders from clobbering one shared
+    // `sqlite.db.tmp`.
     let temp_path = unique_sqlite_temp_path(&path);
     // A residual temp from a crashed rebuild would be reused (and corrupt the new
     // index) by `Connection::open`; start from a clean slate.
@@ -8274,6 +7908,11 @@ fn rebuild_sqlite_index(
         chunking_config_hash,
     ) {
         Ok(()) => {
+            // From the swap onward the old projection no longer describes the
+            // source index.  A strict reader cannot validate or repair it, so
+            // take the existing header out of service before publishing the
+            // replacement and turn it Ready only with the full projection.
+            mark_replica_unavailable_or_log(kio_dir);
             fs::rename(&temp_path, &path)
                 .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
             // 05 §1.8 write-through, placed on the rename rather than in each
@@ -9015,7 +8654,7 @@ fn parse_fail_behavior_name(name: &str) -> Option<SearchFailBehavior> {
 fn enumerate_scope_targets(
     repo: &Repository,
     parsed: &ParsedSearch,
-) -> Result<(ScopeSelectionMode, Vec<ScopeTarget>)> {
+) -> Result<(ScopeSelectionMode, Vec<ScopeTarget>, bool)> {
     if let Some(scope) = &parsed.scope {
         let root = if scope.is_absolute() {
             scope.clone()
@@ -9026,22 +8665,35 @@ fn enumerate_scope_targets(
             let root = root.canonicalize().unwrap_or(root);
             let targets = registry_targets_under(&root)?
                 .unwrap_or_else(|| registry_unavailable_fallback(&root));
-            return Ok((ScopeSelectionMode::Descendants, targets));
+            return Ok((ScopeSelectionMode::Descendants, targets, false));
         }
-        return Ok((ScopeSelectionMode::Scope, vec![scope_target(&root)?]));
+        return Ok((
+            ScopeSelectionMode::Scope,
+            vec![scope_target(&root)?],
+            false,
+        ));
     }
     if parsed.descendants {
         let targets = registry_targets_under(repo.root())?
             .unwrap_or_else(|| registry_unavailable_fallback(repo.root()));
-        return Ok((ScopeSelectionMode::Descendants, targets));
+        return Ok((ScopeSelectionMode::Descendants, targets, false));
     }
     // Default and `--all-scopes` share the same enumeration: every indexed,
     // participating scope in the registry (05 §1.8 / 06 §3, CT3-MULTI-008). The
     // difference between the two is spec-undefined (§C-8) and intentionally none.
     let _all_scopes = parsed.all_scopes;
-    let targets =
-        registry_all_targets()?.unwrap_or_else(|| registry_unavailable_fallback(repo.root()));
-    Ok((ScopeSelectionMode::All, targets))
+    match registry_all_targets()? {
+        Some(targets) => Ok((ScopeSelectionMode::All, targets, true)),
+        // The fallback is deliberately just the current scope.  It is enough
+        // to serve a degraded search, but not an authoritative device-wide
+        // registry snapshot, so callers must not prune replica siblings from
+        // it.
+        None => Ok((
+            ScopeSelectionMode::All,
+            registry_unavailable_fallback(repo.root()),
+            false,
+        )),
+    }
 }
 
 /// Shared by [`registry_all_targets`] and [`registry_duplicate_groups`]
@@ -9267,19 +8919,19 @@ fn scope_id(kio_dir: &Path) -> Result<String> {
         .ok_or_else(|| KioError::schema("scope.json missing scope_id"))
 }
 
-/// Materialize the live chunks of a scope with display metadata (Evidence Pointer
-/// short-hash resolution). Not used for ranking (K2 — ranking reads `sqlite.db`).
+/// Materialize the live chunks of a scope for local Evidence Pointer short-hash
+/// resolution. This is not a `kio search` ranking or candidate path: direct
+/// search obtains both from the device-level replica.
 fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> {
     let repo = Repository::open(&target.repo_root)?;
     let head = repo.head_commit_hash()?.unwrap_or_default();
     if head.is_empty() {
         return Ok(Vec::new());
     }
-    // L3: short-hash / pointer resolution must survive a bare `kio snapshot` that
-    // advances HEAD without refreshing the JSON tree_entries projection. Read the
-    // live entries from SQLite and project the current HEAD lazily, exactly as
-    // search does (`ensure_snapshot_tree_entries`); the old JSON path went stale
-    // right after a snapshot (search succeeded on the same input — the asymmetry).
+    // A bare `kio snapshot` can advance HEAD before the source cache has a
+    // `tree_entries` projection for that commit. This local pointer-resolution
+    // command materializes it before inspecting source rows. It is deliberately
+    // separate from `kio search`, which never repairs or reads source SQLite.
     let db_path = sqlite_path(&target.kio_dir);
     if !db_path.exists() {
         // R23-33 (06 §7 L345-346, same class as R23-14(b)): a missing
@@ -11377,7 +11029,7 @@ fn read_cas_byte_object(
 ///
 /// R23-11 (05-runtime.md §3.5 L934/L942): before trusting an active tail to
 /// hide content, this — the primary resolver entry point
-/// (`purge_blocks_raw`/`enforce_purge_read_barrier`'s shared dependency) —
+/// (`enforce_purge_read_barrier`'s shared dependency) —
 /// now also runs the shared bounded (O(1), no ref-reachability walk)
 /// semantic check: `in_commit` must resolve to a real, verified
 /// `commit_type=purged` commit that actually lists this raw_hash and whose
@@ -11470,6 +11122,61 @@ impl ReadBarrierCheckpoint {
     fn finish<T>(&self, value: T) -> Result<T> {
         self.recheck()?;
         Ok(value)
+    }
+}
+
+/// Recheck only the candidate scopes that remain eligible to cross a search
+/// response boundary.  A normal multi-scope search has already had one chance
+/// to discard a newly blocked scope and retain healthy siblings; this final
+/// pass is intentionally stricter because the response body (including signed
+/// pointers and a cursor) is now complete.  Returning an error drops that
+/// assembled body atomically from the caller's point of view.
+fn recheck_search_response_barriers(
+    late_barriers: &[(usize, usize, ReadBarrierCheckpoint)],
+    exec_scopes: &[ExecScope],
+) -> Result<()> {
+    for (scope_index, _, checkpoint) in late_barriers {
+        if let Err(error) = checkpoint.recheck() {
+            if error.error_code() != "KIO-E-PURGE-JOURNAL-ACTIVE-001" {
+                return Err(error);
+            }
+            let exec = &exec_scopes[*scope_index];
+            if exec.from_cursor {
+                return Err(KioError::new(
+                    "KIO-E-SEARCH-CURSOR-001",
+                    "search cursor active scope is no longer available; re-run without a cursor",
+                    json!({
+                        "reason": "active_scope_unavailable",
+                        "cause": "purge_journal_active",
+                        "scope_id": exec.target.scope_id,
+                    }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Integration-test synchronization point for the narrow interval after the
+/// ordinary candidate check and after all response materialization, but before
+/// the final response-boundary check.  The value is a ready-file path; the
+/// child writes it and waits briefly for the same path with a `.release`
+/// extension.  It is deliberately inert unless the explicitly test-named
+/// variable is set.
+fn maybe_wait_at_test_search_response_barrier() {
+    let Some(ready_path) = std::env::var_os("KIO_TEST_SEARCH_RESPONSE_BARRIER_READY") else {
+        return;
+    };
+    let ready_path = PathBuf::from(ready_path);
+    if fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !release_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
@@ -15932,9 +15639,9 @@ fn run_embedding_enrichment_for_instances(
         let Some(head) = repo.head_commit_hash()? else {
             return Ok(ExecOutcome::default());
         };
-        // `kio snapshot` advances HEAD without projecting tree_entries (search
-        // projects lazily); do the same here or the live-chunk JOIN silently
-        // matches nothing for any scope whose last commit was a snapshot.
+        // A bare `kio snapshot` can advance HEAD without projecting source
+        // `tree_entries`. Enrichment is writer work, so materialize that source
+        // cache relation here before its live-chunk JOIN.
         ensure_snapshot_tree_entries(repo, &conn, &head)?;
         retained_instances_owned = retained_history_instances(repo.kio_dir(), &head)?;
         &retained_instances_owned
@@ -18016,7 +17723,7 @@ fn run_image_embedding_enrichment(
         return Ok(0);
     }
 
-    let embedded = items.len();
+    let mut embedded = 0;
     let Ok(outcome) = run_embedding_adapter(
         execution,
         items,
@@ -18068,6 +17775,15 @@ fn run_image_embedding_enrichment(
             &profile.profile_hash,
         )
         .map_err(index_to_kio)?;
+        embedded += 1;
+    }
+    if embedded > 0 {
+        // `ScopeDelta` only represents chunk-vector additions. Image vectors
+        // also need their image-reference relation, so publish a complete
+        // projection after rotating the source generation.
+        mark_replica_unavailable_or_log(repo.kio_dir());
+        rotate_index_generation_unconditionally(repo.kio_dir())?;
+        write_through_projection_or_log(repo.kio_dir());
     }
     Ok(embedded)
 }
@@ -24233,8 +23949,39 @@ mod tests {
         estimate_embedding_tokens, lane_rate, markdownize_send_lane, parsed_repair, parsed_search,
         query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
-        RepairMode, SearchMode,
+        write_through_projection_with_requested_at, RepairMode, SearchMode,
     };
+
+    #[test]
+    fn replica_write_through_refuses_a_missing_source_index_stamp() {
+        let root = tempfile::tempdir().unwrap();
+        let kio_dir = root.path().join(".kio");
+        std::fs::create_dir_all(&kio_dir).unwrap();
+        std::fs::write(
+            kio_dir.join("scope.json"),
+            r#"{"scope_id":"scope_test_missing_stamp"}"#,
+        )
+        .unwrap();
+
+        let error = write_through_projection_with_requested_at(&kio_dir, &[]).unwrap_err();
+        assert!(
+            error.contains("source index stamp is unavailable"),
+            "a writer must not silently retain a Ready replica when its source index is gone: {error}"
+        );
+    }
+
+    #[test]
+    fn replica_write_through_refuses_an_unresolvable_scope_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let kio_dir = root.path().join(".kio");
+        std::fs::create_dir_all(&kio_dir).unwrap();
+
+        let error = write_through_projection_with_requested_at(&kio_dir, &[]).unwrap_err();
+        assert!(
+            error.contains("source index stamp is unavailable"),
+            "an unresolvable scope must never turn a failed projection into a successful no-op: {error}"
+        );
+    }
 
     /// R23-13 (06 §7 L343-344 "KIO-E-STORE-CONSTRAINT-001 ... permanent・
     /// 非再試行で command を即時中止・exit 4"): `pipeline_to_kio` maps this ONE
@@ -24558,7 +24305,10 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
+                has_image_vec: false,
+                journal_active_at_prepare: false,
                 shallow_skipped: 0,
+                runtime_binding_filter: None,
             },
             SearchedScopeInfo {
                 scope_id: "corrupt".to_owned(),
@@ -24569,7 +24319,10 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
+                has_image_vec: false,
+                journal_active_at_prepare: false,
                 shallow_skipped: 0,
+                runtime_binding_filter: None,
             },
             SearchedScopeInfo {
                 scope_id: "vanished".to_owned(),
@@ -24580,7 +24333,10 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
+                has_image_vec: false,
+                journal_active_at_prepare: false,
                 shallow_skipped: 0,
+                runtime_binding_filter: None,
             },
         ];
 
@@ -24885,98 +24641,6 @@ mod tests {
         let attempt = valid.reserve_file(4).unwrap();
         valid.finish_success(&attempt, 4);
         assert_eq!(valid.remaining_bytes, 6);
-    }
-
-    /// 05 §1.8 (2026-07-24): the cross-scope merge re-fuses the VECTOR term with
-    /// a GLOBAL cosine rank, so a within-scope rank-2 answer whose absolute cosine
-    /// is high outranks another scope's rank-1 whose cosine is low — the exact
-    /// `--all-scopes hit ⟺ within-scope rank == 1` bury this fixes. The text term
-    /// stays per-scope (CT3-MULTI-002). Basis-vector embeddings pin the cosines.
-    #[test]
-    fn cross_scope_merge_regrades_vector_term_by_global_cosine() {
-        use super::{regrade_vector_rank_globally, ChunkMeta, ScoredCandidate};
-        use kio_search::rrf::RrfConfig;
-
-        fn axis_vector(components: &[(usize, f32)]) -> Vec<f32> {
-            let mut vector = vec![0.0f32; super::CHUNK_VEC_DIMENSIONS];
-            for &(axis, value) in components {
-                vector[axis] = value;
-            }
-            vector
-        }
-        fn candidate(
-            scope_id: &str,
-            chunk_hash: &str,
-            vector_rank: u64,
-            embedding: Vec<f32>,
-        ) -> ScoredCandidate {
-            ScoredCandidate {
-                scope_index: 0,
-                scope_id: scope_id.to_owned(),
-                scope_path: std::path::PathBuf::from("/x/.kio"),
-                chunk_hash: chunk_hash.to_owned(),
-                payload: super::ResultPayload::Chunk,
-                rrf_score: 1.0 / (60.0 + vector_rank as f64),
-                text_rank: None,
-                vector_rank: Some(vector_rank),
-                meta: ChunkMeta {
-                    raw_hash: chunk_hash.to_owned(),
-                    tool_profile_hash: "sha256:p".to_owned(),
-                    gen: 0,
-                    heading_path: None,
-                    section_id: None,
-                    byte_start: 0,
-                    byte_end: 1,
-                    text: String::new(),
-                    unit_key: "doc:1".to_owned(),
-                },
-                bindings: Vec::new(),
-                embedding: Some(embedding),
-            }
-        }
-
-        // query = e0. Scope A: a1 cosine 1.0 (A rank-1), a2 cosine ~0.9 (A rank-2).
-        // Scope B: b1 cosine ~0.5 (B rank-1). Per-scope RRF would put a1 and b1
-        // (both rank-1) above a2 (rank-2); global cosine must lift a2 above b1.
-        let query = axis_vector(&[(0, 1.0)]);
-        let mut candidates = vec![
-            candidate("scope_a", "a1", 1, axis_vector(&[(0, 1.0)])),
-            candidate("scope_a", "a2", 2, axis_vector(&[(0, 0.9), (1, 0.436)])),
-            candidate("scope_b", "b1", 1, axis_vector(&[(0, 0.5), (1, 0.866)])),
-        ];
-        let config = RrfConfig {
-            k: 60,
-            w_text: 1.0,
-            w_vector: 1.0,
-            candidate_depth: 200,
-        };
-        regrade_vector_rank_globally(&mut candidates, &query, config);
-        candidates.sort_by(|a, b| {
-            b.rrf_score
-                .total_cmp(&a.rrf_score)
-                .then_with(|| a.scope_id.as_bytes().cmp(b.scope_id.as_bytes()))
-                .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
-        });
-        let order: Vec<&str> = candidates.iter().map(|c| c.chunk_hash.as_str()).collect();
-        assert_eq!(
-            order,
-            vec!["a1", "a2", "b1"],
-            "global cosine must lift scope_a's rank-2 (high cosine) above scope_b's rank-1 (low cosine)"
-        );
-
-        // Single-scope pool: the guard leaves rrf_score untouched (its global
-        // vector rank already equals its per-scope one).
-        let mut single = vec![
-            candidate("scope_a", "a1", 1, axis_vector(&[(0, 1.0)])),
-            candidate("scope_a", "a2", 2, axis_vector(&[(0, 0.9), (1, 0.436)])),
-        ];
-        let before: Vec<f64> = single.iter().map(|c| c.rrf_score).collect();
-        regrade_vector_rank_globally(&mut single, &query, config);
-        let after: Vec<f64> = single.iter().map(|c| c.rrf_score).collect();
-        assert_eq!(
-            before, after,
-            "single-scope pool must be left byte-identical"
-        );
     }
 
     /// 04 §4.3: `chunk_vec` / `image_vec` are one vector space split by a

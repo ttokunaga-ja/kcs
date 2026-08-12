@@ -296,7 +296,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KIO-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`) を **token の独立 field として保持し、かつ §1.8 の query_hash 構成要素にも含める** (query_hash は一方向 hash であり、replay が読み出す行の鍵は token field 側から得る。vector|hybrid のみ — text mode では field 省略)。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KIO-E-SEARCH-CURSOR-001` (再検索が正)。**読み出した行は vector BLOB の sha256 を `target_id` (= query_vector_digest) と再照合する** — 不一致は corruption として当該行を削除し、同じく `KIO-E-SEARCH-CURSOR-001` (query_cache は objects 非由来で fsck / rebuild の検証が及ばないため、読出し時が唯一の検査点 — [04-pipeline.md §4.3](04-pipeline.md)。ただし `kio_format_version` が自己の対応上限より新しい scope では削除を行わず CURSOR-001 へ短絡する — 書込ゼロ規範 [10-operations.md §12.5](10-operations.md))。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は device-local の `${XDG_CACHE_HOME:-$HOME/.cache}/kio/search-query-cache/<query_vector_digest>` に best-effort で保存する（query 本文は保存しない）。digest (= `query_vector_digest`) は **token の独立 field であり、かつ §1.8 の query_hash 構成要素**である (query_hash は一方向 hash であり、replay が読む cache leaf の鍵は token field 側から得る。vector|hybrid のみ — text mode では field 省略)。replay はこの device cache **だけ**から vector を読み、canonical vector bytes の sha256 を digest と再照合する。cache が無い・壊れている・digest 不一致なら `KIO-E-SEARCH-CURSOR-001` (再検索が正) とし、再 embedding も source `.kio/index/sqlite.db` の `embeddings` / `chunk_vec`、CAS の embedding object も読取り・書込みもしない。replay が読む query vector の唯一の入力は上記 device-local cache である。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
 `--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。**vector|hybrid の `--offset` は単一実行内の slice である** (当該実行が取得した query vector に対する確定順序 — CLI 呼び出しを跨ぐ継続は cursor が正。再 embedding の非決定性は cursor の digest 再利用でのみ回避される)。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
 
@@ -326,6 +326,8 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 --since <duration>  --all-history 集合を chunks.created_at >= now - <duration> で絞る
 ```
 
+上表は selector の**論理的な集合規則**であり、`kio search` が source SQLite で実行する SQL ではない。writer / repair は scope resolver の答えを `agg_bindings` に射影する。検索時は履歴 selector と cursor replay だけが source **CAS** から exact binding relation (`raw_hash` / profile / gen / `path_at_commit` / `pointer_commit` / current paths / live) を再解決し、その relation を runtime eligibility filter として `agg_bindings` に交差させる。filter は replica 内の FTS / vector / image 候補 SQL に渡され、`candidate_depth` の前に適用される。これは selector / shallow 確認だけの control-plane read であり、候補の本文・vector・image・Evidence metadata、rank、materialize はすべて既に `aggregator.sqlite` に射影済みの行だけを使う。source `.kio/index/sqlite.db` はこの過程で開かず、CAS の答えから候補データを補充しない。必要な projection marker / binding が無ければ source fallback ではなく fail-closed する。
+
 共通フィルタ: `chunk_config_generations` に**対象 tree の `chunking_config_hash`** の association がある chunk のみ
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
 tree の値で判定する。全 tree が `chunking_config_hash` を持つため代用経路は無い — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
@@ -350,13 +352,19 @@ history projection / include-deleted のいずれも later `latest_normalize_ref
   `path_at_commit` は UTF-8 byte order 最小を使う。live binding が 0 件なら、同じ chunk に対応する
   distinct final-deleted `(path,binding_commit)` を §1.7 の post-ranking group expansion で全件返す
 - `--all-history` / `--since` の「全 commit」は page 1 の `snapshot_commit` から全 parent edge で
-  到達可能な commit に限る。orphan / disconnected tag-only commit は `--at` で明示する。visited set で
-  全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする。
-  **walk 中の shallow 化済み commit (tree 破棄済み — §2.2) は skip し、レスポンスに
-  `shallow_skipped` 件数を可視化して partial (exit 3) とする** — 黙って欠落させない
+   到達可能な commit に限る。orphan / disconnected tag-only commit は `--at` で明示する。visited set で
+   全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする。
+   **`--all-history` / `--since` の all-parent walk と `--include-deleted` の first-parent walk 中にある
+   shallow 化済み ancestor (tree 破棄済み — §2.2) は skip し、レスポンスに `shallow_skipped` 件数を
+   可視化して partial (exit 3) とする**。`--include-deleted` を含め、この partial は all-or-nothing
+   ではない。shallow でない tree から解決済みの live / final-deleted binding は候補・結果に残し、
+   当該 shallow ancestor にしかない alias だけを除外する。削除済み alias を推測・補完せず、黙って
+   欠落させない
 - chunk 行が検索対象になるのは auto snapshot (§8.1 — `kio index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻み、**`chunk_publications` へ `(chunk_id, introduction_commit = 当該 commit)` を追記する** (既存 publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として追記 — [04-pipeline.md §4.1](04-pipeline.md))。新規の config association も同じ commit を `introduction_commit` として刻む。**初回以外の追加 introduction は chunks.jsonl へ publication event 行として同時に append する** ([03-data-model.md §2](03-data-model.md) — rebuild の正本)
 - **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る** (単一の `first_seen_commit` では incomparable な複数導入 — merge の side 枝・独立 import — を表現できないため、判定は publication relation を参照する。relation 自体は SQLite cache であり commit DAG + tree から決定的に再導出できる — [04-pipeline.md §4.1](04-pipeline.md))。**config association にも同条件を適用する** — `chunk_config_generations` の `introduction_commit` が対象 commit の ancestor-or-equal であること (再 chunk 完了前の時点へ後発 association が遡及出現することを防ぐ)。same-gen partial retry の後着 chunk は tree schema v2/v3 (manifest_hash / chunk_set_hash — [03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
-- shallow 化済み commit への `--at` の失敗規則は §2.2
+- shallow 化済みの選択 target への `--at`（cursor replay が固定した selected snapshot を含む）は
+  `KIO-E-COMMIT-SHALLOW-001` で hard-fail する (§2.2)。上の ancestor skip による partial とは異なり、
+  古い replica binding で target tree を代替してはならない
 
 History walk の aggregate security bound は exact に次とする (per-object caps に加算):
 
@@ -399,7 +407,7 @@ commit/evidence restore は ancestry walk を必要としない。
     "budget_paused": true
   },
   "aggregator": {
-    "collection_generation": 41
+    "collection_generation": "sha256:..."
   },
   "results": [
     {
@@ -461,9 +469,9 @@ field `current_path` に同じ値を入れ、identical-byte twins では singula
 path 非依存で 1 行のまま、path alias は snapshot HEAD から全 parent DAG の tree と snapshot HEAD tree
 から導出する。
 
-実装 pipeline は固定する: scope ごとに text/vector を rank → scope 内 RRF し、その候補を cross-scope
-merge → global MMR/`max_per_raw_hash` する。cross-scope merge の RRF は **vector 項のみ global cosine
-順位で振り直す** (§1.8 step 3、text 項は per-scope rank のまま — 2026-07-24)。pre-alias tie は immutable
+実装 pipeline は固定する: aggregate の text / vector / image lane を collection 全体で rank → RRF →
+global MMR / `max_per_raw_hash` → resolver binding の alias 展開、の順に行う。scope ごとの rank、
+cross-scope merge、または vector rank の後段再採点は行わない。pre-alias tie は immutable
 `(scope_id,chunk_hash)` の UTF-8 byte order とする。その確定 semantic position ごとに historical/deleted aliases を展開し、parent
 score/rank をコピーして、group 内を
 `(scope_id,chunk_hash,path_at_commit,evidence_pointer.commit)` の UTF-8 byte order で整列してから paginate
@@ -644,10 +652,15 @@ Agent は `kio open` でバイト列 (キャッシュパス) を得る。base64 
 
 ## 1.8 複数 scope 横断検索 (multi-scope search)
 
-> **この節は目標像を書いている。2026-08-11 時点の実装は追いついていない。**
-> 差分の一覧は本節「[候補選択の所在](#候補選択の所在--replica-未実装2026-08-11-に方針確定)」にまとめてあり、
-> **そこに挙がっていない記述は実装済みと読んでよい**。本節の他の箇所で「〜した」「〜やめた」と
-> 完了形で書いているのは**仕様上の決定**であって実装状況ではない。
+> **2026-08-12 実装更新:** `kio search` の候補選択・採点・結果 materialize は
+> `aggregator.sqlite` の単一路で行う。検索中に `.kio/index/sqlite.db` を開いて refresh / resolver を
+> 再実行しない。完全な replica 射影は writer / repair の責務であり、通常 writer の replica 射影失敗は
+> command を失敗にせず、既存 header があれば `Rebuilding` として検索を fail-closed にする（header が
+> 無ければ projection 欠落として fail-closed、purge は射影完了まで command 自体を失敗にする）。履歴 selector
+> と cursor replay は source **CAS** から exact binding relation を再解決し、それを replica 内の runtime
+> eligibility filter として `candidate_depth` より前に適用する。これは source candidate SQL / materialize /
+> 射影修復への fallback ではない。source CAS はこの selector / shallow 確認と、候補に現れた scope の
+> purge journal / epoch / lifecycle barrier の権威確認にだけ用いる。
 
 デフォルトの `kio search` は scope_registry に登録された全 indexed scope を対象とする ([06-cli-spec.md §3](06-cli-spec.md))。
 
@@ -672,57 +685,46 @@ read replica (`aggregator.sqlite` — [03-data-model.md §4](03-data-model.md)) 
 2. `--scope <path>` 単独指定は canonical root_path の**完全一致** (当該 scope のみ — [06-cli-spec.md §3](06-cli-spec.md) の「カレントフォルダのみ」)。`--descendants` 併用時は self + 「`root_path + '/'` を前置に持つ scope」を対象とする (**path-component 境界で判定** — 単純な文字列前方一致は `/work/a` が `/work/ab` に一致するため用いない)。**canonical root_path の算出規則**: CLI 入力を (1) 絶対化 (cwd 基準)、(2) `.` / `..` の lexical 解決、(3) 末尾 separator 除去、(4) symlink 解決 (realpath) の順で正規化する。比較は **byte 単位** (case-folding しない — case-insensitive filesystem では観測された実 path 表記を正とする)。scope_registry の `root_path` も同一規則で保存する ([10-operations.md §3](10-operations.md))
 3. 到達不能 / stale な scope (外部ドライブ切断等) は skip し、`excluded_scopes` に理由付きで記録する (検索全体はエラーにしない)
 
-### replica の内容 — 「解決済みの集合」を持つ
+### replica の内容 — 解決済み binding を伴う単一コーパス
 
-aggregator は **生テーブルを複製しない**。`chunks` / `chunk_config_generations` / `tree_entries` /
-`kio_eligible_identity` / `first_seen_commit` を全部複製して replica 側で eligibility 述語を組み直すと
-**liveness 判定が 2 箇所になり、必ず乖離する**。代わりに、refresh 時に **scope 側の既存コードが
-解決した答え**を持つ ([03-data-model.md §4](03-data-model.md) 不変条件 7)。
+aggregator は **生テーブルを複製して eligibility を再実装しない**。writer / repair の射影時に scope 側の既存 resolver が
+`current` / `all_history` / `include_deleted` / `at` の各検索条件について解決した答えを受け取り、
+`agg_bindings` として射影する ([03-data-model.md §4](03-data-model.md) 不変条件 7)。この relation は
+`scope_id`、selector 種別、snapshot commit、chunk identity、`path_at_commit`、`pointer_commit`、
+現在 path、live フラグを持つ。config の切替、DAG の分岐・再導入、同一 chunk の複数 alias を
+**scope resolver の出力どおり**表せるため、`first_seen_commit` / `invalidated_commit` だけで履歴の
+可否を推定しない。
 
-これは**答えをどこから得るか**の規範であり、問いを省いてよいという意味ではない (R25-9)。
-**射影の範囲は全 chunk (live + 過去) であり、生存は列として持って `WHERE` で絞る** (2026-08-11)。
-初版は `first_seen_commit IS NOT NULL` の全行を射影したうえで**生存で絞らずに通常検索を当てており**、
-どの検索も返せない行がコーパスの `N` と document frequency を押し上げて生存 chunk の IDF を歪め、
-depth 打ち切りの枠も奪っていた (3 ファイル中 1 つを削除した実測で replica 6 chunk / live 4 chunk)。
-**この差し戻しで是正すべきだったのは射影の範囲ではなく、絞りの欠落である** — 詳細は下表の後の議論。射影は
-per-scope 検索と**同じ関数** (`current_history_plan_from_cache` + `install_eligible_identities`) を呼び、
-同じ述語を使う — ただし liveness でない部分は除く: cursor の `rowid`/`association_rowid` 上限は
-**ページ**の凍結であり、ancestor gate は `--at` のものである。
+`agg_chunks` は全 committed chunk を一度だけ保持する単一の検索表であり、`first_seen_commit` /
+`invalidated_commit` は provenance・診断用 metadata である。候補時の可否は、query ごとの snapshot と
+`agg_bindings` から作る eligible chunk 集合を `WHERE EXISTS` で参照して決める。alias binding を join で
+候補行へ増殖させないため、同じ chunk の複数の履歴 path が rank を重複させることはない。
 
-**全 scope は同一 schema を持つので、replica も 1 表で足りる** — per-scope `chunks` の検索対象列に
-`scope_id` を足したものが `agg_chunks` であり、`agg_fts` はその全体に対する単一の FTS5 である。
+fresh current 検索は durable な `agg_bindings` を使う。対して履歴 selector と**全 cursor replay**は、CAS
+だけで再解決した exact binding relation を request-scoped runtime filter として `agg_bindings` に交差させる。
+この交差は replica connection 内で候補深さより前に評価されるため、後から shallow になった ancestor の
+alias や selector と合わない古い投影を返さない。これは source SQLite を開く fallback でもなく、CAS から候補の本文・
+vector・Pointer metadata を materialize する経路でもない。
 
 | 表 | 内容 |
 | --- | --- |
-| `agg_scopes` | `scope_id` PK / `index_generation` / `refreshed_at` |
-| `agg_chunks` | 解決済みの**全 chunk (2026-08-11 に live 限定をやめた)**: `scope_id` / `chunk_id` / `text` / `heading_path` + **生存区間** (`first_seen_commit` / 失効 commit) |
-| `agg_fts` | `agg_chunks` を external content とする **全 scope 単一の FTS5** — `bm25()` がコーパス全体で計算される |
-| `agg_embeddings` | 全 chunk 分の chunk vector: `chunk_rowid` / `scope_id` / `vector` / `dimensions` |
+| `agg_scopes` | `scope_id` PK / current snapshot・config / `index_generation` / projection の `max_rowid`・`max_association_rowid` / embedding profile / `index_status` / `refreshed_at` |
+| `agg_chunks` | 全 committed chunk を一度だけ保持する検索表。`raw_hash` / profile / generation / text / heading / `section_id` / byte span / unit・作成 metadata を持つ |
+| `agg_fts` | `agg_chunks` を external content とする **全 scope 単一の FTS5** — `bm25()` は常に collection 全体で計算される |
+| `agg_embeddings` | 全 chunk 分の vector: `chunk_rowid` / `scope_id` / `vector` / `dimensions` |
+| `agg_image_embeddings` / `agg_image_refs` | 画像 vector と、その画像を引用する eligible chunk・URI の relation。画像本文用の第 2 FTS は作らない |
+| `agg_bindings` | scope resolver が解決した selector / snapshot ごとの chunk binding。検索対象を選ぶ relation であり、別コーパスではない |
+| `agg_projection_markers` | selector / snapshot の完了 marker。binding 0 行の有効な空答えを cache miss と区別し、config と shallow skip も固定する |
 
-**live と過去を 1 表に持ち、生存で絞るのは `WHERE` 句とする (2026-08-11 確定)。**
-`bm25()` の `N` / df / avgdl は表全体の統計であり `WHERE` では絞れないが、**絞る必要が無い** —
-下記「絞り込み検索」で folder 部分集合について述べているのと同じ規範を、生存部分集合にも当てる。
-行は `WHERE` が落とし、`LIMIT` はその後に効くので、**candidate_depth の枠を過去版が奪うことはない。**
+**live と履歴を分表にしてはならない。**`--include-deleted` は生存・削除済みを同じ順位で返し、
+`--all-history` / `--since` / `--at` も同じ `agg_fts` と vector collection を使う。binding による `WHERE`
+絞り込みは返却候補だけに効き、FTS の `N` / df / avgdl は collection 全体のままである。こうして
+候補深さの上限は eligibility を満たす行に対して適用され、live/history を別 collection の順位として
+混ぜることはない。
 
-**分表にしてはならない。**`--include-deleted` は生存と削除済みを 1 つの順位に混ぜて返す選択子であり、
-2 表に分ければその 2 群が別コーパスで採点され、**互いに比較不能な順位を 1 列に並べる**ことになる。
-これは §1.8 が per-scope について消した欠陥そのものを、live/history へ場所を移して作り直すに等しい。
-
-IDF の歪みについて。初版を差し戻した実測 (上記、replica 6 chunk / live 4 chunk) は
-**N=6 対 N=4 で測ったもの**であり、比が乱高下する最小規模の値である。過去版は同じ文書の別版なので
-語彙分布が生存 chunk とほぼ等しく、`N` と df がほぼ比例して増えるため、**規模が増すほど IDF への
-影響は縮む**。初版の誤りは「全部射影したこと」ではなく、**生存で絞る `WHERE` を持たずに
-通常検索をそのコーパスへ当てたこと**だった。
-
-その結果、**履歴検索も単一コーパスで採点される**ようになる。従前は履歴が
-`fallback_reason = time_selector` で scatter-gather に委譲され、per-scope 順位で融合されていた —
-すなわち §1.8 が消したはずの「scope 間で比較不能な text 順位」が履歴検索にだけ残っていた。
-これはその解消でもある。
-
-**順位を出すのに必要な列しか持たない。** chunk メタ (raw_hash・byte span 等) と `index_generation`
-以外の scope メタは、replica が**候補選択と安全性再確認も担う段階**で必要になるものであり、読み手が
-存在しないうちに置けば「どのコードも参照しない 3,851 行分の列」になる (下記「候補選択の所在」)。
-承認の横断投影 (§1.9) も同様に、その段階で追加する。
+候補 materialize に必要な Evidence Pointer metadata は `agg_chunks` と `agg_bindings` にあり、
+画像候補の引用先も `agg_image_refs` から選ぶ。したがって `Aggregator::search_candidates` が始まった後に
+候補や Pointer を組み立てるため `.kio/index/sqlite.db` を再び開くことはない。
 
 #### 書き込み順序 — 各 scope の索引が先、aggregator が後 (2026-08-11 確定)
 
@@ -733,7 +735,7 @@ IDF の歪みについて。初版を差し戻した実測 (上記、replica 6 c
 
 | 順序 | 中断すると |
 |---|---|
-| **scope → aggregator (規定)** | replica が古いだけ。`index_generation` の食い違いを次の検索の refresh が拾って射影し直す (「実行とマージ」手順 1)。**検索結果は「まだ出ない」であり、出た結果は必ず開ける** |
+| **scope → aggregator (規定)** | writer は完全な replica 射影を試行する。通常 writer の replica 射影が途中失敗しても command は失敗にせず、既存 header があれば `Rebuilding` として検索を fail-closed にする（header 無しも projection 欠落として fail-closed）。purge は replica 消去を確認できなければ command 自体を失敗にする。いずれも検索時に source を読んで補わない。**検索に出た結果は必ず開ける** |
 | aggregator → scope (**禁止**) | **replica が、scope に無い chunk を持つ窓ができる。**検索は replica しか読まないのでその行が結果に出るが、Evidence Pointer は live `.kio` で解決される (08 §3.1) ので**開けない結果**になる |
 
 **検索が replica しか読まないことが、この順序を必須にしている。**replica が先行できると、
@@ -747,82 +749,55 @@ IDF の歪みについて。初版を差し戻した実測 (上記、replica 6 c
 
 #### 更新方式 — 書き手が replica に伝える (write-through、2026-07-25 確定)
 
-**正本を書いた処理が、同じ処理の中で replica にも書く。** 読み手が「変わったかどうか」を
-検知するのではない。**上記の順序 (scope が先、replica が後) を守ること。**
+**正本を書いた処理が、同じ処理の中で完全な scope 射影を replica に書く。** 読み手は
+`index_generation` の差を見て source を開いたり、欠けた binding を補ったりしない。**上記の順序
+(scope が先、replica が後) を守り、射影不能・不完全なら既存 header は `Rebuilding`、header 無しは
+projection 欠落として検索を止める。**
 
-当初は逆向きだった — 検索時に各 scope の `index_generation` を replica のスタンプと比較し、
-差があれば射影し直す。この向きが成立するのは**索引を変えうる全経路が漏れなく回転させる**場合だけで、
-実装を調べると成立していなかった。
+読取り時の lazy refresh は撤去した。replica の世代・必須 binding・本文 metadata が要求を満たさない
+場合、`kio search` は source SQLite へ fallback せず当該 scope を fail-closed とする。通常 writer は
+source 側の成功を取り消さないが、既存 replica header を `Rebuilding` にする。selector の CAS preflight は
+歴史 selector / cursor の runtime eligibility filter を得るための正本確認であり、source から候補や binding を
+materialize / 修復する経路ではない。復旧は `kio index` /
+`kio reindex` / `kio repair` 等の writer が行う。**purge だけは replica の完全消去も command 成功の
+必須条件**である (§3.5)。
 
-| 経路 | live index への書き込み | 回転 |
+| 経路 | live index への書き込み | replica への反映 |
 |---|---|---|
-| 索引の再構築 (`index` / `reindex` / `repair rebuild-db`) | temp DB + rename | あり (新 temp DB が新 ULID を持つ) |
-| purge / lifecycle | in-place | あり (`rotate_index_generation`) |
-| Batch レーンの埋め込み回収 (`batch resume`) | in-place (`chunk_vec`) | **無かった** → あり |
-| 同期レーンの埋め込み (`--realtime`、および `batch resume` 内の enrichment) | in-place (`chunk_vec`) | **無かった** → あり |
-| 内容アドレス再利用の link (API 呼び出し無し) | in-place (`chunk_vec`) | **無かった** → あり |
-| `reindex --at <commit>` の投影 | in-place (`chunks` — **本文**) | **無かった** → あり |
+| 索引の再構築 (`index` / `reindex` / `repair rebuild-db`) | temp DB + rename | 完全射影を試行し、`agg_chunks` / binding / vector / image relation を置換。通常の射影失敗は command を失敗にせず、既存 header があれば `Rebuilding` にする |
+| lifecycle（purge 以外） | in-place | 完全射影を試行。通常の射影失敗は command を失敗にせず、既存 header があれば `Rebuilding` にする |
+| purge | in-place | 完全射影。replica 本文の消去を確認できなければ command を失敗にする |
+| Batch / 同期 enrichment / link | in-place | 完全射影。vector だけの差分適用で検索時の補完を期待しない |
+| `reindex --at <commit>` の投影 | in-place (`chunks` — **本文**) | 完全射影。要求された履歴 binding と、空答えを含む selected target の completed marker を publish |
 
-回転は**コマンドの上端**に置かれる。どの順で呼ばれるか、途中で早期 return しないか、条件付きでないか —
-経路が増えるたびに全コマンドの順序を読み直さないと正しさを保てない。実際 `batch resume` は
-回収 (回転あり) の**後で**同期レーンの enrichment (回転なし) を走らせるので、回転を足しても後段の書き込みは
-取りこぼす。
+write-through は**各 writer の完全性条件**である。`persist_group_vector`、`rebuild_sqlite_index` の rename、
+purge、履歴 reindex を含め、source index を変える経路は最終的に同じ完全射影を試行しなければならない。
+通常 writer の replica 射影失敗は command を失敗にせず、既存 header があれば `Rebuilding` marker として残す。
+header が無い場合も projection 欠落のまま reader を fail-closed とする。purge だけは完全射影を完了できなければ command を失敗にする。
+このため検索時に変化検知や欠損補完を積み残す余地が無い。
 
-write-through は**呼び出しグラフの下端**に置ける。`persist_group_vector` は両レーンが共有する
-唯一の書き込み点であり、`rebuild_sqlite_index` の rename は再構築 3 コマンドが共有する唯一の入れ替え点である。
-書き手が知っていることを書き手が伝えるので、検知を積み残す余地が無い。
+**すべての writer は全置換の完全射影を試行する。** `refresh_scope_with_projection` は対象 scope の
+`agg_chunks`、FTS、chunk / image vector、画像引用 relation、selector / snapshot binding を一つの
+射影単位として delete-then-insert で置換する。本文を変えない vector 更新も例外にしない。差分だけを
+当てて「不足分を次の検索が補う」設計は持たない。
 
-**全置換と差分の使い分けは、書き手が何を知っているかで決まる。**
+完全射影が必要なのは、scope が持たなくなった chunk を確実に落とし、collection の document frequency を
+正しく保つためでもある。部分 projection や generation だけの更新を許すと、本文・binding・vector の
+いずれかが欠けたまま検索に見える。したがって writer は projection の完了を確認してから generation を
+publish する。通常 writer の projection が失敗した場合は source 側の成功を取り消さず、既存 replica
+header を `Rebuilding` にして reader を fail-closed とする。既に不完全な replica を見つけた reader は
+source SQLite を開かず、次の writer / repair に完全射影を要求する。**purge は例外で、replica 本文の
+消去を確認できなければ成功を返さない** (§3.5)。
 
-- **全置換 (`refresh_scope`)** — 索引を丸ごと作り直した経路。temp DB + rename で rowid が総入れ替えに
-  なり、生き残る chunk 集合も任意に変わりうるので、差分では表せない。`reindex --at` と purge も
-  ここに含める (前者は snapshot の投影、後者は chunk・association・vector・orphan embedding の
-  4 層を消すため、正確さがミリ秒より重い)
-- **差分 (`apply_delta`)** — 本文を変えず `chunk_vec` だけを触った経路。書き手は触った chunk を
-  知っているので、読み直しも突き合わせも要らない。パス全体で溜めて**末尾で 1 回**流す
-  (dogfood fixture では 2,321 group あり、group ごとに別 DB の transaction を張るのは無駄)
-
-全置換は upsert ではなく **delete-then-insert** とする。**scope が持たなくなった chunk を落とすため**で、
-残すとその語の document frequency を永久に膨らませ続け、他の全 chunk の IDF を静かに下げる。
-
-**差分が運ぶのはベクタの追加だけである** (R25-7)。かつては purge 用と称する `removed` 欄があり、
-purge はそれを一度も使わなかった — purge は chunk・config association・vector・orphan embedding の 4 層を
-消すため全置換を取る (§3.5)。**書き手が居ないと明記された欄は、「未対応の経路がある」という誤読を招く**
-だけなので削除した。
-
-**差分は「replica が変更前の generation を正確に持っている」ときにだけ書ける。** 差分は変化分しか
-運ばないので、変更前の状態と揃っている replica しか完成させられない。落ちる状態は 2 つあり、
-**当初は前者しか守っていなかった** (R25-3):
-
-- **replica がその scope を一度も複製していない。** 差分は scope を新規に作れず、それでいてスタンプだけ
-  押すと、一度も複製されていない本文について「この scope は最新」と検索に告げてしまう。
-- **replica は何かしら持っているが、この変更が前提とした generation ではない。** write-through が
-  失敗して replica が 1 世代遅れ chunk `b` を欠く → 埋め込みレーンが `b` のベクタを載せた差分を適用 →
-  `b` は無いので skip → **それでもスタンプは現行世代**になり、次の検索は「最新」と判断して射影を飛ばす。
-  **`b` は corpus から恒久的に消える。** 拒否すれば 1 回の射影で済み、受理すれば chunk を失う。
-
-いずれも `apply_delta` が `false` を返し、呼び出し側は**全射影へ落とす** (次の検索まで stale を
-放置しない)。
-
-**in-place で索引を変えた経路は、回転と write-through を 1 つの関数で行う** (`publish_in_place_delta`)。
-どちらか一方だけを行うのは、**2 度見つかった**欠陥である:
-
-- 回転だけして複製しないと、cursor を退役させたうえで次の検索に無駄な再射影をさせる。
-- 複製だけして回転しないと (**R25-4**)、write-through の失敗を**誰も検知できなくなる**。スタンプが
-  動かないので、安全網であるはずの lazy refresh が発火せず、replica は永久に誤ったままになる。
-  再構築経路が自己修復するのは、まさにスタンプが動くからである。
-
-**スタンプは最後に書く。** generation スタンプがこの投影の commit marker であり、
-その手前で落ちた更新はスタンプが古いまま残って次の検索に再射影させる。これが、DB を跨ぐ
-atomic commit 無しで replica を正しく保てる理由である (SQLite の master journal による
-複数 DB の atomic commit は rollback-journal モードでしか働かず、WAL とは併用できない)。
+**スタンプは完全射影の後に書く。** generation スタンプは projection の commit marker である。
+DB を跨ぐ atomic commit が無い以上、途中失敗を「後で読取りが直す」と扱わず、`Rebuilding` marker で
+検索を止めることで整合性を守る。
 
 #### `index_generation` が回転する経路
 
-回転は 2 つの理由で必要である。**LC25 (outstanding cursor の無効化)** — 順位が変わりうる変更は
-replay 中の cursor を退役させなければならない。そして **replica の自己修復** — スタンプは replica の
-唯一の staleness 信号なので、write-through が失敗したときに次の検索へ再射影させられるのは、
-スタンプが動いた場合だけである (R25-4)。**索引を in-place に変える全経路が回転する。**
+回転は cursor を無効化するために必要である。順位が変わりうる変更は replay 中の cursor を
+退役させなければならない。**索引を in-place に変える全経路が回転し、その writer が完全射影を
+publish する。**スタンプは reader-side repair の信号ではない。
 
 1. 索引の再構築 — 新しい temp DB に新 ULID を入れて rename する
 2. lifecycle / purge (`rotate_index_generation`)
@@ -833,166 +808,108 @@ replay 中の cursor を退役させなければならない。そして **repli
 5. **`reindex --at <commit>` の投影** (2026-07-26 追加) — 本文 corpus を再公開する以上、cursor replay の
    順位が変わりうるのは当然である
 
-**回転させないもの**: 差分が空のとき。全 member が secrets hold の group は `content_vectors` 行を
-書くが `chunk_vec` には link しない ([03-data-model.md §4](03-data-model.md) 不変条件 8)。検索は
-`chunk_vec` を読むので、どの replay も順位を変えられない — LC25 が求める回転は無い。
+**回転させないもの**: 検索 collection / binding / vector が変わらない更新。全 member が secrets hold
+の group は `content_vectors` 行を持っても検索用 vector を公開しない
+([03-data-model.md §4](03-data-model.md) 不変条件 8) ため、cursor の順位を変えない。
 
 ### 実行とマージ
 
-1. **refresh (修復経路)**: registry の全 scope について `index_generation` を比較し、差分のある scope
-   だけ射影し直す。**通常はここで何も起きない** — write-through が済んでいるので差分はゼロである。
-   残してあるのは、write-through が届かなかった場合 (replica の削除、cache root ごとの消失、書き込み失敗、
-   write-through 導入前に索引された scope) を検索が自力で埋めるためで、**replica が cache であること
-   ([03-data-model.md §4](03-data-model.md)) を成立させているのはこの経路**である。
-   到達不能な scope は `agg_scopes` から落とし `excluded_scopes` に理由を積む。並列度は min(4, 差分 scope 数)、
-   per-scope timeout は 2 秒 (いずれも config で上書き可) — **per-scope 検索と同じ `[search.multi_scope]` の
-   worker pool を使う** (R25-8。2026-07-26 まで直列ループで timeout も無かった)。**並列化するのは読み取りだけで
-   書き込みは直列**である: ここでの費用は scope ごとに `.kio` を開くこと (初回射影の実測は 428 scope で 2.3 秒) であり、
-   `Aggregator` は SQLite 接続を 1 本しか持たないので、2 本目は並列化ではなく同一ファイルの奪い合いになる。
-   timeout が必要なのは、切断されたドライブ上の読めない scope が検索を無限に開いたままにしないためである。
-   **`agg_scopes` の刈り込みは all-scopes 検索でのみ行う** — `--scope` / `--descendants` の
-   `searched` は device の意図的な部分集合であり、それに合わせて刈ると**ユーザーが対象外にした scope を
-   replica から削除**してしまう。絞り込み検索は collection を読むのであって定義し直すのではない
-2. **単一コーパスで採点**: text 項は `agg_fts` 全体に対する 1 回の `bm25()`、vector 項は
-   `agg_embeddings` 全体に対する cosine。いずれも candidate_depth 件まで。**両者は同一母集団に対する
-   順位**なので RRF で直接加算できる (手順 4)
-3. **purge barrier の再確認 (結果件数に比例、2026-08-11 に 3 点から 1 点へ縮小)**:
-   候補を出した scope についてのみ live `.kio` を開き、**purge journal 非活性 (§3.5)** を確認する。
-   失敗した scope の候補は捨て、`excluded_scopes` に理由を記録し、次順位から補充する。
+1. **projection 完全性と selector の事前確認**: `kio search` は `agg_scopes` と `agg_bindings` を
+    確認し、要求 selector / snapshot に必要な完全 projection がある scope だけを参加させる。欠落・
+    不完全・`Rebuilding` の projection は source SQLite を開いて refresh せず fail-closed とする。`--at` 等の
+    canonical target / shallow 判定には source CAS を正本として用いてよい。履歴 selector と cursor replay は
+    同じ CAS planner から exact binding relation を得て request-scoped runtime filter にする。この filter は
+    `agg_bindings` と交差させるだけであり、chunk / binding / metadata を source SQLite から読み出したり
+    replica を修復したりする経路ではない。
+2. **単一コーパスから候補を選択して採点**: `Aggregator::search_candidates` は query snapshot と
+    `agg_bindings`（履歴 / cursor では上記 runtime filter との交差）から eligible chunk を作り、`agg_fts` の
+    1 回の `bm25()`、`agg_embeddings` の cosine、および短語の bounded `instr` を collection 全体に対して
+    実行する。この eligibility を満たした行に対して各 lane の candidate_depth を適用し、得た global rank を
+    RRF で直接加算する。
+3. **purge barrier（候補 scope のみ）**: replica が候補を選んだ**後**、候補に含まれる distinct scope だけ
+   `ReadBarrierCheckpoint::open` を行う。active purge journal を検出した scope は、その全候補を除外して
+   `excluded_scopes` に記録する。通過した checkpoint は応答境界の直前に `recheck()` し、実行中に
+   journal / purge epoch / lifecycle epoch が変わった scope は、その body を返却せず同様に除外する。これは per-scope 候補生成に
+   埋め込まれた旧 barrier ではなく、replica 候補経路の一部である。live `.kio` の control record を
+   読む安全確認であって、source SQLite / CAS から候補や Evidence metadata を取り直す fallback ではない。
 
-   **`kio_format_version` と `index_generation` はここで再確認しない。**両者は scope を
-   開く時点の**入口ガード**であり、返却の直前に取り直す価値が無い — refresh (手順 1) が
-   既に見ており、再確認が捕まえるのは「**この検索の実行中に**変わった」窓だけである。
-   その窓で負けたときに起きるのは古い行が 1 つ残ることで、**その行の pointer は
-   参照解決の時点で完全な安全確認を通る** ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
-   結果行は本文を持たない (§1.7.1) ので、内容が漏れる経路も無い。
-   **purge だけを残すのは、purge が法務・秘匿の操作であり、文書名だけでも意味を持つため**である。
+   **replica に安全性判定を委ねてはならない** ([03-data-model.md §4](03-data-model.md) 不変条件 6)。
+   ただし毎回全 scope を開くのではなく、候補を出した scope だけ検証するため、検証コストは候補ページの
+   distinct scope 数に比例する。回帰テスト `ct3_multi_021_replica_candidates_exclude_an_active_purge_scope`
+   は、この barrier を外すと active journal の scope が結果へ戻ることを検出する。
 
-   **実装はこの縮小後の形で既に書かれている** (2026-08-11 確認)。purge barrier は
-   `ReadBarrierCheckpoint` の open / scope 返却直前の recheck / 全 scope マージ後の
-   第 3 バリアの 3 点を持つ一方、版検査と `INDEX_REBUILDING` 判定はいずれも候補生成前の
-   一回きりのガードである。**3 点を返却直前に確認する実装は存在したことがない。**
-   **replica に安全性判定を委ねてはならない** ([03-data-model.md §4](03-data-model.md) 不変条件 6) —
-   staleness がそのまま「死んだ Evidence Pointer を返す」「purge 中の scope を読む」に化けるためである。
-   かといって毎回全 scope を開けば replication の意味が無い。**候補を出した scope だけ検証する**ので、
-   コストは `O(結果ページの distinct scope 数)` であり scope 総数に依存しない
+#### 候補選択の所在 — replica（2026-08-12 実装済み）
 
-#### 候補選択の所在 — replica (未実装、2026-08-11 に方針確定)
+**多 scope 検索の候補選択・採点・materialize はすべて replica が行う。** `kio search` は
+scope 数や時間選択子で候補生成経路を分岐させず、source SQLite を読んで lazy refresh しない。
+`Aggregator::search_candidates` は `agg_fts`、`agg_embeddings`、`agg_image_embeddings`、
+`agg_image_refs`、`agg_bindings`、および歴史 selector / cursor に渡された request-scoped CAS filter だけから
+候補を作る。filter は aggregator connection 内の一時 relation であり、source index を読む第 2 の候補経路ではない。
 
-**多 scope 検索の候補選択・materialize・採点はすべて replica が行う** ([03-data-model.md §4](03-data-model.md)
-不変条件 7)。per-scope 経路を多 scope 検索から呼んではならない。
+返却する candidate には text / vector の global rank、Evidence Pointer の全 metadata、解決済みの履歴
+binding が含まれる。よって候補 materialize で scope index を引き直さず、`--all-history`、`--since`、
+`--include-deleted`、`--at` でも CAS が許した alias だけを返す。shallow ancestor を skip した履歴は
+`shallow_skipped` を伴う partial であり、読める tree の healthy binding は返したまま、古い durable binding
+から alias を補完しない。pure-short query は
+aggregate 上の bounded `instr` レーンを用い、FTS5 の trigram 下限によって別経路へ落ちることはない。
 
-**この節は仕様であって現状ではない。**2026-08-11 時点の実装は候補の選択と materialize を
-依然 per-scope 経路が行っており、replica は手順 2 の採点と手順 1 の統計だけを担って候補を返さない。
-**未実装であることを、この見出しに明記し続けること** — 01/03/10/docs README は目標像を
-無条件に書いており、実装状況を留保しているのはこの節だけである。実装が追いついた時点で
-この段落ごと削除する。
-
-実装に必要なもの (この 5 つが揃うまで per-scope 経路は消せない):
-
-| # | 内容 |
-|---|---|
-| 1 | `agg_chunks` に**生存区間**の列 (`first_seen_commit` / 失効 commit) を足し、射影を全 chunk に広げる |
-| 2 | `agg_chunks` に **`raw_hash` / byte span / `section_id`** を足す — 無いと Evidence Pointer を組み立てられず、候補を返せない (`crates/kio-index/src/aggregator.rs` は順位に要る列しか持たない) |
-| 3 | replica 側の**短語レーン** — `agg_chunks.text` への bounded LIKE。per-scope と同じ述語を用いる |
-| 4 | replica が候補を返す経路。これが入った時点で **scope 数によらず** per-scope 呼び出しを検索から削除する (`.kio/index/sqlite.db` は検索面ではない) |
-| 5 | **手順 3 (purge barrier) を replica 経路側に持たせる。**現在は per-scope 経路のコードパス (`ReadBarrierCheckpoint`) に埋まっており、replica が候補を返すようになると誰も呼ばなくなる |
-| 6 | **`aggregator_decline_reason` を関数ごと削除する。**条件がゼロになった (`single_scope` も 2026-08-11 に撤回)。実装は今も 4 条件を返す |
-| 7 | **`aggregator` object から `applied` / `fallback_reason` を削除する** (`collection_generation` だけ残す)。§1.7 の応答契約と、それを固定している契約テスト (`ct3_multi_014` / `ct3_multi_015` が撤回済みの値を期待値にしている) を同時に直す |
-
-さらに、**撤回済みの規範を実装が明示的に適用し続けている箇所がある** — `regrade_vector_rank_globally`
-の doc comment が「撤回された CT3-MULTI-002 がこの経路では引き続き支配する」と書いている。
-経路ごと消えるので、コメントと関数の両方が落ちる。
-契約テスト `ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row` は
-**不変条件 7 が禁じた「live だけを持つ」状態を固定している** — 項目 1 と同時に書き換えること。
-
-5 を落とすと**検査が消えたことに誰も気付かない** — per-scope 経路の削除と同じ変更で、
-その副作用として満たされていた barrier が外れるためである。**4 と 5 は同一の変更で行うこと。**
-
-移行が完了すると、per-scope の `candidate_depth` 打ち切りも解消される — 現行は各 scope の上位
-candidate_depth 件しか融合に届かず、その打ち切りは**per-scope 順位で**行われるため、chunk 数が
-candidate_depth を超える scope では corpus 全体では上位に来る chunk が自 scope 内順位で落ちうる。**scope 数に比例する検索レイテンシ
-(実測 428 scope で 1.2 秒、ほぼ全部が `.kio` を開くコスト) が縮むのもこの段階である。**
-4. 統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。**text 項・vector 項はいずれも単一コーパス上の GLOBAL rank である (2026-07-25)** — replica が 1 つの collection なので、per-scope 順位という概念自体が存在しない。text は `agg_fts` 全体に対する 1 回の `bm25()`、vector は `agg_embeddings` 全体に対する cosine 順位で、両者は同一の母集団に対する順位なので RRF で直接加算できる。**「BM25 の raw スコアを scope 間で比較・正規化してはならない」という旧規範 (CT3-MULTI-002) は撤回する** — 複数コーパスが存在しなくなったので前提が消えた。raw スコアの正規化を行わない点は変わらない (rank へ落としてから融合する)。**2026-08-11: 「fallback の scatter-gather 経路に限り旧規範が引き続き適用される」という但し書きを削除した** — 多 scope の scatter-gather 経路が無くなり、検索は scope 数によらず単一コーパス (`agg_fts`) を引くため、旧規範の適用先が消えた。
+この直接経路と candidate-scope purge barrier は同じ実装単位である。候補を replica から返す変更だけを
+先に行うと barrier が消えるため、active purge journal を除外する回帰テストを常に維持する。
+4. **統合と materialize**: text / vector / image の各 lane が単一 collection で返した global rank を
+   RRF で直接加算する。pre-alias の同点は immutable `(scope_id, chunk_hash)` で安定化し、resolver binding を
+   展開して Evidence Pointer を組み立てる。per-scope rank の比較、BM25 raw score の正規化、または後段の
+   global 再採点は行わない。
 5. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
    `[search]` 実効値 (**default_mode** / rrf / diversify / candidate_depth / fail_behavior) は
    user config (device 層) を用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で
    異なる folder 値の統合は定義しない。cursor が bind する実効値 (§1.5) もこの解決に従う —
    **ただし fail_behavior は挙動方針であり確定順序に影響しないため bind / query_hash preimage の
    対象外**)
-6. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--mode vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+6. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--mode vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope の source SQLite には一切書き込まない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
-### aggregator が答える条件と fallback
+### replica の候補経路と cursor
 
-aggregator は既定検索 — 次を**すべて**満たすもの — を答える。**この条件は
-`aggregator_decline_reason` が実装する** (R25-1/R25-2 — 2026-07-25 まで規範のみ存在し実装が無かった)。
+aggregator を使うかどうかを決める decline / fallback 分岐は存在しない。single scope、複数 scope、
+および全ての時間選択子は、同じ aggregate candidate query を使う。集約後に per-scope rank を再採点する
+処理も無く、各 lane が返す collection 内の rank をそのまま RRF に渡す。
 
-- 参加 scope が 2 つ以上ある (1 つならその scope 自身が collection であり、再採点は tie-flip の
-  risk しか生まない、というのがその理由だった。**2026-08-11 に撤回** — 再採点という概念が
-  無くなったためである。replica が唯一の採点主体になった以上、そこに flip する相手の順位が
-  存在しない。`aggregator_decline_reason` は**条件がゼロになったので関数ごと消える**)
-- ~~時間選択子が無い (`fallback_reason = time_selector`)~~ — **2026-08-11 に撤回。**
-  replica が live 限定をやめ、生存区間の列を持つ全 chunk を射影するようになったので
-  (上記「replica の内容」)、履歴検索が探す chunk は replica にある。撤回前の理由は
-  「replica は live chunk のみを保持するので、`apply_global_ranks` が不在を『順位なし』と読んで
-  項を 0 に落とし、**削除された答えが「まだ存在するだけの chunk」より下に沈む** (北極星 M3-3)」
-  であり、**それは live 限定射影の帰結であって時間選択子の性質ではなかった。**
-  むしろ委譲した先の scatter-gather では per-scope 順位で融合されるため、
-  §1.8 が消したはずの scope 間比較不能性が**履歴検索にだけ残っていた**。
-  (`--at` は PC59/PC60 により単一 scope 必須なので、この撤回が効くのは残る 3 選択子である。)
-- ~~融合に加算されるレーンをすべて replica が採点できる (`fallback_reason =
-  text_lane_not_rankable` / `vector_lane_not_rankable`)~~ — **2026-08-11 に撤回。
-  条件ではなく replica 側の要件とする。**
+**pure-short query**（全 unit が FTS5 trigram 下限未満）も同じ経路である。query の同値形ごとに
+`agg_chunks.text` の bounded `instr` 述語を作り、eligible binding を満たす行から決定的な順序で
+`candidate_depth` 件を選ぶ。日本語の 2 文字語を含め、短語だから source 側の検索へ切り替わることはない。
 
-  撤回前は、**pure-short query** (全 unit が trigram 下限の 3 文字未満 — `build_query_plan` が
-  `match_expr = None` を返す) で text レーンが採点不能になり、scatter-gather へ委譲していた。
-  **日本語では 2 文字語 (認証・設計・課金・障害・監査) が最も普通のクエリ長である。**
-  すなわち**最も普通のクエリ形が常に委譲側を通っており、フォールバックとして機能していなかった。**
-  委譲先では per-scope 順位で融合されるため、§1.8 が消すために作られた欠陥が
-  そこで復活していた — 「片方だけを global に置き換えると欠陥が復活する」という
-  撤回前の理由は正しいが、**その帰結は委譲ではなく、両レーンを replica で採点可能にすること**である。
-
-  **要件: `agg_chunks.text` に対する bounded LIKE 走査を replica 側に持つ。**
-  per-scope 側の短語経路 (§1.1 の `instr` ベース、`candidate_depth` 上限) と**同じ述語**を用いる —
-  2 つの実装を持てば短語検索の結果が経路によって変わる。
-- cursor が凍結済み commit を再生しているのではない (page 1、または replica 世代が cursor と一致する
-  page N)。**cursor は `collection_generation` — replica が保持する全 scope とその `index_generation`
-  の hash — を凍結する**。per-scope の `index_generation` は各 scope の**行**を固定するが、global BM25 は
-  collection 全体の df/`N`/`avgdl` も読むため、**誰も検索していない folder を index しただけで検索した
-  scope の順位が動く**一方で per-scope stamp は一致したままになる。不一致は
-  `KIO-E-SEARCH-CURSOR-001` / `reason = collection_generation_mismatch` (PC19/PC21 の per-scope
-  不一致と同じ救済 — cursor 無しで再実行する)。**多 scope 検索は必ず replica が採点するので
-  (`fallback_reason` の廃止、下記)、`collection_generation` を持たない多 scope cursor は存在しない。**
-  撤回前は page 1 が委譲側で応答しえたため `cursor_pinned_scatter_gather` で page N 以降を
-  委譲側に固定していたが、**受け皿ごと不要になった。**検索は scope 数によらず replica を引くので、
-  `collection_generation` は常に存在し、page 1 から一貫している (途中で経路が変わらない)。
+**cursor は `collection_generation` を常に凍結する。**これは replica が保持する全 scope と各
+`index_generation`、投影された `max_rowid` / `max_association_rowid` の hash である。global BM25 は collection 全体の df / `N` / `avgdl` を読むため、
+検索対象外の scope を index しただけでも順位は変わり得る。generation が一致しなければ
+`KIO-E-SEARCH-CURSOR-001` / `reason = collection_generation_mismatch` とし、cursor 無しの再実行を案内する。
+全ページが同じ replica 経路を通るので、`collection_generation` を持たない search cursor は存在しない。
 
 **cursor replay は collection を再定義しない。** `--scope`/`--descendants` が replica を prune しないのと
 同じ理由で、replay の scope 集合は page 1 が凍結した古い一覧であり、それを権威として page 1 以降に登録
 された scope を追い出してはならない (追い出すと `collection_generation` が page 1 の値へ復元され、
 検出すべき collection 変化そのものを隠す)。
 
-**絞り込み検索の採点は「行」を絞り「統計」は絞らない。** `--scope`/`--descendants` では
-`text_scores`/`vector_scores` は**参加 scope の行だけ**を返す。深さ打ち切り (`candidate_depth`) を
-device 全体で取ると、device 全体では下位に沈む subtree は 1 行も返らず、全候補が text 項を失い、融合は
-`(scope_id, chunk_hash)` の tie-break へ落ちる — **hash 順に並んだ結果**である (dogfood corpus 実測:
-既定 depth 200・クエリ `the ` で、一致 chunk を持つ 263 scope のうち打ち切りが届くのは 76 scope、
-残る 187 scope の絞り込み検索は 0 点しか返さなかった)。一方 BM25 の df/`N`/`avgdl` は `agg_fts` 全体の
-統計であり、join 側の `WHERE` では絞れない — 絞る必要も無い。**部分集合ごとに統計を取り直せば
-folder ごとが再び別 collection になり、この replica が消した per-corpus IDF が戻る。**
+ただし cursor replay も CAS-only の selector preflight を省略しない。page 1 が固定した snapshot から
+exact binding relation を再解決し、runtime filter を replica の eligibility に `candidate_depth` 前で交差させる。
+replay 後に shallow になった selected snapshot は hard-fail、history / include-deleted の shallow ancestor は
+`shallow_skipped` を伴う partial とする。いずれも source SQLite を開いて page 1 の durable binding を補完しない。
 
-**多 scope の scatter-gather 経路は廃止する (2026-08-11 確定)。**残る decline 条件は
-`single_scope` も含めて**ゼロ**である。`aggregator_decline_reason` は関数ごと消える。
+**絞り込み検索の採点は「行」を絞り「統計」は絞らない。** `--scope` / `--descendants` は
+`Aggregator::search_candidates` が作る eligible chunk 集合を絞るため、aggregate candidate query は
+参加 scope の行だけを返す。candidate_depth はこの eligibility の後に適用し、source 側の per-scope SQL を
+実行しない。一方 BM25 の df / `N` / `avgdl` は `agg_fts` 全体の統計であり、部分集合ごとに
+統計を取り直さない。そうすると folder ごとに別 collection を作り直し、replica が除いた per-corpus IDF の
+不整合を復活させるためである。
 
-### 検索は `.kio/index/sqlite.db` を引かない (2026-08-11 確定)
+### 検索は `.kio/index/sqlite.db` を引かない (2026-08-12 確定)
 
 **経路は 1 本だけである。scope 数によらず、検索はアプリ配下の統一 SQLite
 (`aggregator.sqlite`) を引く。**
 
 | 用途 | 読む先 |
 |---|---|
-| **検索 (`kio search`)** | **`aggregator.sqlite` のみ** |
-| replica への射影 (refresh) | 各 scope の `.kio/index/sqlite.db` |
+| **検索の候補選択・採点・materialize (`kio search`)** | **`aggregator.sqlite` のみ** |
+| selector / shallow の CAS preflight（履歴 / cursor の runtime eligibility filter を含む）、候補 scope の purge barrier | 各 scope の source CAS / control record（filter は replica の candidate_depth 前に交差。候補 SQL・射影修復には使わない） |
+| writer / repair による replica 射影 | 各 scope の `.kio/index/sqlite.db` |
 | scope 内の索引構築・`kio repair` 等の保守 | 同上 |
 
 **`.kio/index/sqlite.db` は検索面ではない。****同じ問いに答える派生索引を 2 つ持てば、
@@ -1001,7 +918,10 @@ folder ごとが再び別 collection になり、この replica が消した per
 #### では per-scope の索引は何のためにあるか — replication の複製元である
 
 検索が読まないからといって不要ではない。**aggregator から見れば、per-scope の
-`.kio/index/sqlite.db` が複製元 (正本) である。**射影 (refresh) はこれを読む。
+`.kio/index/sqlite.db` が複製元 (正本) である。**writer / repair の完全射影だけがこれを読む。**
+
+`kio search` はこの複製元を開かない。header が `Rebuilding` または required binding 不足なら
+fail-closed とし、次の writer / repair に完全射影を要求する。
 
 **そしてこれが `.kio` の中にあることが、フォルダの可搬性を成立させている (2026-08-11 記録)。**
 フォルダごと別の場所・別の device へ移すと索引も一緒に動くので、移動先の aggregator は
@@ -1020,16 +940,13 @@ folder ごとが再び別 collection になり、この replica が消した per
 1. **経路が 1 本なら、経路差による挙動の違いが原理的に発生しない。**2 本あれば、
    短語の扱い・tie-break・`candidate_depth` の効き方が経路ごとに分岐しうる
 2. **権限と purge barrier の確認箇所が 1 つで済む。**2 本あれば両方に置く必要があり、
-   片方に入れ忘れても気付かない (この失敗の実例が本節の「候補選択の所在」項目 5)
-3. **撤回前の `single_scope` の理由 (再採点は tie-flip の risk しか生まない) は、
-   2 経路を前提にした議論だった。**replica が唯一の採点主体になれば、flip する相手が存在しない
+   片方に入れ忘れても気付かない。replica 経路の回帰テストが active purge journal の scope を明示的に除外する
+3. **collection が 1 つなら rank の意味も 1 つである。**scope 数を理由に採点主体を変える必要がない
 
-**`aggregator.fallback_reason` を削除する** (§1.1 の text fallback が使う**トップレベルの**
-`fallback_reason` とは別のフィールドであり、そちらは残る)。委譲先が無いので理由も無い。
-検索応答の `aggregator` object は **`collection_generation` だけ**を残す — cursor が凍結する
-対象であり、ページ間で collection が動いたことの検出に要る (§1.5)。`applied` は**常に真**、
-`fallback_reason` は**取りうる値がゼロ**になったので、どちらも列として残さない。
-`cursor_pinned_scatter_gather` も同時に消える。
+検索応答の `aggregator` object は **`collection_generation` だけ**を持つ — cursor が凍結する
+対象であり、ページ間で collection が動いたことの検出に要る (§1.5)。replica の使用有無や
+replica 固有の fallback 理由を表すフィールドは無い。§1.1 の text fallback が使うトップレベルの
+`fallback_reason` は、この経路選択とは別の契約である。
 
 **「どの段が採点したか」を機械可読にする必要も消えた** — 段が 1 つしかないためである。
 これは撤回前、順位品質が落ちた検索 (委譲側へ落ちた検索) を検出するために要る、という理由だった。
@@ -1041,9 +958,9 @@ folder ごとが再び別 collection になり、この replica が消した per
 aggregator を失っても検索が成立しなければならない」と書いていた。**この推論は成り立たない。**
 
 不変条件 2 の文言は「**再構築可能** (各 `.kio` を rescan)」であって「欠損中も動作」ではない。
-再構築の経路は既にあり (上記「実行とマージ」手順 1 の修復経路)、**実測で 428 scope の全射影が
-2.3 秒**である。aggregator を失った場合の正しい挙動は「次の検索が全射影をやり直して数秒かかる」で
-あって、「別実装の検索が動く」ではない。**不変条件 2 は再構築で満たされる。**
+再構築の経路は writer / repair にあり、aggregator を失った場合の正しい挙動は**検索が fail-closed し、
+次の `kio index` / `kio reindex` / `kio repair` が全射影を完了するまで待つ**ことである。「別実装の検索」も
+読取り時の lazy refresh も持たない。**不変条件 2 は writer-side の再構築で満たされる。**
 
 第 2 の実装を持つ代償は、この節が自ら記録していたとおりである — 委譲経路では per-scope 順位が
 使われるため、**そこへ落ちた検索は §1.8 が消したはずの欠陥をそのまま踏む**。
@@ -1059,8 +976,8 @@ enrichment 済み device での既定モード、Cross-Encoder 再ランク) は
 
 ```toml
 [search.multi_scope]
-parallelism = 4                 # refresh で同時に射影する scope 数の上限
-                                # 2026-08-11: scatter-gather 廃止に伴い、refresh 専用の値になった
+parallelism = 4                 # writer / repair が同時に完全射影する scope 数の上限
+                                # kio search は refresh を実行しない
 per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeout)
 ```
 
@@ -1089,9 +1006,9 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 
 `snapshot_at` は scope ごとの検索時点 snapshot (commit_hash, [03-data-model.md §8.1](03-data-model.md))。単一 scope 検索 (`--scope .`) でも同形式 (要素 1 個の配列) を返す。これは [06-cli-spec.md §9](06-cli-spec.md) の Agent API 保証 (searched_scopes / excluded_scopes / fallback_reason) と同一の契約である。
 
-### cursor の multi-scope 拡張
+### cursor の multi-scope binding
 
-§1.5 の cursor を per-scope sub-cursor の合成に拡張する:
+§1.5 の cursor は collection 全体の順序を凍結しつつ、参加 scope ごとの snapshot / config / consumed 状態を保持する:
 
 ```json
 {
@@ -1116,7 +1033,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
 binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
 
-- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, query_vector_digest: <実効 mode が vector|hybrid のときのみ — page 1 の query vector の digest ([04-pipeline.md §4.3](04-pipeline.md) の canonical bytes に対する sha256。text mode ではキー省略>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KIO-E-SEARCH-CURSOR-001` で拒否、§1.5)
+- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, query_vector_digest: <実効 mode が vector|hybrid のときのみ — page 1 の device-local query vector の canonical float32 little-endian bytes に対する sha256。text mode ではキー省略>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KIO-E-SEARCH-CURSOR-001` で拒否、§1.5)
 - page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。
   page-1 `excluded_scopes` は bounded `{scope_id,reason}` として signed token に保持するが active scope や
   query hash の config mapping には入れず、その cursor stream へ後から再参加させない。registry に後から
@@ -1147,20 +1064,18 @@ binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否す�
 
 M3-1 の p95 < 5 秒 ([09-mvp-scope.md §4.1](09-mvp-scope.md)) は **20 scopes / 合計 10 万 chunk** を前提とする。
 
-replication の**採点**は scope 数に依存しない (単一 replica への 1 クエリ)。scope 数に比例して残るのは
-(a) refresh 時の `index_generation` 比較 (差分ゼロなら no-op)、(b) 差分のあった scope の再射影、そして
-**(c) 候補選択の per-scope 経路** — (c) は**未実装の移行が完了するまで残る** (§1.8 「候補選択の所在」)。
+replication の**候補選択と採点**は scope 数に依存しない — `aggregator.sqlite` への 1 回の query である。
+`kio search` が scope の source を読む仕事は、selector の CAS 正当性 / shallow 事前確認と runtime eligibility
+filter の解決、および候補に現れた scope の purge barrier に限られる。`.kio/index/sqlite.db` を開く source projection は writer / repair の
+仕事であり、検索の性能経路には含めない。
 
-実測 (428 scope / 3,851 chunk / 3,851 vector / 24.6 MB): 全 scope 初回射影 2.3 秒、以後の差分ゼロ検索 **1.20 秒**。
-廃止前の scatter-gather も **1.20 秒**でほぼ同じであり、**この時間はほぼ全部 (c) の `.kio` を開くコスト**
-である。**すなわち 2026-08-11 時点では、replica が採点した検索も scatter-gather と同じ費用を払っている** —
-replica は候補選択を担っておらず、per-scope 経路が先に全 scope を開いてしまうためである。
-候補選択が replica へ移れば桁で縮む見込みだが、**現時点では縮んでいない。この数字は移行後に測り直すこと。**
+ここに以前記録していた 428 scope の差分ゼロ検索値は、per-scope 候補生成が残っていた移行前の測定であり、
+現在の経路の性能根拠には使わない。移行後の評価コーパスによる測定値は [09-mvp-scope.md](09-mvp-scope.md) に記録する。
 
-したがって `--scope` での絞り込みや `participates_in_global_search = false` は**移行が完了するまで
-性能上の意味を持つ**。移行後は (c) が消えるので、絞り込みの意味は性能ではなく対象範囲の指定に戻る。
+`--scope` / `--descendants` と `participates_in_global_search = false` は対象範囲を定義する。絞り込みは返却行と
+candidate-scope barrier の対象を狭めるが、BM25 統計は一貫して device-level collection のままである。
 
-## 1.9 権限の横断管理 (未実装 — replica が候補選択を担う段階で追加する)
+## 1.9 権限の横断管理 (未実装)
 
 承認の**正本は各 `.kio`** (`approvals.jsonl` / `scope.json`) であり、この位置づけは変えない
 ([01-positioning.md](01-positioning.md) 「データ・所有権・権限の正本は各フォルダ直下の `.kio` に閉じる」)。
@@ -1292,9 +1207,8 @@ GC (tiered retention / `kio gc --prune-unreachable` を含む) が削除して�
 - tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
   いる場合は削除しない** — tree は content hash 共有されるため、reachability 確認 (全非 shallow commit
   からの参照 0) が削除の前提)
-- SQLite index / FTS など objects/ から再構築可能な cache (例外 = embeddings の
-  `target_type='query_cache'` 行 — 復元されず破棄、影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md)。
-  index を削除すると再構築までの間、
+- SQLite index / FTS など objects/ から再構築可能な cache。device-local の query-vector replay cache は
+  これとは別の非 CAS file cache であり、削除・破損時の影響は cursor 拒否だけである (§1.5)。index を削除すると再構築までの間、
   検索と pointer 解決の 6a/6b 検証は実行不能 — このときの解決は not_found ではなく
   `KIO-E-INDEX-REBUILDING-001` の再構築要求を返す [§6・[08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)]。
   検証不能を「不在の確定」と混同しない)
@@ -1403,17 +1317,17 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
    `kio repair verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
-- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)。**`image_vec` 行と `target_type='image'` の embeddings 行も同じ規則で列挙する** (2026-07-26 — [04-pipeline.md §4.3](04-pipeline.md) の `image_vec` 新設に対応。判定単位は `image_hash`。上の bullet が image object そのものを「live 参照が残る共有 image は削除しない」としているのと同じく、**共有画像のベクトルも live 参照 0 の場合のみ削除する** — 同一の画像が非対象文書からも参照されている場合に消すと、その文書の画像検索が rebuild まで欠ける)
+- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。cursor replay の query-vector cache は source SQLite 行ではなく文書 lifecycle と無関係な device-local file なので、この purge closure の対象に含めない (§1.5)。**`image_vec` 行と `target_type='image'` の embeddings 行も同じ規則で列挙する** (2026-07-26 — [04-pipeline.md §4.3](04-pipeline.md) の `image_vec` 新設に対応。判定単位は `image_hash`。上の bullet が image object そのものを「live 参照が残る共有 image は削除しない」としているのと同じく、**共有画像のベクトルも live 参照 0 の場合のみ削除する** — 同一の画像が非対象文書からも参照されている場合に消すと、その文書の画像検索が rebuild まで欠ける)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす。書き換えは [04-pipeline.md §1.1](04-pipeline.md) の耐久書込 primitive (temp + rename) に従う)
 - 対象 raw_hash に帰属する task の **staging** ([07-adapter-spec.md §8.3](07-adapter-spec.md)) — **task の状態を問わず** (retryable failed の保全 staging を含む。以後の再生成は persist 直前の tombstone 再検査が防ぐ)。**帰属列挙の正本 = `.kio/staging/` の耐久 descriptor 全走査** ([03-data-model.md §2](03-data-model.md) — tasks.jsonl 非依存。task 記録の喪失後も削除対象を列挙できる)
 - **device replica (`~/.cache/kio/aggregator.sqlite`) の当該 scope の投影** — purge 成功時に
   scope 全体を再射影して置き換える (§1.8 write-through)。**replica は chunk 本文を持つ**ので、
   読み手任せにすると「誰も検索しない間、purge した本文が device の cache に読める形で残る」。
-  順位の正しさの話ではない (回転が次の検索に再射影させるので順位は自然に直る) — **本文を消すのが
+  順位の正しさの話ではない（通常 writer の射影失敗なら `Rebuilding` marker が検索を止める）— **本文を消すのが
   purge の目的そのもの**だという話である。
   **この再射影に失敗したら purge は成功を報告しない** (`KIO-E-PURGE-REPLICA-001` / exit 1、R25-5)。
-  replica は cache でありコマンドを壊してはならない ([03-data-model.md §4](03-data-model.md)) —
-  という一般則の**唯一の例外**である。ここでの「cache」は、ユーザーが消滅させるよう求めた本文の、
+  通常 writer は cache の射影失敗を `Rebuilding` にして source 側の成功を維持できるが、purge はその
+  一般則の**唯一の例外**である。ここでの「cache」は、ユーザーが消滅させるよう求めた本文の、
   この device 上の第 2 の複製だからで、それが読める状態で成功と告げるのは劣化した結果ではなく
   **誤った結果**である。復旧手段 (purge 再実行 / cache root の `aggregator.sqlite` 削除) を
   message に含める
@@ -1768,11 +1682,11 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 規約:
 
-- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
+- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容する。検索は `.kio/index/sqlite.db` の WAL snapshot を読まず、公開済み `aggregator.sqlite` の projection だけを読む。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
 - `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
-- `kio repair rebuild-db` 実行中の `kio search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KIO-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
+- `kio repair rebuild-db` 実行中の `kio search` は旧 `.kio/index/sqlite.db` を読まない。scope の replica header が `Rebuilding` または完全 projection を欠く間は `KIO-E-INDEX-REBUILDING-001` で fail-closed とし、writer が新しい projection を publish してから検索へ再参加させる。再構築本体は引き続き atomic rename (`sqlite.db.tmp → sqlite.db`) で切り替える
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kio/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kio` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
 - purge の log scrub と通常 append/rotation は、device logs では `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`、scope access logs では `.kio/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 

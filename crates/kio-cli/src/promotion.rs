@@ -507,6 +507,14 @@ pub(super) fn promote_completed_online_markdownize(repo: &Repository) -> kio_cor
         .commit_hash
         .as_ref()
         .ok_or_else(|| promotion_recovery_error("after_head", "promotion commit is missing"))?;
+    // HEAD now names normalized content that the existing source index and
+    // replica projection do not describe.  Take the replica out of service
+    // before any later durable-publication step (including the fault seam)
+    // can return: direct search is replica-only and must not quietly serve the
+    // previous HEAD as if it were current.  `finish_pending_online_promotion`
+    // publishes Ready again only after the source-index rebuild and complete
+    // writer projection succeed.
+    mark_replica_rebuilding_or_log(repo.kio_dir(), commit_hash);
     state.target_head = Some(commit_hash.clone());
     persist_promotion_state(repo.kio_dir(), &state)?;
     publish_staged_tool_lock(repo.kio_dir(), &state)?;

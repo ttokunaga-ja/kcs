@@ -265,7 +265,7 @@ CREATE TABLE scopes (
   participates_in_global_search INTEGER NOT NULL DEFAULT 1
       CHECK (typeof(participates_in_global_search) = 'integer'
              AND participates_in_global_search IN (0, 1)),
-  indexed INTEGER NOT NULL DEFAULT 0    -- sqlite.db 構築済み (横断検索の対象候補)
+  indexed INTEGER NOT NULL DEFAULT 0    -- scope 索引を構築済み（aggregator の複製対象として列挙可能）
       CHECK (typeof(indexed) = 'integer' AND indexed IN (0, 1)),
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (scope_id, kio_path)
@@ -332,7 +332,7 @@ schema 変更規約に従う)。
 
 ```text
 1. scope_registry / aggregator のみを更新して `.kio` の状態が変わる実装は禁止。**反映順序は「各 scope の索引 → aggregator」** — 逆順は検索に出るのに開けない結果を作る (2026-08-11、05-runtime.md §1.8)。
-2. scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。**「欠損中も動作」は要求しない** — 正しい挙動は次の検索が全射影をやり直すことである (03-data-model.md §4 不変条件 2)。
+2. scope_registry / aggregator 喪失は再構築可能 (各 `.kio` を rescan)。**「欠損中も動作」は要求しない** — 正しい挙動は検索を fail-closed とし、次の writer / repair が完全射影を再公開することである (03-data-model.md §4 不変条件 2)。読取り時の lazy refresh は行わない。
 3. `.kio` 喪失は復旧不能 (registry・aggregator には正本データがない)。
 4. 検索結果メタには「正本の `.kio` パス」を必ず含める。
 5. raw object の所有権・dedup は scope_registry でグローバル化しない。
@@ -344,7 +344,7 @@ schema 変更規約に従う)。
 
 不変条件 6-8 は 2026-07-25 の replication 化で追加した ([03-data-model.md §4](03-data-model.md) が正本)。
 **aggregator は cache root (`$XDG_CACHE_HOME/kio/aggregator.sqlite`) に置く** — data root ではない。
-バックアップ対象外でよく、消しても各 `.kio` から再射影されるだけである (§7.5.2 の backup 例に含めない)。
+バックアップ対象外でよく、消しても writer / repair が各 `.kio` から再射影できる (§7.5.2 の backup 例に含めない)。欠損中の `kio search` は source SQLite に fallback しない。
 
 scope registry は共有 `.kio` の正本ではない。フォルダ移動や外部ドライブ切断時は、`scope.json` の `scope_id` を使って再発見または stale 扱いにする (`folder_id` は同概念の旧称であり廃止)。
 
@@ -515,8 +515,9 @@ kio repair verify-objects
   `logical_name` の対応 (digest 再計算)、torn tail (最終の不完全行のみ切詰め — 途中の malformed 行は
   corruption)、各 canonical ref ↔ 最終有効行の対応 (03 §2 と同一規則)。対応行の無い canonical ref は
   corruption (ref の無い names 行は tag 削除後の残存として正常)
-- SQLite index は検証対象外 (破損時は `rebuild-db` で再構築可能なため。embeddings の
-  `target_type='query_cache'` 行のみ復元されず破棄 — 影響は cursor 拒否 [04-pipeline.md §4.3](04-pipeline.md))
+- SQLite index は検証対象外 (破損時は `rebuild-db` で再構築可能なため)。cursor replay の query vector は
+  source SQLite に置かない device-local file cache であり、読取り時に digest を再検証する。欠落・破損の影響は
+  cursor 拒否のみ ([04-pipeline.md §4.3](04-pipeline.md))
 
 破損検出時の挙動:
 
@@ -644,7 +645,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      コピー中に kio コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
      filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
      `kio repair verify-objects` (§7.5.1) を必ず実行して整合を確認する
-   - sqlite.db は repair rebuild-db で再構築可能 (例外 = embeddings の `target_type='query_cache'` 行 — 復元されず破棄、喪失影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))。ただし**最低保全集合は objects/ と refs/ では
+   - sqlite.db は repair rebuild-db で完全に再構築可能である。cursor replay の query-vector cache は `.kio` 外の device-local file であり、バックアップ対象ではない（喪失時は cursor を拒否し再検索する [04-pipeline.md §4.3](04-pipeline.md)）。ただし**最低保全集合は objects/ と refs/ では
      なく、[03-data-model.md §4.1](03-data-model.md) の truth 区分の全行** (scope.json / config /
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
@@ -688,10 +689,9 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 
 ## 7.5.3 SQLite schema 変更の規約 (rebuild vs in-place migration)
 
-sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md)。
-例外 = embeddings の `target_type='query_cache'` 行のみ再構築対象外 — 破棄で足りる、[04-pipeline.md §4.3](04-pipeline.md))。
+sqlite.db / scope-registry.sqlite / aggregator.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md))。cursor replay の query-vector cache は device-local file であり、SQLite schema migration の対象ではない ([04-pipeline.md §4.3](04-pipeline.md))。
 したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
-(sqlite.db は `kio repair rebuild-db`、registry は各 `.kio` の rescan)。
+(sqlite.db は `kio repair rebuild-db`、registry は各 `.kio` の rescan、aggregator は writer / repair の完全射影)。
 
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
@@ -1022,7 +1022,7 @@ PATCH bump:
 
 **前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
 
-**read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kio/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KIO-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — query_cache を含む一切の書込を行わないため検索参加もさせない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error。単独 search は query_cache へ書けないため cursor replay は保証しない — 再検索が正)。
+**read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kio/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KIO-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — `kio search` は当該 scope の source SQLite を読み書きしない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error)。cursor replay は scope SQLite に依存せず、device-local query-vector cache が欠落・不一致なら `KIO-E-SEARCH-CURSOR-001` とし再検索を要求する。
 
 **tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した

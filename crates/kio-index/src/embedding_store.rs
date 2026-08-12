@@ -1,6 +1,7 @@
 //! Embedding metadata and chunk_vec store contracts.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -125,7 +126,7 @@ fn choose_contextual_embedding<T>(
 
 /// A distinct embedding profile observed in the `embeddings` table (compat check
 /// input, 03 §7).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EmbeddingProfileSummary {
     pub dimensions: u64,
     pub distance: String,

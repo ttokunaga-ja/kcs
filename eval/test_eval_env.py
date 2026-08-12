@@ -21,7 +21,6 @@ class TestEvalEnvironment(unittest.TestCase):
                 "KIO_TEST_GEMINI_EMBED": "mock",
                 "KIO_TEST_MISTRAL_OCR": "mock",
                 "KIO_TEST_MARKDOWNIZE_ADAPTER": "mock",
-                "KIO_TEST_SCOPE_SEARCH_DELAY_MS": "99999",
                 "KIO_TEST_HOLD_LOCK_MS": "99999",
                 "KIO_TEST_PURGE_FAIL_AFTER_PHASE": "publish",
                 "KIO_FUTURE_UNKNOWN_SEAM": "must-not-leak",

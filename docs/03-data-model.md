@@ -292,27 +292,41 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
    「書き込み順序」)
 2. scope_registry / aggregator 喪失は再構築可能 (各 .kio を rescan)。
    **「再構築可能」であって「欠損中も動作」ではない** (2026-08-11 明確化) —
-   aggregator を失った検索の正しい挙動は、次の検索が全射影をやり直して
-   数秒かかること (実測 428 scope で 2.3 秒) であり、第 2 の検索実装を
-   持つことではない。この読み違えが scatter-gather 経路を存置させていた
+   aggregator を失った検索の正しい挙動は、検索を fail-closed とし、次の
+   `kio index` / `kio reindex` / `kio repair` が全射影を完了するまで待つこと
+   であり、第 2 の検索実装や読取り時の lazy refresh を持つことではない。
+   この読み違えが scatter-gather 経路を存置させていた
 3. .kio 喪失は復旧不能 (検証とバックアップの運用は 10-operations.md §7.5)
 4. 検索結果メタには「正本の .kio パス」を必ず含める
 5. raw object の所有権・dedup は scope_registry でグローバル化しない
 6. aggregator は安全性判定の最終権限を持たない — purge journal は、
    結果を返す scope について live .kio で再確認する (05 §1.8 の手順 3)。
-   kio_format_version / index_generation は scope を開く時点の入口ガードで
-   あり、返却直前には取り直さない (2026-08-11 に 3 点から 1 点へ縮小)
+   検索は source SQLite を開かない。replica header の `Rebuilding` と projection
+   完全性は入口で確認し、返却直前に source index から取り直さない。候補に現れた
+   scope の purge journal / epoch / lifecycle barrier だけは応答境界の直前に再確認する。
+   履歴 selector
+   (`--at` / `--all-history` / `--since` / `--include-deleted`) と cursor replay の
+   source CAS preflight は、CAS から解決し直した exact binding relation を runtime
+   eligibility filter として replica query に渡す。この filter は `agg_bindings` との
+   一致だけを許し、FTS / vector / image の `candidate_depth` 適用より前に効く。
+   source の candidate SQL、materialize、射影修復への fallback ではない
 7. aggregator は候補の「選択と採点」を担い、liveness 判定を再実装しない。
-   refresh 時に scope 側で解決済みの答えを持つ — live 集合と過去の chunk の
-   双方を、生存区間の列を付けて 1 表に持つ (2026-08-11)。規範は「解決済みの
-   答えを持つ」ことであって「live だけを持つ」ことではない。生存で絞るのは
-   WHERE 句であり、BM25 統計はコーパス全体のままとする (05 §1.8) —
-   分表にすると live と過去が別コーパスになり、--include-deleted が
-   比較不能な 2 群を 1 つの順位に混ぜることになる。
-   **検索が読む索引は aggregator ただ 1 つとする (2026-08-11)** — scope 数に
-   よらず .kio/index/sqlite.db は検索面ではない。同じ問いに答える派生索引を
-   2 つ持てば、答えが経路によって変わる (05 §1.8「検索は
-   .kio/index/sqlite.db を引かない」)
+   writer / repair の完全射影時に scope resolver が解決した selector / snapshot ごとの結果を
+   `agg_bindings` として持つ。binding は chunk identity と `path_at_commit` /
+   `pointer_commit` を結ぶ relation であり、config 切替、DAG の分岐・再導入、
+   同一 chunk の複数 alias を scope 側の答えどおりに表す。`first_seen_commit` /
+   `invalidated_commit` は provenance 用 metadata であって、replica が eligibility を
+   推定するための唯一の規則ではない。検索時は binding から作る eligible 集合を
+   `WHERE` で参照する。fresh current 検索は durable binding を使う一方、履歴 selector
+   と cursor replay は CAS で再解決した exact relation を `agg_bindings` に交差させる。
+   この pre-rank filter も replica 内で候補を絞るためのものであり、source SQLite を
+   検索面へ戻すものではない。
+   全 committed chunk は `agg_chunks` と単一の FTS / vector collection に一度だけ置く。
+   分表にすると live と過去が別コーパスになり、--include-deleted が比較不能な
+   2 群を 1 つの順位に混ぜることになる。**検索が読む索引は aggregator ただ 1 つとする** —
+   scope 数によらず `.kio/index/sqlite.db` は検索面ではない。同じ問いに答える
+   派生索引を 2 つ持てば、答えが経路によって変わる (05 §1.8「検索は
+   `.kio/index/sqlite.db` を引かない」)
 8. 権限の書き込みは常に .kio へ行う。aggregator は投影のみで、
    送信 gate の可否を aggregator の行で判定してはならない
 ```
@@ -321,14 +335,15 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
 かといって毎回全 scope を開けば replication の意味が無い。結果を出した scope だけ検証すれば
 コストは `O(結果ページの distinct scope 数)` で scope 総数に依存しない。
 **初版は「消えたはずの chunk を返す」も理由に挙げ、`kio_format_version` と `index_generation` の
-再確認まで求めていた。2026-08-11 に取り下げた** — 両者は入口ガードで足り、返却直前の再確認が
-守るのは検索 1 回分の窓にすぎない。その窓で古い行が残っても、pointer は参照解決時に完全な
-安全確認を通り、結果行は本文を持たない ([05-runtime.md §1.8](05-runtime.md) 手順 3)。
+返却直前再確認まで求めていた。2026-08-11 に取り下げた** — この 2 値は入口ガードで足りる。
+ただし候補 scope の purge journal / epoch / lifecycle barrier は別であり、応答境界直前の `recheck()` を
+維持する。前者を再確認して守れるのは検索 1 回分の窓にすぎず、その窓で古い行が残っても、pointer は
+参照解決時に完全な安全確認を通り、結果行は本文を持たない ([05-runtime.md §1.8](05-runtime.md) 手順 3)。
 purge を残すのは法務・秘匿の操作であり**文書名だけでも意味を持つ**ためである。
-**7**: eligibility 述語 (`chunk_config_generations` / `tree_entries` / `first_seen_commit` /
-`kio_eligible_identity`) を aggregator 側で組み直すと liveness 判定が 2 箇所になり、必ず乖離する。
-生テーブルではなく **scope 側の既存コードが解決した答え**を複製する。**8**: aggregator が古くても
-「未承認なのに送信される」が起きてはならない。
+**7**: `chunk_config_generations` / `tree_entries` / publication / ancestry を aggregator 側で
+組み直すと liveness 判定が 2 箇所になり、必ず乖離する。生テーブルではなく **scope 側の既存 resolver が
+解決した binding**を複製し、candidate query はその binding を `WHERE` で参照する。**8**: aggregator が
+古くても「未承認なのに送信される」が起きてはならない。
 
 ## 4.1 永続ストア一覧 (technology × truth/cache)
 
@@ -347,12 +362,13 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 | `.kio/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kio/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
-| `.kio/index/sqlite.db` (**検索面ではないが aggregator の複製元である** — 2026-08-11。`kio search` は引かず、読むのは replica への射影と scope 内保守。`.kio` 内にあることでフォルダごと移動しても移動先で再導出でなく射影で済む。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
+| `.kio/index/sqlite.db` (**検索面ではないが aggregator の複製元である** — 2026-08-12。`kio search` は引かず、読むのは writer / repair による完全射影と scope 内保守。`.kio` 内にあることでフォルダごと移動しても移動先で再導出でなく射影で済む。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kio repair rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kio/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kio` の rescan | [10-operations.md §3](10-operations.md) |
-| `~/.cache/kio/aggregator.sqlite` | **SQLite** (`agg_scopes` / `agg_chunks` / `agg_fts` / `agg_embeddings` の 4 表) | cache | 各 `.kio` の再射影 (`index_generation` 比較で自動) | [05-runtime.md §1.8](05-runtime.md) |
+| `~/.cache/kio/aggregator.sqlite` | **SQLite** (`agg_scopes` / `agg_chunks` / `agg_fts` / `agg_embeddings` / `agg_image_embeddings` / `agg_image_refs` / `agg_bindings` / `agg_projection_markers` の 8 表) | cache | writer / repair が各 `.kio` を完全再射影。欠落・不完全時は `kio search` が source index を読まず fail-closed | [05-runtime.md §1.8](05-runtime.md) |
+| `${XDG_CACHE_HOME:-$HOME/.cache}/kio/search-query-cache/<query_vector_digest>` | file (canonical float32 little-endian vector) | device-local cursor replay cache（query 本文は保存しない） | 欠落・digest 不一致は当該 cursor を `KIO-E-SEARCH-CURSOR-001` で拒否。再 embedding や source SQLite 読みには戻らない | [05-runtime.md §1.5](05-runtime.md) |
 | `~/.local/share/kio/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` / `schema_migrations` の 3 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
-**SQLite を使うのはこの表の 4 ファイル (計 16 テーブル)**。うち index/sqlite.db・scope-registry.sqlite・aggregator.sqlite は正本から再構築可能な検索キャッシュ (index/sqlite.db の例外 = embeddings の `target_type='query_cache'` 行 — objects に由来せず rebuild で破棄、影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。**aggregator.sqlite だけが cache root (`$XDG_CACHE_HOME`) に置かれる** — 他の 3 つは data root。区別の基準は「ユーザーが知る情報を失うか」であり、aggregator は各 `.kio` の射影に過ぎず何も失わない (§4 不変条件 2)。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
+**SQLite を使うのはこの表の 4 ファイル (計 20 テーブル)**。うち index/sqlite.db・scope-registry.sqlite・aggregator.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。cursor replay の query vector は source の `embeddings` 表ではなく上記の device-local file cache に置くため、破棄・欠落の影響は cursor 拒否だけである。**SQLite ファイルとして cache root (`$XDG_CACHE_HOME`) に置かれるのは aggregator.sqlite だけ**だが、query-vector replay cache も同じ cache root の file である — 他の 3 SQLite は data root。区別の基準は「ユーザーが知る情報を失うか」であり、aggregator は各 `.kio` の射影に過ぎず何も失わない (§4 不変条件 2)。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
 
 # 5. Identity — hash と semantic_fingerprint の分離
 
@@ -688,7 +704,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 })))
 ```
 
-- `target_type: "query_cache"` の行 (cursor replay の query vector — [04-pipeline.md §4.3](04-pipeline.md)) も**同一式**で `id` を導出する: `target_type` を `"query_cache"`、`target_hash` を query_vector_digest として適用。同一 (digest, profile) の再挿入は同一 `id` に確定し `ON CONFLICT(id) DO NOTHING` で冪等
+- cursor replay の query vector は embedding object / source SQLite row の identity ではない。device-local の `${XDG_CACHE_HOME:-$HOME/.cache}/kio/search-query-cache/<query_vector_digest>` に digest を名前として保存し、replay 時に同じ digest を再検証する。欠落・不一致は cursor を拒否するだけで、query を再 embedding したり scope の SQLite を読んだりはしない ([05-runtime.md §1.5](05-runtime.md))
 - `target_hash` は対象 chunk の **`text_hash`** (chunk 抽出範囲のみの content hash、§8) であって `chunk_hash` ではない。embedding は Markdown 本文そのものの関数なので、同一本文を持つ複数 chunk (別世代・別ファイルの同一断片) は 1 本の `embeddings` 行を共有する — これが **content ベース再利用** ([04-pipeline.md §4.3 / §5.5](04-pipeline.md)) の identity 基盤である。`chunk_vec` (vec0) は `chunk_hash → embedding` の写像として `embeddings` から導出する。
 - embedding object の保存 bytes は **`JCS(identity fields) + LF + base64(vector, float32 little-endian) + LF + lower_hex64(sha256(vector bytes))`** に固定する。fsck ([10-operations.md §7.5.1](10-operations.md)) は identity hash の再計算に加え、vector 長 (= dimensions × 4 bytes)・有限値 (NaN / Inf の拒否)・**vector digest の一致** (有限値への bit flip の検出) を検査する。
 

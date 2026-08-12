@@ -1,13 +1,15 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use kio_adapter::catalog::{
     TEST_ADOPTED_EMBEDDING_ENV, TEST_LOCAL_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
 };
-use kio_index::aggregator::Aggregator;
-use serde_json::{json, Value};
+use kio_index::aggregator::{AggIndexStatus, Aggregator};
+use rusqlite::Connection;
+use serde_json::Value;
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
@@ -21,8 +23,8 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
     "KIO_TEST_QUERY_EMBED_TRACE",
     "KIO_TEST_HOLD_LOCK_MS",
-    "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
-    "KIO_TEST_SCOPE_SEARCH_DELAY_MS",
+    "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
+    "KIO_TEST_SEARCH_RESPONSE_BARRIER_READY",
     "KIO_TEST_R13_2_AUTH",
     "KIO_TEST_R13_2_DECLARED",
     "KIO_TEST_R13_2_FALLBACK",
@@ -126,6 +128,138 @@ fn read_scope_id(path: &Path) -> String {
     let scope: Value =
         serde_json::from_str(&fs::read_to_string(path.join(".kio/scope.json")).unwrap()).unwrap();
     scope["scope_id"].as_str().unwrap().to_owned()
+}
+
+/// The device replica is the only candidate source for a cross-scope search.
+/// Its generation is included so cursor callers can freeze that corpus.
+fn replica_collection_generation(response: &Value) -> &str {
+    response["aggregator"]["collection_generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("replica collection generation is required: {response:#?}"))
+}
+
+/// Temporarily make a source index unavailable without losing it if a test
+/// assertion fails.  Every fixture has its own directory, so the fixed sibling
+/// backup name cannot collide with another test.  If a buggy command recreates
+/// `sqlite.db`, restore intentionally removes that test-only replacement before
+/// moving the original file back.
+struct HiddenSourceIndex {
+    original: PathBuf,
+    backup: PathBuf,
+}
+
+impl HiddenSourceIndex {
+    fn hide(original: &Path) -> Self {
+        let backup = original.with_file_name("sqlite.db.replica-only-backup");
+        assert!(
+            !backup.exists(),
+            "test backup path must be unused: {}",
+            backup.display()
+        );
+        fs::rename(original, &backup).unwrap_or_else(|error| {
+            panic!(
+                "failed to hide source index {} for replica-only search: {error}",
+                original.display()
+            )
+        });
+        Self {
+            original: original.to_owned(),
+            backup,
+        }
+    }
+
+    fn restore_inner(&self) -> std::io::Result<()> {
+        if !self.backup.exists() {
+            return Ok(());
+        }
+        if self.original.exists() {
+            fs::remove_file(&self.original)?;
+        }
+        fs::rename(&self.backup, &self.original)
+    }
+
+    fn restore(self) {
+        self.restore_inner().unwrap_or_else(|error| {
+            panic!(
+                "failed to restore source index {} after replica-only search: {error}",
+                self.original.display()
+            )
+        });
+    }
+}
+
+impl Drop for HiddenSourceIndex {
+    fn drop(&mut self) {
+        // This is the panic-path safety net. The normal test path calls
+        // `restore` so a restoration failure remains visible to the test.
+        let _ = self.restore_inner();
+    }
+}
+
+/// Replace the test registry database file with an empty directory so
+/// `RegistryDb::open` fails and search exercises its current-scope fallback.
+/// The original registry stays next to it and is restored on both the normal
+/// and panic paths.
+struct UnavailableRegistry {
+    original: PathBuf,
+    backup: PathBuf,
+}
+
+impl UnavailableRegistry {
+    fn block(original: &Path) -> Self {
+        let backup = original.with_file_name("scope-registry.sqlite.unavailable-backup");
+        assert!(
+            original.is_file(),
+            "test registry file must exist: {}",
+            original.display()
+        );
+        assert!(
+            !backup.exists(),
+            "test registry backup path must be unused: {}",
+            backup.display()
+        );
+        fs::rename(original, &backup).unwrap_or_else(|error| {
+            panic!(
+                "failed to hide registry file {} for fallback search: {error}",
+                original.display()
+            )
+        });
+        fs::create_dir(original).unwrap_or_else(|error| {
+            panic!(
+                "failed to replace registry file {} for fallback search: {error}",
+                original.display()
+            )
+        });
+        Self {
+            original: original.to_owned(),
+            backup,
+        }
+    }
+
+    fn restore_inner(&self) -> std::io::Result<()> {
+        if !self.backup.exists() {
+            return Ok(());
+        }
+        if self.original.exists() {
+            fs::remove_dir(&self.original)?;
+        }
+        fs::rename(&self.backup, &self.original)
+    }
+
+    fn restore(self) {
+        self.restore_inner().unwrap_or_else(|error| {
+            panic!(
+                "failed to restore registry file {} after fallback search: {error}",
+                self.original.display()
+            )
+        });
+    }
+}
+
+impl Drop for UnavailableRegistry {
+    fn drop(&mut self) {
+        let _ = self.restore_inner();
+    }
 }
 
 fn replace_scope_id(path: &Path, scope_id: &str) {
@@ -1820,22 +1954,11 @@ fn ct3_multi_013_indexing_replicates_without_waiting_for_a_search() {
     assert_eq!(search["results"].as_array().unwrap().len(), 2);
 }
 
-/// R25-1: a history search is not re-ranked against the live collection.
-///
-/// 05 §1.8 lists "no time selector" as a condition for the replica answering,
-/// and nothing evaluated it. The replica holds each scope's LIVE chunks, so a
-/// chunk that history is being searched FOR is by definition absent from it —
-/// `apply_global_ranks` reads that absence as "no rank" and drops the term to
-/// zero. The deleted answer `--include-deleted` exists to resurface would be
-/// ranked below every chunk that merely still exists, which is north-star
-/// scenario M3-3 exactly.
-///
-/// (`--at` reaches the same defect on paper but not in practice: PC59/PC60
-/// forces it to a single non-`--descendants` scope, which the single-scope
-/// condition already declines. `--all-history` / `--since` /
-/// `--include-deleted` carry no such restriction and are the reachable form.)
+/// R25-1: a history search is selected and ranked from the same device
+/// replica as a live search. The replica retains committed chunks and uses the
+/// scope resolver's liveness projection to choose the requested snapshot.
 #[test]
-fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
+fn ct3_multi_014_a_history_search_is_ranked_by_the_replica() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -1859,7 +1982,7 @@ fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
     json_success_path(&a, &data_home, &["index", "--approve"]);
 
     let live = json_success_path(&a, &data_home, &["search", "vellichor", "--mode", "text"]);
-    assert_eq!(live["aggregator"]["applied"], json!(true));
+    let live_generation = replica_collection_generation(&live).to_owned();
     assert_eq!(live["searched_scopes"].as_array().unwrap().len(), 2);
 
     let history = json_success_path(
@@ -1867,10 +1990,10 @@ fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
         &data_home,
         &["search", "vellichor", "--mode", "text", "--include-deleted"],
     );
+    let history_generation = replica_collection_generation(&history);
     assert_eq!(
-        history["aggregator"],
-        json!({ "applied": false, "fallback_reason": "time_selector" }),
-        "a history search must be ranked by the tier that read the history: {history:#?}"
+        history_generation, live_generation,
+        "time selection changes eligible chunks, not the candidate source: {history:#?}"
     );
     let results = history["results"].as_array().unwrap();
     assert!(
@@ -1881,21 +2004,15 @@ fn ct3_multi_014_a_history_search_is_not_reranked_against_live_chunks() {
         results
             .iter()
             .all(|hit| hit["score"].as_f64().unwrap() > 0.0),
-        "no historical hit may be scored 0 — a zero means its term was dropped \
-         for not existing in the live replica: {history:#?}"
+        "every historical hit must retain its replica text rank: {history:#?}"
     );
 }
 
-/// R25-2: a query the text lane cannot rank globally does not get a globally
-/// ranked vector lane bolted onto a per-scope text one.
-///
-/// `build_query_plan` yields no MATCH expression below the trigram minimum of
-/// 3 characters, so the replica cannot score the text lane at all. Re-basing
-/// only the OTHER lane puts the two RRF addends back on different scales —
-/// which is the defect the replica was built to remove. In Japanese this is
-/// not an edge case: 認証, 設計, 課金, 障害, 監査 are all two characters.
+/// R25-2: short tokens use the replica's bounded `instr` lane, rather than
+/// falling back to per-scope candidate selection. Japanese two-character
+/// queries are a primary path, not an exceptional one.
 #[test]
-fn ct3_multi_015_a_query_the_text_lane_cannot_rank_globally_declines() {
+fn ct3_multi_015_short_tokens_are_ranked_by_the_replica() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -1910,22 +2027,25 @@ fn ct3_multi_015_a_query_the_text_lane_cannot_rank_globally_declines() {
     }
 
     let long = json_success_path(&a, &data_home, &["search", "halcyon", "--mode", "text"]);
-    assert_eq!(
-        long["aggregator"]["applied"],
-        json!(true),
-        "premise: a rankable query on this corpus does use the replica: {long:#?}"
-    );
+    let long_generation = replica_collection_generation(&long).to_owned();
 
     let short = json_success_path(&a, &data_home, &["search", "認証", "--mode", "text"]);
     assert_eq!(
-        short["aggregator"],
-        json!({ "applied": false, "fallback_reason": "text_lane_not_rankable" }),
-        "a lane the replica cannot re-base must not be fused with one it can: \
-         {short:#?}"
+        replica_collection_generation(&short),
+        long_generation,
+        "the short-token lane must query the same device replica: {short:#?}"
     );
     assert!(
         !short["results"].as_array().unwrap().is_empty(),
-        "declining is a ranking decision, not an empty page: {short:#?}"
+        "a bounded short-token query must still return its matches: {short:#?}"
+    );
+    assert!(
+        short["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["score"].as_f64().is_some_and(|score| score > 0.0)),
+        "short-token matches must carry replica ranks: {short:#?}"
     );
 }
 
@@ -1998,11 +2118,7 @@ fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
         ],
     );
     assert_eq!(narrowed["searched_scopes"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        narrowed["aggregator"]["applied"],
-        json!(true),
-        "premise: the narrowed search must reach the replica at all: {narrowed:#?}"
-    );
+    let _generation = replica_collection_generation(&narrowed);
     let results = narrowed["results"].as_array().unwrap();
     assert_eq!(
         results.len(),
@@ -2052,7 +2168,7 @@ fn ct3_multi_017_a_cursor_replays_against_the_collection_that_ranked_page_1() {
         &data_home,
         &["search", "quokka", "--mode", "text", "--limit", "1"],
     );
-    assert_eq!(page1["aggregator"]["applied"], json!(true));
+    let _generation = replica_collection_generation(&page1);
     let cursor = page1["paging"]["next_cursor"].as_str().unwrap().to_owned();
 
     // Neither searched scope moves. A third one joins the device, which
@@ -2078,17 +2194,11 @@ fn ct3_multi_017_a_cursor_replays_against_the_collection_that_ranked_page_1() {
     assert_eq!(error["context"]["reason"], "collection_generation_mismatch");
 }
 
-/// R25-9: the replica holds the LIVE set, not every chunk ever committed.
-///
-/// The projection was `first_seen_commit IS NOT NULL`, which a deleted file's
-/// chunks and a superseded chunking generation's chunks both satisfy. Those
-/// rows cannot be returned by any search, but they still counted toward the
-/// collection's `N` and document frequency — distorting every surviving chunk's
-/// IDF — and still occupied slots in the depth cut ahead of chunks that can be
-/// returned. Deleting one of three files here leaves the index with all six
-/// committed rows (history is kept, as it must be) and the replica with four.
+/// R25-9: the replica retains every committed chunk. A liveness binding, not
+/// physical deletion from the corpus, selects the chunks visible to each time
+/// selector.
 #[test]
-fn ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row() {
+fn ct3_multi_020_the_replica_retains_committed_chunks_across_liveness_changes() {
     let dir = tempfile::tempdir().unwrap();
     for n in 1..=3 {
         fs::write(
@@ -2129,11 +2239,11 @@ fn ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row() {
         all_committed,
         "premise: the deleted file's chunks stay in the index — that is history"
     );
-    assert!(
-        replicated() < all_committed as u64,
-        "but they must leave the collection: {} replicated of {all_committed} \
-         committed",
-        replicated()
+    assert_eq!(
+        replicated(),
+        all_committed as u64,
+        "the deleted file's committed chunks remain in the one replica corpus; \
+         liveness is selected at query time"
     );
 }
 
@@ -2143,10 +2253,9 @@ fn ct3_multi_020_the_replica_projects_live_chunks_not_every_committed_row() {
 /// — and until R25 it rotated nowhere in the whole command. Two things break on
 /// that. LC25: a command that republishes the text corpus can certainly make a
 /// cursor replay rank differently, so outstanding cursors must retire. And
-/// R25-4: the stamp is the replica's ONLY staleness signal, so a stamp that
-/// never moves means a failed write-through is never noticed by the lazy
-/// refresh that is supposed to be the safety net — the replica stays wrong
-/// forever, where a rebuild path would have self-healed.
+/// R25-4: the stamp retires cursor snapshots whenever the published corpus can
+/// change. A failed write-through leaves the replica `Rebuilding` and direct
+/// search fails closed; it is never repaired lazily by a reader.
 #[test]
 fn ct3_multi_018_reindex_at_rotates_the_generation_it_publishes_under() {
     let dir = tempfile::tempdir().unwrap();
@@ -2188,14 +2297,40 @@ fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
     let a = parent.path().join("a");
     fs::create_dir_all(&a).unwrap();
     fs::write(a.join("a.md"), "# A\n\n## Sec\nzephyrterm secret\n").unwrap();
+    // Keep one non-purged chunk so a failed full replacement reaches the
+    // `agg_chunks` insert below. The trigger rolls that transaction back,
+    // preserving the formerly Ready secret row unless the writer explicitly
+    // marks the header Rebuilding afterwards.
+    fs::write(a.join("survivor.md"), "# Survivor\n\nprojection survivor\n").unwrap();
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&a, &data_home, &["index", "--offline", "--approve"]);
 
-    // Make the replica impossible to open: a directory where the database
-    // belongs. Done after indexing so the failure is purge's alone.
+    let ready = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
+    assert!(
+        ready["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["snippet"].as_str().is_some_and(|text| text.contains("zephyrterm secret"))),
+        "fixture must start with a readable Ready replica: {ready:#?}"
+    );
+
+    // Force the complete replica replacement to fail while preserving a
+    // readable, formerly Ready database. This is stronger than making the
+    // aggregator impossible to open: after the failed purge, the stale secret
+    // row must still be made ineligible to direct search.
     let replica_path = data_home.join("cache/kio/aggregator.sqlite");
-    fs::remove_file(&replica_path).unwrap();
-    fs::create_dir_all(&replica_path).unwrap();
+    let replica_conn = Connection::open(&replica_path).unwrap();
+    replica_conn
+        .execute_batch(
+            "CREATE TRIGGER reject_test_projection\n\
+             BEFORE INSERT ON agg_chunks\n\
+             BEGIN\n\
+               SELECT RAISE(FAIL, 'injected replica projection failure');\n\
+             END;",
+        )
+        .unwrap();
+    drop(replica_conn);
 
     let stderr = hermetic_kio_command()
         .current_dir(&a)
@@ -2210,18 +2345,270 @@ fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
         .clone();
     let error: Value = serde_json::from_slice(&stderr).unwrap();
     assert_eq!(error["error_code"], "KIO-E-PURGE-REPLICA-001");
+
+    let scope_id = read_scope_id(&a);
+    let header = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .expect("existing replica header must be retained for fail-closed status");
+    assert_eq!(header.index_status, AggIndexStatus::Rebuilding);
+
+    // The reader must not compensate by reopening the source index either.
+    let source = a.join(".kio/index/sqlite.db");
+    let hidden_source = a.join(".kio/index/sqlite.db.hidden-after-purge");
+    fs::rename(&source, &hidden_source).unwrap();
+    let search_assert = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "zephyrterm", "--json"])
+        .assert()
+        .code(3);
+    let output = search_assert.get_output();
+    let search_error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(search_error["error_code"], "KIO-E-INDEX-REBUILDING-001");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !rendered.contains("zephyrterm secret"),
+        "a failed purge must not leave stale replica text searchable: {rendered}"
+    );
 }
 
-/// A single-scope search is byte-identical to the per-scope fusion: one scope
-/// IS the collection, so there is nothing to re-rank — and that stays true even
-/// though `kio index` has already written this scope into the replica.
+/// An active purge journal is a candidate-time barrier for the device replica.
+/// The replica already contains `a`'s row before the journal starts, so this
+/// fails if the replica route stops checking the candidate scopes it returns.
+#[test]
+fn ct3_multi_021_replica_candidates_exclude_an_active_purge_scope() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(
+        a.join("secret.md"),
+        "# Secret\n\n## Restricted\npurgebarrierneedle active-scope-secret\n",
+    )
+    .unwrap();
+    fs::write(
+        b.join("public.md"),
+        "# Public\n\n## Available\npurgebarrierneedle public-answer\n",
+    )
+    .unwrap();
+    for dir in [&a, &b] {
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--offline", "--approve"]);
+    }
+    let a_scope_id = read_scope_id(&a);
+    let raw_hash: String = rusqlite::Connection::open(a.join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row(
+            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // Write a valid prepared journal without performing the destructive part
+    // of purge. `ReadBarrierCheckpoint::open` must reject it before a
+    // replica-produced candidate can cross the response boundary.
+    let state = kio_core::purge::PurgeState::new(a.join(".kio"));
+    let purge_id = kio_core::scope::new_ulid(&a);
+    let closure = kio_core::purge::PurgeClosure::new(
+        purge_id.clone(),
+        vec![kio_core::purge::ClosureItem {
+            object_type: "raw".to_owned(),
+            hash: raw_hash.clone(),
+        }],
+        Vec::new(),
+    )
+    .unwrap();
+    let closure_hash = kio_core::purge::closure_content_hash(&closure).unwrap();
+    state.write_closure(&closure).unwrap();
+    let started = state
+        .begin(
+            vec![raw_hash],
+            kio_core::purge::PurgeReason::Legal,
+            kio_core::purge::TombstoneMode::Default,
+            "test",
+            "2026-08-12T00:00:00Z",
+            1,
+            kio_pipeline::prepare::hash_bytes(b"replica candidate purge barrier"),
+            closure_hash,
+            purge_id,
+        )
+        .unwrap();
+    assert!(matches!(started, kio_core::purge::BeginOutcome::Started(_)));
+
+    let output = hermetic_kio_command()
+        .current_dir(&b)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "purgebarrierneedle", "--mode", "text", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let response: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(response["searched_scopes"].as_array().unwrap().len(), 1);
+    assert!(
+        response["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
+            scope["scope_id"] == a_scope_id
+                && scope["reason"] == "purge_journal_active"
+        }),
+        "the active scope must be excluded by the replica route: {response:#?}"
+    );
+    assert!(
+        response["results"].as_array().unwrap().iter().all(|hit| {
+            hit["evidence_pointer"]["scope_id"] != a_scope_id
+        }),
+        "no candidate from the active-purge scope may survive: {response:#?}"
+    );
+    assert!(
+        !serde_json::to_string(&response)
+            .unwrap()
+            .contains("active-scope-secret"),
+        "the active scope's body must not leak through the replica: {response:#?}"
+    );
+}
+
+/// A candidate-scope journal can appear after the first replica barrier
+/// recheck while pointer/snippet/cursor materialization is still in progress.
+/// The final response-boundary recheck must discard the whole assembled body:
+/// even a title or Evidence Pointer from the newly blocked scope is a leak.
+#[test]
+fn ct3_multi_022_replica_response_boundary_rechecks_a_late_purge() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let scope = parent.path().join("scope");
+    fs::create_dir_all(&scope).unwrap();
+    fs::write(
+        scope.join("secret.md"),
+        "# Secret\n\n## Restricted\nresponsebarrierneedle response-boundary-secret\n",
+    )
+    .unwrap();
+    json_success_path(&scope, &data_home, &["init"]);
+    json_success_path(&scope, &data_home, &["index", "--offline", "--approve"]);
+
+    let raw_hash: String = rusqlite::Connection::open(scope.join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row(
+            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ready = parent.path().join("response-boundary.ready");
+    let release = ready.with_extension("release");
+    let bin = assert_cmd::cargo::cargo_bin("kio");
+    let mut child = hermetic_process_command(&bin)
+        .current_dir(&scope)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KIO_TEST_SEARCH_RESPONSE_BARRIER_READY", &ready)
+        .args([
+            "search",
+            "responsebarrierneedle",
+            "--mode",
+            "text",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "search exited before the response-boundary hook was reached: {status}"
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("timed out waiting for response-boundary hook: {}", ready.display());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Publish the same valid prepared journal as CT3-MULTI-021, but only after
+    // candidate selection's first barrier check has passed.  The child is held
+    // at the exact final response boundary above, so no timing assumption is
+    // hidden in this regression.
+    let state = kio_core::purge::PurgeState::new(scope.join(".kio"));
+    let purge_id = kio_core::scope::new_ulid(&scope);
+    let closure = kio_core::purge::PurgeClosure::new(
+        purge_id.clone(),
+        vec![kio_core::purge::ClosureItem {
+            object_type: "raw".to_owned(),
+            hash: raw_hash.clone(),
+        }],
+        Vec::new(),
+    )
+    .unwrap();
+    let closure_hash = kio_core::purge::closure_content_hash(&closure).unwrap();
+    state.write_closure(&closure).unwrap();
+    let started = state
+        .begin(
+            vec![raw_hash],
+            kio_core::purge::PurgeReason::Legal,
+            kio_core::purge::TombstoneMode::Default,
+            "test",
+            "2026-08-12T00:00:00Z",
+            1,
+            kio_pipeline::prepare::hash_bytes(b"replica response-boundary purge barrier"),
+            closure_hash,
+            purge_id,
+        )
+        .unwrap();
+    assert!(matches!(started, kio_core::purge::BeginOutcome::Started(_)));
+    fs::write(&release, b"continue").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a late purge must reject the fully assembled response: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the response body must be discarded after the final purge recheck: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-PURGE-JOURNAL-ACTIVE-001");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !rendered.contains("response-boundary-secret"),
+        "the late-purged scope must not leak title/snippet/pointer data: {rendered}"
+    );
+}
+
+/// A single-scope search still uses the collection candidate route. One scope
+/// simply contributes all eligible rows, with no cross-scope ranking distinction.
 ///
 /// The write-through is unconditional on purpose. A scope cannot know whether
 /// it is alone: `kio index` runs inside one `.kio` folder, and making the write
 /// conditional on the device having other scopes would leave the first scope
 /// missing from the collection the moment a second one appeared.
 #[test]
-fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
+fn ct3_multi_010_single_scope_search_uses_the_collection_candidate_route() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -2247,7 +2634,7 @@ fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
     assert_eq!(search["results"].as_array().unwrap().len(), 1);
     assert!(
         (search["results"][0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12,
-        "unchanged per-scope rank-1 score: {search:#?}"
+        "unchanged collection rank-1 score: {search:#?}"
     );
     let after = Aggregator::open(&replica_path)
         .unwrap()
@@ -2257,55 +2644,6 @@ fn ct3_multi_010_single_scope_search_is_not_reranked_by_the_replica() {
         after, projected,
         "a single-scope search reads nothing and writes nothing here"
     );
-}
-
-#[test]
-fn ct3_multi_006_completion_order_does_not_change_results_or_cursor() {
-    let parent = tempfile::tempdir().unwrap();
-    let data_home = parent.path().join("xdg");
-    let a = parent.path().join("a");
-    let b = parent.path().join("b");
-    fs::create_dir_all(&a).unwrap();
-    fs::create_dir_all(&b).unwrap();
-    fs::write(a.join("a.md"), "# A\n\n## Sec\norderstable token\n").unwrap();
-    fs::write(b.join("b.md"), "# B\n\n## Sec\norderstable token\n").unwrap();
-    json_success_path(&a, &data_home, &["init"]);
-    json_success_path(&b, &data_home, &["init"]);
-    replace_scope_id(&a, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
-    replace_scope_id(&b, "00000000000000000000000001");
-    json_success_path(&a, &data_home, &["index", "--approve"]);
-    json_success_path(&b, &data_home, &["index", "--approve"]);
-    fs::write(
-        a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\n",
-    )
-    .unwrap();
-
-    let baseline = json_success_path(&a, &data_home, &["search", "orderstable", "--limit", "1"]);
-    let delayed_output = hermetic_kio_command()
-        .current_dir(&a)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        // Registry/input order is a then b. Delay a so b completes first.
-        .env(
-            "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
-            "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
-        )
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "300")
-        .args(["search", "orderstable", "--limit", "1", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let delayed: Value = serde_json::from_slice(&delayed_output).unwrap();
-
-    assert!(baseline["paging"]["next_cursor"].is_string());
-    assert_eq!(delayed["results"], baseline["results"]);
-    assert_eq!(delayed["searched_scopes"], baseline["searched_scopes"]);
-    assert_eq!(delayed["excluded_scopes"], baseline["excluded_scopes"]);
-    assert_eq!(delayed["paging"], baseline["paging"]);
 }
 
 // diversify runs on the merged pool: max_per_raw_hash caps a raw_hash across scopes.
@@ -2398,112 +2736,6 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     kio(&dir, &["init"]).assert().success();
     let err = json_failure(&dir, &["search", "alpha"], 4);
     assert_eq!(err["error_code"], "KIO-E-SEARCH-SCOPE-ALL-FAILED-001");
-}
-
-#[test]
-fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
-    let parent = tempfile::tempdir().unwrap();
-    let data_home = parent.path().join("xdg");
-    let a = parent.path().join("a");
-    let b = parent.path().join("b");
-    fs::create_dir_all(&a).unwrap();
-    fs::create_dir_all(&b).unwrap();
-    fs::write(a.join("a.md"), "# A\n\n## Sec\ntimeouttoken alpha\n").unwrap();
-    fs::write(b.join("b.md"), "# B\n\n## Sec\ntimeouttoken beta\n").unwrap();
-    json_success_path(&a, &data_home, &["init"]);
-    json_success_path(&b, &data_home, &["init"]);
-    json_success_path(&a, &data_home, &["index", "--approve"]);
-    json_success_path(&b, &data_home, &["index", "--approve"]);
-    fs::write(
-        a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
-    )
-    .unwrap();
-    let b_scope_id = read_scope_id(&b);
-
-    // A fresh search isolates the timed-out scope, returns the healthy result,
-    // and uses the established partial-failure exit 3 payload contract.
-    let partial_output = hermetic_kio_command()
-        .current_dir(&a)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
-        .args(["search", "timeouttoken", "--json"])
-        .assert()
-        .code(3)
-        .get_output()
-        .stdout
-        .clone();
-    let partial: Value = serde_json::from_slice(&partial_output).unwrap();
-    assert_eq!(partial["searched_scopes"].as_array().unwrap().len(), 1);
-    assert_eq!(partial["excluded_scopes"].as_array().unwrap().len(), 1);
-    assert_eq!(partial["excluded_scopes"][0]["scope_id"], b_scope_id);
-    assert_eq!(partial["excluded_scopes"][0]["reason"], "timeout");
-    assert!(!partial["results"].as_array().unwrap().is_empty());
-    assert!(partial.get("__exit_code").is_none());
-
-    // With only the delayed scope selected, the same reason participates in the
-    // all-scopes-failed aggregation — PC57 (05 §1.8 L392 / 06 §7 L362-363)
-    // splits this by retryability rather than always landing on exit 4:
-    // `timeout` is one of the explicitly retryable reasons (a retry might
-    // simply not hit the deadline next time), so this all-timeout case is
-    // exit 3, not the old unconditional exit 4.
-    let b_arg = b.display().to_string();
-    let all_failed = hermetic_kio_command()
-        .current_dir(&a)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
-        .args(["search", "timeouttoken", "--scope", &b_arg, "--json"])
-        .assert()
-        .code(3)
-        .get_output()
-        .stderr
-        .clone();
-    let all_failed: Value = serde_json::from_slice(&all_failed).unwrap();
-    assert_eq!(
-        all_failed["error_code"],
-        "KIO-E-SEARCH-SCOPE-ALL-FAILED-001"
-    );
-    assert_eq!(
-        all_failed["context"]["excluded_scopes"][0]["reason"],
-        "timeout"
-    );
-
-    // Cursor replay cannot shrink its frozen active set. A timeout therefore
-    // hard-fails with no partial stdout or replacement cursor.
-    let first = json_success_path(&a, &data_home, &["search", "timeouttoken", "--limit", "1"]);
-    let cursor = first["paging"]["next_cursor"].as_str().unwrap();
-    let replay = hermetic_kio_command()
-        .current_dir(&a)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
-        .args([
-            "search",
-            "timeouttoken",
-            "--limit",
-            "1",
-            "--cursor",
-            cursor,
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(replay.status.code(), Some(2));
-    assert!(
-        replay.stdout.is_empty(),
-        "cursor failure must not emit a page"
-    );
-    let replay_error: Value = serde_json::from_slice(&replay.stderr).unwrap();
-    assert_eq!(replay_error["error_code"], "KIO-E-SEARCH-CURSOR-001");
-    assert_eq!(replay_error["context"]["cause"], "timeout");
 }
 
 // Step 4 cursor v2 freezes the complete active scope set. Losing any active
@@ -2774,27 +3006,697 @@ fn ct3_obs_001_index_status_reports_partial_enrichment() {
     assert_eq!(status["budget_paused"], false);
 }
 
-// CT3-HYBRID-003: "text も vector も不可" on a PLAIN auto search (no flags).
-// Both backends live in sqlite.db, so deleting it makes them both
-// structurally unavailable. R23-14(b) (06 §7 L345-346 "sqlite.db 不在・利用不能
-// ... 全経路 ... KIO-E-INDEX-REBUILDING-001・exit 3"): this used to be the
-// permanent-looking KIO-E-SEARCH-VEC-UNAVAIL-001 / exit 1 — now the same
-// retryable classification a mid-rebuild window gets (`kio repair
-// --rebuild-db` resolves it, same as waiting out a rebuild).
+/// A completed index writes its candidates through to the device replica.
+/// Once that has happened, direct search must not reopen the per-scope source
+/// index merely to select or materialize a result. Renaming (rather than
+/// deleting) is safe on Windows and lets the Drop guard restore the source
+/// database even if the assertion fails.
 #[test]
-fn ct3_hybrid_003_text_and_vector_unavailable_is_an_error() {
+fn ct3_replica_001_direct_search_survives_a_temporarily_hidden_source_index() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("replica.md"),
+        "# Replica-only route\n\nreplicaonlydirectneedle must come from aggregator\n",
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    let scope_id = read_scope_id(dir.path());
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let replica = Aggregator::open(&replica_path).unwrap();
+    assert!(
+        replica.scope_generation(&scope_id).unwrap().is_some(),
+        "index must write this scope through to the device replica"
+    );
+    drop(replica);
+
+    let source_index = dir.path().join(".kio/index/sqlite.db");
+    assert!(source_index.is_file());
+    let hidden = HiddenSourceIndex::hide(&source_index);
+    assert!(
+        !source_index.exists(),
+        "the command must run while the source index is unavailable"
+    );
+
+    let response = json_success(
+        &dir,
+        &[
+            "search",
+            "replicaonlydirectneedle",
+            "--mode",
+            "text",
+        ],
+    );
+    let _generation = replica_collection_generation(&response);
+    let results = response["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "the write-through replica must return the indexed match: {response:#?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|hit| hit["evidence_pointer"]["scope_id"] == scope_id),
+        "the result must still identify the indexed scope: {response:#?}"
+    );
+    assert!(
+        !source_index.exists(),
+        "direct search must not recreate or replace the hidden source index"
+    );
+
+    hidden.restore();
+    assert!(source_index.is_file(), "the source index must be restored");
+}
+
+/// A manual snapshot moves HEAD before the source sqlite projection catches
+/// up. The previous replica rows remain useful evidence for a later rebuild,
+/// but must not be certified as a strict current-snapshot answer.
+#[test]
+fn ct3_replica_002_snapshot_marks_the_prior_projection_rebuilding() {
     let dir = indexed_scope();
-    // Counter-assertion: the same auto search succeeds while the index exists.
+    let scope_id = read_scope_id(dir.path());
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    let header_before = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_before.index_status, AggIndexStatus::Ready);
+    assert_eq!(
+        header_before.current_snapshot_commit.as_deref(),
+        Some(head_before.trim()),
+        "the indexed projection must begin at the source HEAD"
+    );
+
+    fs::write(
+        dir.path().join("auth.md"),
+        "# Updated auth specification\n\nnew snapshot-only content\n",
+    )
+    .unwrap();
+    let snapshot = json_success(&dir, &["snapshot", "--message", "snapshot only"]);
+    assert_eq!(snapshot["status"], "created", "{snapshot}");
+    let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    assert_ne!(head_after, head_before, "the test must advance HEAD");
+
+    let header_after = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_after.index_status, AggIndexStatus::Rebuilding);
+    assert_eq!(
+        header_after.current_snapshot_commit.as_deref(),
+        Some(head_after.trim()),
+        "the rebuilding header must name the new HEAD without certifying stale rows ready"
+    );
+}
+
+/// An auto snapshot advances HEAD before `rebuild_step3_index` has rebuilt the
+/// source SQLite cache. Even if a crash lands in the tiny interval before the
+/// writer marks its old Ready header Rebuilding, direct current search and a
+/// current cursor must reject that stale header by comparing it with CAS HEAD.
+#[test]
+fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
+    let dir = indexed_scope();
+    let scope_id = read_scope_id(dir.path());
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let indexed_raw_hash: String = Connection::open(dir.path().join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row(
+            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL ORDER BY rowid LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    let header_before = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_before.index_status, AggIndexStatus::Ready);
+    let cursor = json_success(&dir, &["search", "認証仕様", "--limit", "1"])["paging"]
+        ["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    fs::write(
+        dir.path().join("auth.md"),
+        "# Updated auth specification\n\npostheadreplicafailclosed new content\n",
+    )
+    .unwrap();
+    let stderr = kio(&dir, &["index", "--offline", "--approve"])
+        .env(
+            "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
+            "index_before_marker",
+        )
+        .arg("--json")
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let fault: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(fault["error_code"], "KIO-E-REPLICA-AFTER-HEAD-FAULT-001");
+
+    let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    assert_ne!(head_after, head_before, "the injected path must advance HEAD");
+    let header_after = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_after.index_status, AggIndexStatus::Ready);
+    assert_eq!(
+        header_after.current_snapshot_commit.as_deref(),
+        Some(head_before.trim()),
+        "the injected pre-marker interval must retain the old Ready header"
+    );
+
+    let search_error = json_failure(
+        &dir,
+        &["search", "postheadreplicafailclosed", "--mode", "text"],
+        3,
+    );
+    assert_eq!(search_error["error_code"], "KIO-E-INDEX-REBUILDING-001");
+    assert_eq!(
+        search_error["context"]["excluded_scopes"][0]["reason"],
+        "index_rebuilding"
+    );
+    for selector in ["--all-history", "--include-deleted"] {
+        let selector_error = json_failure(
+            &dir,
+            &[
+                "search",
+                "認証仕様",
+                selector,
+                "--limit",
+                "1",
+            ],
+            3,
+        );
+        assert_eq!(
+            selector_error["error_code"],
+            "KIO-E-INDEX-REBUILDING-001",
+            "{selector} must not trust the stale Ready header"
+        );
+    }
+
+    let cursor_error = json_failure(
+        &dir,
+        &["search", "認証仕様", "--cursor", &cursor, "--limit", "1"],
+        2,
+    );
+    assert_eq!(cursor_error["error_code"], "KIO-E-SEARCH-CURSOR-001");
+    assert_eq!(cursor_error["context"]["cause"], "index_rebuilding");
+
+    // An explicit historical target has its own completed marker/binding
+    // relation. It remains independent of the current HEAD mismatch.
+    let historical = json_success(
+        &dir,
+        &[
+            "search",
+            "認証仕様",
+            "--at",
+            head_before.trim(),
+            "--scope",
+            ".",
+            "--limit",
+            "1",
+        ],
+    );
+    assert!(
+        !historical["results"].as_array().unwrap().is_empty(),
+        "an explicit completed historical marker must remain usable: {historical:#?}"
+    );
+
+    // A committed purge can advance HEAD while its journal remains active and
+    // the last Ready replica header still names the prior coherent snapshot.
+    // That is not permission to promote the stale-header condition above to
+    // `index_rebuilding`: the replica must select the old candidate only far
+    // enough to let the candidate-scope purge barrier reject it. Hide source
+    // SQLite as well, so this verifies the strict replica/CAS route rather
+    // than a source-index fallback.
+    let state = kio_core::purge::PurgeState::new(dir.path().join(".kio"));
+    let purge_id = kio_core::scope::new_ulid(dir.path());
+    let closure = kio_core::purge::PurgeClosure::new(
+        purge_id.clone(),
+        vec![kio_core::purge::ClosureItem {
+            object_type: "raw".to_owned(),
+            hash: indexed_raw_hash.clone(),
+        }],
+        Vec::new(),
+    )
+    .unwrap();
+    let closure_hash = kio_core::purge::closure_content_hash(&closure).unwrap();
+    state.write_closure(&closure).unwrap();
+    let journal = match state
+        .begin(
+            vec![indexed_raw_hash],
+            kio_core::purge::PurgeReason::Legal,
+            kio_core::purge::TombstoneMode::Default,
+            "test",
+            "2026-08-12T00:00:00Z",
+            1,
+            kio_pipeline::prepare::hash_bytes(b"stale ready header purge priority"),
+            closure_hash,
+            purge_id,
+        )
+        .unwrap()
+    {
+        kio_core::purge::BeginOutcome::Started(journal) => journal,
+        other => panic!("test journal must start: {other:?}"),
+    };
+    let hidden_source = HiddenSourceIndex::hide(&dir.path().join(".kio/index/sqlite.db"));
+    let journal_error = json_failure(&dir, &["search", "admin", "--mode", "text"], 3);
+    assert_eq!(
+        journal_error["error_code"],
+        "KIO-E-PURGE-JOURNAL-ACTIVE-001",
+        "an active journal takes priority over this stale header only at the selected candidate scope"
+    );
+    assert!(
+        journal_error["context"]["excluded_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope["reason"] == "purge_journal_active"),
+        "the stale replica candidate must be discarded by the purge barrier: {journal_error:#?}"
+    );
+    hidden_source.restore();
+    state.abort_before_barrier(&journal).unwrap();
+
+    // A later normal writer pass replaces the source index and publishes a
+    // complete Ready projection; the fail-closed transition is recoverable.
+    json_success(&dir, &["index", "--offline", "--approve"]);
+    let recovered = json_success(
+        &dir,
+        &["search", "postheadreplicafailclosed", "--mode", "text"],
+    );
+    assert!(
+        !recovered["results"].as_array().unwrap().is_empty(),
+        "a completed writer projection must restore direct search: {recovered:#?}"
+    );
+}
+
+/// `reindex --regenerate` also publishes a new HEAD before its source rebuild.
+/// Its pre-marker crash window is covered by the same reader-side HEAD guard.
+#[test]
+fn ct3_replica_007_regenerate_head_advance_fails_closed_before_source_rebuild() {
+    let dir = indexed_scope();
+    let scope_id = read_scope_id(dir.path());
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+
+    let stderr = kio(&dir, &["reindex", "--regenerate", "--yes", "--offline"])
+        .env(
+            "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
+            "reindex_before_marker",
+        )
+        .arg("--json")
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let fault: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(fault["error_code"], "KIO-E-REPLICA-AFTER-HEAD-FAULT-001");
+
+    let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    assert_ne!(head_after, head_before, "regeneration must advance HEAD");
+    let header = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header.index_status, AggIndexStatus::Ready);
+    assert_eq!(header.current_snapshot_commit.as_deref(), Some(head_before.trim()));
+
+    let search_error = json_failure(&dir, &["search", "token", "--mode", "text"], 3);
+    assert_eq!(search_error["error_code"], "KIO-E-INDEX-REBUILDING-001");
+}
+
+/// A checkpoint-only manual snapshot immediately after `kio index` has the
+/// same path/raw/type tree as the indexed auto snapshot.  The manual form
+/// omits normalize refs, so it receives a distinct CAS tree/commit, but the
+/// writer can prove that its existing Ready tree projection remains exact.
+/// It must materialize that target identity and publish a full replica before
+/// direct search returns; a source-index-free search then proves this is not a
+/// reader-side fallback.
+#[test]
+fn ct3_replica_005_same_content_snapshot_republishes_ready_projection() {
+    let dir = indexed_scope();
+    let scope_id = read_scope_id(dir.path());
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    let header_before = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_before.index_status, AggIndexStatus::Ready);
+    let prior_tree_rows: i64 = Connection::open(dir.path().join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            rusqlite::params![head_before.trim()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(prior_tree_rows > 0, "indexed predecessor must have tree rows");
+
+    let snapshot = json_success(&dir, &["snapshot", "--message", "checkpoint only"]);
+    assert_eq!(snapshot["status"], "created", "{snapshot}");
+    let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    assert_ne!(head_after, head_before, "manual checkpoint must create its own commit");
+
+    let header_after = Aggregator::open(&replica_path)
+        .unwrap()
+        .scope_header(&scope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header_after.index_status, AggIndexStatus::Ready);
+    assert_eq!(
+        header_after.current_snapshot_commit.as_deref(),
+        Some(head_after.trim()),
+        "the complete replica must name the checkpoint commit"
+    );
+    assert_eq!(
+        header_after.index_generation, header_before.index_generation,
+        "tree identity materialization does not alter indexed chunks or their generation"
+    );
+    let target_tree_rows: i64 = Connection::open(dir.path().join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            rusqlite::params![head_after.trim()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(target_tree_rows, prior_tree_rows);
+
+    let source_index = dir.path().join(".kio/index/sqlite.db");
+    let hidden = HiddenSourceIndex::hide(&source_index);
+    let searched = json_success(&dir, &["search", "認証仕様", "--mode", "text"]);
+    assert!(
+        !searched["results"].as_array().unwrap().is_empty(),
+        "the republished checkpoint must search from aggregator.sqlite only: {searched}"
+    );
+    hidden.restore();
+}
+
+/// A fresh all-scopes search is allowed to exclude a temporarily rebuilding
+/// scope, but that request-local exclusion must not erase the scope's durable
+/// replica projection.  Once the header returns to Ready, a text search must
+/// use the preserved projection without requiring another source-index write.
+#[test]
+fn ct3_replica_003_temporarily_excluded_scope_keeps_its_replica_projection() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\nretainprojectionalpha\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\nretainprojectionbeta\n").unwrap();
+    for scope in [&a, &b] {
+        json_success_path(scope, &data_home, &["init"]);
+        json_success_path(scope, &data_home, &["index", "--approve"]);
+    }
+
+    let b_scope_id = read_scope_id(&b);
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    let ready_header = {
+        let mut replica = Aggregator::open(&replica_path).unwrap();
+        let header = replica
+            .scope_header(&b_scope_id)
+            .unwrap()
+            .expect("indexing must publish B's replica header");
+        assert_eq!(header.index_status, AggIndexStatus::Ready);
+        let mut rebuilding = header.clone();
+        rebuilding.index_status = AggIndexStatus::Rebuilding;
+        assert!(
+            replica
+                .update_scope_header(&b_scope_id, &rebuilding, 1)
+                .unwrap(),
+            "the test must mark B temporarily unavailable without dropping its rows"
+        );
+        header
+    };
+
+    let partial_stdout = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args([
+            "search",
+            "retainprojectionalpha",
+            "--mode",
+            "text",
+            "--all-scopes",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let partial: Value = serde_json::from_slice(&partial_stdout).unwrap();
+    assert!(
+        partial["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
+            scope["scope_id"] == b_scope_id && scope["reason"] == "index_rebuilding"
+        }),
+        "B must be excluded only for this rebuilding request: {partial:#?}"
+    );
+
+    {
+        let mut replica = Aggregator::open(&replica_path).unwrap();
+        assert!(
+            replica
+                .update_scope_header(&b_scope_id, &ready_header, 2)
+                .unwrap(),
+            "a request-local exclusion must retain B's complete replica projection"
+        );
+    }
+
+    let after = json_success_path(
+        &a,
+        &data_home,
+        &[
+            "search",
+            "retainprojectionbeta",
+            "--mode",
+            "text",
+            "--all-scopes",
+        ],
+    );
+    assert!(
+        after["results"].as_array().unwrap().iter().any(|hit| {
+            hit["evidence_pointer"]["scope_id"] == b_scope_id
+                && hit["snippet"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("retainprojectionbeta"))
+        }),
+        "the later text search must use B's retained replica projection: {after:#?}"
+    );
+}
+
+/// A stale Ready header is not authority to search a scope whose on-disk
+/// identity can no longer be opened.  This is the fail-closed companion to a
+/// writer failing to obtain `replica_scope_stamp`: the writer cannot address
+/// the old header without a scope id, and direct search must constrain the
+/// replica query to successfully prepared scope stores instead.
+#[test]
+fn ct3_replica_008_unresolvable_scope_identity_cannot_serve_a_ready_projection() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(
+        a.join("a.md"),
+        "# A\n\nunresolvableidentityneedle stale-ready-secret\n",
+    )
+    .unwrap();
+    fs::write(
+        b.join("b.md"),
+        "# B\n\nunresolvableidentityneedle healthy-public-answer\n",
+    )
+    .unwrap();
+    for scope in [&a, &b] {
+        json_success_path(scope, &data_home, &["init"]);
+        json_success_path(scope, &data_home, &["index", "--offline", "--approve"]);
+    }
+
+    let a_scope_id = read_scope_id(&a);
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    assert_eq!(
+        Aggregator::open(&replica_path)
+            .unwrap()
+            .scope_header(&a_scope_id)
+            .unwrap()
+            .expect("A must begin with a Ready replica header")
+            .index_status,
+        AggIndexStatus::Ready
+    );
+
+    // Keep the stale header and corpus intentionally, but make the scope's
+    // source identity unavailable. The registry still names A, so the direct
+    // route must explicitly exclude it rather than accidentally querying its
+    // otherwise Ready aggregator rows.
+    let scope_json = a.join(".kio/scope.json");
+    let hidden_scope_json = a.join(".kio/scope.json.hidden-for-replica-test");
+    fs::rename(&scope_json, &hidden_scope_json).unwrap();
+
+    let output = hermetic_kio_command()
+        .current_dir(&b)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args([
+            "search",
+            "unresolvableidentityneedle",
+            "--mode",
+            "text",
+            "--all-scopes",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let response: Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        response["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
+            scope["scope_id"] == a_scope_id && scope["reason"] == "unreachable"
+        }),
+        "the scope with no resolvable identity must be excluded: {response:#?}"
+    );
+    assert!(
+        response["results"].as_array().unwrap().iter().all(|hit| {
+            hit["evidence_pointer"]["scope_id"] != a_scope_id
+                && !hit["snippet"]
+                    .as_str()
+                    .is_some_and(|snippet| snippet.contains("stale-ready-secret"))
+        }),
+        "a Ready replica header must not make an unresolvable scope searchable: {response:#?}"
+    );
+    assert!(
+        serde_json::to_string(&response)
+            .unwrap()
+            .contains("healthy-public-answer"),
+        "the reachable sibling should still be returned: {response:#?}"
+    );
+
+    fs::rename(&hidden_scope_json, &scope_json).unwrap();
+}
+
+/// The all-scopes fallback used when the registry itself is unavailable can
+/// search only the current scope. It is therefore not authority to reconcile
+/// the device-wide replica and must leave siblings alone.
+#[test]
+fn ct3_replica_004_registry_fallback_does_not_prune_unenumerated_siblings() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\nregistryfallbackalpha\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\nregistryfallbackbeta\n").unwrap();
+    for scope in [&a, &b] {
+        json_success_path(scope, &data_home, &["init"]);
+        json_success_path(scope, &data_home, &["index", "--approve"]);
+    }
+
+    let b_scope_id = read_scope_id(&b);
+    let replica_path = data_home.join("cache/kio/aggregator.sqlite");
+    assert!(
+        Aggregator::open(&replica_path)
+            .unwrap()
+            .scope_ids()
+            .unwrap()
+            .contains(&b_scope_id),
+        "indexing must prepopulate B's device-level projection"
+    );
+
+    let registry = UnavailableRegistry::block(&data_home.join("data/kio/scope-registry.sqlite"));
+    let degraded = json_success_path(
+        &a,
+        &data_home,
+        &[
+            "search",
+            "registryfallbackalpha",
+            "--mode",
+            "text",
+            "--all-scopes",
+        ],
+    );
+    assert_eq!(
+        degraded["searched_scopes"].as_array().unwrap().len(),
+        1,
+        "registry fallback may search only the current scope: {degraded:#?}"
+    );
+    registry.restore();
+
+    assert!(
+        Aggregator::open(&replica_path)
+            .unwrap()
+            .scope_ids()
+            .unwrap()
+            .contains(&b_scope_id),
+        "a non-authoritative fallback must not prune B's replica rows"
+    );
+    let after = json_success_path(
+        &a,
+        &data_home,
+        &[
+            "search",
+            "registryfallbackbeta",
+            "--mode",
+            "text",
+            "--all-scopes",
+        ],
+    );
+    assert!(
+        after["results"].as_array().unwrap().iter().any(|hit| {
+            hit["evidence_pointer"]["scope_id"] == b_scope_id
+                && hit["snippet"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("registryfallbackbeta"))
+        }),
+        "the restored registry must still reach B's preserved projection: {after:#?}"
+    );
+}
+
+// CT3-HYBRID-003: an auto search keeps working when the source SQLite index is
+// unavailable after indexing. Candidate selection and lane availability are
+// served by the device replica; source SQLite is a writer-side projection only.
+#[test]
+fn ct3_hybrid_003_replica_serves_auto_search_without_source_sqlite() {
+    let dir = indexed_scope();
     let before = json_success(&dir, &["search", "認証仕様"]);
     assert!(!before["results"].as_array().unwrap().is_empty());
-    // Remove the search index: text (FTS5) and vector (chunk_vec) are both gone.
+    let generation = replica_collection_generation(&before).to_owned();
+
+    // This removes every source text/vector table. A candidate path that still
+    // opens `.kio/index/sqlite.db` fails here instead of returning the replica
+    // row below.
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
-    let err = json_failure(&dir, &["search", "認証仕様"], 3);
-    assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
-    // The excluded scope list discloses why (index_missing).
+    let after = json_success(&dir, &["search", "認証仕様"]);
     assert_eq!(
-        err["context"]["excluded_scopes"][0]["reason"],
-        "index_missing"
+        replica_collection_generation(&after),
+        generation,
+        "source-index removal must not change the replica corpus"
+    );
+    assert!(
+        !after["results"].as_array().unwrap().is_empty(),
+        "the auto query must be selected by the device replica: {after:#?}"
     );
 }
 
@@ -2811,17 +3713,17 @@ fn ct3_obs_002_metrics_use_search_namespace_code_and_component() {
     assert!(last["context"]["result_count"].as_u64().is_some());
 }
 
-// K8 / CT3-FTS-004: search is served from sqlite.db; deleting it disables search
-// (both backends unavailable — R23-14(b): KIO-E-INDEX-REBUILDING-001 / exit 3,
-// CT3-HYBRID-003 conformance), and `repair --rebuild-db` re-derives the FTS
-// index from chunks.
+// K8 / CT3-FTS-004: rebuilding the source FTS index is a writer operation. A
+// previously published replica continues serving search during that repair.
 #[test]
-fn ct3_fts_004_rebuild_db_reenables_fts_search() {
+fn ct3_fts_004_replica_serves_search_while_source_fts_is_rebuilt() {
     let dir = indexed_scope();
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
-    // With the only scope's index gone, text and vector are both unavailable.
-    let err = json_failure(&dir, &["search", "認証仕様"], 3);
-    assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
+    let during_repair = json_success(&dir, &["search", "認証仕様"]);
+    assert!(
+        !during_repair["results"].as_array().unwrap().is_empty(),
+        "a missing source FTS index must not take the replica candidate route down"
+    );
     json_success(&dir, &["repair", "rebuild-db"]);
     let after = json_success(&dir, &["search", "認証仕様"]);
     assert!(!after["results"].as_array().unwrap().is_empty());
@@ -2830,8 +3732,8 @@ fn ct3_fts_004_rebuild_db_reenables_fts_search() {
 /// R23-21 (05 §1.8 L416-417 "RRF 済み unique semantic chunk 上位
 /// candidate_depth 件を候補として返す"): when the text and vector backends'
 /// own top-N are DISJOINT, `fuse_rrf`'s union can carry up to 2x
-/// `candidate_depth` candidates out of a single scope — more than the
-/// per-scope contract promises the cross-scope merge / global MMR. Proven
+/// `candidate_depth` candidates through the one collection query unless the
+/// collection candidate pool is capped before MMR. Proven
 /// with candidate_depth=1 and two documents constructed so each backend's
 /// sole top-1 pick differs: one document's body is byte-identical to the
 /// query (the SHA256-seeded mock embedding has no partial-similarity
@@ -2841,7 +3743,7 @@ fn ct3_fts_004_rebuild_db_reenables_fts_search() {
 /// (so its mock vector is uncorrelated — effectively random relative to the
 /// query's).
 #[test]
-fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
+fn r23_21_hybrid_collection_candidates_are_truncated_to_candidate_depth() {
     let dir = tempfile::tempdir().unwrap();
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): the mock vector is
     // `deterministic_embedding_vector(item.text)`, and the send path now prepends
@@ -2896,8 +3798,8 @@ fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
     );
 
     // candidate_depth=1: without the R23-21 truncate, `fuse_rrf`'s union of
-    // both backends' disjoint top-1s would carry 2 candidates out of this
-    // one scope. PC49/PC50 (05 §1.8 L384-387): the folder config only
+    // both backends' disjoint top-1s would carry 2 candidates through this
+    // collection query. PC49/PC50 (05 §1.8 L384-387): the folder config only
     // applies for a single, non-`--descendants` `--scope <path>` search, so
     // `--scope .` is required here for `candidate_depth = 1` to take effect
     // (a bare default search would use the user/device layer instead).
@@ -2923,7 +3825,7 @@ fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
     assert_eq!(
         hybrid["results"].as_array().unwrap().len(),
         1,
-        "candidate_depth=1 must cap the per-scope candidate pool to 1 even when text/vector \
+        "candidate_depth=1 must cap the collection candidate pool to 1 even when text/vector \
          top-1 disagree: {hybrid}"
     );
 }
@@ -3385,7 +4287,8 @@ fn r11_8_retryable_failed_enrichment_counts_as_pending_in_index_status() {
 fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     // 2026-07-04 実運用バグ #2 の回帰ガード: `kio snapshot` は tree_entries を
     // 射影せず HEAD だけ進めるため、enrichment の live-chunk JOIN が 0 件になり
-    // retry/resume が何も実行しなかった (search は lazy 射影するので隠れていた)。
+    // retry/resume が何も実行しなかった。enrichment は writer 側で source
+    // relation を materialize し、search に補完を委ねてはならない。
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), "# メモ\n射影テスト。\n").unwrap();
     kio(&dir, &["init"]).assert().success();
@@ -3720,9 +4623,9 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
 // Scenario (c) — L3: a short-hash `view` still resolves after a bare `kio
 // snapshot` advanced HEAD. The manual snapshot writes a raw-only tree (differs
 // from the index's normalized tree, so HEAD genuinely advances) without
-// refreshing the tree_entries projection; before L3 the short-hash resolver read
-// a stale JSON projection filtered by the new HEAD and returned CONFIG-USAGE,
-// while search (SQLite lazy projection) still succeeded — the asymmetry.
+// refreshing the source tree_entries projection. Before L3 the short-hash
+// resolver read a stale JSON projection filtered by the new HEAD and returned
+// CONFIG-USAGE; it now materializes that local command's source relation itself.
 #[test]
 fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
     let dir = indexed_scope();
@@ -3861,12 +4764,11 @@ fn m3_short_chunk_hash_view_resolves_chunk() {
     assert!(view_slice(&viewed).contains("トークン TTL"));
 }
 
-// M4 + acceptance (d): a scope whose sqlite.db is corrupt (garbage bytes, which
-// `Connection::open` accepts lazily) is excluded from a multi-scope search with
-// reason "index_corrupt" while the healthy scope's results survive (exit 3), not
-// exploded into an exit-2 that drops everything.
+// M4 + acceptance (d): corrupting a source sqlite.db after indexing cannot
+// exclude that scope from a replica-only multi-scope search. The replica has
+// already received its candidate material and is the read boundary.
 #[test]
-fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
+fn m4_corrupt_source_sqlite_does_not_exclude_multiscope_replica_search() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -3879,54 +4781,61 @@ fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
     json_success_path(&b, &data_home, &["init"]);
     json_success_path(&a, &data_home, &["index", "--approve"]);
     json_success_path(&b, &data_home, &["index", "--approve"]);
+    let a_scope_id = read_scope_id(&a);
+    let b_scope_id = read_scope_id(&b);
 
-    // Corrupt scope b's index in place (still a readable file, so b is discovered).
+    // Corrupt scope b's writer-side source index in place. Search must not
+    // inspect it after the write-through replica has been published.
     fs::write(
         b.join(".kio/index/sqlite.db"),
         b"this is not a sqlite database",
     )
     .unwrap();
 
-    // A partial-failure search writes results to STDOUT with exit 3.
+    // A successful replica search still returns both scopes.
     let output = hermetic_kio_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
         .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .args(["search", "alphaunique", "--json"])
+        .args(["search", "token", "--mode", "text", "--json"])
         .assert()
-        .code(3)
+        .success()
         .get_output()
         .stdout
         .clone();
     let search: Value = serde_json::from_slice(&output).unwrap();
-    assert!(!search["results"].as_array().unwrap().is_empty());
-    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
-    let excluded = search["excluded_scopes"].as_array().unwrap();
-    assert_eq!(excluded.len(), 1);
-    // R23-20 (03 §4 L296): scope_path is the canonical `.kio` directory.
-    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kio"));
-    assert_eq!(excluded[0]["reason"], "index_corrupt");
+    let _generation = replica_collection_generation(&search);
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
+    assert!(search["excluded_scopes"].as_array().unwrap().is_empty());
+    let result_scopes = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|hit| hit["evidence_pointer"]["scope_id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        result_scopes,
+        std::collections::BTreeSet::from([a_scope_id.as_str(), b_scope_id.as_str()]),
+        "both replica-published scopes must remain searchable: {search:#?}"
+    );
 }
 
-// M4: a single corrupt-index scope lands on the KIO-E-INDEX-REBUILDING-001
-// branch (R23-14(b), 06 §7 L345-346: sqlite.db unusable is retryable exit 3,
-// same as `index_missing` and a mid-rebuild window — `kio repair
-// --rebuild-db` resolves it) rather than an exit-2 config-schema lie, with
-// reason "index_corrupt".
+// M4: the same isolation holds for a one-scope search. A corrupt source index
+// is not a candidate-time error after its replica publication.
 #[test]
-fn m4_single_corrupt_sqlite_is_vec_unavailable() {
+fn m4_single_corrupt_source_sqlite_is_served_by_the_replica() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/index/sqlite.db"),
         b"not a sqlite database at all",
     )
     .unwrap();
-    let err = json_failure(&dir, &["search", "認証仕様"], 3);
-    assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
-    assert_eq!(
-        err["context"]["excluded_scopes"][0]["reason"],
-        "index_corrupt"
+    let search = json_success(&dir, &["search", "認証仕様"]);
+    let _generation = replica_collection_generation(&search);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "the published replica must survive a corrupt source index: {search:#?}"
     );
 }
 
@@ -4851,12 +5760,10 @@ fn p3_plain_auth_tools_toml_permission_warning() {
 }
 
 /// P5: a concurrent `kio search` during repeated `repair --rebuild-db` must
-/// never silently return exit 0 with 0 / partial results — the temp+rename
-/// rebuild keeps the reader on a complete DB (old until the atomic swap, new
-/// after), exactly the docs/05:564 contract. `repair --rebuild-db` leaves HEAD
-/// untouched, so the only thing search observes changing is the sqlite.db swap —
-/// the precise window P5's atomic rebuild closes (the old remove_file + in-place
-/// rebuild exposed an empty/missing DB here, yielding exit 0 with 0 results).
+/// never silently return exit 0 with 0 / partial results. The writer marks the
+/// replica Rebuilding around its temp+rename source rebuild, so search either
+/// observes a complete published replica or fails closed; it never reads the
+/// transient source SQLite file.
 #[test]
 fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -5085,18 +5992,13 @@ fn r9_3_open_reuse_rehardens_stale_permissions() {
     );
 }
 
-/// P10 (deterministic): `run_reindex` advances HEAD to a new generation and only
-/// afterwards swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search
-/// in that window reads HEAD=C_new against the old-generation sqlite, whose chunks
-/// join to none of C_new's tree_entries — pre-P10 that was a silent exit-0 empty
-/// page. This reproduces the exact window without a race: back up the generation-N
-/// sqlite, `reindex` to N+1 (HEAD moves), then restore the generation-N sqlite while
-/// HEAD stays at N+1. The search must surface KIO-E-INDEX-REBUILDING-001 (docs/05
-/// §6, retryable exit 3), never a silent empty. It also asserts a *completed*
-/// reindex still returns the full set (no false positive) and that the state is
-/// transient (a fresh reindex recovers).
+/// P10 (deterministic): once a writer moves the source HEAD before a replacement
+/// replica projection exists, the replica header must fail closed.  Search must
+/// not reopen the old per-scope sqlite to decide that it can still answer: that
+/// would certify stale candidates.  A subsequent index writer publishes a complete
+/// replica projection and makes the state searchable again.
 #[test]
-fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
+fn p10_replica_rebuilding_returns_not_silent_empty() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("a.md"),
@@ -5115,20 +6017,16 @@ fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
     let expected = baseline["results"].as_array().unwrap().len();
     assert!(expected > 0);
 
-    let db = dir.path().join(".kio/index/sqlite.db");
-    let backup = dir.path().join("sqlite_gen_n.db");
-    fs::copy(&db, &backup).unwrap();
-
-    // A completed reindex advances HEAD and atomically swaps in a fresh sqlite; the
-    // search still returns the full set — no false REBUILDING.
-    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
-    let after = json_success(&dir, &["search", "alphaunique", "--mode", "text"]);
-    assert_eq!(after["results"].as_array().unwrap().len(), expected);
-
-    // Restore the generation-N sqlite while HEAD is at generation N+1 — the exact
-    // state a concurrent search observes inside the reindex window (HEAD=C_new,
-    // on-disk sqlite still the old generation, no live chunk for C_new).
-    fs::copy(&backup, &db).unwrap();
+    // `snapshot` advances the source HEAD without rebuilding its derived index.
+    // Its writer-side marker must make the previously Ready replica unavailable to
+    // direct search until an index writer can publish a replacement projection.
+    fs::write(
+        dir.path().join("a.md"),
+        "# Alpha revised\n\n## S\nalphaunique alphaunique replacement content here\n",
+    )
+    .unwrap();
+    let snapshot = json_success(&dir, &["snapshot", "--message", "advance source HEAD"]);
+    assert_eq!(snapshot["status"], "created", "{snapshot}");
     let err = json_failure(&dir, &["search", "alphaunique", "--mode", "text"], 3);
     assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
     // The offending scope is reported as a part-failure exclusion, not dropped.
@@ -5137,8 +6035,8 @@ fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
         "index_rebuilding"
     );
 
-    // The state is transient: rebuilding the index recovers the full result set.
-    json_success(&dir, &["reindex", "--regenerate", "--yes"]);
+    // The state is transient: a complete writer projection recovers the full set.
+    json_success(&dir, &["index", "--approve"]);
     let recovered = json_success(&dir, &["search", "alphaunique", "--mode", "text"]);
     assert_eq!(recovered["results"].as_array().unwrap().len(), expected);
 }
@@ -6654,6 +7552,56 @@ fn image_objects_referenced_by_chunks_are_embedded_into_image_vec() {
     );
 }
 
+/// The image pass runs before the chunk `pending.is_empty()` return. Restore a
+/// missing image vector while every chunk already has a vector, then require the
+/// writer (not a later search) to repopulate the replica image relation.
+#[test]
+fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
+    let dir = indexed_scope_local_embed_with_images();
+    let (source_images, chunks, chunk_vectors) = {
+        let conn = index_db(&dir);
+        let source_images = count(&conn, "SELECT COUNT(*) FROM image_vec");
+        let chunks = count(&conn, "SELECT COUNT(*) FROM chunks");
+        let chunk_vectors = count(&conn, "SELECT COUNT(*) FROM chunk_vec");
+        conn.execute("DELETE FROM image_vec", []).unwrap();
+        conn.execute("DELETE FROM embeddings WHERE target_type = 'image'", [])
+            .unwrap();
+        (source_images, chunks, chunk_vectors)
+    };
+    assert!(source_images > 0, "fixture must embed at least one image");
+    assert_eq!(
+        chunk_vectors, chunks,
+        "the resumed pass must reach image enrichment with no chunk work left"
+    );
+
+    {
+        let replica = rusqlite::Connection::open(
+            dir.path().join(".test-cache/kio/aggregator.sqlite"),
+        )
+        .unwrap();
+        replica.execute("DELETE FROM agg_image_refs", []).unwrap();
+        replica
+            .execute("DELETE FROM agg_image_embeddings", [])
+            .unwrap();
+    }
+
+    json_success_local_embed(&dir, &["batch", "resume"]);
+    let source_after = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
+    let replica = rusqlite::Connection::open(
+        dir.path().join(".test-cache/kio/aggregator.sqlite"),
+    )
+    .unwrap();
+    let replica_images = count(&replica, "SELECT COUNT(*) FROM agg_image_embeddings");
+    assert_eq!(
+        source_after, source_images,
+        "batch resume must restore the missing source image vector"
+    );
+    assert_eq!(
+        replica_images, source_after,
+        "image enrichment must refresh the device projection without a search"
+    );
+}
+
 /// U9: images deduplicate by `image_hash`, not by the chunk `text_hash` the
 /// chunk path groups on. Re-indexing must not re-embed what is already stored.
 #[test]
@@ -6996,10 +7944,9 @@ fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
     );
 }
 
-/// An index written before `image_vec` existed must still be searchable. The
-/// search path opens the database directly and never runs `ensure_schema` —
-/// creating tables on a read would be the read path writing to the store — so
-/// the missing table has to be tolerated rather than assumed away.
+/// A completed image projection remains searchable if a legacy source later
+/// lacks `image_vec`.  Direct search reads only the device replica; it must not
+/// reopen or repair the per-scope source index merely to answer this query.
 #[test]
 fn a_scope_indexed_before_image_vec_existed_still_searches() {
     let dir = indexed_scope_local_embed_with_images();
@@ -7015,8 +7962,24 @@ fn a_scope_indexed_before_image_vec_existed_still_searches() {
         !search["results"].as_array().unwrap().is_empty(),
         "chunk results must survive a missing image_vec: {search}"
     );
-    assert!(image_rows(&search).is_empty(), "{search}");
-    // And `kio index` is what brings it back, without a manual repair.
+    assert!(
+        !image_rows(&search).is_empty(),
+        "the already-published replica image relation must remain searchable: {search}"
+    );
+    let source_image_table_count: i64 = index_db(&dir)
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'image_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        source_image_table_count, 0,
+        "direct search must not recreate the source image_vec table"
+    );
+
+    // A writer repairs the source and republishes it, without changing the
+    // searchable replica result contract.
     json_success_local_embed(&dir, &["index"]);
     let restored = json_success_local_embed(
         &dir,
@@ -9107,12 +10070,12 @@ fn r19_2_exhausted_quota_phantom_settled_on_sweep() {
     );
 }
 
-// R19-6: R18-4 wired the store-corruption recovery hint only for store_corrupt/
-// snapshot_shallow. The most common class — index_missing/index_corrupt (sqlite.db
-// absent/damaged) — surfaced bare in a partial exclusion. Mirrors r18_4 with a corrupt
-// sqlite.db instead of a corrupt commit object.
+// R19-6: source-index corruption used to create a partial `index_corrupt`
+// exclusion and therefore needed a recovery hint. Once the replica is the only
+// candidate source, that writer-side damage must not enter the search response
+// at all.
 #[test]
-fn r19_6_partial_index_corrupt_entry_carries_recovery_hint() {
+fn r19_6_corrupt_source_index_does_not_create_a_search_exclusion() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -9126,7 +10089,7 @@ fn r19_6_partial_index_corrupt_entry_carries_recovery_hint() {
     json_success_path(&a, &data_home, &["index", "--approve"]);
     json_success_path(&b, &data_home, &["index", "--approve"]);
 
-    // Corrupt scope B's sqlite.db (index_corrupt) — A stays healthy (partial exclusion).
+    // Corrupt scope B's writer-side SQLite after its replica write-through.
     fs::write(b.join(".kio/index/sqlite.db"), b"GARBAGE not a sqlite db").unwrap();
 
     let output = hermetic_kio_command()
@@ -9136,18 +10099,18 @@ fn r19_6_partial_index_corrupt_entry_carries_recovery_hint() {
         .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args(["search", "alphaunique", "--all-scopes", "--json"])
         .assert()
-        .code(3)
+        .success()
         .get_output()
         .stdout
         .clone();
     let search: Value = serde_json::from_slice(&output).unwrap();
-    let excluded = search["excluded_scopes"].as_array().unwrap();
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0]["reason"], "index_corrupt");
-    let recovery = excluded[0]["recovery"].as_str().unwrap_or_default();
     assert!(
-        recovery.contains("index_corrupt") && recovery.contains("repair --rebuild-db"),
-        "R19-6: the partial index_corrupt entry must carry a recovery hint: {search}"
+        search["excluded_scopes"].as_array().unwrap().is_empty(),
+        "the candidate path must not inspect source SQLite: {search:#?}"
+    );
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "the healthy replica result must remain available: {search:#?}"
     );
 }
 

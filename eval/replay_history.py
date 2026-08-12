@@ -29,6 +29,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 from eval_env import subprocess_env  # noqa: E402
 
+# The Kio CLI's JSON protocol is UTF-8.  Spell that out rather than inheriting
+# Windows' active console code page through `text=True`.
+KIO_SUBPROCESS_TEXT = {"text": True, "encoding": "utf-8", "errors": "strict"}
+
 # anchor の (scope, file) -> 定義 (旧内容の見出し解決に使う)。
 # renamed は old_file、edited/deleted は file が anchor の原名と一致する。
 _ANCHOR_BY_KEY = {(a["scope"], a["file"]): a for a in spec.ANCHORS}
@@ -60,7 +64,7 @@ def run_kio(bin_path, scope_dir, args, tolerate_partial=True, corpus_dir=None):
         cmd,
         cwd=scope_dir,
         capture_output=True,
-        text=True,
+        **KIO_SUBPROCESS_TEXT,
         env=subprocess_env(corpus_dir),
     )
     # index --approve は failed_files>0 で exit 3 を返すが auto snapshot は済む。

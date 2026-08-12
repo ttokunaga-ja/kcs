@@ -92,9 +92,10 @@ impl SearchHistoryPlan {
     }
 }
 
-/// Build current-search eligibility from the existing SQLite projection. This is
-/// the sole compatibility path that may serve cached rows for a shallow current
-/// HEAD; explicit historical selectors never call it.
+/// Build current-selector eligibility from the existing source SQLite projection.
+/// This is writer/repair-only input to a complete replica projection; direct
+/// search never calls it or opens the source index. Explicit historical
+/// selectors use their corresponding resolver plans instead.
 pub(super) fn current_history_plan_from_cache(
     conn: &Connection,
     snapshot_commit: &str,
@@ -131,44 +132,6 @@ pub(super) fn current_history_plan_from_cache(
         bindings: by_key.into_values().collect(),
         shallow_skipped: Vec::new(),
     })
-}
-
-/// Refresh one historical snapshot's SQLite cache from its exact CAS tree. Raw-
-/// only entries remain present with a NULL normalize identity and are never made
-/// eligible by a later normalize cache.
-pub(super) fn exact_project_snapshot(
-    repo: &Repository,
-    conn: &Connection,
-    snapshot_commit: &str,
-) -> Result<()> {
-    let node = HistoryReader::new(repo.kio_dir()).snapshot(snapshot_commit)?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|error| KioError::schema(error.to_string()))?;
-    tx.execute(
-        "DELETE FROM tree_entries WHERE commit_hash = ?1",
-        rusqlite::params![snapshot_commit],
-    )
-    .map_err(|error| KioError::schema(error.to_string()))?;
-    for entry in &node.tree.entries {
-        let (tool_profile_hash, gen) = entry.normalize.as_ref().map_or((None, 0), |normalize| {
-            (Some(normalize.tool_profile_hash.as_str()), normalize.gen)
-        });
-        tx.execute(
-            "INSERT INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                snapshot_commit,
-                entry.path,
-                entry.raw_hash,
-                tool_profile_hash,
-                gen as i64,
-            ],
-        )
-        .map_err(|error| KioError::schema(error.to_string()))?;
-    }
-    tx.commit()
-        .map_err(|error| KioError::schema(error.to_string()))
 }
 
 pub(super) fn install_eligible_identities(

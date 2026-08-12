@@ -59,6 +59,17 @@ fn json_success_at(dir: &TempDir, args: &[&str], fixed_now: Option<&str>) -> Val
     serde_json::from_slice(&output).unwrap()
 }
 
+fn json_partial(dir: &TempDir, args: &[&str]) -> Value {
+    let output = kio(dir, args, None)
+        .arg("--json")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 fn json_success_embed(dir: &TempDir, args: &[&str]) -> Value {
     let output = kio(dir, args, None)
         .env("KIO_TEST_GEMINI_EMBED", "mock")
@@ -358,8 +369,9 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
         .unwrap()
         .to_owned();
 
-    // Remove the historical projection while leaving canonical commit/tree CAS
-    // intact. The first --at lookup must lazily and exactly re-project C1.
+    // Remove the source-side historical projection while leaving canonical
+    // commit/tree CAS intact. The replica already received C1 at index time,
+    // so `--at` must still answer exactly without rewriting source sqlite.
     let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
     conn.execute(
         "DELETE FROM tree_entries WHERE commit_hash = ?1",
@@ -368,7 +380,7 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
     .unwrap();
     drop(conn);
 
-    for (index, operand) in [&c1, "old"].into_iter().enumerate() {
+    for operand in [&c1, "old"] {
         let at = json_success(
             &dir,
             &[
@@ -387,17 +399,18 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
         assert!(results(&at)
             .iter()
             .all(|result| { result_raw(result) == hash_bytes(a) && result_commit(result) == c1 }));
-        if index == 0 {
-            let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
-            let projected: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM tree_entries WHERE commit_hash = ?1",
-                    params![c1],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(projected > 0, "--at must lazily project canonical C1 tree");
-        }
+        let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+        let projected: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tree_entries WHERE commit_hash = ?1",
+                params![c1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            projected, 0,
+            "--at must answer from the replica without lazily rewriting source sqlite"
+        );
     }
     let head = json_success(
         &dir,
@@ -448,6 +461,174 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
         ],
     );
     assert!(results(&absent).is_empty(), "{absent}");
+}
+
+/// A snapshot retained by the source cache can become disconnected from the
+/// current HEAD when a writer moves onto another branch. Its `--at` projection
+/// must survive the next writer refresh; direct search may not reopen source
+/// SQLite to reconstruct it.
+#[test]
+fn ct4_timetravel_013_disconnected_at_uses_writer_published_replica() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+
+    fs::write(
+        dir.path().join("branch.md"),
+        b"# Branch\n\nbranchfixture root payload\n",
+    )
+    .unwrap();
+    let c1 = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let retained = b"# Branch\n\nbranchfixture disconnected target\n";
+    fs::write(dir.path().join("branch.md"), retained).unwrap();
+    let disconnected = index_at(&dir, "2026-07-12T01:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Move HEAD back to C1, then publish a different C3. C2 remains a valid
+    // CAS commit with source tree rows, but is no longer a HEAD ancestor.
+    fs::write(dir.path().join(".kio/HEAD"), format!("{c1}\n")).unwrap();
+    fs::write(
+        dir.path().join(".kio/refs/heads/main"),
+        format!("{c1}\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("branch.md"),
+        b"# Branch\n\nbranchfixture current sibling\n",
+    )
+    .unwrap();
+    let sibling = index_at(&dir, "2026-07-12T02:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(sibling, disconnected, "the test must create a side commit");
+
+    // The completed writer projection is now the only index search may read.
+    let source = dir.path().join(".kio/index/sqlite.db");
+    let hidden = dir.path().join(".kio/index/sqlite.db.hidden-for-at");
+    fs::rename(&source, &hidden).unwrap();
+
+    let response = json_success(
+        &dir,
+        &[
+            "search",
+            "disconnected target",
+            "--scope",
+            ".",
+            "--mode",
+            "text",
+            "--at",
+            &disconnected,
+        ],
+    );
+    assert_eq!(response["searched_scopes"][0]["snapshot_at"], disconnected);
+    assert!(!results(&response).is_empty(), "{response}");
+    assert!(results(&response).iter().all(|result| {
+        result_raw(result) == hash_bytes(retained) && result_commit(result) == disconnected
+    }));
+    assert!(
+        !source.exists(),
+        "--at must not recreate or read the hidden source SQLite index"
+    );
+}
+
+/// An empty tree has no `tree_entries` row by which a later writer can discover
+/// an otherwise valid disconnected snapshot. A targeted historical reindex is
+/// the writer that knows this exact `--at` target, so it must publish the
+/// completed empty marker before a replica-only reader needs it.
+#[test]
+fn ct4_timetravel_014_historical_reindex_publishes_empty_disconnected_at_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+
+    fs::write(
+        dir.path().join("root.md"),
+        b"# Root\n\nemptyatfixture root payload\n",
+    )
+    .unwrap();
+    let c1 = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    fs::remove_file(dir.path().join("root.md")).unwrap();
+    let c2 = index_at(&dir, "2026-07-12T01:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let repo = Repository::open(dir.path()).unwrap();
+    let c2_tree = repo
+        .read_tree(&repo.read_commit(&c2).unwrap().tree)
+        .unwrap();
+    assert!(c2_tree.entries.is_empty(), "C2 must be the empty target tree");
+
+    // Move back to C1 before making C3. C2 remains readable in CAS but has no
+    // parent/child relation to the current branch and no source cache rows.
+    fs::write(dir.path().join(".kio/HEAD"), format!("{c1}\n")).unwrap();
+    fs::write(
+        dir.path().join(".kio/refs/heads/main"),
+        format!("{c1}\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("sibling.md"),
+        b"# Sibling\n\nemptyatfixture current sibling\n",
+    )
+    .unwrap();
+    let c3 = index_at(&dir, "2026-07-12T02:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(c3, c2, "C3 must leave C2 disconnected from current HEAD");
+
+    let reindexed = json_success(&dir, &["reindex", "--at", &c2]);
+    assert_eq!(reindexed["status"], "reindexed");
+    assert_eq!(reindexed["snapshot_at"], c2);
+
+    // A valid empty snapshot deliberately has no tree-entry sentinel. The
+    // replica completion marker is the only durable way to distinguish it
+    // from a projection miss once source SQLite is unavailable to search.
+    let source = dir.path().join(".kio/index/sqlite.db");
+    let conn = Connection::open(&source).unwrap();
+    let cached_rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM tree_entries WHERE commit_hash = ?1",
+            params![c2],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached_rows, 0);
+    drop(conn);
+
+    let hidden = dir.path().join(".kio/index/sqlite.db.hidden-for-empty-at");
+    fs::rename(&source, &hidden).unwrap();
+    let response = json_success(
+        &dir,
+        &[
+            "search",
+            "emptyatfixture",
+            "--scope",
+            ".",
+            "--mode",
+            "text",
+            "--at",
+            &c2,
+        ],
+    );
+    assert_eq!(response["searched_scopes"][0]["snapshot_at"], c2);
+    assert!(
+        results(&response).is_empty(),
+        "the explicitly selected empty tree must not leak C1/C3 chunks: {response}"
+    );
+    assert!(
+        !source.exists(),
+        "--at must answer the writer-published empty marker without reopening source SQLite"
+    );
 }
 
 #[test]
@@ -1022,75 +1203,17 @@ fn ct4_timetravel_005_since_includes_cutoff_and_freezes_it_in_cursor() {
 }
 
 #[test]
-fn ct4_timetravel_006_cursor_freezes_config_association_maximum() {
+fn ct4_timetravel_006_cursor_rejects_write_through_visible_append() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
-    fs::write(
-        dir.path().join("rank-a.md"),
-        "# A\n\nassociationfixture associationfixture associationfixture rank a\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join("rank-b.md"),
-        "# B\n\nassociationfixture associationfixture rank b\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join("late.md"),
-        "# Late\n\nassociationfixture lateassociation candidate\n",
-    )
-    .unwrap();
+    for name in ["rank-a.md", "rank-b.md"] {
+        fs::write(
+            dir.path().join(name),
+            format!("# {name}\n\nassociationfixture established {name}\n"),
+        )
+        .unwrap();
+    }
     index_at(&dir, "2026-07-10T00:00:00Z");
-    let config_c1 = fs::read_to_string(dir.path().join(".kio/config.toml")).unwrap();
-
-    // A config change that preserves these short chunk boundaries must append a
-    // second association to the same immutable chunk ids.
-    fs::write(
-        dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 3999\n",
-    )
-    .unwrap();
-    index_at(&dir, "2026-07-11T00:00:00Z");
-
-    let db_path = dir.path().join(".kio/index/sqlite.db");
-    let conn = Connection::open(&db_path).unwrap();
-    let late_chunk: String = conn
-        .query_row(
-            "SELECT chunk_id FROM chunks WHERE text LIKE '%lateassociation%' LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let current_config: String = conn
-        .query_row(
-            "SELECT chunking_config_hash
-               FROM chunk_config_generations
-              GROUP BY chunking_config_hash
-              ORDER BY MAX(association_rowid) DESC
-              LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let older_config: String = conn
-        .query_row(
-            "SELECT chunking_config_hash
-               FROM chunk_config_generations
-              WHERE chunking_config_hash <> ?1
-              ORDER BY association_rowid
-              LIMIT 1",
-            params![current_config],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_ne!(current_config, older_config);
-    conn.execute(
-        "DELETE FROM chunk_config_generations
-          WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
-        params![late_chunk, current_config],
-    )
-    .unwrap();
-    drop(conn);
 
     let page1 = json_success(
         &dir,
@@ -1106,27 +1229,28 @@ fn ct4_timetravel_006_cursor_freezes_config_association_maximum() {
             "1",
         ],
     );
-    assert!(results(&page1).iter().all(|result| !result["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("lateassociation")));
     let cursor = page1["paging"]["next_cursor"]
         .as_str()
-        .expect("two pre-existing current-config candidates must page")
+        .expect("two indexed candidates must page")
         .to_owned();
 
-    // Publish the missing C2 association after page 1. A fresh search sees it,
-    // while replay is frozen at the token's max_association_rowid.
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute(
-        "INSERT INTO chunk_config_generations
-             (chunk_id, chunking_config_hash, created_at)
-         VALUES (?1, ?2, '2026-07-12T00:00:00Z')",
-        params![late_chunk, current_config],
+    // A normal writer publishes the new chunk plus its binding to the replica.
+    // Direct search must see that published state, while a cursor signed before
+    // it must be rejected rather than reading an unannounced source-db edit.
+    fs::write(
+        dir.path().join("late.md"),
+        "# Late\n\nassociationfixture write-through-visible candidate\n",
     )
     .unwrap();
-    drop(conn);
-    let replay = json_success(
+    index_at(&dir, "2026-07-11T00:00:00Z");
+
+    let fresh = search_all_history(&dir, "associationfixture", "100");
+    assert!(results(&fresh).iter().any(|result| result["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("write-through-visible")));
+
+    let replay = json_failure(
         &dir,
         &[
             "search",
@@ -1140,35 +1264,10 @@ fn ct4_timetravel_006_cursor_freezes_config_association_maximum() {
             "--limit",
             "100",
         ],
-    );
-    assert!(results(&replay).iter().all(|result| !result["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("lateassociation")));
-    let fresh = search_all_history(&dir, "associationfixture", "100");
-    assert!(results(&fresh).iter().any(|result| result["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("lateassociation")));
-
-    // Restoring the older effective config changes the sorted per-scope mapping,
-    // even though its associations are below the frozen maximum.
-    fs::write(dir.path().join(".kio/config.toml"), config_c1).unwrap();
-    let config_mismatch = json_failure(
-        &dir,
-        &[
-            "search",
-            "associationfixture",
-            "--scope",
-            ".",
-            "--mode",
-            "text",
-            "--cursor",
-            &cursor,
-        ],
         2,
     );
-    assert_eq!(config_mismatch["error_code"], "KIO-E-SEARCH-CURSOR-001");
+    assert_eq!(replay["error_code"], "KIO-E-SEARCH-CURSOR-001");
+    assert_eq!(replay["context"]["reason"], "index_generation_mismatch");
 }
 
 #[test]
@@ -1324,22 +1423,28 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
     assert_eq!(force_at["error_code"], "KIO-E-CONFIG-USAGE-001");
 }
 
-fn discard_commit_tree(dir: &TempDir, commit_hash: &str) {
+fn discard_commit_tree(dir: &TempDir, commit_hash: &str) -> std::path::PathBuf {
     let repo = Repository::open(dir.path()).unwrap();
     let tree_hash = repo.read_commit(commit_hash).unwrap().tree;
     let path = ObjectStore::new(repo.kio_dir())
         .object_path(ObjectKind::Tree, &tree_hash)
         .unwrap();
-    fs::remove_file(path).unwrap();
+    fs::remove_file(&path).unwrap();
+    path
 }
 
 #[test]
-fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
+fn ct4_timetravel_007_replica_revalidates_history_after_cas_becomes_shallow() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(
         dir.path().join("history.md"),
         "# Old\n\nshallowhistoryfixture old value\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("deleted.md"),
+        "# Deleted\n\nshallowdeletedfixture old value\n",
     )
     .unwrap();
     let c1 = index_at(&dir, "2026-07-09T00:00:00Z")["commit_hash"]
@@ -1349,6 +1454,12 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
     fs::write(
         dir.path().join("history.md"),
         "# New\n\nreplacement without the historical search term\n",
+    )
+    .unwrap();
+    fs::remove_file(dir.path().join("deleted.md")).unwrap();
+    fs::write(
+        dir.path().join("healthy.md"),
+        "# Healthy\n\nshallowhistoryfixture shallowdeletedfixture healthy survivor\n",
     )
     .unwrap();
     index_at(&dir, "2026-07-10T00:00:00Z");
@@ -1364,12 +1475,11 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
         .unwrap();
     assert!(cached > 0, "fixture must retain historical cache rows");
     drop(conn);
-    discard_commit_tree(&dir, &c1);
+    let c1_tree_path = discard_commit_tree(&dir, &c1);
 
-    // `--at c1` targets the shallow commit itself (PC47 — 05 §2.2 "kio search
-    // --at <shallow-commit>" — still hard-fails: the exact target's whole tree
-    // is required, so there is no partial degradation to fall back to).
-    let error = json_failure(
+    // A durable replica projection is never authority for a selected `--at`
+    // tree: the CAS target itself must remain readable.
+    let at = json_failure(
         &dir,
         &[
             "search",
@@ -1383,19 +1493,13 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
         ],
         1,
     );
-    assert_eq!(error["error_code"], "KIO-E-COMMIT-SHALLOW-001");
+    assert_eq!(at["error_code"], "KIO-E-COMMIT-SHALLOW-001");
+    assert!(!c1_tree_path.exists());
 
-    // PC45/PC46 (05 §1.6/§2.2): `--all-history` walks FROM HEAD (C2, not
-    // shallow) and encounters the shallow c1 only as an *ancestor* mid-walk —
-    // that is skipped and counted (`shallow_skipped`) rather than hard-failing
-    // the whole scope/command, superseding the pre-PC45 contract this loop
-    // used to assert (a shallow ancestor anywhere in the walk was a command-
-    // wide `KIO-E-COMMIT-SHALLOW-001`/exit 1, taking down even an unrelated
-    // healthy sibling scope in a multi-scope search). The fixture's only
-    // occurrence of the search term lived in c1's (now-shallow) content, so
-    // the walk finds nothing else, but it still returns a normal (empty)
-    // partial page instead of erroring.
-    let all_history = kio(
+    // A shallow ancestor is a partial walk, but aliases only found in that
+    // tree are removed before the replica ranks its candidate depth. C2's
+    // readable healthy binding must survive the C1 skip.
+    let all_history = json_partial(
         &dir,
         &[
             "search",
@@ -1406,17 +1510,46 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
             "text",
             "--all-history",
         ],
-        None,
-    )
-    .arg("--json")
-    .assert()
-    .code(3)
-    .get_output()
-    .stdout
-    .clone();
-    let all_history: Value = serde_json::from_slice(&all_history).unwrap();
-    assert!(results(&all_history).is_empty());
+    );
+    assert!(
+        !results(&all_history).is_empty(),
+        "a partial history walk must retain healthy survivors: {all_history}"
+    );
+    assert!(
+        results(&all_history)
+            .iter()
+            .all(|result| result_path(result) == "healthy.md"),
+        "only C2's readable binding may survive the shallow C1 skip: {all_history}"
+    );
     assert_eq!(all_history["searched_scopes"][0]["shallow_skipped"], 1);
+    assert!(!c1_tree_path.exists());
+
+    // The first-parent deleted-alias planner has the same runtime CAS filter:
+    // C1 was the only snapshot containing this final-deleted file, while C2's
+    // live healthy binding proves --include-deleted stays partial, not empty.
+    let include_deleted = json_partial(
+        &dir,
+        &[
+            "search",
+            "shallowdeletedfixture",
+            "--scope",
+            ".",
+            "--mode",
+            "text",
+            "--include-deleted",
+        ],
+    );
+    assert!(
+        !results(&include_deleted).is_empty(),
+        "a partial include-deleted walk must retain healthy survivors: {include_deleted}"
+    );
+    assert!(
+        results(&include_deleted)
+            .iter()
+            .all(|result| result_path(result) == "healthy.md"),
+        "the shallow deleted alias must not replace C2's readable binding: {include_deleted}"
+    );
+    assert_eq!(include_deleted["searched_scopes"][0]["shallow_skipped"], 1);
 
     // A cursor snapshot that becomes shallow also hard-fails; it cannot serve a
     // partial page from cached HEAD rows.
@@ -1448,8 +1581,8 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
         ],
     );
     let cursor = page1["paging"]["next_cursor"].as_str().unwrap();
-    discard_commit_tree(&cursor_dir, &head);
-    let error = json_failure(
+    let head_tree_path = discard_commit_tree(&cursor_dir, &head);
+    let page2 = json_failure(
         &cursor_dir,
         &[
             "search",
@@ -1463,7 +1596,8 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
         ],
         1,
     );
-    assert_eq!(error["error_code"], "KIO-E-COMMIT-SHALLOW-001");
+    assert_eq!(page2["error_code"], "KIO-E-COMMIT-SHALLOW-001");
+    assert!(!head_tree_path.exists());
 }
 
 fn write_commit(store: &ObjectStore, commit: &CommitObject) -> String {

@@ -486,13 +486,13 @@ fn execute_phase_machine(
             // happened to run.
             crate::recover_index_generation(repo.kio_dir())?;
             // 05 §1.8 write-through. Ranking is not the reason here: the
-            // rotation above already guarantees the next search re-projects
-            // this scope, which would drop the purged rows on its own. The
+            // rotation makes an incomplete replica fail closed; it does not
+            // ask a reader to re-project this scope. The
             // reason is that the replica holds the chunk TEXT, on the device,
             // under the cache root — and purge exists to make that text stop
             // existing. Waiting for a reader to notice would leave purged
-            // content readable in `aggregator.sqlite` for as long as nobody
-            // searched.
+            // content readable in `aggregator.sqlite` for as long as the
+            // writer had not published a coherent deletion.
             //
             // A full re-projection rather than a delta, deliberately: purge
             // deletes chunk rows, config associations, chunk vectors AND

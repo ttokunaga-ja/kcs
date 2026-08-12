@@ -32,7 +32,8 @@
 //! binding's own `pointer_commit`, not the single shared
 //! `kio_target_ancestors` `--at` installs; see the doc comment on the
 //! `TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted`
-//! match arm in `search_one_scope_inner`).
+//! relation prepared by `prepare_scope_from_replica_header` before the
+//! replica ranks candidates).
 
 use std::fs;
 
@@ -305,21 +306,17 @@ fn pc15_pc17_candidate_depth_configuration_is_not_hardcoded_to_200() {
     );
 }
 
-/// R23-17 (05 §1.3 L146-157, 2026-07-22 feedback #3 "有界エスカレーション"):
-/// the inner FTS LIMIT excludes eligibility (config generation / identity /
-/// time), so non-eligible rows with strong bm25 can starve eligible rows out
-/// of a small `candidate_depth` window entirely. Fixture: 4 "victim"
+/// R23-17 (05 §1.3 L146-157, 2026-07-22 feedback #3): replica candidate SQL
+/// applies the resolved current binding relation before `candidate_depth`.
+/// The retired per-scope inner-LIMIT escalation was only needed because it
+/// ranked stale rows first and filtered them afterwards. Fixture: 4 "victim"
 /// documents repeat the query term densely (dominant bm25, ranked 1-4) and
-/// are then deleted from the working tree (their chunks stay in `chunks`/
-/// `chunk_fts` — append-only — but drop out of `kio_eligible_identity` once
-/// HEAD advances past them); 1 "survivor" document mentions the term once
-/// (weak bm25, ranked 5th — beyond a `candidate_depth=2` window) and stays
-/// live. Without escalation, the inner LIMIT=2 window is entirely consumed
-/// by the 4 non-eligible victims, so zero eligible rows ever reach the outer
-/// filter and the search returns empty; the bounded escalation (LIMIT x4, up
-/// to 2 extra attempts) must widen enough to surface the survivor.
+/// are then deleted; 1 "survivor" document mentions it once (weak bm25,
+/// formerly fifth). After a writer publishes the refreshed replica, historical
+/// victim chunks may remain available to history selectors but must not consume
+/// a current-search `candidate_depth=2` slot ahead of the survivor.
 #[test]
-fn r23_17_bounded_escalation_recovers_eligible_row_starved_by_inner_limit() {
+fn r23_17_replica_filters_ineligible_rows_before_candidate_depth() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..4 {
         fs::write(
@@ -351,18 +348,18 @@ fn r23_17_bounded_escalation_recovers_eligible_row_starved_by_inner_limit() {
     );
     assert_eq!(baseline["results"].as_array().unwrap().len(), 5);
 
-    // Delete the 4 victims and advance HEAD — their chunks remain FTS-indexed
-    // (append-only `chunks`/`chunk_fts`) but drop out of `kio_eligible_identity`.
+    // Delete the 4 victims and publish the new current snapshot. The writer's
+    // complete replica projection carries the current binding relation; direct
+    // search must not reopen the source index to rediscover it.
     for i in 0..4 {
         fs::remove_file(dir.path().join(format!("victim{i}.md"))).unwrap();
     }
-    success(&dir, &["snapshot", "-m", "delete victims"]);
-
     fs::write(
         dir.path().join(".kio/config.toml"),
         "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
     )
     .unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
     let escalated = success(
         &dir,
         &[
@@ -1030,7 +1027,7 @@ fn pc38_pc39_at_excludes_chunks_introduced_only_at_a_descendant_commit() {
 /// `KIO-E-COMMIT-SHALLOW-001` — PC45's skip-and-continue policy is not a
 /// blanket exemption; only an *ancestor encountered mid-walk* is tolerated
 /// (proven in `step4_time_travel.rs`'s
-/// `ct4_timetravel_007_shallow_history_rejects_cached_tree_rows`, which
+/// `ct4_timetravel_007_replica_revalidates_history_after_cas_becomes_shallow`, which
 /// exercises both this case and PC45's skip-and-continue side by side).
 #[test]
 fn pc47_at_a_shallow_commit_itself_still_hard_fails() {
@@ -1279,20 +1276,15 @@ fn pc53_pc54_incompatible_format_version_scope_is_store_version_exit_8() {
 }
 
 /// PC57 (05 §1.8 L392 / 06 §7 L362-363): a mixed all-scopes-failed set that
-/// includes at least one retryable reason (here, `index_rebuilding` from one
-/// scope — PC34's HEAD-unset case — alongside a `store_version_incompatible`
-/// permanent reason from another) exits 3, not the old unconditional exit 4
+/// includes at least one retryable reason (here, a replica header marked
+/// `index_rebuilding`) alongside a `store_version_incompatible` permanent
+/// reason from another scope exits 3, not the old unconditional exit 4
 /// — retryability, not a uniform "everything failed" verdict, decides the
 /// exit family once no single homogeneous-reason promotion (PC55) applies.
 #[test]
 fn pc57_mixed_retryable_and_permanent_all_failed_exits_3() {
-    // `b` (not `a`) must be both indexed AND registry-participating for the
-    // default (all-registered-scopes) enumeration to reach it at all —
-    // `RegistryDb::search_targets` only lists `indexed = 1` rows, so an
-    // unindexed scope (PC34's own HEAD-unset case) can only ever be reached
-    // via a single EXPLICIT `--scope <path>`, never a multi-scope default —
-    // making "timeout" (05 §1.8's own per-scope-timeout exclusion, already
-    // wired) the constructible retryable member here instead.
+    // Both targets must be indexed and registry-participating for the default
+    // all-scopes enumeration to reach them.
     let (_parent, data_home, targets) = multi_scope_env(&["a", "b"]);
     let (a, b) = (&targets[0], &targets[1]);
     for (target, term) in [(a, "a"), (b, "b")] {
@@ -1315,46 +1307,47 @@ fn pc57_mixed_retryable_and_permanent_all_failed_exits_3() {
     }
     // `a`'s format_version is bumped to permanent/incompatible.
     bump_format_version(a);
-    // `b` is made to time out: a 1-second per-scope timeout on the `runner`
-    // CWD (whose config `multi_scope::effective_settings` actually reads)
-    // plus an artificial per-scope delay longer than that, targeted at `b`'s
-    // own scope_id.
-    let runner = a.parent().unwrap().join("runner");
+    // Move B's source HEAD without publishing a replacement projection. The
+    // snapshot writer marks B's durable replica header Rebuilding, so direct
+    // search must produce the retryable `index_rebuilding` exclusion from the
+    // replica-only route rather than a removed per-scope delay seam.
     fs::write(
-        runner.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n\
-         [scope]\nparticipates_in_global_search = false\n\
-         [search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
+        b.join("doc.md"),
+        "# Doc\n\nmixedreasonterm b after snapshot\n",
     )
     .unwrap();
-    let b_scope_id =
-        serde_json::from_str::<Value>(&fs::read_to_string(b.join(".kio/scope.json")).unwrap())
-            .unwrap()["scope_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-
-    let output = Command::cargo_bin("kio")
-        .unwrap()
-        .current_dir(&runner)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .env_remove("GEMINI_API_KEY")
-        .env_remove("MISTRAL_API_KEY")
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
-        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
-        .args(["search", "mixedreasonterm", "--json"])
-        .output()
-        .unwrap();
-    let code = output.status.code().unwrap();
-    let stream: &[u8] = if !output.stdout.is_empty() {
-        &output.stdout
-    } else {
-        &output.stderr
-    };
-    let body: Value = serde_json::from_slice(stream).unwrap();
-    assert_eq!(code, 3, "mixed retryable(timeout)+permanent(store_version_incompatible) all-failed must be exit 3: {body}");
+    let (snapshot_code, snapshot) = run_in(
+        &data_home,
+        b,
+        &["snapshot", "--message", "make B replica rebuilding"],
+    );
+    assert_eq!(
+        snapshot_code, 0,
+        "snapshot must advance B's source HEAD: {snapshot}"
+    );
+    assert_eq!(snapshot["status"], "created", "{snapshot}");
+    let runner = a.parent().unwrap().join("runner");
+    let (code, body) = run_in(&data_home, &runner, &["search", "mixedreasonterm"]);
+    assert_eq!(
+        code, 3,
+        "mixed retryable(index_rebuilding)+permanent(store_version_incompatible) all-failed must be exit 3: {body}"
+    );
+    assert_eq!(body["error_code"], "KIO-E-SEARCH-SCOPE-ALL-FAILED-001");
+    let excluded = body["context"]["excluded_scopes"]
+        .as_array()
+        .expect("mixed failure must report both scope exclusions");
+    assert!(
+        excluded
+            .iter()
+            .any(|scope| scope["reason"] == "store_version_incompatible"),
+        "A's permanent reason must be retained: {body}"
+    );
+    assert!(
+        excluded
+            .iter()
+            .any(|scope| scope["reason"] == "index_rebuilding"),
+        "B's replica-header rebuilding reason must be retained: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

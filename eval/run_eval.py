@@ -80,6 +80,10 @@ MAX_CHUNK_OBJECT_BYTES = 128 * 1024 * 1024
 MAX_TREE_ENTRIES = 10_000
 MAX_POINTER_ATTESTATIONS_PER_QUERY = 10
 MAX_POINTER_ATTESTATION_BYTES = 512 * 1024 * 1024
+# Kio's machine-readable stdout/stderr is UTF-8 on every platform.  Leaving
+# `text=True` to choose the host locale makes a Japanese JSON response fail to
+# decode under a Windows cp932 Python process before the evaluator can score it.
+KIO_SUBPROCESS_TEXT = {"text": True, "encoding": "utf-8", "errors": "strict"}
 
 
 # --------------------------------------------------------------------------- #
@@ -477,7 +481,8 @@ def run_search(bin_path, corpus_dir, query, flags):
     cmd = [bin_path, "--json", "search", query, "--all-scopes"] + list(flags)
     started = time.monotonic()
     proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True,
+        cmd, cwd=cwd, capture_output=True,
+        **KIO_SUBPROCESS_TEXT,
         env=subprocess_env(corpus_dir))
     duration_ms = (time.monotonic() - started) * 1000.0
     return {"returncode": proc.returncode,
@@ -492,7 +497,7 @@ def validate_replayed_history(bin_path, corpus_dir, history_manifest):
         cwd = scope_dir_for(corpus_dir, scope)
         proc = subprocess.run(
             [bin_path, "--json", "log"], cwd=cwd, capture_output=True,
-            text=True, env=subprocess_env(corpus_dir))
+            **KIO_SUBPROCESS_TEXT, env=subprocess_env(corpus_dir))
         response = _parse_json(proc.stdout)
         if proc.returncode != 0 or not isinstance(response, dict):
             problems.append(f"history log unavailable: {scope}")
@@ -981,7 +986,8 @@ def verify_deleted_restore(bin_path, corpus_dir, history_manifest, deleted_resul
             proc = subprocess.run(
                 [bin_path, "--json", "restore", json.dumps(pointer, separators=(",", ":")),
                  "--to", destination],
-                cwd=cwd, capture_output=True, text=True, env=subprocess_env(corpus_dir))
+                cwd=cwd, capture_output=True, **KIO_SUBPROCESS_TEXT,
+                env=subprocess_env(corpus_dir))
             if proc.returncode != 0:
                 problems.append(
                     f"restore failed for {entry['scope']}/{entry['file']}: {proc.stderr.strip()}")

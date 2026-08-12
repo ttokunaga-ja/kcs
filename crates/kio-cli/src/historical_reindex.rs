@@ -6,6 +6,7 @@
 //! associations and their derived search/embedding projections.
 
 use super::*;
+use kio_core::history::TreeBinding;
 
 #[derive(Debug, Default)]
 pub(super) struct ParsedReindex {
@@ -619,8 +620,8 @@ fn project_selected_snapshot(
             // The rotation is what makes the write-through recoverable rather
             // than a single point of failure (R25-4): until R25 this command
             // rotated nowhere, so a failed projection left the stamp naming a
-            // state the index had already left, the lazy refresh that is meant
-            // to be the safety net never fired, and the replica stayed wrong
+            // state the index had already left, direct search now fails closed
+            // until a writer publishes a coherent replacement, rather than staying wrong
             // for good. It is also what LC25 requires on its own terms — a
             // command that republishes the text corpus can certainly make a
             // cursor replay rank differently.
@@ -630,7 +631,10 @@ fn project_selected_snapshot(
             // readily as it adds new ones.
             drop(fts);
             crate::rotate_index_generation_unconditionally(repo.kio_dir())?;
-            crate::write_through_projection_or_log(repo.kio_dir());
+            crate::write_through_projection_or_log_for_at_snapshot(
+                repo.kio_dir(),
+                selected_commit,
+            );
             Ok(())
         }
         Err(error) => {

@@ -19,10 +19,12 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 import generate_corpus  # noqa: E402
+import replay_history  # noqa: E402
 import run_eval  # noqa: E402
 
 
@@ -416,6 +418,42 @@ class TestClassifyOutcome(unittest.TestCase):
         outcome = {"returncode": 0, "stdout": "not json", "stderr": ""}
         kind, resp, code, detail = run_eval.classify_outcome(outcome)
         self.assertEqual(kind, "fail")
+
+
+class TestUtf8KioSubprocesses(unittest.TestCase):
+    """The evaluator must not inherit Windows' active console code page."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="kio-eval-utf8-")
+        self.addCleanup(self.temp.cleanup)
+
+    def test_run_search_requests_strict_utf8(self):
+        completed = mock.Mock(
+            returncode=0, stdout='{"message":"日本語"}', stderr="")
+        with mock.patch.object(
+                run_eval.subprocess, "run", return_value=completed) as invoke:
+            outcome = run_eval.run_search(
+                "kio", self.temp.name, "日本語の検索", ["--limit", "1"])
+
+        self.assertEqual(outcome["stdout"], '{"message":"日本語"}')
+        kwargs = invoke.call_args.kwargs
+        self.assertTrue(kwargs["text"])
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "strict")
+
+    def test_replay_requests_strict_utf8(self):
+        completed = mock.Mock(
+            returncode=0, stdout='{"message":"日本語"}', stderr="")
+        with mock.patch.object(
+                replay_history.subprocess, "run", return_value=completed) as invoke:
+            response = replay_history.run_kio(
+                "kio", self.temp.name, ["log"], corpus_dir=self.temp.name)
+
+        self.assertEqual(response, {"message": "日本語"})
+        kwargs = invoke.call_args.kwargs
+        self.assertTrue(kwargs["text"])
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "strict")
 
 
 class TestStep4EvalGates(unittest.TestCase):

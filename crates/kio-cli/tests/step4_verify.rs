@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use kio_core::cas::{ObjectKind, ObjectStore};
 use kio_core::dag::{CommitObject, CommitStats, CommitType};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
+use kio_index::aggregator::{AggIndexStatus, AggSelector, Aggregator};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -262,12 +263,35 @@ fn ct4_fsck_recovers_identical_working_raw_and_records_repaired_commit() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let store = ObjectStore::new(dir.path().join(".kio"));
+    let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
     let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
     assert_eq!(output["repaired_raw_count"], 1);
     assert!(output["repaired_commit_hash"].as_str().is_some());
     assert!(store.inspect_object(ObjectKind::Raw, raw_hash).is_ok());
+
+    let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
+    assert_ne!(head_after, head_before, "repair recovery must move HEAD");
+    let scope: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join(".kio/scope.json")).unwrap())
+            .unwrap();
+    let scope_id = scope["scope_id"].as_str().unwrap();
+    let replica = Aggregator::open(&dir.path().join(".test-cache/kio/aggregator.sqlite"))
+        .unwrap();
+    let header = replica.scope_header(scope_id).unwrap().unwrap();
+    assert_eq!(header.index_status, AggIndexStatus::Ready);
+    assert_eq!(
+        header.current_snapshot_commit.as_deref(),
+        Some(head_after.trim()),
+        "verify-objects recovery must publish the repaired HEAD to the replica"
+    );
+    assert!(
+        replica
+            .has_binding(scope_id, AggSelector::Current, head_after.trim())
+            .unwrap(),
+        "the repaired commit has the prior tree but still needs current-snapshot bindings"
+    );
 }
 
 #[test]

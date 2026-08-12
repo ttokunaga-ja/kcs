@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use kio_core::cas::read_bounded_regular_file;
 use kio_core::{KioError, Result};
-use rusqlite::Connection;
 
 pub(crate) const DEFAULT_PARALLELISM: usize = 4;
 pub(crate) const MAX_PARALLELISM: usize = 4;
@@ -124,17 +123,6 @@ impl ScopeDeadline {
         Instant::now() >= self.expires_at
     }
 
-    #[cfg(debug_assertions)]
-    fn remaining(self) -> Duration {
-        self.expires_at.saturating_duration_since(Instant::now())
-    }
-
-    /// Interrupt long-running SQLite VM work cooperatively once this scope's
-    /// deadline expires. Each worker owns its connection, so the callback never
-    /// crosses a connection/thread boundary.
-    pub(crate) fn install_sqlite_progress_handler(self, conn: &Connection) {
-        conn.progress_handler(1_000, Some(move || self.is_expired()));
-    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -207,52 +195,12 @@ where
         .collect()
 }
 
-/// Deterministic integration-test seam for completion-order and timeout tests.
-/// It is unavailable in release builds and wakes in short intervals so the same
-/// scope deadline still bounds the injected delay.
-#[cfg(debug_assertions)]
-pub(crate) fn maybe_delay_scope_for_test(scope_id: &str, deadline: ScopeDeadline) {
-    const DELAY_SCOPE_ID_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID";
-    const DELAY_MS_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_MS";
-
-    if std::env::var(DELAY_SCOPE_ID_ENV).as_deref() != Ok(scope_id) {
-        return;
-    }
-    let Some(delay) = std::env::var(DELAY_MS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_millis)
-    else {
-        return;
-    };
-    let started = Instant::now();
-    loop {
-        let elapsed = started.elapsed();
-        if elapsed >= delay || deadline.is_expired() {
-            return;
-        }
-        let delay_left = delay.saturating_sub(elapsed);
-        let sleep_for = delay_left
-            .min(deadline.remaining())
-            .min(Duration::from_millis(10));
-        if sleep_for.is_zero() {
-            thread::yield_now();
-        } else {
-            thread::sleep(sleep_for);
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-pub(crate) fn maybe_delay_scope_for_test(_scope_id: &str, _deadline: ScopeDeadline) {}
-
 #[cfg(test)]
 mod tests {
     use super::{
         effective_settings, run_ordered, MultiScopeSettings, ScopeDeadline, ScopeExecution,
         MAX_PARALLELISM,
     };
-    use rusqlite::Connection;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -332,23 +280,6 @@ mod tests {
         );
         assert!(completed[0].1 < completed[1].1);
         assert!(completed[1].1 < completed[2].1);
-    }
-
-    #[test]
-    fn sqlite_progress_handler_interrupts_after_deadline() {
-        let conn = Connection::open_in_memory().unwrap();
-        let deadline = ScopeDeadline::from_now(Duration::from_millis(10));
-        deadline.install_sqlite_progress_handler(&conn);
-        let result: rusqlite::Result<i64> = conn.query_row(
-            "WITH RECURSIVE spin(n) AS (VALUES(0) UNION ALL SELECT n + 1 FROM spin WHERE n < 1000000000) SELECT max(n) FROM spin",
-            [],
-            |row| row.get(0),
-        );
-        assert!(
-            result.is_err(),
-            "the progress handler must interrupt the query"
-        );
-        assert!(deadline.is_expired());
     }
 
     #[test]
