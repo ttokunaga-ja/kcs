@@ -411,7 +411,6 @@ pub struct CanonicalFinalEvent {
 /// `lifecycle_epoch`; on a tie the tombstone wins deterministically. A tail
 /// missing its required lifecycle epoch is rejected fail-closed, even if a
 /// caller bypasses marker-record structural validation.
-#[must_use]
 pub fn canonical_final_event(
     tombstone_tail: Option<&LifecycleEvent>,
     receipt_tail: Option<&LifecycleEvent>,
