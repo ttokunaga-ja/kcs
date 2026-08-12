@@ -2471,13 +2471,6 @@ mod tests {
     }
 
     #[test]
-    fn lc42_index_metadata_shape_is_the_caller_side_concern() {
-        // Structural placeholder: index_metadata/index_generation live in
-        // kio-index (see crates/kio-index/src/fts.rs), which this crate cannot
-        // depend on. This test only documents the boundary.
-    }
-
-    #[test]
     fn lc43_lc44_lifecycle_epoch_rollback_recreates_at_max_plus_one() {
         let (_dir, state) = setup();
         state.write_lifecycle_epoch(3).unwrap();

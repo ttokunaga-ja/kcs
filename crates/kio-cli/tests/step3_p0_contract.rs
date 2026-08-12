@@ -5887,22 +5887,6 @@ fn pc60_search_at_with_descendants_is_invalid_usage() {
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001");
 }
 
-/// R9-6: every remaining KIO-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the
-/// canonical class 1. Step 4 implements search-at, historical reindex, and object
-/// verification, so none of those completed paths belongs here.
-#[test]
-fn r9_6_not_implemented_exit_code_is_uniform() {
-    // QB50-58 (step4b-contract-tests-p3b.md §D) implemented `kio log
-    // --at/--since` (see step4b_p3b_contract.rs's qb5x tests) — this
-    // regression now exercises `kio gc`, a still-genuine Phase 4+ command
-    // placeholder (`Command::Gc`'s own doc comment), to keep pinning the
-    // not-implemented exit-code convention itself.
-    let dir = indexed_scope();
-    let args = ["gc"];
-    let err = json_failure(&dir, &args, 1);
-    assert_eq!(err["error_code"], "KIO-E-CONFIG-NOT-IMPLEMENTED-001");
-}
-
 // step4b-contract-tests-p2b.md PB21/22: a scope_id registered against two
 // distinct .kio is fail-closed (KIO-E-REGISTRY-DUP-001), regardless of
 // last_seen_at — this fixture happens to also share the newest timestamp,
@@ -8851,50 +8835,6 @@ fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
             .any(|hit| hit.get("related_images").is_some()),
         "the figures must still be named on the chunk rows: {text}"
     );
-}
-
-/// A completed image projection remains searchable if a legacy source later
-/// lacks `image_vec`.  Direct search reads only the device replica; it must not
-/// reopen or repair the per-scope source index merely to answer this query.
-#[test]
-fn a_scope_indexed_before_image_vec_existed_still_searches() {
-    let dir = indexed_scope_local_embed_with_images();
-    {
-        let conn = index_db(&dir);
-        conn.execute_batch("DROP TABLE image_vec;").unwrap();
-    }
-    let search = json_success_local_embed(
-        &dir,
-        &["search", "figure page one", "--scope", ".", "--limit", "20"],
-    );
-    assert!(
-        !search["results"].as_array().unwrap().is_empty(),
-        "chunk results must survive a missing image_vec: {search}"
-    );
-    assert!(
-        !image_rows(&search).is_empty(),
-        "the already-published replica image relation must remain searchable: {search}"
-    );
-    let source_image_table_count: i64 = index_db(&dir)
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'image_vec'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        source_image_table_count, 0,
-        "direct search must not recreate the source image_vec table"
-    );
-
-    // A writer repairs the source and republishes it, without changing the
-    // searchable replica result contract.
-    json_success_local_embed(&dir, &["index"]);
-    let restored = json_success_local_embed(
-        &dir,
-        &["search", "figure page one", "--scope", ".", "--limit", "20"],
-    );
-    assert!(!image_rows(&restored).is_empty(), "{restored}");
 }
 
 /// U5 / §4.2 問題 A: an image is not in the FTS index, so RRF would add two

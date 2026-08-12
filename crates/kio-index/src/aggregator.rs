@@ -195,8 +195,6 @@ pub struct AggScopeHeader {
     /// The two append-only source boundaries captured by this projection.
     pub max_rowid: u64,
     pub max_association_rowid: u64,
-    /// Whether the source exposed `image_vec` at projection time.
-    pub has_image_vec: bool,
     /// The actual set of chunk embedding profiles present in the source. It
     /// lets a replica-only caller make the same cross-scope compatibility
     /// decision without probing every source index.
@@ -828,7 +826,6 @@ impl Aggregator {
                 -- so exact snapshot bindings must carry both bounds too.
                 max_rowid INTEGER NOT NULL,
                 max_association_rowid INTEGER NOT NULL,
-                has_image_vec INTEGER NOT NULL,
                 embedding_profiles_json TEXT NOT NULL,
                 index_status TEXT NOT NULL,
                 refreshed_at     INTEGER NOT NULL
@@ -1050,7 +1047,6 @@ impl Aggregator {
                     ("index_generation", "TEXT", true, 0),
                     ("max_rowid", "INTEGER", true, 0),
                     ("max_association_rowid", "INTEGER", true, 0),
-                    ("has_image_vec", "INTEGER", true, 0),
                     ("embedding_profiles_json", "TEXT", true, 0),
                     ("index_status", "TEXT", true, 0),
                     ("refreshed_at", "INTEGER", true, 0),
@@ -1286,7 +1282,7 @@ impl Aggregator {
     pub fn collection_generation(&self) -> Result<String> {
         let mut stmt = self.conn.prepare(
             "SELECT scope_id, current_snapshot_commit, current_chunking_config_hash,
-                        index_generation, max_rowid, max_association_rowid, has_image_vec,
+                        index_generation, max_rowid, max_association_rowid,
                         embedding_profiles_json, index_status
                  FROM agg_scopes ORDER BY scope_id",
         )?;
@@ -1298,9 +1294,8 @@ impl Aggregator {
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
+                row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
             ))
         })?;
         let mut hasher = Sha256::new();
@@ -1312,7 +1307,6 @@ impl Aggregator {
                 generation,
                 max_rowid,
                 max_association_rowid,
-                has_image_vec,
                 embedding_profiles_json,
                 index_status,
             ) = row?;
@@ -1337,8 +1331,6 @@ impl Aggregator {
             hasher.update(max_rowid.to_string().as_bytes());
             hasher.update(b"\t");
             hasher.update(max_association_rowid.to_string().as_bytes());
-            hasher.update(b"\n");
-            hasher.update(has_image_vec.to_string().as_bytes());
             hasher.update(b"\n");
             hasher.update(embedding_profiles_json.as_bytes());
             hasher.update(b"\t");
@@ -1377,21 +1369,6 @@ impl Aggregator {
             .map_err(Into::into)
     }
 
-    /// Whether `image_vec` existed in the source index when the current scope
-    /// projection was made.  A legacy source may legitimately lack that table;
-    /// its old image candidates must not survive in the replica after the
-    /// source has been observed without it.
-    pub fn scope_has_image_vec(&self, scope_id: &str) -> Result<Option<bool>> {
-        self.conn
-            .query_row(
-                "SELECT has_image_vec FROM agg_scopes WHERE scope_id = ?1",
-                params![scope_id],
-                |row| Ok(row.get::<_, i64>(0)? != 0),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     /// The complete source header last committed with `scope_id`'s replica
     /// projection. `None` means this device has no completed projection for
     /// the scope, which is intentionally different from a `Ready` header with
@@ -1402,7 +1379,7 @@ impl Aggregator {
             .query_row(
                 "SELECT current_snapshot_commit, current_chunking_config_hash,
                         index_generation, max_rowid, max_association_rowid,
-                        has_image_vec, embedding_profiles_json, index_status
+                        embedding_profiles_json, index_status
                  FROM agg_scopes WHERE scope_id = ?1",
                 params![scope_id],
                 |row| {
@@ -1412,9 +1389,8 @@ impl Aggregator {
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -1425,7 +1401,6 @@ impl Aggregator {
             index_generation,
             max_rowid,
             max_association_rowid,
-            has_image_vec,
             embedding_profiles_json,
             index_status,
         )) = row
@@ -1440,7 +1415,6 @@ impl Aggregator {
             index_generation,
             max_rowid: max_rowid as u64,
             max_association_rowid: max_association_rowid as u64,
-            has_image_vec: has_image_vec != 0,
             embedding_profiles,
             index_status: AggIndexStatus::parse(&index_status)?,
         }))
@@ -1468,10 +1442,9 @@ impl Aggregator {
                  index_generation = ?4,
                  max_rowid = ?5,
                  max_association_rowid = ?6,
-                 has_image_vec = ?7,
-                 embedding_profiles_json = ?8,
-                 index_status = ?9,
-                 refreshed_at = ?10
+                 embedding_profiles_json = ?7,
+                 index_status = ?8,
+                 refreshed_at = ?9
              WHERE scope_id = ?1",
             params![
                 scope_id,
@@ -1480,7 +1453,6 @@ impl Aggregator {
                 header.index_generation,
                 header.max_rowid as i64,
                 header.max_association_rowid as i64,
-                if header.has_image_vec { 1_i64 } else { 0_i64 },
                 embedding_profiles_json,
                 header.index_status.as_str(),
                 now_ms,
@@ -2009,16 +1981,15 @@ impl Aggregator {
         tx.execute(
             "INSERT INTO agg_scopes(
                  scope_id, current_snapshot_commit, current_chunking_config_hash,
-                 index_generation, max_rowid, max_association_rowid, has_image_vec,
+                 index_generation, max_rowid, max_association_rowid,
                  embedding_profiles_json, index_status, refreshed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(scope_id) DO UPDATE SET
                  current_snapshot_commit = excluded.current_snapshot_commit,
                  current_chunking_config_hash = excluded.current_chunking_config_hash,
                  index_generation = excluded.index_generation,
                  max_rowid = excluded.max_rowid,
                  max_association_rowid = excluded.max_association_rowid,
-                 has_image_vec = excluded.has_image_vec,
                  embedding_profiles_json = excluded.embedding_profiles_json,
                  index_status = excluded.index_status,
                  refreshed_at = excluded.refreshed_at",
@@ -2029,7 +2000,6 @@ impl Aggregator {
                 header.index_generation,
                 header.max_rowid as i64,
                 header.max_association_rowid as i64,
-                if header.has_image_vec { 1_i64 } else { 0_i64 },
                 embedding_profiles_json,
                 header.index_status.as_str(),
                 now_ms,
@@ -3087,7 +3057,6 @@ mod tests {
             index_generation: generation.to_owned(),
             max_rowid: 17,
             max_association_rowid: 23,
-            has_image_vec: true,
             embedding_profiles: vec![EmbeddingProfileSummary {
                 dimensions: 2,
                 distance: "cosine".to_owned(),
@@ -3773,7 +3742,6 @@ mod tests {
         );
         assert_eq!(stored.index_generation, "gen-1");
         assert_eq!((stored.max_rowid, stored.max_association_rowid), (17, 23));
-        assert!(stored.has_image_vec);
         assert_eq!(stored.index_status, AggIndexStatus::Ready);
         assert_eq!(
             stored
@@ -3793,7 +3761,6 @@ mod tests {
             index.scope_projection_bounds("empty").unwrap(),
             Some((17, 23))
         );
-        assert_eq!(index.scope_has_image_vec("empty").unwrap(), Some(true));
         assert!(
             !index
                 .has_binding("empty", AggSelector::Current, "commit:head")

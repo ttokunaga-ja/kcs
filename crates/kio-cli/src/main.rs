@@ -223,15 +223,11 @@ enum Command {
     View(PointerArgs),
     /// Restore historical raw bytes to an explicit destination.
     Restore(RestoreArgs),
-    /// Phase 4+ command placeholder.
-    Gc(PlaceholderArgs),
     /// Remove content from KIO-managed history after preview and confirmation.
     Purge(purge::PurgeArgs),
     /// Reindex normalized instances.
     Reindex(ReindexArgs),
-    /// Phase 4+ command placeholder.
-    Move(PlaceholderArgs),
-    /// Step 4 command placeholder.
+    /// Verify an Evidence Pointer.
     Evidence(EvidenceArgs),
 }
 
@@ -465,12 +461,6 @@ enum LedgerCommand {
 
 #[derive(Debug, Args)]
 struct ReconcileArgs {}
-
-/// A command whose implementation is Phase 4+ (`gc` / `move`). Declared with
-/// no operands so `--help` says so plainly instead of silently swallowing
-/// whatever was typed.
-#[derive(Debug, Args)]
-struct PlaceholderArgs {}
 
 /// `kio open` / `kio view` — one Evidence Pointer operand (06 §1.1).
 #[derive(Debug, Args)]
@@ -1154,7 +1144,6 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Evidence(args) => verify_objects::run_evidence(args),
         Command::Restore(args) => restore::run(args),
         Command::Purge(args) => purge::run(args),
-        Command::Gc(_) | Command::Move(_) => Err(KioError::not_implemented("command")),
     }
 }
 
@@ -2868,9 +2857,6 @@ struct SearchedScopeInfo {
     /// PC19/PC21: this scope's `index_metadata.index_generation` ULID at the
     /// moment it was searched — frozen into the next page's cursor.
     index_generation: String,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    has_image_vec: bool,
     /// An active purge journal was observed only while admitting this scope's
     /// last coherent Ready header across a HEAD/header mismatch.  Candidate
     /// selection may use that older projection solely to reach the narrow
@@ -3114,7 +3100,6 @@ struct ScopeProjection {
     completions: Vec<kio_index::aggregator::AggProjectionCompletion>,
     max_rowid: u64,
     max_association_rowid: u64,
-    has_image_vec: bool,
 }
 
 /// Project one scope's committed chunks and resolved visibility bindings into
@@ -3180,7 +3165,6 @@ fn collect_scope_projection(
             completions: Vec::new(),
             max_rowid: 0,
             max_association_rowid: 0,
-            has_image_vec: false,
         });
     };
 
@@ -3427,22 +3411,8 @@ fn collect_scope_projection(
 
     // Image vectors remain attached to every committed citing chunk. At query
     // time the same eligible chunk binding gates the image reference, so a
-    // historical image never needs a second visibility rule.
-    if !table_exists(&conn, "image_vec")? {
-        return Ok(ScopeProjection {
-            chunks,
-            images: Vec::new(),
-            bindings,
-            current_snapshot_commit: Some(head),
-            current_chunking_config_hash: Some(live_chunking_config_hash),
-            embedding_profiles,
-            completions,
-            max_rowid,
-            max_association_rowid,
-            has_image_vec: false,
-        });
-    }
-
+    // historical image never needs a second visibility rule. The strict
+    // source-index schema guarantees that `image_vec` is present.
     let mut image_vectors = BTreeMap::<String, Option<Vec<f32>>>::new();
     let mut seen_references = BTreeSet::<(String, String)>::new();
     let mut images = Vec::new();
@@ -3461,14 +3431,14 @@ fn collect_scope_projection(
             if !seen_references.insert((image_id.clone(), chunk.chunk_id.clone())) {
                 continue;
             }
-            let vector = image_vectors
-                .entry(image_id.clone())
-                .or_insert_with(|| {
-                    kio_index::embedding_store::read_image_vector(&conn, &image_id)
-                        .ok()
-                        .flatten()
-                })
-                .clone();
+            let vector = if let Some(vector) = image_vectors.get(&image_id) {
+                vector.clone()
+            } else {
+                let vector = kio_index::embedding_store::read_image_vector(&conn, &image_id)
+                    .map_err(index_to_kio)?;
+                image_vectors.insert(image_id.clone(), vector.clone());
+                vector
+            };
             if let Some(embedding) = vector {
                 images.push(kio_index::aggregator::AggImage {
                     image_id,
@@ -3489,7 +3459,6 @@ fn collect_scope_projection(
         completions,
         max_rowid,
         max_association_rowid,
-        has_image_vec: true,
     })
 }
 
@@ -3968,7 +3937,6 @@ fn write_through_projection_inner(
         index_generation: generation,
         max_rowid: projection.max_rowid,
         max_association_rowid: projection.max_association_rowid,
-        has_image_vec: projection.has_image_vec,
         embedding_profiles: projection.embedding_profiles,
         index_status: kio_index::aggregator::AggIndexStatus::Ready,
     };
@@ -5090,8 +5058,6 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     max_association_rowid: outcome.max_association_rowid,
                     chunking_config_hash: outcome.chunking_config_hash.clone(),
                     index_generation: outcome.index_generation.clone(),
-                    #[cfg(test)]
-                    has_image_vec: false,
                     journal_active_at_prepare: outcome.journal_active_at_prepare,
                     shallow_skipped: outcome.shallow_skipped,
                     runtime_binding_filter: outcome.runtime_binding_filter,
@@ -6726,18 +6692,6 @@ fn give_images_their_chunks_text_rank(
         }
     }
     *text_ranks = widened;
-}
-
-/// Whether this index has `name` at all — the question an index written by an
-/// older build makes necessary.
-fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1)",
-        rusqlite::params![name],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|found| found != 0)
-    .map_err(|error| KioError::schema(error.to_string()))
 }
 
 /// One image object that can be returned as a search result (05 §1.7).
@@ -14056,7 +14010,6 @@ fn search_to_kio(error: kio_search::SearchError) -> KioError {
         ),
         kio_search::SearchError::Evidence(message) => KioError::schema(message),
         kio_search::SearchError::Contract(message) => KioError::schema(message),
-        kio_search::SearchError::NotImplemented(feature) => KioError::not_implemented(feature),
     }
 }
 
@@ -27026,7 +26979,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,
@@ -27040,7 +26992,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,
@@ -27054,7 +27005,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,

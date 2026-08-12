@@ -137,14 +137,14 @@ Step 別の目安 (テスト除く):
 | `kio repair verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
-| `kio gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
+| on-demand / shallow / prune-unreachable GC | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (CLI は未公開) |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
 | CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |
 | export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |
 | `kio evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
-| `kio move` (scope 内移動の明示追跡。現状は lock 対象として予約のみ、full spec は未定) | [05-runtime.md §6](05-runtime.md) | Phase 4+ (予約) |
+| scope 内移動の明示追跡 | [05-runtime.md §6](05-runtime.md) | Phase 4+ (CLI は未公開) |
 | agent API の外部公開・発見導線 / navigation | [06-cli-spec.md §9](06-cli-spec.md) | Phase 5 |
 | GUI 用語翻訳マッピング | [06-cli-spec.md §14](06-cli-spec.md) | Phase 4+ |
 

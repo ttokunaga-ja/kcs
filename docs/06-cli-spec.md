@@ -93,7 +93,6 @@ kio tag <name> [<commit>]               # 論理名を refs/tags-v1/names.jsonl 
 kio tag --delete <name>                 # canonical ref を .kio/.lock 下で atomic に除去。names.jsonl の
                                         # 行は残す (監査保全 — 「ref の無い names 行 = 正常」と整合。
                                         # 付替えは削除 → 再作成の 2 操作 — 専用 retarget は持たない)
-kio gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
 kio purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone] [--yes]  # 詳細 §6 (確認プロンプト必須 — --yes で省略)
 kio reindex [--regenerate] [--at <commit>] [--yes] [--online|--offline] [--realtime|--batch]  # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
                                         # --regenerate = 新 gen で再 normalize / 再 embedding (Step 3)。
@@ -105,8 +104,6 @@ kio reindex [--regenerate] [--at <commit>] [--yes] [--online|--offline] [--realt
                                         # 上書きチェーンは manifest の parent_gen (同一 raw 内) / parent_instance
                                         # (raw 跨ぎ incremental の三つ組 — full では null) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--regenerate は確認プロンプト必須 (--yes で省略可)
-kio move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
-kio move --accept <id> | --reject <id>  # 提案の承認/却下。Kio が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
 kio evidence verify <pointer> [--strict]
 kio evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Phase 4+ — §7、08 §4.3)
 kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)。
@@ -585,7 +582,6 @@ MVP では CLI のみ提供。将来 GUI を作る際の用語置換テーブル
 | branch | 修正提案 / 変更案 |
 | merge | 反映 |
 | conflict | 最新版と重なる編集 |
-| gc | 不要な内部データを整理 |
 | purge | このファイルの本文を全履歴から物理削除 (削除した事実は記録に残る) |
 
 GUI は MVP の責務ではないため、用語翻訳は GUI 実装フェーズで再評価する (今書いた表は出発点に過ぎない)。
