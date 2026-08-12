@@ -24,15 +24,15 @@ import corpus_spec as spec  # noqa: E402
 
 
 def _raw_sha256(raw_bytes):
-    """ファイル bytes の sha256 hexdigest (run_eval の解決層が raw_hash に使う)."""
+    """ファイル bytes の sha256 hexdigest (評価器の解決層が raw_hash に使う)."""
     return hashlib.sha256(raw_bytes).hexdigest()
 
 
 def build_manifest():
     files = []
     # anchor 文書: sections は {slug, heading} (実見出しテキスト) を持つ。
-    # run_eval の解決層が heading -> slugify(heading) -> section_id を導くため heading が必須。
-    # raw_sha256 は render_anchor が書き出す bytes の sha256。run_eval が raw_hash に使う。
+    # 評価器の解決層が heading -> slugify(heading) -> section_id を導くため heading が必須。
+    # raw_sha256 は render_anchor が書き出す bytes の sha256。評価器が raw_hash に使う。
     for anchor in spec.ANCHORS:
         entry = spec.anchor_manifest_entry(anchor)
         entry["raw_sha256"] = _raw_sha256(spec.render_anchor(anchor).encode("utf-8"))

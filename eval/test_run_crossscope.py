@@ -33,26 +33,26 @@ class TestCrossscopeResultArtifact(unittest.TestCase):
             outcome = {"duration_ms": 12.5}
 
             with mock.patch.object(
-                    run_crossscope.run_eval, "load_golden", return_value=[query]), \
+                    run_crossscope.eval_oracle, "load_golden", return_value=[query]), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "load_json", return_value={}), \
+                    run_crossscope.eval_oracle, "load_json", return_value={}), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "CorpusModel", return_value=mock.Mock()), \
+                    run_crossscope.eval_oracle, "CorpusModel", return_value=mock.Mock()), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "Resolver", return_value=resolver), \
+                    run_crossscope.eval_oracle, "Resolver", return_value=resolver), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "run_search", return_value=outcome), \
+                    run_crossscope.eval_oracle, "run_search", return_value=outcome), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "classify_outcome",
+                    run_crossscope.eval_oracle, "classify_outcome",
                     return_value=("scored", response, None, "")), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "evidence_problems", return_value=[]), \
+                    run_crossscope.eval_oracle, "evidence_problems", return_value=[]), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "recall_at_k", return_value=1.0), \
+                    run_crossscope.eval_oracle, "recall_at_k", return_value=1.0), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "percentile_nearest_rank", return_value=12.5), \
+                    run_crossscope.eval_oracle, "percentile_nearest_rank", return_value=12.5), \
                  mock.patch.object(
-                    run_crossscope.run_eval, "passes_latency_target", return_value=True), \
+                    run_crossscope.eval_oracle, "passes_latency_target", return_value=True), \
                  mock.patch.object(run_crossscope, "worst_expected_rank", return_value=2):
                 exit_code = run_crossscope.main([
                     "--corpus", directory,

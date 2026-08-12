@@ -51,7 +51,7 @@ sys.path.insert(0, HERE)
 
 import corpus_spec as spec  # noqa: E402
 from eval_env import subprocess_env  # noqa: E402
-from run_eval import (  # noqa: E402
+from python_eval_oracle import (  # noqa: E402
     CorpusModel,
     _pointer_section,
     Resolver,
@@ -102,9 +102,9 @@ def chunk_text(corpus_dir, pointer):
 
 
 def result_key(pointer):
-    """The same 3-element projection `run_eval._result_keys` scores against.
+    """The same 3-element projection `python_eval_oracle._result_keys` scores against.
 
-    The section element is `run_eval._pointer_section`, not the raw
+    The section element is `python_eval_oracle._pointer_section`, not the raw
     `section_id`: J2's ruling matches on the **leaf** heading slug, so
     `a/b` scores as `b`. Reimplementing that split here once produced a dump
     whose stored keys silently never matched `expected`, while the baseline —

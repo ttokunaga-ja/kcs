@@ -2,7 +2,7 @@
 
 docs/09-mvp-scope.md §4.3 のゴールデンクエリ評価規約に対応する合成コーパスと
 履歴シナリオ (編集 / リネーム / 削除) を **決定論的** に定義するモジュール。
-generate_corpus.py / replay_history.py / run_eval.py が本モジュールを共有し、
+generate_corpus.py / replay_history.py と限定的な Python oracle が本モジュールを共有し、
 コーパス・履歴・ゴールデンクエリの整合を構造的に保証する (drift を防ぐ)。
 
 設計:

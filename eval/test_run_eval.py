@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_eval.py の軽量単体テスト (Python 標準ライブラリのみ).
+"""Python oracle と Rust evaluator shim の軽量単体テスト.
 
 実行:
     python3 -m unittest eval/test_run_eval.py
@@ -17,6 +17,7 @@ import copy
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 import generate_corpus  # noqa: E402
 import replay_history  # noqa: E402
-import run_eval  # noqa: E402
+import python_eval_oracle as run_eval  # noqa: E402
+import run_eval as run_eval_shim  # noqa: E402
 
 
 def _strict_object(value, required, optional=()):
@@ -665,162 +667,57 @@ class TestUtf8KioSubprocesses(unittest.TestCase):
         self.assertEqual(kwargs["errors"], "strict")
 
 
-class TestStep4EvalGates(unittest.TestCase):
-    @staticmethod
-    def _record(results, expected_set=None):
-        if expected_set is None:
-            # QB24/裁定4: 3 要素射影 (raw_hash, section, path_at_commit).
-            expected_set = {
-                (result["evidence_pointer"]["raw_hash"],
-                 run_eval._pointer_section(result["evidence_pointer"]),
-                 result["evidence_pointer"].get("path_at_commit"))
-                for result in results
-            }
-        return {"response": {"results": results}, "expected_set": expected_set}
+class TestRustEvaluatorWrapper(unittest.TestCase):
+    """The legacy Python entry point must only forward to Rust."""
 
-    def _history(self):
-        history = {
-            "replay": "eval/replay_history.py",
-            "seed": spec.SEED,
-            "scopes": list(spec.SCOPES),
-            "renamed": copy.deepcopy(spec.HISTORY["renames"]),
-            "edited": copy.deepcopy(spec.HISTORY["edits"]),
-            "deleted": copy.deepcopy(spec.HISTORY["deletes"]),
-            "verified": {},
-        }
-        for manifest_key in ("edited", "renamed", "deleted"):
-            file_field = "old_file" if manifest_key == "renamed" else "file"
-            for entry in history[manifest_key]:
-                anchor = run_eval._history_anchor(entry["scope"], entry[file_field])
-                entry["raw_sha256"] = hashlib.sha256(
-                    spec.render_anchor(anchor).encode("utf-8")).hexdigest()
-                entry["sections"] = [
-                    {"slug": section["slug"], "heading": section["heading"]}
-                    for section in anchor["sections"]
-                ]
-        for scope in spec.SCOPES:
-            steps = ["baseline"]
-            if any(item["scope"] == scope for item in spec.HISTORY["edits"]):
-                steps.append("edit")
-            if any(item["scope"] == scope for item in spec.HISTORY["renames"]):
-                steps.append("rename")
-            if any(item["scope"] == scope for item in spec.HISTORY["deletes"]):
-                steps.append("delete")
-            count = 2 * len(steps)
-            history["verified"][scope] = {
-                "steps": steps,
-                "commit_count": count,
-                "messages": run_eval._expected_history_messages(scope),
-            }
-        return history
+    def _stub(self, directory, exit_code=17):
+        path = os.path.join(directory, "evaluator-stub")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "print('stdout:' + '|'.join(sys.argv[1:]))\n"
+                "print('stderr:' + '|'.join(sys.argv[1:]), file=sys.stderr)\n"
+                f"raise SystemExit({exit_code})\n")
+        os.chmod(path, 0o755)
+        return path
 
-    def test_history_manifest_structure_accepts_exact_and_rejects_stale(self):
-        history = self._history()
-        self.assertEqual(run_eval.validate_history_manifest(history), [])
-        stale = copy.deepcopy(history)
-        stale["seed"] += 1
-        stale["verified"].pop(spec.SCOPES[-1])
-        problems = run_eval.validate_history_manifest(stale)
-        self.assertTrue(any("seed" in problem for problem in problems))
-        self.assertTrue(any("scope set" in problem for problem in problems))
+    def _run_wrapper(self, cwd, env, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "run_eval.py"), *args],
+            cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
 
-        corrupt = copy.deepcopy(history)
-        corrupt["edited"][0]["raw_sha256"] = "not-a-hash"
-        corrupt["renamed"][0]["sections"][0]["slug"] = "stale"
-        corrupt["verified"][spec.SCOPES[0]]["messages"][0] = "wrong"
-        problems = run_eval.validate_history_manifest(corrupt)
-        self.assertTrue(any("raw_sha256" in problem for problem in problems))
-        self.assertTrue(any("sections" in problem for problem in problems))
-        self.assertTrue(any("messages" in problem for problem in problems))
+    def test_override_forwards_argv_streams_exit_and_works_from_other_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            stub = self._stub(directory)
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = stub
+            completed = self._run_wrapper(directory, env, "--scenario", "M3-1", "--dry-run")
+        self.assertEqual(completed.returncode, 17)
+        self.assertEqual(completed.stdout, "stdout:--scenario|M3-1|--dry-run\n")
+        self.assertEqual(completed.stderr, "stderr:--scenario|M3-1|--dry-run\n")
 
-    def test_head_only_point_eight_one_two_five_cannot_false_pass_m3_2(self):
-        history = self._history()
-        # The aggregate score 13/16 = .8125 clears the numeric threshold, but none
-        # of the three edited-away old identities appears.
-        self.assertGreaterEqual(13 / 16, run_eval.RECALL_TARGET)
-        coverage = run_eval.assess_history_coverage({"M3-2": []}, history)
-        self.assertEqual(len(coverage["edited_old_missing"]), 3)
-        self.assertFalse(coverage["passes_m3_2"])
+    def test_missing_override_fails_without_python_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = os.path.join(directory, "missing")
+            completed = self._run_wrapper(directory, env, "--dry-run")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Rust evaluator kio-eval", completed.stderr)
 
-    def test_all_edited_old_identities_are_required(self):
-        history = self._history()
-        results = []
-        for entry in history["edited"]:
-            results.append(_pointer("sha256:" + entry["raw_sha256"], section_id="x/y"))
-        coverage = run_eval.assess_history_coverage(
-            {"M3-2": [self._record(results)]}, history)
-        self.assertEqual(coverage["edited_old_missing"], [])
-
-        noise = run_eval.assess_history_coverage(
-            {"M3-2": [self._record(results, {("sha256:other", "y", None)})]}, history)
-        self.assertEqual(len(noise["edited_old_missing"]), 3)
-
-    def test_rename_requires_old_and_new_snapshot_paths_with_current_alias(self):
-        history = self._history()
-        responses = []
-        for entry in history["renamed"]:
-            raw_hash = "sha256:" + entry["raw_sha256"]
-            results = []
-            for path_at_commit in (entry["old_file"], entry["new_file"]):
-                result = _pointer(raw_hash, section_id="x/y")
-                result["evidence_pointer"]["path_at_commit"] = path_at_commit
-                result["current_paths"] = [entry["new_file"]]
-                result["current_path"] = entry["new_file"]
-                results.append(result)
-            responses.append(self._record(results))
-        coverage = run_eval.assess_history_coverage(
-            {"M3-2": responses}, history)
-        self.assertEqual(coverage["rename_failures"], [])
-
-        responses[0]["response"]["results"][0]["current_paths"] = [
-            history["renamed"][0]["old_file"]]
-        stale = run_eval.assess_history_coverage(
-            {"M3-2": responses}, history)
-        self.assertTrue(stale["rename_failures"])
-
-    def test_every_deleted_identity_is_required(self):
-        history = self._history()
-        results = [
-            _pointer("sha256:" + entry["raw_sha256"], section_id="x/y")
-            for entry in history["deleted"]
-        ]
-        coverage = run_eval.assess_history_coverage(
-            {"M3-3": [self._record(results)]}, history)
-        self.assertEqual(coverage["deleted_missing"], [])
-        self.assertTrue(coverage["passes_m3_3"])
-
-        incomplete = run_eval.assess_history_coverage(
-            {"M3-3": [self._record(results[:-1])]}, history)
-        self.assertEqual(len(incomplete["deleted_missing"]), 1)
-        self.assertFalse(incomplete["passes_m3_3"])
-
-    def test_evidence_fields(self):
-        bad = {"results": [_pointer("sha256:a", section_id="x/y")]}
-        self.assertTrue(run_eval.evidence_problems(bad))
-        pointer = {
-            "schema_version": 1,
-            "commit": "sha256:c",
-            "raw_hash": "sha256:r",
-            "tool_profile_hash": "sha256:t",
-            "chunk_hash": "sha256:h",
-            "scope_id": "scope_1",
-        }
-        self.assertEqual(run_eval.evidence_problems(
-            {"results": [{"evidence_pointer": pointer}]}), [])
-
-    def test_scenario_specific_latency_boundaries(self):
-        self.assertEqual(run_eval.percentile_nearest_rank([1, 2, 3, 4, 5], .95), 5)
-        self.assertEqual(run_eval.LATENCY_TARGET_MS, {
-            "M3-1": 5_000.0,
-            "M3-2": 7_000.0,
-            "M3-3": 7_000.0,
-        })
-        self.assertTrue(run_eval.passes_latency_target("M3-1", 4_999.9))
-        self.assertFalse(run_eval.passes_latency_target("M3-1", 5_000.0))
-        for scenario in ("M3-2", "M3-3"):
-            self.assertTrue(run_eval.passes_latency_target(scenario, 6_999.9))
-            self.assertFalse(run_eval.passes_latency_target(scenario, 7_000.0))
-        self.assertFalse(run_eval.passes_latency_target("M3-1", None))
+    def test_repository_binary_resolves_from_foreign_cwd(self):
+        # Keep the unit test independent of an existing Cargo build while
+        # proving resolution is repository-rooted rather than cwd-rooted.
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            executable = "kio-eval.exe" if os.name == "nt" else "kio-eval"
+            binary = os.path.join(directory, "target", "debug", executable)
+            os.makedirs(os.path.dirname(binary))
+            with open(binary, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(run_eval_shim, "REPO_ROOT", directory):
+                self.assertEqual(run_eval_shim.evaluator_binary(), binary)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,10 @@
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
 (`docs/09-mvp-scope.md` §5.5、**Step 3 着手前ゲート**) の成果物。
 
-- 依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
+- Python 補助スクリプトの依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
 - 決定論: すべて固定 seed (`corpus_spec.SEED`) + hashlib 由来の seed。2 回実行で byte 同一。
-- `crates/` の `kio` バイナリ (Step 1-2 実装済み) を使う。`cargo build --release` 済み前提。
+- 通常評価は Rust の `kio-eval` と評価対象の `kio` を使う。
+  `cargo build --release --locked --all-features` 済み前提。
 
 ## ファイル構成
 
@@ -17,12 +18,13 @@
 | `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `run_eval.py` | 評価ランナー。`kio search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
+| `run_eval.py` | 互換 CLI shim。リポジトリ内の Rust `kio-eval` をそのまま起動する。評価・report・exit code の正本は Rust であり、Python へ暗黙に fallback しない。`KIO_EVAL_BIN` で明示的に evaluator binary を差し替えられる |
+| `python_eval_oracle.py` | Python の独立 differential/security oracle。共有 golden vectors、pointer CAS attestation、crossscope/reranker の限定的な補助だけを持つ。通常の full evaluator・履歴ゲート・report 生成は持たない |
 | `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
-| `run_crossscope.py` | 横断増補の専用ランナー。`run_eval.py` の `HISTORY_QUERY_COUNT` / `assess_history_coverage` は**セット全体**の契約であり部分集合には当てられないため別立て。診断値 `worst_expected_rank` を併記する (Recall@10 は横断融合の欠陥をほぼ検出できない — 実測で replica 有無ともに 1.000) |
+| `run_crossscope.py` | 横断増補の専用ランナー。`python_eval_oracle.py` の限定的な補助を明示利用する。full Rust evaluator のセット全体ゲートは部分集合に当てられないため別立て。診断値 `worst_expected_rank` を併記する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
+| `test_run_eval.py` | Python oracle の独立テストと Rust evaluator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
 | `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
@@ -37,7 +39,7 @@
 
 ```bash
 # 0. バイナリ (未ビルドなら)
-cargo build --release
+cargo build --release --locked --all-features
 
 # 1. 合成コーパス生成 (決定論的)
 python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
@@ -49,12 +51,10 @@ python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/releas
 python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run
 python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
-# 3a. dry-run: golden-queries の expected {scope,file,section} が
-#     corpus-manifest.json / history-manifest.json に実在し、かつ
-#     (raw_hash, section_id) へ解決できる (slugify が空でない) か検証 (Step 3 前でも通る)
+# 3a. dry-run: Rust の正本 evaluator が golden-queries / manifest を検証する
 python3 eval/run_eval.py --dry-run --corpus /tmp/kio-eval-corpus
 
-# 3b. 本評価: Recall@10 をシナリオ別に集計。
+# 3b. 本評価: Rust の正本 evaluator が Recall@10 をシナリオ別に集計。
 #     kio search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
 python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
