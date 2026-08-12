@@ -8809,7 +8809,7 @@ fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
         err["message"]
             .as_str()
             .unwrap()
-            .contains("repair --rebuild-db"),
+            .contains("repair rebuild-db"),
         "guidance names the recovery command: {err}"
     );
 }
@@ -9750,7 +9750,7 @@ fn r18_4_partial_store_corruption_entry_carries_recovery_hint() {
     assert_eq!(excluded[0]["reason"], "store_corrupt");
     let recovery = excluded[0]["recovery"].as_str().unwrap_or_default();
     assert!(
-        recovery.contains("store_corrupt") && recovery.contains("repair --rebuild-db"),
+        recovery.contains("store_corrupt") && recovery.contains("repair rebuild-db"),
         "the partial-exclusion entry must carry the store_corrupt recovery hint: {search}"
     );
 }

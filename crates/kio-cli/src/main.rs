@@ -4094,8 +4094,9 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         if all_rebuilding {
             return Err(KioError::new(
                 "KIO-E-INDEX-REBUILDING-001",
-                "the search index (sqlite.db) is missing, unusable, or being rebuilt in every \
-                 searched scope; retry, or run `kio repair --rebuild-db` if the problem persists",
+                "the searched scopes' projections in the device search replica are missing, \
+                 unusable, or being rebuilt; retry, or run `kio repair rebuild-db` if the problem \
+                 persists",
                 json!({
                     "excluded_scopes": excluded,
                     "recovery": aggregate_store_recovery_hints(&excluded),
@@ -6070,7 +6071,7 @@ fn is_retryable_scope_reason(reason: &str) -> bool {
 fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
     match reason {
         "store_corrupt" => Some(
-            "store_corrupt: try `kio repair --rebuild-db`; if it still fails, restore \
+            "store_corrupt: try `kio repair rebuild-db`; if it still fails, restore \
              the corrupt commit/tree object from objects/refs",
         ),
         "snapshot_shallow" => Some(
@@ -6084,11 +6085,11 @@ fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
         // fell through both homogeneous aggregations to a hintless message. Same
         // repair path as the others.
         "index_missing" => Some(
-            "index_missing: run `kio repair --rebuild-db` to rebuild the search index \
+            "index_missing: run `kio repair rebuild-db` to rebuild the search index \
              from the store",
         ),
         "index_corrupt" => Some(
-            "index_corrupt: run `kio repair --rebuild-db` to rebuild the search index \
+            "index_corrupt: run `kio repair rebuild-db` to rebuild the search index \
              from the store",
         ),
         _ => None,
@@ -8937,8 +8938,8 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
         // caller then misreports as "not found".
         return Err(KioError::new(
             "KIO-E-INDEX-REBUILDING-001",
-            "the search index (sqlite.db) is missing or being rebuilt in this scope; retry, \
-             or run `kio repair --rebuild-db` if the problem persists",
+            "this scope's projection in the device search replica is missing or being rebuilt; \
+             retry, or run `kio repair rebuild-db` if the problem persists",
             json!({ "scope_path": target.kio_dir.display().to_string() }),
             ExitCode::PartialFailure,
         ));
@@ -10037,7 +10038,7 @@ fn point_in_time_store_corrupt_error(pointer: &EvidencePointer) -> KioError {
     KioError::new(
         "KIO-E-STORE-CORRUPT-001",
         "the entry's manifest object is missing and no purge/erase marker explains \
-         its absence within scope; run kio repair --verify-objects",
+         its absence within scope; run kio repair verify-objects",
         json!({
             "commit": pointer.commit,
             "raw_hash": pointer.raw_hash,
@@ -11314,7 +11315,7 @@ fn retired_raw_missing_error(target: &ScopeTarget, raw_hash: &str) -> KioError {
 fn unmarked_missing_raw_error(target: &ScopeTarget, raw_hash: &str) -> KioError {
     KioError::new(
         "KIO-E-STORE-CORRUPT-001",
-        "raw object is missing with no purge marker to explain the absence; run kio repair --verify-objects",
+        "raw object is missing with no purge marker to explain the absence; run kio repair verify-objects",
         json!({
             "raw_hash": raw_hash,
             "scope_path": target.kio_dir.display().to_string(),
