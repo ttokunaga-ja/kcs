@@ -31,7 +31,8 @@ use crate::purge::PurgeState;
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
 
-const FORMAT_VERSION: &str = "0.1.0";
+/// Exact on-disk scope format understood by this pre-stable reader.
+pub const KIO_FORMAT_VERSION: &str = "0.1.0";
 pub const DEFAULT_MAX_ARCHIVE_FILE_BYTES: u64 = MAX_RAW_OBJECT_BYTES;
 pub const DEFAULT_MAX_ARCHIVE_SCOPE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub use crate::dag::{MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES};
@@ -248,7 +249,7 @@ impl Repository {
         atomic_write(
             &kio_dir.join("scope.json"),
             serde_json::to_string_pretty(&json!({
-                "kio_format_version": FORMAT_VERSION,
+                "kio_format_version": KIO_FORMAT_VERSION,
                 "scope_id": new_ulid(&root),
                 "scope_path": root,
             }))
@@ -1810,13 +1811,7 @@ impl Repository {
         let path = self.kio_dir.join("scope.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
             .map_err(|err| KioError::schema(err.to_string()))?;
-        if let Some(version) = value.get("kio_format_version") {
-            let version = version
-                .as_str()
-                .ok_or_else(|| KioError::schema("kio_format_version must be a string"))?;
-            validate_format_version(version)?;
-        }
-        validate_json_schema(SchemaKind::Scope, &value)?;
+        validate_scope_json_value(&value)?;
         let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
             return Err(KioError::schema("scope.json missing scope_id"));
         };
@@ -3475,15 +3470,15 @@ fn diff_side_shallow_error(side: &str, commit_hash: &str) -> KioError {
 }
 
 fn validate_format_version(version: &str) -> Result<()> {
-    let major = version
-        .split('.')
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| KioError::schema("invalid kio_format_version"))?;
-    if major > 0 {
-        Err(KioError::incompatible_format(version))
-    } else {
+    // This is a pre-stable store format, not the package's semver
+    // compatibility range.  The current reader understands exactly the
+    // current on-disk format; every different string is either older,
+    // malformed, or newer and must take the version-specific fail-closed
+    // path before current-schema validation.
+    if version == KIO_FORMAT_VERSION {
         Ok(())
+    } else {
+        Err(KioError::incompatible_format(version))
     }
 }
 
@@ -3934,8 +3929,24 @@ pub const NETWORK_APPROVAL_EXECUTION_MODE: &str = "online_api";
 
 fn read_scope_json_value(kio_dir: &Path) -> Result<Value> {
     let path = kio_dir.join("scope.json");
-    serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
-        .map_err(|err| KioError::schema(err.to_string()))
+    let value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
+        .map_err(|err| KioError::schema(err.to_string()))?;
+    validate_scope_json_value(&value)?;
+    Ok(value)
+}
+
+/// Validate a persisted scope before any public reader exposes its approval
+/// state. Version compatibility intentionally precedes schema validation so a
+/// future-format scope with new keys reports the upgrade-required error rather
+/// than an unknown-key schema error.
+fn validate_scope_json_value(value: &Value) -> Result<()> {
+    let version = match value.get("kio_format_version") {
+        Some(Value::String(version)) => version.as_str(),
+        Some(_) => return Err(KioError::incompatible_format("<non-string>")),
+        None => return Err(KioError::incompatible_format("<missing>")),
+    };
+    validate_format_version(version)?;
+    validate_json_schema(SchemaKind::Scope, value)
 }
 
 fn overwrite_scope_json_value(kio_dir: &Path, value: &Value) -> Result<()> {
@@ -3974,9 +3985,7 @@ pub fn network_approvals_initialized(kio_dir: &Path) -> Result<bool> {
 /// `scope_id`/`execution_mode`/`tool_profile_hash` match the CURRENT values
 /// exactly (07 §3's send-gate AND condition: "現在の execution_mode/
 /// tool_profile_hash に一致する status=active 行が存在する" — a profile
-/// change invalidates the row until re-approval, QA23). A row's absent
-/// `status` reads as `active` (10 §12.3 element-level backward
-/// compatibility for a pre-r9-schema row).
+/// change invalidates the row until re-approval, QA23).
 pub fn network_approval_active(
     kio_dir: &Path,
     tool_id: &str,
@@ -4020,13 +4029,10 @@ pub fn network_approval_row_present(kio_dir: &Path, tool_id: &str) -> Result<boo
 }
 
 /// The single in-flight `approval_pending` object, or `None` when absent (07
-/// §3 L191-205, 10 §12.3: the write-order's step (0) pending intent — a
+/// §3 L191-205: the write-order's step (0) pending intent — a
 /// single object, never an array, since approval operations are serialized
-/// under `.kio/.lock`). Does not distinguish a well-formed pending from a
-/// legacy one missing `approved_at`/`approval_method` — that shape check is
-/// the caller's job (`try_self_heal_network_approval` in `kio-cli`), matching
-/// this module's other plain readers (`read_network_approvals`,
-/// `network_approvals_initialized`).
+/// under `.kio/.lock`). Persisted scopes are fully version- and schema-validated
+/// before this value is returned.
 pub fn read_network_approval_pending(kio_dir: &Path) -> Result<Option<Value>> {
     Ok(read_scope_json_value(kio_dir)?
         .get("approval_pending")
@@ -4188,11 +4194,7 @@ pub fn revoke_network_approval(
                 .get("tool_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let is_active = row
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("active")
-                == "active";
+            let is_active = row.get("status").and_then(Value::as_str) == Some("active");
             let matches_target = match tool_id {
                 Some(target) => row_tool_id.as_deref() == Some(target),
                 None => true,
@@ -4236,49 +4238,16 @@ pub fn revoke_network_approval(
     Ok(outcome)
 }
 
-/// 07 §3 L199-205 / 10 §12.3: locked-mutation cleanup for a MALFORMED
-/// `approval_pending` — one missing `approved_at`/`approval_method`, which can
-/// never exact-match self-heal's 4-tuple-plus-audit-values condition and so
-/// must not sit there indefinitely. Removes `approval_pending` and, in the SAME
-/// atomic write, sets `approvals_initialized: true` if it is not already —
-/// mirroring [`revoke_network_approval`]'s pending-removal tail (07 §3:
-/// "この除去も approvals_initialized marker が無ければ同一 atomic write で
-/// true 化する" — otherwise "true × 行ゼロ × marker 無し" reverts to a
-/// genuine first-time state, and the next run's initial-materialize
-/// exception would silently bypass the explicit-approval requirement this
-/// cleanup exists to enforce).
-///
-/// Callers MUST only invoke this when a pending is actually present (07 §3:
-/// "対象なしでは書かない") — unlike [`revoke_network_approval`], this
-/// function does not itself check for a no-op case.
-pub fn discard_network_approval_pending(kio_dir: &Path) -> Result<()> {
-    let mut value = read_scope_json_value(kio_dir)?;
-    let Some(object) = value.as_object_mut() else {
-        return Err(KioError::schema("scope.json must be an object"));
-    };
-    object.remove("approval_pending");
-    let already_initialized = object
-        .get("approvals_initialized")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !already_initialized {
-        object.insert("approvals_initialized".to_owned(), json!(true));
-    }
-    validate_json_schema(SchemaKind::Scope, &value)?;
-    overwrite_scope_json_value(kio_dir, &value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::enforce_config_semantics;
     use super::{
-        append_jsonl_rotating, civil_from_days, discard_network_approval_pending,
-        format_unix_seconds, format_utc_seconds, network_approvals_initialized,
+        append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
         open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
-        read_adapter_lane, read_logs_retention_days, read_network_approval_pending, redact_context,
-        redact_message_paths, rotate_stale_log, write_network_approval_pending, ArchiveLimits,
-        PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
-        MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
+        read_adapter_lane, read_logs_retention_days, read_network_approval_pending,
+        read_network_approvals, redact_context, redact_message_paths, rotate_stale_log,
+        write_network_approval_pending, ArchiveLimits, PendingNormalizeRef, Repository, StoreLock,
+        DEFAULT_MAX_ARCHIVE_FILE_BYTES, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
 
     #[test]
@@ -4359,15 +4328,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
 
-    // =======================================================================
-    // 07 §3 L191-205 / 10 §12.3: `read_network_approval_pending` /
-    // `discard_network_approval_pending` — the self-heal fallthrough's
-    // read/legacy-cleanup helpers (`kio-cli`'s
-    // `try_self_heal_network_approval` is the write-side caller these back;
-    // exercised end-to-end in `kio-cli`'s
-    // `step4b_selfheal_contract.rs`).
-    // =======================================================================
-
     #[test]
     fn read_network_approval_pending_returns_none_when_absent() {
         let dir = tempfile::tempdir().unwrap();
@@ -4395,83 +4355,96 @@ mod tests {
         );
     }
 
-    /// A malformed pending (missing `approved_at`/`approval_method`) removes
-    /// cleanly and, since no marker existed yet, sets
-    /// `approvals_initialized: true` in the same write (07
-    /// §3 L202-205 — the removal-consumes-the-initial-materialize-exception
-    /// rule shared with `revoke_network_approval`'s pending-removal tail).
     #[test]
-    fn discard_network_approval_pending_removes_pending_and_sets_absent_marker() {
+    fn scope_validation_rejects_missing_or_non_string_version_as_incompatible() {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
-        let scope_id = repo.scope_identity().unwrap().scope_id;
-        let legacy_pending = json!({
-            "scope_id": scope_id,
-            "tool_id": "mistral_ocr_markdownize",
-            "execution_mode": "online_api",
-            "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
-        });
-        write_network_approval_pending(repo.kio_dir(), legacy_pending).unwrap();
-        assert!(!network_approvals_initialized(repo.kio_dir()).unwrap());
+        let scope_path = repo.kio_dir().join("scope.json");
 
-        discard_network_approval_pending(repo.kio_dir()).unwrap();
-
-        assert_eq!(
-            read_network_approval_pending(repo.kio_dir()).unwrap(),
-            None,
-            "the pending key must be removed"
-        );
-        assert!(
-            network_approvals_initialized(repo.kio_dir()).unwrap(),
-            "an absent marker must be set true in the same write"
-        );
+        for invalid_version in [None, Some(json!(1))] {
+            let mut scope: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+            match invalid_version {
+                Some(version) => scope["kio_format_version"] = version,
+                None => {
+                    scope.as_object_mut().unwrap().remove("kio_format_version");
+                }
+            }
+            fs::write(&scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+            let error = repo.scope_identity().unwrap_err();
+            assert_eq!(error.error_code(), "KIO-E-STORE-VERSION-001");
+        }
     }
 
-    /// When `approvals_initialized` is ALREADY `true` (e.g. a different
-    /// tool_id in this scope was already explicitly approved), discarding a
-    /// legacy pending must leave the marker as `true` — not error, not flip
-    /// it, not write a second conflicting key.
     #[test]
-    fn discard_network_approval_pending_leaves_an_already_true_marker_untouched() {
+    fn incompatible_scope_versions_precede_current_schema_validation() {
+        for version in ["0.0.0", "0.1.1", "0.2.0", "1.0.0", "malformed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = Repository::init(dir.path()).unwrap();
+            let scope_path = repo.kio_dir().join("scope.json");
+            let mut scope: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+            scope["kio_format_version"] = json!(version);
+            scope["future_only_key"] = json!(true);
+            fs::write(&scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+
+            let error = repo.scope_identity().unwrap_err();
+            assert_eq!(error.error_code(), "KIO-E-STORE-VERSION-001");
+            assert_eq!(error.context()["found"], version);
+        }
+    }
+
+    #[test]
+    fn approval_readers_reject_malformed_current_scope_shapes() {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
-        let scope_id = repo.scope_identity().unwrap().scope_id;
-        let legacy_pending = json!({
-            "scope_id": scope_id,
-            "tool_id": "mistral_ocr_markdownize",
-            "execution_mode": "online_api",
-            "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
-        });
-        write_network_approval_pending(repo.kio_dir(), legacy_pending).unwrap();
-
-        // Hand-set the marker directly: every public writer that sets it
-        // also clears `approval_pending` in the same atomic write, so none
-        // of them can build a "marker true AND pending still present"
-        // fixture on their own.
         let scope_path = repo.kio_dir().join("scope.json");
-        let mut value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
-        value["approvals_initialized"] = json!(true);
-        fs::write(&scope_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let scope_id = repo.scope_identity().unwrap().scope_id;
+        let row = |status: &str| {
+            json!({
+                "scope_id": scope_id,
+                "tool_id": "mistral_ocr_markdownize",
+                "execution_mode": "online_api",
+                "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
+                "approved_at": "2026-07-22T00:00:00Z",
+                "approval_method": "approve",
+                "status": status,
+            })
+        };
 
-        discard_network_approval_pending(repo.kio_dir()).unwrap();
+        let cases = [
+            json!({ "approvals": [{
+                "scope_id": scope_id,
+                "tool_id": "mistral_ocr_markdownize",
+                "execution_mode": "online_api",
+                "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
+                "approved_at": "2026-07-22T00:00:00Z",
+                "approval_method": "approve"
+            }]}),
+            json!({ "approvals": [row("revoked")] }),
+            json!({ "approval_pending": {
+                "scope_id": scope_id,
+                "tool_id": "mistral_ocr_markdownize",
+                "execution_mode": "online_api",
+                "tool_profile_hash": format!("sha256:{}", "a".repeat(64))
+            }}),
+        ];
 
-        assert_eq!(
-            read_network_approval_pending(repo.kio_dir()).unwrap(),
-            None,
-            "the pending key must still be removed"
-        );
-        assert!(
-            network_approvals_initialized(repo.kio_dir()).unwrap(),
-            "an already-true marker must stay true"
-        );
-        let after: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
-        assert_eq!(
-            after["approvals_initialized"],
-            json!(true),
-            "the marker must remain the plain boolean true, not be duplicated or altered"
-        );
+        for patch in cases {
+            let mut scope: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+            for (key, value) in patch.as_object().unwrap() {
+                scope[key] = value.clone();
+            }
+            fs::write(&scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+            assert!(read_network_approvals(repo.kio_dir()).is_err());
+
+            let mut current: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+            current.as_object_mut().unwrap().remove("approvals");
+            current.as_object_mut().unwrap().remove("approval_pending");
+            fs::write(&scope_path, serde_json::to_vec_pretty(&current).unwrap()).unwrap();
+        }
     }
 
     #[test]

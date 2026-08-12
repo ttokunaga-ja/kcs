@@ -464,8 +464,7 @@ impl TaskStore {
     ) -> Result<Option<TaskDescriptor>> {
         Ok(self.all()?.into_iter().find(|task| {
             task.input_hash == input_hash
-                && (task.output_ref == output_ref
-                    || normalized_output_refs_equivalent(input_hash, &task.output_ref, output_ref))
+                && task.output_ref == output_ref
                 && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
         }))
     }
@@ -488,21 +487,6 @@ pub fn is_scope_local_file_name(input_path: &str) -> bool {
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
-fn normalized_output_ref_identity(input_hash: &str, output_ref: &str) -> Option<(String, u64)> {
-    if !kio_core::cas::is_hash(input_hash) {
-        return None;
-    }
-    let name = Path::new(output_ref).file_name()?.to_str()?;
-    parse_normalized_output_basename(input_hash, name)
-}
-
-fn normalized_output_refs_equivalent(input_hash: &str, left: &str, right: &str) -> bool {
-    Path::new(left).parent() == Path::new(right).parent()
-        && normalized_output_ref_identity(input_hash, left)
-            == normalized_output_ref_identity(input_hash, right)
-        && normalized_output_ref_identity(input_hash, left).is_some()
-}
-
 fn parse_normalized_output_basename(input_hash: &str, name: &str) -> Option<(String, u64)> {
     let raw_digest = input_hash.strip_prefix("sha256:")?;
     let canonical_suffix = name.strip_prefix(&format!("{raw_digest}."));
@@ -515,20 +499,7 @@ fn parse_normalized_output_basename(input_hash: &str, name: &str) -> Option<(Str
         return None;
     }
 
-    #[cfg(not(windows))]
-    {
-        let suffix = name.strip_prefix(&format!("{input_hash}."))?;
-        let (tool_profile_hash, gen_text) = suffix.rsplit_once(".g")?;
-        if !kio_core::cas::is_hash(tool_profile_hash) || !is_canonical_generation(gen_text) {
-            return None;
-        }
-        let gen = gen_text.parse::<u64>().ok()?;
-        Some((tool_profile_hash.to_owned(), gen))
-    }
-    #[cfg(windows)]
-    {
-        None
-    }
+    None
 }
 
 fn is_lower_sha256_digest(value: &str) -> bool {
@@ -630,6 +601,19 @@ pub fn validate_task_output_ref(
     let (tool_profile_hash, gen) =
         parse_normalized_output_basename(&descriptor.input_hash, &components[2])
             .ok_or_else(|| invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref))?;
+    // `output_ref` is a durable identity, not merely a path that resolves to
+    // the generated instance. Reconstruct its sole canonical spelling so
+    // aliases such as trailing separators, doubled separators, or cwd-relative
+    // paths cannot make a completed task invisible to `done_output_for`.
+    let canonical = crate::markdownize::normalized_instance_dir(
+        kio_dir.as_ref(),
+        &descriptor.input_hash,
+        &tool_profile_hash,
+        gen,
+    );
+    if canonical.to_str() != Some(descriptor.output_ref.as_str()) {
+        return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
+    }
 
     // Validate every existing component from `.kio` downward. In particular,
     // `normalized_units` cannot become a second trust root by being a symlink.
@@ -1558,20 +1542,19 @@ mod tests {
         assert!(validate_task_output_ref(dir.path(), &task).is_err());
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn legacy_output_ref_validates_and_matches_canonical_only_under_same_parent() {
+    fn normalized_output_ref_requires_canonical_basename_and_exact_persisted_ref() {
         let dir = tempfile::tempdir().unwrap();
         let raw_hash = format!("sha256:{}", "a".repeat(64));
         let tool_hash = format!("sha256:{}", "b".repeat(64));
         let canonical =
             crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 7);
         let legacy = canonical.with_file_name(format!("{raw_hash}.{tool_hash}.g7"));
-        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&canonical).unwrap();
 
         let mut task = valid_task();
         task.input_hash = raw_hash.clone();
-        task.output_ref = legacy.display().to_string();
+        task.output_ref = canonical.display().to_string();
         task.status = TaskStatus::Done;
         assert!(matches!(
             validate_task_output_ref(dir.path(), &task).unwrap(),
@@ -1588,14 +1571,47 @@ mod tests {
             .done_output_for(&raw_hash, &canonical.display().to_string())
             .unwrap()
             .is_some());
-        let foreign = dir
-            .path()
-            .join("objects/normalized_units/ff/ff")
-            .join(canonical.file_name().unwrap());
+
+        task.output_ref = legacy.display().to_string();
+        assert!(validate_task_output_ref(dir.path(), &task).is_err());
         assert!(store
-            .done_output_for(&raw_hash, &foreign.display().to_string())
+            .done_output_for(&raw_hash, &legacy.display().to_string())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn normalized_output_ref_rejects_path_spelling_aliases() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("kio-task-output-ref-")
+            .tempdir_in(&cwd)
+            .unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let canonical =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 7);
+        fs::create_dir_all(&canonical).unwrap();
+
+        let mut task = valid_task();
+        task.input_hash = raw_hash;
+        task.output_ref = canonical.display().to_string();
+        assert!(validate_task_output_ref(dir.path(), &task).is_ok());
+
+        let parent = canonical.parent().unwrap().display();
+        let file_name = canonical.file_name().unwrap().to_str().unwrap();
+        let relative = canonical.strip_prefix(&cwd).unwrap().display().to_string();
+        for alias in [
+            format!("{}{}", canonical.display(), std::path::MAIN_SEPARATOR),
+            format!(
+                "{parent}{separator}{separator}{file_name}",
+                separator = std::path::MAIN_SEPARATOR
+            ),
+            relative,
+        ] {
+            task.output_ref = alias;
+            assert!(validate_task_output_ref(dir.path(), &task).is_err());
+        }
     }
 
     #[cfg(windows)]

@@ -14,7 +14,7 @@ current-format の置換 test を同じ変更で確認して初めて完了に�
 | `撤去可能` | 下記 precondition と置換契約を満たす実装 bundle がレビュー可能 |
 | `完了` | production branch・旧 fixture/test を除去し、置換 test が通ったことを確認済み |
 
-現状: **bundle 1 / 2 / 5 / 6 は実装・置換テスト・関連 validation まで完了。bundle 3 / 4 / 7 は実装監査中。**
+現状: **bundle 1〜7 は production branch・旧 fixture/test の撤去、置換テスト、関連 validation まで完了。**
 
 ## 撤去 bundle と完了 precondition
 
@@ -22,11 +22,11 @@ current-format の置換 test を同じ変更で確認して初めて完了に�
 |---:|---|---|---|---|
 | 1 | derived SQLite の旧 schema / `ALTER TABLE` / missing `context_key` | 完了 | startup、repair、fixture、static test の旧 shape reader | fresh / missing DB は current schema で初期化。既存 incompatible DB は fingerprint gate で書込み前に検出し、無変更で `repair rebuild-db` を案内 |
 | 2 | pre-object-store SQLite snapshot と旧 DB source、mutable normalized unit body を history source にする分岐 | 完了 | rebuild-db の source 選択、old-row fixture、history test、manifest → unit_object_hash CAS closure | historical cache は current commit / tree / manifest CAS → unit_object_hash CAS から再構築。missing / old unit-object field は history を黙って落とさず corruption / shallow state で fail-closed |
-| 3 | missing / legacy `kio_format_version` と current object の missing field default | 実装監査中 | scope loader、tree / pointer / normalized object reader、test vectors | current version と required fields は strict reject。自己より新しい version のみ read-only で維持 |
-| 4 | legacy tree/path、raw-name ref、CAS colon/raw leaf fallback | 実装監査中 | resolver、fsck、restore、Windows fixture、canonical/legacy conflict test | canonical digest-only physical name のみ。Windows / non-Windows の canonical write/read/hash mismatch test と Unicode portability test は維持 |
+| 3 | missing / legacy `kio_format_version` と current object の missing field default | 完了 | scope loader、tree / pointer / normalized object reader、test vectors | current version と required fields は strict reject。自己より新しい version のみ read-only で維持 |
+| 4 | legacy tree/path、raw-name ref、CAS colon/raw leaf fallback | 完了 | resolver、fsck、restore、Windows fixture、canonical/legacy conflict test | canonical digest-only physical name のみ。Windows / non-Windows の canonical write/read/hash mismatch test と Unicode portability test は維持 |
 | 5 | lifecycle event の missing `epoch` を 0 と読む分岐 | 完了 | lifecycle parser、repair、event fixture | malformed current event は reject。counter file の欠落・torn-write recovery は current corruption recovery として維持 |
 | 6 | cost-ledger JSONL importer、`.migrated` rename、**JSONL cutover** marker / 推測 backfill | 完了 | startup、DDL fingerprint、recovery、JSONL fixture、migration test | ledger bytes と audit / intent truth を保存。old / incompatible ledger は ALTER・rename・import せず actionable error で fail-closed。current operational `schema_migrations` marker と current-schema crash recovery は維持 |
-| 7 | approval / task / normalized object の missing field fallback | 実装監査中 | schema loader、cleanup/reservation、normalized-unit `metadata` / `unit_object_hash`、fixture、test | current schema に required な field は reject。normalized-unit の `metadata` は required object（空 `{}` は有効、field 全体の欠落は reject）。Done manifest entry は non-null `unit_object_hash`、failed entry は explicit null が必須で、missing / default / migration reader は置かない。`approval_pending` 全体の absence は有効だが、存在する malformed pending は fail-closed。適用可能な current task field だけを required 化し、推測 default は置かない |
+| 7 | approval / task / normalized object の missing field fallback | 完了 | schema loader、cleanup/reservation、normalized-unit `metadata` / `unit_object_hash`、fixture、test | current schema に required な field は reject。normalized-unit の `metadata` は required object（空 `{}` は有効、field 全体の欠落は reject）。Done manifest entry は non-null `unit_object_hash`、failed entry は explicit null が必須で、missing / default / migration reader は置かない。`approval_pending` 全体の absence は有効だが、存在する malformed pending は fail-closed。適用可能な current task field だけを required 化し、推測 default は置かない |
 
 ## 実装監査の手順
 

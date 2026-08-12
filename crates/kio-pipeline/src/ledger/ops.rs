@@ -85,6 +85,25 @@ pub fn get_batch_request(conn: &Connection, key: &TaskKey) -> Result<Option<Batc
 }
 
 fn row_to_batch_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRequestRow> {
+    let state_value = row.get::<_, i64>(4)?;
+    let state = BatchState::from_i64(state_value).ok_or_else(|| {
+        invalid_ledger_enum(
+            4,
+            rusqlite::types::Type::Integer,
+            "batch_requests.state",
+            state_value,
+        )
+    })?;
+    let request_kind_value = row.get::<_, String>(5)?;
+    let request_kind = RequestKind::parse(&request_kind_value).ok_or_else(|| {
+        invalid_ledger_enum(
+            5,
+            rusqlite::types::Type::Text,
+            "batch_requests.request_kind",
+            &request_kind_value,
+        )
+    })?;
+
     Ok(BatchRequestRow {
         key: TaskKey::new(
             row.get::<_, String>(0)?,
@@ -92,8 +111,8 @@ fn row_to_batch_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<BatchReques
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
         ),
-        state: BatchState::from_i64(row.get(4)?).unwrap_or(BatchState::Intent),
-        request_kind: RequestKind::parse(&row.get::<_, String>(5)?).unwrap_or(RequestKind::Batch),
+        state,
+        request_kind,
         intent_token: row.get(6)?,
         upload_id: row.get(7)?,
         batch_job_id: row.get(8)?,
@@ -111,6 +130,16 @@ fn row_to_batch_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<BatchReques
 }
 
 fn row_to_cost_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostLedgerRow> {
+    let outcome_value = row.get::<_, String>(8)?;
+    let outcome = Outcome::parse(&outcome_value).ok_or_else(|| {
+        invalid_ledger_enum(
+            8,
+            rusqlite::types::Type::Text,
+            "cost_ledger.outcome",
+            &outcome_value,
+        )
+    })?;
+
     Ok(CostLedgerRow {
         key: TaskKey::new(
             row.get::<_, String>(0)?,
@@ -122,10 +151,30 @@ fn row_to_cost_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<CostLedgerRow
         batch_job_id: row.get(5)?,
         usd: row.get(6)?,
         estimated: row.get::<_, i64>(7)? != 0,
-        outcome: Outcome::parse(&row.get::<_, String>(8)?).unwrap_or(Outcome::Succeeded),
+        outcome,
         month: row.get(9)?,
         recorded_at: row.get(10)?,
     })
+}
+
+/// Persisted enum values are part of the ledger schema's closed set.  If a
+/// damaged or bypass-written row contains an unknown value, surface it as a
+/// SQLite conversion failure rather than silently inferring a safe-looking
+/// state or outcome.
+fn invalid_ledger_enum(
+    column_index: usize,
+    column_type: rusqlite::types::Type,
+    column_name: &str,
+    value: impl std::fmt::Display,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column_index,
+        column_type,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid closed enum value {value} in {column_name}"),
+        )),
+    )
 }
 
 /// All `cost_ledger` rows for one task key, ordered by `submission_seq` — a test
@@ -2435,6 +2484,73 @@ mod tests {
         let db =
             crate::ledger::schema::LedgerDb::open(dir.path().join("cost-ledger.sqlite")).unwrap();
         (dir, db)
+    }
+
+    fn assert_closed_enum_decode_failure(err: PipelineError, column_name: &str) {
+        assert!(
+            matches!(
+                err,
+                PipelineError::Sqlite(rusqlite::Error::FromSqlConversionFailure(_, _, _))
+            ),
+            "unknown persisted enum must be a SQL conversion failure: {err}"
+        );
+        assert!(
+            err.to_string().contains(column_name),
+            "failure must identify the corrupt column: {err}"
+        );
+    }
+
+    #[test]
+    fn corrupt_batch_request_enums_fail_public_read_without_defaulting() {
+        let (_dir, db) = open_temp_ledger_for_gate_tests();
+        let conn = db.connection();
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+
+        for (suffix, column, value) in [
+            ("state", "state", "99"),
+            ("kind", "request_kind", "'unknown-kind'"),
+        ] {
+            let key = TaskKey::new(
+                format!("scope-{suffix}"),
+                "markdownize",
+                "hash-a",
+                "profile-a",
+            );
+            phase1_intent(conn, &key, RequestKind::Batch, 1.0, None).unwrap();
+            conn.execute_batch(&format!(
+                "UPDATE batch_requests SET {column} = {value} WHERE scope_id = 'scope-{suffix}'"
+            ))
+            .unwrap();
+
+            let err = get_batch_request(conn, &key).unwrap_err();
+            assert_closed_enum_decode_failure(err, &format!("batch_requests.{column}"));
+        }
+    }
+
+    #[test]
+    fn corrupt_cost_ledger_outcome_fails_public_read_without_succeeding() {
+        let (_dir, db) = open_temp_ledger_for_gate_tests();
+        let conn = db.connection();
+        let key = TaskKey::new("scope-a", "markdownize", "hash-a", "profile-a");
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cost_ledger (
+                scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq,
+                batch_job_id, usd, estimated, outcome, month, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, 1, 'job-a', 1.0, 0, 'unknown-outcome', '2026-08', 0)",
+            params![
+                key.scope_id,
+                key.adapter_kind,
+                key.input_hash,
+                key.tool_profile_hash
+            ],
+        )
+        .unwrap();
+
+        let err = cost_ledger_rows_for_key(conn, &key).unwrap_err();
+        assert_closed_enum_decode_failure(err, "cost_ledger.outcome");
     }
 
     /// `phase1_intent` is the SOLE `batch_requests` INSERT — gating it here

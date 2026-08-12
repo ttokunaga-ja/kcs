@@ -50,8 +50,8 @@ use kio_adapter::types::{
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kio_core::cas::{
-    canonical_json_bytes, fanout_path, hash_path_component, is_hash, read_bounded_regular_file,
-    ChunkObject, ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    canonical_json_bytes, fanout_path, is_hash, read_bounded_regular_file, ChunkObject,
+    ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitObject, CommitType, NormalizeRef, TreeObject};
 use kio_core::history::HistoryReader;
@@ -12366,14 +12366,14 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
 /// QB6: reads `scope.json` directly (no `Repository::open*` — deliberately
 /// skips JSON Schema validation and every other store check) for one
 /// resolution candidate, so `resolve_scope_target`'s final fallback can
-/// diagnose "found, but a newer kio_format_version than this build supports"
-/// distinctly from "does not exist" without paying for (or risking a false
-/// positive from) full validation. `candidate_root` may be either a scope
-/// root or its `.kio` directory (mirrors `open_scope_from_hint`). Returns
-/// the found version string only when the scope_id matches AND the version
-/// is incompatible — every other case (missing file, schema mismatch,
-/// scope_id mismatch, compatible version) returns `None`, so this can never
-/// invent a false STORE-VERSION-001 for a scope that is simply absent.
+/// diagnose "found, but its kio_format_version is incompatible" distinctly
+/// from "does not exist" without paying for (or risking a false positive
+/// from) full validation. `candidate_root` may be either a scope root or its
+/// `.kio` directory (mirrors `open_scope_from_hint`). Returns the persisted
+/// version—or an explicit missing/non-string marker—only when the scope_id
+/// matches and the version is not this build's exact current format. Missing
+/// file, unparsable JSON, scope_id mismatch, and the current version return
+/// `None`, so this cannot invent a STORE-VERSION error for an absent scope.
 fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Option<String> {
     let scope_json_path = if candidate_root.file_name() == Some(std::ffi::OsStr::new(".kio")) {
         candidate_root.join("scope.json")
@@ -12385,13 +12385,16 @@ fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Op
     if value.get("scope_id").and_then(Value::as_str) != Some(scope_id) {
         return None;
     }
-    let version = value.get("kio_format_version")?.as_str()?.to_owned();
-    // Mirrors `kio_core::scope`'s private `validate_format_version` (major
-    // component > 0 is beyond this build's supported ceiling) — not exported,
-    // so the trivial comparison is duplicated here rather than widening
-    // kio-core's public surface for one caller.
-    let major: u64 = version.split('.').next()?.parse().ok()?;
-    (major > 0).then_some(version)
+    let version = match value.get("kio_format_version") {
+        Some(Value::String(version)) => version.clone(),
+        Some(_) => "<non-string>".to_owned(),
+        None => "<missing>".to_owned(),
+    };
+    // Mirrors `kio_core::scope`'s private current-format equality check. This
+    // pre-stable reader understands only 0.1.0; an older, malformed, or newer
+    // value all take the same version-specific fail-closed path before current
+    // schema validation.
+    (version != kio_core::scope::KIO_FORMAT_VERSION).then_some(version)
 }
 
 /// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kio`
@@ -12792,17 +12795,6 @@ fn cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> 
     fanout_path(kio_dir.join("objects").join(subdir), hash)
 }
 
-#[cfg(not(windows))]
-fn legacy_cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
-    let digest = hash_path_component(hash)?;
-    Ok(kio_dir
-        .join("objects")
-        .join(subdir)
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(hash))
-}
-
 fn path_entry_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -12811,47 +12803,22 @@ fn path_entry_exists(path: &Path) -> Result<bool> {
     }
 }
 
-fn existing_cas_object_paths(kio_dir: &Path, subdir: &str, hash: &str) -> Result<Vec<PathBuf>> {
+fn existing_cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<Option<PathBuf>> {
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
-    let mut paths = Vec::with_capacity(2);
     if path_entry_exists(&canonical)? {
-        paths.push(canonical);
+        Ok(Some(canonical))
+    } else {
+        Ok(None)
     }
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        if path_entry_exists(&legacy)? {
-            paths.push(legacy);
-        }
-    }
-    Ok(paths)
 }
 
 fn cas_object_present(kio_dir: &Path, subdir: &str, hash: &str, max_bytes: u64) -> Result<bool> {
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
-    let canonical_present = path_entry_exists(&canonical)?;
-
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        let legacy_present = path_entry_exists(&legacy)?;
-        if canonical_present && legacy_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-        } else if canonical_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-        } else if legacy_present {
-            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-        }
-        Ok(canonical_present || legacy_present)
-    }
-
-    #[cfg(windows)]
-    {
-        if canonical_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-        }
-        Ok(canonical_present)
+    if path_entry_exists(&canonical)? {
+        verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -12864,23 +12831,7 @@ fn read_cas_byte_object(
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
     if path_entry_exists(&canonical)? {
         let bytes = read_bounded_cas_object(&canonical, hash, max_bytes)?;
-        #[cfg(not(windows))]
-        {
-            let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-            if path_entry_exists(&legacy)? {
-                verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-            }
-        }
         return Ok(Some((canonical, bytes)));
-    }
-
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        if path_entry_exists(&legacy)? {
-            let bytes = read_bounded_cas_object(&legacy, hash, max_bytes)?;
-            return Ok(Some((legacy, bytes)));
-        }
     }
     Ok(None)
 }
@@ -14890,7 +14841,7 @@ fn execute_pending_markdownize_tasks(
             .map_err(pipeline_to_kio)?;
     let ledger = open_ledger_db()?;
     let month = utc_month(&now_utc_seconds());
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     // N1a (defense in depth): even a Pending online markdownize task must not be
     // sent when its input is a Tier B (candidate-secret) file and the scope is not
     // `--send-secrets`-approved — in case the hold was cleared by some other path.
@@ -15517,8 +15468,8 @@ fn persistent_network_allowed_for(
 /// here would materialize a row for whatever `tool_id`/`tool_profile_hash`
 /// this call happens to carry — a possibly DIFFERENT identity than the one
 /// actually pending). `try_self_heal_network_approval` owns the entire
-/// pending-present branch (well-formed-and-matching / well-formed-but
-/// -mismatched / legacy).
+/// pending-present branch (matching / mismatched). A malformed current
+/// pending is rejected by the scope reader rather than cleaned up or inferred.
 fn persistent_network_allowed_for_kio_dir(
     kio_dir: &Path,
     tool_id: &str,
@@ -15618,20 +15569,10 @@ fn try_materialize_initial_network_approval(
 /// Re-reads `approval_pending` itself (rather than trusting the caller's
 /// presence check) — same defensive-independence style as
 /// `try_materialize_initial_network_approval` re-checking the boolean its
-/// own caller already checked. Three cases, checked in this order:
+/// own caller already checked. The scope reader has already enforced the
+/// complete current pending schema, leaving two cases:
 ///
-/// (a) **Malformed** — `approved_at`/`approval_method` absent or non-string,
-///     so it can never satisfy self-heal's exact-match. Cleaned up via
-///     `discard_network_approval_pending`, which removes the pending AND
-///     sets `approvals_initialized` in the same atomic write if it was not
-///     already set (07 §3 L202-205 — otherwise "true × 行ゼロ × marker 無
-///     し" reverts to a genuine first-time state and the NEXT call's
-///     initial-materialize exception would silently bypass the explicit
-///     -approval requirement this cleanup enforces). This check runs BEFORE
-///     the tuple-match check below regardless of what the tuple would have
-///     matched — a malformed pending is unconditionally self-heal-ineligible.
-///     Returns `Ok(false)`.
-/// (b) **Well-formed AND 4-tuple-matching** — `scope_id` (against THIS
+/// (a) **4-tuple-matching** — `scope_id` (against THIS
 ///     scope's current `scope.json`), `tool_id`, `execution_mode` (against
 ///     [`NETWORK_APPROVAL_EXECUTION_MODE`]), and `tool_profile_hash` all
 ///     equal the caller's current values exactly. Self-heal: publish the
@@ -15647,17 +15588,16 @@ fn try_materialize_initial_network_approval(
 ///     として非発火のままでよい" — only the EXPLICIT approval commands turn
 ///     this CAS conflict into a hard error/exit 5). Any other error
 ///     propagates via `?`.
-/// (c) **Well-formed but tuple-mismatched** — leave the pending untouched
+/// (b) **Tuple-mismatched** — leave the pending untouched
 ///     and return `Ok(false)`; explicit approval is required, and that
 ///     approval's own step (0) overwrites this stale pending (07 §3
 ///     L191-198).
 ///
 /// Locking posture: identical to `try_materialize_initial_network_approval`
 /// — no lock is acquired here. Both functions perform a single atomic-rename
-/// overwrite of `scope.json` (`publish_network_approval`/
-/// `discard_network_approval_pending`), the same durability unit
-/// `try_materialize_...` already relied on from this exact call path without
-/// a dedicated lock.
+/// overwrite of `scope.json` (`publish_network_approval`), the same durability
+/// unit `try_materialize_...` already relied on from this exact call path
+/// without a dedicated lock.
 fn try_self_heal_network_approval(
     kio_dir: &Path,
     tool_id: &str,
@@ -15666,15 +15606,6 @@ fn try_self_heal_network_approval(
     let Some(pending) = kio_core::scope::read_network_approval_pending(kio_dir)? else {
         return Ok(false);
     };
-    let has_audit_values = pending.get("approved_at").and_then(Value::as_str).is_some()
-        && pending
-            .get("approval_method")
-            .and_then(Value::as_str)
-            .is_some();
-    if !has_audit_values {
-        kio_core::scope::discard_network_approval_pending(kio_dir)?;
-        return Ok(false);
-    }
     let Ok(this_scope_id) = scope_id(kio_dir) else {
         return Ok(false);
     };
@@ -16247,7 +16178,12 @@ fn execute_offline_markdownize_task(
         ..
     } = prepared_input;
     let profile = kio_adapter::local_ocr_markdownize::profile_for(execution);
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo
+        .scope_id_for_adapter()
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
+        })?;
     let adapter = local_ocr_markdownize_adapter(execution, &scope_id, repo.kio_dir(), &bytes)
         .map_err(task_failure_from_adapter)?;
     let hints = prepared_unit_hints(&prepared_units);
@@ -16349,7 +16285,12 @@ fn execute_online_markdownize_task(
             retry_after_ms: None,
         });
     }
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo
+        .scope_id_for_adapter()
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
+        })?;
     // R11-6: on a UNIT-SCOPED retry, `task.unit_keys` names the still-failed units.
     // Request ONLY those from the adapter (re-OCR + re-bill just the failed subset,
     // not the whole document); the full prepared set still drives the manifest so
@@ -16482,7 +16423,7 @@ fn materialize_online_markdownize_response(
         // No page artifact exists before OCR for a scanned PDF. The already-verified
         // immutable raw object is the bounded prepared source shared by each discovered
         // unit; publish it under the same content hash before the manifest can refer to it.
-        write_cas_object_or_reuse_legacy(repo.kio_dir(), "prepared", &task.input_hash, bytes)
+        write_canonical_cas_object_or_reuse(repo.kio_dir(), "prepared", &task.input_hash, bytes)
             .map_err(|_| TaskExecutionFailure {
                 retry_kind: persist_failure_retry_kind(),
                 retry_after_ms: None,
@@ -16907,21 +16848,12 @@ fn consecutive_online_incremental_count(task_store: &TaskStore, input_path: &str
 }
 
 trait RepositoryScopeId {
-    fn scope_id_for_adapter(&self) -> String;
+    fn scope_id_for_adapter(&self) -> Result<String>;
 }
 
 impl RepositoryScopeId for Repository {
-    fn scope_id_for_adapter(&self) -> String {
-        fs::read_to_string(self.kio_dir().join("scope.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| {
-                value
-                    .get("scope_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| "unknown".to_owned())
+    fn scope_id_for_adapter(&self) -> Result<String> {
+        Ok(self.scope_identity()?.scope_id)
     }
 }
 
@@ -17638,7 +17570,7 @@ fn run_embedding_enrichment_for_instances(
         read_budget_policy(user_config_toml_path(), repo.kio_dir().join("config.toml"))
             .map_err(pipeline_to_kio)?;
     let month = utc_month(&now);
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
 
     // R11-5: accumulate every chunk's task-store transition in memory and write it
     // back in ONE `update_matching` after the loop, instead of a full all()+
@@ -18848,7 +18780,7 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
     else {
         return Ok(outcome);
     };
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let rows = batch_poll_candidates(ledger.connection(), &scope_id, EMBEDDING_ADAPTER_KIND)
         .map_err(pipeline_to_kio)?;
     if rows.is_empty() {
@@ -19777,7 +19709,7 @@ fn reconcile_committed_embedding_tasks(
     // skips these now-terminal tasks). Only Pending/Running/Failed STAMPED tasks are
     // eligible: a Done task's stamp is REAL spend (its vector is stored), never a
     // charge to release.
-    let reservation_scope_id = repo.scope_id_for_adapter();
+    let reservation_scope_id = repo.scope_id_for_adapter()?;
     #[derive(Clone, Copy)]
     enum ReconcileReservationAction {
         Revive,
@@ -20094,7 +20026,7 @@ fn hold_secret_embedding_tasks(
     // send is blocked by the hold — so release it (settles `unknown_settled` at the
     // reservation estimate if a row is still open, a no-op otherwise).
     if !to_demote.is_empty() {
-        let reservation_scope_id = repo.scope_id_for_adapter();
+        let reservation_scope_id = repo.scope_id_for_adapter()?;
         for task in &all_tasks {
             if task.task_type == TaskType::Embedding && to_demote.contains_key(&task.output_ref) {
                 let key = task_ledger_key(
@@ -20538,7 +20470,7 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
     let now = now_utc_seconds();
     let month = utc_month(&now);
     let ledger = open_ledger_db()?;
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let conn = ledger.connection();
     let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kio)?;
     let folder_spent =
@@ -20582,7 +20514,7 @@ fn scope_budget_warning(repo: &Repository) -> Result<Option<String>> {
         .map_err(pipeline_to_kio)?;
     let month = utc_month(&now_utc_seconds());
     let ledger = open_ledger_db()?;
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let conn = ledger.connection();
     let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kio)?;
     let folder_spent =
@@ -20958,7 +20890,7 @@ fn run_index_pipeline(
     {
         let online_profile = online_markdownize_profile_for(repo)?;
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
-        let reservation_scope_id = repo.scope_id_for_adapter();
+        let reservation_scope_id = repo.scope_id_for_adapter()?;
         let live_paths: BTreeSet<&str> = preview
             .candidates
             .iter()
@@ -22045,43 +21977,44 @@ fn verify_exact_cas_object(path: &Path, expected: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn verify_existing_cas_objects(
+fn verify_existing_cas_object(
     kio_dir: &Path,
     subdir: &str,
     hash: &str,
     bytes: &[u8],
 ) -> Result<bool> {
-    let paths = existing_cas_object_paths(kio_dir, subdir, hash)?;
-    for path in &paths {
+    if let Some(path) = existing_cas_object_path(kio_dir, subdir, hash)? {
         let parent = path
             .parent()
             .ok_or_else(|| KioError::io("path has no parent", path.display().to_string()))?;
         ensure_contained_directory_chain(kio_dir, parent)?;
-        verify_exact_cas_object(path, bytes)?;
+        verify_exact_cas_object(&path, bytes)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(!paths.is_empty())
 }
 
-fn write_cas_object_or_reuse_legacy(
+fn write_canonical_cas_object_or_reuse(
     kio_dir: &Path,
     subdir: &str,
     hash: &str,
     bytes: &[u8],
 ) -> Result<()> {
-    if verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    if verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Ok(());
     }
 
     // Close the preflight/publication window as far as possible before entering the
     // atomic canonical writer. Its own create-new publication handles a canonical
-    // race; the postcondition below also catches a concurrently-created legacy leaf.
-    if verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    // race, which is re-verified below.
+    if verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Ok(());
     }
 
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
     atomic_write_cas_object(kio_dir, &canonical, bytes)?;
-    if !verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    if !verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Err(KioError::not_found(hash));
     }
     Ok(())
@@ -22165,7 +22098,12 @@ fn write_prepared_objects(
                 "prepared object bytes do not match the declared hash",
             ));
         }
-        write_cas_object_or_reuse_legacy(repo.kio_dir(), "prepared", prepared_hash, object_bytes)?;
+        write_canonical_cas_object_or_reuse(
+            repo.kio_dir(),
+            "prepared",
+            prepared_hash,
+            object_bytes,
+        )?;
     }
     Ok(())
 }
@@ -23495,7 +23433,7 @@ fn poll_batch_markdownize_jobs(
     let Some(client) = batch_markdownize_lane_client()? else {
         return Ok(counts);
     };
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let rows = batch_poll_candidates(ledger.connection(), &scope_id, "markdownize")
         .map_err(pipeline_to_kio)?;
     if !rows.is_empty() {
@@ -24292,7 +24230,7 @@ fn enqueue_online_placeholder_task(
     // (`repo.scope_id_for_adapter()`), so the release nets out at the
     // folder-scoped totals too, not just the device total.
     let markdownize_adapter_kind = "markdownize";
-    let reservation_scope_id = repo.scope_id_for_adapter();
+    let reservation_scope_id = repo.scope_id_for_adapter()?;
     let mut stale_ids = BTreeSet::new();
     for task in task_store.all().map_err(pipeline_to_kio)? {
         let stale = task.task_type == TaskType::Markdownize
@@ -25699,13 +25637,9 @@ fn random_key_32() -> Result<Vec<u8>> {
 /// same-gen finalize's repeated manifest updates (03 §8, "unit の failed →
 /// done 遷移で変わるため" — each transition yields a new manifest_hash).
 ///
-/// Deliberately best-effort (`Result` for the caller to `.ok()`): a
-/// normalize binding forward-compatibly carries `manifest_hash: None` (v1
-/// legacy semantics, 10 §7.5.1 L501) when the manifest cannot be hashed —
-/// e.g., because it belongs to a call site synthesizing a normalize ref this
-/// session did not target for eager computation. Callers that already carry
-/// a known-good `manifest_hash` forward (history-derived normalize refs)
-/// never call this.
+/// This is a strict provenance boundary: callers must propagate any failure.
+/// Every current-format `NormalizeRef` carries the returned manifest hash;
+/// there is no missing-hash compatibility shape.
 fn compute_manifest_hash(
     kio_dir: &Path,
     raw_hash: &str,
@@ -25917,7 +25851,7 @@ mod tests {
         terminal_safe_text, truncate_torn_chunk_tail, unit_authorities_from_inputs,
         write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command,
         LaneOverride, MarkdownizeSendLane, NormalizedUnitInput, PreferredRequestKind, RepairMode,
-        RepairOperation, SearchMode, StoredChunk,
+        RepairOperation, RepositoryScopeId, SearchMode, StoredChunk,
     };
 
     fn ledger_test_chunk() -> StoredChunk {
@@ -26270,6 +26204,16 @@ mod tests {
             error.contains("source index stamp is unavailable"),
             "an unresolvable scope must never turn a failed projection into a successful no-op: {error}"
         );
+    }
+
+    #[test]
+    fn adapter_scope_id_refuses_malformed_scope_identity_instead_of_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = kio_core::scope::Repository::init(root.path()).unwrap();
+        fs::write(repo.kio_dir().join("scope.json"), "{not valid json").unwrap();
+
+        let error = repo.scope_id_for_adapter().unwrap_err();
+        assert_ne!(error.to_string(), "unknown");
     }
 
     /// R23-13 (06 §7 L343-344 "KIO-E-STORE-CONSTRAINT-001 ... permanent・
@@ -28589,75 +28533,103 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    fn historical_colon_leaf(
+        kio_dir: &std::path::Path,
+        subdir: &str,
+        hash: &str,
+    ) -> std::path::PathBuf {
+        let digest = hash.strip_prefix("sha256:").unwrap();
+        kio_dir
+            .join("objects")
+            .join(subdir)
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(hash)
+    }
+
+    #[cfg(not(windows))]
     #[test]
-    fn legacy_cas_leaf_is_verified_and_dual_conflict_fails_closed() {
-        use super::{
-            cas_object_path, hash_bytes, legacy_cas_object_path, read_cas_byte_object,
-            MAX_RAW_OBJECT_BYTES,
-        };
+    fn legacy_only_cas_leaf_is_ignored_as_not_found() {
+        use super::{cas_object_present, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
 
         let dir = tempfile::tempdir().unwrap();
-        let bytes = b"legacy object";
+        let bytes = b"historical legacy object";
         let hash = hash_bytes(bytes);
-        let legacy = legacy_cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        let legacy = historical_colon_leaf(dir.path(), "prepared", &hash);
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, bytes).unwrap();
+        std::fs::write(legacy, bytes).unwrap();
+
+        assert!(!cas_object_present(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap());
+        assert!(
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_cas_read_succeeds_and_hash_mismatch_fails_closed() {
+        use super::{cas_object_path, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"canonical object";
+        let hash = hash_bytes(bytes);
+        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, bytes).unwrap();
         let (resolved, loaded) =
             read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
                 .unwrap()
                 .unwrap();
-        assert_eq!(resolved, legacy);
+        assert_eq!(resolved, canonical);
         assert_eq!(loaded, bytes);
 
-        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
-        std::fs::write(&canonical, bytes).unwrap();
-        std::fs::write(&legacy, b"conflicting bytes").unwrap();
+        std::fs::write(&canonical, b"hash mismatch").unwrap();
         let error =
             read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn prepared_writer_reuses_verified_legacy_and_validates_both_slots() {
-        use super::{
-            cas_object_path, hash_bytes, legacy_cas_object_path, write_cas_object_or_reuse_legacy,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let kio_dir = dir.path().join(".kio");
-        std::fs::create_dir(&kio_dir).unwrap();
-        let bytes = b"prepared bytes";
-        let hash = hash_bytes(bytes);
-        let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
-        let legacy = legacy_cas_object_path(&kio_dir, "prepared", &hash).unwrap();
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, bytes).unwrap();
-
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
-        assert!(!canonical.exists(), "legacy reuse must not eagerly migrate");
-        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
-
-        std::fs::write(&canonical, bytes).unwrap();
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
-        std::fs::write(&legacy, b"conflict").unwrap();
-        let error =
-            write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
-    }
-
-    #[test]
-    fn prepared_writer_publishes_new_objects_to_portable_leaf() {
-        use super::{cas_object_path, hash_bytes, write_cas_object_or_reuse_legacy};
+    fn prepared_writer_publishes_new_objects_to_canonical_leaf() {
+        use super::{cas_object_path, hash_bytes, write_canonical_cas_object_or_reuse};
 
         let dir = tempfile::tempdir().unwrap();
         let kio_dir = dir.path().join(".kio");
         std::fs::create_dir(&kio_dir).unwrap();
         let bytes = b"new prepared bytes";
         let hash = hash_bytes(bytes);
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
+        write_canonical_cas_object_or_reuse(&kio_dir, "prepared", &hash, bytes).unwrap();
         let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
         assert_eq!(std::fs::read(canonical).unwrap(), bytes);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_conflict_cannot_influence_canonical_read_or_write() {
+        use super::{
+            cas_object_path, hash_bytes, read_cas_byte_object, write_canonical_cas_object_or_reuse,
+            MAX_RAW_OBJECT_BYTES,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let kio_dir = dir.path().join(".kio");
+        std::fs::create_dir(&kio_dir).unwrap();
+        let bytes = b"canonical prepared bytes";
+        let hash = hash_bytes(bytes);
+        let legacy = historical_colon_leaf(&kio_dir, "prepared", &hash);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"conflicting legacy bytes").unwrap();
+
+        write_canonical_cas_object_or_reuse(&kio_dir, "prepared", &hash, bytes).unwrap();
+        let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
+        let (resolved, loaded) =
+            read_cas_byte_object(&kio_dir, "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved, canonical);
+        assert_eq!(loaded, bytes);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"conflicting legacy bytes");
     }
 
     #[test]

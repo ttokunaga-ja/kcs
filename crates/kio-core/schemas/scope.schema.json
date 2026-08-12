@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["scope_id"],
+  "required": ["kio_format_version", "scope_id"],
   "properties": {
     "kio_format_version": {
       "type": "string",
@@ -45,7 +45,7 @@
     },
     "approvals": {
       "type": "array",
-      "description": "QA21-27 (step4b-contract-tests-p3a.md §G/§H, 07 §3 L148-168, 10 §12.3): adapter-level network opt-in rows, distinct from `scan_approval`. One row per (scope_id, tool_id); revoke/invalidation updates `status` in place (rows are never deleted, for audit). `status` is intentionally NOT required at the element level: a legacy row (r9-schema-and-earlier, before `status` existed) reads as `active` (10 §12.3 element-level backward compat) rather than failing schema validation.",
+      "description": "QA21-27 (step4b-contract-tests-p3a.md §G/§H, 07 §3 L148-168): adapter-level network opt-in rows, distinct from `scan_approval`. One row per (scope_id, tool_id); revoke/invalidation updates `status` in place (rows are never deleted, for audit).",
       "items": {
         "type": "object",
         "properties": {
@@ -64,14 +64,24 @@
           "execution_mode",
           "tool_profile_hash",
           "approved_at",
-          "approval_method"
+          "approval_method",
+          "status"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": { "status": { "const": "revoked" } },
+              "required": ["status"]
+            },
+            "then": { "required": ["revoked_at"] }
+          }
         ],
         "additionalProperties": false
       }
     },
     "approval_pending": {
       "type": "object",
-      "description": "QA21/25-27 (07 §3 L191-205, 10 §12.3): the single in-flight approval write-order's pending intent (a single object, not an array — approval operations are serialized under `.kio/.lock`). `approved_at`/`approval_method` are intentionally NOT required at the element level: a legacy pending missing them is not a schema error (10 §12.3 element-level backward compat) — it simply never exact-matches for self-heal/CAS purposes and is cleaned up on the next locked mutation.",
+      "description": "QA21/25-27 (07 §3 L191-205): the single in-flight approval write-order's pending intent (a single object, not an array — approval operations are serialized under `.kio/.lock`).",
       "properties": {
         "scope_id": { "type": "string" },
         "tool_id": { "type": "string", "minLength": 1 },
@@ -80,7 +90,7 @@
         "approved_at": { "type": "string" },
         "approval_method": { "type": "string" }
       },
-      "required": ["scope_id", "tool_id", "execution_mode", "tool_profile_hash"],
+      "required": ["scope_id", "tool_id", "execution_mode", "tool_profile_hash", "approved_at", "approval_method"],
       "additionalProperties": false
     },
     "approvals_initialized": {

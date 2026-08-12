@@ -252,68 +252,38 @@ fn selfheal_02_mismatched_profile_pending_is_left_untouched_and_gate_stays_close
     );
 }
 
-/// selfheal_03 (07 §3 L199-205, 10 §12.3): a LEGACY pending (missing
-/// `approval_method` — the r9-schema-and-earlier shape 10 §12.3 keeps from
-/// being a schema error) is outside self-heal's exact-match condition
-/// entirely. The first run must discard it via the locked-mutation cleanup
-/// (removed + marker set true in the same write, since it was previously
-/// absent) rather than leaving it to rot or erroring out. A second,
-/// otherwise-identical run must be a clean no-op (idempotent: no error, gate
-/// stays closed, no row appears) — the marker being true now is what stops
-/// the SECOND run's fallthrough from taking the fresh-scope materialize
-/// branch.
+/// A present pending missing a required audit field is a current scope-schema
+/// violation. It must fail closed before self-heal and must not be cleaned up,
+/// inferred, or otherwise mutate the portable approval record.
 #[test]
-fn selfheal_03_legacy_pending_is_discarded_then_idempotent_on_rerun() {
+fn selfheal_03_malformed_pending_fails_closed_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let scope_id = init_with_allow_network(&dir);
     let (tool_id, tool_profile_hash) = standard_markdownize_identity();
 
-    let legacy_pending = json!({
+    let malformed_pending = json!({
         "scope_id": scope_id,
         "tool_id": tool_id,
         "execution_mode": "online_api",
         "tool_profile_hash": tool_profile_hash,
         "approved_at": "2020-01-01T00:00:00Z",
-        // approval_method intentionally absent — the legacy shape.
+        // approval_method intentionally absent.
     });
-    write_network_approval_pending(&kio_dir(&dir), legacy_pending).unwrap();
-    assert!(!scope_json(&dir)["approvals_initialized"]
-        .as_bool()
-        .unwrap_or(false));
+    let scope_path = kio_dir(&dir).join("scope.json");
+    let mut scope = scope_json(&dir);
+    scope["approval_pending"] = malformed_pending;
+    fs::write(&scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+    let before = fs::read(&scope_path).unwrap();
 
-    let first = json_success(&dir, &["index", "--yes"]);
-    assert_eq!(
-        first["network_opt_in"], false,
-        "a legacy pending must never self-heal: {first}"
-    );
-    let after_first = scope_json(&dir);
-    assert!(
-        after_first.get("approvals").is_none(),
-        "no row must be published from a legacy pending: {after_first}"
-    );
-    assert!(
-        after_first.get("approval_pending").is_none(),
-        "the legacy pending must be discarded: {after_first}"
-    );
-    assert_eq!(
-        after_first["approvals_initialized"], true,
-        "the discard must set the marker in the same write (07 §3 L202-205): {after_first}"
-    );
-
-    // Idempotent re-run: the pending is already gone, so the fallthrough now
-    // takes the materialize branch — which must stay a no-op because the
-    // marker is already true (not a fresh scope).
-    let second = json_success(&dir, &["index", "--yes"]);
-    assert_eq!(
-        second["network_opt_in"], false,
-        "the marker set by the first run's cleanup must keep materialize closed \
-         on rerun: {second}"
-    );
-    let after_second = scope_json(&dir);
-    assert!(
-        after_second.get("approvals").is_none(),
-        "still no row after the idempotent rerun: {after_second}"
-    );
+    let stderr = kio(&dir, &["index", "--yes", "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
+    assert_eq!(fs::read(&scope_path).unwrap(), before);
 }
 
 /// selfheal_04 (07 §3 L186-190, 197-198): a SECOND tool's crash mid-flight —

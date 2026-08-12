@@ -337,15 +337,13 @@ fn plan_online_markdownize_promotion(
         })
         .map(|candidate| candidate.bbox_annotation_enabled)
         .collect::<BTreeSet<_>>();
+    let adapter_scope_id = repo.scope_id_for_adapter()?;
     let resolved_profiles = policies_to_resolve
         .into_iter()
         .filter_map(|bbox_enabled| {
-            resolve_standard_online_markdownize_profile_with_bbox(
-                &repo.scope_id_for_adapter(),
-                bbox_enabled,
-            )
-            .ok()
-            .map(|profile| (bbox_enabled, profile))
+            resolve_standard_online_markdownize_profile_with_bbox(&adapter_scope_id, bbox_enabled)
+                .ok()
+                .map(|profile| (bbox_enabled, profile))
         })
         .collect::<BTreeMap<_, _>>();
 

@@ -543,11 +543,17 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     .unwrap();
 
     fs::write(temp.path().join(".kio/scope.json"), "{}").unwrap();
-    kio()
+    let out = kio()
         .args(["status", "--json"])
         .current_dir(temp.path())
         .assert()
-        .code(2);
+        .code(8)
+        .get_output()
+        .stderr
+        .clone();
+    let err: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(err["error_code"], "KIO-E-STORE-VERSION-001");
+    assert_eq!(err["context"]["found"], "<missing>");
     fs::write(temp.path().join(".kio/scope.json"), scope_json).unwrap();
 
     fs::write(
