@@ -5,7 +5,7 @@
 (`docs/09-mvp-scope.md` §5.5、**Step 3 着手前ゲート**) の成果物。
 
 - Python 補助スクリプトの依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
-- 決定論: すべて固定 seed (`corpus_spec.SEED`) + hashlib 由来の seed。2 回実行で byte 同一。
+- 決定論: 凍結済み `corpus-fixture.json` を Rust generator が materialize する。2 回実行で byte 同一。
 - 通常評価は Rust の `kio-eval` と評価対象の `kio` を使う。
   `cargo build --release --locked --all-features` 済み前提。
 
@@ -13,8 +13,9 @@
 
 | ファイル | 役割 |
 | --- | --- |
-| `corpus_spec.py` | **正本**。scope / anchor 文書 / 履歴シナリオ (編集・リネーム・削除) の単一定義。他スクリプトが共有し drift を防ぐ |
-| `generate_corpus.py` | 合成コーパス生成 (200-500 ファイル / 複数 scope)。`corpus-manifest.json` を出力 |
+| `corpus-fixture.json` | **生成物の凍結正本**。305 文書の bytes と manifest を保持し、Rust `kio-eval generate-corpus` が検証して materialize する |
+| `corpus_spec.py` | Python replay/oracle 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
+| `generate_corpus.py` | 旧 CLI 互換 shim。`kio-eval generate-corpus` を exec するだけで、Python/Cargo fallback は持たない |
 | `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
@@ -24,7 +25,7 @@
 | `run_crossscope.py` | 横断増補の専用ランナー。`python_eval_oracle.py` の限定的な補助を明示利用する。full Rust evaluator のセット全体ゲートは部分集合に当てられないため別立て。診断値 `worst_expected_rank` を併記する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `test_run_eval.py` | Python oracle の独立テストと Rust evaluator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
+| `test_run_eval.py` | Python oracle の独立テストと Rust evaluator/generator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
 | `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
@@ -41,8 +42,9 @@
 # 0. バイナリ (未ビルドなら)
 cargo build --release --locked --all-features
 
-# 1. 合成コーパス生成 (決定論的)
+# 1. 合成コーパス生成 (Rust 正本。Python entry point は互換 shim)
 python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
+# 直接実行する場合: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
 
 # 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
 python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
@@ -124,7 +126,7 @@ Done 条件 = **synthetic で各シナリオ Recall@10 >= 0.8** + **dogfood で 
 - ゴールデンクエリの追加は **Step 3 着手前まで**。
 - **Step 3 着手後は `golden-queries.jsonl` の追加・差し替え・削除を禁止** (シナリオ凍結規律に準ずる)。
   悪化を隠すためのクエリ削除は禁止。物理的に実装不可能と判明した場合のみ docs 側で撤回 + 代替採用。
-- コーパス定義 (`corpus_spec.py`) と履歴シナリオも同様に凍結対象。変更は Recall 数値の連続性を壊すため、
+- 凍結 corpus fixture (`corpus-fixture.json`) と履歴シナリオも同様に凍結対象。変更は Recall 数値の連続性を壊すため、
   Step 3 着手後は原則行わない。
 
 ## 決定論の検証

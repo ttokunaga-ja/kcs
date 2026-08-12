@@ -2,6 +2,7 @@
 
 pub mod attestation;
 pub mod boundary;
+pub mod generator;
 pub mod manifest;
 pub mod resolver;
 pub mod runner;

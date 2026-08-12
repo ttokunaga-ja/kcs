@@ -16,7 +16,7 @@ use std::{
 };
 
 use cap_primitives::fs as cap_fs;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use kio_core::{
     cas::{hash_bytes, read_bounded_regular_file, MAX_RAW_OBJECT_BYTES},
     ExitCode,
@@ -41,6 +41,8 @@ const DEFAULT_BIN: &str = "target/release/kio";
 #[derive(Debug, Parser)]
 #[command(name = "kio-eval", about = "Kio synthetic search evaluator")]
 pub struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
     #[arg(long)]
     golden: Option<PathBuf>,
     #[arg(long)]
@@ -65,6 +67,17 @@ pub struct Args {
     dry_run: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Materialize the frozen synthetic evaluation corpus.
+    GenerateCorpus {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("{0}")]
@@ -73,6 +86,22 @@ pub enum AppError {
     Manifest(#[from] kio_eval::manifest::ManifestError),
     #[error(transparent)]
     Runner(#[from] kio_eval::runner::RunnerError),
+    #[error(transparent)]
+    Generator(#[from] kio_eval::generator::GeneratorError),
+}
+
+fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
+    let summary = kio_eval::generator::generate_corpus(&out, force)?;
+    println!("[ok] コーパス生成: {}", summary.output.display());
+    println!(
+        "     files={} anchors={} scopes={}",
+        summary.file_count, summary.anchor_count, summary.scope_count
+    );
+    for (scope, count) in summary.per_scope {
+        println!("       - {scope:12}: {count} files");
+    }
+    println!("     manifest: {}", summary.manifest_path.display());
+    Ok(ExitCode::Success)
 }
 
 fn parse_scenario(value: &str) -> Result<String, String> {
@@ -446,6 +475,11 @@ fn walk_regular_files(root: &Path) -> Vec<PathBuf> {
 }
 
 pub fn run(args: Args) -> Result<ExitCode, AppError> {
+    if let Some(command) = args.command.as_ref() {
+        return match command {
+            Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
+        };
+    }
     let golden = args
         .golden
         .unwrap_or_else(|| bundled_eval_path("golden-queries.jsonl"));

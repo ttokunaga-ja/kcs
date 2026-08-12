@@ -11,7 +11,7 @@ use std::{
     sync::OnceLock,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SEED: u64 = 20_260_703;
@@ -129,14 +129,14 @@ fn invalid(kind: &'static str, message: impl Into<String>) -> ManifestError {
     ManifestError::Invalid(kind, message.into())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
     pub slug: String,
     pub heading: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusFile {
     pub scope: String,
@@ -148,7 +148,7 @@ pub struct CorpusFile {
     pub raw_sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusManifest {
     pub generator: String,
