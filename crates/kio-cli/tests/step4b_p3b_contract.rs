@@ -685,21 +685,150 @@ fn qb14b_xdg_data_home_fallback_resolves_under_home() {
     );
 }
 
-/// QB15 (weak subset — the child-`.kio`-generation mechanism itself does not
-/// exist yet, per the task's own note): `[scope] index_vcs_repos` is not yet
-/// declared in `config.schema.json`, confirming the spec-gap's premise this
-/// contract pins for later implementation.
+/// QB15: parent scopes remain direct-file-only, while bounded child discovery
+/// makes separate scopes for file-bearing ordinary directories. VCS roots and
+/// their descendants are skipped by default, including a regular `.git`
+/// gitfile; opt-in permits them. Preview reports its plan without mutation.
 #[test]
-fn qb15_index_vcs_repos_schema_key_not_yet_declared() {
-    let schema = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-core/schemas/config.schema.json"
-    ))
-    .unwrap();
+fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("ordinary/nested")).unwrap();
+    fs::create_dir_all(dir.path().join("ignored")).unwrap();
+    fs::write(dir.path().join("ordinary/note.md"), "ordinary").unwrap();
+    fs::write(dir.path().join("ordinary/nested/deep.md"), "nested").unwrap();
+    fs::write(dir.path().join("ignored/private.md"), "ignore me").unwrap();
+    fs::create_dir_all(dir.path().join("git-dir/.git")).unwrap();
+    fs::write(dir.path().join("git-dir/readme.md"), "git dir").unwrap();
+    fs::create_dir_all(dir.path().join("git-file/inner")).unwrap();
+    fs::write(dir.path().join("git-file/.git"), "gitdir: elsewhere\n").unwrap();
+    fs::write(dir.path().join("git-file/inner/readme.md"), "git file").unwrap();
+    #[cfg(unix)]
+    let symlink_victim = {
+        let victim = tempfile::tempdir().unwrap();
+        fs::write(victim.path().join("outside.md"), "must stay outside").unwrap();
+        std::os::unix::fs::symlink(victim.path(), dir.path().join("linked-child")).unwrap();
+        victim
+    };
+    success(&dir, &["init"]);
+    fs::write(dir.path().join(".kioignore"), "ignored\n").unwrap();
+
+    let preview = success(&dir, &["index", "--preview", "--offline"]);
     assert!(
-        !schema.contains("index_vcs_repos"),
-        "index_vcs_repos is not implemented yet; this test must be updated when it lands"
+        !dir.path().join("ordinary/.kio").exists(),
+        "preview must not initialize children"
     );
+    assert!(preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["input_path"] != "ordinary/note.md"));
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ordinary" && row["status"] == "planned"));
+    assert_eq!(preview["estimated_aggregate_file_count"], 2);
+    assert_eq!(preview["estimated_aggregate_size_bytes"], 14);
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ordinary"
+            && row["estimated_file_count"] == 1
+            && row["estimated_size_bytes"] == 8));
+    #[cfg(unix)]
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "linked-child" && row["status"] == "skipped_symlink"));
+    let indexed = success(&dir, &["index", "--offline", "--approve"]);
+    assert!(dir.path().join("ordinary/.kio").is_dir());
+    assert!(dir.path().join("ordinary/nested/.kio").is_dir());
+    assert!(!dir.path().join("git-dir/.kio").exists());
+    assert!(!dir.path().join("git-file/.kio").exists());
+    assert!(!dir.path().join("ignored/.kio").exists());
+    assert!(!dir.path().join(".test-config/.kio").exists());
+    assert!(!dir.path().join(".test-data/.kio").exists());
+    assert!(!dir.path().join(".test-cache/.kio").exists());
+    #[cfg(unix)]
+    assert!(
+        !symlink_victim.path().join(".kio").exists(),
+        "child discovery must not follow a directory symlink into the victim"
+    );
+    assert!(indexed["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
+    assert!(indexed["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-file" && row["status"] == "skipped_vcs"));
+    let nested = success(&dir, &["search", "nested", "--mode", "text"]);
+    assert!(nested["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["title"] == "deep.md"));
+
+    fs::write(
+        kio_dir(&dir).join("config.toml"),
+        "[scope]\nindex_vcs_repos = true\nignore = [\"ignored\"]\n",
+    )
+    .unwrap();
+    let opted_in = success(&dir, &["index", "--offline", "--approve"]);
+    assert!(dir.path().join("git-dir/.kio").is_dir());
+    assert!(dir.path().join("git-file/inner/.kio").is_dir());
+    assert!(opted_in["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "indexed"));
+    assert!(opted_in["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ignored" && row["status"] == "skipped_ignored"));
+    assert!(
+        !dir.path().join("git-file/.kio").exists(),
+        "a gitfile marker alone is not file-bearing"
+    );
+}
+
+#[test]
+fn qb15_parent_ignore_is_persisted_and_excludes_child_cas() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("project")).unwrap();
+    fs::write(dir.path().join("project/private.md"), "private").unwrap();
+    fs::write(dir.path().join("project/public.md"), "public").unwrap();
+    success(&dir, &["init"]);
+    fs::write(
+        kio_dir(&dir).join("config.toml"),
+        "[scope]\nignore = [\"project/private.md\"]\n",
+    )
+    .unwrap();
+
+    success(&dir, &["index", "--offline", "--approve"]);
+    let child_kio = dir.path().join("project/.kio");
+    let child_config = fs::read_to_string(child_kio.join("config.toml")).unwrap();
+    assert!(child_config.contains("generated_parent_policy"));
+    assert!(child_config.contains("scope_prefix = \"project\""));
+    let store = ObjectStore::new(&child_kio);
+    assert!(store
+        .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
+        .unwrap()
+        .exists());
+    assert!(!store
+        .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
+        .unwrap()
+        .exists());
 }
 
 /// QB19 [regression-lock, structural]: scope-local `access.jsonl` and

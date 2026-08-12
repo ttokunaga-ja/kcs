@@ -338,24 +338,18 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   — spec-gap が疑っていた「不正パス生成バグ」は現行実装には存在しない。本契約は両サブクレームとも
   現状固定の回帰ロック。
 
-### QB15 VCS リポジトリ root 配下の子 `.kio` 生成除外 (前提機構の欠如を明記) [P1]
+### QB15 VCS リポジトリ root 配下の子 `.kio` 生成除外 [P1]
 - 正本: 03-data-model.md §3 L267 (『**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ)
   とその配下にも既定では子 `.kio` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true`
   で opt-in) ... **本既定の導入以前に生成済みの既存子 `.kio` は grandfathered**』)
-- 前提: **本契約が検証しようとする「子 `.kio` の自動生成」機構自体が、`kio index` の現行実装には
-  存在しない** (`.kio` を除く通常のサブディレクトリはそもそも走査対象から単純に skip されるのみで
-  (`scan.rs:117`/`scope.rs:627-628` が `is_dir()`/`is_file()` チェックで弾く)、対象ファイルを含む
-  サブフォルダへ子 `.kio` を生成する再帰探索コードパスは grep 0 件)。したがって「VCS repo root を
-  除外する」規則を対象を持たないまま実装するのは無意味であり、本契約は **前提機構が実装されたとき**
-  に満たすべき事後条件として先行固定する。
-- 操作: (将来) 子 `.kio` 自動生成が実装された時点で、`.git` を持つフォルダとその配下に対して
-  `kio index` を実行する。
-- 期待: 子 `.kio` は生成されず、当該フォルダは `kio status` 等で skip 表示される。`[scope]
-  index_vcs_repos = true` を設定した場合のみ子 `.kio` が生成される。本既定の導入前に既に存在する
-  子 `.kio` (grandfathered) は本規則の影響を受けず有効な scope のまま残る。**現状の代替確認**:
-  `folder-config.schema.json` に `[scope] index_vcs_repos` キーが定義されているか (config schema
-  レベルでの先行受理) だけは今すぐ検証可能であり、本契約の**弱い部分集合**として実施する — grep
-  `index_vcs_repos` は crates 全域で 0 件 (schema にもキー未定義)。
+- 操作: 通常の file-bearing subdirectory、`.git` directory を持つ subdirectory、および regular
+  gitfile の `.git` を持つ subdirectory を置き、`kio index --preview` と通常の `kio index` を実行する。
+  次に親 scope の `[scope] index_vcs_repos = true` を設定して再実行する。
+- 期待: preview は `child_scopes` に `planned` / `skipped_vcs` を返し、子 `.kio` を作らない。通常実行は
+  通常の file-bearing directory を `indexed` として child scope 化する一方、VCS root とその descendants
+  は `skipped_vcs` として表示し生成しない。opt-in 時だけ VCS root も child scope 化する。探索は parent
+  scope の ignore を先に、root `.kioignore` を後に適用し、`.kio`、directory symlink、unreadable directory
+  を安全側に扱う。既存 child scope の grandfather 専用分岐は置かない。
 
 ### QB16 `kio import --as-new-scope` の fork 機構 [P1]
 - 正本: 06-cli-spec.md §10 (『bundle の scope_id が registry に live 登録済みなら拒否

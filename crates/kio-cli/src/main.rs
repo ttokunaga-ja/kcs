@@ -107,8 +107,12 @@ use kio_pipeline::prepare::{
     PrepareStageBytesRequest, PreparedUnit, UnitFingerprint, UnitType,
 };
 use kio_pipeline::scan::{
-    build_scan_preview, classify_secret, current_scan_policy_allows_file, hash_verified_scan_input,
-    read_verified_scan_input, ScanCandidate, ScanPreview, ScanPreviewRequest,
+    build_bound_scan_preview, build_scan_preview, build_scan_preview_with_inherited_rules,
+    classify_secret, configure_planned_child_index_command, current_bound_scan_policy_allows_file,
+    current_scan_policy_allows_file, discover_child_scopes, generated_parent_policy_for_child,
+    generated_parent_policy_payload_for_child, hash_verified_scan_input,
+    parse_generated_parent_policy_payload, read_bound_verified_scan_input,
+    read_verified_scan_input, PlannedChildCommand, ScanCandidate, ScanPreview, ScanPreviewRequest,
 };
 use kio_pipeline::task::{
     hold_reason_for_reason, retry_policy, task_can_complete_from_materialized_output,
@@ -282,7 +286,7 @@ struct RestoreArgs {
     yes: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct IndexArgs {
     #[arg(long)]
     preview: bool,
@@ -319,6 +323,17 @@ struct IndexArgs {
     /// consent. Persisted so `batch resume` honors it (decisions #45).
     #[arg(long)]
     send_secrets: bool,
+    /// Internal only: parent index binds this process to a retained child
+    /// descriptor before exec. It is deliberately hidden from normal help.
+    #[arg(long, hide = true)]
+    internal_bound_child: bool,
+    #[arg(long, hide = true, requires = "internal_bound_child")]
+    internal_canonical_root: Option<PathBuf>,
+    /// Strict, bounded policy envelope emitted only by the retained-handle
+    /// parent.  It is persisted before the child scans so later child-only
+    /// reindex/current-policy checks retain ancestor ignore authorization.
+    #[arg(long, hide = true, requires = "internal_bound_child")]
+    internal_parent_ignore_policy: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -733,6 +748,17 @@ fn clap_error_reason(err: &clap::Error) -> String {
 /// payload to stdout (multi-scope search partial failure, 05 §1.8).
 fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
     let code = output.as_object_mut()?.remove("__exit_code")?.as_u64()?;
+    exit_code_from_override(code)
+}
+
+fn peek_exit_override(output: &Value) -> Option<ExitCode> {
+    output
+        .get("__exit_code")
+        .and_then(Value::as_u64)
+        .and_then(exit_code_from_override)
+}
+
+fn exit_code_from_override(code: u64) -> Option<ExitCode> {
     match code {
         3 => Some(ExitCode::PartialFailure),
         4 => Some(ExitCode::PermanentFailure),
@@ -740,6 +766,40 @@ fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
         5 => Some(ExitCode::AuthError),
         6 => Some(ExitCode::BudgetExceeded),
         _ => None,
+    }
+}
+
+/// Merge the result of a parent index with every child-scope outcome. A child
+/// cannot make already-published parent work "all permanently failed", so any
+/// retryable/permanent child-only failure is a partial result. Auth and budget
+/// still retain the index command's documented user-action priority.
+fn merged_index_exit_override(
+    parent: Option<ExitCode>,
+    children: impl IntoIterator<Item = ExitCode>,
+    incomplete_child_discovery: bool,
+) -> Option<ExitCode> {
+    let mut auth = parent == Some(ExitCode::AuthError);
+    let mut budget = parent == Some(ExitCode::BudgetExceeded);
+    let mut partial = incomplete_child_discovery
+        || parent.is_some_and(|code| {
+            matches!(code, ExitCode::PartialFailure | ExitCode::PermanentFailure)
+        });
+    for code in children {
+        match code {
+            ExitCode::AuthError => auth = true,
+            ExitCode::BudgetExceeded => budget = true,
+            ExitCode::PartialFailure | ExitCode::PermanentFailure => partial = true,
+            _ => {}
+        }
+    }
+    if auth {
+        Some(ExitCode::AuthError)
+    } else if budget {
+        Some(ExitCode::BudgetExceeded)
+    } else if partial {
+        Some(ExitCode::PartialFailure)
+    } else {
+        None
     }
 }
 
@@ -1099,13 +1159,57 @@ fn run(cli: Cli) -> Result<Value> {
 }
 
 fn run_index(args: IndexArgs) -> Result<Value> {
+    let internal = args.internal_bound_child;
+    let repo = if internal {
+        let canonical_root = args.internal_canonical_root.clone().ok_or_else(|| {
+            KioError::invalid_usage("internal bound child requires a canonical root")
+        })?;
+        let payload = args
+            .internal_parent_ignore_policy
+            .as_deref()
+            .ok_or_else(|| {
+                KioError::invalid_usage("internal bound child requires a parent ignore policy")
+            })?;
+        let rules = parse_generated_parent_policy_payload(payload).map_err(pipeline_to_kio)?;
+        let policy = toml::Value::try_from(serde_json::json!({ "rules": rules }))
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            Repository::init_bound_current_with_generated_parent_policy(
+                canonical_root,
+                Some(policy),
+            )?
+        }
+        #[cfg(windows)]
+        {
+            let _ = (canonical_root, policy);
+            return Err(KioError::new(
+                "KIO-E-SCOPE-BOUND-UNSUPPORTED-001",
+                "Windows child scope execution requires a retained-handle launcher",
+                json!({}),
+                ExitCode::Failure,
+            ));
+        }
+    } else {
+        Repository::open_current()?
+    };
+    run_index_for_repo(args, repo, !internal)
+}
+
+/// Index one scope. Only the user-invoked parent discovers children; child
+/// scopes stay direct-file-only and cannot recursively fan out a single run.
+fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool) -> Result<Value> {
     if args.online && args.offline {
         return Err(KioError::invalid_usage(
             "--online and --offline are mutually exclusive",
         ));
     }
     let lane_override = LaneOverride::new(args.realtime, args.batch);
-    let repo = Repository::open_current()?;
+    let child_plan = if discover_children {
+        Some(discover_child_scopes(repo.root()).map_err(pipeline_to_kio)?)
+    } else {
+        None
+    };
     // Resolve the invocation lane BEFORE anything plans or prices a send: the
     // OCR lane selection and both reservation estimates read it, and by ruling
     // OCR and embedding must never end up on different lanes.
@@ -1120,15 +1224,81 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         write_network_revoke_record(&repo)?;
         return Ok(json!({ "status": "network revoked" }));
     }
-    let preview = build_scan_preview(ScanPreviewRequest {
-        scope_path: repo.root().display().to_string(),
-        include_raw_hashes: !args.preview,
-        require_network_approval: !args.offline,
-    })
+    let preview = build_repository_scan_preview(
+        &repo,
+        ScanPreviewRequest {
+            scope_path: repo.root().display().to_string(),
+            include_raw_hashes: !args.preview,
+            require_network_approval: !args.offline,
+        },
+    )
     .map_err(pipeline_to_kio)?;
 
     if args.preview {
-        return Ok(index_preview_json(repo.root(), &preview));
+        let mut output = index_preview_json(repo.canonical_root(), &preview);
+        if let Some(plan) = child_plan {
+            let mut children = Vec::new();
+            let mut aggregate_files = preview
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.ignored)
+                .count();
+            let mut aggregate_bytes = preview
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.ignored)
+                .map(|candidate| candidate.size_bytes)
+                .sum::<u64>();
+            let mut aggregate_cost = preview
+                .estimated_cost
+                .as_ref()
+                .map(|cost| cost.estimated_usd)
+                .unwrap_or_default();
+            for child in plan.candidates.clone() {
+                let mut row = serde_json::to_value(&child)
+                    .unwrap_or_else(|_| json!({ "path": child.path, "status": child.status }));
+                if child.status == "planned" {
+                    let rules = generated_parent_policy_for_child(&plan, &child.path)
+                        .map_err(pipeline_to_kio)?;
+                    let child_preview = build_scan_preview_with_inherited_rules(
+                        ScanPreviewRequest {
+                            scope_path: repo.root().join(&child.path).display().to_string(),
+                            include_raw_hashes: false,
+                            require_network_approval: !args.offline,
+                        },
+                        &rules,
+                    )
+                    .map_err(pipeline_to_kio)?;
+                    let included = child_preview
+                        .candidates
+                        .iter()
+                        .filter(|candidate| !candidate.ignored)
+                        .collect::<Vec<_>>();
+                    let count = included.len();
+                    let bytes = included
+                        .iter()
+                        .map(|candidate| candidate.size_bytes)
+                        .sum::<u64>();
+                    let cost = child_preview
+                        .estimated_cost
+                        .as_ref()
+                        .map(|cost| cost.estimated_usd)
+                        .unwrap_or_default();
+                    row["estimated_file_count"] = json!(count);
+                    row["estimated_size_bytes"] = json!(bytes);
+                    row["estimated_cost_usd"] = json!(cost);
+                    aggregate_files += count;
+                    aggregate_bytes += bytes;
+                    aggregate_cost += cost;
+                }
+                children.push(row);
+            }
+            output["child_scopes"] = json!(children);
+            output["estimated_aggregate_file_count"] = json!(aggregate_files);
+            output["estimated_aggregate_size_bytes"] = json!(aggregate_bytes);
+            output["estimated_aggregate_cost_usd"] = json!(aggregate_cost);
+        }
+        return Ok(output);
     }
 
     let approved = approval_exists(&repo)?;
@@ -1278,7 +1448,250 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     if let Some(code) = exit_override {
         set_exit_override(&mut output, code);
     }
+    if let Some(plan) = child_plan {
+        let mut children = Vec::new();
+        let parent_exit_override = peek_exit_override(&output);
+        let mut child_exit_overrides = Vec::new();
+        let mut incomplete_child_discovery = plan.candidates.iter().any(|child| {
+            matches!(
+                child.status.as_str(),
+                "skipped_limit" | "skipped_unreadable"
+            )
+        });
+        for mut child in plan.candidates.clone() {
+            if child.status != "planned" {
+                children.push(child);
+                continue;
+            }
+            match run_bound_child_index(&plan, &child.path, &args) {
+                Ok(None) => {
+                    child.status = "skipped_vcs".to_owned();
+                    child.reason = Some("vcs_marker_added_after_discovery".to_owned());
+                }
+                Ok(Some(child_output)) if peek_exit_override(&child_output).is_none() => {
+                    child.status = "indexed".to_owned()
+                }
+                Ok(Some(child_output)) => {
+                    let child_exit = peek_exit_override(&child_output)
+                        .expect("guarded child output must carry a supported exit override");
+                    child_exit_overrides.push(child_exit);
+                    child.status = "indexed_partial".to_owned();
+                    child.error_code = child_output
+                        .get("error_code")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| Some(exit_override_error_code(child_exit).to_owned()));
+                    child.message = child_output
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            Some("child index completed with a non-success exit".to_owned())
+                        });
+                }
+                Err(error) => {
+                    incomplete_child_discovery = true;
+                    if matches!(
+                        error.exit_code(),
+                        ExitCode::AuthError
+                            | ExitCode::BudgetExceeded
+                            | ExitCode::PartialFailure
+                            | ExitCode::PermanentFailure
+                    ) {
+                        child_exit_overrides.push(error.exit_code());
+                    }
+                    child.status = "skipped_error".to_owned();
+                    child.error_code = Some(error.error_code().to_owned());
+                    child.message = Some(error.message().to_owned());
+                }
+            }
+            children.push(child);
+        }
+        output["child_scopes"] = serde_json::to_value(children).unwrap_or_else(|_| json!([]));
+        if let Some(code) = merged_index_exit_override(
+            parent_exit_override,
+            child_exit_overrides,
+            incomplete_child_discovery,
+        ) {
+            if output.get("error_code").is_none() {
+                output["error_code"] = json!(match code {
+                    ExitCode::AuthError => "KIO-E-ADAPTER-AUTH-001",
+                    ExitCode::BudgetExceeded => "KIO-E-BUDGET-EXCEEDED-001",
+                    _ => "KIO-E-INDEX-PARTIAL-001",
+                });
+            }
+            set_exit_override(&mut output, code);
+        }
+    }
     Ok(output)
+}
+
+/// Select the capability-bound scan path only for an internal child process.
+/// The public `Repository::root()` path is metadata-only in that process after
+/// it enters its retained `.kio` directory, so source reads must never fall
+/// back to it.
+fn build_repository_scan_preview(
+    repo: &Repository,
+    request: ScanPreviewRequest,
+) -> kio_pipeline::Result<ScanPreview> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(kio)) => return build_bound_scan_preview(root, kio, request, &[]),
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    build_scan_preview(request)
+}
+
+fn read_repository_scan_input(
+    repo: &Repository,
+    input_path: &str,
+    max_bytes: u64,
+) -> kio_pipeline::Result<kio_pipeline::scan::VerifiedScanInput> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(_)) => {
+                return read_bound_verified_scan_input(root, input_path, max_bytes)
+            }
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    read_verified_scan_input(repo.root(), input_path, max_bytes)
+}
+
+fn repository_scan_policy_allows_file(
+    repo: &Repository,
+    input_path: &str,
+) -> kio_pipeline::Result<bool> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(kio)) => {
+                return current_bound_scan_policy_allows_file(root, kio, input_path, &[])
+            }
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    current_scan_policy_allows_file(repo.root(), input_path)
+}
+
+/// A stable presentation-only source path. Bound children use the retained
+/// descriptor for all I/O; this is never dereferenced after binding.
+fn repository_input_display_path(repo: &Repository, input_path: &str) -> PathBuf {
+    repo.canonical_root().join(input_path)
+}
+
+/// Spawn one planned child as a separate process. The pipeline configures the
+/// cwd from its retained capability handle; this function deliberately never
+/// constructs a child `Repository` from a public path.
+fn run_bound_child_index(
+    plan: &kio_pipeline::scan::ChildScopePlan,
+    relative: &str,
+    args: &IndexArgs,
+) -> Result<Option<Value>> {
+    let executable = std::env::current_exe()
+        .map_err(|err| KioError::io(err.to_string(), "current executable"))?;
+    let mut command = std::process::Command::new(executable);
+    command.arg("--json").arg("index");
+    append_index_child_flags(&mut command, args);
+    match configure_planned_child_index_command(plan, relative, &mut command)
+        .map_err(pipeline_to_kio)?
+    {
+        PlannedChildCommand::SkippedVcs => return Ok(None),
+        PlannedChildCommand::Spawn { canonical_root } => {
+            let payload = generated_parent_policy_payload_for_child(plan, relative)
+                .map_err(pipeline_to_kio)?;
+            command
+                .arg("--internal-bound-child")
+                .arg("--internal-canonical-root")
+                .arg(canonical_root)
+                .arg("--internal-parent-ignore-policy")
+                .arg(payload);
+        }
+    }
+    let output = command
+        .output()
+        .map_err(|err| KioError::io(err.to_string(), relative.to_owned()))?;
+    if !output.status.success() {
+        let mut value: Value = serde_json::from_slice(&output.stderr).map_err(|err| {
+            KioError::io(
+                format!(
+                    "bound child did not emit JSON error: {err}; stderr: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                relative.to_owned(),
+            )
+        })?;
+        if let Some(code) = output
+            .status
+            .code()
+            .and_then(|code| exit_code_from_override(code as u64))
+        {
+            set_exit_override(&mut value, code);
+        } else {
+            let code = value
+                .get("error_code")
+                .and_then(Value::as_str)
+                .unwrap_or("KIO-E-INDEX-PARTIAL-001");
+            return Err(KioError::new(
+                code,
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bound child failed"),
+                value
+                    .get("context")
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "path": relative })),
+                ExitCode::PartialFailure,
+            ));
+        }
+        return Ok(Some(value));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+        KioError::io(
+            format!("bound child did not emit JSON: {err}"),
+            relative.to_owned(),
+        )
+    })?;
+    Ok(Some(value))
+}
+
+fn append_index_child_flags(command: &mut std::process::Command, args: &IndexArgs) {
+    for (enabled, flag) in [
+        (args.approve, "--approve"),
+        (args.yes, "--yes"),
+        (args.online, "--online"),
+        (args.offline, "--offline"),
+        (args.revoke_network, "--revoke-network"),
+        (args.realtime, "--realtime"),
+        (args.batch, "--batch"),
+        (args.send_secrets, "--send-secrets"),
+    ] {
+        if enabled {
+            command.arg(flag);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2720,6 +3133,7 @@ struct ScopeProjection {
 /// relation and never reopen source SQLite to make it up.
 fn collect_scope_projection(
     kio_dir: &Path,
+    repository: Option<&Repository>,
     completed_at_snapshots: &BTreeSet<String>,
     requested_at_snapshots: &[&str],
 ) -> Result<ScopeProjection> {
@@ -2738,7 +3152,18 @@ fn collect_scope_projection(
     // Projection is a derived-cache operation and must never repair source
     // refs as a side effect. In particular `repair replica` promises to leave
     // HEAD/CAS/source SQLite byte-for-byte under the source owner's control.
-    let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
+    let owned_repository = if repository.is_none() {
+        Some(Repository::open_without_head_repair(
+            kio_dir.parent().unwrap_or(kio_dir),
+        )?)
+    } else {
+        None
+    };
+    let repo = repository.unwrap_or_else(|| {
+        owned_repository
+            .as_ref()
+            .expect("an absent projection repository is opened locally")
+    });
     let embedding_profiles =
         embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
     // `head_commit_hash` resolves an empty/truncated HEAD through a verified
@@ -2765,7 +3190,7 @@ fn collect_scope_projection(
     let max_rowid = current_max_rowid(&conn)?;
     let max_association_rowid =
         kio_index::fts::max_chunk_config_association_rowid(&conn).map_err(index_to_kio)?;
-    let live_chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
+    let live_chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let current_plan = current_history_plan_from_cache(&conn, &head)?;
     let mut completions = vec![kio_index::aggregator::AggProjectionCompletion {
         selector: kio_index::aggregator::AggSelector::Current,
@@ -2774,7 +3199,7 @@ fn collect_scope_projection(
         shallow_skipped: current_plan.shallow_skipped.len() as u64,
     }];
     let mut bindings = projection_bindings_for_plan(
-        repo.kio_dir(),
+        repo,
         &conn,
         &current_plan,
         "current",
@@ -2791,11 +3216,11 @@ fn collect_scope_projection(
     // current resolver answer remains usable while optional historical
     // snapshots are omitted. Direct readers never perform this refresh;
     // explicit history selectors are rejected during scope preparation.
-    match plan_search_history(&repo, &head, &TimeSelector::AllHistory, None) {
+    match plan_search_history(repo, &head, &TimeSelector::AllHistory, None) {
         Ok(all_history_plan) => {
             let shallow_skipped = all_history_plan.shallow_skipped.len() as u64;
             bindings.extend(projection_bindings_for_plan(
-                repo.kio_dir(),
+                repo,
                 &conn,
                 &all_history_plan,
                 "all_history",
@@ -2814,11 +3239,11 @@ fn collect_scope_projection(
         Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {}
         Err(error) => return Err(error),
     }
-    match plan_search_history(&repo, &head, &TimeSelector::IncludeDeleted, None) {
+    match plan_search_history(repo, &head, &TimeSelector::IncludeDeleted, None) {
         Ok(include_deleted_plan) => {
             let shallow_skipped = include_deleted_plan.shallow_skipped.len() as u64;
             bindings.extend(projection_bindings_for_plan(
-                repo.kio_dir(),
+                repo,
                 &conn,
                 &include_deleted_plan,
                 "include_deleted",
@@ -2874,7 +3299,7 @@ fn collect_scope_projection(
     );
     for snapshot_commit in at_snapshots {
         let selector = TimeSelector::At(snapshot_commit.clone());
-        let plan = match plan_search_history(&repo, &snapshot_commit, &selector, None) {
+        let plan = match plan_search_history(repo, &snapshot_commit, &selector, None) {
             Ok(plan) => plan,
             // A retained source row can outlive a discarded CAS commit/tree.
             // It cannot form a valid replica marker, and direct `--at` will
@@ -2894,7 +3319,7 @@ fn collect_scope_projection(
         // including for a valid but empty snapshot where no previous planner
         // call happened to create the table.
         install_eligible_identities(&conn, &plan)?;
-        let (ancestors, _) = at_target_ancestors(&repo, &snapshot_commit)?;
+        let (ancestors, _) = at_target_ancestors(repo, &snapshot_commit)?;
         install_target_ancestors(&conn, &ancestors)?;
         let target_config = resolve_target_chunking_config_hash(
             &conn,
@@ -2904,7 +3329,7 @@ fn collect_scope_projection(
             max_association_rowid,
         )?;
         bindings.extend(projection_bindings_for_plan(
-            repo.kio_dir(),
+            repo,
             &conn,
             &plan,
             "at",
@@ -3075,7 +3500,7 @@ fn collect_scope_projection(
 /// that decision stays in `SearchHistoryPlan`.
 #[allow(clippy::too_many_arguments)]
 fn projection_bindings_for_plan(
-    kio_dir: &Path,
+    repo: &Repository,
     conn: &Connection,
     plan: &SearchHistoryPlan,
     selector_kind: &str,
@@ -3084,6 +3509,7 @@ fn projection_bindings_for_plan(
     max_association_rowid: u64,
     ancestor_gated: bool,
 ) -> Result<Vec<kio_index::aggregator::AggBinding>> {
+    let kio_dir = repo.kio_dir();
     // Purge visibility is authoritative over immutable history.  Filter a
     // blocked raw identity before opening its pinned manifest: purge removes
     // that manifest/object closure deliberately, so attempting validation
@@ -3102,7 +3528,6 @@ fn projection_bindings_for_plan(
     // Validate each immutable manifest once. The SQL below may yield many
     // chunks for one identity, but a retry's Done set is an identity fact.
     let mut done_units = BTreeMap::<SearchContentKey, BTreeSet<(String, String)>>::new();
-    let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
     for (key, bindings) in &grouped {
         let binding = bindings
             .first()
@@ -3126,7 +3551,7 @@ fn projection_bindings_for_plan(
             Err(error) => {
                 if error.error_code() == "KIO-E-STORE-NOT-FOUND-001"
                     && purge_explains_missing_pinned_manifest(
-                        &repo,
+                        repo,
                         &binding.raw_hash,
                         bindings
                             .iter()
@@ -3144,13 +3569,7 @@ fn projection_bindings_for_plan(
     // each need their own pointer ancestry; all-history alone has the exact
     // canonical-introduction equality rule.
     let target_ancestors = if matches!(selector_kind, "current" | "at") {
-        Some(
-            at_target_ancestors(
-                &Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?,
-                &plan.snapshot_commit,
-            )?
-            .0,
-        )
+        Some(at_target_ancestors(repo, &plan.snapshot_commit)?.0)
     } else {
         None
     };
@@ -3173,7 +3592,6 @@ fn projection_bindings_for_plan(
     let mut include_deleted_ranks = BTreeMap::<String, u64>::new();
     let mut include_deleted_thresholds = BTreeMap::<String, u64>::new();
     if selector_kind == "include_deleted" {
-        let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
         let (graph, skipped) =
             HistoryReader::new(repo.kio_dir()).all_parents_tolerant(&plan.snapshot_commit)?;
         let mut parents = graph
@@ -3491,7 +3909,7 @@ fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
 /// Normal writers use the preserving variant below so their routine HEAD
 /// refresh cannot discard completed disconnected `--at` projections.
 fn write_through_projection_full(kio_dir: &Path) -> std::result::Result<(), String> {
-    write_through_projection_inner(kio_dir, &[], false)
+    write_through_projection_inner(kio_dir, None, &[], false)
 }
 
 /// Writer-side variant for an operation that explicitly resolved one or more
@@ -3503,11 +3921,12 @@ fn write_through_projection_with_requested_at(
     kio_dir: &Path,
     requested_at_snapshots: &[&str],
 ) -> std::result::Result<(), String> {
-    write_through_projection_inner(kio_dir, requested_at_snapshots, true)
+    write_through_projection_inner(kio_dir, None, requested_at_snapshots, true)
 }
 
 fn write_through_projection_inner(
     kio_dir: &Path,
+    repository: Option<&Repository>,
     requested_at_snapshots: &[&str],
     preserve_completed_at: bool,
 ) -> std::result::Result<(), String> {
@@ -3536,9 +3955,13 @@ fn write_through_projection_inner(
     } else {
         BTreeSet::new()
     };
-    let projection =
-        collect_scope_projection(kio_dir, &completed_at_snapshots, requested_at_snapshots)
-            .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
+    let projection = collect_scope_projection(
+        kio_dir,
+        repository,
+        &completed_at_snapshots,
+        requested_at_snapshots,
+    )
+    .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
     let header = kio_index::aggregator::AggScopeHeader {
         current_snapshot_commit: projection.current_snapshot_commit,
         current_chunking_config_hash: projection.current_chunking_config_hash,
@@ -3580,6 +4003,13 @@ fn write_through_projection_inner(
 /// as survivable — every one except purge.
 fn write_through_projection_or_log(kio_dir: &Path) {
     write_through_projection_or_log_with_requested_at(kio_dir, &[]);
+}
+
+fn write_through_projection_or_log_for_repo(repo: &Repository) {
+    if let Err(reason) = write_through_projection_inner(repo.kio_dir(), Some(repo), &[], true) {
+        log_aggregator_degraded(&reason);
+        mark_replica_unavailable_or_log(repo.kio_dir());
+    }
 }
 
 fn write_through_projection_or_log_with_requested_at(
@@ -7748,18 +8178,18 @@ struct AuthenticatedNormalizedUnit {
 type AuthenticatedNormalizedUnits = BTreeMap<NormalizedUnitKey, AuthenticatedNormalizedUnit>;
 
 pub(crate) fn retained_unit_introductions(
-    kio_dir: &Path,
+    repo: &Repository,
     retained_instances: &[RetainedNormalizedInstance],
 ) -> Result<AuthenticatedNormalizedUnits> {
+    let kio_dir = repo.kio_dir();
     let mut units = AuthenticatedNormalizedUnits::new();
-    let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
     for instance in retained_instances {
         let done = match pinned_done_units(kio_dir, &instance.raw_hash, &instance.normalize) {
             Ok(done) => done,
             Err(error) => {
                 if error.error_code() == "KIO-E-STORE-NOT-FOUND-001"
                     && purge_explains_missing_pinned_manifest(
-                        &repo,
+                        repo,
                         &instance.raw_hash,
                         instance.introductions.clone(),
                     )?
@@ -7963,8 +8393,10 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         .as_deref()
         .map(|head| read_head_tree_for_rebuild(repo, head))
         .transpose()?;
-    let existing = read_stored_chunks(repo.kio_dir())?;
-    let rebuild_roots = durable_history_roots(repo)?;
+    let existing = read_stored_chunks(repo.kio_dir())
+        .map_err(|error| annotate_index_stage(error, "read chunk ledger"))?;
+    let rebuild_roots = durable_history_roots(repo)
+        .map_err(|error| annotate_index_stage(error, "authenticate history roots"))?;
     if rebuild_roots.is_empty() {
         return Ok(Step3RebuildReport::default());
     }
@@ -7980,7 +8412,9 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // the old database. This also makes a tag-only/disconnected branch a first
     // class root rather than an accidental cache survivor.
     let mut tree_rows = BTreeMap::<(String, String), TreeEntryRow>::new();
-    let graph = HistoryReader::new(repo.kio_dir()).all_parents_for_roots(&rebuild_roots)?;
+    let graph = HistoryReader::new(repo.kio_dir())
+        .all_parents_for_roots(&rebuild_roots)
+        .map_err(|error| annotate_index_stage(error, "walk retained history"))?;
     for node in graph.nodes_in_visit_order() {
         for entry in &node.tree.entries {
             let (tool_profile_hash, gen, manifest_hash) =
@@ -8015,9 +8449,11 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // several `step3_p0_contract.rs` history/deleted-content tests). Instead this
     // rebuild-only set below narrows WHICH retained instances may receive a brand
     // NEW `chunk_config_generations` association this pass — see the loop below.
-    let retained_instances = retained_history_instances_for_roots(repo.kio_dir(), &rebuild_roots)?;
-    let retained_unit_introductions =
-        retained_unit_introductions(repo.kio_dir(), &retained_instances)?;
+    let retained_instances =
+        retained_history_instances_for_roots(repo.kio_dir(), &rebuild_roots)
+            .map_err(|error| annotate_index_stage(error, "load retained instances"))?;
+    let retained_unit_introductions = retained_unit_introductions(repo, &retained_instances)
+        .map_err(|error| annotate_index_stage(error, "authenticate retained units"))?;
     let retained_instance_keys = retained_instances
         .iter()
         .map(|instance| {
@@ -8290,7 +8726,8 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         }
     }
 
-    append_stored_chunks(repo.kio_dir(), &appended)?;
+    append_stored_chunks(repo.kio_dir(), &appended)
+        .map_err(|error| annotate_index_stage(error, "append chunk creations"))?;
     // A creation record proves only that the chunk/config association is
     // durable.  Publication is a separate fact: every retained manifest
     // introduction that authenticates this exact immutable unit must be
@@ -8303,24 +8740,36 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         repo.kio_dir(),
         &retained_unit_introductions,
         &mut pending_publication_events,
-    )?;
-    append_chunk_publication_events(repo.kio_dir(), &pending_publication_events)?;
+    )
+    .map_err(|error| annotate_index_stage(error, "stage chunk publications"))?;
+    append_chunk_publication_events(repo.kio_dir(), &pending_publication_events)
+        .map_err(|error| annotate_index_stage(error, "append chunk publications"))?;
     // The source SQLite `tree_entries` table (below) is the writer-side cache for
     // live-chunk resolution and local short-hash resolution. Direct
     // search uses only replica corpus rows and bindings. The former JSON projection
     // went stale after a bare snapshot and is no longer written (L3).
     rebuild_sqlite_index(
-        repo.kio_dir(),
+        repo,
         &tree_entries,
         &retained_instances,
         &retained_unit_introductions,
         &config.chunking_config_hash,
-    )?;
+    )
+    .map_err(|error| annotate_index_stage(error, "rebuild source index"))?;
     Ok(Step3RebuildReport {
         rebuilt_chunks: appended.len() as u64,
         rebuilt_tree_entries: tree_entries.len() as u64,
         skipped_units,
     })
+}
+
+fn annotate_index_stage(error: KioError, stage: &str) -> KioError {
+    KioError::new(
+        error.error_code(),
+        format!("{stage}: {}", error.message()),
+        error.context().clone(),
+        error.exit_code(),
+    )
 }
 
 /// Stage durable publication rows for every authenticated retained unit.  This
@@ -8667,6 +9116,15 @@ fn open_kio_root_dir(kio_dir: &Path) -> Result<std::fs::File> {
             "repository .kio root must be a real directory, not a symlink",
             kio_dir.display().to_string(),
         ));
+    }
+    // A descriptor-bound child has already `fchdir`ed into the retained `.kio`
+    // directory, so `.` is both its only operational store spelling and an
+    // inode-stable authority. Do not recover a parent/leaf path in this case:
+    // doing so would either reject `.` syntactically or re-enter a replaceable
+    // public `.kio` pathname.
+    if kio_dir == Path::new(".") {
+        return cap_fs::open_ambient_dir(Path::new("."), cap_primitives::ambient_authority())
+            .map_err(|error| KioError::io(error.to_string(), "."));
     }
     let outer = kio_dir
         .parent()
@@ -9577,12 +10035,13 @@ pub(crate) fn append_chunk_publication_events(
 }
 
 fn rebuild_sqlite_index(
-    kio_dir: &Path,
+    repo: &Repository,
     tree_entries: &[TreeEntryRow],
     retained_instances: &[RetainedNormalizedInstance],
     retained_unit_introductions: &AuthenticatedNormalizedUnits,
     chunking_config_hash: &str,
 ) -> Result<()> {
+    let kio_dir = repo.kio_dir();
     ensure_no_visible_purge_journal(kio_dir)?;
     let path = sqlite_path(kio_dir);
     // O5: a 0-chunk scope (empty folder / secrets-only / text-less PDF) skips
@@ -9623,7 +10082,7 @@ fn rebuild_sqlite_index(
     }
     match build_sqlite_index_at(
         &temp_path,
-        kio_dir,
+        repo,
         tree_entries,
         retained_instances,
         retained_unit_introductions,
@@ -9649,7 +10108,7 @@ fn rebuild_sqlite_index(
             // one line, and a fourth caller would otherwise have to remember.
             // No rotation here: the rebuild minted a fresh `index_generation`
             // into the temp db moments ago (PB28), so the stamp already moved.
-            write_through_projection_or_log(kio_dir);
+            write_through_projection_or_log_for_repo(repo);
             Ok(())
         }
         Err(error) => {
@@ -10006,12 +10465,13 @@ pub(crate) fn authenticate_publication_event_cached(
 /// handle / leftover journal.
 fn build_sqlite_index_at(
     temp_path: &Path,
-    kio_dir: &Path,
+    repository: &Repository,
     tree_entries: &[TreeEntryRow],
     retained_instances: &[RetainedNormalizedInstance],
     retained_unit_introductions: &AuthenticatedNormalizedUnits,
     chunking_config_hash: &str,
 ) -> Result<()> {
+    let kio_dir = repository.kio_dir();
     ensure_no_visible_purge_journal(kio_dir)?;
     let mut fts = SqliteFtsIndex::open(
         temp_path,
@@ -10038,7 +10498,6 @@ fn build_sqlite_index_at(
     let mut live_associations = BTreeSet::new();
     let durable_publications = read_chunk_publication_events(kio_dir)?;
     let stored_chunks = read_stored_chunks(kio_dir)?;
-    let repository = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
     let creation_created_at = stored_chunks
         .iter()
         .map(|chunk| {
@@ -10123,7 +10582,7 @@ fn build_sqlite_index_at(
             .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
             .expect("validated publication event has its creation association");
         if !authenticate_publication_event_cached(
-            &repository,
+            repository,
             kio_dir,
             event,
             creation,
@@ -10698,8 +11157,10 @@ fn register_scope(repo: &Repository, indexed: bool) {
     };
     let entry = RegistryEntry {
         scope_id,
-        kio_path: repo.kio_dir().display().to_string(),
-        root_path: repo.root().display().to_string(),
+        // Bound child processes operate via `.` / `..`; device-global state
+        // must retain the discovery-time canonical identity instead.
+        kio_path: repo.canonical_root().join(".kio").display().to_string(),
+        root_path: repo.canonical_root().display().to_string(),
         participates_in_global_search: participates_in_global_search(repo.kio_dir()),
         indexed,
         last_seen_at: now_utc_seconds(),
@@ -15644,11 +16105,7 @@ fn approval_row_present(repo: &Repository, tool_id: &str) -> Result<bool> {
 }
 
 fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> Result<bool> {
-    approval_row_present_in_kio_dir(repo.kio_dir(), tool_id)
-}
-
-fn approval_row_present_in_kio_dir(kio_dir: &Path, tool_id: Option<&str>) -> Result<bool> {
-    trusted_consent_present(kio_dir, tool_id, ConsentOperation::Network)
+    trusted_consent_present_for_repo(repo, tool_id, ConsentOperation::Network)
 }
 
 /// PC4 (05 §1.1 / 07 §3): the query-embedding send consent gate is an OR
@@ -15918,13 +16375,11 @@ fn classify_online_markdownize_precondition(
     if raw_ingest_is_purge_blocked(repo, &task.input_hash) {
         return OnlineMarkdownizePrecondition::Retire;
     }
-    let path = repo.root().join(&task.input_path);
+    let path = repository_input_display_path(repo, &task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
-    let Ok(verified) = read_verified_scan_input(
-        repo.root(),
-        &task.input_path,
-        effective_max_input_bytes(repo),
-    ) else {
+    let Ok(verified) =
+        read_repository_scan_input(repo, &task.input_path, effective_max_input_bytes(repo))
+    else {
         return OnlineMarkdownizePrecondition::Retire;
     };
     if verified.raw_hash != task.input_hash {
@@ -15935,7 +16390,7 @@ fn classify_online_markdownize_precondition(
     // then; a Pending task must not be sent to the online adapter if the operator has
     // since lowered the cap below the file's size — the same live re-check the sibling
     // `[adapter.policy]` key `allow_network` already gets at send time.
-    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
+    if !repository_scan_policy_allows_file(repo, &task.input_path).unwrap_or(false) {
         return OnlineMarkdownizePrecondition::Retire;
     }
     if is_text_native_media(&media_type) {
@@ -16260,7 +16715,7 @@ fn execute_online_markdownize_task(
     // machine has no dedicated "superseded" state). Distinct from R14-1 (which degrades
     // an unreadable PREVIOUS instance to a Full re-send of the CURRENT content): here the
     // CURRENT content itself no longer matches the task, so there is nothing to send.
-    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
+    if !repository_scan_policy_allows_file(repo, &task.input_path).unwrap_or(false) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
             retry_after_ms: None,
@@ -16534,7 +16989,7 @@ fn materialize_online_markdownize_response(
     } else {
         task_status_from_unit_counts(done, failed, false)
     };
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let manifest = manifest_from_units(
         &prepared_units,
         &units,
@@ -16763,7 +17218,7 @@ fn try_online_incremental_markdownize(
     {
         return Ok(None);
     }
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let manifest = manifest_from_units(
         prepared_units,
         &units,
@@ -19969,7 +20424,7 @@ fn hold_secret_embedding_tasks(
             continue;
         }
         let task = TaskDescriptor {
-            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_id: format!("task_{}", new_ulid(repo.canonical_root())),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: chunk.raw_path.clone(),
@@ -20137,7 +20592,7 @@ fn enqueue_embedding_tasks(
             continue;
         }
         let task = TaskDescriptor {
-            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_id: format!("task_{}", new_ulid(repo.canonical_root())),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: chunk.raw_path.clone(),
@@ -20991,9 +21446,9 @@ fn run_index_pipeline(
         // `!candidate.ignored` filter above skips it), so `.is_some()` newly gates only
         // lifted Tier A.
         let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();
-        let path = repo.root().join(&candidate.input_path);
+        let path = repository_input_display_path(repo, &candidate.input_path);
         let verified =
-            match read_verified_scan_input(repo.root(), &candidate.input_path, max_input_bytes) {
+            match read_repository_scan_input(repo, &candidate.input_path, max_input_bytes) {
                 Ok(verified) => verified,
                 Err(error) => {
                     append_event_log(
@@ -21029,7 +21484,7 @@ fn run_index_pipeline(
                 continue;
             }
         }
-        if !current_scan_policy_allows_file(repo.root(), &candidate.input_path)
+        if !repository_scan_policy_allows_file(repo, &candidate.input_path)
             .map_err(pipeline_to_kio)?
         {
             append_event_log(
@@ -21321,7 +21776,7 @@ fn run_index_pipeline(
                 raw: RawInput {
                     raw_hash: previous.manifest.raw_hash.clone(),
                     path: Some(
-                        repo.root()
+                        repo.canonical_root()
                             .join(&candidate.input_path)
                             .display()
                             .to_string(),
@@ -21442,7 +21897,7 @@ fn run_index_pipeline(
         }
 
         let generated_at = now_utc_seconds();
-        let run_id = format!("run_{}", new_ulid(repo.root()));
+        let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
         let units = normalized_units_from_response(
             &response,
             &prepare.prepared_units,
@@ -21753,7 +22208,7 @@ fn create_prepared_hash_drift_instance(
         return Ok(());
     }
     let generated_at = now_utc_seconds();
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let units = normalized_units_from_response(
         &response,
         fresh_prepared_units,
@@ -22137,7 +22592,7 @@ fn task_descriptor(
     created_at: &str,
 ) -> TaskDescriptor {
     TaskDescriptor {
-        task_id: format!("task_{}", new_ulid(repo.root())),
+        task_id: format!("task_{}", new_ulid(repo.canonical_root())),
         task_type,
         mode,
         input_path: candidate.input_path.clone(),
@@ -24665,8 +25120,31 @@ fn consent_identity(kio_dir: &Path) -> Result<(String, String)> {
     ))
 }
 
+fn consent_identity_for_repo(repo: &Repository) -> Result<(String, String)> {
+    Ok((
+        scope_id(repo.kio_dir())?,
+        repo.canonical_root().to_string_lossy().into_owned(),
+    ))
+}
+
+fn trusted_consent_present_for_repo(
+    repo: &Repository,
+    tool_id: Option<&str>,
+    operation: ConsentOperation,
+) -> Result<bool> {
+    trusted_consent_present_for_identity(consent_identity_for_repo(repo)?, tool_id, operation)
+}
+
 fn trusted_consent_present(
     kio_dir: &Path,
+    tool_id: Option<&str>,
+    operation: ConsentOperation,
+) -> Result<bool> {
+    trusted_consent_present_for_identity(consent_identity(kio_dir)?, tool_id, operation)
+}
+
+fn trusted_consent_present_for_identity(
+    (expected_scope_id, expected_root): (String, String),
     tool_id: Option<&str>,
     operation: ConsentOperation,
 ) -> Result<bool> {
@@ -24690,7 +25168,6 @@ fn trusted_consent_present(
             ));
         }
     }
-    let (expected_scope_id, expected_root) = consent_identity(kio_dir)?;
     let text = fs::read_to_string(&path)
         .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     Ok(text
@@ -24727,10 +25204,10 @@ fn write_device_consent(
             .map_err(|err| KioError::io(err.to_string(), parent.display().to_string()))?;
     }
     let _lock = StoreLock::acquire_path(device_consent_lock_path())?;
-    if trusted_consent_present(repo.kio_dir(), Some(tool_id), operation)? {
+    if trusted_consent_present_for_repo(repo, Some(tool_id), operation)? {
         return Ok(());
     }
-    let (scope_id, canonical_root) = consent_identity(repo.kio_dir())?;
+    let (scope_id, canonical_root) = consent_identity_for_repo(repo)?;
     let mut line = serde_json::to_string(&json!({
         "schema_version": DEVICE_CONSENT_SCHEMA_VERSION,
         "scope_id": scope_id,
@@ -25131,7 +25608,7 @@ fn write_approval_record(
         .unwrap_or((0.0, 0.0));
     repo.record_scan_approval(json!({
         "scope_id": preview.scope_id,
-        "root_path": repo.root().display().to_string(),
+        "root_path": repo.canonical_root().display().to_string(),
         "approved_at": now_utc_seconds(),
         "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
         "approval_method": approval_method,
@@ -25184,7 +25661,7 @@ fn write_approval_record(
     }
     let base = json!({
         "scope_id": preview.scope_id,
-        "root_path": repo.root(),
+        "root_path": repo.canonical_root(),
         "approved_at": now_utc_seconds(),
         "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
         "approval_method": approval_method,
@@ -27956,6 +28433,48 @@ mod tests {
             ..ExecOutcome::default()
         })
         .is_none());
+    }
+
+    #[test]
+    fn qb15_parent_and_child_index_exits_keep_user_action_priority() {
+        use super::merged_index_exit_override;
+        use kio_core::ExitCode;
+
+        assert_eq!(
+            merged_index_exit_override(None, [], false),
+            None,
+            "a clean parent and child set exits successfully"
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [], true),
+            Some(ExitCode::PartialFailure)
+        );
+        assert_eq!(
+            merged_index_exit_override(
+                Some(ExitCode::PartialFailure),
+                [ExitCode::BudgetExceeded, ExitCode::AuthError],
+                true,
+            ),
+            Some(ExitCode::AuthError)
+        );
+        assert_eq!(
+            merged_index_exit_override(
+                Some(ExitCode::PartialFailure),
+                [ExitCode::BudgetExceeded],
+                false,
+            ),
+            Some(ExitCode::BudgetExceeded)
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [ExitCode::PermanentFailure], false),
+            Some(ExitCode::PartialFailure),
+            "a failed child cannot erase already-published parent work"
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [ExitCode::AuthError], true),
+            Some(ExitCode::AuthError),
+            "a Result::Err child retains the same auth priority as an output marker"
+        );
     }
 
     #[test]

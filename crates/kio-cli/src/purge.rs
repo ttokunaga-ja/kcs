@@ -316,7 +316,7 @@ fn authenticate_target_chunk_rows(
         repo.kio_dir(),
         &crate::durable_history_roots(repo)?,
     )?;
-    let authorities = crate::retained_unit_introductions(repo.kio_dir(), &retained)?;
+    let authorities = crate::retained_unit_introductions(repo, &retained)?;
     let store = ObjectStore::new(repo.kio_dir());
     for stored in stored_chunks
         .iter()

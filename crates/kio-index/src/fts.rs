@@ -145,57 +145,78 @@ fn bind_source_index(
     let parent = path.parent().expect("source index has a parent");
     let root = parent.parent().filter(|root| !root.as_os_str().is_empty());
     let (root_handle, parent_handle) = if let Some(root) = root {
-        let root_leaf = root.file_name().ok_or_else(|| {
-            IndexError::Schema(format!(
-                "source index parent has no repository root component: {}",
-                parent.display()
-            ))
-        })?;
-        let outer = root
-            .parent()
-            .filter(|outer| !outer.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let before_root = std::fs::symlink_metadata(root).map_err(|e| {
-            IndexError::Schema(format!("inspect source index root {}: {e}", root.display()))
-        })?;
-        if before_root.file_type().is_symlink() || !before_root.is_dir() {
-            return Err(IndexError::Schema(format!(
-                "source index root must be a real directory, not a symlink: {}",
-                root.display()
-            )));
-        }
-        let outer_handle = cap_fs::open_ambient_dir(outer, cap_primitives::ambient_authority())
-            .map_err(|e| {
+        // A descriptor-bound child index has already changed cwd to the
+        // retained `.kio` directory, which is represented as `.`. Treat that
+        // current directory as the root capability directly instead of trying
+        // to split `.` into a public parent/leaf path.
+        if root == Path::new(".") {
+            let root_handle =
+                cap_fs::open_ambient_dir(Path::new("."), cap_primitives::ambient_authority())
+                    .map_err(|e| {
+                        IndexError::Schema(format!("open descriptor-bound source index root: {e}"))
+                    })?;
+            let parent_leaf = parent.file_name().expect("source index parent has a leaf");
+            let parent_handle = cap_fs::open_dir_nofollow(&root_handle, Path::new(parent_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index parent {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            (root_handle, parent_handle)
+        } else {
+            let root_leaf = root.file_name().ok_or_else(|| {
                 IndexError::Schema(format!(
-                    "open source index root ancestor {}: {e}",
-                    outer.display()
-                ))
-            })?;
-        let root_handle =
-            cap_fs::open_dir_nofollow(&outer_handle, Path::new(root_leaf)).map_err(|e| {
-                IndexError::Schema(format!("open source index root {}: {e}", root.display()))
-            })?;
-        let opened_root = root_handle.metadata().map_err(|e| {
-            IndexError::Schema(format!(
-                "inspect opened source index root {}: {e}",
-                root.display()
-            ))
-        })?;
-        if !same_std_and_cap_directory(&before_root, &opened_root) {
-            return Err(IndexError::Schema(format!(
-                "source index root changed while opening: {}",
-                root.display()
-            )));
-        }
-        let parent_leaf = parent.file_name().expect("source index parent has a leaf");
-        let parent_handle = cap_fs::open_dir_nofollow(&root_handle, Path::new(parent_leaf))
-            .map_err(|e| {
-                IndexError::Schema(format!(
-                    "open source index parent {}: {e}",
+                    "source index parent has no repository root component: {}",
                     parent.display()
                 ))
             })?;
-        (root_handle, parent_handle)
+            let outer = root
+                .parent()
+                .filter(|outer| !outer.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let before_root = std::fs::symlink_metadata(root).map_err(|e| {
+                IndexError::Schema(format!("inspect source index root {}: {e}", root.display()))
+            })?;
+            if before_root.file_type().is_symlink() || !before_root.is_dir() {
+                return Err(IndexError::Schema(format!(
+                    "source index root must be a real directory, not a symlink: {}",
+                    root.display()
+                )));
+            }
+            let outer_handle = cap_fs::open_ambient_dir(outer, cap_primitives::ambient_authority())
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index root ancestor {}: {e}",
+                        outer.display()
+                    ))
+                })?;
+            let root_handle = cap_fs::open_dir_nofollow(&outer_handle, Path::new(root_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!("open source index root {}: {e}", root.display()))
+                })?;
+            let opened_root = root_handle.metadata().map_err(|e| {
+                IndexError::Schema(format!(
+                    "inspect opened source index root {}: {e}",
+                    root.display()
+                ))
+            })?;
+            if !same_std_and_cap_directory(&before_root, &opened_root) {
+                return Err(IndexError::Schema(format!(
+                    "source index root changed while opening: {}",
+                    root.display()
+                )));
+            }
+            let parent_leaf = parent.file_name().expect("source index parent has a leaf");
+            let parent_handle = cap_fs::open_dir_nofollow(&root_handle, Path::new(parent_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index parent {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            (root_handle, parent_handle)
+        }
     } else {
         // A bare relative path has no repository-root component to bind. Keep
         // the old lstat/open/identity check for that API convenience case.

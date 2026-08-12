@@ -10,11 +10,38 @@
       "type": "object",
       "properties": {
         "participates_in_global_search": { "type": "boolean" },
+        "index_vcs_repos": { "type": "boolean" },
         "ignore": {
           "type": "array",
-          "items": { "type": "string" }
+          "maxItems": 1024,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         }
       },
+      "additionalProperties": false
+    },
+    "generated_parent_policy": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "negated": { "type": "boolean" },
+              "scope_prefix": { "type": "string", "minLength": 1, "maxLength": 4096 }
+            },
+            "required": ["pattern", "negated", "scope_prefix"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["rules"],
       "additionalProperties": false
     },
     "chunking": {

@@ -551,16 +551,29 @@ pub fn validate_task_output_ref(
     }
 
     let persisted = Path::new(&descriptor.output_ref);
-    let has_unsafe_component = persisted
+    let has_parent_component = persisted
         .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir));
+        .any(|component| matches!(component, Component::ParentDir));
+    let has_current_component = persisted
+        .components()
+        .any(|component| matches!(component, Component::CurDir));
     let has_prefix = persisted
         .components()
         .any(|component| matches!(component, Component::Prefix(_)));
     let has_root = persisted
         .components()
         .any(|component| matches!(component, Component::RootDir));
-    if has_unsafe_component || ((has_prefix || has_root) && !persisted.is_absolute()) {
+    // Descriptor-bound child indexing deliberately addresses the retained
+    // `.kio` directory as `.`. Its canonical normalized-instance spelling is
+    // therefore `./objects/...`; accept that one relative spelling only when
+    // the task store itself is descriptor-bound to `.`. Ordinary repositories
+    // still require an absolute canonical output reference, and `..` remains
+    // forbidden in every mode.
+    let bound_relative_root = kio_dir.as_ref() == Path::new(".");
+    if has_parent_component
+        || (has_current_component && !bound_relative_root)
+        || ((has_prefix || has_root) && !persisted.is_absolute())
+    {
         return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
     }
     let current_dir = std::env::current_dir().map_err(|err| PipelineError::Io {

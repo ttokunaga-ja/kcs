@@ -730,7 +730,9 @@ dependencies = [
 name = "kio-core"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "jsonschema",
+ "libc",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -781,8 +783,10 @@ dependencies = [
 name = "kio-pipeline"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "kio-adapter",
  "kio-core",
+ "libc",
  "rusqlite",
  "serde",
  "serde_jcs",
