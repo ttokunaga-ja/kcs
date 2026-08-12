@@ -5000,6 +5000,7 @@ fn prepare_scope_from_replica_header(
     since_cutoff: Option<&str>,
     deadline: multi_scope::ScopeDeadline,
 ) -> std::result::Result<ReplicaScopeResolution, ScopeSearchError> {
+    multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, deadline);
     scope_deadline_check(deadline)?;
     // Preserve the format-version priority and the existing cursor scope
     // availability contract.  `Repository::open_for_search` validates only

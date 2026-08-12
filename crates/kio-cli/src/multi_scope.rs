@@ -122,6 +122,11 @@ impl ScopeDeadline {
     pub(crate) fn is_expired(self) -> bool {
         Instant::now() >= self.expires_at
     }
+
+    #[cfg(debug_assertions)]
+    fn remaining(self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -194,11 +199,49 @@ where
         .collect()
 }
 
+/// Deterministic integration-test seam for completion-order and timeout tests.
+/// It is unavailable in release builds and wakes in short intervals so the same
+/// scope deadline still bounds the injected delay.
+#[cfg(debug_assertions)]
+pub(crate) fn maybe_delay_scope_for_test(scope_id: &str, deadline: ScopeDeadline) {
+    const DELAY_SCOPE_ID_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID";
+    const DELAY_MS_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_MS";
+
+    if std::env::var(DELAY_SCOPE_ID_ENV).as_deref() != Ok(scope_id) {
+        return;
+    }
+    let Some(delay) = std::env::var(DELAY_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+    else {
+        return;
+    };
+    let started = Instant::now();
+    loop {
+        let elapsed = started.elapsed();
+        if elapsed >= delay || deadline.is_expired() {
+            return;
+        }
+        let delay_left = delay.saturating_sub(elapsed);
+        let sleep_for = delay_left
+            .min(deadline.remaining())
+            .min(Duration::from_millis(10));
+        if sleep_for.is_zero() {
+            thread::yield_now();
+        } else {
+            thread::sleep(sleep_for);
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn maybe_delay_scope_for_test(_scope_id: &str, _deadline: ScopeDeadline) {}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_settings, run_ordered, MultiScopeSettings, ScopeDeadline, ScopeExecution,
-        MAX_PARALLELISM,
+        effective_settings, run_ordered, MultiScopeSettings, ScopeExecution, MAX_PARALLELISM,
     };
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};

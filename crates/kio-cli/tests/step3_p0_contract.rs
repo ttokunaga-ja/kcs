@@ -23,6 +23,8 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
     "KIO_TEST_QUERY_EMBED_TRACE",
     "KIO_TEST_HOLD_LOCK_MS",
+    "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
+    "KIO_TEST_SCOPE_SEARCH_DELAY_MS",
     "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
     "KIO_TEST_SEARCH_RESPONSE_BARRIER_READY",
     "KIO_TEST_R13_2_AUTH",
@@ -2746,6 +2748,156 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     kio(&dir, &["init"]).assert().success();
     let err = json_failure(&dir, &["search", "alpha"], 4);
     assert_eq!(err["error_code"], "KIO-E-SEARCH-SCOPE-ALL-FAILED-001");
+}
+
+#[test]
+fn ct3_multi_006_completion_order_does_not_change_results_or_cursor() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\norderstable token\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\norderstable token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    replace_scope_id(&a, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
+    replace_scope_id(&b, "00000000000000000000000001");
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    fs::write(
+        a.join(".kio/config.toml"),
+        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\n",
+    )
+    .unwrap();
+
+    let baseline = json_success_path(&a, &data_home, &["search", "orderstable", "--limit", "1"]);
+    let delayed_output = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        // Registry/input order is a then b. Delay a so b completes first.
+        .env(
+            "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
+            "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        )
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "300")
+        .args(["search", "orderstable", "--limit", "1", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let delayed: Value = serde_json::from_slice(&delayed_output).unwrap();
+
+    assert!(baseline["paging"]["next_cursor"].is_string());
+    assert_eq!(delayed["results"], baseline["results"]);
+    assert_eq!(delayed["searched_scopes"], baseline["searched_scopes"]);
+    assert_eq!(delayed["excluded_scopes"], baseline["excluded_scopes"]);
+    assert_eq!(delayed["paging"], baseline["paging"]);
+}
+
+#[test]
+fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\ntimeouttoken alpha\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\ntimeouttoken beta\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    fs::write(
+        a.join(".kio/config.toml"),
+        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
+    )
+    .unwrap();
+    let b_scope_id = read_scope_id(&b);
+
+    // A fresh search isolates the timed-out scope, returns the healthy result,
+    // and uses the established partial-failure exit 3 payload contract.
+    let partial_output = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args(["search", "timeouttoken", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let partial: Value = serde_json::from_slice(&partial_output).unwrap();
+    assert_eq!(partial["searched_scopes"].as_array().unwrap().len(), 1);
+    assert_eq!(partial["excluded_scopes"].as_array().unwrap().len(), 1);
+    assert_eq!(partial["excluded_scopes"][0]["scope_id"], b_scope_id);
+    assert_eq!(partial["excluded_scopes"][0]["reason"], "timeout");
+    assert!(!partial["results"].as_array().unwrap().is_empty());
+    assert!(partial.get("__exit_code").is_none());
+
+    // A single timed-out scope remains a retryable all-scope failure (exit 3).
+    let b_arg = b.display().to_string();
+    let all_failed = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args(["search", "timeouttoken", "--scope", &b_arg, "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stderr
+        .clone();
+    let all_failed: Value = serde_json::from_slice(&all_failed).unwrap();
+    assert_eq!(
+        all_failed["error_code"],
+        "KIO-E-SEARCH-SCOPE-ALL-FAILED-001"
+    );
+    assert_eq!(
+        all_failed["context"]["excluded_scopes"][0]["reason"],
+        "timeout"
+    );
+
+    // Cursor replay cannot shrink its frozen active set. A timeout therefore
+    // hard-fails with no partial stdout or replacement cursor.
+    let first = json_success_path(&a, &data_home, &["search", "timeouttoken", "--limit", "1"]);
+    let cursor = first["paging"]["next_cursor"].as_str().unwrap();
+    let replay = hermetic_kio_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KIO_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args([
+            "search",
+            "timeouttoken",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(replay.status.code(), Some(2));
+    assert!(
+        replay.stdout.is_empty(),
+        "cursor failure must not emit a page"
+    );
+    let replay_error: Value = serde_json::from_slice(&replay.stderr).unwrap();
+    assert_eq!(replay_error["error_code"], "KIO-E-SEARCH-CURSOR-001");
+    assert_eq!(replay_error["context"]["cause"], "timeout");
 }
 
 // Step 4 cursor v2 freezes the complete active scope set. Losing any active

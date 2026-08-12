@@ -58,6 +58,8 @@ fn kio(dir: &TempDir, args: &[&str]) -> Command {
         .env_remove("MISTRAL_API_KEY")
         .env_remove("KIO_FIXED_NOW")
         .env_remove("KIO_TEST_QUERY_EMBED_TRACE")
+        .env_remove("KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID")
+        .env_remove("KIO_TEST_SCOPE_SEARCH_DELAY_MS")
         .args(args);
     command
 }
