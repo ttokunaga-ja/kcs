@@ -476,7 +476,7 @@ fn execute_phase_machine(
             // LC42-LC44 (item 2): purge's own `tombstoned`-phase marker
             // append (and any resurrection retire folded into the same
             // mutation) advances `.kio/tombstones/lifecycle-epoch` directly
-            // (unlike `kio index`/`reindex`/`repair --rebuild-db`, purge
+            // (unlike `kio index`/`reindex`/`repair rebuild-db`, purge
             // writes `sqlite.db` in place — `delete_derived_surfaces`'s
             // `SqliteFtsIndex::open` on the live path, no temp+rename — so
             // there is no later rename to discard this write). Without this,

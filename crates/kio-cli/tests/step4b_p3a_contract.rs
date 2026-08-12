@@ -1354,7 +1354,7 @@ fn mock_embed_json(dir: &TempDir, args: &[&str]) -> Value {
 }
 
 /// QA29 (step4b-contract-tests-p3a.md §I, 06-cli-spec.md §1 L52-55,
-/// 07-adapter-spec.md §3 L220-222): `kio repair --rebuild-db --online`
+/// 07-adapter-spec.md §3 L220-222): `kio repair rebuild-db --online`
 /// drives the post-rebuild enrichment pass's `--online` fallback — the
 /// previously hard-coded `embedding_online_allowed(&repo, false, false,
 /// false)` call — instead of failing as an unknown flag or being silently

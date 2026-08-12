@@ -1518,7 +1518,7 @@ enum RepairMode {
     /// modifier on `--verify-objects`, never valid alone or with
     /// `--rebuild-db`.
     VerifyObjectsPruneOrphans,
-    /// PB25 (§H, 10 §3 L291-293): `kio repair --registry-prune`.
+    /// PB25 (§H, 10 §3 L291-293): `kio repair registry-prune`.
     RegistryPrune,
 }
 
@@ -4136,7 +4136,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // `context.recovery`); the error CODE stays the docs-registered
         // SCOPE-ALL-FAILED-001 (the code registry in docs/06 §8 / docs/10 §7.5 is
         // normative and docs are frozen — no new code). Deliberately NOT unified with
-        // `index_missing`'s exit-1 + "run repair" push: `repair --rebuild-db` rebuilds
+        // `index_missing`'s exit-1 + "run repair" push: `repair rebuild-db` rebuilds
         // the sqlite index FROM the store, so it does not heal a corrupt/absent
         // commit-or-tree object (it re-hits the same corruption) — the real recovery is
         // restoring the object from objects/refs or re-indexing. Exit stays 4 (manual
@@ -4923,7 +4923,7 @@ fn ensure_no_visible_purge_journal(kio_dir: &Path) -> Result<()> {
 /// receipt's higher-`lifecycle_epoch` `retired` tail. A resurrected raw_hash
 /// (canonical = `retired`) therefore stayed excluded from every rebuild
 /// forever after its first purge, even though `08 §3.1`'s resolvers treat it
-/// as alive — `kio repair --rebuild-db` after a resurrection silently
+/// as alive — `kio repair rebuild-db` after a resurrection silently
 /// dropped its chunk from `chunk_publications`/`tree_entries`/FTS, which
 /// then made a freshly-alive pointer's own v2/v3 ancestry check (this
 /// session's new consumer) resolve `not_found` against a rebuilt index, even
@@ -6881,7 +6881,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(Step3RebuildReport::default());
     };
-    // R16-1/R16-4: `repair --rebuild-db` (the only implemented recovery command),
+    // R16-1/R16-4: `repair rebuild-db` (the only implemented recovery command),
     // `index`, and `reindex` all rebuild through here. A shallow HEAD (commit OR tree
     // object gone) must fail with a clear KIO-E-COMMIT-SHALLOW-001 + recovery guidance
     // — NOT the raw KIO-E-STORE-NOT-FOUND-001 that let `repair` die on the very
@@ -7181,7 +7181,7 @@ fn append_new_chunk_association(
 }
 
 /// R16-1/R16-4: read the HEAD commit's tree object for a *write* / rebuild path
-/// (index / reindex / repair --rebuild-db), folding a missing commit OR tree object
+/// (index / reindex / repair rebuild-db), folding a missing commit OR tree object
 /// (shallow: GC'd / deleted / corrupt CAS) into a clear KIO-E-COMMIT-SHALLOW-001 with
 /// recovery guidance instead of a raw, opaque KIO-E-STORE-NOT-FOUND-001. Shared so
 /// every rebuild caller gets the same conversion (rationale: the recovery — restore
@@ -7456,7 +7456,7 @@ fn ensure_purge_epoch_initialized(kio_dir: &Path) -> Result<()> {
 /// logic (`PurgeState::recover_lifecycle_epoch`/`max_recorded_lifecycle_epoch`)
 /// is already implemented in `kio-core::purge`. Called both from every write
 /// command that actually touches the search index (`kio index`/`kio
-/// reindex`/`kio repair --rebuild-db`, after `rebuild_step3_index` — whose
+/// reindex`/`kio repair rebuild-db`, after `rebuild_step3_index` — whose
 /// temp-build-then-rename replaces `sqlite.db` wholesale, so writing
 /// `index_metadata` any earlier in the same command would be silently
 /// discarded by that rename) and from `kio purge` (whose own marker-append
@@ -7521,7 +7521,7 @@ fn recover_index_generation(kio_dir: &Path) -> Result<()> {
 /// so a write that ALSO happens to move the lifecycle-epoch counter is not
 /// short-circuited into a single rotation by an early return here).
 ///
-/// `index`/`reindex`/`repair --rebuild-db` already rotate on every pass via
+/// `index`/`reindex`/`repair rebuild-db` already rotate on every pass via
 /// `build_sqlite_index_at`'s unconditional `ensure_index_metadata` call on
 /// its always-fresh temp db (PB28) — this helper is for the writers that
 /// mutate `sqlite.db` IN PLACE instead of via that temp+rename (purge's
@@ -7597,7 +7597,7 @@ fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
     // / `cas::append_jsonl`), so a crash / ENOSPC mid-`write_all` can leave the
     // FINAL line torn. That chunk is regenerated from normalized_units /
     // tree_entries on the next rebuild, so tolerate a torn tail (skip it) and let
-    // `index` / `reindex` / `repair --rebuild-db` self-heal — rather than bricking
+    // `index` / `reindex` / `repair rebuild-db` self-heal — rather than bricking
     // every write path (and the sole recovery command) on exit 2.
     //
     // A torn cut can land mid multi-byte UTF-8 character (content routinely has
@@ -7919,7 +7919,7 @@ fn rebuild_sqlite_index(
                 .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
             // 05 §1.8 write-through, placed on the rename rather than in each
             // command that triggers a rebuild: `index`, `reindex` and
-            // `repair --rebuild-db` all reach cross-scope search through this
+            // `repair rebuild-db` all reach cross-scope search through this
             // one line, and a fourth caller would otherwise have to remember.
             // No rotation here: the rebuild minted a fresh `index_generation`
             // into the temp db moments ago (PB28), so the stamp already moved.
@@ -13889,7 +13889,7 @@ fn online_opt_in_opens_scope(kio_dir: &Path) -> Result<bool> {
 /// adapter's own opt-in, not the markdownize approval it used to ride on.
 /// `offline` forces it off regardless of any recorded approval. Callers:
 /// `kio index` (already wired, `online_confirmed = args.yes || args.approve`),
-/// `kio repair --rebuild-db`, `kio batch resume`/`kio batch retry`, and `kio
+/// `kio repair rebuild-db`, `kio batch resume`/`kio batch retry`, and `kio
 /// reindex` (`--force` and `--at`) all thread their own `--online`/
 /// `--offline` here now (`online_confirmed = false` for all four — none of
 /// them carry a same-invocation `--yes`/`--approve`-equivalent confirming

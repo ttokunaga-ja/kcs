@@ -2855,7 +2855,7 @@ fn ct3_embed_008_non_multimodal_profile_is_rejected_at_index() {
     assert_eq!(err["error_code"], "KIO-E-EMBED-MODALITY-001");
 }
 
-// CT3-EMBED-005: `repair --rebuild-db` re-derives chunk_vec from the preserved
+// CT3-EMBED-005: `repair rebuild-db` re-derives chunk_vec from the preserved
 // `embeddings` rows (source of truth), so hybrid vector search survives the
 // rebuild rather than falling back to text.
 #[test]
@@ -5766,7 +5766,7 @@ fn p3_plain_auth_tools_toml_permission_warning() {
     );
 }
 
-/// P5: a concurrent `kio search` during repeated `repair --rebuild-db` must
+/// P5: a concurrent `kio search` during repeated `repair rebuild-db` must
 /// never silently return exit 0 with 0 / partial results. The writer marks the
 /// replica Rebuilding around its temp+rename source rebuild, so search either
 /// observes a complete published replica or fails closed; it never reads the
@@ -6219,7 +6219,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
 // Q1 (full cycle): a torn trailing record in `chunks.jsonl` (crash / ENOSPC
 // post-state, no trailing '\n') must fully self-heal. Skipping it on read alone
 // welds the next append onto the torn bytes, producing a permanently-skipped
-// malformed line that re-bricks `repair --rebuild-db` on exit 4 and re-appends the
+// malformed line that re-bricks `repair rebuild-db` on exit 4 and re-appends the
 // same chunk forever. After the fix the torn tail is physically truncated before
 // the append, so index -> repair -> index all exit 0 and the file stays valid with
 // no duplicate chunk_id.
@@ -6611,7 +6611,7 @@ fn first_manifest_json(root: &Path) -> std::path::PathBuf {
 /// R9-5: a normalized gen dir polluted with crash/OS junk — a torn `.tmp-*` left
 /// by a killed atomic writer and a `.DS_Store` — must not brick `reindex`. Before
 /// the fix, `copy_normalized_instance_gen` read every non-manifest entry as a unit
-/// and failed with KIO-E-STORE-CORRUPT-001 (exit 4), which `repair --rebuild-db`
+/// and failed with KIO-E-STORE-CORRUPT-001 (exit 4), which `repair rebuild-db`
 /// could not heal. After: junk is skipped, the orphan `.tmp-*` is GC'd from the
 /// old gen dir, and reindex succeeds and the index still resolves the document.
 #[test]
@@ -8530,7 +8530,7 @@ fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
     assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kio"));
 }
 
-// R16-4(a): `repair --rebuild-db` — the only implemented recovery command — must not
+// R16-4(a): `repair rebuild-db` — the only implemented recovery command — must not
 // die on the very shallow-HEAD corruption it exists to recover from. A discarded HEAD
 // tree object yields a clear COMMIT-SHALLOW (via the shared rebuilder), not a raw
 // KIO-E-STORE-NOT-FOUND-001 (R15-4 fixed reindex but its fix skipped repair).
@@ -8557,7 +8557,7 @@ fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
 }
 
 // R16-4(b): a single document's missing normalized unit must not abort the whole
-// rebuild. `repair --rebuild-db` skips that document (reporting it under skipped_units
+// rebuild. `repair rebuild-db` skips that document (reporting it under skipped_units
 // with KIO-E-STORE-IO-001 + recovery guidance) and rebuilds the rest. Before the fix
 // one missing unit failed the entire scope (STORE-IO exit 1).
 #[test]
@@ -8767,7 +8767,7 @@ fn r17_2_reindex_force_skips_corrupt_unit_and_renormalizes_healthy() {
 // index_missing/index_corrupt case which points at `repair`. A store_corrupt (tampered
 // HEAD commit object) all-scope failure keeps the docs-registered
 // KIO-E-SEARCH-SCOPE-ALL-FAILED-001 code but now carries class-specific recovery
-// guidance in `context.recovery` + the message. Exit stays 4: `repair --rebuild-db`
+// guidance in `context.recovery` + the message. Exit stays 4: `repair rebuild-db`
 // rebuilds the index FROM the store, so it does not heal a corrupt commit object.
 #[test]
 fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
@@ -8868,7 +8868,7 @@ fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
                 .as_str()
                 .unwrap()
                 .contains("restore the discarded"),
-        "guidance names object restore / re-index (NOT `repair --rebuild-db` alone): {err}"
+        "guidance names object restore / re-index (NOT `repair rebuild-db` alone): {err}"
     );
 }
 

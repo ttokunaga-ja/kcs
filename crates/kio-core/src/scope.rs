@@ -1302,7 +1302,7 @@ impl Repository {
         // still held. A crash before this point leaves the tombstone/receipt
         // active (LC24, safe side); the next locked mutation touching this
         // raw_hash (this same code path, naturally re-run) or an explicit
-        // `kio repair --verify-objects` backfill (LC27) completes it later.
+        // `kio repair verify-objects` backfill (LC27) completes it later.
         if !resurrection_candidates.is_empty() {
             let purge = PurgeState::new(&self.kio_dir);
             let actor = std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned());

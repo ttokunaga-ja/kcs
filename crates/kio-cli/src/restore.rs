@@ -1413,7 +1413,7 @@ fn missing_live_raw_error(target: &ScopeTarget, raw_hash: &str) -> KioError {
 /// SAME error/exit as a perfectly ordinary `erased` absence — hiding real
 /// store corruption from any automation watching exit_code/error_code to
 /// tell "purge did this on purpose" apart from "something is broken, run
-/// `kio repair --verify-objects`". This is an INDEPENDENT implementation with
+/// `kio repair verify-objects`". This is an INDEPENDENT implementation with
 /// the SAME decision table (05 §3.5 L907's "入口を問わず...同じ" requirement)
 /// — reusing `main.rs`'s own error constructors via `super::` for
 /// byte-identical error codes/bodies — rather than a call-through to

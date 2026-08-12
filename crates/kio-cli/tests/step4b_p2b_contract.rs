@@ -52,7 +52,7 @@ fn run(dir: &TempDir, args: &[&str]) -> (i32, Value) {
     let output = kio(dir, args).arg("--json").output().unwrap();
     let code = output.status.code().unwrap();
     // A non-zero exit does NOT imply the JSON landed on stderr: several
-    // commands (`repair --verify-objects` findings, search partial failure,
+    // commands (`repair verify-objects` findings, search partial failure,
     // this session's `evidence verify` status responses) succeed at the
     // `run()` level and request a non-zero process exit via a private
     // `__exit_code` marker while still printing their JSON body to STDOUT
@@ -729,7 +729,7 @@ fn pb21_pb22_live_duplicate_fails_closed_even_without_a_last_seen_tie() {
     assert_eq!(output["error_code"], "KIO-E-REGISTRY-DUP-001", "{output}");
 }
 
-/// PB25: `kio repair --registry-prune` deletes only registry rows whose
+/// PB25: `kio repair registry-prune` deletes only registry rows whose
 /// `.kio` is unreachable, never a live (even if duplicated) row.
 #[test]
 fn pb25_registry_prune_removes_only_unreachable_rows() {
@@ -769,7 +769,7 @@ fn pb25_registry_prune_removes_only_unreachable_rows() {
 // §J — rebuild-db index_metadata (U144, §Z ruling 4).
 // ===========================================================================
 
-/// PB28: `kio repair --rebuild-db` initializes `index_metadata.
+/// PB28: `kio repair rebuild-db` initializes `index_metadata.
 /// last_lifecycle_epoch` to the CURRENT lifecycle-epoch counter value (not
 /// the column's `DEFAULT 0`), atomically with the rebuild.
 #[test]
@@ -1215,7 +1215,7 @@ fn pb65_lc14_unmarked_missing_raw_is_store_corrupt() {
 }
 
 /// PB67 [regression-lock]: a structurally malformed tombstone record is
-/// `KIO-E-STORE-CORRUPT-001` identically via `kio repair --verify-objects`
+/// `KIO-E-STORE-CORRUPT-001` identically via `kio repair verify-objects`
 /// (a finding) and `kio evidence verify` (a raw command error) — both read
 /// through the same low-level `PurgeState::read_tombstone` parse/validate
 /// path.

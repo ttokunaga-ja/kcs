@@ -542,7 +542,7 @@ fn pa14_pa15_prune_orphans_recovers_purged_raw_and_type_separated_image_cache() 
     // Simulate a publish-then-crash residue: purge the raw_hash (its own
     // purge closure evicts these caches already, PA11/12) then manually
     // re-materialize the caches to stand in for a crash-orphaned leftover
-    // `kio repair --verify-objects --prune-orphans` (PA14/15) must recover.
+    // `kio repair verify-objects --prune-orphans` (PA14/15) must recover.
     json_success(
         &fixture.dir,
         &[

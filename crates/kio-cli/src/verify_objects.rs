@@ -1,4 +1,4 @@
-//! Bounded object-store verification for `repair --verify-objects`.
+//! Bounded object-store verification for `repair verify-objects`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -1252,7 +1252,7 @@ fn verify_objects_with_limits(
     }
     let repaired = staged_raws.len() as u64;
     let repaired_commit_hash = if repaired > 0 && repairs_allowed && !state.exceeded_bounds {
-        Some(repo.record_repaired_commit(Some("repair --verify-objects recovered raw CAS"))?)
+        Some(repo.record_repaired_commit(Some("repair verify-objects recovered raw CAS"))?)
     } else {
         None
     };
@@ -1991,7 +1991,7 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
 }
 
 // ===========================================================================
-// `kio repair --verify-objects --prune-orphans` (step4b-contract-tests-p2b.md
+// `kio repair verify-objects --prune-orphans` (step4b-contract-tests-p2b.md
 // §E, U43, 10-operations.md §7.5.1 L586-626).
 // ===========================================================================
 
@@ -2112,7 +2112,7 @@ pub fn prune_orphans_apply(
     })
 }
 
-/// PB12-17 (§E): `kio repair --verify-objects --prune-orphans`.
+/// PB12-17 (§E): `kio repair verify-objects --prune-orphans`.
 ///
 /// **Implemented this session**: PB13 (orphan prepared/image — referenced by
 /// no live manifest across the FULL reachable commit history, not just HEAD),
@@ -2197,7 +2197,7 @@ pub fn prune_orphans_plan(repo: &Repository) -> Result<PruneOrphansPlan> {
                 normalize.gen,
             ) else {
                 // A missing/corrupt normalized instance is fsck's concern
-                // (`kio repair --verify-objects` without `--prune-orphans`);
+                // (`kio repair verify-objects` without `--prune-orphans`);
                 // prune-orphans conservatively treats it as "cannot prove
                 // orphan-ness" rather than compounding a corruption finding
                 // with a deletion.
@@ -2318,7 +2318,7 @@ fn inventory_content_dir(kio_dir: &Path, kind: ContentObjectKind) -> Result<BTre
 }
 
 // ===========================================================================
-// `kio repair --registry-prune` (step4b-contract-tests-p2b.md §H, U46,
+// `kio repair registry-prune` (step4b-contract-tests-p2b.md §H, U46,
 // 10-operations.md §3 L291-293).
 // ===========================================================================
 

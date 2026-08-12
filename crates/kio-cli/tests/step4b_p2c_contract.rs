@@ -410,7 +410,7 @@ fn pc19_cursor_scope_carries_index_generation() {
 /// longer matches the scope's current value is rejected with
 /// `KIO-E-SEARCH-CURSOR-001` / `index_generation_mismatch` — proven directly
 /// by round-tripping a page-1 token with its `index_generation` field
-/// corrupted (no `kio repair --rebuild-db`/re-index needed to observe the
+/// corrupted (no `kio repair rebuild-db`/re-index needed to observe the
 /// read-side check itself; `pc19_pc21_index_generation_rotation_rejects_a_cursor_after_new_content_is_indexed`
 /// in `step3_p0_contract.rs` separately proves the write-side rotation this
 /// depends on for a real content change).
@@ -1478,7 +1478,7 @@ fn pc37_chunk_publications_table_exists_and_is_populated_after_index() {
 
 /// PC40 (05 §1.6 L266): a fresh `chunk_config_generations` association is
 /// stamped with the commit at which it was created, and a no-op rebuild
-/// (`repair --rebuild-db` with no source change) must NOT re-stamp an
+/// (`repair rebuild-db` with no source change) must NOT re-stamp an
 /// already-durable association's `introduction_commit` with a later HEAD —
 /// `record_chunk_config_association`'s existing-row branch leaves it
 /// untouched, and `index_chunk_with_rowids` reads it back from the durable
@@ -1506,7 +1506,7 @@ fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
     assert_eq!(introduction, ca);
 
     success(&dir, &["repair", "rebuild-db"]);
-    // Reopen: `repair --rebuild-db` replaces sqlite.db via temp+rename (P5),
+    // Reopen: `repair rebuild-db` replaces sqlite.db via temp+rename (P5),
     // so a connection opened before this would keep reading the pre-rebuild
     // inode on POSIX rather than the freshly-published file.
     let after: String = {

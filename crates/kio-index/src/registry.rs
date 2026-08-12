@@ -344,7 +344,7 @@ mod tests {
     }
 
     // PB25 (step4b-contract-tests-p2b.md §H): `all_entries`/`remove` are the
-    // primitives `kio repair --registry-prune` uses to enumerate the whole
+    // primitives `kio repair registry-prune` uses to enumerate the whole
     // table and delete a proven-unreachable row.
     #[test]
     fn all_entries_lists_every_row_and_remove_deletes_exactly_one() {

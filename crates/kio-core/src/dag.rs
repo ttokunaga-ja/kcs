@@ -76,7 +76,7 @@ impl TreeEntry {
             // PB04: format-only check, the same one `tool_profile_hash` gets
             // above. The cross-reference (does this hash resolve to a real
             // manifest object whose identity fields agree with this entry?) is
-            // a `kio repair --verify-objects` corpus-shaped check (PB04's CAS
+            // a `kio repair verify-objects` corpus-shaped check (PB04's CAS
             // re-hash comparison), not a per-entry schema invariant.
             if !is_hash(&normalize.manifest_hash) {
                 return Err(KioError::schema(
