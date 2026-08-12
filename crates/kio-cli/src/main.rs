@@ -4653,7 +4653,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             kio_index::aggregator::Aggregator::open(&aggregator_path()).map_err(|error| {
                 KioError::new(
                     "KIO-E-AGGREGATOR-001",
-                    "the device search replica could not be opened; retry after indexing",
+                    "the device search replica could not be opened; run `kio repair replica` (or `kio repair all`) to recreate it, then retry",
                     json!({ "reason": error.to_string() }),
                     ExitCode::PartialFailure,
                 )

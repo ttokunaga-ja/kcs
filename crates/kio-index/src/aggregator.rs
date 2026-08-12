@@ -3187,6 +3187,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retired_image_vec_header_requires_explicit_replica_recreation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        let replica = Aggregator::open(&path).unwrap();
+        // This is the exact former device-cache column.  It is deliberately
+        // not tolerated as a read-time compatibility path: a replica is
+        // disposable, so recovery must cross the explicit `repair replica`
+        // boundary rather than silently altering a cache while searching.
+        replica
+            .conn
+            .execute_batch(
+                "ALTER TABLE agg_scopes \
+                 ADD COLUMN has_image_vec INTEGER NOT NULL DEFAULT 1",
+            )
+            .unwrap();
+        drop(replica);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("retired image-vector header must fail closed");
+        assert!(error.to_string().contains("incompatible schema"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let replica = Aggregator::recreate(&path).unwrap();
+        let columns = replica
+            .conn
+            .prepare("PRAGMA table_info(agg_scopes)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !columns.iter().any(|column| column == "has_image_vec"),
+            "explicit recreation must publish the strict schema"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn recreate_rejects_a_symlink_cache_target() {
