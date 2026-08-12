@@ -476,7 +476,7 @@ struct EvidenceArgs {
 
 /// `kio repair` (10 §7.5).
 ///
-/// C (2026-07-24): the three operations are sub-commands, not flags. They were
+/// C (2026-07-24): the operations are sub-commands, not flags. They were
 /// always mutually exclusive with exactly one required, and each nests its own
 /// options — a shape clap expresses natively, so the hand-written exactly-one
 /// and nesting checks are gone with them.
@@ -488,6 +488,12 @@ struct RepairArgs {
 
 #[derive(Debug, Subcommand)]
 enum RepairOperation {
+    /// Rebuild every indexed scope registered on this device.
+    #[command(short_flag = 'a')]
+    All,
+    /// Rebuild the device-wide search replica from every indexed scope.
+    #[command(short_flag = 'r')]
+    Replica,
     /// Rebuild the SQLite acceleration tables from the CAS objects. May drive a
     /// post-rebuild enrichment pass, so it is the only operation that takes the
     /// send-consent and lane options.
@@ -747,6 +753,13 @@ fn append_exit_override_error(output: &Value, code: ExitCode) {
         if excluded.as_array().is_some_and(|array| !array.is_empty()) {
             if let Some(object) = context.as_object_mut() {
                 object.insert("excluded_scopes".to_owned(), excluded.clone());
+            }
+        }
+    }
+    if let Some(failed) = output.get("failed_scopes") {
+        if failed.as_array().is_some_and(|array| !array.is_empty()) {
+            if let Some(object) = context.as_object_mut() {
+                object.insert("failed_scopes".to_owned(), failed.clone());
             }
         }
     }
@@ -1343,6 +1356,12 @@ fn reject_inert_repair_yes(args: &RepairArgs) -> Result<()> {
 
 fn run_repair(args: RepairArgs) -> Result<Value> {
     reject_inert_repair_yes(&args)?;
+    if matches!(
+        args.operation,
+        RepairOperation::All | RepairOperation::Replica
+    ) {
+        return run_device_repair(matches!(args.operation, RepairOperation::All));
+    }
     let parsed = parsed_repair(&args);
     let mode = parsed.mode;
     // PB25: `registry-prune` operates on the device-global scope-registry,
@@ -1456,15 +1475,30 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
         }
         return Ok(output);
     }
+    run_rebuild_db_locked(&repo, parsed.online, parsed.offline, true)
+}
+
+/// The locked, source-SQLite half of `repair rebuild-db`.  Keeping it separate
+/// lets device-global repair use the identical recovery path while forcing it
+/// offline, without widening the legacy command's CLI surface.
+fn run_rebuild_db_locked(
+    repo: &Repository,
+    online_requested: bool,
+    offline: bool,
+    poll_remote_jobs: bool,
+) -> Result<Value> {
     // CL45/item 5: reconcile any stale `request_kind='sync'` cost-ledger.sqlite
     // rows left by a crashed prior run — `--rebuild-db` only (CL32/CL45 do not
     // list `--verify-objects`, handled by the early return above).
     recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kio_dir())?)?;
-    // 04 §5.8 相 3: poll/collect in-flight Batch markdownize jobs at the same
-    // write-command entry point (see `poll_batch_markdownize_jobs`).
-    poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
-    // 04 §5.8 相 3 for the embedding Batch lane at the same entry point.
-    poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
+    if poll_remote_jobs {
+        // 04 §5.8 相 3: poll/collect in-flight Batch jobs at the scoped
+        // write-command entry point. Device-global `repair all` disables this
+        // entire block: its offline contract forbids provider polling and
+        // remote-residue cleanup as well as new paid sends.
+        poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
+        poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
+    }
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kio_dir())?;
     let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
@@ -1488,7 +1522,7 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
     // L220-222): `--online`/`--offline` now reach the post-rebuild enrichment
     // pass instead of the hard-coded `(false, false, false)` this used to
     // pass unconditionally.
-    let embedding_online = embedding_online_allowed(&repo, parsed.offline, parsed.online, false)?;
+    let embedding_online = embedding_online_allowed(repo, offline, online_requested, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
     // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
     let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
@@ -1507,6 +1541,324 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
         set_exit_override(&mut output, code);
     }
     Ok(output)
+}
+
+/// Device-global repair deliberately enumerates the registry before opening any
+/// scope.  The registry connection is dropped before locks are taken: a repair
+/// must never hold the device database while it waits on a scope writer.
+fn run_device_repair(rebuild_source: bool) -> Result<Value> {
+    let entries = {
+        let registry = RegistryDb::open_default().map_err(index_to_kio)?;
+        registry.all_entries().map_err(index_to_kio)?
+    };
+    let mut entries: Vec<_> = entries.into_iter().filter(|entry| entry.indexed).collect();
+    entries.sort_by(|left, right| {
+        left.root_path
+            .cmp(&right.root_path)
+            .then_with(|| left.scope_id.cmp(&right.scope_id))
+    });
+
+    let mut failures = Vec::new();
+    let mut live = Vec::new();
+    for entry in entries {
+        match Repository::open_without_head_repair(&entry.root_path)
+            .and_then(|repo| validate_device_registry_entry(&entry, &repo).map(|()| repo))
+        {
+            Ok(repo) => live.push((entry, repo)),
+            Err(error) => failures.push(device_repair_failure(&entry, "open", &error)),
+        }
+    }
+    let mut duplicate_ids = BTreeSet::new();
+    let mut counts = BTreeMap::new();
+    for (entry, _) in &live {
+        *counts.entry(entry.scope_id.clone()).or_insert(0usize) += 1;
+    }
+    for (scope_id, count) in counts {
+        if count > 1 {
+            duplicate_ids.insert(scope_id);
+        }
+    }
+    let mut successes = Vec::new();
+    for (entry, repo) in live {
+        if duplicate_ids.contains(&entry.scope_id) {
+            let error = KioError::new(
+                "KIO-E-REGISTRY-DUP-001",
+                "multiple live registry roots share a scope ID",
+                json!({ "scope_id": entry.scope_id }),
+                ExitCode::PermanentFailure,
+            );
+            failures.push(device_repair_failure(&entry, "identity", &error));
+            continue;
+        }
+        match run_one_device_repair(
+            &repo,
+            &entry,
+            if rebuild_source {
+                DeviceRepairOperation::All
+            } else {
+                DeviceRepairOperation::Replica
+            },
+        ) {
+            Ok(value) => successes.push(json!({
+                "scope_id": entry.scope_id,
+                "path": entry.root_path,
+                "status": value.get("status").cloned().unwrap_or_else(|| json!("repaired")),
+                "result": value,
+            })),
+            Err(error) => failures.push(device_repair_failure(
+                &entry,
+                device_repair_stage(&error, rebuild_source),
+                &error,
+            )),
+        }
+    }
+    successes.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    failures.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let mut output = json!({
+        "status": if failures.is_empty() && successes.is_empty() {
+            "up_to_date"
+        } else if failures.is_empty() {
+            "repaired"
+        } else if successes.is_empty() {
+            "failed"
+        } else {
+            "partial"
+        },
+        "operation": if rebuild_source { "all" } else { "replica" },
+        "repaired_scopes": successes,
+        "failed_scopes": failures,
+        "summary": { "repaired": successes.len(), "failed": failures.len() },
+    });
+    if !failures.is_empty() {
+        let homogeneous = successes.is_empty()
+            && failures.iter().all(|f| {
+                f["error_code"] == failures[0]["error_code"]
+                    && f["exit_code"] == failures[0]["exit_code"]
+            });
+        if homogeneous {
+            let exit = failures[0]["exit_code"].as_i64().unwrap_or(4);
+            let code = failures[0]["error_code"]
+                .as_str()
+                .unwrap_or("KIO-E-REPAIR-ALL-FAILED-001")
+                .to_owned();
+            return Err(KioError::new(
+                code,
+                "device repair failed for every registered scope",
+                output,
+                exit_code_from_i64(exit),
+            ));
+        }
+        let (code, exit) = if successes.is_empty() {
+            // Retryable classes retain an exit that invites another run. A
+            // heterogeneous set never borrows one arbitrary scope's code.
+            let retryable = failures
+                .iter()
+                .any(|failure| matches!(failure["exit_code"].as_i64(), Some(1 | 3 | 5 | 6 | 7)));
+            ("KIO-E-REPAIR-ALL-FAILED-001", if retryable { 3 } else { 4 })
+        } else {
+            ("KIO-E-REPAIR-PARTIAL-001", 3)
+        };
+        output
+            .as_object_mut()
+            .unwrap()
+            .insert("error_code".to_owned(), json!(code));
+        output
+            .as_object_mut()
+            .unwrap()
+            .insert("__exit_code".to_owned(), json!(exit));
+    }
+    Ok(output)
+}
+
+fn exit_code_from_i64(code: i64) -> ExitCode {
+    match code {
+        0 => ExitCode::Success,
+        1 => ExitCode::Failure,
+        2 => ExitCode::InvalidUsage,
+        3 => ExitCode::PartialFailure,
+        4 => ExitCode::PermanentFailure,
+        5 => ExitCode::AuthError,
+        6 => ExitCode::BudgetExceeded,
+        7 => ExitCode::Interrupted,
+        8 => ExitCode::IncompatibleProfile,
+        9 => ExitCode::ConfirmationRejected,
+        _ => ExitCode::Failure,
+    }
+}
+
+fn device_repair_failure(entry: &RegistryEntry, stage: &str, error: &KioError) -> Value {
+    json!({
+        "scope_id": entry.scope_id,
+        "path": entry.root_path,
+        "stage": stage,
+        "reason": device_repair_reason(stage, error),
+        "error_code": error.error_code(),
+        "message": error.message(),
+        "context": error.context(),
+        "exit_code": error.exit_code().code(),
+    })
+}
+
+fn validate_device_registry_entry(entry: &RegistryEntry, repo: &Repository) -> Result<()> {
+    let actual_scope_id = scope_id(repo.kio_dir())?;
+    let registered_root = PathBuf::from(&entry.root_path)
+        .canonicalize()
+        .map_err(|error| KioError::io(error.to_string(), entry.root_path.clone()))?;
+    let registered_kio = PathBuf::from(&entry.kio_path)
+        .canonicalize()
+        .map_err(|error| KioError::io(error.to_string(), entry.kio_path.clone()))?;
+    let actual_root = repo
+        .root()
+        .canonicalize()
+        .map_err(|error| KioError::io(error.to_string(), repo.root().display().to_string()))?;
+    let actual_kio = repo
+        .kio_dir()
+        .canonicalize()
+        .map_err(|error| KioError::io(error.to_string(), repo.kio_dir().display().to_string()))?;
+    if actual_scope_id != entry.scope_id
+        || registered_root != actual_root
+        || registered_kio != actual_kio
+    {
+        return Err(KioError::new(
+            "KIO-E-REGISTRY-STALE-001",
+            "registered scope does not match the on-disk scope",
+            json!({
+                "registered_scope_id": entry.scope_id,
+                "on_disk_scope_id": actual_scope_id,
+                "registered_root_path": entry.root_path,
+                "on_disk_root_path": actual_root,
+                "registered_kio_path": entry.kio_path,
+                "on_disk_kio_path": actual_kio,
+            }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+    Ok(())
+}
+
+fn device_repair_stage(error: &KioError, rebuild_source: bool) -> &'static str {
+    match error.error_code() {
+        "KIO-E-PURGE-JOURNAL-ACTIVE-001" => "purge_preflight",
+        "KIO-E-AGGREGATOR-001" => "replica",
+        "KIO-E-REGISTRY-DUP-001" | "KIO-E-REGISTRY-STALE-001" => "identity",
+        _ if rebuild_source => "source",
+        _ => "replica",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceRepairOperation {
+    All,
+    Replica,
+}
+
+fn device_repair_reason(stage: &str, error: &KioError) -> &'static str {
+    match error.error_code() {
+        "KIO-E-PURGE-JOURNAL-ACTIVE-001" => "purge_journal_active",
+        "KIO-E-REGISTRY-DUP-001" => "registry_duplicate",
+        "KIO-E-REGISTRY-STALE-001" => "registry_stale",
+        "KIO-E-STORE-LOCKED-001" => "locked",
+        "KIO-E-STORE-VERSION-001" => "store_version_incompatible",
+        "KIO-E-STORE-CORRUPT-001" => "store_corrupt",
+        "KIO-E-PURGE-INCOMPLETE-001" => "purge_incomplete",
+        "KIO-E-AGGREGATOR-001" => "replica_error",
+        "KIO-E-STORE-IO-001" | "KIO-E-CONFIG-USAGE-001" if stage == "open" => "unreachable",
+        _ => "repair_failed",
+    }
+}
+
+fn run_one_device_repair(
+    repo: &Repository,
+    entry: &RegistryEntry,
+    operation: DeviceRepairOperation,
+) -> Result<Value> {
+    let _lock = repo.lock_store()?;
+    // Revalidate after taking the lock so a path replaced between registry
+    // enumeration and execution cannot be repaired under the stale identity.
+    validate_device_registry_entry(entry, repo)?;
+    // Fail closed before every source preflight: an old Ready projection must
+    // never survive once an explicit global repair has started.
+    mark_replica_unavailable_or_log(repo.kio_dir());
+    if let Some(journal) = PurgeState::new(repo.kio_dir()).read_journal()? {
+        return Err(KioError::new(
+            "KIO-E-PURGE-JOURNAL-ACTIVE-001",
+            "device repair is blocked while purge remains incomplete",
+            json!({
+                "component": "device_repair",
+                "purge_id": journal.purge_id,
+            }),
+            ExitCode::PartialFailure,
+        ));
+    }
+    if operation == DeviceRepairOperation::All {
+        repo.self_heal_head_for_repair()?;
+        validate_repo_tool_lock(repo)?;
+        let verification = verify_objects::verify_objects(repo)?;
+        if let Some(repaired) = verification.repaired_commit_hash.as_deref() {
+            // `all` rebuilds the source SQLite immediately below, so unlike
+            // standalone `verify-objects` it must not require the old cache to
+            // materialize bindings for the repaired HEAD. This is what lets
+            // `all` recover a missing/corrupt sqlite.db and canonical objects
+            // in the same pass.
+            mark_replica_rebuilding_or_log(repo.kio_dir(), repaired);
+        }
+        if verification.has_remaining_findings() {
+            let purge_incomplete = verification
+                .remaining_findings
+                .iter()
+                .any(|finding| finding.kind == "purge_incomplete");
+            return Err(KioError::new(
+                if purge_incomplete {
+                    "KIO-E-PURGE-INCOMPLETE-001"
+                } else {
+                    "KIO-E-STORE-CORRUPT-001"
+                },
+                "object verification found remaining findings",
+                serde_json::to_value(&verification).unwrap_or_else(|_| json!({})),
+                ExitCode::PartialFailure,
+            ));
+        }
+        let mut result = run_rebuild_db_locked(repo, false, true, false)?;
+        let exit = take_exit_override(&mut result);
+        if let Some(exit) = exit {
+            let code = result
+                .get("error_code")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| exit_override_error_code(exit))
+                .to_owned();
+            return Err(KioError::new(
+                code,
+                "source SQLite recovery completed with outstanding work",
+                result,
+                exit,
+            ));
+        }
+        write_through_projection(repo.kio_dir()).map_err(|reason| {
+            KioError::new(
+                "KIO-E-AGGREGATOR-001",
+                reason,
+                json!({ "component": "replica" }),
+                ExitCode::PartialFailure,
+            )
+        })?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert("replica".to_owned(), json!("ready"));
+        }
+        Ok(result)
+    } else {
+        // Replica recovery must leave the source store (including HEAD and
+        // sqlite.db) untouched; only the device projection is regenerated.
+        validate_repo_tool_lock(repo)?;
+        write_through_projection(repo.kio_dir()).map_err(|reason| {
+            KioError::new(
+                "KIO-E-AGGREGATOR-001",
+                reason,
+                json!({ "component": "replica" }),
+                ExitCode::PartialFailure,
+            )
+        })?;
+        Ok(json!({ "status": "replica_rebuilt" }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1558,6 +1910,9 @@ fn parsed_repair(args: &RepairArgs) -> ParsedRepair {
             online: false,
             offline: false,
         },
+        RepairOperation::All | RepairOperation::Replica => {
+            unreachable!("device-global repair is dispatched before the scoped parser")
+        }
     }
 }
 
@@ -2304,11 +2659,20 @@ fn collect_scope_projection(
     // Read-write so the resolver's TEMP identity tables can be created. They
     // live only in this connection's temp schema and never touch the source
     // store.
-    let conn = Connection::open(&db)
-        .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
-    let repo = Repository::open(kio_dir.parent().unwrap_or(kio_dir))?;
+    let conn = Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
+    // Projection is a derived-cache operation and must never repair source
+    // refs as a side effect. In particular `repair replica` promises to leave
+    // HEAD/CAS/source SQLite byte-for-byte under the source owner's control.
+    let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
     let embedding_profiles =
         embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
+    // `head_commit_hash` resolves an empty/truncated HEAD through a verified
+    // refs/heads/main without writing it. Keep that logical read-only answer:
+    // replica repair must neither mutate HEAD nor publish a false empty corpus.
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(ScopeProjection {
             chunks: Vec::new(),
@@ -4079,8 +4443,9 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // both live in that one file, so losing it is never actually a
         // "vector-only" unavailability, and it is exactly as recoverable as a
         // mid-rebuild window). This is transient — the complete result set
-        // returns on retry once the atomic rename lands, or once `kio repair
-        // --rebuild-db` runs — so surface the honest KIO-E-INDEX-REBUILDING-001
+        // returns on retry once the atomic rename lands, or once `kio repair all`
+        // repairs the source and replica (or `kio repair replica` repairs only
+        // the device replica) — so surface the honest KIO-E-INDEX-REBUILDING-001
         // (docs/05:564) with the retryable exit 3 (05 §6, as
         // KIO-E-STORE-LOCKED-001 does), never a false permanent all-failed or a
         // silent empty page.
@@ -4095,7 +4460,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             return Err(KioError::new(
                 "KIO-E-INDEX-REBUILDING-001",
                 "the searched scopes' projections in the device search replica are missing, \
-                 unusable, or being rebuilt; retry, or run `kio repair rebuild-db` if the problem \
+                 unusable, or being rebuilt; retry, or run `kio repair replica` (or `kio repair all`) if the problem \
                  persists",
                 json!({
                     "excluded_scopes": excluded,
@@ -4136,12 +4501,11 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // `context.recovery`); the error CODE stays the docs-registered
         // SCOPE-ALL-FAILED-001 (the code registry in docs/06 §8 / docs/10 §7.5 is
         // normative and docs are frozen — no new code). Deliberately NOT unified with
-        // `index_missing`'s exit-1 + "run repair" push: `repair rebuild-db` rebuilds
-        // the sqlite index FROM the store, so it does not heal a corrupt/absent
-        // commit-or-tree object (it re-hits the same corruption) — the real recovery is
-        // restoring the object from objects/refs or re-indexing. Exit stays 4 (manual
-        // intervention required), the honest current semantics; the `recovery` context
-        // is what makes the path agent-detectable.
+        // `index_missing`'s retryable device-repair guidance: a shallow snapshot
+        // still needs object restore/re-index, while `repair all` can attempt the
+        // verifier's bounded working-tree recovery for store_corrupt. Exit stays 4
+        // when that source state cannot be read (manual intervention required); the
+        // `recovery` context is what makes the path agent-detectable.
         let store_corruption = !excluded.is_empty()
             && excluded.iter().all(|entry| {
                 matches!(
@@ -6072,7 +6436,7 @@ fn is_retryable_scope_reason(reason: &str) -> bool {
 fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
     match reason {
         "store_corrupt" => Some(
-            "store_corrupt: try `kio repair rebuild-db`; if it still fails, restore \
+            "store_corrupt: try `kio repair all`; if it still fails, restore \
              the corrupt commit/tree object from objects/refs",
         ),
         "snapshot_shallow" => Some(
@@ -6086,12 +6450,12 @@ fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
         // fell through both homogeneous aggregations to a hintless message. Same
         // repair path as the others.
         "index_missing" => Some(
-            "index_missing: run `kio repair rebuild-db` to rebuild the search index \
-             from the store",
+            "index_missing: run `kio repair replica`; if the scope SQLite source is \
+             also missing, run `kio repair all`",
         ),
         "index_corrupt" => Some(
-            "index_corrupt: run `kio repair rebuild-db` to rebuild the search index \
-             from the store",
+            "index_corrupt: run `kio repair replica`; if the scope SQLite source is \
+             also corrupt, run `kio repair all`",
         ),
         _ => None,
     }
@@ -8940,7 +9304,7 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
         return Err(KioError::new(
             "KIO-E-INDEX-REBUILDING-001",
             "this scope's projection in the device search replica is missing or being rebuilt; \
-             retry, or run `kio repair rebuild-db` if the problem persists",
+             retry, or run `kio repair replica` (or `kio repair all`) if the problem persists",
             json!({ "scope_path": target.kio_dir.display().to_string() }),
             ExitCode::PartialFailure,
         ));
@@ -23948,7 +24312,7 @@ mod tests {
         estimate_embedding_tokens, lane_rate, markdownize_send_lane, parsed_repair, parsed_search,
         query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, write_through_projection_with_requested_at, Cli, Command, LaneOverride,
-        MarkdownizeSendLane, PreferredRequestKind, RepairMode, SearchMode,
+        MarkdownizeSendLane, PreferredRequestKind, RepairMode, RepairOperation, SearchMode,
     };
 
     #[test]
@@ -23966,6 +24330,10 @@ mod tests {
         assert!(
             error.contains("source index stamp is unavailable"),
             "a writer must not silently retain a Ready replica when its source index is gone: {error}"
+        );
+        assert!(
+            !kio_dir.join("index/sqlite.db").exists(),
+            "replica repair must not create a missing source index"
         );
     }
 
@@ -25419,6 +25787,8 @@ mod tests {
         // The dead `--yes` (06 §1 requires a prompt that was never implemented,
         // so it had nothing to skip) is gone rather than kept as a no-op.
         assert!(Cli::try_parse_from(["kio", "repair", "rebuild-db", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "all", "--offline"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "repair", "replica", "--online"]).is_err());
         // The old flag spellings are removed, not aliased.
         assert!(Cli::try_parse_from(["kio", "repair", "--rebuild-db"]).is_err());
 
@@ -25443,6 +25813,22 @@ mod tests {
         let rebuild = parsed_repair(&repair_of(&["kio", "repair", "rebuild-db", "--online"]));
         assert_eq!(rebuild.mode, RepairMode::RebuildDb);
         assert!(rebuild.online);
+        assert!(matches!(
+            repair_of(&["kio", "repair", "all"]).operation,
+            RepairOperation::All
+        ));
+        assert!(matches!(
+            repair_of(&["kio", "repair", "-a"]).operation,
+            RepairOperation::All
+        ));
+        assert!(matches!(
+            repair_of(&["kio", "repair", "replica"]).operation,
+            RepairOperation::Replica
+        ));
+        assert!(matches!(
+            repair_of(&["kio", "repair", "-r"]).operation,
+            RepairOperation::Replica
+        ));
     }
 
     #[test]

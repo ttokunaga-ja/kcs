@@ -758,8 +758,9 @@ projection 欠落として検索を止める。**
 場合、`kio search` は source SQLite へ fallback せず当該 scope を fail-closed とする。通常 writer は
 source 側の成功を取り消さないが、既存 replica header を `Rebuilding` にする。selector の CAS preflight は
 歴史 selector / cursor の runtime eligibility filter を得るための正本確認であり、source から候補や binding を
-materialize / 修復する経路ではない。復旧は `kio index` /
-`kio reindex` / `kio repair` 等の writer が行う。**purge だけは replica の完全消去も command 成功の
+materialize / 修復する経路ではない。単一 scope の復旧は `kio index` / `kio reindex` /
+`kio repair rebuild-db`、device replica 全体の復旧は `kio repair replica` (`-r`)、source の検証・
+SQLite 再構築も含む全体復旧は `kio repair all` (`-a`) が行う。**purge だけは replica の完全消去も command 成功の
 必須条件**である (§3.5)。
 
 | 経路 | live index への書き込み | replica への反映 |
@@ -1687,6 +1688,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - refs (refs/heads/main, refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kio repair rebuild-db` 実行中の `kio search` は旧 `.kio/index/sqlite.db` を読まない。scope の replica header が `Rebuilding` または完全 projection を欠く間は `KIO-E-INDEX-REBUILDING-001` で fail-closed とし、writer が新しい projection を publish してから検索へ再参加させる。再構築本体は引き続き atomic rename (`sqlite.db.tmp → sqlite.db`) で切り替える
+- `kio repair replica` / `kio repair all` は registry の indexed scope を決定的順序で走査し、各 scope の `.kio/.lock` を 1 個ずつ取得する。`replica` は source を変更せず完全射影だけ、`all` は objects 検証・source SQLite rebuild・完全射影を行う。active purge journal の scope は修復対象として開かず partial failure に残し、replica の旧本文を Ready として再公開しない
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kio/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kio` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
 - purge の log scrub と通常 append/rotation は、device logs では `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`、scope access logs では `.kio/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 

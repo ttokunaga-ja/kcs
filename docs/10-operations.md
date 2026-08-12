@@ -485,6 +485,30 @@ Kio 自身のログのスクラブ (該当行の削除またはマスク) と、
 「`.kio` 喪失は復旧不能」(§3 不変条件 3) である以上、破損の検出手段とバックアップ手順を
 仕様として持つ。
 
+## device 全体の修復 (`repair all` / `repair replica`)
+
+`kio repair all` (`kio repair -a`) と `kio repair replica` (`kio repair -r`) は、CWD に依存せず
+scope registry の `indexed=true` 全行を対象とする。検索参加を無効化した
+`participates_in_global_search=false` の scope も、device 上に存在する indexed scope なので対象に含む。
+registry は探索入力であり truth ではないため、各行は実際の `.kio/scope.json` と `scope_id` を照合する。
+到達不能な行と identity / path が一致しない stale 行 (`KIO-E-REGISTRY-STALE-001`)、複数 live clone は
+黙って無視せず `failed_scopes` に記録し、自動 prune / dedupe は行わない。registry 自体を開けない場合に
+current scope だけへ縮退して「全体修復」と報告してはならない。
+
+- **`repair replica` / `-r`**: 各 scope の `.kio/.lock` を個別に取得し、active purge journal が無いことを
+  確認して、既存 `.kio/index/sqlite.db` から `aggregator.sqlite` へ完全射影する。source の HEAD / CAS /
+  SQLite は変更しない。source SQLite が無い・破損している scope は失敗として残し、`repair all` を案内する。
+- **`repair all` / `-a`**: 各 scope を `verify-objects` (prune 無し) → `rebuild-db` → replica 完全射影の順に
+  修復する。raw object の working-tree からの回収と repaired commit は既存 fsck 規則どおり許可するが、
+  `--prune-orphans` と `registry-prune` は確認を要する破壊操作なので含めない。device 全体を対象とする
+  呼出しで予期せぬ外部通信や課金を起こさないため、新規 online send と既存 Batch job の provider poll /
+  remote cleanup を禁止し、不足 enrichment は既存の offline task 規則に従う。
+
+registry connection は対象一覧を owned snapshot として読み終えてから閉じ、その後に scope lock を
+決定的順序で 1 個ずつ取得する (registry → scope の lock を同時保持しない)。ある scope の失敗で残りを
+中断せず、全成功 0 / 部分成功 3 / 全失敗は [06-cli-spec.md §7](06-cli-spec.md) の同一理由昇格・
+retryability 規則で返す。いずれも冪等であり、2 回目は同じ正本から同じ完全状態へ収束する。
+
 ## 7.5.1 kio repair verify-objects (fsck 相当)
 
 ```bash
@@ -896,6 +920,7 @@ Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍�
 DOMAIN:
   BATCH    バッチ処理 (markdownize / embedding / etc.)
   INDEX    インデックス更新
+  REPAIR   device / scope 修復の集約
   SEARCH   検索 (FTS / vector / hybrid)
   COMMIT   commit / snapshot / restore
   GC       garbage collection
@@ -911,6 +936,11 @@ DOMAIN:
 ```
 
 例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-SEARCH-VEC-UNAVAIL-001`, `KIO-E-SEARCH-VEC-UNAUTHORIZED-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001`, `KIO-E-STORE-CORRUPT-001`, `KIO-E-STORE-VERSION-001` (§12.5 — 新しい `kio_format_version` の store への書き込み系実行・読解不能), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001`, `KIO-E-SEARCH-CURSOR-001`, `KIO-E-INDEX-REBUILDING-001`, `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KIO-E-EVIDENCE-RETARGET-AMBIG-001`, `KIO-E-ADAPTER-CONTRACT-001`、`KIO-E-PURGE-REPLICA-001` (purge 後の device replica 再射影に失敗 — 本文が cache root に読める状態で成功と報告しないための fail-closed 終端。exit 1、[05-runtime.md §3.5](05-runtime.md))、`KIO-E-CONFIG-OFFLINE-URL-001` (`execution_mode = "offline_api"` の Adapter に loopback リテラル (`127.0.0.1` / `localhost` / `[::1]` / UNIX domain socket) 以外の `url` が宣言されている — tool-lock materialize / adapter 登録時に検証。exit 2、[07-adapter-spec.md §3](07-adapter-spec.md))。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+
+device-global repair の scope 集約 code は `KIO-E-REPAIR-PARTIAL-001` と
+`KIO-E-REPAIR-ALL-FAILED-001` とする ([06-cli-spec.md §7](06-cli-spec.md))。
+registry 行が on-disk の scope identity / path と一致しない場合は
+`KIO-E-REGISTRY-STALE-001` とする。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 

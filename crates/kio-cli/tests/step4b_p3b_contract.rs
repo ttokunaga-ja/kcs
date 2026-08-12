@@ -523,7 +523,8 @@ fn qb9_new_version_store_write_command_rejects_with_zero_writes() {
 // ===========================================================================
 
 /// QB11 [regression-lock, structural]: `.kio/.lock` (`repo.lock_store()`) is
-/// acquired exactly at the top of `run_index`/`run_repair`/`run_reindex`/
+/// acquired exactly at the top of `run_index`/the scoped repair dispatcher/
+/// each device-repair scope/`run_reindex`/
 /// `run_batch` (covering batch resume/retry/abandon, which share `run_batch`'s
 /// one lock guard across their dispatch) and nowhere in the `open`/`view`
 /// resolution paths. A functional two-process race for one representative
@@ -534,6 +535,7 @@ fn qb11_lock_store_call_sites_are_write_commands_only() {
     for needle in [
         "fn run_index(",
         "fn run_repair(",
+        "fn run_one_device_repair(",
         "fn run_reindex(",
         "fn run_batch(",
     ] {
@@ -541,7 +543,11 @@ fn qb11_lock_store_call_sites_are_write_commands_only() {
             .split(needle)
             .nth(1)
             .unwrap_or_else(|| panic!("{needle} not found"));
-        let head = &body[..body.len().min(1500)];
+        // Device-global dispatch and registry-prune now precede the scoped
+        // repository path, so bound this structural scan generously while
+        // still keeping it near the dispatcher rather than searching the
+        // entire file.
+        let head = &body[..body.len().min(3000)];
         assert!(
             head.contains("lock_store()"),
             "{needle} must acquire the store lock near its top"

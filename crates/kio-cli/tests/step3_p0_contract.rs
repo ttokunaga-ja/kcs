@@ -17,9 +17,11 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "MISTRAL_API_KEY",
     "KIO_FIXED_NOW",
     "KIO_TEST_GEMINI_EMBED",
+    "KIO_TEST_GEMINI_BATCH",
     "KIO_TEST_LOCAL_EMBED",
     "KIO_TEST_MISTRAL_OCR",
     "KIO_TEST_MISTRAL_BATCH",
+    "KIO_TEST_BATCH_INVENTORY",
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
     "KIO_TEST_QUERY_EMBED_TRACE",
     "KIO_TEST_HOLD_LOCK_MS",
@@ -1582,6 +1584,284 @@ fn ct3_multi_008_all_scopes_flag_targets_all_indexed_scopes() {
         "b/.kio"
     ));
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn ct3_repair_device_replica_rebuilds_all_indexed_scopes_outside_a_scope() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    for (dir, text) in [(&a, "replica device alpha"), (&b, "replica device hidden")] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("doc.md"), text).unwrap();
+        json_success_path(dir, &data_home, &["init"]);
+    }
+    // This row must still be selected: repair is device-global, not search-global.
+    fs::write(
+        b.join(".kio/config.toml"),
+        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+    )
+    .unwrap();
+    for dir in [&a, &b] {
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    // Empty HEAD is recoverable from refs/heads/main for reads. Replica-only
+    // repair may use that logical value, but must not write the source HEAD.
+    fs::write(b.join(".kio/HEAD"), b"").unwrap();
+    let a_head = fs::read(a.join(".kio/HEAD")).unwrap();
+    let b_head = fs::read(b.join(".kio/HEAD")).unwrap();
+    let a_sqlite = fs::read(a.join(".kio/index/sqlite.db")).unwrap();
+    let b_sqlite = fs::read(b.join(".kio/index/sqlite.db")).unwrap();
+    fs::remove_file(data_home.join("cache/kio/aggregator.sqlite")).unwrap();
+
+    let repaired = json_success_path(parent.path(), &data_home, &["repair", "-r"]);
+    assert_eq!(repaired["operation"], "replica");
+    assert_eq!(repaired["summary"]["repaired"], 2);
+    let repaired_ids: Vec<_> = repaired["repaired_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scope| scope["scope_id"].as_str().unwrap())
+        .collect();
+    assert!(repaired_ids.contains(&read_scope_id(&a).as_str()));
+    assert!(repaired_ids.contains(&read_scope_id(&b).as_str()));
+    assert_eq!(fs::read(a.join(".kio/HEAD")).unwrap(), a_head);
+    assert_eq!(fs::read(b.join(".kio/HEAD")).unwrap(), b_head);
+    assert_eq!(fs::read(a.join(".kio/index/sqlite.db")).unwrap(), a_sqlite);
+    assert_eq!(fs::read(b.join(".kio/index/sqlite.db")).unwrap(), b_sqlite);
+    let hidden_header = Aggregator::open(&data_home.join("cache/kio/aggregator.sqlite"))
+        .unwrap()
+        .scope_header(&read_scope_id(&b))
+        .unwrap()
+        .expect("replica repair publishes the non-participating scope");
+    assert_eq!(hidden_header.index_status, AggIndexStatus::Ready);
+    assert!(
+        hidden_header.current_snapshot_commit.is_some(),
+        "the read-only refs/main fallback must not publish a false empty corpus"
+    );
+    assert_eq!(
+        json_success_path(parent.path(), &data_home, &["repair", "replica"])["summary"]["repaired"],
+        2
+    );
+}
+
+#[test]
+fn ct3_repair_device_all_recovers_missing_source_and_replica_outside_a_scope() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    for (dir, text) in [(&a, "all repair alpha"), (&b, "all repair beta")] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("doc.md"), text).unwrap();
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    let a_kio = a.join(".kio");
+    let a_head_before = fs::read_to_string(a_kio.join("HEAD")).unwrap();
+    let a_raw_hash: String = Connection::open(a_kio.join("index/sqlite.db"))
+        .unwrap()
+        .query_row("SELECT raw_hash FROM chunks LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    fs::remove_file(object_path(&a_kio, "raw", &a_raw_hash)).unwrap();
+    fs::remove_file(a.join(".kio/index/sqlite.db")).unwrap();
+    fs::remove_file(data_home.join("cache/kio/aggregator.sqlite")).unwrap();
+    let repaired = json_success_path(parent.path(), &data_home, &["repair", "-a"]);
+    assert_eq!(repaired["summary"]["repaired"], 2, "{repaired:#?}");
+    assert!(a.join(".kio/index/sqlite.db").is_file());
+    assert!(
+        object_path(&a_kio, "raw", &a_raw_hash).is_file(),
+        "all recovers a missing canonical raw from the unchanged working tree"
+    );
+    assert_ne!(
+        fs::read_to_string(a_kio.join("HEAD")).unwrap(),
+        a_head_before,
+        "canonical recovery records the verifier's repaired commit"
+    );
+    let search = json_success_path(
+        &a,
+        &data_home,
+        &["search", "all repair beta", "--mode", "text"],
+    );
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        json_success_path(parent.path(), &data_home, &["repair", "all"])["summary"]["repaired"],
+        2
+    );
+}
+
+#[test]
+fn ct3_repair_device_unreachable_registry_scope_is_partial_without_cwd_fallback() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    for dir in [&a, &b] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("doc.md"), "partial repair healthy").unwrap();
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    let b_scope = read_scope_id(&b);
+    fs::remove_dir_all(&b).unwrap();
+    let stdout = hermetic_kio_command()
+        .current_dir(parent.path())
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["repair", "replica", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let response: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(response["error_code"], "KIO-E-REPAIR-PARTIAL-001");
+    assert_eq!(response["summary"]["repaired"], 1);
+    assert_eq!(response["summary"]["failed"], 1);
+    let failed = &response["failed_scopes"][0];
+    assert_eq!(failed["scope_id"], b_scope);
+    assert_eq!(
+        failed["path"],
+        parent
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("b")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(failed["stage"], "open");
+}
+
+#[test]
+fn ct3_repair_device_registry_unavailable_never_falls_back_to_cwd() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let scope = parent.path().join("scope");
+    fs::create_dir_all(&scope).unwrap();
+    fs::write(scope.join("doc.md"), "registry unavailable repair").unwrap();
+    json_success_path(&scope, &data_home, &["init"]);
+    json_success_path(&scope, &data_home, &["index", "--approve"]);
+    let blocked = UnavailableRegistry::block(&registry_path(&data_home));
+
+    let output = hermetic_kio_command()
+        .current_dir(&scope)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["repair", "replica", "--json"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
+    blocked.restore();
+}
+
+#[test]
+fn ct3_repair_device_all_failed_homogeneous_promotes_scope_error() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let scope = parent.path().join("scope");
+    fs::create_dir_all(&scope).unwrap();
+    fs::write(scope.join("doc.md"), "homogeneous repair failure").unwrap();
+    json_success_path(&scope, &data_home, &["init"]);
+    json_success_path(&scope, &data_home, &["index", "--approve"]);
+    fs::remove_dir_all(&scope).unwrap();
+
+    let output = hermetic_kio_command()
+        .current_dir(parent.path())
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["repair", "replica", "--json"])
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-STORE-IO-001");
+    assert_eq!(error["context"]["summary"]["repaired"], 0);
+    assert_eq!(error["context"]["summary"]["failed"], 1);
+}
+
+#[test]
+fn ct3_repair_device_active_purge_is_partial_and_never_leaves_ready_replica() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let blocked = parent.path().join("blocked");
+    let healthy = parent.path().join("healthy");
+    for (dir, text) in [
+        (&blocked, "purge repair blocked-secret"),
+        (&healthy, "purge repair healthy-public"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("doc.md"), text).unwrap();
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--offline", "--approve"]);
+    }
+    let blocked_scope = read_scope_id(&blocked);
+    let raw_hash: String = Connection::open(blocked.join(".kio/index/sqlite.db"))
+        .unwrap()
+        .query_row("SELECT raw_hash FROM chunks LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let state = kio_core::purge::PurgeState::new(blocked.join(".kio"));
+    let purge_id = kio_core::scope::new_ulid(&blocked);
+    let closure = kio_core::purge::PurgeClosure::new(
+        purge_id.clone(),
+        vec![kio_core::purge::ClosureItem {
+            object_type: "raw".to_owned(),
+            hash: raw_hash.clone(),
+        }],
+        Vec::new(),
+    )
+    .unwrap();
+    let closure_hash = kio_core::purge::closure_content_hash(&closure).unwrap();
+    state.write_closure(&closure).unwrap();
+    let started = state
+        .begin(
+            vec![raw_hash],
+            kio_core::purge::PurgeReason::Legal,
+            kio_core::purge::TombstoneMode::Default,
+            "test",
+            "2026-08-12T00:00:00Z",
+            1,
+            kio_pipeline::prepare::hash_bytes(b"repair device active purge"),
+            closure_hash,
+            purge_id,
+        )
+        .unwrap();
+    assert!(matches!(started, kio_core::purge::BeginOutcome::Started(_)));
+    let stdout = hermetic_kio_command()
+        .current_dir(parent.path())
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["repair", "replica", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let response: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(response["error_code"], "KIO-E-REPAIR-PARTIAL-001");
+    assert!(response["failed_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|scope| scope["scope_id"] == blocked_scope
+            && scope["error_code"] == "KIO-E-PURGE-JOURNAL-ACTIVE-001"));
+    let header = Aggregator::open(&data_home.join("cache/kio/aggregator.sqlite"))
+        .unwrap()
+        .scope_header(&blocked_scope)
+        .unwrap()
+        .expect("blocked scope header remains visible but unavailable");
+    assert_ne!(header.index_status, AggIndexStatus::Ready);
 }
 
 // R15-3: a `.kio` deleted and re-`init`ed at the SAME path mints a fresh scope_id.
@@ -8919,8 +9199,8 @@ fn r17_2_reindex_force_skips_corrupt_unit_and_renormalizes_healthy() {
 // index_missing/index_corrupt case which points at `repair`. A store_corrupt (tampered
 // HEAD commit object) all-scope failure keeps the docs-registered
 // KIO-E-SEARCH-SCOPE-ALL-FAILED-001 code but now carries class-specific recovery
-// guidance in `context.recovery` + the message. Exit stays 4: `repair rebuild-db`
-// rebuilds the index FROM the store, so it does not heal a corrupt commit object.
+// guidance in `context.recovery` + the message. Exit stays 4; `repair all` is the
+// device-global path that verifies/rebuilds both the store and its derived indexes.
 #[test]
 fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
     let dir = tempfile::tempdir().unwrap();
@@ -8958,10 +9238,7 @@ fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
         "store_corrupt-specific recovery guidance is present: {err}"
     );
     assert!(
-        err["message"]
-            .as_str()
-            .unwrap()
-            .contains("repair rebuild-db"),
+        err["message"].as_str().unwrap().contains("repair all"),
         "guidance names the recovery command: {err}"
     );
 }
@@ -9020,7 +9297,7 @@ fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
                 .as_str()
                 .unwrap()
                 .contains("restore the discarded"),
-        "guidance names object restore / re-index (NOT `repair rebuild-db` alone): {err}"
+        "guidance names object restore / re-index (not a derived-index rebuild alone): {err}"
     );
 }
 
@@ -9902,7 +10179,7 @@ fn r18_4_partial_store_corruption_entry_carries_recovery_hint() {
     assert_eq!(excluded[0]["reason"], "store_corrupt");
     let recovery = excluded[0]["recovery"].as_str().unwrap_or_default();
     assert!(
-        recovery.contains("store_corrupt") && recovery.contains("repair rebuild-db"),
+        recovery.contains("store_corrupt") && recovery.contains("repair all"),
         "the partial-exclusion entry must carry the store_corrupt recovery hint: {search}"
     );
 }
