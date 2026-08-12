@@ -25,6 +25,7 @@ toml.workspace = true
 rusqlite.workspace = true
 tempfile = "3"
 thiserror.workspace = true
+unicode-normalization.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

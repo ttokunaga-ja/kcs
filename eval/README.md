@@ -28,6 +28,8 @@
 | `test_run_eval.py` | Python oracle の独立テストと Rust evaluator/generator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
 | `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
 | `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
+| `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
+| `run_baseline.py` | 歴史的/reference runner。新規の baseline 判定は Rust `kio-eval benchmark baseline` が正本 |
 | `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
@@ -105,6 +107,31 @@ directory / scope 数に上限を設ける。検索 subprocess は fixture XDG s
 synthetic M3-1 18 問を再測定し、Q_hard 8 問と合算した 26 問 / 21 hit gate を report に
 記録する。外部の結果 artifact は受け付けない。指定なしの Q_hard-only 実行は evidence-only
 であり、acceptance success にはならない。
+
+## fixture-B baseline 比較
+
+fixture-B の24問は Q_hard 8問 + synthetic M3-1 18問の26/21 gateとは別の、Spotlight/rga
+比較だけの凍結母集団である。まず `.kio` を除く indexed/pristine source が p01..p20 で等価な
+ことを安全に束縛し、その attestation を測定に渡す。
+
+```bash
+target/release/kio-eval benchmark baseline-attest \
+  --fixture-root /private/tmp/kio-fixture-run --baseline-corpus /path/to/pristine \
+  --out /tmp/kio-fixture-b-attestation.json
+target/release/kio-eval benchmark baseline \
+  --fixture-root /private/tmp/kio-fixture-run --baseline-corpus /path/to/pristine \
+  --attestation /tmp/kio-fixture-b-attestation.json --bin target/release/kio --out /tmp/kio-baseline.json
+```
+
+Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
+新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
+
+比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
+入力に使うため、可変な public corpus path を再オープンしない。`kio` と `rga` は検査済み regular executable
+の private snapshot に束縛する。macOS の `mdfind` はコピー実行を許さない system tool のため、例外として
+正確な `/usr/bin/mdfind` のみを直接実行する。その場合も capability preflight、実体 digest の束縛、および
+各 query 後の再照合を必須にする。比較器の欠落・preflight failure・予期しない `mdfind` failure、または
+`rga` の 0/1 以外の終了は、miss として margin を有利にせず測定を block する。
 
 ## シナリオと評価コーパスの対応 (docs/09 §4)
 
@@ -255,10 +282,13 @@ Rust の `kio-eval benchmark scale` は release binary・manifest・保存済み
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
 主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
-両方の生標本とp50/p95/p99を保存する。M3-1の `< 5秒` 判定は
+両方の生標本とp50/p95/p99を保存する。full の acceptance は M3-1 の `< 5秒` と
+M3-2/M3-3 の `< 7秒` を全て判定する（tiny は pass fields を出さない）。M3-1の `< 5秒` 判定は
 **high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
 (`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
-編集・rename・deleteを含まないため、結果は **execution-path-only** であり正式な履歴性能値ではない。
+編集・rename・deleteを含まないため、結果は **execution-path-only** であり、履歴データの品質・母集団の
+代表性を示す正式な履歴性能値ではない。ただし selected execution path に対する full Scale の合否契約には、
+両シナリオの `< 7秒` p95 を含める。
 
 ### このfixtureで証明しないもの
 

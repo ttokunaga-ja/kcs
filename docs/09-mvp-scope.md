@@ -227,6 +227,15 @@ report は測定値であり、M3-1 の 26 問 / 21 hit 合算判定には `--sy
 同一実行内で再測定された frozen synthetic M3-1 18 問が必要である。外部結果 artifact は
 受け付けない。
 
+Spotlight/rga との baseline 比較は、Q_hard 8 問や synthetic M3-1 18 問とは混同しない
+別の凍結母集団 `eval/golden-queries-fixture-b.jsonl`（hard1/2/3 各8、24問、
+`sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45`）で行う。
+正本は Rust の `kio-eval benchmark baseline` である。実行前に
+`kio-eval benchmark baseline-attest` が indexed fixture と `.kio` を除いた pristine
+tree の同値性、p01..p20、golden を束縛する attestation を生成する。Python
+`eval/run_baseline.py` は歴史的な reference であり、新規判定の正本ではない。保存済み JSON は
+計測証拠ではなく、実測の pass を主張しない。
+
 ## 4.2 シナリオ凍結規律
 
 Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-3 完了までシナリオを動かさない。例外: 物理的に実装不可能と判明した場合のみ本書で撤回 + 代替採用。**一回限りの例外**: M3-1 の Q_hard を §4.1 の「20 問以上」へ増補する**追加のみ**、**Step 3 着手前**に限り認める (既存問の差し替えは不可 — 増補後に再凍結し、以後この例外は消滅する)。この増補に伴う #5 行の件数・digest 追記は本例外の完遂手続きであり、§6.2 のドキュメント凍結の対象外とする。

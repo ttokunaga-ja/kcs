@@ -27,7 +27,7 @@ use kio_eval::{
     manifest::{
         load_corpus_manifest, load_golden_queries, load_history_manifest, Scenario, SCOPES,
     },
-    qhard::{self, QhardOptions},
+    qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
     resolver::{validate_query, CorpusModel, Resolver},
     runner::{
         assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
@@ -87,6 +87,38 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum BenchmarkCommands {
+    /// Attest matching indexed and pristine fixture-B trees before measurement.
+    BaselineAttest {
+        #[arg(long, default_value = "eval/golden-queries-fixture-b.jsonl")]
+        golden: PathBuf,
+        #[arg(long)]
+        fixture_root: PathBuf,
+        #[arg(long)]
+        baseline_corpus: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Compare Kio with Spotlight and ripgrep-all on frozen fixture-B.
+    Baseline {
+        #[arg(long, default_value = "eval/golden-queries-fixture-b.jsonl")]
+        golden: PathBuf,
+        #[arg(long)]
+        fixture_root: PathBuf,
+        #[arg(long)]
+        baseline_corpus: PathBuf,
+        #[arg(long)]
+        attestation: PathBuf,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long, default_value = "mdfind")]
+        mdfind: PathBuf,
+        #[arg(long, default_value = "rga")]
+        rga: PathBuf,
+        #[arg(long)]
+        online_query: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Run the 20-scope scale search measurement lane.
     Scale {
         #[arg(long)]
@@ -550,6 +582,58 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
         return match command {
             Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
             Commands::Benchmark { command } => match command {
+                BenchmarkCommands::BaselineAttest {
+                    golden,
+                    fixture_root,
+                    baseline_corpus,
+                    out,
+                } => {
+                    let bytes = qhard::generate_baseline_attestation(BaselineAttestOptions {
+                        golden: golden.clone(),
+                        fixture_root: fixture_root.clone(),
+                        baseline_corpus: baseline_corpus.clone(),
+                    })
+                    .map_err(|e| AppError::Input(e.to_string()))?;
+                    qhard::write_baseline_attestation(out, fixture_root, baseline_corpus, &bytes)
+                        .map_err(|e| AppError::Input(e.to_string()))?;
+                    Ok(ExitCode::Success)
+                }
+                BenchmarkCommands::Baseline {
+                    golden,
+                    fixture_root,
+                    baseline_corpus,
+                    attestation,
+                    bin,
+                    mdfind,
+                    rga,
+                    online_query,
+                    out,
+                } => {
+                    let report = qhard::run_baseline(BaselineOptions {
+                        golden: golden.clone(),
+                        fixture_root: fixture_root.clone(),
+                        baseline_corpus: baseline_corpus.clone(),
+                        attestation: Some(attestation.clone()),
+                        bin: bin.clone(),
+                        mdfind: mdfind.clone(),
+                        rga: rga.clone(),
+                        online_query: *online_query,
+                    })
+                    .map_err(|e| AppError::Input(e.to_string()))?;
+                    let rendered = serde_json::to_vec_pretty(&report)
+                        .map_err(|e| AppError::Input(e.to_string()))?;
+                    if let Some(path) = out {
+                        qhard::write_baseline_report(path, fixture_root, baseline_corpus, &report)
+                            .map_err(|e| AppError::Input(e.to_string()))?;
+                    } else {
+                        println!("{}", String::from_utf8_lossy(&rendered));
+                    }
+                    Ok(if report.acceptance_passed() {
+                        ExitCode::Success
+                    } else {
+                        ExitCode::Failure
+                    })
+                }
                 BenchmarkCommands::Scale {
                     corpus,
                     manifest,
