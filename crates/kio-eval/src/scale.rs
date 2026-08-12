@@ -4,7 +4,7 @@
 //! The constants below are the frozen `scale_fixture_spec.py` contract.
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::BTreeSet,
     env,
@@ -22,6 +22,7 @@ use kio_core::cas::hash_bytes;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::runner::{run_bounded_command, BoundedProcessOptions};
@@ -119,9 +120,15 @@ const MAX_METRICS_DELTA_BYTES: u64 = 64 * 1024;
 const MAX_METRIC_LINE_BYTES: u64 = 32 * 1024;
 const MAX_REPORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OWNER_BYTES: u64 = 64 * 1024;
-const MAX_SNAPSHOT_FILE_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_SNAPSHOT_ENTRIES: usize = 250_000;
+// The full frozen fixture contains a ~1.5 GiB SQLite aggregate and is about
+// 4.8 GiB in total.  These remain explicit denial-of-service bounds while
+// allowing that known full measurement corpus plus modest SQLite growth.
+const MAX_SNAPSHOT_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// The frozen full fixture has 317,337 entries (including its indexed SQLite
+// tree).  Keep a finite margin without accepting unbounded directory trees.
+const MAX_SNAPSHOT_ENTRIES: usize = 400_000;
+const SNAPSHOT_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_WARMUPS: usize = 5;
 const MAX_SAMPLES: usize = 100;
 const RESULT_LIMIT: usize = 10;
@@ -341,6 +348,101 @@ fn read_regular_at(
     Ok(bytes)
 }
 
+/// Open one retained-directory entry without following links and verify that
+/// the opened descriptor still names the same bounded regular file.
+fn open_regular_at(
+    parent: &fs::File,
+    name: &str,
+    maximum: u64,
+    label: &str,
+) -> Result<(fs::File, u64), ScaleError> {
+    let before = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)
+        .map_err(|e| ScaleError::Input(format!("{label} is missing: {e}")))?;
+    if !before.file_type().is_file() || before.len() > maximum {
+        return Err(ScaleError::Input(format!(
+            "{label} must be a bounded regular file"
+        )));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let file = cap_fs::open(parent, Path::new(name), &options).map_err(|e| {
+        ScaleError::Input(format!("cannot open {label} without following links: {e}"))
+    })?;
+    let opened = cap_fs::Metadata::from_file(&file)
+        .map_err(|e| ScaleError::Input(format!("cannot inspect {label}: {e}")))?;
+    let after = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)
+        .map_err(|e| ScaleError::Input(format!("cannot recheck {label}: {e}")))?;
+    if !opened.file_type().is_file()
+        || opened.len() > maximum
+        || !same_file(&before, &opened)
+        || !same_file(&opened, &after)
+    {
+        return Err(ScaleError::Input(format!("{label} changed while opening")));
+    }
+    Ok((file, opened.len()))
+}
+
+/// Consume a descriptor-bound regular file with fixed-size buffers.  Recheck
+/// the descriptor and retained directory entry after consumption so a rename,
+/// replacement, truncation, or append cannot silently enter the snapshot.
+fn stream_open_regular_at(
+    parent: &fs::File,
+    name: &str,
+    mut file: fs::File,
+    expected_len: u64,
+    label: &str,
+    mut consume: impl FnMut(&[u8]) -> Result<(), ScaleError>,
+) -> Result<u64, ScaleError> {
+    let mut buffer = [0_u8; SNAPSHOT_BUFFER_BYTES];
+    let buffer_len = buffer.len();
+    let mut consumed = 0_u64;
+    while consumed < expected_len {
+        let remaining = expected_len - consumed;
+        let requested = usize::try_from(remaining.min(buffer_len as u64))
+            .expect("buffer length always fits usize");
+        let read = file
+            .read(&mut buffer[..requested])
+            .map_err(|e| ScaleError::Input(format!("cannot read {label}: {e}")))?;
+        if read == 0 {
+            return Err(ScaleError::Input(format!("{label} changed while reading")));
+        }
+        consume(&buffer[..read])?;
+        consumed += read as u64;
+    }
+    let mut extra = [0_u8; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|e| ScaleError::Input(format!("cannot recheck {label}: {e}")))?
+        != 0
+    {
+        return Err(ScaleError::Input(format!("{label} changed while reading")));
+    }
+    let opened_after = cap_fs::Metadata::from_file(&file)
+        .map_err(|e| ScaleError::Input(format!("cannot inspect {label}: {e}")))?;
+    let named_after = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)
+        .map_err(|e| ScaleError::Input(format!("cannot recheck {label}: {e}")))?;
+    if opened_after.len() != expected_len
+        || !same_file(&opened_after, &named_after)
+        || named_after.len() != expected_len
+    {
+        return Err(ScaleError::Input(format!("{label} changed while reading")));
+    }
+    Ok(consumed)
+}
+
+fn stream_regular_at(
+    parent: &fs::File,
+    name: &str,
+    maximum: u64,
+    label: &str,
+    consume: impl FnMut(&[u8]) -> Result<(), ScaleError>,
+) -> Result<u64, ScaleError> {
+    let (file, expected_len) = open_regular_at(parent, name, maximum, label)?;
+    stream_open_regular_at(parent, name, file, expected_len, label, consume)
+}
+
 #[cfg(unix)]
 fn open_sqlite_at(
     parent: &fs::File,
@@ -375,9 +477,18 @@ fn open_sqlite_at(
                 )))
             }
             Ok(_) => {
-                let bytes = read_regular_at(parent, &source, MAX_SNAPSHOT_FILE_BYTES, label)?;
-                fs::write(temp.path().join(&source), bytes).map_err(|e| {
-                    ScaleError::Input(format!("cannot write private {label} snapshot: {e}"))
+                let target = temp.path().join(&source);
+                let mut output = fs::OpenOptions::new();
+                output.write(true).create_new(true);
+                #[cfg(unix)]
+                output.mode(0o600);
+                let mut output = output.open(&target).map_err(|e| {
+                    ScaleError::Input(format!("cannot create private {label} snapshot: {e}"))
+                })?;
+                stream_regular_at(parent, &source, MAX_SNAPSHOT_FILE_BYTES, label, |chunk| {
+                    output.write_all(chunk).map_err(|e| {
+                        ScaleError::Input(format!("cannot write private {label} snapshot: {e}"))
+                    })
                 })?;
             }
         }
@@ -503,13 +614,17 @@ fn copy_snapshot_tree(
             let child = open_dir_at(source, &name, "fixture snapshot directory")?;
             copy_snapshot_tree(&child, &target, budget)?;
         } else if ty.is_file() {
-            let data = read_regular_at(
+            // Reserve against the descriptor-bound length, before creating or
+            // writing the target.  A pathname re-stat before a separate open
+            // could otherwise allow an intervening growth to exceed the
+            // aggregate cap transiently.
+            let (file, length) = open_regular_at(
                 source,
                 &name,
                 MAX_SNAPSHOT_FILE_BYTES,
                 "fixture snapshot file",
             )?;
-            budget.bytes = budget.bytes.checked_add(data.len() as u64).ok_or_else(|| {
+            budget.bytes = budget.bytes.checked_add(length).ok_or_else(|| {
                 ScaleError::Input("fixture snapshot byte counter overflow".into())
             })?;
             if budget.bytes > MAX_SNAPSHOT_BYTES {
@@ -517,9 +632,30 @@ fn copy_snapshot_tree(
                     "fixture snapshot exceeds byte bound".into(),
                 ));
             }
-            fs::write(&target, data).map_err(|e| {
-                ScaleError::Input(format!("cannot write private fixture snapshot: {e}"))
+            let mut output = fs::OpenOptions::new();
+            output.write(true).create_new(true);
+            #[cfg(unix)]
+            output.mode(0o600);
+            let mut output = output.open(&target).map_err(|e| {
+                ScaleError::Input(format!("cannot create private fixture snapshot: {e}"))
             })?;
+            let copied = stream_open_regular_at(
+                source,
+                &name,
+                file,
+                length,
+                "fixture snapshot file",
+                |chunk| {
+                    output.write_all(chunk).map_err(|e| {
+                        ScaleError::Input(format!("cannot write private fixture snapshot: {e}"))
+                    })
+                },
+            )?;
+            if copied != length {
+                return Err(ScaleError::Input(
+                    "fixture snapshot file changed while copying".into(),
+                ));
+            }
             #[cfg(unix)]
             fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).map_err(|e| {
                 ScaleError::Input(format!("cannot secure private fixture snapshot file: {e}"))
@@ -537,10 +673,25 @@ fn copy_snapshot_tree(
 /// intentionally covers the SQLite files/WAL, registry, device state, and
 /// every source byte, rather than only manifest-declared documents.
 fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
+    struct TreeDigest {
+        digest: Sha256,
+        has_record: bool,
+    }
+
+    impl TreeDigest {
+        fn record(&mut self, value: &str) {
+            if self.has_record {
+                self.digest.update(b"\n");
+            }
+            self.digest.update(value.as_bytes());
+            self.has_record = true;
+        }
+    }
+
     fn walk(
         directory: &fs::File,
         prefix: &Path,
-        records: &mut Vec<String>,
+        digest: &mut TreeDigest,
         budget: &mut SnapshotBudget,
     ) -> Result<(), ScaleError> {
         let mut entries = Vec::new();
@@ -570,21 +721,21 @@ fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
                 .file_type()
                 .map_err(|e| ScaleError::Input(format!("cannot inspect retained fixture: {e}")))?;
             if ty.is_dir() {
-                records.push(format!("D:{}", relative.display()));
+                digest.record(&format!("D:{}", relative.display()));
                 walk(
                     &open_dir_at(directory, &name, "fixture digest directory")?,
                     &relative,
-                    records,
+                    digest,
                     budget,
                 )?;
             } else if ty.is_file() {
-                let data = read_regular_at(
+                let (file, length) = open_regular_at(
                     directory,
                     &name,
                     MAX_SNAPSHOT_FILE_BYTES,
-                    "fixture digest file",
+                    &format!("fixture digest file {}", relative.display()),
                 )?;
-                budget.bytes = budget.bytes.checked_add(data.len() as u64).ok_or_else(|| {
+                budget.bytes = budget.bytes.checked_add(length).ok_or_else(|| {
                     ScaleError::Input("fixture digest byte counter overflow".into())
                 })?;
                 if budget.bytes > MAX_SNAPSHOT_BYTES {
@@ -592,7 +743,20 @@ fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
                         "fixture digest exceeds byte bound".into(),
                     ));
                 }
-                records.push(format!("F:{}:{}", relative.display(), hash_bytes(&data)));
+                let mut hasher = Sha256::new();
+                stream_open_regular_at(
+                    directory,
+                    &name,
+                    file,
+                    length,
+                    &format!("fixture digest file {}", relative.display()),
+                    |chunk| {
+                        hasher.update(chunk);
+                        Ok(())
+                    },
+                )?;
+                let file_digest = format!("sha256:{:x}", hasher.finalize());
+                digest.record(&format!("F:{}:{file_digest}", relative.display()));
             } else {
                 return Err(ScaleError::Input(
                     "fixture digest rejects links and special files".into(),
@@ -601,14 +765,17 @@ fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
         }
         Ok(())
     }
-    let mut records = Vec::new();
+    let mut digest = TreeDigest {
+        digest: Sha256::new(),
+        has_record: false,
+    };
     walk(
         source,
         Path::new(""),
-        &mut records,
+        &mut digest,
         &mut SnapshotBudget::default(),
     )?;
-    Ok(hash_bytes(records.join("\n").as_bytes()))
+    Ok(format!("sha256:{:x}", digest.digest.finalize()))
 }
 
 fn snapshot_measurement_inputs(
@@ -2545,6 +2712,29 @@ mod tests {
         let before = snapshot_tree_digest(&handle).unwrap();
         fs::write(root.path().join("payload"), b"after").unwrap();
         assert_ne!(before, snapshot_tree_digest(&handle).unwrap());
+    }
+
+    #[test]
+    fn descriptor_bound_streaming_digest_matches_and_respects_the_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = vec![0x5a; SNAPSHOT_BUFFER_BYTES * 3 + 17];
+        fs::write(root.path().join("payload"), &payload).unwrap();
+        let handle = cap_fs::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+        let (file, length) =
+            open_regular_at(&handle, "payload", payload.len() as u64, "test payload").unwrap();
+        let mut digest = Sha256::new();
+        stream_open_regular_at(&handle, "payload", file, length, "test payload", |chunk| {
+            digest.update(chunk);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            format!("sha256:{:x}", digest.finalize()),
+            hash_bytes(&payload)
+        );
+        assert!(
+            open_regular_at(&handle, "payload", payload.len() as u64 - 1, "test payload").is_err()
+        );
     }
 
     #[test]
