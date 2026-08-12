@@ -22569,8 +22569,19 @@ fn normalized_output_ref(
     tool_profile_hash: &str,
     gen: u64,
 ) -> String {
+    // The child-index process keeps its operational store at `.` after
+    // entering a retained `.kio` descriptor.  A task reference is durable,
+    // however, and must remain valid when that child is later opened through
+    // its ordinary public scope path.  Persist the discovery-time canonical
+    // `.kio` spelling rather than the descriptor-local `./objects/...` alias.
+    // All actual child-store I/O continues to use `repo.kio_dir()`.
+    let output_root = if repo.kio_dir() == Path::new(".") {
+        repo.canonical_root().join(".kio")
+    } else {
+        repo.kio_dir().to_path_buf()
+    };
     kio_pipeline::markdownize::normalized_instance_dir(
-        repo.kio_dir(),
+        output_root,
         raw_hash,
         tool_profile_hash,
         gen,

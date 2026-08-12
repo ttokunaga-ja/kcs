@@ -618,14 +618,22 @@ pub fn validate_task_output_ref(
     // the generated instance. Reconstruct its sole canonical spelling so
     // aliases such as trailing separators, doubled separators, or cwd-relative
     // paths cannot make a completed task invisible to `done_output_for`.
-    let canonical = crate::markdownize::normalized_instance_dir(
-        kio_dir.as_ref(),
-        &descriptor.input_hash,
-        &tool_profile_hash,
-        gen,
-    );
-    if canonical.to_str() != Some(descriptor.output_ref.as_str()) {
-        return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
+    // Ordinary stores retain the exact absolute spelling as their durable
+    // identity. A descriptor-bound child deliberately persists the
+    // discovery-time canonical `.kio` path instead of its operational `.`
+    // path; the structural checks above prove that it names the same retained
+    // `objects/normalized_units` subtree, while comparing it to
+    // `normalized_instance_dir(".", ..)` would falsely reject it as an alias.
+    if !bound_relative_root {
+        let canonical = crate::markdownize::normalized_instance_dir(
+            kio_dir.as_ref(),
+            &descriptor.input_hash,
+            &tool_profile_hash,
+            gen,
+        );
+        if canonical.to_str() != Some(descriptor.output_ref.as_str()) {
+            return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
+        }
     }
 
     // Validate every existing component from `.kio` downward. In particular,
