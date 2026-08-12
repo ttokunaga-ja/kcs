@@ -6,7 +6,10 @@ use kio_core::cas::{fanout_path, hash_bytes, ContentObjectKind, ObjectKind, Obje
 use kio_core::dag::CommitType;
 use kio_core::purge::{PurgeReason, PurgeState};
 use kio_core::scope::Repository;
-use kio_pipeline::markdownize::{load_validated_normalized_instance, persist_normalized_instance};
+use kio_pipeline::markdownize::{
+    load_validated_normalized_instance, persist_normalized_instance, NormalizedInstanceManifest,
+    UnitStatus,
+};
 use kio_pipeline::task::TaskStore;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -137,6 +140,73 @@ fn current_raw_for(dir: &TempDir, path: &str) -> String {
         .find(|entry| entry.path == path)
         .unwrap()
         .raw_hash
+}
+
+fn normalized_unit_pins_for(dir: &TempDir, path: &str) -> Vec<String> {
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let commit = repo.read_commit(&head).unwrap();
+    let entry = repo
+        .read_tree(&commit.tree)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .unwrap();
+    let normalize = entry.normalize.unwrap();
+    let manifest_bytes = ObjectStore::new(repo.kio_dir())
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    assert_eq!(hash_bytes(&manifest_bytes), normalize.manifest_hash);
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest
+        .units
+        .into_iter()
+        .filter(|entry| entry.status == UnitStatus::Done)
+        .map(|entry| entry.unit_object_hash.unwrap())
+        .collect()
+}
+
+fn tree_manifest_hash_for(dir: &TempDir, path: &str) -> String {
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let commit = repo.read_commit(&head).unwrap();
+    repo.read_tree(&commit.tree)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .unwrap()
+        .normalize
+        .unwrap()
+        .manifest_hash
+}
+
+fn current_manifest_hash_for_raw(dir: &TempDir, raw_hash: &str) -> String {
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let commit = repo.read_commit(&head).unwrap();
+    let normalize = repo
+        .read_tree(&commit.tree)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.raw_hash == raw_hash)
+        .unwrap()
+        .normalize
+        .unwrap();
+    let instance = load_validated_normalized_instance(
+        repo.kio_dir(),
+        raw_hash,
+        &normalize.tool_profile_hash,
+        normalize.gen,
+    )
+    .unwrap();
+    kio_core::cas::hash_json(&serde_json::to_value(instance.manifest).unwrap()).unwrap()
 }
 
 fn tombstone_path(kio_dir: &Path, raw_hash: &str) -> PathBuf {
@@ -340,7 +410,16 @@ fn ct4_purge_typed_path_preview_warns_on_live_working_copy_and_purges_all_versio
 fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     let fixture = indexed_fixture();
     let kio_dir = fixture.dir.path().join(".kio");
+    let historical_manifest_hash = tree_manifest_hash_for(&fixture.dir, "doc.md");
     let image_hash = add_image_reference(&fixture.dir, &fixture.raw_hash, b"private image bytes");
+    let current_manifest_hash = current_manifest_hash_for_raw(&fixture.dir, &fixture.raw_hash);
+    assert_ne!(historical_manifest_hash, current_manifest_hash);
+    for hash in [&historical_manifest_hash, &current_manifest_hash] {
+        assert!(ObjectStore::new(&kio_dir)
+            .content_path(ContentObjectKind::Manifest, hash)
+            .unwrap()
+            .exists());
+    }
     let image_path = fanout_path(kio_dir.join("objects/image"), &image_hash).unwrap();
 
     fs::write(
@@ -412,6 +491,12 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
             >= 1
     );
     assert_eq!(output["deleted_counts"]["image_objects"], 1);
+    for hash in [&historical_manifest_hash, &current_manifest_hash] {
+        assert!(!ObjectStore::new(&kio_dir)
+            .content_path(ContentObjectKind::Manifest, hash)
+            .unwrap()
+            .exists());
+    }
     assert!(output["deleted_counts"]["tasks"].as_u64().unwrap() >= 1);
     assert!(output["log_files_scrubbed"].as_u64().unwrap() >= 2);
     let bounded_report = output.to_string();
@@ -512,6 +597,263 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
         fs::read(tombstone_path(&kio_dir, &fixture.raw_hash)).unwrap(),
         tombstone
     );
+}
+
+#[test]
+fn ct4_purge_deletes_target_immutable_normalized_unit_objects() {
+    let fixture = indexed_fixture();
+    let kio_dir = fixture.dir.path().join(".kio");
+    let unit_hashes = normalized_unit_pins_for(&fixture.dir, "doc.md");
+    assert!(!unit_hashes.is_empty());
+    for hash in &unit_hashes {
+        assert!(ObjectStore::new(&kio_dir)
+            .content_path(ContentObjectKind::NormalizedUnit, hash)
+            .unwrap()
+            .exists());
+    }
+
+    fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
+    let output = json_success(
+        &fixture.dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &fixture.raw_hash,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        output["deleted_counts"]["normalized_unit_objects"],
+        unit_hashes.len()
+    );
+    for hash in &unit_hashes {
+        assert!(!ObjectStore::new(&kio_dir)
+            .content_path(ContentObjectKind::NormalizedUnit, hash)
+            .unwrap()
+            .exists());
+    }
+}
+
+#[test]
+fn ct4_purge_preserves_other_raws_immutable_normalized_unit_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.md"), "target-only secret").unwrap();
+    fs::write(dir.path().join("survivor.md"), "survivor-only text").unwrap();
+    json_success(&dir, &["init"]);
+    json_success(&dir, &["index", "--offline", "--approve"]);
+    let raw_hash = current_raw_for(&dir, "target.md");
+    let target_units = normalized_unit_pins_for(&dir, "target.md");
+    let survivor_units = normalized_unit_pins_for(&dir, "survivor.md");
+    let kio_dir = dir.path().join(".kio");
+
+    fs::remove_file(dir.path().join("target.md")).unwrap();
+    json_success(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &raw_hash,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+    );
+    let store = ObjectStore::new(&kio_dir);
+    for hash in target_units {
+        assert!(!store
+            .content_path(ContentObjectKind::NormalizedUnit, &hash)
+            .unwrap()
+            .exists());
+    }
+    for hash in survivor_units {
+        assert!(store
+            .content_path(ContentObjectKind::NormalizedUnit, &hash)
+            .unwrap()
+            .exists());
+    }
+}
+
+#[test]
+fn ct4_purge_rejects_forged_target_ledger_row_before_deleting_survivor_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("target.md"), "target-only secret").unwrap();
+    fs::write(dir.path().join("survivor.md"), "unrelated survivor content").unwrap();
+    json_success(&dir, &["init"]);
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    let target_raw = current_raw_for(&dir, "target.md");
+    let survivor_raw = current_raw_for(&dir, "survivor.md");
+    let survivor_chunk = json_success(
+        &dir,
+        &["search", "unrelated survivor content", "--mode", "text"],
+    )["results"][0]["evidence_pointer"]["chunk_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let repo = Repository::open(dir.path()).unwrap();
+    let ledger_path = repo.kio_dir().join("index/chunks.jsonl");
+    let mut forged = false;
+    let rewritten = fs::read_to_string(&ledger_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            if row["raw_hash"] == survivor_raw && row["chunk_id"] == survivor_chunk {
+                row["raw_hash"] = json!(target_raw);
+                forged = true;
+            }
+            serde_json::to_string(&row).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(forged, "fixture must contain the survivor chunk ledger row");
+    fs::write(&ledger_path, format!("{rewritten}\n")).unwrap();
+
+    fs::remove_file(dir.path().join("target.md")).unwrap();
+    let error = json_failure(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &target_raw,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+        4,
+    );
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+    assert!(ObjectStore::new(repo.kio_dir())
+        .chunk_path(&survivor_chunk)
+        .unwrap()
+        .exists());
+    assert!(ObjectStore::new(repo.kio_dir())
+        .object_path(ObjectKind::Raw, &target_raw)
+        .unwrap()
+        .exists());
+    assert!(PurgeState::new(repo.kio_dir())
+        .read_tombstone(&target_raw)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn ct4_purge_fails_closed_on_cross_raw_reachable_manifest_reuse() {
+    // The target binding is visited first.  A corrupt survivor binding then
+    // reuses its manifest hash: de-duplicating before validating each binding
+    // used to skip that second tuple check and could delete content still
+    // named by the surviving tree.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a-target.md"), "target-only secret").unwrap();
+    fs::write(dir.path().join("z-survivor.md"), "survivor-only text").unwrap();
+    json_success(&dir, &["init"]);
+    json_success(&dir, &["index", "--offline", "--approve"]);
+
+    let target_raw = current_raw_for(&dir, "a-target.md");
+    let target_manifest = tree_manifest_hash_for(&dir, "a-target.md");
+    let target_units = normalized_unit_pins_for(&dir, "a-target.md");
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let mut forged_tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let survivor = forged_tree
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == "z-survivor.md")
+        .unwrap();
+    survivor.normalize.as_mut().unwrap().manifest_hash = target_manifest.clone();
+    let store = ObjectStore::new(repo.kio_dir());
+    let (tree_hash, _) = store
+        .write_json(
+            ObjectKind::Tree,
+            &serde_json::to_value(&forged_tree).unwrap(),
+        )
+        .unwrap();
+    let mut forged_commit = repo.read_commit(&head).unwrap();
+    forged_commit.tree = tree_hash;
+    forged_commit.parents = vec![head];
+    forged_commit.message = "test: forged cross-raw manifest binding".to_owned();
+    let (commit_hash, _) = store
+        .write_json(
+            ObjectKind::Commit,
+            &serde_json::to_value(&forged_commit).unwrap(),
+        )
+        .unwrap();
+    fs::write(repo.kio_dir().join("refs/heads/main"), &commit_hash).unwrap();
+    fs::write(repo.kio_dir().join("HEAD"), &commit_hash).unwrap();
+
+    fs::remove_file(dir.path().join("a-target.md")).unwrap();
+    let error = json_failure(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &target_raw,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+        4,
+    );
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+    assert!(store
+        .content_path(ContentObjectKind::Manifest, &target_manifest)
+        .unwrap()
+        .exists());
+    for unit_hash in target_units {
+        assert!(store
+            .content_path(ContentObjectKind::NormalizedUnit, &unit_hash)
+            .unwrap()
+            .exists());
+    }
+    assert!(store
+        .object_path(ObjectKind::Raw, &target_raw)
+        .unwrap()
+        .exists());
+    assert!(PurgeState::new(repo.kio_dir())
+        .read_tombstone(&target_raw)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn ct4_purge_fails_closed_when_a_target_manifest_pinned_unit_is_missing() {
+    let fixture = indexed_fixture();
+    let kio_dir = fixture.dir.path().join(".kio");
+    let unit_hash = normalized_unit_pins_for(&fixture.dir, "doc.md")
+        .into_iter()
+        .next()
+        .unwrap();
+    let unit_path = ObjectStore::new(&kio_dir)
+        .content_path(ContentObjectKind::NormalizedUnit, &unit_hash)
+        .unwrap();
+    fs::remove_file(&unit_path).unwrap();
+    fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
+
+    let error = json_failure(
+        &fixture.dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &fixture.raw_hash,
+            "--reason",
+            "privacy",
+            "--yes",
+        ],
+        4,
+    );
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+    assert!(ObjectStore::new(&kio_dir)
+        .object_path(ObjectKind::Raw, &fixture.raw_hash)
+        .unwrap()
+        .exists());
+    assert!(PurgeState::new(&kio_dir)
+        .read_tombstone(&fixture.raw_hash)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

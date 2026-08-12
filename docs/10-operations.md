@@ -389,17 +389,20 @@ VCS リポジトリ root   既定で子 .kio を生成しない。既存子 .kio
 
 # 5. 物理レイアウト統一
 
-内部正本は `.kio/objects/normalized_units/` (unit object 群 + manifest) に統一する
-([03-data-model.md §2.1](03-data-model.md))。全文 Markdown は unit を決定論的に結合した
+内部正本は immutable manifest CAS と `.kio/objects/normalized_unit_objects/` (full NormalizedUnitObject CAS)
+に統一する ([03-data-model.md §2.1](03-data-model.md))。path-named `.kio/objects/normalized_units/` は current
+working projection であり、全文 Markdown は unit を決定論的に結合した
 view (再生成可能な cache) であり正本ではない。
 
 過去メモにある `.kio/normalized/` は、bootstrap 時の簡略表記または仮想表示パスとして扱う。実装・契約ドキュメントでは、hash ベースの object store を正とする。
 
 ```text
 truth:
-  .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
+  .kio/objects/manifests/ab/cd/<manifest64>
+  .kio/objects/normalized_unit_objects/ab/cd/<unit-object64>
 
 materialized view (cache):
+  .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
   .kio/objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md
 
 virtual view:
@@ -515,22 +518,27 @@ retryability 規則で返す。いずれも冪等であり、2 回目は同じ�
 kio repair verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
+- `objects/` 配下の全 CAS object (raw / prepared / image / normalized_unit_object / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
   保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
   と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
   ([03-data-model.md §8.1](03-data-model.md))。**embedding も chunk と同じく content hash ではなく identity hash と照合する**
   — 保存 key は「この vector が何の vector か」(target / profile / context) の hash であり、bytes の hash ではない。
   したがって「別の identity の下に置かれた object」は identity 再計算でしか検出できず、
   **vector 本体の bit flip は末尾の vector digest でしか検出できない** (保存 key は本体について何も言わない)
-- normalized の unit bytes は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
-  参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する。**manifest object
+- path-named normalized working projection の unit bytes は content hash を持たないため hash 検証対象外とし、
+  current loader が CAS から再生成できる cache とする。**manifest object
   (objects/manifests/ — [03-data-model.md §2.1](03-data-model.md)) は content-addressed であり再 hash 検証の対象**:
   各 tree entry の `normalize.manifest_hash` が実在する manifest object を指し、**かつ当該 manifest の
   (raw_hash, tool_profile_hash, gen) が entry 側と一致する**こと (hash が正しいだけの別 instance
   manifest への誤配線検出) (**tombstone / erase
   receipt が説明する purge 済み raw の entry を除く** — 下記 dead terminal 規則。purge は manifest object を
   削除するが tree は書き換えないため、この例外なしには正規 purge 直後の store が必ず corruption になる)、
-  HEAD tree の entry については作業コピー manifest.json の canonical JCS hash が一致することも検査する
+  manifest の各 done entry が required non-null `unit_object_hash` を持ち、当該 `normalized_unit_object` CAS の
+  JCS re-hash、full schema、unit_key / raw_hash / prepared_hash / tool_profile_hash / gen の manifest との一致を
+  検査する。failed entry は explicit null でなければならず、field 欠落・done null・failed non-null は
+  current-schema corruption として fail-closed にする。tree `manifest_hash` からこの closure を辿るため、
+  `--at` / historical rebuild / Evidence Pointer は mutable projection を参照しない。HEAD tree の entry については
+  作業コピー manifest.json の canonical JCS hash が一致することも検査する
   (不一致 = 破損ではなく「**未 finalize の進行状態**」として incomplete (exit 3) — manifest finalize と
   次回 snapshot の間のクラッシュ窓で正常に生じる。次回 index / batch resume が同期する。corruption と
   するのは manifest object 自体の再 hash 不一致のみ)
@@ -551,7 +559,7 @@ kio repair verify-objects
      (復元した raw object は GC 対象外、05-runtime.md §2.6)
 2. 復元手段なし
    → missing として errors.jsonl に KIO-E-STORE-CORRUPT-001 を記録し、
-     (normalized unit の done object 欠落も同様 — same-gen 再生成は行わない (unit object は
+     (normalized unit の done `unit_object_hash` CAS 欠落も同様 — same-gen 再生成は行わない (unit object は
       immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
       restore、または明示の新 gen (kio reindex --regenerate) で行う)
      影響を受ける commit hash の bounded 一覧と
@@ -641,7 +649,9 @@ manifest 進行状態・active な purge journal のいずれかが存在する�
 blocker の種別と対象 (intent_token または 4 組キー) を含め、次操作 (`kio batch resume` /
 `kio batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
 
-**purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
+**purge closure** は raw とその prepared / image / manifest / normalized_unit_object / chunk / embedding の
+到達 object、および current projection / view cache を含む。purge / verify の marker による dead-terminal
+説明も、この immutable unit-object closure に及ぶ。**purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
 `purged` **または `erased`** である各 raw_hash について `~/.cache/kio/open/<raw_hash digest64>/` の
 残存も検査し、存在すれば同じ locked repair の削除対象に含める ([06-cli-spec.md §1.1](06-cli-spec.md) の
 cache publish と起動直前検査の間の crash は、publish 済み cache を除去主体なしに残し得る —
@@ -1108,7 +1118,7 @@ canonical_text_hash              | (廃止)                               | rese
 canonical_hash                   | (廃止)                               | research/diff.md §17
 markdown_hash                    | (廃止)                               | research/diff.md §3
 Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | research/read_only.md §2
-.kio/normalized/<path>.md        | .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/ (正本) | research/kio.md §11
+.kio/normalized/<path>.md        | manifest CAS → normalized_unit_object CAS (正本。`normalized_units/` は current projection) | research/kio.md §11
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
 last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kio.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3

@@ -651,7 +651,7 @@ def _chunk_identity_hash(chunk):
     # PointerAttestor below reads and re-verifies) would silently mismatch here.
     identity_fields = (
         "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
-        "heading_path", "section_id", "byte_start", "byte_end",
+        "unit_content_hash", "heading_path", "section_id", "byte_start", "byte_end",
     )
     identity = {field: chunk[field] for field in identity_fields if field in chunk}
     return _hash_bytes(_canonical_json_bytes(identity))

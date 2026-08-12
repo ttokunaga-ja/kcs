@@ -57,7 +57,7 @@ Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `commit` | commit object の content hash (commit_hash, [03-data-model.md §8.1](03-data-model.md)) | append-only。GC (shallow 化) でも失われない |
 | `raw_hash` | 原文バイト列の identity | 移動・リネームで不変 |
 | `tool_profile_hash` | Markdownize Adapter capability の identity | tool 変更で別 chunk に飛ばない保証 |
-| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` から導出 (算出式は [03-data-model.md §8.1](03-data-model.md)) |
+| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` から導出。本文変更は分離し、同一本文の再取り込みは identity を維持 ([03-data-model.md §8.1](03-data-model.md)) |
 | `scope_id` | 正本 `.kio` の path 非依存 identity (`.kio/scope.json` 保持) | `.kio` の移動・export/import で不変 |
 
 ## 2.2 Optional フィールド
@@ -202,11 +202,16 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     `kio repair verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)。
     **(i)〜(iv) のいずれにも該当しない場合** (marker が無い・または active な erase receipt が
     あっても raw object が存在する場合を含む) は raw object が存在する通常状態であり、手順 6 へ進む
-6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決する。
+6.  tree entry の normalize.(tool_profile_hash, gen) と `manifest_hash` で normalized instance を解決する。
+    historical / `--at` / Evidence 解決は manifest CAS の該当 done entry の non-null `unit_object_hash` から
+    immutable NormalizedUnitObject CAS を読む。path-named `normalized_units/` の current body や、同 gen の
+    後から更新された最新 body を読む経路はない。
     `normalize` が存在する entry で gen が欠落する場合は current schema violation / corruption として
     fail-closed にする (gen=0 へ補う reader は置かない)。
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
-    chunk の unit_key が当該 manifest で status=done であることを検証する (unit_key は chunk_hash から chunk object の header を読み取って得る — 手順 7 の本文取り出しに先行する read-only 参照) — done でない unit の
+    chunk の unit_key が当該 manifest で status=done かつ non-null `unit_object_hash` を持つことを検証し、
+    当該 hash の NormalizedUnitObject CAS から exact body を得て、その Markdown hash が chunk object の
+    `unit_content_hash` と一致することを検証する (unit_key は chunk_hash から chunk object の header を読み取って得る — 手順 7 の本文取り出しに先行する read-only 参照) — done でない unit の
     chunk は当該 commit 時点に存在しない (same-gen retry の後着 chunk を過去 commit の証拠として
     返さない → not_found)。**v2/v3 tree ではさらに、chunk の publication と config association の
     introduction ([04-pipeline.md §4.1](04-pipeline.md)) が pointer の commit の ancestor-or-equal で

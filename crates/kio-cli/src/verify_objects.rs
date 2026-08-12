@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use kio_core::cas::{
-    hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError, ChunkObject,
-    ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    canonical_json_bytes, hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError,
+    ChunkObject, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitObject, TreeObject};
 use kio_core::portable::portable_tag_digest64;
@@ -17,8 +17,8 @@ use kio_core::purge::{
 use kio_core::scope::{names_jsonl_path, now_utc_seconds, Repository};
 use kio_core::{KioError, Result};
 use kio_pipeline::markdownize::{
-    load_validated_normalized_instance, normalized_instance_read_budget,
-    NormalizedInstanceIdentity, ValidatedNormalizedInstance,
+    load_validated_normalized_units_from_manifest, validate_normalized_instance,
+    NormalizedInstanceIdentity, NormalizedInstanceManifest, ValidatedNormalizedInstance,
 };
 use serde::Serialize;
 
@@ -28,6 +28,42 @@ const MAX_OBJECTS: usize = 1_000_000;
 const MAX_VERIFIED_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_FINDINGS: usize = 1_024;
 const MAX_AFFECTED_COMMITS: usize = 4_096;
+
+/// A normalized unit authenticated by a reachable manifest, indexed by the
+/// hash of its exact Markdown bytes. The manifest's immutable CAS pin is
+/// verified before this index is populated; the content hash is deliberately
+/// stable across non-content metadata changes such as `generated_at`.
+#[derive(Clone)]
+struct ValidatedNormalizedInstanceUnit {
+    raw_hash: String,
+    tool_profile_hash: String,
+    gen: u64,
+    unit: kio_pipeline::markdownize::NormalizedUnitObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkPinnedUnitError {
+    Unreachable,
+    IdentityMismatch,
+}
+
+fn exact_pinned_content_unit_for_chunk<'a>(
+    chunk: &ChunkObject,
+    reachable_units: &'a BTreeMap<String, Vec<ValidatedNormalizedInstanceUnit>>,
+) -> std::result::Result<&'a ValidatedNormalizedInstanceUnit, ChunkPinnedUnitError> {
+    let candidates = reachable_units
+        .get(&chunk.unit_content_hash)
+        .ok_or(ChunkPinnedUnitError::Unreachable)?;
+    candidates
+        .iter()
+        .find(|pinned_unit| {
+            pinned_unit.raw_hash == chunk.raw_hash
+                && pinned_unit.tool_profile_hash == chunk.tool_profile_hash
+                && pinned_unit.gen == chunk.gen
+                && pinned_unit.unit.unit_key == chunk.unit_key
+        })
+        .ok_or(ChunkPinnedUnitError::IdentityMismatch)
+}
 
 pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
     // B (2026-07-24): operand shape and `--strict` are declared on
@@ -406,6 +442,9 @@ pub struct CheckedObjects {
     pub trees: u64,
     pub commits: u64,
     pub normalized_instances: u64,
+    /// Immutable, content-addressed normalized unit objects verified from
+    /// `objects/normalized_unit_objects/`.
+    pub normalized_units: u64,
     /// PB01 (§A, U39): `objects/embeddings/` CAS objects verified (digest +
     /// declared-length/finite-vector).
     pub embeddings: u64,
@@ -568,6 +607,16 @@ fn verify_objects_with_limits(
     if state.exceeded_bounds {
         return Ok(finish_limit_report(state));
     }
+    verify_content_hash_closure(
+        &store,
+        repo.kio_dir(),
+        ContentObjectKind::NormalizedUnit,
+        "normalized_unit_corrupt",
+        &mut state,
+    )?;
+    if state.exceeded_bounds {
+        return Ok(finish_limit_report(state));
+    }
 
     // §C (U41, PB07-09): names.jsonl full-line verification + canonical tag
     // ref correspondence.
@@ -686,7 +735,14 @@ fn verify_objects_with_limits(
         return Ok(finish_limit_report(state));
     }
     let mut raw_affected = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut normalized = BTreeMap::<(String, String, u64), ValidatedNormalizedInstance>::new();
+    // The path-named `normalized_units/` directory is only a mutable current
+    // cache. Every historical tree instead names a manifest CAS object, which
+    // in turn pins immutable unit CAS bodies. After that pin has been
+    // validated, chunks select the exact Markdown body by its content hash,
+    // never by the non-unique
+    // (raw, profile, generation, unit_key) tuple.
+    let mut pinned_normalized = BTreeMap::<String, ValidatedNormalizedInstance>::new();
+    let mut reachable_units = BTreeMap::<String, Vec<ValidatedNormalizedInstanceUnit>>::new();
     let mut prepared_references = BTreeSet::<String>::new();
     let mut raw_substitutable_prepared = BTreeSet::<String>::new();
     let mut image_references = BTreeSet::<String>::new();
@@ -745,63 +801,53 @@ fn verify_objects_with_limits(
                 continue;
             }
             if let Some(reference) = &entry.normalize {
-                let key = (
-                    entry.raw_hash.clone(),
-                    reference.tool_profile_hash.clone(),
-                    reference.gen,
-                );
-                let lookup_key = key.clone();
-                if let std::collections::btree_map::Entry::Vacant(slot) = normalized.entry(key) {
-                    state.count_object();
-                    if state.exceeded_bounds {
-                        return Ok(finish_limit_report(state));
-                    }
-                    let key = slot.key();
-                    let identity = NormalizedInstanceIdentity {
-                        raw_hash: key.0.clone(),
-                        tool_profile_hash: key.1.clone(),
-                        gen: key.2,
-                    };
-                    let budget = match normalized_instance_read_budget(
+                let manifest_hash = &reference.manifest_hash;
+                if !pinned_normalized.contains_key(manifest_hash) {
+                    match load_pinned_normalized_instance(
+                        &store,
                         repo.kio_dir(),
-                        &identity.raw_hash,
-                        &identity.tool_profile_hash,
-                        identity.gen,
+                        &entry.raw_hash,
+                        reference,
+                        &mut state,
                     ) {
-                        Ok(bytes) => bytes,
+                        Ok(instance) => {
+                            state.checked.normalized_instances += 1;
+                            pinned_normalized.insert(manifest_hash.clone(), instance);
+                        }
+                        Err(PinnedNormalizedError::Missing)
+                            if purge_explains_old_closure_gap(
+                                &purge,
+                                &entry.raw_hash,
+                                commit_hash,
+                                &commits,
+                                &trees,
+                                &reachable,
+                                &invocation_time,
+                            ) =>
+                        {
+                            state.finding(
+                                "normalized_closure_incomplete",
+                                manifest_hash,
+                                "historical normalized closure is absent from a purge-explained pre-resurrection commit",
+                                std::slice::from_ref(commit_hash),
+                            );
+                            continue;
+                        }
                         Err(error) => {
                             state.finding(
-                                "normalized_corrupt",
-                                &entry.raw_hash,
+                                "normalized_closure_corrupt",
+                                manifest_hash,
                                 &error.to_string(),
                                 std::slice::from_ref(commit_hash),
                             );
                             continue;
                         }
-                    };
-                    state.add_bytes(budget);
+                    }
                     if state.exceeded_bounds {
                         return Ok(finish_limit_report(state));
                     }
-                    match load_validated_normalized_instance(
-                        repo.kio_dir(),
-                        &identity.raw_hash,
-                        &identity.tool_profile_hash,
-                        identity.gen,
-                    ) {
-                        Ok(instance) => {
-                            state.checked.normalized_instances += 1;
-                            slot.insert(instance);
-                        }
-                        Err(error) => state.finding(
-                            "normalized_corrupt",
-                            &entry.raw_hash,
-                            &error.to_string(),
-                            std::slice::from_ref(commit_hash),
-                        ),
-                    }
                 }
-                if let Some(instance) = normalized.get(&lookup_key) {
+                if let Some(instance) = pinned_normalized.get(manifest_hash) {
                     for manifest_entry in &instance.manifest.units {
                         prepared_references.insert(manifest_entry.prepared_hash.clone());
                         let affected = prepared_affected
@@ -814,7 +860,27 @@ fn verify_objects_with_limits(
                             raw_substitutable_prepared.insert(manifest_entry.prepared_hash.clone());
                         }
                     }
-                    for unit in &instance.units {
+                    for (_manifest_entry, unit) in instance
+                        .manifest
+                        .units
+                        .iter()
+                        .filter(|entry| entry.status == kio_pipeline::markdownize::UnitStatus::Done)
+                        .zip(&instance.units)
+                    {
+                        // `load_pinned_normalized_instance` has validated the
+                        // manifest/body correspondence. Index the exact body
+                        // only after its full CAS binding passed validation;
+                        // a content hash stays stable when volatile metadata
+                        // differs across a resurrection.
+                        let content_hash = hash_bytes(unit.markdown.as_bytes());
+                        reachable_units.entry(content_hash).or_default().push(
+                            ValidatedNormalizedInstanceUnit {
+                                raw_hash: instance.manifest.raw_hash.clone(),
+                                tool_profile_hash: instance.manifest.tool_profile_hash.clone(),
+                                gen: instance.manifest.gen,
+                                unit: unit.clone(),
+                            },
+                        );
                         let mut unit_images = BTreeSet::new();
                         if let Err(reason) = collect_unit_image_references(
                             &unit.metadata,
@@ -1140,33 +1206,28 @@ fn verify_objects_with_limits(
         if dead_raws.contains(&chunk.raw_hash) {
             continue;
         }
-        let key = (
-            chunk.raw_hash.clone(),
-            chunk.tool_profile_hash.clone(),
-            chunk.gen,
-        );
-        let Some(instance) = normalized.get(&key) else {
-            state.finding(
-                "chunk_normalized_missing",
-                chunk_hash,
-                "chunk has no reachable normalized instance",
-                &[],
-            );
-            continue;
+        let pinned_unit = match exact_pinned_content_unit_for_chunk(chunk, &reachable_units) {
+            Ok(unit) => unit,
+            Err(ChunkPinnedUnitError::Unreachable) => {
+                state.finding(
+                    "chunk_unit_content_unreachable",
+                    chunk_hash,
+                    "chunk unit_content_hash is absent from the reachable pinned normalized closure",
+                    &[],
+                );
+                continue;
+            }
+            Err(ChunkPinnedUnitError::IdentityMismatch) => {
+                state.finding(
+                    "chunk_unit_identity_mismatch",
+                    chunk_hash,
+                    "chunk identity does not match its pinned normalized unit object",
+                    &[],
+                );
+                continue;
+            }
         };
-        let Some(unit) = instance
-            .units
-            .iter()
-            .find(|unit| unit.unit_key == chunk.unit_key)
-        else {
-            state.finding(
-                "chunk_unit_missing",
-                chunk_hash,
-                "chunk unit_key is absent from normalized instance",
-                &[],
-            );
-            continue;
-        };
+        let unit = &pinned_unit.unit;
         // byte_start/byte_end are unit-local UTF-8 byte offsets (03 §8.1), always
         // present and ordered by construction — `ChunkObject::validate()` already
         // rejected any object with byte_start > byte_end before it reached this
@@ -1262,6 +1323,176 @@ fn verify_objects_with_limits(
     Ok(finish_report(state, repaired, repaired_commit_hash))
 }
 
+/// The only error class that a canonical `retired` lifecycle can explain is a
+/// physically absent object in the historical closure. A malformed manifest,
+/// a hash mismatch, or an invalid unit tuple is never a purge explanation.
+#[derive(Debug)]
+enum PinnedNormalizedError {
+    Missing,
+    Corrupt(String),
+}
+
+impl std::fmt::Display for PinnedNormalizedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str("pinned normalized CAS object is missing"),
+            Self::Corrupt(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+const MAX_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Verify the immutable closure named by one tree `NormalizeRef`. This never
+/// opens `objects/normalized_units/`: that path-named representation is a
+/// mutable current cache and cannot authenticate a historical snapshot.
+fn load_pinned_normalized_instance(
+    store: &ObjectStore,
+    kio_dir: &Path,
+    raw_hash: &str,
+    normalize: &NormalizeRef,
+    state: &mut State,
+) -> std::result::Result<ValidatedNormalizedInstance, PinnedNormalizedError> {
+    state.count_object();
+    if state.exceeded_bounds {
+        return Err(PinnedNormalizedError::Corrupt(
+            "verification object bound exceeded".to_owned(),
+        ));
+    }
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+    if fs::symlink_metadata(&manifest_path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(PinnedNormalizedError::Missing);
+    }
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            MAX_MANIFEST_OBJECT_BYTES,
+        )
+        .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+    state.add_bytes(manifest_bytes.len() as u64);
+    if state.exceeded_bounds {
+        return Err(PinnedNormalizedError::Corrupt(
+            "verification byte bound exceeded".to_owned(),
+        ));
+    }
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| PinnedNormalizedError::Corrupt(format!("manifest schema: {error}")))?;
+    // CAS manifests are canonical JCS. Comparing the exact bytes both proves
+    // canonical serialization and makes serde's otherwise permissive unknown
+    // field behavior fail closed for this durable schema.
+    let canonical_manifest = canonical_json_bytes(
+        &serde_json::to_value(&manifest)
+            .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?,
+    )
+    .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+    if canonical_manifest != manifest_bytes {
+        return Err(PinnedNormalizedError::Corrupt(
+            "manifest is not canonical JSON or has unknown fields".to_owned(),
+        ));
+    }
+    let identity = NormalizedInstanceIdentity {
+        raw_hash: raw_hash.to_owned(),
+        tool_profile_hash: normalize.tool_profile_hash.clone(),
+        gen: normalize.gen,
+    };
+    if manifest.raw_hash != identity.raw_hash
+        || manifest.tool_profile_hash != identity.tool_profile_hash
+        || manifest.gen != identity.gen
+    {
+        return Err(PinnedNormalizedError::Corrupt(
+            "manifest identity does not match its tree normalization reference".to_owned(),
+        ));
+    }
+    // Identify an actual absence before entering the shared loader so only a
+    // missing historical closure, not any other loader error, can receive the
+    // narrow lifecycle explanation below.
+    for entry in manifest
+        .units
+        .iter()
+        .filter(|entry| entry.status == UnitStatus::Done)
+    {
+        let hash = entry.unit_object_hash.as_deref().ok_or_else(|| {
+            PinnedNormalizedError::Corrupt(
+                "done manifest entry has no normalized unit object hash".to_owned(),
+            )
+        })?;
+        state.count_object();
+        if state.exceeded_bounds {
+            return Err(PinnedNormalizedError::Corrupt(
+                "verification object bound exceeded".to_owned(),
+            ));
+        }
+        let path = store
+            .content_path(ContentObjectKind::NormalizedUnit, hash)
+            .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+        if fs::symlink_metadata(&path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(PinnedNormalizedError::Missing);
+        }
+    }
+    let units = load_validated_normalized_units_from_manifest(kio_dir, &manifest)
+        .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+    // The loader has already compared each stored body with canonical JSON.
+    // Count those exact canonical bytes for this tree-reachable closure.
+    let mut verified_unit_bytes = 0_u64;
+    for unit in &units {
+        let canonical = canonical_json_bytes(
+            &serde_json::to_value(unit)
+                .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?,
+        )
+        .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+        let bytes = canonical.len() as u64;
+        verified_unit_bytes = verified_unit_bytes.saturating_add(bytes);
+        state.add_bytes(bytes);
+        if state.exceeded_bounds {
+            return Err(PinnedNormalizedError::Corrupt(
+                "verification byte bound exceeded".to_owned(),
+            ));
+        }
+    }
+    validate_normalized_instance(&manifest_path, &identity, &manifest, &units)
+        .map_err(|error| PinnedNormalizedError::Corrupt(error.to_string()))?;
+    Ok(ValidatedNormalizedInstance {
+        manifest,
+        units,
+        verified_bytes: manifest_bytes.len() as u64 + verified_unit_bytes,
+    })
+}
+
+/// A retired marker proves that the closure which existed before its verified
+/// resurrection may have been physically removed by purge. It does *not*
+/// excuse the resurrection snapshot itself, nor any unrelated later branch.
+fn purge_explains_old_closure_gap(
+    purge: &PurgeState,
+    raw_hash: &str,
+    commit_hash: &str,
+    commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
+    reachable: &BTreeSet<String>,
+    invocation_time: &str,
+) -> bool {
+    let lookup = canonical_lookup(purge, raw_hash, commits, trees, reachable, invocation_time);
+    if lookup.tombstone_error.is_some() || lookup.receipt_error.is_some() {
+        return false;
+    }
+    let Some(canonical) = lookup.canonical else {
+        return false;
+    };
+    if canonical.event.kind != EventKind::Retired {
+        return false;
+    }
+    let Some(resurrection) = canonical.event.resurrection_commit.as_deref() else {
+        return false;
+    };
+    commit_hash == resurrection || is_ancestor(commits, commit_hash, resurrection)
+}
+
 /// PB01 (§A, 10 §7.5.1 L489 → 03 §8.1): `objects/embeddings/` CAS objects.
 ///
 /// The per-type algorithm is 03 §8.1's, not the generic byte-hash every other
@@ -1348,6 +1579,7 @@ fn verify_content_hash_closure(
                 match kind {
                     ContentObjectKind::Manifest => state.checked.manifests += 1,
                     ContentObjectKind::Toollock => state.checked.toollocks += 1,
+                    ContentObjectKind::NormalizedUnit => state.checked.normalized_units += 1,
                     _ => {}
                 }
             }
@@ -1826,7 +2058,7 @@ fn reachable_commits(
     state: &mut State,
 ) -> Result<BTreeSet<String>> {
     let mut visited = BTreeSet::new();
-    let mut queue = commit_roots(repo, state)?
+    let mut queue = authenticated_history_roots(repo, state)?
         .into_iter()
         .collect::<VecDeque<_>>();
     while let Some(hash) = queue.pop_front() {
@@ -1849,6 +2081,113 @@ fn reachable_commits(
         }
     }
     Ok(visited)
+}
+
+/// The history closure is not limited to mutable refs.  Rebuild records
+/// durable publication introductions so an explicitly addressable historical
+/// commit survives ref movement and a later SQLite loss.  The ledger is not,
+/// however, an authority by itself: every non-ref root must be authenticated
+/// against the commit tree's pinned normalized unit before it can extend the
+/// verification walk.
+///
+/// Keep [`durable_history_roots`] as the candidate source so rebuild and fsck
+/// use the same durable-root vocabulary.  This filtering is deliberately here
+/// rather than in that helper: fsck has already inventoried commit objects and
+/// can report a forged/unrelated ledger event without granting it reachability.
+fn authenticated_history_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>> {
+    let ref_roots = commit_roots(repo, state)?;
+    if state.exceeded_bounds {
+        return Ok(ref_roots);
+    }
+    let candidates = durable_history_roots(repo)?;
+    let creations = read_stored_chunks(repo.kio_dir())?;
+    let events = read_chunk_publication_events(repo.kio_dir())?;
+    let mut roots = ref_roots.clone();
+    let mut authentication_cache = PublicationAuthenticationCache::default();
+
+    for candidate in candidates {
+        if ref_roots.contains(&candidate) {
+            continue;
+        }
+        let mut authenticated = false;
+        for creation in &creations {
+            let creation_introductions = [
+                creation.row.first_seen_commit.as_deref(),
+                (!creation.row.chunking_config_introduction_commit.is_empty())
+                    .then_some(creation.row.chunking_config_introduction_commit.as_str()),
+            ];
+            for introduction_commit in creation_introductions.into_iter().flatten() {
+                if introduction_commit != candidate {
+                    continue;
+                }
+                let event = ChunkPublicationEvent {
+                    event: "publication".to_owned(),
+                    chunk_id: creation.row.chunk_id.clone(),
+                    chunking_config_hash: creation.row.chunking_config_hash.clone(),
+                    introduction_commit: candidate.clone(),
+                };
+                match authenticate_publication_event_cached(
+                    repo,
+                    repo.kio_dir(),
+                    &event,
+                    creation,
+                    &mut authentication_cache,
+                ) {
+                    Ok(true) => authenticated = true,
+                    Ok(false) => {}
+                    Err(error) => state.finding(
+                        "chunk_publication_corrupt",
+                        &candidate,
+                        &error.to_string(),
+                        &[],
+                    ),
+                }
+            }
+        }
+        for event in events
+            .iter()
+            .filter(|event| event.introduction_commit == candidate)
+        {
+            let Some(creation) = creations.iter().find(|creation| {
+                creation.row.chunk_id == event.chunk_id
+                    && creation.row.chunking_config_hash == event.chunking_config_hash
+            }) else {
+                // `parse_chunk_ledger` should have caught this; retain the
+                // guard because a forged ledger must never become a root.
+                state.finding(
+                    "chunk_publication_corrupt",
+                    &candidate,
+                    "publication event has no creation association",
+                    &[],
+                );
+                continue;
+            };
+            match authenticate_publication_event_cached(
+                repo,
+                repo.kio_dir(),
+                event,
+                creation,
+                &mut authentication_cache,
+            ) {
+                Ok(true) => authenticated = true,
+                Ok(false) => {}
+                Err(error) => state.finding(
+                    "chunk_publication_corrupt",
+                    &candidate,
+                    &error.to_string(),
+                    &[],
+                ),
+            }
+        }
+        if authenticated {
+            roots.insert(candidate);
+        }
+        if roots.len() > state.max_objects {
+            state.exceeded_bounds = true;
+            break;
+        }
+    }
+    Ok(roots)
 }
 
 fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>> {
@@ -2774,6 +3113,10 @@ fn recover_raw(path: &Path, expected_hash: &str, remaining_bytes: u64) -> Result
 mod tests {
     use super::*;
     use kio_core::dag::{CommitStats, CommitType, TreeEntry};
+    use kio_pipeline::markdownize::{
+        MarkdownizeMode, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
+    };
+    use kio_pipeline::prepare::UnitType;
 
     fn hash(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
@@ -2821,6 +3164,214 @@ mod tests {
             "user",
             1,
         )
+    }
+
+    fn pinned_fixture(
+        kio_dir: &Path,
+    ) -> (
+        String,
+        NormalizeRef,
+        NormalizedInstanceManifest,
+        NormalizedUnitObject,
+    ) {
+        let raw_hash = hash('1');
+        let profile_hash = hash('2');
+        let prepared_hash = hash('3');
+        let unit = NormalizedUnitObject {
+            unit_key: "file:1".to_owned(),
+            unit_type: UnitType::File,
+            raw_hash: raw_hash.clone(),
+            prepared_hash: prepared_hash.clone(),
+            tool_profile_hash: profile_hash.clone(),
+            gen: 4,
+            mode: MarkdownizeMode::Full,
+            markdown: "immutable markdown".to_owned(),
+            metadata: BTreeMap::new(),
+            reused_from: None,
+            generated_at: "2026-08-12T00:00:00Z".to_owned(),
+        };
+        let store = ObjectStore::new(kio_dir);
+        let unit_bytes = canonical_json_bytes(&serde_json::to_value(&unit).unwrap()).unwrap();
+        let unit_hash = store
+            .write_content_object(ContentObjectKind::NormalizedUnit, &unit_bytes)
+            .unwrap();
+        let manifest = NormalizedInstanceManifest {
+            raw_hash: raw_hash.clone(),
+            tool_profile_hash: profile_hash.clone(),
+            gen: 4,
+            parent_gen: None,
+            run_id: "test-run".to_owned(),
+            units: vec![NormalizedUnitManifestEntry {
+                order: 0,
+                unit_key: unit.unit_key.clone(),
+                unit_ref: kio_pipeline::prepare::unit_ref(&unit.unit_key),
+                unit_type: UnitType::File,
+                status: UnitStatus::Done,
+                prepared_hash,
+                unit_object_hash: Some(unit_hash),
+                error_kind: None,
+            }],
+            generated_at: "2026-08-12T00:00:00Z".to_owned(),
+        };
+        let manifest_bytes =
+            canonical_json_bytes(&serde_json::to_value(&manifest).unwrap()).unwrap();
+        let manifest_hash = store
+            .write_content_object(ContentObjectKind::Manifest, &manifest_bytes)
+            .unwrap();
+        (
+            raw_hash,
+            NormalizeRef {
+                tool_profile_hash: profile_hash,
+                gen: 4,
+                manifest_hash,
+            },
+            manifest,
+            unit,
+        )
+    }
+
+    #[test]
+    fn pinned_normalized_closure_uses_immutable_cas_and_rejects_tamper_or_wrong_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let (raw_hash, normalize, manifest, _unit) = pinned_fixture(dir.path());
+        let store = ObjectStore::new(dir.path());
+        let mut state = State::default();
+        let valid =
+            load_pinned_normalized_instance(&store, dir.path(), &raw_hash, &normalize, &mut state)
+                .unwrap();
+        assert_eq!(valid.units.len(), 1);
+        assert_eq!(state.inventoried_objects, 2);
+        assert!(state.verified_bytes > 0);
+
+        let unit_hash = manifest.units[0].unit_object_hash.as_ref().unwrap();
+        let unit_path = store
+            .content_path(ContentObjectKind::NormalizedUnit, unit_hash)
+            .unwrap();
+        std::fs::write(&unit_path, b"tampered").unwrap();
+        let mut state = State::default();
+        assert!(matches!(
+            load_pinned_normalized_instance(&store, dir.path(), &raw_hash, &normalize, &mut state,),
+            Err(PinnedNormalizedError::Corrupt(_))
+        ));
+
+        // A validly hashed unit object carrying a different tuple is equally
+        // invalid: CAS integrity alone must not retarget a tree reference.
+        let second = tempfile::tempdir().unwrap();
+        let (raw_hash, mut normalize, mut manifest, mut unit) = pinned_fixture(second.path());
+        unit.raw_hash = hash('9');
+        let store = ObjectStore::new(second.path());
+        let bytes = canonical_json_bytes(&serde_json::to_value(&unit).unwrap()).unwrap();
+        manifest.units[0].unit_object_hash = Some(
+            store
+                .write_content_object(ContentObjectKind::NormalizedUnit, &bytes)
+                .unwrap(),
+        );
+        let bytes = canonical_json_bytes(&serde_json::to_value(&manifest).unwrap()).unwrap();
+        normalize.manifest_hash = store
+            .write_content_object(ContentObjectKind::Manifest, &bytes)
+            .unwrap();
+        let mut state = State::default();
+        assert!(matches!(
+            load_pinned_normalized_instance(
+                &store,
+                second.path(),
+                &raw_hash,
+                &normalize,
+                &mut state,
+            ),
+            Err(PinnedNormalizedError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn chunk_uses_exact_reachable_unit_content_not_a_same_tuple_fallback() {
+        let raw_hash = hash('1');
+        let profile_hash = hash('2');
+        let first = NormalizedUnitObject {
+            unit_key: "file:1".to_owned(),
+            unit_type: UnitType::File,
+            raw_hash: raw_hash.clone(),
+            prepared_hash: hash('3'),
+            tool_profile_hash: profile_hash.clone(),
+            gen: 4,
+            mode: MarkdownizeMode::Full,
+            markdown: "first body".to_owned(),
+            metadata: BTreeMap::new(),
+            reused_from: None,
+            generated_at: "2026-08-12T00:00:00Z".to_owned(),
+        };
+        let mut second = first.clone();
+        second.markdown = "second body".to_owned();
+        second.prepared_hash = hash('4');
+        // The fixture deliberately models two reachable manifests with the
+        // same (raw, profile, generation, unit_key), but different Markdown
+        // bodies. A chunk must select the latter by `unit_content_hash`.
+        let first_hash = hash_bytes(first.markdown.as_bytes());
+        let second_hash = hash_bytes(second.markdown.as_bytes());
+        let mut reachable = BTreeMap::new();
+        reachable.insert(
+            first_hash,
+            vec![ValidatedNormalizedInstanceUnit {
+                raw_hash: raw_hash.clone(),
+                tool_profile_hash: profile_hash.clone(),
+                gen: 4,
+                unit: first,
+            }],
+        );
+        reachable.insert(
+            second_hash.clone(),
+            vec![ValidatedNormalizedInstanceUnit {
+                raw_hash: raw_hash.clone(),
+                tool_profile_hash: profile_hash.clone(),
+                gen: 4,
+                unit: second,
+            }],
+        );
+        let mut chunk = ChunkObject {
+            spec_version: 1,
+            raw_hash: raw_hash.clone(),
+            tool_profile_hash: profile_hash.clone(),
+            gen: 4,
+            unit_key: "file:1".to_owned(),
+            unit_content_hash: second_hash,
+            heading_path: Vec::new(),
+            section_id: None,
+            byte_start: 0,
+            byte_end: "second".len() as u64,
+            text_hash: hash_bytes(b"second"),
+            text: "second".to_owned(),
+        };
+        let selected = exact_pinned_content_unit_for_chunk(&chunk, &reachable).unwrap();
+        assert_eq!(
+            selected.unit.markdown.get(0..6),
+            Some("second"),
+            "the chunk must not fall back to the first same-tuple manifest"
+        );
+
+        chunk.unit_content_hash = hash('c');
+        assert!(matches!(
+            exact_pinned_content_unit_for_chunk(&chunk, &reachable),
+            Err(ChunkPinnedUnitError::Unreachable)
+        ));
+
+        // Equal Markdown can be valid for several document tuples; select the
+        // tuple-matching candidate rather than treating the first one as
+        // authoritative.
+        let mut same_content_other_tuple = reachable[&hash_bytes(b"second body")][0].clone();
+        same_content_other_tuple.raw_hash = hash('9');
+        reachable
+            .get_mut(&hash_bytes(b"second body"))
+            .unwrap()
+            .push(same_content_other_tuple);
+        chunk.unit_content_hash = hash_bytes(b"second body");
+        chunk.raw_hash = hash('9');
+        assert!(exact_pinned_content_unit_for_chunk(&chunk, &reachable).is_ok());
+
+        chunk.tool_profile_hash = hash('8');
+        assert!(matches!(
+            exact_pinned_content_unit_for_chunk(&chunk, &reachable),
+            Err(ChunkPinnedUnitError::IdentityMismatch)
+        ));
     }
 
     /// R23-08 test helper: [`commit`], parameterized on `tree`/`parents` so a

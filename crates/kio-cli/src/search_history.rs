@@ -22,6 +22,9 @@ pub struct SearchContentKey {
     pub raw_hash: String,
     pub tool_profile_hash: String,
     pub gen: u64,
+    /// A generation can be retried with a different pinned manifest.  It is
+    /// consequently part of the searchable normalized identity.
+    pub manifest_hash: String,
 }
 
 /// One deterministic path alias for an eligible normalized identity.
@@ -30,6 +33,7 @@ pub struct SearchHistoryBinding {
     pub raw_hash: String,
     pub tool_profile_hash: String,
     pub gen: u64,
+    pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
     /// Populated only for all-history/since aliases.  Paths are distinct and in
@@ -46,6 +50,7 @@ impl SearchHistoryBinding {
             raw_hash: self.raw_hash.clone(),
             tool_profile_hash: self.tool_profile_hash.clone(),
             gen: self.gen,
+            manifest_hash: self.manifest_hash.clone(),
         }
     }
 
@@ -102,7 +107,7 @@ pub(super) fn current_history_plan_from_cache(
 ) -> Result<SearchHistoryPlan> {
     let mut stmt = conn
         .prepare(
-            "SELECT raw_hash, tool_profile_hash, gen, path
+            "SELECT raw_hash, tool_profile_hash, gen, manifest_hash, path
              FROM tree_entries
              WHERE commit_hash = ?1 AND tool_profile_hash IS NOT NULL
              ORDER BY raw_hash, tool_profile_hash, gen, path",
@@ -114,7 +119,8 @@ pub(super) fn current_history_plan_from_cache(
                 raw_hash: row.get(0)?,
                 tool_profile_hash: row.get(1)?,
                 gen: row.get::<_, i64>(2)? as u64,
-                path_at_commit: row.get(3)?,
+                manifest_hash: row.get(3)?,
+                path_at_commit: row.get(4)?,
                 pointer_commit: snapshot_commit.to_owned(),
                 current_paths: Vec::new(),
                 is_live: true,
@@ -147,15 +153,21 @@ pub(super) fn install_eligible_identities(
              raw_hash TEXT NOT NULL,
              tool_profile_hash TEXT NOT NULL,
              gen INTEGER NOT NULL,
-             PRIMARY KEY(raw_hash, tool_profile_hash, gen)
+             manifest_hash TEXT NOT NULL,
+             PRIMARY KEY(raw_hash, tool_profile_hash, gen, manifest_hash)
          ) WITHOUT ROWID;",
     )
     .map_err(|error| KioError::schema(error.to_string()))?;
     for key in plan.grouped_bindings().keys() {
         tx.execute(
-            "INSERT INTO kio_eligible_identity(raw_hash, tool_profile_hash, gen)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![key.raw_hash, key.tool_profile_hash, key.gen as i64],
+            "INSERT INTO kio_eligible_identity(raw_hash, tool_profile_hash, gen, manifest_hash)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                key.raw_hash,
+                key.tool_profile_hash,
+                key.gen as i64,
+                key.manifest_hash
+            ],
         )
         .map_err(|error| KioError::schema(error.to_string()))?;
     }
@@ -190,11 +202,13 @@ pub fn plan_search_history(
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: normalize.tool_profile_hash.clone(),
                     gen: normalize.gen,
+                    manifest_hash: normalize.manifest_hash.clone(),
                 };
                 let candidate = SearchHistoryBinding {
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: normalize.tool_profile_hash.clone(),
                     gen: normalize.gen,
+                    manifest_hash: normalize.manifest_hash.clone(),
                     path_at_commit: entry.path.clone(),
                     pointer_commit: snapshot_commit.to_owned(),
                     current_paths: Vec::new(),
@@ -329,6 +343,7 @@ fn plan_all_history(graph: &HistoryGraph) -> Result<Vec<SearchHistoryBinding>> {
                 raw_hash: binding.raw_hash.clone(),
                 tool_profile_hash: normalize.tool_profile_hash.clone(),
                 gen: normalize.gen,
+                manifest_hash: normalize.manifest_hash.clone(),
                 path_at_commit: binding.path.clone(),
                 pointer_commit: introduction.commit_hash,
                 current_paths: graph.snapshot_paths_for_raw(&binding.raw_hash),
@@ -354,11 +369,13 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
             gen: normalize.gen,
+            manifest_hash: normalize.manifest_hash.clone(),
         };
         let candidate = SearchHistoryBinding {
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
             gen: normalize.gen,
+            manifest_hash: normalize.manifest_hash.clone(),
             path_at_commit: entry.path.clone(),
             pointer_commit: history.start_commit().to_owned(),
             current_paths: Vec::new(),
@@ -389,6 +406,7 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
             raw_hash: deleted.binding.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
             gen: normalize.gen,
+            manifest_hash: normalize.manifest_hash.clone(),
         };
         if live_keys.contains(&key) {
             continue;
@@ -397,6 +415,7 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
             raw_hash: deleted.binding.raw_hash,
             tool_profile_hash: normalize.tool_profile_hash,
             gen: normalize.gen,
+            manifest_hash: normalize.manifest_hash,
             path_at_commit: deleted.binding.path,
             pointer_commit: deleted.commit_hash,
             current_paths: Vec::new(),
@@ -447,6 +466,11 @@ fn sort_bindings(bindings: &mut [SearchHistoryBinding]) {
                     .cmp(right.tool_profile_hash.as_bytes())
             })
             .then_with(|| left.gen.cmp(&right.gen))
+            .then_with(|| {
+                left.manifest_hash
+                    .as_bytes()
+                    .cmp(right.manifest_hash.as_bytes())
+            })
             .then_with(|| {
                 left.path_at_commit
                     .as_bytes()
@@ -555,6 +579,29 @@ mod tests {
         let groups = plan.grouped_bindings();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups.into_values().next().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn distinct_pinned_manifests_do_not_collapse_identity_groups() {
+        let fixture = Fixture::new();
+        let first = profile();
+        let second = NormalizeRef {
+            manifest_hash: hash_bytes(b"different manifest"),
+            ..first.clone()
+        };
+        let tree = fixture.tree(vec![
+            normalized("first.md", b"same raw", &first),
+            normalized("second.md", b"same raw", &second),
+        ]);
+        let head = fixture.commit("head", &tree, Vec::new());
+
+        let plan = plan_search_history(&fixture.repo, &head, &TimeSelector::Current, None).unwrap();
+        assert_eq!(plan.bindings.len(), 2);
+        assert_eq!(plan.grouped_bindings().len(), 2);
+        assert_ne!(
+            plan.bindings[0].manifest_hash,
+            plan.bindings[1].manifest_hash
+        );
     }
 
     #[test]

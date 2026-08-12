@@ -91,6 +91,7 @@ class TestPointerAttestation(unittest.TestCase):
             "tool_profile_hash": self.profile_hash,
             "gen": 3,
             "unit_key": "section:old",
+            "unit_content_hash": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
             "heading_path": ["Old Document", "Historical"],
             "section_id": "old-document/historical",
             "byte_start": 0,

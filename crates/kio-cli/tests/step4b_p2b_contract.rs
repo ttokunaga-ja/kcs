@@ -15,6 +15,7 @@ use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, Normalize
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
 use kio_index::registry::{RegistryDb, RegistryEntry};
+use kio_pipeline::markdownize::NormalizedUnitObject;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -123,6 +124,205 @@ fn write_content_bytes(kio_dir: &Path, kind_dir: &str, bytes: &[u8]) -> String {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, bytes).unwrap();
     hash
+}
+
+/// Publish a real successor snapshot whose immutable manifest marks every
+/// normalized unit Failed. This models a point-in-time retry state without
+/// corrupting bytes underneath an existing CAS hash.
+fn successor_with_failed_pinned_manifest(dir: &TempDir, pointer: &Value) -> String {
+    let repo = Repository::open(dir.path()).unwrap();
+    let parent = pointer["commit"].as_str().unwrap().to_owned();
+    let parent_commit = repo.read_commit(&parent).unwrap();
+    let mut tree = repo.read_tree(&parent_commit.tree).unwrap();
+    let entry = tree
+        .entries
+        .iter_mut()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .unwrap();
+    let normalize = entry.normalize.as_mut().unwrap();
+    let store = ObjectStore::new(kio_dir(dir));
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    for unit in manifest["units"].as_array_mut().unwrap() {
+        unit["status"] = Value::String("failed".to_owned());
+        unit["unit_object_hash"] = Value::Null;
+        unit["error_kind"] = Value::String("contract_violation".to_owned());
+    }
+    let manifest_bytes = serde_jcs::to_vec(&manifest).unwrap();
+    normalize.manifest_hash = store
+        .write_content_object(ContentObjectKind::Manifest, &manifest_bytes)
+        .unwrap();
+
+    let tree = build_tree(tree.entries).unwrap();
+    let (tree_hash, _) = store
+        .write_json(ObjectKind::Tree, &serde_json::to_value(&tree).unwrap())
+        .unwrap();
+    let commit = CommitObject::new(
+        tree_hash,
+        vec![parent],
+        "2026-07-20T00:00:00Z".to_owned(),
+        "fixture: pin failed normalized manifest".to_owned(),
+        parent_commit.tool_lock_hash,
+        CommitStats {
+            files_added: 0,
+            files_modified: 1,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let (commit_hash, _) = store
+        .write_json(ObjectKind::Commit, &serde_json::to_value(&commit).unwrap())
+        .unwrap();
+    fs::write(kio_dir(dir).join("refs/heads/main"), &commit_hash).unwrap();
+    fs::write(kio_dir(dir).join("HEAD"), &commit_hash).unwrap();
+    commit_hash
+}
+
+/// PB46: two immutable normalized bodies for the same
+/// `(raw_hash, tool_profile_hash, gen, unit_key)` are distinguished by the
+/// manifest pinned by each commit. Rebuilding the derived index must preserve
+/// that point-in-time binding rather than letting C2's same-generation retry
+/// overwrite C1's searchable body.
+#[test]
+fn pb46_same_generation_immutable_bodies_remain_commit_pinned_after_rebuild() {
+    const BODY_A: &str = "samegenbodyalphaonly";
+    const BODY_B: &str = "samegenbodybetaonly";
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("evidence.md"),
+        format!("# Evidence\n\n{BODY_A}\n"),
+    )
+    .unwrap();
+    success(&dir, &["init"]);
+    let indexed = success(&dir, &["index", "--offline", "--approve"]);
+    let c1 = indexed["commit_hash"].as_str().unwrap().to_owned();
+
+    let repo = Repository::open(dir.path()).unwrap();
+    let parent_commit = repo.read_commit(&c1).unwrap();
+    let mut tree = repo.read_tree(&parent_commit.tree).unwrap();
+    let entry = tree
+        .entries
+        .iter_mut()
+        .find(|entry| entry.path == "evidence.md")
+        .unwrap();
+    let normalize = entry.normalize.as_mut().unwrap();
+    let store = ObjectStore::new(kio_dir(&dir));
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let unit_hash = manifest["units"].as_array().unwrap().first().unwrap()["unit_object_hash"]
+        .as_str()
+        .unwrap();
+    let unit_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::NormalizedUnit,
+            unit_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let mut unit: NormalizedUnitObject = serde_json::from_slice(&unit_bytes).unwrap();
+    unit.markdown = BODY_B.to_owned();
+    let replacement_unit_bytes = serde_jcs::to_vec(&unit).unwrap();
+    let replacement_unit_hash = store
+        .write_content_object(ContentObjectKind::NormalizedUnit, &replacement_unit_bytes)
+        .unwrap();
+    assert_ne!(replacement_unit_hash, unit_hash);
+
+    manifest["units"].as_array_mut().unwrap()[0]["unit_object_hash"] =
+        Value::String(replacement_unit_hash.clone());
+    let replacement_manifest_bytes = serde_jcs::to_vec(&manifest).unwrap();
+    normalize.manifest_hash = store
+        .write_content_object(ContentObjectKind::Manifest, &replacement_manifest_bytes)
+        .unwrap();
+    let tree = build_tree(tree.entries).unwrap();
+    let (tree_hash, _) = store
+        .write_json(ObjectKind::Tree, &serde_json::to_value(&tree).unwrap())
+        .unwrap();
+    let c2_commit = CommitObject::new(
+        tree_hash,
+        vec![c1.clone()],
+        "2026-08-12T00:00:00Z".to_owned(),
+        "fixture: same-generation immutable normalized body B".to_owned(),
+        parent_commit.tool_lock_hash,
+        CommitStats {
+            files_added: 0,
+            files_modified: 1,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let (c2, _) = store
+        .write_json(
+            ObjectKind::Commit,
+            &serde_json::to_value(&c2_commit).unwrap(),
+        )
+        .unwrap();
+    fs::write(kio_dir(&dir).join("refs/heads/main"), &c2).unwrap();
+    fs::write(kio_dir(&dir).join("HEAD"), &c2).unwrap();
+
+    success(&dir, &["repair", "rebuild-db"]);
+
+    let at_c1_a = success(
+        &dir,
+        &[
+            "search", BODY_A, "--mode", "text", "--at", &c1, "--scope", ".",
+        ],
+    );
+    assert_eq!(at_c1_a["results"].as_array().unwrap().len(), 1, "{at_c1_a}");
+    let c1_pointer = &at_c1_a["results"][0]["evidence_pointer"];
+    assert_eq!(c1_pointer["commit"], c1, "{at_c1_a}");
+    assert!(
+        at_c1_a["results"][0].to_string().contains(BODY_A),
+        "{at_c1_a}"
+    );
+    let at_c1_b = success(
+        &dir,
+        &[
+            "search", BODY_B, "--mode", "text", "--at", &c1, "--scope", ".",
+        ],
+    );
+    assert!(
+        at_c1_b["results"].as_array().unwrap().is_empty(),
+        "{at_c1_b}"
+    );
+
+    let at_c2_b = success(
+        &dir,
+        &[
+            "search", BODY_B, "--mode", "text", "--at", &c2, "--scope", ".",
+        ],
+    );
+    assert_eq!(at_c2_b["results"].as_array().unwrap().len(), 1, "{at_c2_b}");
+    let c2_pointer = &at_c2_b["results"][0]["evidence_pointer"];
+    assert_eq!(c2_pointer["commit"], c2, "{at_c2_b}");
+    assert!(
+        at_c2_b["results"][0].to_string().contains(BODY_B),
+        "{at_c2_b}"
+    );
+    let at_c2_a = success(
+        &dir,
+        &[
+            "search", BODY_A, "--mode", "text", "--at", &c2, "--scope", ".",
+        ],
+    );
+    assert!(
+        at_c2_a["results"].as_array().unwrap().is_empty(),
+        "{at_c2_a}"
+    );
 }
 
 // ===========================================================================
@@ -645,28 +845,31 @@ fn pb15_prune_orphans_blocked_by_active_purge_journal() {
 // §G — SQLite schema-change regression locks (U45).
 // ===========================================================================
 
-/// PB20 [regression-lock]: `migrate_legacy_chunk_config_column` remains the
-/// ONLY in-place `ALTER TABLE` migration function for sqlite.db — a static
-/// source check, not a CLI run.
+/// PB20: a legacy derived schema is rejected before Kio can create, alter, or
+/// rebuild any SQLite object. The bytes are the contract: the operator must
+/// choose `kio repair rebuild-db`, not receive a silent in-place migration.
 #[test]
-fn pb20_regression_single_documented_in_place_migration_function() {
-    let source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-index/src/fts.rs"
-    ))
+fn pb20_legacy_sqlite_is_fail_closed_without_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sqlite.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE chunks (chunk_id TEXT PRIMARY KEY, chunking_config_hash TEXT NOT NULL);",
+    )
     .unwrap();
-    let alter_table_fns = source
-        .lines()
-        .filter(|line| line.contains("ALTER TABLE"))
-        .count();
-    assert!(
-        alter_table_fns > 0,
-        "expected the known chunk_config_generations migration to still exist"
-    );
-    assert!(
-        source.contains("fn migrate_legacy_chunk_config_column"),
-        "the one documented in-place migration function must still exist"
-    );
+    drop(conn);
+    let before = fs::read(&path).unwrap();
+
+    let error = kio_index::fts::SqliteFtsIndex::open(
+        &path,
+        kio_index::fts::FtsSchemaConfig {
+            tokenizer: kio_index::fts::FtsTokenizer::Trigram,
+        },
+    )
+    .err()
+    .expect("legacy schema must fail closed");
+    assert!(error.to_string().contains("kio repair rebuild-db"));
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 // ===========================================================================
@@ -885,41 +1088,131 @@ fn pb44_verify_side_no_matching_entry_short_circuits_to_store_corrupt() {
 /// not exist at this commit's point in time.
 #[test]
 fn pb45_chunk_backed_by_non_done_unit_resolves_not_found() {
+    let (dir, mut pointer, _) = fixture();
+    pointer["commit"] = Value::String(successor_with_failed_pinned_manifest(&dir, &pointer));
+
+    let pointer_json = serde_json::to_string(&pointer).unwrap();
+    let output = success(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(output["status"], "not_found", "{output}");
+}
+
+/// The manifest path named by a tree is not trustworthy merely because it is
+/// present. Point-in-time attribution must reject bytes forged underneath the
+/// pinned digest instead of treating its JSON shape as sufficient evidence.
+#[test]
+fn point_in_time_rejects_forged_pinned_manifest_bytes() {
     let (dir, pointer, _) = fixture();
     let repo = Repository::open(dir.path()).unwrap();
     let commit = repo
         .read_commit(pointer["commit"].as_str().unwrap())
         .unwrap();
     let tree = repo.read_tree(&commit.tree).unwrap();
-    let entry = tree
+    let normalize = tree
         .entries
         .iter()
         .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .and_then(|entry| entry.normalize.as_ref())
         .unwrap();
-    let normalize = entry.normalize.as_ref().unwrap();
-
-    // PB04: a v2/v3 tree entry's `normalize.manifest_hash` pins the manifest
-    // object as it existed at commit time — 6a reads THAT frozen CAS object,
-    // not the mutable working-copy `manifest.json` a same-gen retry may have
-    // since moved on (03 §8's "unit の failed → done 遷移で変わるため, past
-    // resolution only through the manifest object"). Mutate the CAS object
-    // directly (fsck-style fixture — `read_content_object_bytes` does not
-    // itself re-verify the digest) so this test exercises the actual
-    // same-gen-retry scenario 6a guards against, not a stale read path.
-    let manifest_path = content_path(
-        &kio_dir(&dir),
-        ContentObjectKind::Manifest.directory(),
-        &normalize.manifest_hash,
-    );
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    for unit in manifest["units"].as_array_mut().unwrap() {
-        unit["status"] = serde_json::json!("failed");
-    }
-    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let store = ObjectStore::new(kio_dir(&dir));
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    fs::write(&manifest_path, br#"{"forged":true}"#).unwrap();
 
     let pointer_json = serde_json::to_string(&pointer).unwrap();
-    let output = success(&dir, &["evidence", "verify", &pointer_json]);
-    assert_eq!(output["status"], "not_found", "{output}");
+    let (code, output) = run(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(code, 4, "{output}");
+    assert_eq!(output["error_code"], "KIO-E-STORE-CORRUPT-001", "{output}");
+}
+
+/// A Done entry authorizes a pointer only if its pinned immutable normalized
+/// unit object remains present and valid. The mutable normalized-unit cache is
+/// deliberately irrelevant to this closure check.
+#[test]
+fn point_in_time_rejects_missing_pinned_normalized_unit() {
+    let (dir, pointer, _) = fixture();
+    let repo = Repository::open(dir.path()).unwrap();
+    let commit = repo
+        .read_commit(pointer["commit"].as_str().unwrap())
+        .unwrap();
+    let tree = repo.read_tree(&commit.tree).unwrap();
+    let normalize = tree
+        .entries
+        .iter()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .and_then(|entry| entry.normalize.as_ref())
+        .unwrap();
+    let store = ObjectStore::new(kio_dir(&dir));
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let unit_hash = manifest["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|unit| unit["unit_object_hash"].as_str())
+        .unwrap();
+    fs::remove_file(
+        store
+            .content_path(ContentObjectKind::NormalizedUnit, unit_hash)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let pointer_json = serde_json::to_string(&pointer).unwrap();
+    let (code, output) = run(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(code, 4, "{output}");
+    assert_eq!(output["error_code"], "KIO-E-STORE-CORRUPT-001", "{output}");
+}
+
+/// Presence alone is likewise insufficient: byte substitution below a Done
+/// entry's immutable unit digest must fail the CAS closure before attribution.
+#[test]
+fn point_in_time_rejects_forged_pinned_normalized_unit_bytes() {
+    let (dir, pointer, _) = fixture();
+    let repo = Repository::open(dir.path()).unwrap();
+    let commit = repo
+        .read_commit(pointer["commit"].as_str().unwrap())
+        .unwrap();
+    let tree = repo.read_tree(&commit.tree).unwrap();
+    let normalize = tree
+        .entries
+        .iter()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .and_then(|entry| entry.normalize.as_ref())
+        .unwrap();
+    let store = ObjectStore::new(kio_dir(&dir));
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let unit_hash = manifest["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|unit| unit["unit_object_hash"].as_str())
+        .unwrap();
+    fs::write(
+        store
+            .content_path(ContentObjectKind::NormalizedUnit, unit_hash)
+            .unwrap(),
+        br#"{"forged":true}"#,
+    )
+    .unwrap();
+
+    let pointer_json = serde_json::to_string(&pointer).unwrap();
+    let (code, output) = run(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(code, 4, "{output}");
+    assert_eq!(output["error_code"], "KIO-E-STORE-CORRUPT-001", "{output}");
 }
 
 /// R25-10: `reindex --at` reads the PINNED manifest, not the working copy.
@@ -937,31 +1230,10 @@ fn pb45_chunk_backed_by_non_done_unit_resolves_not_found() {
 #[test]
 fn pb45_historical_reindex_reads_the_pinned_manifest_not_the_working_copy() {
     let (dir, pointer, _) = fixture();
-    let commit = pointer["commit"].as_str().unwrap().to_owned();
-    let repo = Repository::open(dir.path()).unwrap();
-    let tree = repo
-        .read_tree(&repo.read_commit(&commit).unwrap().tree)
-        .unwrap();
-    let entry = tree
-        .entries
-        .iter()
-        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
-        .unwrap();
-    let manifest_hash = entry.normalize.as_ref().unwrap().manifest_hash.clone();
-
-    // The pinned object says this unit was never finished at `commit`. The
-    // working copy — untouched — still says it was, exactly as a same-gen
-    // retry would leave it.
-    let manifest_path = content_path(
-        &kio_dir(&dir),
-        ContentObjectKind::Manifest.directory(),
-        &manifest_hash,
-    );
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    for unit in manifest["units"].as_array_mut().unwrap() {
-        unit["status"] = serde_json::json!("failed");
-    }
-    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    // The successor's immutable pinned manifest says the unit was unfinished;
+    // the path-named current cache remains Done, exactly as a later same-gen
+    // retry can leave it.
+    let commit = successor_with_failed_pinned_manifest(&dir, &pointer);
 
     // A changed chunking config is what gives `reindex --at` real work: it
     // appends the missing current-config associations. Without the pinned

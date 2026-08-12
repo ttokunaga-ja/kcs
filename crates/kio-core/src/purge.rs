@@ -460,7 +460,8 @@ pub fn canonical_final_event(
 }
 
 /// LC46/PA43's `closure` item: one `(object_type, hash)` deletion target.
-/// `object_type` is one of `"raw"`, `"prepared"`, `"image"`, or `"chunk"`
+/// `object_type` is one of `"raw"`, `"prepared"`, `"image"`, `"chunk"`,
+/// `"manifest"`, or `"normalized_unit"`
 /// (`hash` is a `chunk_id`, which is itself a canonical `sha256:` hash — see
 /// `crate::cas::is_hash`). The full enumeration — including the
 /// shared-derived live-reference resolution result for `prepared`/`image` —
@@ -562,8 +563,8 @@ impl PurgeClosure {
         Ok(())
     }
 
-    /// The subset of `items` for one `object_type` ("raw" / "prepared" /
-    /// "image" / "chunk"), as an owned set of hashes/ids.
+    /// The subset of `items` for one `object_type` (including `manifest` and
+    /// `normalized_unit`), as an owned set of hashes/ids.
     #[must_use]
     pub fn hashes_for(&self, object_type: &str) -> BTreeSet<String> {
         Self::hashes_for_in(&self.items, object_type)

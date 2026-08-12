@@ -746,6 +746,7 @@ dependencies = [
 name = "kio-index"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "kio-core",
  "rusqlite",
  "serde",
@@ -756,6 +757,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "unicode-normalization",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

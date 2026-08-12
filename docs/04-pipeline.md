@@ -92,8 +92,10 @@ code          | doc:1 (symbol 分割は chunk の責務)
 ```text
 .kio/objects/prepared/ab/cd/<prepared64>           # unit 単位の中間表現 (CAS)
 .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
-  manifest.json                                   # 順序付き unit 一覧 + unit status
-  <unit_ref>.json                                 # unit object (unit_ref = base16(sha256(unit_key))[0:16])
+  manifest.json                                   # current working projection
+  <unit_ref>.json                                 # current mutable view/cache
+.kio/objects/normalized_unit_objects/ab/cd/<unit-object64>
+                                                  # immutable full NormalizedUnitObject CAS
 ```
 
 `<prepared64>` / `<raw64>` / `<tool64>` は論理 hash から `sha256:` を除いた 64 文字の小文字 hex。
@@ -122,7 +124,8 @@ unit object (schema は [03-data-model.md §2.1](03-data-model.md) と同一。u
 ```
 
 normalized 全文 (`report.pdf.md`) は **生成物 (view)** で、unit を決定論的に結合して組み立てる
-(組み立て規則は [03-data-model.md §2.1](03-data-model.md))。正本は unit object 群 (normalized instance)。
+(組み立て規則は [03-data-model.md §2.1](03-data-model.md))。確定 manifest の done entry が指す
+`normalized_unit_object` CAS 群が immutable な正本であり、path-named instance は current working projection に過ぎない。
 
 **unit_key の正準生成規則** (2026-07-03 確定、step2a §C-3):
 
@@ -395,6 +398,7 @@ CREATE TABLE chunks (
   tool_profile_hash TEXT NOT NULL,
   gen INTEGER NOT NULL,                -- chunk は常に normalized instance 由来のため DEFAULT を持たない
   unit_key TEXT NOT NULL,
+  unit_content_hash TEXT NOT NULL,      -- sha256(exact Markdown bytes); chunk identity 入力
   raw_path TEXT NOT NULL,              -- chunk 生成時点の path (表示用)。現在 path は tree_entries join で得る。
                                        -- rebuild 入力 = chunks.jsonl の path (03 §2)
   heading_path TEXT NOT NULL,          -- 見出し未出現は空 ([] 相当)。NULL は許可しない (境界規則 3)
@@ -406,7 +410,7 @@ CREATE TABLE chunks (
   first_seen_commit TEXT,              -- 最初の publication commit (便宜列。時点条件の正本は chunk_publications)
   created_at TEXT NOT NULL
 );
-CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
+CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash);
 
 CREATE TABLE chunk_publications (      -- publication relation (cache — rebuild 正本は chunks.jsonl の
                                        -- current publication event 行 (03 §2)。欠落は current
@@ -442,7 +446,7 @@ CREATE TABLE chunk_config_generations (
 );
 ```
 
-`chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする (算出式は [03-data-model.md §8.1](03-data-model.md))。`gen` / `unit_key` は chunk が由来する normalized instance の世代と unit ([03-data-model.md §2.1](03-data-model.md)。`byte_start` / `byte_end` は unit-local)。chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
+`chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする。`unit_content_hash` は exact Markdown bytes の安定 hash で chunk identity 入力。同一 gen の本文変更を分離する一方、generated_at 等だけが違う同一本文の再取り込みでは旧 pointer identity を維持する。exact immutable object の `unit_object_hash` は tree-pinned manifest entry が保持し、chunk row/object へは複製しない。
 
 **chunk 境界の正準規則** (2026-07-03 確定、step3a §C-1 の決定性論点解消。chunk_hash の入力である heading_path / section_id / span を実装非依存にする):
 
@@ -725,7 +729,8 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
 
 **partial の規範** (markdownize task):
 
-- 状態表現の正本は normalized instance の manifest (`units[].status`,
+- 状態表現と immutable body binding の正本は normalized instance の manifest (`units[].status` /
+  `units[].unit_object_hash`,
   [03-data-model.md §2.1](03-data-model.md))。task / normalization_runs はその cache
 - done unit は保全する (first-instance-wins)。chunking / embedding / index は done unit 由来のみ実行し、
   failed unit 由来の chunk は index に載せない (= 検索対象は成功 unit のみ)
@@ -957,7 +962,8 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 
   ```text
   normalization_runs の done / partial / missing_output 相当の状態
-      (normalized_units/ の manifest と unit object から)
+      (manifest CAS と、その done entry の normalized_unit_object CAS から。current `normalized_units/`
+       projection は欠落しても CAS から再 materialize できる)
   最新 gen (instance ディレクトリ名の g<gen> から)
   manifest 記載の run_id / parent_gen (provenance)
   prepared_units 台帳 (raw object + 決定論的 prepare の再実行から)

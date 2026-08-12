@@ -17,15 +17,15 @@ Object 種別:
   manifest     normalized instance manifest の確定版 (canonical JCS bytes — §2.1。tree v2/v3 の
                normalize.manifest_hash が指す)
   toollock     tool-lock.json の確定版 (canonical JCS bytes — §5.2。commit の tool_lock_hash が指す)
-  normalized_unit  unit 単位の Markdown (read-only artifact, content hash 不採用)。
-                   normalized の正本 (§2.1)
+  normalized_unit_object  unit 単位の完全な NormalizedUnitObject (canonical JCS bytes の CAS)。
+                          normalized の immutable な正本 (§2.1)
   chunk        normalized から見出し単位で切り出し
   embedding    chunk のベクトル表現
   tree         path → object_hash のスナップショット
   commit       tree + parents + metadata
 ```
 
-raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、manifest / toollock / tree / commit は **canonical JSON 保存バイト列の content hash** (manifest は §2.1、toollock は §5.2 の JCS bytes)、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
+raw / prepared / image / normalized_unit_object / chunk / embedding / manifest / toollock / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、normalized_unit_object / manifest / toollock / tree / commit は **canonical JCS JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。`normalized_units/` の path-named instance は current working projection / cache として残してよいが、履歴の正本ではない (§2.1)。ファイル全文の normalized Markdown も unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
 
 # 2. .kio 物理レイアウト
 
@@ -63,9 +63,10 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                                     # dir 名は §1 の objects/<type>/ 公式どおり type 名 (単数形) と一致させる。
                                     # media_type は unit metadata に記録)
     normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
-      manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)
-      <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key の UTF-8 バイト列))[0:16] — §8.1 共通規則)
+      manifest.json                    # current working projection (最新版、§2.1)
+      <unit_ref>.json                  # current mutable view/cache (unit_ref = base16(sha256(unit_key の UTF-8 バイト列))[0:16])
     normalized/ab/cd/<raw64>.<tool64>.g<gen>.md   # 全文 view (cache, 再生成可能)
+    normalized_unit_objects/ab/cd/<unit-object64> # immutable NormalizedUnitObject (canonical JCS bytes、§2.1)
     manifests/ab/cd/<manifest64>    # manifest の immutable 確定版 (canonical JCS bytes、§2.1。
                                     # tree v2 の normalize.manifest_hash が指す — §8)
     toollocks/ab/cd/<toollock64>    # tool-lock の immutable 確定版 (canonical JCS bytes、§5.2。
@@ -142,7 +143,7 @@ names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複�
 
 ## 2.1 normalized instance と全文 view
 
-**normalized の正本は unit object 群** ([04-pipeline.md §2](04-pipeline.md))。1 つの
+**normalized の正本は manifest CAS が参照する NormalizedUnitObject CAS 群** ([04-pipeline.md §2](04-pipeline.md))。1 つの
 `(raw_hash, tool_profile_hash, gen)` の組を **normalized instance** と呼び、
 `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` ディレクトリ全体で表現する。
 
@@ -164,6 +165,7 @@ manifest schema:
       "unit_type": "page",
       "status": "done",
       "prepared_hash": "sha256:...",
+      "unit_object_hash": "sha256:...",
       "error_kind": null
     },
     {
@@ -173,6 +175,7 @@ manifest schema:
       "unit_type": "page",
       "status": "failed",
       "prepared_hash": "sha256:...",
+      "unit_object_hash": null,
       "error_kind": "invalid_input"
     }
   ],
@@ -180,7 +183,7 @@ manifest schema:
 }
 ```
 
-unit object schema (`<unit_ref>.json`):
+`NormalizedUnitObject` schema (CAS body; `<unit_ref>.json` はその current projection):
 
 ```json
 {
@@ -201,9 +204,12 @@ unit object schema (`<unit_ref>.json`):
 }
 ```
 
-`reused_from` は unit_mapping ([04-pipeline.md §2.2](04-pipeline.md)) による再利用の provenance:
-`{ "raw_hash": "sha256:old...", "gen": 0, "unit_key": "page:11" }`。再利用時は unit object 本体を
-新 instance へ **複製** する (per-.kio 重複容認、§9)。
+`NormalizedUnitObject` は上記 unit object schema 全体を RFC 8785 JCS で保存した immutable CAS object である。
+`unit_object_hash = sha256(JCS(full NormalizedUnitObject))` とし、保存先は
+`objects/normalized_unit_objects/ab/cd/<unit-object64>` である。`reused_from` は unit_mapping
+([04-pipeline.md §2.2](04-pipeline.md)) による再利用の provenance:
+`{ "raw_hash": "sha256:old...", "gen": 0, "unit_key": "page:11" }`。再利用時も新 instance 用の
+full NormalizedUnitObject を JCS CAS として確定する (per-.kio 重複容認、§9)。
 `metadata` は current schema の **required object** であり、page/bbox/confidence と Step 4 の bounded
 `bbox_annotations` を保持する。内容が無い場合は空 object `{}` を明示する。field 全体の欠落を `{}` に
 読み替える旧 reader / default は置かず reject する。検索用 annotation block は同じ unit の `markdown` にも
@@ -211,7 +217,12 @@ unit object schema (`<unit_ref>.json`):
 
 不変条件:
 
-- unit object は read-only artifact。書き換え・削除しない (purge を除く)
+- **確定 manifest の `status=done` entry は non-null `unit_object_hash` を必須とし、その CAS object の full body と
+  hash が一致しなければならない。`status=failed` entry は `unit_object_hash: null` を明示しなければならない**。
+  field 欠落、done の null、failed の non-null は current schema violation として fail-closed にする。旧 shape を
+  default / migration で読む経路は置かない。
+- path-named `<unit_ref>.json` は current loader がこの CAS object から再 materialize できる mutable working
+  projection であり、履歴、`--at`、Evidence Pointer は決してこれや同 gen の「最新」body を読まない。
 - manifest の `units[].error_kind` は [04-pipeline.md §5.3](04-pipeline.md) の閉 enum (フリーテキストではない) —
   unit 単位の retry 可否の機械判定に使う ([10-operations.md §12.1](10-operations.md) の明示例外)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
@@ -222,7 +233,9 @@ unit object schema (`<unit_ref>.json`):
   content-addressed で書く (post-write verify 対象)。path-named `manifest.json` は**最新版の作業コピー**であり、
   過去版の解決は manifest object のみが担う。tree entry の `normalize.manifest_hash` (§8) は常に対応する
   manifest object を指すため、same-gen partial retry で作業コピーが更新された後も、過去 commit 時点の
-  unit 完成状態を正確に列挙・検証できる (fsck の照合 = [10-operations.md §7.5.1](10-operations.md))
+  unit 完成状態と各 unit body を正確に列挙・検証できる。すなわち tree の `NormalizeRef.manifest_hash` は
+  manifest CAS → `units[].unit_object_hash` CAS を transitively pin する (fsck の照合 =
+  [10-operations.md §7.5.1](10-operations.md))
 
 **gen (generation)**: 同一 `(raw_hash, tool_profile_hash)` に対する instance の世代番号 (0 起点の整数)。
 通常は `g0` のみ存在する。`gen = 現最大 + 1` の新 instance を作れるのは `kio reindex --regenerate` と、
@@ -352,7 +365,7 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 
 | ストア | 技術 | 区分 | 喪失時 | schema 正本 |
 |---|---|---|---|---|
-| `.kio/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS — **例外 = normalized_units/ 全体は path-named** (§1: unit object も content hash 不採用の path-named immutable。うち**直下の `manifest.json` のみ mutable** = 最新版の作業コピーで置換 rename 側 ([04-pipeline.md §1.1](04-pipeline.md))。確定版は objects/manifests/ の CAS — §2.1)) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kio/objects/` (raw / prepared / image / normalized_unit_objects / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS。`normalized_units/` はこの inventory 外の path-named current projection / cache であり、`manifest.json` / `<unit_ref>.json` は CAS closure から再 materialize 可。immutable truth は manifests + normalized_unit_objects — §2.1) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kio/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kio/tombstones/` + `.kio/purge/erase-receipts/` (erase receipt) | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kio/purge/journal` | file (単一 JSON、temp + rename — [04-pipeline.md §1.1](04-pipeline.md)) | **truth** (active purge の crash 回復正本 — 対象 closure と phase を耐久記録し各 phase を冪等再開する。完遂で削除 = 定常時は不在) | active purge 中の喪失は phase 再開情報の喪失 (closure の残骸・不整合は `kio repair verify-objects` が corruption として検出 — [10-operations.md §7.5.1](10-operations.md)) | [05-runtime.md §3.5](05-runtime.md) |
@@ -499,7 +512,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
 - `unicode_version` は **`kio init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨)。これを欠く config は schema error / fail-closed とし、同梱版で読み替えたり次回書込みで補完したりしない
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
-- これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
+- これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` とする。`unit_content_hash` は exact Markdown bytes の hash なので同一 gen の本文変更を分離しつつ、同一本文の再取り込みでは identity を維持する。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
 # 6. Up_to_date 判定
 
@@ -673,6 +686,16 @@ manifest_hash = "sha256:" + base16(sha256(manifest の canonical JCS バイト�
 - 保存パスは `objects/manifests/ab/cd/<manifest64>` (immutable — §2.1)。fsck は再ハッシュで検証し、
   tree entry の `normalize.manifest_hash` (§8) がこの object を指す ([10-operations.md §7.5.1](10-operations.md))。
 
+**normalized_unit_object** — canonical JSON の content hash (§2.1):
+
+```text
+unit_object_hash = "sha256:" + base16(sha256(full NormalizedUnitObject の canonical JCS バイト列))
+```
+
+- 保存パスは `objects/normalized_unit_objects/ab/cd/<unit-object64>`。確定 manifest の done entry が
+  この hash を必須で参照し、failed entry は明示 null とする。path-named current projection の bytes は hash
+  入力でも歴史的な解決元でもない。
+
 **chunk** — identity hash:
 
 ```text
@@ -682,6 +705,7 @@ chunk_hash = "sha256:" + base16(sha256(JCS({
   "tool_profile_hash": "...",
   "gen": <int>,
   "unit_key": "...",
+  "unit_content_hash": "sha256:...",
   "heading_path": ["...", "..."],
   "section_id": "...",
   "byte_start": <int>,
@@ -689,9 +713,9 @@ chunk_hash = "sha256:" + base16(sha256(JCS({
 })))
 ```
 
-- `gen` は normalized unit の世代番号、`unit_key` は chunk が属する unit の識別子 (例 `page:12`)。`byte_start` / `byte_end` は **unit-local** の UTF-8 byte span (当該 unit 本文 bytes 先頭を 0 とする 0-based half-open — §8)。
+- `gen` は normalized unit の世代番号、`unit_key` は chunk が属する unit の識別子 (例 `page:12`)。`unit_content_hash = sha256(exact normalized Markdown bytes)` は same-gen retry の本文差を別 chunk identity にし、provider metadata / generated_at だけが異なる同一本文の re-ingest は同一 identity に保つ。full immutable unit の CAS locator は tree が pin する manifest の `units[].unit_object_hash` にだけ保持し、chunk object へ複製しない。`byte_start` / `byte_end` は **unit-local** の UTF-8 byte span。
 - null / 未設定フィールドは hash 入力に含めない (§5.1 と同じ規則。`section_id` を持たない chunking strategy では省略)。
-- chunk object 本体 (`text_hash` 等を含む) は `chunk_hash` をキーに保存されるが、`text_hash` は **hash 入力に含めない**。Markdown は LLM ベース非決定的であり (§5)、chunk の同一性は原文 + tool capability + unit 世代 + 構造的位置 + span のみで決まるため。
+- chunk object 本体は `unit_content_hash` (exact Markdown bytes hash) を保持する。`unit_object_hash` は同じ Markdown でも provider metadata / generated_at により変わり得るため chunk へ保持しない (同一 chunk hash の object bytes を複数形にしない)。fsck / Evidence は tree → manifest → immutable unit CAS の閉包を検証し、そこで得た exact Markdown の hash を chunk の `unit_content_hash` と照合する。`text_hash` は unit content hash が既に本文全体を認証するため identity へ重複して含めない。
 
 **embedding** — identity hash:
 
@@ -737,7 +761,8 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 //    tree_hash を変える
 //  - 両フィールドとも必須。欠落した tree entry は schema violation であり、読取可の旧形式は無い
 //  - manifest_hash は objects/manifests/ の immutable manifest object (§2.1) を指す — same-gen retry で
-//    作業コピー manifest.json が更新された後も、過去 commit の manifest bytes はこの object から解決できる
+//    作業コピー manifest.json が更新された後も、過去 commit の manifest bytes と、その done unit が指す
+//    normalized_unit_object CAS body はこの closure から解決できる
 // tree schema v3 (2026-07-18 確定 — 同じく実装・store 公開前の schema 確定で MAJOR bump ではない):
 //  - tree.chunk_set_hash = この snapshot で公開済みの chunk 集合の digest。canonical bytes =
 //    公開 chunk の chunk_hash 完全表記 ("sha256:<64hex>") を UTF-8 バイト列昇順にソートし LF 連結 +
@@ -775,7 +800,8 @@ Step 2 で Markdownize されたファイルから順に `normalize` 付き entr
 
 `normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1) であり必須である。欠落は schema violation として拒否する。`kio reindex --regenerate` 後も過去 commit の tree entry はその記録済み gen を
 指し続けるため、`kio view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
-不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は gen 保全により成立する。
+不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は、gen ではなく
+`manifest_hash → unit_object_hash` の immutable CAS closure により成立する。
 
 `commit_type` は固定 enum (詳細は [05-runtime.md §2](05-runtime.md)):
 
@@ -812,6 +838,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
   "tool_profile_hash": "sha256:tool1",
   "gen": 3,
   "unit_key": "page:12",
+  "unit_content_hash": "sha256:markdown...",
   "heading_path": ["認証仕様", "API Token"],
   "section_id": "認証仕様/api-token",
   "byte_start": 1200,
@@ -821,7 +848,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 }
 ```
 
-chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。**`byte_start` / `byte_end` は unit-local の UTF-8 byte offset・0-based half-open** — 「文字」単位ではない (旧称 `char_start` / `char_end`。実装・pointer 発行前の 2026-07 改名で、意味と名称を一致させた)。Normalized Markdown は UTF-8/NFC/LF に固定されるため byte offset は決定的 — [07-adapter-spec.md §5.2.1](07-adapter-spec.md))。`text_hash` は **chunk 抽出範囲のみ** の hash (= sha256(当該 byte 範囲の exact bytes)) であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` で決まり、chunk_hash の算出式は §8.1 に定める。`unit_content_hash` は exact normalized Markdown bytes の hash。full immutable object の `unit_object_hash` は manifest entry が保持し、fsck/Evidence が tree から closure を認証する。chunk object へは複製しないため、metadata だけが異なる同一本文でも同じ chunk identity の CAS bytes は一意である。heading_path と section_id は両方 hash 入力、未設定フィールドは省略する。**`byte_start` / `byte_end` は unit-local の UTF-8 byte offset・0-based half-open**。
 
 chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
 自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。
@@ -879,7 +906,7 @@ Generated-At: 2026-04-25T12:00:00Z
 -->
 ```
 
-ハッシュ検証で破損検出はしない (§5: Markdown content hash を持たないため)。unit object が直接編集された場合でも次回 `kio index` は `(raw_hash, tool_profile_hash)` 一致で「up-to-date」と判定する (= Markdown 内容そのものは正本ではなく、原文 + tool_profile が正本)。全文 view (`objects/normalized/*.md`) は cache のため、直接編集は次回 view 再生成で破棄される。
+path-named current projection の直接編集は hash 検証で破損検出しない (projection 自体は content hash を持たないため)。次回 loader は `unit_object_hash` CAS からこれを再 materialize する。immutable NormalizedUnitObject CAS の変更・欠落は再 hash で検出し、過去 commit の内容を same-gen で差し替えない。全文 view (`objects/normalized/*.md`) も cache のため、直接編集は次回 view 再生成で破棄される。
 
 # 11. 設定ファイル
 

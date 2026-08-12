@@ -344,6 +344,27 @@ impl Repository {
         &self.kio_dir
     }
 
+    /// Enumerate the commit targets named by every current on-disk ref.
+    ///
+    /// This is deliberately a filesystem-validation boundary rather than a
+    /// convenience wrapper around `HEAD`: repair must be able to reconstruct
+    /// projections for history retained solely by a branch or a tag.  The
+    /// returned hashes are not dereferenced here; [`HistoryReader`] owns the
+    /// subsequent strict commit/tree walk and reports a shallow object with its
+    /// precise object cause.
+    pub fn current_ref_targets(&self) -> Result<BTreeSet<String>> {
+        let mut targets = BTreeSet::new();
+        let head = read_commit_ref(&self.kio_dir.join("HEAD"), true)?;
+        if let Some(hash) = head {
+            targets.insert(hash);
+        }
+
+        let refs = self.kio_dir.join("refs");
+        collect_branch_ref_targets(&refs.join("heads"), &mut targets)?;
+        collect_tag_ref_targets(&refs.join(PORTABLE_TAGS_DIRECTORY), &mut targets)?;
+        Ok(targets)
+    }
+
     /// QA5 (step4b-contract-tests-p3a.md §B, 10 §1 L97-113): record the
     /// one-time scope-level scan approval into `.kio/scope.json`'s
     /// `scan_approval` key — distinct from the adapter-level network opt-in
@@ -2689,12 +2710,73 @@ fn validate_tag_refs_directory(path: &Path, allow_missing: bool) -> Result<bool>
     Ok(true)
 }
 
-fn read_tag_ref(path: &Path) -> Result<String> {
+/// `refs/heads/` is intentionally flat: branch names are not a second path
+/// namespace.  Ref enumeration treats every unexpected entry as corruption so
+/// a repair never quietly omits history because a symlink, directory, or bad
+/// leaf was planted beneath `.kio/refs`.
+fn collect_branch_ref_targets(path: &Path, targets: &mut BTreeSet<String>) -> Result<()> {
+    if !validate_tag_refs_directory(path, true)? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).kio_io(path)? {
+        let entry = entry.kio_io(path)?;
+        let leaf = entry.file_name();
+        let leaf = leaf
+            .to_str()
+            .ok_or_else(|| tag_ref_corrupt(&entry.path(), "branch ref leaf is not UTF-8"))?;
+        if leaf.is_empty() || leaf == "." || leaf == ".." {
+            return Err(tag_ref_corrupt(&entry.path(), "branch ref leaf is invalid"));
+        }
+        let value = read_commit_ref(&entry.path(), leaf == "main")?;
+        if let Some(hash) = value {
+            targets.insert(hash);
+        }
+    }
+    Ok(())
+}
+
+/// Add canonical tag targets while excluding the adjacent logical-name ledger.
+fn collect_tag_ref_targets(path: &Path, targets: &mut BTreeSet<String>) -> Result<()> {
+    if !validate_tag_refs_directory(path, true)? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).kio_io(path)? {
+        let entry = entry.kio_io(path)?;
+        let leaf = entry.file_name();
+        let leaf = leaf
+            .to_str()
+            .ok_or_else(|| tag_ref_corrupt(&entry.path(), "tag ref leaf is not UTF-8"))?;
+        if leaf == "names.jsonl" {
+            continue;
+        }
+        let valid = leaf.strip_prefix("tag-").is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+        if !valid {
+            return Err(tag_ref_corrupt(
+                &entry.path(),
+                "canonical tag leaf is invalid",
+            ));
+        }
+        // Keep the existing single-link/no-follow reader as the sole parser
+        // for tag contents, including its bounded-size and canonical-hash
+        // checks.
+        targets.insert(read_tag_ref(&entry.path())?);
+    }
+    Ok(())
+}
+
+/// Read one bounded, regular, single-link commit ref without following it.
+/// `HEAD` and the unborn `main` branch are the only refs permitted to be empty.
+fn read_commit_ref(path: &Path, allow_empty: bool) -> Result<Option<String>> {
     let listed = fs::symlink_metadata(path).kio_io(path)?;
     if !listed.file_type().is_file() || listed.len() > MAX_TAG_REF_BYTES {
         return Err(tag_ref_corrupt(
             path,
-            "tag ref is not a bounded regular file",
+            "commit ref is not a bounded regular file",
         ));
     }
     #[cfg(unix)]
@@ -2703,14 +2785,14 @@ fn read_tag_ref(path: &Path) -> Result<String> {
         if listed.nlink() != 1 {
             return Err(tag_ref_corrupt(
                 path,
-                "tag ref has an unexpected hard-link count",
+                "commit ref has an unexpected hard-link count",
             ));
         }
     }
     let file = open_scope_file_nofollow(path)?;
     let opened = file.metadata().kio_io(path)?;
     if !opened.is_file() || opened.len() != listed.len() || opened.len() > MAX_TAG_REF_BYTES {
-        return Err(tag_ref_corrupt(path, "tag ref changed while opening"));
+        return Err(tag_ref_corrupt(path, "commit ref changed while opening"));
     }
     let mut bytes = Vec::new();
     file.take(MAX_TAG_REF_BYTES + 1)
@@ -2719,19 +2801,26 @@ fn read_tag_ref(path: &Path) -> Result<String> {
     if bytes.len() as u64 > MAX_TAG_REF_BYTES {
         return Err(tag_ref_corrupt(
             path,
-            "tag ref exceeds the bounded size limit",
+            "commit ref exceeds the bounded size limit",
         ));
     }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| tag_ref_corrupt(path, "tag ref is not UTF-8"))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| tag_ref_corrupt(path, "commit ref is not UTF-8"))?;
     let hash = text.trim();
+    if hash.is_empty() && allow_empty {
+        return Ok(None);
+    }
     if !is_hash(hash) {
         return Err(tag_ref_corrupt(
             path,
-            "tag ref target is not a canonical commit hash",
+            "commit ref target is not a canonical commit hash",
         ));
     }
-    Ok(hash.to_owned())
+    Ok(Some(hash.to_owned()))
+}
+
+fn read_tag_ref(path: &Path) -> Result<String> {
+    read_commit_ref(path, false)?.ok_or_else(|| tag_ref_corrupt(path, "tag ref is empty"))
 }
 
 fn tag_ref_corrupt(path: &Path, message: &str) -> KioError {
@@ -4191,6 +4280,35 @@ mod tests {
         PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
         MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
+
+    #[test]
+    fn current_ref_targets_reads_head_branch_and_canonical_tags_without_names_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let head = format!("sha256:{}", "a".repeat(64));
+        let branch = format!("sha256:{}", "b".repeat(64));
+        let tag = format!("sha256:{}", "c".repeat(64));
+        fs::write(repo.kio_dir().join("HEAD"), &head).unwrap();
+        fs::write(repo.kio_dir().join("refs/heads/main"), &branch).unwrap();
+        let tags = repo.kio_dir().join("refs/tags-v1");
+        fs::create_dir_all(&tags).unwrap();
+        fs::write(tags.join(format!("tag-{}", "d".repeat(64))), &tag).unwrap();
+        fs::write(tags.join("names.jsonl"), b"not a ref\n").unwrap();
+
+        let expected = BTreeSet::from([head, branch, tag]);
+        assert_eq!(repo.current_ref_targets().unwrap(), expected);
+    }
+
+    #[test]
+    fn current_ref_targets_rejects_invalid_tag_leaf_instead_of_omitting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let tags = repo.kio_dir().join("refs/tags-v1");
+        fs::create_dir_all(&tags).unwrap();
+        fs::write(tags.join("old-tag"), format!("sha256:{}", "a".repeat(64))).unwrap();
+
+        assert!(repo.current_ref_targets().is_err());
+    }
 
     /// D7 (07 §7): the `offline_api` sub-table is wired, so a non-default
     /// timeout there is accepted rather than rejected.

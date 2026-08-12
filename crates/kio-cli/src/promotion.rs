@@ -654,6 +654,7 @@ mod tests {
                 status: UnitStatus::Done,
                 prepared_hash: prepared_hash.clone(),
                 error_kind: None,
+                unit_object_hash: None,
             }],
             generated_at: "2026-07-13T00:00:00Z".to_owned(),
         };

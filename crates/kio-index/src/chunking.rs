@@ -24,6 +24,9 @@ pub struct NormalizedUnitInput {
     pub tool_profile_hash: String,
     pub gen: u64,
     pub unit_key: String,
+    /// Hash of exact normalized Markdown bytes. There is deliberately no
+    /// legacy missing-value fallback.
+    pub unit_content_hash: String,
     pub markdown: String,
 }
 
@@ -54,6 +57,7 @@ pub fn chunking_config_hash(strategy: &str, max_chars: u64) -> Result<String> {
 }
 
 pub fn chunk_hash(row: &ChunkRow) -> Result<String> {
+    validate_unit_hash("unit_content_hash", &row.unit_content_hash)?;
     let mut map = Map::new();
     map.insert("byte_end".to_owned(), json!(row.byte_end));
     map.insert("byte_start".to_owned(), json!(row.byte_start));
@@ -69,7 +73,29 @@ pub fn chunk_hash(row: &ChunkRow) -> Result<String> {
     map.insert("spec_version".to_owned(), json!(1));
     map.insert("tool_profile_hash".to_owned(), json!(row.tool_profile_hash));
     map.insert("unit_key".to_owned(), json!(row.unit_key));
+    map.insert("unit_content_hash".to_owned(), json!(row.unit_content_hash));
     hash_jcs(&Value::Object(map))
+}
+
+/// Require the canonical SHA-256 content-address spelling used for immutable
+/// normalized-unit objects. Keeping this at the index boundary prevents a
+/// malformed durable record from becoming a distinct chunk identity.
+pub(crate) fn validate_unit_hash(label: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(IndexError::Contract(format!(
+            "{label} must be sha256:<64 lowercase hex digits>"
+        )));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(IndexError::Contract(format!(
+            "{label} must be sha256:<64 lowercase hex digits>"
+        )));
+    }
+    Ok(())
 }
 
 pub fn slugify_heading(text: &str) -> String {
@@ -116,6 +142,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
 
     let mut rows = Vec::new();
     for unit in &input.units {
+        validate_unit_hash("unit_content_hash", &unit.unit_content_hash)?;
         // N6: materialize the unit's chars once so every span slice is an O(1)
         // index range instead of an O(offset) `chars().skip(start)` rescan. The
         // section/heading scan stays &str-based (already a single linear pass);
@@ -206,6 +233,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     tool_profile_hash: unit.tool_profile_hash.clone(),
                     gen: unit.gen,
                     unit_key: unit.unit_key.clone(),
+                    unit_content_hash: unit.unit_content_hash.clone(),
                     chunking_config_hash: input.config.chunking_config_hash.clone(),
                     raw_path: input.raw_path.clone(),
                     heading_path: Some(section.heading_path.clone()),
@@ -215,7 +243,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     text_hash: hash_bytes(text.as_bytes()),
                     text,
                     first_seen_commit: None,
-                    chunking_config_introduction_commit: None,
+                    chunking_config_introduction_commit: String::new(),
                     created_at: input.created_at.clone(),
                 };
                 row.chunk_id = chunk_hash(&row)?;
@@ -422,6 +450,7 @@ mod tests {
 
     const RAW: &str = "sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a";
     const TOOL: &str = "sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0";
+    const UNIT: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     fn fixture_row(gen: u64, section_id: Option<&str>, heading_path: Vec<&str>) -> ChunkRow {
         ChunkRow {
@@ -430,6 +459,7 @@ mod tests {
             tool_profile_hash: TOOL.to_owned(),
             gen,
             unit_key: "page:12".to_owned(),
+            unit_content_hash: UNIT.to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
             raw_path: "report.pdf".to_owned(),
             heading_path: Some(heading_path.into_iter().map(str::to_owned).collect()),
@@ -439,7 +469,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
-            chunking_config_introduction_commit: None,
+            chunking_config_introduction_commit: String::new(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }
@@ -449,7 +479,7 @@ mod tests {
         let row = fixture_row(0, Some("認証仕様/api-token"), vec!["認証仕様", "API Token"]);
         assert_eq!(
             chunk_hash(&row).unwrap(),
-            "sha256:dd0fcce91922d28404fc036213d176a6bc8d8a5d5635575a9804bed3ee3b19dc"
+            "sha256:a485028c5eb08b1d3f2466f298d5747968f053544cb62e231205737b8c42d46b"
         );
     }
 
@@ -458,7 +488,7 @@ mod tests {
         let row = fixture_row(3, Some("認証仕様/api-token"), vec!["認証仕様", "API Token"]);
         assert_eq!(
             chunk_hash(&row).unwrap(),
-            "sha256:4c9576771a9dc4d3cd6197feda6510a7ef65381ef74588eacc6fa79f27a23442"
+            "sha256:a35deaf388632d20ee99f65d9944455ca87552badcc28ca74afacb0680d7c746"
         );
     }
 
@@ -470,6 +500,7 @@ mod tests {
             tool_profile_hash: TOOL.to_owned(),
             gen: 0,
             unit_key: "doc:1".to_owned(),
+            unit_content_hash: UNIT.to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
             raw_path: "report.pdf".to_owned(),
             heading_path: Some(Vec::new()),
@@ -479,7 +510,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
-            chunking_config_introduction_commit: None,
+            chunking_config_introduction_commit: String::new(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
         let omitted = chunk_hash(&row).unwrap();
@@ -487,8 +518,25 @@ mod tests {
         assert_eq!(chunk_hash(&row).unwrap(), omitted);
         assert_eq!(
             omitted,
-            "sha256:2d6d42758c3f7f22e87422a5ca7e9d0a0c8ee18425915d661b3bd21c6664d0ae"
+            "sha256:c2edc03222dd9bfbd2d70334aa71f0f568592f08edfaec5d2f7148417ff4189c"
         );
+    }
+
+    #[test]
+    fn immutable_unit_content_hash_separates_otherwise_identical_chunk_ids() {
+        let first = fixture_row(0, Some("認証仕様/api-token"), vec!["認証仕様", "API Token"]);
+        let mut corrected = first.clone();
+        corrected.unit_content_hash =
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222".to_owned();
+
+        assert_ne!(chunk_hash(&first).unwrap(), chunk_hash(&corrected).unwrap());
+    }
+
+    #[test]
+    fn unit_content_hash_must_use_canonical_sha256_spelling() {
+        let mut row = fixture_row(0, None, Vec::new());
+        row.unit_content_hash = "sha256:ABC".to_owned();
+        assert!(matches!(chunk_hash(&row), Err(IndexError::Contract(_))));
     }
 
     #[test]
@@ -505,6 +553,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: "intro\n```text\n# not heading\n```\n# 認証仕様\npara one\n\npara two\n## API Token\nbody".to_owned(),
             }],
             config,
@@ -539,6 +588,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: "\n\n\n# H\nbody".to_owned(),
             }],
             config,
@@ -566,6 +616,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: "abc\n# H\nbody".to_owned(),
             }],
             config,
@@ -595,6 +646,7 @@ mod tests {
                     tool_profile_hash: TOOL.to_owned(),
                     gen: 0,
                     unit_key: "doc:1".to_owned(),
+                    unit_content_hash: UNIT.to_owned(),
                     markdown: "# First\nfirst body of some length".to_owned(),
                 },
                 NormalizedUnitInput {
@@ -602,6 +654,7 @@ mod tests {
                     tool_profile_hash: TOOL.to_owned(),
                     gen: 0,
                     unit_key: "doc:2".to_owned(),
+                    unit_content_hash: UNIT.to_owned(),
                     markdown: "second body, no heading here".to_owned(),
                 },
             ],
@@ -639,6 +692,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 // Section body ("paragraph one long enough\n\nparagraph two also
                 // long enough") is well over max_chars=20 and has a paragraph
                 // boundary (blank line) to split on.
@@ -708,6 +762,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.clone(),
             }],
             config,
@@ -766,6 +821,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.clone(),
             }],
             config,
@@ -844,6 +900,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "page:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.to_owned(),
             }],
             config,
@@ -904,6 +961,7 @@ mod tests {
                 tool_profile_hash: TOOL.to_owned(),
                 gen: 0,
                 unit_key: "doc:1".to_owned(),
+                unit_content_hash: UNIT.to_owned(),
                 markdown: "a".repeat(n),
             }],
             config,

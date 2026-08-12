@@ -489,6 +489,47 @@ fn ct4_timetravel_013_disconnected_at_uses_writer_published_replica() {
         .unwrap()
         .to_owned();
 
+    // C2's initial writer has already published its exact `--at` projection.
+    // Remove the only source-cache discovery row before the next normal
+    // writer. That writer can neither rediscover nor regenerate C2; it must
+    // retain the existing replica marker and bindings incrementally.
+    let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    conn.execute(
+        "DELETE FROM tree_entries WHERE commit_hash = ?1",
+        params![disconnected],
+    )
+    .unwrap();
+    drop(conn);
+    let scope_id =
+        serde_json::from_slice::<Value>(&fs::read(dir.path().join(".kio/scope.json")).unwrap())
+            .unwrap()["scope_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    let replica = Connection::open(&replica_path).unwrap();
+    let before_marker: (i64, i64) = replica
+        .query_row(
+            "SELECT rowid, completed_at FROM agg_projection_markers \
+             WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2",
+            params![scope_id, disconnected],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let before_binding_rowids = replica
+        .prepare(
+            "SELECT rowid FROM agg_bindings \
+             WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2 \
+             ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map(params![scope_id, disconnected], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!before_binding_rowids.is_empty());
+    drop(replica);
+
     // Move HEAD back to C1, then publish a different C3. C2 remains a valid
     // CAS commit with source tree rows, but is no longer a HEAD ancestor.
     fs::write(dir.path().join(".kio/HEAD"), format!("{c1}\n")).unwrap();
@@ -503,6 +544,36 @@ fn ct4_timetravel_013_disconnected_at_uses_writer_published_replica() {
         .unwrap()
         .to_owned();
     assert_ne!(sibling, disconnected, "the test must create a side commit");
+
+    let replica = Connection::open(&replica_path).unwrap();
+    let after_marker: (i64, i64) = replica
+        .query_row(
+            "SELECT rowid, completed_at FROM agg_projection_markers \
+             WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2",
+            params![scope_id, disconnected],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let after_binding_rowids = replica
+        .prepare(
+            "SELECT rowid FROM agg_bindings \
+             WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2 \
+             ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map(params![scope_id, disconnected], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        after_marker, before_marker,
+        "normal refresh must not rewrite C2's completed --at marker"
+    );
+    assert_eq!(
+        after_binding_rowids, before_binding_rowids,
+        "normal refresh must preserve C2's existing --at bindings in place"
+    );
+    drop(replica);
 
     // The completed writer projection is now the only index search may read.
     let source = dir.path().join(".kio/index/sqlite.db");
@@ -623,6 +694,157 @@ fn ct4_timetravel_014_historical_reindex_publishes_empty_disconnected_at_snapsho
     assert!(
         !source.exists(),
         "--at must answer the writer-published empty marker without reopening source SQLite"
+    );
+}
+
+/// A historical reindex can select a disconnected commit whose normalized
+/// binding and chunk/config association already exist in the ledger.  That
+/// must still durably record the selected commit as a *publication* (rather
+/// than relying on a new creation row), so a later SQLite rebuild can answer
+/// the exact historical selector without source-index history.
+#[test]
+fn ct4_timetravel_015_historical_reindex_durably_publishes_existing_disconnected_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+
+    let content = b"# Durable publication\n\ndurablepublicationfixture existing chunk binding\n";
+    fs::write(dir.path().join("publication.md"), content).unwrap();
+    let a = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let repo = Repository::open(dir.path()).unwrap();
+    let a_object = repo.read_commit(&a).unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    // B deliberately reuses A's immutable tree, but has no parent: its
+    // normalized binding, chunks, and chunking configuration are all already
+    // durable while B remains incomparable to A.  It has no ref, while HEAD
+    // remains at A, so B is disconnected from the live ref and A cannot pass
+    // B's config-association introduction gate by ancestry.
+    let b = write_commit(
+        &store,
+        &synthetic_commit(
+            a_object.tree,
+            Vec::new(),
+            "2026-07-12T01:00:00Z",
+            "disconnected duplicate binding",
+            a_object.tool_lock_hash,
+            CommitType::Manual,
+        ),
+    );
+    assert_eq!(
+        repo.head_commit_hash().unwrap().as_deref(),
+        Some(a.as_str())
+    );
+
+    let chunks_path = dir.path().join(".kio/index/chunks.jsonl");
+    let creation = fs::read_to_string(&chunks_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|row| row.get("event").is_none())
+        .expect("A must create a durable chunk association");
+    let chunk_id = creation["chunk_id"].as_str().unwrap();
+    let config_hash = creation["chunking_config_hash"].as_str().unwrap();
+
+    let reindexed = json_success(&dir, &["reindex", "--at", &b]);
+    assert_eq!(reindexed["status"], "reindexed");
+    assert_eq!(reindexed["snapshot_at"], b);
+
+    let has_b_publication = fs::read_to_string(&chunks_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .any(|row| {
+            row["event"] == "publication"
+                && row["chunk_id"] == chunk_id
+                && row["chunking_config_hash"] == config_hash
+                && row["introduction_commit"] == b
+        });
+    assert!(
+        has_b_publication,
+        "historical reindex must append B's durable publication event"
+    );
+
+    // B is still disconnected from every mutable ref.  Fsck must nevertheless
+    // authenticate its durable publication event and include the tree closure;
+    // treating the JSONL event as either ignorable or self-authenticating would
+    // respectively lose history or let a forged row choose arbitrary roots.
+    let verified = json_success(&dir, &["repair", "verify-objects"]);
+    assert_eq!(verified["status"], "ok", "{verified}");
+    assert!(
+        verified["remaining_findings"]
+            .as_array()
+            .expect("verify report has findings array")
+            .is_empty(),
+        "a disconnected reindex publication must be a clean verified root: {verified}"
+    );
+
+    // Remove every mutable ref and then lose SQLite.  B and A are
+    // incomparable roots; only the authenticated, durable publication rows
+    // can retain their historical closure for this rebuild.
+    fs::write(dir.path().join(".kio/HEAD"), b"").unwrap();
+    fs::write(dir.path().join(".kio/refs/heads/main"), b"").unwrap();
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
+
+    let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    let published_at_b: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM chunk_publications \
+             WHERE chunk_id = ?1 AND introduction_commit = ?2",
+            params![chunk_id, b],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        published_at_b, 1,
+        "B publication must survive SQLite rebuild"
+    );
+    let config_introduced_at_b: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM chunk_config_generations \
+             WHERE chunk_id = ?1 \
+               AND chunking_config_hash = ?2 \
+               AND introduction_commit = ?3",
+            params![chunk_id, config_hash, b],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        config_introduced_at_b, 1,
+        "B config association must survive SQLite rebuild"
+    );
+    drop(conn);
+
+    // Source-index retention above intentionally ran with no live ref.  Put
+    // the ordinary writer ref back before asking the device replica to serve
+    // the historical selector; replica publication itself has no meaningful
+    // current snapshot while every ref is unborn.
+    fs::write(dir.path().join(".kio/HEAD"), format!("{a}\n")).unwrap();
+    fs::write(dir.path().join(".kio/refs/heads/main"), format!("{a}\n")).unwrap();
+    json_success(&dir, &["repair", "replica"]);
+
+    let response = json_success(
+        &dir,
+        &[
+            "search",
+            "durablepublicationfixture",
+            "--at",
+            &b,
+            "--scope",
+            ".",
+            "--mode",
+            "text",
+        ],
+    );
+    assert_eq!(response["searched_scopes"][0]["snapshot_at"], b);
+    assert!(
+        results(&response).iter().any(|result| {
+            result_raw(result) == hash_bytes(content) && result_commit(result) == b
+        }),
+        "the rebuilt projection must retain B's publication: {response}"
     );
 }
 

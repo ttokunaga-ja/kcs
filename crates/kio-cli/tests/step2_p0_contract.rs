@@ -435,6 +435,7 @@ fn ct2_unit_003_manifest_schema_and_status() {
             prepared_hash:
                 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
             error_kind: Some("invalid_input".to_owned()),
+            unit_object_hash: None,
         }],
         generated_at: "2026-04-25T12:00:00Z".to_owned(),
     };
@@ -2913,9 +2914,9 @@ fn offline_instance_output_ref(dir: &TempDir, input_path: &str) -> String {
         .to_owned()
 }
 
-/// Delete one unit `<unit_ref>.json` inside a normalized instance dir, leaving
-/// `manifest.json` (which still marks the unit `done`) intact.
-fn corrupt_one_unit_json(instance_dir: &Path) {
+/// Delete one mutable `<unit_ref>.json` cache file while leaving the immutable
+/// manifest -> unit-object CAS closure intact.
+fn remove_one_cached_unit_json(instance_dir: &Path) {
     let unit_json = fs::read_dir(instance_dir)
         .unwrap()
         .flatten()
@@ -2924,14 +2925,15 @@ fn corrupt_one_unit_json(instance_dir: &Path) {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
         })
-        .unwrap_or_else(|| panic!("a unit json to corrupt under {}", instance_dir.display()));
-    fs::remove_file(&unit_json).unwrap();
+        .unwrap_or_else(|| panic!("a cached unit json under {}", instance_dir.display()));
+    fs::remove_file(unit_json).unwrap();
 }
 
-// (a)+(d): online route — a deleted unit in the v1 online instance must not brick the
-// document; v2 re-sends Full and completes (self-heal), never a stuck failed task.
+// The mutable normalized-instance directory is only a current cache now. Losing
+// one cached unit must not invalidate the tree-pinned immutable unit CAS or force
+// a full re-send.
 #[test]
-fn r14_1_online_previous_partial_corruption_recovers_via_full() {
+fn r14_1_online_mutable_unit_cache_loss_uses_immutable_incremental_baseline() {
     let dir = scope();
     fs::write(
         dir.path().join("report.pdf"),
@@ -2945,7 +2947,7 @@ fn r14_1_online_previous_partial_corruption_recovers_via_full() {
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
 
-    // Corrupt the v1 online instance: delete ONE unit json (manifest untouched).
+    // Delete one v1 mutable cache body; the manifest-pinned unit CAS remains.
     let status = json_success(&dir, ["status"]);
     let output_ref = status["tasks"]
         .as_array()
@@ -2959,7 +2961,7 @@ fn r14_1_online_previous_partial_corruption_recovers_via_full() {
         .and_then(|task| task["output_ref"].as_str())
         .unwrap_or_else(|| panic!("v1 online done task with instance output_ref: {status}"))
         .to_owned();
-    corrupt_one_unit_json(Path::new(&output_ref));
+    remove_one_cached_unit_json(Path::new(&output_ref));
 
     // v2 light revision (would be incremental if the previous were intact).
     fs::write(
@@ -2973,14 +2975,14 @@ fn r14_1_online_previous_partial_corruption_recovers_via_full() {
         ["batch", "resume"],
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
-    // The corrupt previous is bypassed (Full re-send), not a hard non-retryable fail.
+    // The immutable previous remains usable and the task completes normally.
     assert_eq!(
         resume["tasks_failed"], 0,
-        "corrupt previous must degrade to Full, not fail the task: {resume}"
+        "mutable cache loss must not fail the immutable incremental baseline: {resume}"
     );
 
-    // v1 + v2 online tasks are both done; v2 could NOT reuse the corrupt previous, so
-    // it is a Full send, not incremental.
+    // v1 + v2 online tasks are both done; v2 reuses the authenticated immutable
+    // baseline and remains incremental.
     let status = json_success(&dir, ["status"]);
     let done_online = status["tasks"]
         .as_array()
@@ -2994,25 +2996,29 @@ fn r14_1_online_previous_partial_corruption_recovers_via_full() {
         .count();
     assert!(
         done_online >= 2,
-        "v2 online task must recover via a Full re-send: {status}"
+        "v2 online task must complete from the immutable baseline: {status}"
     );
+    let incremental = online_incremental_task(&status)
+        .unwrap_or_else(|| panic!("v2 must remain incremental after cache loss: {status}"));
     assert!(
-        online_incremental_task(&status).is_none(),
-        "a corrupt previous cannot drive incremental — v2 must be Full: {status}"
+        incremental["changed_unit_keys"]
+            .as_array()
+            .is_some_and(|keys| keys.contains(&json!("page:2"))),
+        "the immutable baseline must still identify page:2 as changed: {incremental}"
     );
 }
 
 // (b): offline route — a corrupt prior instance for one file must not abort the whole
 // index and skip alphabetically-later candidates.
 #[test]
-fn r14_1_offline_previous_corruption_does_not_abort_index() {
+fn r14_1_offline_mutable_unit_cache_loss_does_not_abort_index() {
     let dir = scope();
-    // `report.pdf` sorts before `zzz.pdf`; report.pdf gets the corrupt previous.
+    // `report.pdf` sorts before `zzz.pdf`; report.pdf loses one mutable cache body.
     fs::write(dir.path().join("report.pdf"), fake_pdf(&["a1", "a2", "a3"])).unwrap();
     fs::write(dir.path().join("zzz.pdf"), fake_pdf(&["z1", "z2"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
 
-    corrupt_one_unit_json(Path::new(&offline_instance_output_ref(&dir, "report.pdf")));
+    remove_one_cached_unit_json(Path::new(&offline_instance_output_ref(&dir, "report.pdf")));
 
     // Change report.pdf so re-index reaches `previous_instance_for_path` (a new
     // raw_hash bypasses the done-output early return).

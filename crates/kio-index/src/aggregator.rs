@@ -45,9 +45,14 @@
 //! nothing else, which is why it lives under the cache root.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::CStr;
 use std::path::Path;
+#[cfg(unix)]
+use std::sync::{Once, OnceLock};
 
-use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
+use cap_primitives::fs as cap_fs;
+use rusqlite::{params, params_from_iter, types::Value, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -105,6 +110,7 @@ pub struct AggBinding {
     pub raw_hash: String,
     pub tool_profile_hash: String,
     pub gen: u64,
+    pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
     pub current_paths: Vec<String>,
@@ -280,6 +286,7 @@ pub struct AggBindingFilter {
     pub raw_hash: String,
     pub tool_profile_hash: String,
     pub gen: u64,
+    pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
     pub current_paths: Vec<String>,
@@ -422,8 +429,347 @@ fn encode_embedding_profiles(profiles: &[EmbeddingProfileSummary]) -> Result<Str
         .map_err(|error| crate::IndexError::Schema(format!("aggregator profiles: {error}")))
 }
 
+#[cfg(test)]
+fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
+/// A cache leaf and its parent directory retained as capabilities.  The parent
+/// must stay alive: a public cache pathname can be redirected after opening it.
+struct BoundCache {
+    _parent: std::fs::File,
+    file: std::fs::File,
+    public_path: std::path::PathBuf,
+}
+
+struct BoundCacheParent {
+    parent: std::fs::File,
+    public_path: std::path::PathBuf,
+}
+
+/// Bind the immediate cache parent without following it. Ancestors may be
+/// OS-owned symlinks (such as `/var`), so only the direct parent is selected
+/// relative to a canonicalized *outer* directory capability.
+fn bind_cache_parent(path: &Path, create_parent: bool) -> Result<BoundCacheParent> {
+    let lexical_parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        crate::IndexError::Schema(format!(
+            "aggregator cache path has no file name: {}",
+            path.display()
+        ))
+    })?;
+    let (parent, resolved_parent) = open_or_create_cache_parent(lexical_parent, create_parent)?;
+    Ok(BoundCacheParent {
+        parent,
+        public_path: resolved_parent.join(file_name),
+    })
+}
+
+fn open_or_create_cache_parent(
+    path: &Path,
+    create_missing: bool,
+) -> Result<(std::fs::File, std::path::PathBuf)> {
+    let mut existing = path;
+    while matches!(std::fs::symlink_metadata(existing), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        existing = existing.parent().ok_or_else(|| {
+            crate::IndexError::Schema(format!(
+                "no existing aggregator cache ancestor for {}",
+                path.display()
+            ))
+        })?;
+    }
+    let before = std::fs::symlink_metadata(existing).map_err(|e| {
+        crate::IndexError::Schema(format!(
+            "inspect aggregator cache ancestor {}: {e}",
+            existing.display()
+        ))
+    })?;
+    if !before.is_dir() || before.file_type().is_symlink() {
+        return Err(crate::IndexError::Schema(format!(
+            "aggregator cache ancestor must be a real directory: {}",
+            existing.display()
+        )));
+    }
+    #[cfg(windows)]
+    if !kio_core::cas::windows_directory_is_real(existing).map_err(|error| {
+        crate::IndexError::Schema(format!(
+            "inspect aggregator cache ancestor reparse state {}: {error}",
+            existing.display()
+        ))
+    })? {
+        return Err(crate::IndexError::Schema(format!(
+            "aggregator cache ancestor must not be a Windows reparse point: {}",
+            existing.display()
+        )));
+    }
+    let resolved_existing = std::fs::canonicalize(existing).map_err(|e| {
+        crate::IndexError::Schema(format!(
+            "resolve aggregator cache ancestor {}: {e}",
+            existing.display()
+        ))
+    })?;
+    let mut handle =
+        cap_fs::open_ambient_dir(&resolved_existing, cap_primitives::ambient_authority()).map_err(
+            |e| {
+                crate::IndexError::Schema(format!(
+                    "open aggregator cache ancestor {}: {e}",
+                    resolved_existing.display()
+                ))
+            },
+        )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = handle.metadata().map_err(|e| {
+            crate::IndexError::Schema(format!("inspect opened aggregator cache ancestor: {e}"))
+        })?;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(crate::IndexError::Schema(format!(
+                "aggregator cache ancestor changed while opening: {}",
+                existing.display()
+            )));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let opened = handle.metadata().map_err(|e| {
+            crate::IndexError::Schema(format!("inspect opened aggregator cache ancestor: {e}"))
+        })?;
+        if before.volume_serial_number() != opened.volume_serial_number()
+            || before.file_index() != opened.file_index()
+        {
+            return Err(crate::IndexError::Schema(format!(
+                "aggregator cache ancestor changed while opening: {}",
+                existing.display()
+            )));
+        }
+    }
+    let mut resolved = resolved_existing;
+    let remainder = path.strip_prefix(existing).map_err(|_| {
+        crate::IndexError::Schema(format!(
+            "derive cache path below ancestor: {}",
+            path.display()
+        ))
+    })?;
+    for component in remainder.components() {
+        let std::path::Component::Normal(component) = component else {
+            continue;
+        };
+        handle = match cap_fs::open_dir_nofollow(&handle, Path::new(component)) {
+            Ok(child) => child,
+            Err(_)
+                if create_missing
+                    && matches!(cap_fs::stat(&handle, Path::new(component), cap_fs::FollowSymlinks::No), Err(e) if e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                cap_fs::create_dir(&handle, Path::new(component), &cap_fs::DirOptions::new())
+                    .map_err(|e| {
+                        crate::IndexError::Schema(format!(
+                            "create aggregator cache directory {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                cap_fs::open_dir_nofollow(&handle, Path::new(component)).map_err(|e| {
+                    crate::IndexError::Schema(format!(
+                        "open created aggregator cache directory {}: {e}",
+                        path.display()
+                    ))
+                })?
+            }
+            Err(e) => {
+                return Err(crate::IndexError::Schema(format!(
+                    "open aggregator cache directory {} without following links: {e}",
+                    path.display()
+                )))
+            }
+        };
+        resolved.push(component);
+    }
+    Ok((handle, resolved))
+}
+
+#[cfg(unix)]
+fn cache_file_identity(file: &std::fs::File) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|e| crate::IndexError::Schema(format!("inspect opened aggregator cache: {e}")))?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn validate_bound_cache_file(file: &std::fs::File, path: &Path) -> Result<()> {
+    let metadata = file.metadata().map_err(|e| {
+        crate::IndexError::Schema(format!(
+            "inspect opened aggregator cache {}: {e}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(crate::IndexError::Schema(format!(
+            "aggregator cache target is not a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(crate::IndexError::Schema(format!(
+                "aggregator cache target must have exactly one hard link (found {}): {}",
+                metadata.nlink(),
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn bind_cache(path: &Path, create_missing: bool) -> Result<BoundCache> {
+    let BoundCacheParent {
+        parent: parent_handle,
+        public_path: path,
+    } = bind_cache_parent(path, true)?;
+    let leaf = path.file_name().expect("resolved cache has leaf");
+    let before_leaf = cap_fs::stat(&parent_handle, Path::new(leaf), cap_fs::FollowSymlinks::No);
+    if matches!(&before_leaf, Ok(metadata) if !metadata.is_file()) {
+        return Err(crate::IndexError::Schema(format!(
+            "aggregator cache target is not a regular file (possibly a symlink): {}",
+            path.display()
+        )));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    if create_missing && matches!(&before_leaf, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        options.create_new(true);
+    }
+    let file = cap_fs::open(&parent_handle, Path::new(leaf), &options).map_err(|e| {
+        crate::IndexError::Schema(format!("open aggregator cache {}: {e}", path.display()))
+    })?;
+    validate_bound_cache_file(&file, &path)?;
+    #[cfg(unix)]
+    if let Ok(before) = before_leaf {
+        use cap_fs::MetadataExt;
+        if (before.dev(), before.ino()) != cache_file_identity(&file)? {
+            return Err(crate::IndexError::Schema(format!(
+                "aggregator cache leaf changed while opening: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(BoundCache {
+        _parent: parent_handle,
+        file,
+        public_path: path,
+    })
+}
+
+#[cfg(unix)]
+const BOUND_CACHE_VFS_NAME: &CStr = c"kio-bound-cache-unix";
+#[cfg(unix)]
+static BOUND_CACHE_VFS_INIT: Once = Once::new();
+#[cfg(unix)]
+static BOUND_CACHE_VFS_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+#[cfg(unix)]
+static BOUND_CACHE_DEFAULT_VFS: OnceLock<usize> = OnceLock::new();
+
+#[cfg(unix)]
+fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<Connection> {
+    use std::os::fd::AsRawFd;
+    BOUND_CACHE_VFS_INIT.call_once(|| {
+        let result = unsafe {
+            let original = rusqlite::ffi::sqlite3_vfs_find(std::ptr::null());
+            if original.is_null() {
+                Err("SQLite has no default VFS".to_owned())
+            } else {
+                let _ = BOUND_CACHE_DEFAULT_VFS.set(original as usize);
+                let mut wrapped = Box::new(*original);
+                wrapped.zName = BOUND_CACHE_VFS_NAME.as_ptr();
+                wrapped.xFullPathname = Some(bound_cache_x_full_pathname);
+                let code = rusqlite::ffi::sqlite3_vfs_register(Box::into_raw(wrapped), 0);
+                if code == rusqlite::ffi::SQLITE_OK {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "register bound cache SQLite VFS: SQLite error {code}"
+                    ))
+                }
+            }
+        };
+        let _ = BOUND_CACHE_VFS_RESULT.set(result);
+    });
+    BOUND_CACHE_VFS_RESULT
+        .get()
+        .expect("VFS initializer sets result")
+        .as_ref()
+        .map_err(|e| crate::IndexError::Schema(e.clone()))?;
+    let path = std::path::PathBuf::from(format!("/dev/fd/{}", cache.file.as_raw_fd()));
+    Ok(Connection::open_with_flags_and_vfs(
+        &path,
+        flags,
+        "kio-bound-cache-unix",
+    )?)
+}
+#[cfg(not(unix))]
+fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<Connection> {
+    Ok(Connection::open_with_flags(&cache.public_path, flags)?)
+}
+#[cfg(unix)]
+unsafe extern "C" fn bound_cache_x_full_pathname(
+    _: *mut rusqlite::ffi::sqlite3_vfs,
+    name: *const std::ffi::c_char,
+    output_len: std::ffi::c_int,
+    output: *mut std::ffi::c_char,
+) -> std::ffi::c_int {
+    if name.is_null() || output.is_null() || output_len <= 0 {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    }
+    let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
+    if bytes
+        .strip_prefix(b"/dev/fd/")
+        .is_some_and(|fd| !fd.is_empty() && fd.iter().all(u8::is_ascii_digit))
+    {
+        if bytes.len() + 1 > output_len as usize {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr().cast::<std::ffi::c_char>(),
+                output,
+                bytes.len(),
+            );
+            *output.add(bytes.len()) = 0;
+        }
+        return rusqlite::ffi::SQLITE_OK;
+    }
+    let Some(default_vfs) = BOUND_CACHE_DEFAULT_VFS.get() else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    let default_vfs = *default_vfs as *mut rusqlite::ffi::sqlite3_vfs;
+    let Some(callback) = (unsafe { (*default_vfs).xFullPathname }) else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    unsafe { callback(default_vfs, name, output_len, output) }
+}
+
 pub struct Aggregator {
     conn: Connection,
+    // Retain the directory and leaf capabilities for the lifetime of SQLite.
+    // On Unix the VFS opens `/dev/fd/N`; on Windows this denies delete-sharing
+    // while SQLite completes its public-path open.
+    _cache: BoundCache,
 }
 
 impl Aggregator {
@@ -435,13 +781,34 @@ impl Aggregator {
     /// tokenizer mismatch would make the projection and its candidate query
     /// disagree about what the user asked for.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                crate::IndexError::Schema(format!("aggregator cache dir: {error}"))
-            })?;
-        }
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let cache = bind_cache(path, true)?;
+        Self::open_bound(cache)
+    }
+
+    fn open_bound(cache: BoundCache) -> Result<Self> {
+        Self::reject_obsolete_binding_schema(&cache)?;
+        // `recreate` validates and unlinks the old cache before it calls us,
+        // but that validation is not a lock on the pathname.  In particular,
+        // another process may replace the final component with a symlink in
+        // the interval between that work and this open.  Have SQLite perform
+        // the final lookup with NOFOLLOW so a device-cache repair can never
+        // continue through that replacement.  This is also intentionally used
+        // by ordinary opens: the replica is disposable, whereas following an
+        // attacker-controlled link is not.
+        let conn = open_bound_cache_connection(
+            &cache,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        // This is a disposable, derived cache. Keep SQLite's rollback journal
+        // in process memory so writes require no on-disk journal, WAL, or SHM
+        // sidecar that SQLite would open without the NOFOLLOW protection used
+        // for the primary database file. Transactions still make each
+        // projection atomic for this connection, but deliberately do not
+        // promise crash durability: after a process or power failure the cache
+        // may need its already-supported explicit recreation.
+        conn.pragma_update(None, "journal_mode", "MEMORY")?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(
             r#"
@@ -535,6 +902,7 @@ impl Aggregator {
                 raw_hash TEXT NOT NULL,
                 tool_profile_hash TEXT NOT NULL,
                 gen INTEGER NOT NULL,
+                manifest_hash TEXT NOT NULL,
                 path_at_commit TEXT NOT NULL,
                 pointer_commit TEXT NOT NULL,
                 current_paths_json TEXT NOT NULL,
@@ -564,7 +932,337 @@ impl Aggregator {
             );
             "#,
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _cache: cache,
+        })
+    }
+
+    /// Explicitly discard and recreate the disposable device replica.
+    ///
+    /// This is deliberately separate from [`Self::open`]: ordinary use must
+    /// never turn discovery of an incompatible cache into a write.  Callers
+    /// invoke it only under the user-authorized device repair operation.
+    pub fn recreate(path: &Path) -> Result<Self> {
+        let BoundCacheParent {
+            parent: parent_handle,
+            public_path: path,
+        } = bind_cache_parent(path, true)?;
+        let leaf = path.file_name().expect("resolved cache has leaf");
+        // Cap-relative deletion prevents a swapped public parent from becoming
+        // the authority for any part of explicit recreation.
+        for candidate in [
+            leaf.to_os_string(),
+            format!("{}-wal", leaf.to_string_lossy()).into(),
+            format!("{}-shm", leaf.to_string_lossy()).into(),
+        ] {
+            let candidate = Path::new(&candidate);
+            match cap_fs::stat(&parent_handle, candidate, cap_fs::FollowSymlinks::No) {
+                Ok(metadata) if metadata.is_file() => {
+                    #[cfg(unix)]
+                    {
+                        use cap_fs::MetadataExt;
+                        if metadata.nlink() != 1 {
+                            return Err(crate::IndexError::Schema(format!(
+                                "aggregator cache target must have exactly one hard link: {}",
+                                candidate.display()
+                            )));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    return Err(crate::IndexError::Schema(format!(
+                        "refusing to recreate aggregator cache through symlink or non-file: {}",
+                        candidate.display()
+                    )))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(crate::IndexError::Schema(format!(
+                        "inspect aggregator cache {}: {e}",
+                        candidate.display()
+                    )))
+                }
+            }
+            cap_fs::remove_file(&parent_handle, candidate).map_err(|e| {
+                crate::IndexError::Schema(format!(
+                    "remove aggregator cache {}: {e}",
+                    candidate.display()
+                ))
+            })?;
+        }
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        #[cfg(windows)]
+        {
+            use cap_fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let file = cap_fs::open(&parent_handle, Path::new(leaf), &options).map_err(|e| {
+            crate::IndexError::Schema(format!("create aggregator cache {}: {e}", path.display()))
+        })?;
+        let cache = BoundCache {
+            _parent: parent_handle,
+            file,
+            public_path: path,
+        };
+        Self::open_bound(cache)
+    }
+
+    /// Validate an existing replica before opening it for writing.
+    ///
+    /// A device replica is disposable, but it is still not safe to let
+    /// `CREATE ... IF NOT EXISTS` turn a partial or obsolete cache into a
+    /// superficially current one.  In particular, a successful normal open
+    /// must never write a WAL or alter bytes merely while discovering that it
+    /// cannot interpret the existing cache.  Only an absent database, or an
+    /// actually empty SQLite database, is eligible for bootstrap.
+    fn reject_obsolete_binding_schema(cache: &BoundCache) -> Result<()> {
+        type SchemaColumn = (&'static str, &'static str, bool, i64);
+        type TableSchema = (&'static str, &'static [SchemaColumn]);
+        validate_bound_cache_file(&cache.file, &cache.public_path)?;
+        let conn = open_bound_cache_connection(
+            cache,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let objects = conn
+            .prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+        if objects.is_empty() {
+            return Ok(());
+        }
+
+        const TABLES: &[TableSchema] = &[
+            (
+                "agg_scopes",
+                &[
+                    ("scope_id", "TEXT", false, 1),
+                    ("current_snapshot_commit", "TEXT", false, 0),
+                    ("current_chunking_config_hash", "TEXT", false, 0),
+                    ("index_generation", "TEXT", true, 0),
+                    ("max_rowid", "INTEGER", true, 0),
+                    ("max_association_rowid", "INTEGER", true, 0),
+                    ("has_image_vec", "INTEGER", true, 0),
+                    ("embedding_profiles_json", "TEXT", true, 0),
+                    ("index_status", "TEXT", true, 0),
+                    ("refreshed_at", "INTEGER", true, 0),
+                ],
+            ),
+            (
+                "agg_chunks",
+                &[
+                    ("rowid", "INTEGER", false, 1),
+                    ("scope_id", "TEXT", true, 0),
+                    ("chunk_id", "TEXT", true, 0),
+                    ("raw_hash", "TEXT", true, 0),
+                    ("tool_profile_hash", "TEXT", true, 0),
+                    ("gen", "INTEGER", true, 0),
+                    ("text", "TEXT", true, 0),
+                    ("heading_path", "TEXT", false, 0),
+                    ("section_id", "TEXT", false, 0),
+                    ("byte_start", "INTEGER", true, 0),
+                    ("byte_end", "INTEGER", true, 0),
+                    ("unit_key", "TEXT", true, 0),
+                    ("created_at", "TEXT", true, 0),
+                    ("first_seen_commit", "TEXT", true, 0),
+                    ("invalidated_commit", "TEXT", false, 0),
+                ],
+            ),
+            (
+                "agg_embeddings",
+                &[
+                    ("chunk_rowid", "INTEGER", false, 1),
+                    ("scope_id", "TEXT", true, 0),
+                    ("vector", "BLOB", true, 0),
+                    ("dimensions", "INTEGER", true, 0),
+                ],
+            ),
+            (
+                "agg_image_embeddings",
+                &[
+                    ("scope_id", "TEXT", true, 1),
+                    ("image_id", "TEXT", true, 2),
+                    ("vector", "BLOB", true, 0),
+                    ("dimensions", "INTEGER", true, 0),
+                ],
+            ),
+            (
+                "agg_image_refs",
+                &[
+                    ("scope_id", "TEXT", true, 1),
+                    ("image_id", "TEXT", true, 2),
+                    ("chunk_id", "TEXT", true, 3),
+                    ("image_uri", "TEXT", true, 0),
+                ],
+            ),
+            (
+                "agg_bindings",
+                &[
+                    ("scope_id", "TEXT", true, 1),
+                    ("selector_kind", "TEXT", true, 2),
+                    ("snapshot_commit", "TEXT", true, 3),
+                    ("chunk_id", "TEXT", true, 4),
+                    ("raw_hash", "TEXT", true, 0),
+                    ("tool_profile_hash", "TEXT", true, 0),
+                    ("gen", "INTEGER", true, 0),
+                    ("manifest_hash", "TEXT", true, 0),
+                    ("path_at_commit", "TEXT", true, 5),
+                    ("pointer_commit", "TEXT", true, 6),
+                    ("current_paths_json", "TEXT", true, 0),
+                    ("is_live", "INTEGER", true, 0),
+                ],
+            ),
+            (
+                "agg_projection_markers",
+                &[
+                    ("scope_id", "TEXT", true, 1),
+                    ("selector_kind", "TEXT", true, 2),
+                    ("snapshot_commit", "TEXT", true, 3),
+                    ("chunking_config_hash", "TEXT", false, 0),
+                    ("shallow_skipped", "INTEGER", true, 0),
+                    ("binding_count", "INTEGER", true, 0),
+                    ("completed_at", "INTEGER", true, 0),
+                ],
+            ),
+        ];
+        const INDEX_NAMES: &[&str] = &[
+            "agg_chunks_key",
+            "agg_chunks_scope",
+            "agg_chunks_identity",
+            "agg_embeddings_scope",
+            "agg_image_refs_chunk",
+            "agg_bindings_lookup",
+        ];
+        let expected_tables = TABLES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        let allowed_tables = expected_tables
+            .iter()
+            .copied()
+            .chain([
+                "agg_fts",
+                "agg_fts_data",
+                "agg_fts_idx",
+                "agg_fts_content",
+                "agg_fts_docsize",
+                "agg_fts_config",
+            ])
+            .collect::<BTreeSet<_>>();
+        for (kind, name) in &objects {
+            if (kind == "table" && allowed_tables.contains(name.as_str()))
+                || (kind == "index" && INDEX_NAMES.contains(&name.as_str()))
+            {
+                continue;
+            }
+            return Err(Self::incompatible_schema_error());
+        }
+        if !expected_tables
+            .iter()
+            .all(|name| objects.contains(&(String::from("table"), String::from(*name))))
+            || !objects.contains(&(String::from("table"), String::from("agg_fts")))
+        {
+            return Err(Self::incompatible_schema_error());
+        }
+        for (table, expected_columns) in TABLES {
+            let actual = conn
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if actual.len() != expected_columns.len()
+                || actual
+                    .iter()
+                    .zip(*expected_columns)
+                    .any(|(actual, expected)| {
+                        actual.0 != expected.0
+                            || actual.1 != expected.1
+                            || actual.2 != expected.2
+                            || actual.3 != expected.3
+                    })
+            {
+                return Err(Self::incompatible_schema_error());
+            }
+        }
+        let fts_sql = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agg_fts'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let normalized_fts_sql = fts_sql
+            .split_whitespace()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if !normalized_fts_sql.contains("createvirtualtableagg_ftsusingfts5(text,heading_path,content='agg_chunks',content_rowid='rowid',tokenize='trigram')") {
+            return Err(Self::incompatible_schema_error());
+        }
+        for (index, table, unique, columns) in [
+            (
+                "agg_chunks_key",
+                "agg_chunks",
+                true,
+                &["scope_id", "chunk_id"][..],
+            ),
+            ("agg_chunks_scope", "agg_chunks", false, &["scope_id"][..]),
+            (
+                "agg_chunks_identity",
+                "agg_chunks",
+                false,
+                &["scope_id", "raw_hash", "tool_profile_hash", "gen"][..],
+            ),
+            (
+                "agg_embeddings_scope",
+                "agg_embeddings",
+                false,
+                &["scope_id"][..],
+            ),
+            (
+                "agg_image_refs_chunk",
+                "agg_image_refs",
+                false,
+                &["scope_id", "chunk_id"][..],
+            ),
+            (
+                "agg_bindings_lookup",
+                "agg_bindings",
+                false,
+                &["selector_kind", "snapshot_commit", "scope_id", "chunk_id"][..],
+            ),
+        ] {
+            let (actual_table, actual_unique): (String, i64) = conn.query_row(
+                "SELECT tbl_name, sql IS NOT NULL AND sql LIKE 'CREATE UNIQUE INDEX%' FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|_| Self::incompatible_schema_error())?;
+            let actual_columns = conn
+                .prepare(&format!("PRAGMA index_info({index})"))?
+                .query_map([], |row| row.get::<_, String>(2))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if actual_table != table || (actual_unique != 0) != unique || actual_columns != columns
+            {
+                return Err(Self::incompatible_schema_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn incompatible_schema_error() -> crate::IndexError {
+        crate::IndexError::Schema(
+            "aggregator cache has incompatible schema; recreate the device replica".to_owned(),
+        )
     }
 
     /// One stamp for the whole collection: every scope this replica holds,
@@ -903,6 +1601,27 @@ impl Aggregator {
             .map_err(Into::into)
     }
 
+    /// Every completed snapshot for this scope and selector, ordered by commit
+    /// identifier.  In particular, callers use the `At` selector to discover
+    /// the immutable historical projections that an incremental refresh must
+    /// retain without reopening the source index.
+    pub fn completed_projection_snapshots(
+        &self,
+        scope_id: &str,
+        selector: AggSelector,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT snapshot_commit
+             FROM agg_projection_markers
+             WHERE scope_id = ?1 AND selector_kind = ?2
+             ORDER BY snapshot_commit",
+        )?;
+        let snapshots = statement
+            .query_map(params![scope_id, selector.as_str()], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(snapshots)
+    }
+
     /// Replace everything this replica holds for one scope, in one transaction.
     ///
     /// Whole-scope replace rather than a row-level delta. `index_generation` is
@@ -928,6 +1647,28 @@ impl Aggregator {
     pub fn refresh_scope_with_projection(
         &mut self,
         request: AggProjectionRequest<'_>,
+    ) -> Result<()> {
+        self.refresh_scope_with_projection_inner(request, false)
+    }
+
+    /// Replace a scope's current corpus while retaining completed `At`
+    /// projections other than the `At` snapshots supplied by this request.
+    ///
+    /// This is for ordinary writer refreshes: a historical projection is an
+    /// immutable answer to an explicit snapshot and must not disappear just
+    /// because HEAD changed.  Full replacement remains available through
+    /// [`Self::refresh_scope_with_projection`] for purge and device repair.
+    pub fn refresh_scope_with_projection_preserving_at(
+        &mut self,
+        request: AggProjectionRequest<'_>,
+    ) -> Result<()> {
+        self.refresh_scope_with_projection_inner(request, true)
+    }
+
+    fn refresh_scope_with_projection_inner(
+        &mut self,
+        request: AggProjectionRequest<'_>,
+        preserve_at: bool,
     ) -> Result<()> {
         let AggProjectionRequest {
             scope_id,
@@ -990,7 +1731,146 @@ impl Aggregator {
             }
         }
         let tx = self.conn.transaction()?;
-        delete_scope_rows(&tx, scope_id)?;
+        if preserve_at {
+            // These connection-local TEMP relations deliberately avoid a
+            // giant `IN (?, …)` expression. A projection can contain more
+            // chunk ids than SQLite permits bound parameters (and that must
+            // not turn a harmless ordinary refresh into a failed replica
+            // write). They are dropped after validation below.
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS aggregator_refresh_chunks (
+                     chunk_id TEXT PRIMARY KEY
+                 ) WITHOUT ROWID;
+                 CREATE TEMP TABLE IF NOT EXISTS aggregator_refresh_at_snapshots (
+                     snapshot_commit TEXT PRIMARY KEY
+                 ) WITHOUT ROWID;
+                 DELETE FROM aggregator_refresh_chunks;
+                 DELETE FROM aggregator_refresh_at_snapshots;",
+            )?;
+            {
+                let mut insert_chunk = tx.prepare(
+                    "INSERT OR IGNORE INTO aggregator_refresh_chunks(chunk_id) VALUES (?1)",
+                )?;
+                for chunk in chunks {
+                    insert_chunk.execute(params![chunk.chunk_id])?;
+                }
+                let mut insert_snapshot = tx.prepare(
+                    "INSERT OR IGNORE INTO aggregator_refresh_at_snapshots(snapshot_commit)
+                     VALUES (?1)",
+                )?;
+                for completion in completions
+                    .iter()
+                    .filter(|completion| completion.selector == AggSelector::At)
+                {
+                    insert_snapshot.execute(params![completion.snapshot_commit])?;
+                }
+            }
+            let missing = tx
+                .query_row(
+                    "SELECT binding.chunk_id FROM agg_bindings binding
+                     WHERE binding.scope_id = ?1 AND binding.selector_kind = 'at'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM aggregator_refresh_at_snapshots replacement
+                           WHERE replacement.snapshot_commit = binding.snapshot_commit
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM aggregator_refresh_chunks incoming
+                           WHERE incoming.chunk_id = binding.chunk_id
+                       )
+                     LIMIT 1",
+                    params![scope_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(chunk_id) = missing {
+                return Err(crate::IndexError::Schema(format!(
+                    "preserved At binding references missing incoming chunk: {chunk_id}"
+                )));
+            }
+            let missing_marker = tx
+                .query_row(
+                    "SELECT binding.snapshot_commit
+                     FROM agg_bindings binding
+                     WHERE binding.scope_id = ?1 AND binding.selector_kind = 'at'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM aggregator_refresh_at_snapshots replacement
+                           WHERE replacement.snapshot_commit = binding.snapshot_commit
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM agg_projection_markers marker
+                           WHERE marker.scope_id = binding.scope_id
+                             AND marker.selector_kind = binding.selector_kind
+                             AND marker.snapshot_commit = binding.snapshot_commit
+                       )
+                     LIMIT 1",
+                    params![scope_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(snapshot_commit) = missing_marker {
+                return Err(crate::IndexError::Schema(format!(
+                    "preserved At binding has no completion marker: {snapshot_commit}"
+                )));
+            }
+            let inconsistent_marker = tx
+                .query_row(
+                    "SELECT marker.snapshot_commit
+                     FROM agg_projection_markers marker
+                     WHERE marker.scope_id = ?1 AND marker.selector_kind = 'at'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM aggregator_refresh_at_snapshots replacement
+                           WHERE replacement.snapshot_commit = marker.snapshot_commit
+                       )
+                       AND marker.binding_count != (
+                           SELECT COUNT(*) FROM agg_bindings binding
+                           WHERE binding.scope_id = marker.scope_id
+                             AND binding.selector_kind = marker.selector_kind
+                             AND binding.snapshot_commit = marker.snapshot_commit
+                       )
+                     LIMIT 1",
+                    params![scope_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(snapshot_commit) = inconsistent_marker {
+                return Err(crate::IndexError::Schema(format!(
+                    "preserved At completion marker has inconsistent binding count: {snapshot_commit}"
+                )));
+            }
+            tx.execute_batch(
+                "DROP TABLE aggregator_refresh_chunks;
+                 DROP TABLE aggregator_refresh_at_snapshots;",
+            )?;
+        }
+        delete_scope_corpus_rows(&tx, scope_id)?;
+        if preserve_at {
+            tx.execute(
+                "DELETE FROM agg_bindings WHERE scope_id = ?1 AND selector_kind != 'at'",
+                params![scope_id],
+            )?;
+            tx.execute(
+                "DELETE FROM agg_projection_markers
+                 WHERE scope_id = ?1 AND selector_kind != 'at'",
+                params![scope_id],
+            )?;
+            for completion in completions
+                .iter()
+                .filter(|completion| completion.selector == AggSelector::At)
+            {
+                tx.execute(
+                    "DELETE FROM agg_bindings
+                     WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2",
+                    params![scope_id, completion.snapshot_commit],
+                )?;
+                tx.execute(
+                    "DELETE FROM agg_projection_markers
+                     WHERE scope_id = ?1 AND selector_kind = 'at' AND snapshot_commit = ?2",
+                    params![scope_id, completion.snapshot_commit],
+                )?;
+            }
+        } else {
+            delete_scope_relations(&tx, scope_id)?;
+        }
         {
             let mut ins = tx.prepare(
                 "INSERT INTO agg_chunks(
@@ -1072,9 +1952,9 @@ impl Aggregator {
             let mut insert = tx.prepare(
                 "INSERT INTO agg_bindings(
                     scope_id, selector_kind, snapshot_commit, chunk_id,
-                    raw_hash, tool_profile_hash, gen, path_at_commit,
+                    raw_hash, tool_profile_hash, gen, manifest_hash, path_at_commit,
                     pointer_commit, current_paths_json, is_live
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             for binding in bindings {
                 insert.execute(params![
@@ -1085,6 +1965,7 @@ impl Aggregator {
                     binding.raw_hash,
                     binding.tool_profile_hash,
                     binding.gen as i64,
+                    binding.manifest_hash,
                     binding.path_at_commit,
                     binding.pointer_commit,
                     serde_json::to_string(&binding.current_paths)
@@ -1503,12 +2384,13 @@ impl Aggregator {
                  raw_hash TEXT NOT NULL,
                  tool_profile_hash TEXT NOT NULL,
                  gen INTEGER NOT NULL,
+                 manifest_hash TEXT NOT NULL,
                  path_at_commit TEXT NOT NULL,
                  pointer_commit TEXT NOT NULL,
                  current_paths_json TEXT NOT NULL,
                  is_live INTEGER NOT NULL,
                  PRIMARY KEY (
-                     scope_id, raw_hash, tool_profile_hash, gen,
+                     scope_id, raw_hash, tool_profile_hash, gen, manifest_hash,
                      path_at_commit, pointer_commit, current_paths_json, is_live
                  )
              ) WITHOUT ROWID;
@@ -1547,9 +2429,9 @@ impl Aggregator {
         if let Some(filters) = request.binding_filter {
             let mut insert = self.conn.prepare(
                 "INSERT OR IGNORE INTO query_runtime_bindings(
-                    scope_id, raw_hash, tool_profile_hash, gen,
+                    scope_id, raw_hash, tool_profile_hash, gen, manifest_hash,
                     path_at_commit, pointer_commit, current_paths_json, is_live
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for filter in filters {
                 insert.execute(params![
@@ -1557,6 +2439,7 @@ impl Aggregator {
                     filter.raw_hash,
                     filter.tool_profile_hash,
                     filter.gen as i64,
+                    filter.manifest_hash,
                     filter.path_at_commit,
                     filter.pointer_commit,
                     serde_json::to_string(&filter.current_paths)
@@ -1580,6 +2463,7 @@ impl Aggregator {
                   AND runtime.raw_hash = binding.raw_hash
                   AND runtime.tool_profile_hash = binding.tool_profile_hash
                   AND runtime.gen = binding.gen
+                  AND runtime.manifest_hash = binding.manifest_hash
                   AND runtime.path_at_commit = binding.path_at_commit
                   AND runtime.pointer_commit = binding.pointer_commit
                   AND runtime.current_paths_json = binding.current_paths_json
@@ -1850,7 +2734,7 @@ impl Aggregator {
         };
         let mut stmt = self.conn.prepare(
             "SELECT binding.snapshot_commit, binding.raw_hash, binding.tool_profile_hash,
-                    binding.gen, binding.path_at_commit, binding.pointer_commit,
+                    binding.gen, binding.manifest_hash, binding.path_at_commit, binding.pointer_commit,
                     binding.current_paths_json, binding.is_live
              FROM agg_bindings binding
              JOIN query_eligible_bindings eligible
@@ -1868,10 +2752,10 @@ impl Aggregator {
         let rows = stmt.query_map(
             params![seed.scope_id, seed.chunk_id, selector.as_str()],
             |row| {
-                let current_paths = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(6)?)
+                let current_paths = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(7)?)
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            6,
+                            7,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -1883,10 +2767,11 @@ impl Aggregator {
                     raw_hash: row.get(1)?,
                     tool_profile_hash: row.get(2)?,
                     gen: row.get::<_, i64>(3)? as u64,
-                    path_at_commit: row.get(4)?,
-                    pointer_commit: row.get(5)?,
+                    manifest_hash: row.get(4)?,
+                    path_at_commit: row.get(5)?,
+                    pointer_commit: row.get(6)?,
                     current_paths,
-                    is_live: row.get::<_, i64>(7)? != 0,
+                    is_live: row.get::<_, i64>(8)? != 0,
                 })
             },
         )?;
@@ -1998,6 +2883,11 @@ fn sort_and_truncate(scored: &mut Vec<VectorScore>, limit: u64) {
 }
 
 fn delete_scope_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<()> {
+    delete_scope_corpus_rows(tx, scope_id)?;
+    delete_scope_relations(tx, scope_id)
+}
+
+fn delete_scope_corpus_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<()> {
     let doomed = stored_rows(
         tx,
         "SELECT rowid, text, heading_path FROM agg_chunks WHERE scope_id = ?1",
@@ -2017,15 +2907,19 @@ fn delete_scope_rows(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<(
         params![scope_id],
     )?;
     tx.execute(
+        "DELETE FROM agg_chunks WHERE scope_id = ?1",
+        params![scope_id],
+    )?;
+    Ok(())
+}
+
+fn delete_scope_relations(tx: &rusqlite::Transaction<'_>, scope_id: &str) -> Result<()> {
+    tx.execute(
         "DELETE FROM agg_bindings WHERE scope_id = ?1",
         params![scope_id],
     )?;
     tx.execute(
         "DELETE FROM agg_projection_markers WHERE scope_id = ?1",
-        params![scope_id],
-    )?;
-    tx.execute(
-        "DELETE FROM agg_chunks WHERE scope_id = ?1",
         params![scope_id],
     )?;
     Ok(())
@@ -2178,6 +3072,7 @@ mod tests {
             raw_hash: format!("raw:{chunk_id}"),
             tool_profile_hash: "tool:test".to_owned(),
             gen: 0,
+            manifest_hash: "manifest:test".to_owned(),
             path_at_commit: path.to_owned(),
             pointer_commit: snapshot.to_owned(),
             current_paths: Vec::new(),
@@ -2221,6 +3116,301 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = Aggregator::open(&dir.path().join("aggregator.sqlite")).unwrap();
         (dir, index)
+    }
+
+    #[test]
+    fn obsolete_binding_schema_fails_closed_until_explicit_recreate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agg_bindings (scope_id TEXT NOT NULL); \
+             CREATE TABLE agg_projection_markers (scope_id TEXT NOT NULL); \
+             INSERT INTO agg_bindings VALUES ('legacy'); \
+             INSERT INTO agg_projection_markers VALUES ('legacy');",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("obsolete schema must fail");
+        assert!(error.to_string().contains("incompatible schema"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let replica = Aggregator::recreate(&path).unwrap();
+        let columns = replica
+            .conn
+            .prepare("PRAGMA table_info(agg_bindings)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "manifest_hash"));
+        assert_eq!(
+            replica
+                .conn
+                .query_row("SELECT COUNT(*) FROM agg_bindings", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            replica
+                .conn
+                .query_row("SELECT COUNT(*) FROM agg_projection_markers", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn partial_currentish_schema_fails_closed_without_creating_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agg_bindings (
+                 scope_id TEXT NOT NULL,
+                 manifest_hash TEXT NOT NULL
+             );
+             CREATE INDEX agg_bindings_lookup
+                 ON agg_bindings(scope_id, manifest_hash);",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("partial schema must fail before bootstrap");
+        assert!(error.to_string().contains("incompatible schema"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!sqlite_sidecar(&path, "-wal").exists());
+        assert!(!sqlite_sidecar(&path, "-shm").exists());
+    }
+
+    #[test]
+    fn complete_replica_schema_reopens_without_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        drop(Aggregator::open(&path).unwrap());
+
+        let reopened = Aggregator::open(&path).expect("complete schema reopens");
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .unwrap()
+                .to_ascii_lowercase(),
+            "memory"
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM agg_chunks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recreate_rejects_a_symlink_cache_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.sqlite");
+        std::fs::write(&target, b"must not be removed").unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        symlink(&target, &path).unwrap();
+
+        let error = Aggregator::recreate(&path)
+            .err()
+            .expect("symlink cache target must fail");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"must not be removed");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_symlink_cache_target_without_touching_its_destination() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.sqlite");
+        std::fs::write(&target, b"must not be opened as a cache").unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        symlink(&target, &path).unwrap();
+
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("symlink cache target must fail at SQLite open");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"must not be opened as a cache"
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_cache_survives_parent_replacement_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let cache_parent = directory.path().join("cache");
+        std::fs::create_dir(&cache_parent).unwrap();
+        let path = cache_parent.join("aggregator.sqlite");
+        let index = Aggregator::open(&path).unwrap();
+
+        let original = directory.path().join("cache-original");
+        std::fs::rename(&cache_parent, &original).unwrap();
+        symlink(victim.path(), &cache_parent).unwrap();
+        index
+            .conn
+            .execute("CREATE TABLE post_parent_replace (id INTEGER)", [])
+            .unwrap();
+        drop(index);
+
+        assert!(
+            !victim.path().join("aggregator.sqlite").exists(),
+            "the swapped public parent must never become SQLite's authority"
+        );
+        let reopened = Connection::open(original.join("aggregator.sqlite")).unwrap();
+        assert!(
+            reopened
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'post_parent_replace'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_cache_ancestor_is_rejected_without_touching_victim() {
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let junction = directory.path().join("cache-junction");
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(victim.path())
+            .status()
+            .expect("create Windows junction fixture");
+        assert!(status.success(), "mklink /J must create the test junction");
+
+        let path = junction.join("kio/aggregator.sqlite");
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("a junction must never become the cache authority");
+        assert!(error.to_string().contains("reparse point"));
+        assert!(!victim.path().join("kio/aggregator.sqlite").exists());
+
+        std::fs::remove_dir(&junction).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_open_does_not_follow_attacker_controlled_wal_and_shm_sidecars() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        // Simulate a cache produced by the prior WAL-based implementation.
+        drop(Aggregator::open(&path).unwrap());
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "journal_mode", "WAL").unwrap();
+        drop(legacy);
+        let wal_target = dir.path().join("wal-target");
+        let shm_target = dir.path().join("shm-target");
+        std::fs::write(&wal_target, b"must not be opened as a WAL").unwrap();
+        std::fs::write(&shm_target, b"must not be opened as shared memory").unwrap();
+        let wal = sqlite_sidecar(&path, "-wal");
+        let shm = sqlite_sidecar(&path, "-shm");
+        symlink(&wal_target, &wal).unwrap();
+        symlink(&shm_target, &shm).unwrap();
+
+        let error = Aggregator::open(&path)
+            .err()
+            .expect("ordinary open must fail rather than follow legacy WAL sidecars");
+        assert!(error.to_string().contains("unable to open database file"));
+
+        assert_eq!(
+            std::fs::read(&wal_target).unwrap(),
+            b"must not be opened as a WAL"
+        );
+        assert_eq!(
+            std::fs::read(&shm_target).unwrap(),
+            b"must not be opened as shared memory"
+        );
+        // The failed open must not follow either link or replace it with a
+        // file. Explicit `recreate` is the only path allowed to remove stale
+        // sidecars after validating them.
+        for sidecar in [&wal, &shm] {
+            match std::fs::symlink_metadata(sidecar) {
+                Ok(metadata) => assert!(metadata.file_type().is_symlink()),
+                Err(error) => panic!("ordinary open removed sidecar: {error}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recreate_refuses_symlink_wal_and_shm_sidecars_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregator.sqlite");
+        drop(Aggregator::open(&path).unwrap());
+        let wal_target = dir.path().join("wal-target");
+        let shm_target = dir.path().join("shm-target");
+        std::fs::write(&wal_target, b"must not be removed as WAL").unwrap();
+        std::fs::write(&shm_target, b"must not be removed as SHM").unwrap();
+        let wal = sqlite_sidecar(&path, "-wal");
+        let shm = sqlite_sidecar(&path, "-shm");
+        symlink(&wal_target, &wal).unwrap();
+        symlink(&shm_target, &shm).unwrap();
+
+        let error = Aggregator::recreate(&path)
+            .err()
+            .expect("recreate must reject sidecar symlinks");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            std::fs::read(&wal_target).unwrap(),
+            b"must not be removed as WAL"
+        );
+        assert_eq!(
+            std::fs::read(&shm_target).unwrap(),
+            b"must not be removed as SHM"
+        );
+        assert!(std::fs::symlink_metadata(&wal)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&shm)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
@@ -2413,6 +3603,7 @@ mod tests {
             raw_hash: "raw:current".to_owned(),
             tool_profile_hash: "tool:test".to_owned(),
             gen: 0,
+            manifest_hash: "manifest:test".to_owned(),
             path_at_commit: "current.md".to_owned(),
             pointer_commit: "head".to_owned(),
             current_paths: Vec::new(),
@@ -2634,6 +3825,190 @@ mod tests {
             .projection_marker("empty", AggSelector::At, "commit:head")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn incremental_at_refresh_preserves_old_and_empty_markers_and_replaces_requested_at() {
+        let (_dir, mut index) = store();
+        let initial_header = header("gen-1");
+        index
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "scope",
+                header: &initial_header,
+                chunks: &[chunk("old", "old"), chunk("replace", "replace")],
+                images: &[],
+                bindings: &[
+                    binding("at", "commit:old", "old", "old.md"),
+                    binding("at", "commit:replace", "replace", "replace.md"),
+                ],
+                completions: &[
+                    completion(AggSelector::At, "commit:old"),
+                    completion(AggSelector::At, "commit:replace"),
+                    completion(AggSelector::At, "commit:empty"),
+                    completion(AggSelector::Current, "commit:head"),
+                ],
+                now_ms: 1,
+            })
+            .unwrap();
+        let old_marker = index
+            .projection_marker("scope", AggSelector::At, "commit:old")
+            .unwrap()
+            .unwrap();
+        let empty_marker = index
+            .projection_marker("scope", AggSelector::At, "commit:empty")
+            .unwrap()
+            .unwrap();
+
+        let next_header = header("gen-2");
+        index
+            .refresh_scope_with_projection_preserving_at(AggProjectionRequest {
+                scope_id: "scope",
+                header: &next_header,
+                chunks: &[chunk("old", "old"), chunk("replace", "new replace")],
+                images: &[],
+                bindings: &[binding("at", "commit:replace", "replace", "new.md")],
+                completions: &[completion(AggSelector::At, "commit:replace")],
+                now_ms: 2,
+            })
+            .unwrap();
+
+        assert!(index
+            .has_binding("scope", AggSelector::At, "commit:old")
+            .unwrap());
+        assert_eq!(
+            index
+                .conn
+                .query_row(
+                    "SELECT path_at_commit FROM agg_bindings
+                     WHERE scope_id = 'scope' AND selector_kind = 'at'
+                       AND snapshot_commit = 'commit:old'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "old.md",
+            "an unrelated At binding remains unchanged"
+        );
+        assert_eq!(
+            index
+                .projection_marker("scope", AggSelector::At, "commit:old")
+                .unwrap(),
+            Some(old_marker),
+            "an unrelated completed At projection retains its marker unchanged"
+        );
+        assert_eq!(
+            index
+                .projection_marker("scope", AggSelector::At, "commit:empty")
+                .unwrap(),
+            Some(empty_marker),
+            "a completed empty At projection remains physically stored"
+        );
+        assert_eq!(
+            index
+                .projection_marker("scope", AggSelector::At, "commit:replace")
+                .unwrap()
+                .unwrap()
+                .completed_at,
+            2
+        );
+        assert_eq!(
+            index
+                .conn
+                .query_row(
+                    "SELECT path_at_commit FROM agg_bindings
+                     WHERE scope_id = 'scope' AND selector_kind = 'at'
+                       AND snapshot_commit = 'commit:replace'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "new.md"
+        );
+        assert_eq!(
+            index
+                .completed_projection_snapshots("scope", AggSelector::At)
+                .unwrap(),
+            vec![
+                "commit:empty".to_owned(),
+                "commit:old".to_owned(),
+                "commit:replace".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_at_refresh_rejects_a_missing_preserved_chunk() {
+        let (_dir, mut index) = store();
+        let initial_header = header("gen-1");
+        index
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "scope",
+                header: &initial_header,
+                chunks: &[chunk("old", "old")],
+                images: &[],
+                bindings: &[binding("at", "commit:old", "old", "old.md")],
+                completions: &[completion(AggSelector::At, "commit:old")],
+                now_ms: 1,
+            })
+            .unwrap();
+
+        let error = index
+            .refresh_scope_with_projection_preserving_at(AggProjectionRequest {
+                scope_id: "scope",
+                header: &header("gen-2"),
+                chunks: &[],
+                images: &[],
+                bindings: &[],
+                completions: &[],
+                now_ms: 2,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("preserved At binding references missing incoming chunk: old"));
+        assert!(index
+            .has_binding("scope", AggSelector::At, "commit:old")
+            .unwrap());
+    }
+
+    #[test]
+    fn incremental_at_refresh_handles_sqlite_parameter_scale_chunk_sets() {
+        let (_dir, mut index) = store();
+        index
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "scope",
+                header: &header("gen-1"),
+                chunks: &[chunk("keep", "retained")],
+                images: &[],
+                bindings: &[binding("at", "commit:old", "keep", "keep.md")],
+                completions: &[completion(AggSelector::At, "commit:old")],
+                now_ms: 1,
+            })
+            .unwrap();
+        let chunks = (0..32_766)
+            .map(|number| {
+                if number == 0 {
+                    chunk("keep", "retained")
+                } else {
+                    chunk(&format!("chunk:{number}"), "text")
+                }
+            })
+            .collect::<Vec<_>>();
+
+        index
+            .refresh_scope_with_projection_preserving_at(AggProjectionRequest {
+                scope_id: "scope",
+                header: &header("gen-2"),
+                chunks: &chunks,
+                images: &[],
+                bindings: &[],
+                completions: &[],
+                now_ms: 2,
+            })
+            .unwrap();
+        assert!(index
+            .has_binding("scope", AggSelector::At, "commit:old")
+            .unwrap());
     }
 
     #[test]

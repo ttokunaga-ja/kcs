@@ -95,35 +95,6 @@ pub fn contextualized_embedding_input(context: Option<&str>, text: &str) -> Stri
     }
 }
 
-/// Choose the one stored embedding that belongs to a chunk from the candidate
-/// rows sharing its `text_hash` (07 §5.3 contextual-embedding addendum). With
-/// per-filename contextualization a single `text_hash` can carry several
-/// `embeddings` rows (identical body text, different filenames), so a plain
-/// `chunks ⋈ embeddings ON text_hash` join is ambiguous. Resolution, robust to
-/// legacy non-contextual rows (`context_key IS NULL`):
-/// - exactly one candidate → it (the overwhelming common case, and every
-///   pre-addendum store — keeps the single-embedding-per-text invariant intact);
-/// - several candidates → the one whose stored `context_key` equals this chunk's
-///   recomputed `chunk_embedding_context(raw_path)`; if none matches (a mixed
-///   legacy store), the first by the caller's stable order, so a chunk always
-///   links *some* deterministic vector rather than silently dropping out of KNN.
-fn choose_contextual_embedding<T>(
-    raw_path: &str,
-    candidates: &[(Option<String>, T)],
-) -> Option<usize> {
-    match candidates.len() {
-        0 => None,
-        1 => Some(0),
-        _ => {
-            let want = chunk_embedding_context(raw_path);
-            candidates
-                .iter()
-                .position(|(context_key, _)| context_key.as_deref() == want.as_deref())
-                .or(Some(0))
-        }
-    }
-}
-
 /// A distinct embedding profile observed in the `embeddings` table (compat check
 /// input, 03 §7).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -202,9 +173,9 @@ pub fn write_chunk_embedding(
     profile_hash: &str,
     // 2026-07-24 (07 §5.3 contextual-embedding addendum): the humanized filename
     // context this vector was embedded with (`chunk_embedding_context`), stored
-    // so `rebuild_chunk_vec`/`snapshot_chunk_embeddings` can disambiguate several
-    // rows sharing one `text_hash`. `None` for a non-contextual (legacy or
-    // symbolic-name) chunk — persisted as SQL NULL.
+    // so `rebuild_chunk_vec` can disambiguate several
+    // rows sharing one `text_hash`. `None` for a symbolic-name chunk —
+    // persisted as SQL NULL.
     context_key: Option<&str>,
 ) -> Result<()> {
     validate_embedding_vector(vector, dimensions)?;
@@ -380,32 +351,59 @@ pub fn link_chunk_vecs_to_content_vector<'a>(
 /// R19-4's Failed(retryable) content-twin convergence is unaffected: only Paused
 /// secret-holds are passed here, never Failed tasks. Releasing the hold (`--send-secrets`)
 /// drops the chunk from this set, so the next rebuild re-links it.
-pub fn rebuild_chunk_vec(conn: &Connection, held_chunk_ids: &BTreeSet<String>) -> Result<()> {
+pub fn rebuild_chunk_vec(
+    conn: &Connection,
+    expected_profile: Option<&EmbeddingProfileSummary>,
+    held_chunk_ids: &BTreeSet<String>,
+) -> Result<()> {
     with_savepoint(conn, "kio_rebuild_chunk_vec", || {
         conn.execute_batch("DELETE FROM chunk_vec;")?;
         // 2026-07-24 (07 §5.3 contextual-embedding addendum): one `text_hash` can
-        // now own several `embeddings` rows (same body, different filenames), so
-        // gather ALL candidates per chunk and let `choose_contextual_embedding`
-        // pick the one whose `context_key` matches this chunk's own filename —
-        // with the single-candidate fast path preserving every non-contextual
-        // store's existing behavior. `ORDER BY c.chunk_id, e.id` fixes the
-        // legacy-mixed tie-break deterministically.
+        // now own several `embeddings` rows (same body, different filenames).
+        // A rebuild may link only the NULL-safe exact contextual match. Absence
+        // is an honest no-vector result; more than one matching row is corrupt
+        // rather than permission to select an arbitrary profile or vector.
         let mut stmt = conn.prepare(
             "SELECT c.chunk_id, c.raw_path, e.vector, e.dimensions, e.context_key
              FROM chunks c
              JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash
+             WHERE (?1 = 1
+                    AND e.dimensions = ?2
+                    AND e.distance = ?3
+                    AND e.modality = ?4
+                    AND e.profile_hash = ?5)
              ORDER BY c.chunk_id, e.id",
         )?;
+        let (profile_present, dimensions, distance, modality, profile_hash) = match expected_profile
+        {
+            Some(profile) => (
+                1_i64,
+                profile.dimensions as i64,
+                profile.distance.as_str(),
+                profile.modality.as_str(),
+                profile.profile_hash.as_str(),
+            ),
+            None => (0_i64, 0_i64, "", "", ""),
+        };
         let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })?
+            .query_map(
+                params![
+                    profile_present,
+                    dimensions,
+                    distance,
+                    modality,
+                    profile_hash
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         // (chunk_id -> (raw_path, [(context_key, (vector, dimensions))])): all
         // embedding rows sharing a chunk's text_hash, for context disambiguation.
@@ -422,15 +420,27 @@ pub fn rebuild_chunk_vec(conn: &Connection, held_chunk_ids: &BTreeSet<String>) -
                 .push((context_key, (vector, dimensions)));
         }
         for (chunk_id, (raw_path, candidates)) in by_chunk {
-            if let Some(index) = choose_contextual_embedding(&raw_path, &candidates) {
-                let (vector, dimensions) = &candidates[index].1;
-                link_chunk_vec_unless_held(
-                    conn,
-                    &chunk_id,
-                    vector,
-                    sql_dimension(*dimensions)?,
-                    held_chunk_ids,
-                )?;
+            let wanted_context = chunk_embedding_context(&raw_path);
+            let matching = candidates
+                .iter()
+                .filter(|(context, _)| context.as_deref() == wanted_context.as_deref())
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [] => {}
+                [(_, (vector, dimensions))] => {
+                    link_chunk_vec_unless_held(
+                        conn,
+                        &chunk_id,
+                        vector,
+                        sql_dimension(*dimensions)?,
+                        held_chunk_ids,
+                    )?;
+                }
+                _ => {
+                    return Err(IndexError::Schema(format!(
+                        "multiple contextual chunk embeddings match {chunk_id}"
+                    )))
+                }
             }
         }
         Ok(())
@@ -440,111 +450,6 @@ pub fn rebuild_chunk_vec(conn: &Connection, held_chunk_ids: &BTreeSet<String>) -
 /// Return the subset of supplied chunk ids that currently have a materialized
 /// `chunk_vec` row. Task-state callers can use this to distinguish an already
 /// materialized budget pause from a still-unpublished authorization hold.
-/// Snapshot every chunk embedding row (content + all mapped chunk_ids) so the
-/// acceleration DB can be dropped and rebuilt without losing vectors (they live
-/// only in SQLite; objects/ holds no embedding objects in the MVP). Returns one
-/// entry per `(chunk_id, embedding)` so `chunk_vec` reconstructs exactly.
-pub struct ChunkEmbeddingSnapshotRow {
-    pub embedding_hash: String,
-    pub text_hash: String,
-    pub chunk_id: String,
-    pub vector: Vec<u8>,
-    pub dimensions: u64,
-    pub distance: String,
-    pub modality: String,
-    pub profile_hash: String,
-    /// 2026-07-24 (07 §5.3 contextual-embedding addendum): the filename context
-    /// this chunk's vector was embedded with, replayed verbatim so a rebuilt DB
-    /// keeps the same `text_hash`-disambiguation the original write recorded.
-    pub context_key: Option<String>,
-}
-
-pub fn snapshot_chunk_embeddings(conn: &Connection) -> Result<Vec<ChunkEmbeddingSnapshotRow>> {
-    // The `chunks` table may not exist on a corrupt DB; tolerate its absence.
-    let has_chunks: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false);
-    if !has_chunks {
-        return Ok(Vec::new());
-    }
-    // 2026-07-24 (07 §5.3 contextual-embedding addendum): with per-filename
-    // contextualization a `text_hash` can own several `embeddings` rows, so this
-    // `chunks ⋈ embeddings ON text_hash` join is one-to-many. Collapse each chunk
-    // to the SINGLE embedding it actually belongs to (`choose_contextual_embedding`)
-    // — otherwise the replay would link a chunk to a sibling filename's vector.
-    //
-    // This reads the EXISTING db during an atomic rebuild, BEFORE any migration
-    // runs on it (rebuild_sqlite_index opens it directly and snapshots), so a
-    // pre-addendum store has no `context_key` column yet. Select a NULL literal
-    // in that case — every such row is non-contextual and routes through
-    // `choose_contextual_embedding`'s single-candidate path unchanged.
-    let context_key_expr = if column_exists(conn, "embeddings", "context_key")? {
-        "e.context_key"
-    } else {
-        "NULL"
-    };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT c.chunk_id, c.raw_path, e.id, e.target_id, e.vector, e.dimensions,
-                e.distance, e.modality, e.profile_hash, {context_key_expr}
-         FROM embeddings e
-         JOIN chunks c ON e.target_type = 'chunk' AND c.text_hash = e.target_id
-         ORDER BY c.chunk_id, e.id",
-    ))?;
-    let rows = stmt
-        .query_map([], |row| {
-            let raw_path = row.get::<_, String>(1)?;
-            Ok((
-                raw_path,
-                ChunkEmbeddingSnapshotRow {
-                    chunk_id: row.get::<_, String>(0)?,
-                    embedding_hash: row.get::<_, String>(2)?,
-                    text_hash: row.get::<_, String>(3)?,
-                    vector: row.get::<_, Vec<u8>>(4)?,
-                    dimensions: 0,
-                    distance: row.get::<_, String>(6)?,
-                    modality: row.get::<_, String>(7)?,
-                    profile_hash: row.get::<_, String>(8)?,
-                    context_key: row.get::<_, Option<String>>(9)?,
-                },
-                row.get::<_, i64>(5)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    #[allow(clippy::type_complexity)]
-    let mut grouped: std::collections::BTreeMap<
-        String,
-        (String, Vec<(Option<String>, ChunkEmbeddingSnapshotRow)>),
-    > = std::collections::BTreeMap::new();
-    for (raw_path, mut snapshot, dimensions) in rows {
-        snapshot.dimensions = sql_dimension(dimensions)?;
-        validate_embedding_vector(&snapshot.vector, snapshot.dimensions)?;
-        let context_key = snapshot.context_key.clone();
-        grouped
-            .entry(snapshot.chunk_id.clone())
-            .or_insert_with(|| (raw_path, Vec::new()))
-            .1
-            .push((context_key, snapshot));
-    }
-    let mut out = Vec::new();
-    for (_, (raw_path, mut candidates)) in grouped {
-        if let Some(index) = choose_contextual_embedding(&raw_path, &candidates) {
-            out.push(candidates.swap_remove(index).1);
-        }
-    }
-    out.sort_by(|a, b| {
-        a.chunk_id
-            .cmp(&b.chunk_id)
-            .then(a.embedding_hash.cmp(&b.embedding_hash))
-    });
-    Ok(out)
-}
-
 /// KNN over `chunk_vec`: the nearest `k` chunk_ids to `query_vector` ordered by
 /// cosine distance (04 §4.3). Ties are re-broken by `chunk_id` ascending by the
 /// caller. `query_vector` is raw f32 LE bytes of the adopted dimension.
@@ -751,24 +656,59 @@ pub fn image_vec_count(conn: &Connection) -> Result<u64> {
 /// Restricted to `profile_hash` for the same reason the chunk rebuild is:
 /// several profiles' rows can legitimately coexist, and linking all of them
 /// would put two vector spaces in one KNN table.
-pub fn rebuild_image_vec(conn: &Connection, profile_hash: &str) -> Result<()> {
+pub fn rebuild_image_vec(
+    conn: &Connection,
+    expected_profile: Option<&EmbeddingProfileSummary>,
+) -> Result<()> {
     with_savepoint(conn, "kio_rebuild_image_vec", || {
         conn.execute("DELETE FROM image_vec", [])?;
         let mut stmt = conn.prepare(
             "SELECT target_id, vector, dimensions FROM embeddings
-             WHERE target_type = 'image' AND profile_hash = ?1
-             ORDER BY target_id",
+             WHERE target_type = 'image'
+               AND (?1 = 1
+                    AND dimensions = ?2
+                    AND distance = ?3
+                    AND modality = ?4
+                    AND profile_hash = ?5)
+             ORDER BY target_id, id",
         )?;
-        let rows = stmt.query_map(params![profile_hash], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)? as u64,
-            ))
-        })?;
+        let (profile_present, dimensions, distance, modality, profile_hash) = match expected_profile
+        {
+            Some(profile) => (
+                1_i64,
+                profile.dimensions as i64,
+                profile.distance.as_str(),
+                profile.modality.as_str(),
+                profile.profile_hash.as_str(),
+            ),
+            None => (0_i64, 0_i64, "", "", ""),
+        };
+        let rows = stmt.query_map(
+            params![
+                profile_present,
+                dimensions,
+                distance,
+                modality,
+                profile_hash
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            },
+        )?;
+        let mut previous_image: Option<String> = None;
         for row in rows {
             let (image_hash, vector, dimensions) = row?;
+            if previous_image.as_deref() == Some(image_hash.as_str()) {
+                return Err(IndexError::Schema(format!(
+                    "multiple compatible image embeddings match {image_hash}"
+                )));
+            }
             link_image_vec(conn, &image_hash, &vector, dimensions)?;
+            previous_image = Some(image_hash);
         }
         Ok(())
     })
@@ -918,22 +858,6 @@ fn sql_dimension(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(|_| {
         IndexError::Contract("embedding vector dimensions must be non-negative".to_owned())
     })
-}
-
-/// Whether `table` has `column`, for tolerating a pre-migration schema on a
-/// directly-opened (un-`ensure_schema`d) connection — see
-/// [`snapshot_chunk_embeddings`]. `table` is a fixed internal identifier, never
-/// user input, and is quoted for `PRAGMA table_info`.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let quoted = format!("'{}'", table.replace('\'', "''"));
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn with_savepoint<T>(
@@ -1114,6 +1038,8 @@ mod tests {
             tool_profile_hash: "sha256:tool".to_owned(),
             gen: 0,
             unit_key: "page:1".to_owned(),
+            unit_content_hash:
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
             raw_path: "a.md".to_owned(),
             heading_path: None,
@@ -1123,7 +1049,7 @@ mod tests {
             text_hash: text_hash.to_owned(),
             text: "body".to_owned(),
             first_seen_commit: None,
-            chunking_config_introduction_commit: None,
+            chunking_config_introduction_commit: "sha256:commit".to_owned(),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
         }
     }
@@ -1153,8 +1079,8 @@ mod tests {
         dimensions: u64,
     ) {
         conn.execute(
-            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)
-             VALUES (?1, 'chunk', ?2, 'multimodal', ?3, ?4, 'cosine', 'sha256:profile')",
+            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
+             VALUES (?1, 'chunk', ?2, 'multimodal', ?3, ?4, 'cosine', 'sha256:profile', 'a')",
             params![embedding_hash, text_hash, vector, dimensions as i64],
         )
         .unwrap();
@@ -1171,7 +1097,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
-            None,
+            Some("a"),
         )
         .unwrap();
     }
@@ -1193,7 +1119,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
-            None,
+            Some("a"),
         )
         .unwrap_err();
         assert!(err.to_string().contains("positive and finite"));
@@ -1214,24 +1140,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_invalid_content_vector_is_not_reused_or_snapshotted() {
+    fn invalid_content_vector_is_not_reused() {
         let mut store = schema_conn();
         store
-            .index_chunk(&chunk_row("c-legacy", "sha256:t-legacy"))
+            .index_chunk(&chunk_row("c-invalid", "sha256:t-invalid"))
             .unwrap();
         let conn = store.connection();
         insert_raw_embedding(
             conn,
-            "sha256:legacy",
-            "sha256:t-legacy",
+            "sha256:invalid",
+            "sha256:t-invalid",
             &zero_vector(),
             CHUNK_VEC_DIMENSIONS as u64,
         );
 
-        let err = content_vector(conn, "sha256:legacy").unwrap_err();
-        assert!(err.to_string().contains("positive and finite"));
-
-        let err = snapshot_chunk_embeddings(conn).err().unwrap();
+        let err = content_vector(conn, "sha256:invalid").unwrap_err();
         assert!(err.to_string().contains("positive and finite"));
     }
 
@@ -1286,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_rolls_back_when_legacy_invalid_vector_would_be_relinked() {
+    fn rebuild_rolls_back_when_invalid_vector_would_be_relinked() {
         let mut store = schema_conn();
         store
             .index_chunk(&chunk_row("c-valid", "sha256:t-valid"))
@@ -1305,7 +1228,17 @@ mod tests {
         );
         assert_eq!(chunk_vec_count(conn).unwrap(), 1);
 
-        let err = rebuild_chunk_vec(conn, &std::collections::BTreeSet::new()).unwrap_err();
+        let err = rebuild_chunk_vec(
+            conn,
+            Some(&EmbeddingProfileSummary {
+                dimensions: CHUNK_VEC_DIMENSIONS as u64,
+                distance: "cosine".to_owned(),
+                modality: "multimodal".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+            }),
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("positive and finite"));
 
         assert_eq!(
@@ -1398,13 +1331,23 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
-            None,
+            Some("a"),
         )
         .unwrap();
         conn.execute_batch("DELETE FROM chunk_vec").unwrap();
 
         let held = std::collections::BTreeSet::from(["c-secret".to_owned()]);
-        rebuild_chunk_vec(conn, &held).unwrap();
+        rebuild_chunk_vec(
+            conn,
+            Some(&EmbeddingProfileSummary {
+                dimensions: CHUNK_VEC_DIMENSIONS as u64,
+                distance: "cosine".to_owned(),
+                modality: "multimodal".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+            }),
+            &held,
+        )
+        .unwrap();
         let materialized = |chunk_id: &str| {
             conn.prepare("SELECT 1 FROM chunk_vec WHERE chunk_id = ?1 LIMIT 1")
                 .unwrap()
@@ -1468,6 +1411,103 @@ mod tests {
         assert!(linked.is_empty());
         assert!(read_chunk_vector(conn, "c-fan-a").unwrap().is_none());
         assert!(read_chunk_vector(conn, "c-fan-b").unwrap().is_none());
+    }
+
+    #[test]
+    fn rebuild_chunk_vec_requires_every_persisted_profile_field() {
+        let mut store = schema_conn();
+        store
+            .index_chunk(&chunk_row("c-profile", "sha256:t-profile"))
+            .unwrap();
+        let conn = store.connection();
+        let expected = EmbeddingProfileSummary {
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: "sha256:expected".to_owned(),
+        };
+        let mismatches = [
+            (512_i64, "cosine", "multimodal", "sha256:expected"),
+            (
+                CHUNK_VEC_DIMENSIONS as i64,
+                "dot",
+                "multimodal",
+                "sha256:expected",
+            ),
+            (
+                CHUNK_VEC_DIMENSIONS as i64,
+                "cosine",
+                "text",
+                "sha256:expected",
+            ),
+            (
+                CHUNK_VEC_DIMENSIONS as i64,
+                "cosine",
+                "multimodal",
+                "sha256:other",
+            ),
+        ];
+        for (index, (dimensions, distance, modality, profile_hash)) in
+            mismatches.into_iter().enumerate()
+        {
+            conn.execute(
+                "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
+                 VALUES (?1, 'chunk', 'sha256:t-profile', ?2, ?3, ?4, ?5, ?6, 'a')",
+                params![
+                    format!("sha256:mismatch-{index}"),
+                    modality,
+                    basis_vector(0),
+                    dimensions,
+                    distance,
+                    profile_hash,
+                ],
+            )
+            .unwrap();
+        }
+
+        rebuild_chunk_vec(conn, Some(&expected), &BTreeSet::new()).unwrap();
+        assert!(read_chunk_vector(conn, "c-profile").unwrap().is_none());
+
+        rebuild_chunk_vec(conn, None, &BTreeSet::new()).unwrap();
+        assert_eq!(chunk_vec_count(conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn rebuild_image_vec_requires_complete_profile_and_rejects_duplicates() {
+        let store = schema_conn();
+        let conn = store.connection();
+        let expected = EmbeddingProfileSummary {
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: "sha256:expected".to_owned(),
+        };
+        conn.execute(
+            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
+             VALUES ('sha256:image-wrong', 'image', 'sha256:image', 'multimodal', ?1, ?2, 'cosine', 'sha256:other', NULL)",
+            params![basis_vector(0), CHUNK_VEC_DIMENSIONS as i64],
+        )
+        .unwrap();
+        rebuild_image_vec(conn, Some(&expected)).unwrap();
+        assert_eq!(image_vec_count(conn).unwrap(), 0);
+
+        for id in ["sha256:image-good-a", "sha256:image-good-b"] {
+            conn.execute(
+                "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash, context_key)
+                 VALUES (?1, 'image', 'sha256:image', 'multimodal', ?2, ?3, 'cosine', 'sha256:expected', NULL)",
+                params![id, basis_vector(0), CHUNK_VEC_DIMENSIONS as i64],
+            )
+            .unwrap();
+        }
+        let error = rebuild_image_vec(conn, Some(&expected)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple compatible image embeddings"));
+        assert_eq!(
+            image_vec_count(conn).unwrap(),
+            0,
+            "savepoint rolls back partial image replay"
+        );
     }
 
     #[test]
@@ -1583,7 +1623,17 @@ mod tests {
         // Drop the derived table, then rebuild it from embeddings (source of truth).
         conn.execute_batch("DELETE FROM chunk_vec;").unwrap();
         assert_eq!(chunk_vec_count(conn).unwrap(), 0);
-        rebuild_chunk_vec(conn, &std::collections::BTreeSet::new()).unwrap();
+        rebuild_chunk_vec(
+            conn,
+            Some(&EmbeddingProfileSummary {
+                dimensions: CHUNK_VEC_DIMENSIONS as u64,
+                distance: "cosine".to_owned(),
+                modality: "multimodal".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+            }),
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(chunk_vec_count(conn).unwrap(), 2);
         let knn = knn_chunk_distances(conn, &basis_vector(1), 10).unwrap();
         assert_eq!(knn[0].0, "c2");

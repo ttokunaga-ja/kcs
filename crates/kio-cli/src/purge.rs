@@ -5,7 +5,7 @@
 //! shallow.  Mutable manifests and index/cache projections are never accepted as
 //! purge truth.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,13 +14,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgGroup, Args};
-use kio_core::cas::{is_hash, ContentObjectKind, ObjectKind, ObjectStore};
+use kio_core::cas::{
+    canonical_json_bytes, hash_bytes, is_hash, ChunkObject, ContentObjectKind, ObjectKind,
+    ObjectStore,
+};
 use kio_core::dag::CommitType;
 use kio_core::dag::TreeEntry;
 use kio_core::history::HistoryReader;
 use kio_core::purge::{
-    closure_content_hash, BeginOutcome, ClosureItem, LifecycleEvent, PurgeClosure, PurgeJournal,
-    PurgePhase, PurgeReason, PurgeState, TombstoneMode,
+    canonical_final_event, closure_content_hash, BeginOutcome, ClosureItem, EventKind,
+    LifecycleEvent, PurgeClosure, PurgeJournal, PurgePhase, PurgeReason, PurgeState, TombstoneMode,
 };
 use kio_core::scope::{
     append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds, Repository, StoreLock,
@@ -33,7 +36,8 @@ use kio_pipeline::ledger::ops::{
 };
 use kio_pipeline::ledger::{LedgerDb, TaskKey};
 use kio_pipeline::markdownize::{
-    load_validated_normalized_instance, NormalizedInstanceManifest, NormalizedUnitObject,
+    load_validated_normalized_units_from_manifest, NormalizedInstanceManifest,
+    NormalizedUnitObject, UnitStatus,
 };
 use kio_pipeline::task::{TaskStore, TaskType, MAX_TASK_STORE_BYTES};
 use serde::{Deserialize, Serialize};
@@ -131,12 +135,18 @@ struct DeletedCounts {
     /// scope-level `.kio/manifest.json` file-inventory row count).
     #[serde(default)]
     manifest_objects: u64,
+    /// Immutable normalized-unit CAS bodies selected by target manifest
+    /// objects. These are distinct from the mutable normalized instance cache.
+    #[serde(default)]
+    normalized_unit_objects: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SharedArtifactsPreserved {
     prepared_objects: u64,
     image_objects: u64,
+    #[serde(default)]
+    normalized_unit_objects: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -204,7 +214,9 @@ fn compute_purge_closure(
         })
         .collect::<Vec<_>>();
 
-    for stored in &crate::read_stored_chunks(repo.kio_dir())? {
+    let stored_chunks = crate::read_stored_chunks(repo.kio_dir())?;
+    authenticate_target_chunk_rows(repo, &targets, &stored_chunks)?;
+    for stored in &stored_chunks {
         if targets.contains(stored.row.raw_hash.as_str()) {
             items.push(ClosureItem {
                 object_type: "chunk".to_owned(),
@@ -213,7 +225,8 @@ fn compute_purge_closure(
         }
     }
 
-    let inventory = scan_derived_inventory(repo.kio_dir(), &targets)?;
+    let mut inventory = scan_derived_inventory(repo.kio_dir(), &targets)?;
+    extend_inventory_from_reachable_refs(repo, &targets, &mut inventory)?;
     let shared_prepared = inventory
         .target_prepared
         .intersection(&inventory.surviving_prepared)
@@ -246,6 +259,25 @@ fn compute_purge_closure(
             hash: hash.clone(),
         });
     }
+    // A normalized-unit CAS body is normally impossible to share across raw
+    // identities: its canonical body embeds `raw_hash`. Still, do not rely on
+    // that invariant as the deletion authority. A surviving manifest pin wins
+    // conservatively, and leaves the body intact if malformed state somehow
+    // creates a shared reference.
+    let shared_normalized_units = inventory
+        .target_normalized_units
+        .intersection(&inventory.surviving_normalized_units)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for hash in inventory
+        .target_normalized_units
+        .difference(&shared_normalized_units)
+    {
+        items.push(ClosureItem {
+            object_type: "normalized_unit".to_owned(),
+            hash: hash.clone(),
+        });
+    }
 
     let mut preserved = Vec::new();
     for hash in &shared_prepared {
@@ -260,8 +292,75 @@ fn compute_purge_closure(
             hash: hash.clone(),
         });
     }
+    for hash in &shared_normalized_units {
+        preserved.push(ClosureItem {
+            object_type: "normalized_unit".to_owned(),
+            hash: hash.clone(),
+        });
+    }
 
     PurgeClosure::new(purge_id.to_owned(), items, preserved)
+}
+
+/// `chunks.jsonl` is an acceleration ledger, not deletion authority.  Before a
+/// target-associated row can contribute a chunk id to a purge closure, prove
+/// both the row and the CAS body against units pinned by immutable retained
+/// commit/tree history.  In particular, never trust its raw hash merely to
+/// select a chunk object for deletion.
+fn authenticate_target_chunk_rows(
+    repo: &Repository,
+    targets: &BTreeSet<&str>,
+    stored_chunks: &[crate::StoredChunk],
+) -> Result<()> {
+    let retained = crate::retained_history_instances_for_roots(
+        repo.kio_dir(),
+        &crate::durable_history_roots(repo)?,
+    )?;
+    let authorities = crate::retained_unit_introductions(repo.kio_dir(), &retained)?;
+    let store = ObjectStore::new(repo.kio_dir());
+    for stored in stored_chunks
+        .iter()
+        .filter(|stored| targets.contains(stored.row.raw_hash.as_str()))
+    {
+        crate::authenticate_chunk_row(&stored.row, &authorities)
+            .map_err(chunk_ledger_authentication_error)?;
+        let expected = ChunkObject {
+            spec_version: 1,
+            raw_hash: stored.row.raw_hash.clone(),
+            tool_profile_hash: stored.row.tool_profile_hash.clone(),
+            gen: stored.row.gen,
+            unit_key: stored.row.unit_key.clone(),
+            unit_content_hash: stored.row.unit_content_hash.clone(),
+            heading_path: stored.row.heading_path.clone().unwrap_or_default(),
+            section_id: stored
+                .row
+                .section_id
+                .clone()
+                .filter(|value| !value.is_empty()),
+            byte_start: stored.row.byte_start,
+            byte_end: stored.row.byte_end,
+            text_hash: stored.row.text_hash.clone(),
+            text: stored.row.text.clone(),
+        };
+        let actual = store
+            .read_chunk(&stored.row.chunk_id)
+            .map_err(chunk_ledger_authentication_error)?;
+        if actual != expected {
+            return Err(chunk_ledger_authentication_error(KioError::schema(
+                "chunk ledger row does not match its immutable chunk CAS object",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn chunk_ledger_authentication_error(error: KioError) -> KioError {
+    KioError::new(
+        "KIO-E-STORE-CORRUPT-001",
+        "chunk ledger creation is not authenticated by immutable history",
+        json!({ "reason": error.to_string() }),
+        ExitCode::PermanentFailure,
+    )
 }
 
 /// Run the durable phase machine. This is kept separate from preview so there
@@ -729,11 +828,12 @@ fn delete_content_surfaces(
         .into_iter()
         .filter(|stored| !targets.contains(stored.row.raw_hash.as_str()))
         .collect::<Vec<_>>();
-    report.deleted.chunk_ledger_rows = rewrite_chunk_ledger(repo.kio_dir(), &kept)?;
+    report.deleted.chunk_ledger_rows = rewrite_chunk_ledger(repo, &kept)?;
     Ok(())
 }
 
-fn rewrite_chunk_ledger(kio_dir: &Path, kept: &[crate::StoredChunk]) -> Result<u64> {
+fn rewrite_chunk_ledger(repo: &Repository, kept: &[crate::StoredChunk]) -> Result<u64> {
+    let kio_dir = repo.kio_dir();
     let original_count = crate::read_stored_chunks(kio_dir)?.len();
     let mut bytes = Vec::new();
     for stored in kept {
@@ -741,8 +841,68 @@ fn rewrite_chunk_ledger(kio_dir: &Path, kept: &[crate::StoredChunk]) -> Result<u
             .map_err(|error| KioError::schema(error.to_string()))?;
         bytes.push(b'\n');
     }
-    atomic_private_replace(&crate::chunks_jsonl_path(kio_dir), &bytes)?;
+    // Preserve non-target publication events; target events are removed with
+    // their creation rows. Re-emit from the durable ledger after filtering.
+    let kept_ids = kept
+        .iter()
+        .map(|c| c.row.chunk_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for event in authenticated_publication_events(repo, kept)? {
+        if kept_ids.contains(event.chunk_id.as_str()) {
+            serde_json::to_writer(&mut bytes, &event)
+                .map_err(|e| KioError::schema(e.to_string()))?;
+            bytes.push(b'\n');
+        }
+    }
+    // The chunk ledger is repository state, not purge-private state.  Rewrite
+    // it through the retained `.kio/index` capability so a concurrent public
+    // path replacement cannot redirect the replacement into an attacker-owned
+    // directory.
+    crate::replace_chunk_ledger_contents(kio_dir, &bytes)?;
     Ok(u64::try_from(original_count.saturating_sub(kept.len())).unwrap_or(u64::MAX))
+}
+
+/// Publication rows are liveness hints only after their introduction commit
+/// attests the exact unit for the creation association.  A missing commit is
+/// tolerated as the established pre-commit crash residue; a present but forged
+/// event remains corruption and is never carried through a purge rewrite.
+fn authenticated_publication_events(
+    repo: &Repository,
+    creations: &[crate::StoredChunk],
+) -> Result<Vec<crate::ChunkPublicationEvent>> {
+    let creations_by_association = creations
+        .iter()
+        .map(|creation| {
+            (
+                (
+                    creation.row.chunk_id.clone(),
+                    creation.row.chunking_config_hash.clone(),
+                ),
+                creation,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut authenticated = Vec::new();
+    let mut authentication_cache = crate::PublicationAuthenticationCache::default();
+    for event in crate::read_chunk_publication_events(repo.kio_dir())? {
+        let Some(creation) = creations_by_association
+            .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+        else {
+            // Its creation is being purged, so the event cannot contribute to
+            // preserved liveness or the rewritten ledger.
+            continue;
+        };
+        if crate::authenticate_publication_event_cached(
+            repo,
+            repo.kio_dir(),
+            &event,
+            creation,
+            &mut authentication_cache,
+        )? {
+            authenticated.push(event);
+        }
+    }
+    Ok(authenticated)
 }
 
 fn phase_chunk_ids_path(kio_dir: &Path) -> PathBuf {
@@ -859,6 +1019,8 @@ struct DerivedInventory {
     /// this set when the instance predates `NormalizeRef::manifest_hash`
     /// (v1 legacy — nothing to compute or delete).
     target_manifest_hashes: BTreeSet<String>,
+    target_normalized_units: BTreeSet<String>,
+    surviving_normalized_units: BTreeSet<String>,
 }
 
 fn delete_derived_surfaces(
@@ -961,10 +1123,13 @@ fn delete_derived_surfaces(
     // live scan below.
     let removable_prepared = closure.hashes_for("prepared");
     let removable_images = closure.hashes_for("image");
+    let removable_normalized_units = closure.hashes_for("normalized_unit");
     report.shared.prepared_objects =
         u64::try_from(closure.preserved_hashes_for("prepared").len()).unwrap_or(u64::MAX);
     report.shared.image_objects =
         u64::try_from(closure.preserved_hashes_for("image").len()).unwrap_or(u64::MAX);
+    report.shared.normalized_unit_objects =
+        u64::try_from(closure.preserved_hashes_for("normalized_unit").len()).unwrap_or(u64::MAX);
 
     let inventory = scan_derived_inventory(repo.kio_dir(), &targets)?;
     for hash in &removable_prepared {
@@ -975,6 +1140,15 @@ fn delete_derived_surfaces(
     for hash in &removable_images {
         if store.remove_content(ContentObjectKind::Image, hash)? {
             report.deleted.image_objects = report.deleted.image_objects.saturating_add(1);
+        }
+    }
+    // The closure was derived from verified immutable manifest pins before
+    // the journal was created. Verify the unit CAS body again immediately
+    // before unlinking it.
+    for hash in &removable_normalized_units {
+        if store.remove_content(ContentObjectKind::NormalizedUnit, hash)? {
+            report.deleted.normalized_unit_objects =
+                report.deleted.normalized_unit_objects.saturating_add(1);
         }
     }
     // PB04/item 3 (05 §3.5 L701-703): the target instances' own manifest CAS
@@ -1064,6 +1238,27 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
             manifest.gen,
         );
         let target = targets.contains(manifest.raw_hash.as_str());
+        // The mutable instance manifest merely locates the immutable manifest
+        // CAS object. A purge may not derive a deletion closure from that
+        // mutable copy alone: read the exact CAS bytes under a bound, verify
+        // their digest, deserialize, and then validate every pinned Done unit
+        // body before recording any unit hash for deletion.
+        let manifest_hash = manifest_content_hash(&manifest)?;
+        let manifest = read_verified_manifest_object(kio_dir, &manifest_hash, &leaf)?;
+        validate_instance_leaf(&leaf, &manifest)?;
+        let units = load_validated_normalized_units_from_manifest(kio_dir, &manifest)
+            .map_err(crate::pipeline_to_kio)?;
+        let unit_hashes = manifest
+            .units
+            .iter()
+            .filter(|entry| entry.status == UnitStatus::Done)
+            .map(|entry| {
+                entry
+                    .unit_object_hash
+                    .clone()
+                    .expect("validated done normalized unit hash")
+            })
+            .collect::<BTreeSet<_>>();
         if target {
             inventory.target_instance_dirs.insert(leaf.clone());
             // PB04/item 3: the manifest CAS object hash this instance's tree
@@ -1072,19 +1267,15 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
             // manifest struct), not read back from a tree entry (a purge
             // target's raw need not currently be bound in HEAD's tree at
             // all, e.g. a historical-only raw-hash purge).
-            let value = serde_json::to_value(&manifest)
-                .map_err(|error| KioError::schema(error.to_string()))?;
-            inventory
-                .target_manifest_hashes
-                .insert(kio_core::cas::hash_json(&value)?);
+            inventory.target_manifest_hashes.insert(manifest_hash);
+            inventory.target_normalized_units.extend(unit_hashes);
+        } else {
+            inventory.surviving_normalized_units.extend(unit_hashes);
         }
         if !identities.insert(identity.clone()) {
             continue;
         }
-        let instance =
-            load_validated_normalized_instance(kio_dir, &identity.0, &identity.1, identity.2)
-                .map_err(crate::pipeline_to_kio)?;
-        let (prepared, images) = normalized_references(&instance.manifest, &instance.units);
+        let (prepared, images) = normalized_references(&manifest, &units);
         if target {
             inventory.target_prepared.extend(prepared);
             inventory.target_images.extend(images);
@@ -1094,6 +1285,219 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
         }
     }
     Ok(inventory)
+}
+
+/// Add every immutable normalized manifest/unit closure that remains reachable
+/// from *any* current ref. Mutable normalized-instance directories are useful
+/// for deleting their cache projections, but they are not a history inventory:
+/// a later same-generation retry can replace that directory while older tree
+/// snapshots still pin a distinct manifest and immutable unit body.
+#[derive(Debug)]
+struct VerifiedManifestClosure {
+    raw_hash: String,
+    tool_profile_hash: String,
+    gen: u64,
+    unit_hashes: BTreeSet<String>,
+    prepared: BTreeSet<String>,
+    images: BTreeSet<String>,
+}
+
+fn extend_inventory_from_reachable_refs(
+    repo: &Repository,
+    targets: &BTreeSet<&str>,
+    inventory: &mut DerivedInventory,
+) -> Result<()> {
+    let mut seen_manifest_hashes = BTreeSet::new();
+    let mut verified_closures = BTreeMap::<String, VerifiedManifestClosure>::new();
+    // Keep purge's liveness roots exactly in step with rebuild-db.  A durable
+    // chunks.jsonl association can retain a disconnected commit after refs
+    // moved away from it; its immutable manifest/unit/prepared/image closure
+    // must therefore count as surviving content.  The shared helper treats
+    // ledger values only as candidates: it authenticates creation and
+    // publication introductions against immutable commit/tree state, allowing
+    // only a missing pre-commit crash residue.  Do not re-add raw ledger
+    // fields here by commit existence alone.
+    let roots = crate::durable_history_roots(repo)?;
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let graph = HistoryReader::new(repo.kio_dir()).all_parents_for_roots(&roots)?;
+    for binding in graph.bindings() {
+        let Some(normalize) = binding.binding.normalize.as_ref() else {
+            continue;
+        };
+        let source_path = ObjectStore::new(repo.kio_dir())
+            .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)?;
+        if !verified_closures.contains_key(&normalize.manifest_hash) {
+            // A prior completed purge intentionally leaves the old tree/commit
+            // for audit but removes its manifest closure. Once the raw has
+            // been resurrected, that old absence is explainable only before
+            // the recorded resurrection commit; the resurrection snapshot's
+            // own manifest is still mandatory and any other absence fails
+            // closed below.
+            if !path_exists(&source_path)?
+                && historical_manifest_was_purged_before_resurrection(
+                    repo,
+                    &binding.binding.raw_hash,
+                    &binding.commit_hash,
+                )?
+            {
+                continue;
+            }
+            let manifest = read_verified_manifest_object(
+                repo.kio_dir(),
+                &normalize.manifest_hash,
+                &source_path,
+            )?;
+            let units = load_validated_normalized_units_from_manifest(repo.kio_dir(), &manifest)
+                .map_err(crate::pipeline_to_kio)?;
+            let unit_hashes = manifest
+                .units
+                .iter()
+                .filter(|entry| entry.status == UnitStatus::Done)
+                .map(|entry| {
+                    entry
+                        .unit_object_hash
+                        .clone()
+                        .expect("validated done normalized unit hash")
+                })
+                .collect::<BTreeSet<_>>();
+            let (prepared, images) = normalized_references(&manifest, &units);
+            verified_closures.insert(
+                normalize.manifest_hash.clone(),
+                VerifiedManifestClosure {
+                    raw_hash: manifest.raw_hash,
+                    tool_profile_hash: manifest.tool_profile_hash,
+                    gen: manifest.gen,
+                    unit_hashes,
+                    prepared,
+                    images,
+                },
+            );
+        }
+        let closure = verified_closures
+            .get(&normalize.manifest_hash)
+            .expect("verified manifest closure was inserted");
+        // Validate every tree binding before coalescing equal content hashes.
+        // A forged binding for a different raw could otherwise reuse a target's
+        // manifest hash and make purge classify the closure as target-only.
+        // This tuple validation intentionally remains outside the cache lookup:
+        // the CAS manifest/unit closure is read once, but every attestation is
+        // still checked before inventory hash de-duplication.
+        if closure.raw_hash != binding.binding.raw_hash
+            || closure.tool_profile_hash != normalize.tool_profile_hash
+            || closure.gen != normalize.gen
+        {
+            return Err(store_corrupt(
+                &source_path,
+                "manifest CAS object disagrees with its reachable tree binding",
+            ));
+        }
+        if !seen_manifest_hashes.insert(normalize.manifest_hash.clone()) {
+            continue;
+        }
+        if targets.contains(closure.raw_hash.as_str()) {
+            inventory
+                .target_manifest_hashes
+                .insert(normalize.manifest_hash.clone());
+            inventory
+                .target_normalized_units
+                .extend(closure.unit_hashes.iter().cloned());
+            inventory
+                .target_prepared
+                .extend(closure.prepared.iter().cloned());
+            inventory
+                .target_images
+                .extend(closure.images.iter().cloned());
+        } else {
+            inventory
+                .surviving_normalized_units
+                .extend(closure.unit_hashes.iter().cloned());
+            inventory
+                .surviving_prepared
+                .extend(closure.prepared.iter().cloned());
+            inventory
+                .surviving_images
+                .extend(closure.images.iter().cloned());
+        }
+    }
+    Ok(())
+}
+
+fn historical_manifest_was_purged_before_resurrection(
+    repo: &Repository,
+    raw_hash: &str,
+    binding_commit: &str,
+) -> Result<bool> {
+    let state = PurgeState::new(repo.kio_dir());
+    let tombstone = state.read_tombstone(raw_hash)?;
+    let receipt = state.read_erase_receipt(raw_hash)?;
+    let final_event = canonical_final_event(
+        tombstone.as_ref().map(|record| record.tail()),
+        receipt.as_ref().map(|record| record.tail()),
+    )?;
+    let Some(final_event) = final_event else {
+        return Ok(false);
+    };
+    if final_event.event.kind != EventKind::Retired {
+        return Ok(false);
+    }
+    let Some(resurrection_commit) = final_event.event.resurrection_commit.as_deref() else {
+        return Ok(false);
+    };
+    if resurrection_commit == binding_commit {
+        return Ok(false);
+    }
+    Ok(HistoryReader::new(repo.kio_dir())
+        .all_parents(resurrection_commit)?
+        .node(binding_commit)
+        .is_some())
+}
+
+const MAX_NORMALIZED_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
+
+fn manifest_content_hash(manifest: &NormalizedInstanceManifest) -> Result<String> {
+    let value =
+        serde_json::to_value(manifest).map_err(|error| KioError::schema(error.to_string()))?;
+    kio_core::cas::hash_json(&value)
+}
+
+/// Read the immutable manifest object which the mutable instance manifest
+/// names. This is deliberately separate from the current-instance loader: a
+/// purge must verify the exact manifest object *before* committing a durable
+/// deletion closure, and must never infer unit-object liveness from a mutable
+/// file after that point.
+fn read_verified_manifest_object(
+    kio_dir: &Path,
+    manifest_hash: &str,
+    source_path: &Path,
+) -> Result<NormalizedInstanceManifest> {
+    let bytes = ObjectStore::new(kio_dir)
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            manifest_hash,
+            MAX_NORMALIZED_MANIFEST_OBJECT_BYTES,
+        )
+        .map_err(|error| store_corrupt(source_path, &format!("manifest CAS object: {error}")))?;
+    if hash_bytes(&bytes) != manifest_hash {
+        return Err(store_corrupt(
+            source_path,
+            "manifest CAS object does not match its content hash",
+        ));
+    }
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| store_corrupt(source_path, &format!("manifest CAS object: {error}")))?;
+    let canonical = canonical_json_bytes(
+        &serde_json::to_value(&manifest)
+            .map_err(|error| store_corrupt(source_path, &error.to_string()))?,
+    )?;
+    if canonical != bytes {
+        return Err(store_corrupt(
+            source_path,
+            "manifest CAS object is not canonical JSON",
+        ));
+    }
+    Ok(manifest)
 }
 
 fn validate_instance_leaf(path: &Path, manifest: &NormalizedInstanceManifest) -> Result<()> {
@@ -2259,8 +2663,14 @@ fn resolve_plan(repo: &Repository, args: &PurgeArgs) -> Result<PurgePlan> {
             // Reuse the persisted TreeEntry boundary rather than interpreting a
             // deleted historical operand through host filesystem canonicalization.
             TreeEntry::raw_file(logical_path, VALIDATION_HASH)?;
-            let graph = HistoryReader::new(repo.kio_dir()).all_parents(&head_commit)?;
-            let bindings = graph.bindings();
+            let roots = crate::durable_history_roots(repo)?;
+            let bindings = if roots.is_empty() {
+                Vec::new()
+            } else {
+                HistoryReader::new(repo.kio_dir())
+                    .all_parents_for_roots(&roots)?
+                    .bindings()
+            };
             let targets = bindings
                 .iter()
                 .filter(|binding| binding.binding.path == logical_path)

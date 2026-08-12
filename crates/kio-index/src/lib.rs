@@ -51,6 +51,8 @@ mod tests {
             tool_profile_hash: "sha256:tool".to_owned(),
             gen: 0,
             unit_key: "page:1".to_owned(),
+            unit_content_hash:
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
             raw_path: "report.pdf".to_owned(),
             heading_path: Some(vec!["Auth".to_owned()]),
@@ -60,7 +62,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: "sample text".to_owned(),
             first_seen_commit: None,
-            chunking_config_introduction_commit: None,
+            chunking_config_introduction_commit: "sha256:commit".to_owned(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
 
