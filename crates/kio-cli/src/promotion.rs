@@ -228,6 +228,12 @@ pub(crate) fn validated_online_promotions(
                 "Done online Markdownize task points at an incomplete normalized instance",
             ));
         }
+        let bbox_annotation_enabled = task.bbox_annotation_enabled.ok_or_else(|| {
+            PipelineError::corrupt(
+                kio_dir.join("tasks.jsonl").display().to_string(),
+                "completed online Markdownize task is missing bbox_annotation_enabled policy stamp",
+            )
+        })?;
         promotions.push(ValidatedOnlinePromotion {
             task_id: task.task_id.clone(),
             input_path: task.input_path.clone(),
@@ -235,7 +241,7 @@ pub(crate) fn validated_online_promotions(
             tool_profile_hash,
             gen,
             created_at: task.created_at.clone(),
-            bbox_annotation_enabled: task.bbox_annotation_enabled.unwrap_or(false),
+            bbox_annotation_enabled,
         });
     }
     promotions.sort_by(|left, right| {
@@ -684,5 +690,53 @@ mod tests {
         assert!(validated_online_promotions(&kio_dir, &[partial])
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn rejects_completed_online_instance_without_bbox_policy_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let kio_dir = dir.path().join(".kio");
+        fs::create_dir_all(&kio_dir).unwrap();
+        let raw_hash = hash_bytes(b"raw");
+        let profile_hash = hash_bytes(b"profile");
+        let prepared_hash = hash_bytes(b"prepared");
+        let manifest = NormalizedInstanceManifest {
+            raw_hash: raw_hash.clone(),
+            tool_profile_hash: profile_hash.clone(),
+            gen: 0,
+            parent_gen: None,
+            run_id: "run_current".to_owned(),
+            units: vec![NormalizedUnitManifestEntry {
+                order: 0,
+                unit_key: "page:1".to_owned(),
+                unit_ref: unit_ref("page:1"),
+                unit_type: UnitType::Page,
+                status: UnitStatus::Done,
+                prepared_hash: prepared_hash.clone(),
+                error_kind: None,
+                unit_object_hash: None,
+            }],
+            generated_at: "2026-08-13T00:00:00Z".to_owned(),
+        };
+        let unit = NormalizedUnitObject {
+            unit_key: "page:1".to_owned(),
+            unit_type: UnitType::Page,
+            raw_hash: raw_hash.clone(),
+            prepared_hash,
+            tool_profile_hash: profile_hash.clone(),
+            gen: 0,
+            mode: MarkdownizeMode::Full,
+            markdown: "promoted mock text".to_owned(),
+            metadata: BTreeMap::new(),
+            reused_from: None,
+            generated_at: "2026-08-13T00:00:00Z".to_owned(),
+        };
+        persist_normalized_instance(&kio_dir, &manifest, &[unit]).unwrap();
+        let output_ref = normalized_instance_dir(&kio_dir, &raw_hash, &profile_hash, 0)
+            .display()
+            .to_string();
+        let mut task = done_task(output_ref, raw_hash);
+        task.bbox_annotation_enabled = None;
+        assert!(validated_online_promotions(&kio_dir, &[task]).is_err());
     }
 }

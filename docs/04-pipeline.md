@@ -704,12 +704,25 @@ order_index             unit の出現順 (03-data-model.md §2.1 の順序)
   "deadline": "2026-05-02T23:59:59Z",
   "heartbeat_at": null,
   "fallback_reason": null,
-  "created_at": "2026-04-25T12:00:00Z"
+  "created_at": "2026-04-25T12:00:00Z",
+  "bbox_annotation_enabled": true,
+  "hold_reason": null,
+  "reserved_usd": null,
+  "reserved_month": null,
+  "reservation_id": null
 }
 ```
 
 `unit_keys` は unit スコープの再投入 (partial の retry) 時のみ非 null で、対象 unit_key の配列。
-null は全 unit 対象。
+null は全 unit 対象。**この object に列挙した key は全て current format では必須**であり、
+該当しない値も key の省略ではなく明示的な `null` で記録する。未知 key も reject する。
+したがって旧 task 行を default 値で current task として解釈する reader は持たない。
+
+`bbox_annotation_enabled` は online Markdownize では必須の boolean policy stamp（他の task は
+`null`）。`status="paused"` は `fallback_reason` と一致する `hold_reason` を必須とし、他の
+status は `hold_reason=null`。予約の3 field は全て `null`、または有限・非負の USD、UTC 月、
+canonical lowercase UUID の完全な組だけを許可する。これらの不変条件は append と read の
+両方で検証し、不完全な旧レコードは課金や再開の経路へ進めず fail-closed にする。
 
 ## 5.2 状態遷移
 

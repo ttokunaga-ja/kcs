@@ -1097,7 +1097,7 @@ aggregator の `agg_approvals` は**読み取り専用の投影**であり、用
 検証 (publication 時の loader)** である。値域 (JSON Schema enum 相当):
 
 ```text
-commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged', 'purged' }
+commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
 ```
 
 | type | 用途 | protected | GC policy |
@@ -1105,12 +1105,11 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 | manual | 明示 commit | true | none |
 | auto | 自動 snapshot (取り込み完了時 = MVP / 定期 = Phase 4、§8) | false | shallow (個数 / 時間で tree を減衰) |
 | imported | 外部 Kio から取り込んだ commit | true | none |
-| migrated | format 変換時の中間 commit | false | shallow |
 | repaired | repair 操作の中間 commit | false | shallow |
 | merged | 共有版マージ (Phase 5+) | true | none |
 | purged | 法務・秘匿削除後の commit | true | none |
 
-`semver MAJOR でも値域 bump しない` 契約は他フィールドより強い保証。
+`semver MAJOR でも値域 bump しない` 契約は release 後は他フィールドより強い保証である。Phase 3 受入前に廃止した enum を持つ store は current reader が拒否し、互換変換せず clean recreation する ([10-operations.md §12.5](10-operations.md))。
 
 ## 2.2 GC
 
@@ -1119,7 +1118,6 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 ```text
 gc_policy(commit_type):
   auto      → shallow   (tiered retention 満了で tree のみ破棄、commit object は残す)
-  migrated  → shallow
   repaired  → shallow
   manual    → none
   imported  → none
@@ -1169,7 +1167,7 @@ max_runtime_seconds = 60
 
 ## 2.4 Tiered Retention
 
-`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`migrated` / `repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_*_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
+`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_repaired_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
 **ref tip 除外**: HEAD・branch・tag が指す commit の tree は、retention 満了でも **shallow 化の対象にしない** — 無変更 scope では auto snapshot が no-op を続け HEAD が古い auto commit に留まり続けるため、除外しないと現在状態の基点 (bare search / restore / cursor) を失う。物理削除の直前にも、ref tip 非該当と「非 shallow commit からの参照ゼロ」を同一 exclusive critical section で再検証する (§2.5):
 
 ```toml
@@ -1179,7 +1177,6 @@ keep_hourly_days   = 7
 keep_daily_weeks   = 4
 keep_weekly_months = 6
 [gc.derived_retention]
-keep_migrated_per_branch = 5
 keep_repaired_per_branch = 5
 ```
 
@@ -1225,7 +1222,7 @@ GC が削除してはならないもの:
   未公開 finalize 由来の未参照 toollock のみ、全 commit 参照走査の後に回収可)
 - manifest object — 参照する tree object が存在する限り削除不可 (削除の唯一の経路は purge。shallow 化で
   未参照になったものの回収は Phase 4 GC の対象 — shallow 化を駆動した系統の retention (§2.2 表の
-  gc_policy: auto = tiered retention・migrated / repaired = `[gc.derived_retention]` — §2.4) に従う)
+  gc_policy: auto = tiered retention・repaired = `[gc.derived_retention]` — §2.4) に従う)
 ```
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。

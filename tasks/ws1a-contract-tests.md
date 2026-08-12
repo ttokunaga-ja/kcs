@@ -317,11 +317,11 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 
 ### CT-COMMIT-* — commit 契約 (`03 §8, §8.1` / `05 §2, §8` / `06 §12`)
 
-**CT-COMMIT-001** — P0 — commit_type 7 値 enum を受理
-- Given: `commit_type ∈ {manual, auto, imported, migrated, repaired, merged, purged}`。
-- When: commit 生成 / 保存 (Step 1 で実際に発行するのは manual/auto。他 5 値は schema 受理のみ確認)。
-- Then: 全 7 値が CHECK 制約を通過する。
-- 根拠: `05 §2.1` (CHECK 制約 7 値) / `03 §8` (enum)。
+**CT-COMMIT-001** — P0 — commit_type 6 値 enum を受理
+- Given: `commit_type ∈ {manual, auto, imported, repaired, merged, purged}`。
+- When: commit 生成 / 保存 (Step 1 で実際に発行するのは manual/auto。他 4 値は schema 受理のみ確認)。
+- Then: 全 6 値が CHECK 制約を通過する。
+- 根拠: `05 §2.1` (CHECK 制約 6 値) / `03 §8` (enum)。
 
 **CT-COMMIT-002** — P0 — 不正 commit_type を拒否
 - Given: `commit_type = "snapshot"` 等、enum 外の値。
@@ -404,7 +404,7 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 - Given: 各 commit_type。
 - When: `gc_policy` を引く (Step 1 は schema/純関数のみ。回収は実行しない)。
 - Then:
-  - `auto → shallow`, `migrated → shallow`, `repaired → shallow`
+  - `auto → shallow`, `repaired → shallow`
   - `manual → none`, `imported → none`, `merged → none`, `purged → none`
 - 根拠: `05 §2.2` (gc_policy 表)。
 
@@ -423,7 +423,7 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 **CT-GC-004** — P1 — protected(commit_type) マッピング
 - Given: 各 commit_type。
 - When: `protected` フラグを引く。
-- Then: `manual / imported / merged / purged → true`、`auto / migrated / repaired → false`。
+- Then: `manual / imported / merged / purged → true`、`auto / repaired → false`。
 - 根拠: `05 §2.1` (commit_type 表の protected 列)。
 
 ### CT-SCOPE-* — スコープ境界 (`03 §3`)

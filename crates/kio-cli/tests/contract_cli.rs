@@ -511,14 +511,10 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     let err: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(err["error_code"], "KIO-E-CONFIG-SCHEMA-001");
 
+    fs::write(temp.path().join(".kio/config.toml"), "").unwrap();
     fs::write(
         temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n",
-    )
-    .unwrap();
-    fs::write(
-        temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 0\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 0\n",
     )
     .unwrap();
     kio()
@@ -528,7 +524,7 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .code(2);
     fs::write(
         temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = -1\n",
+        "[budget]\nmonthly_usd_cap = -1\n",
     )
     .unwrap();
     kio()
@@ -536,11 +532,7 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .current_dir(temp.path())
         .assert()
         .code(2);
-    fs::write(
-        temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n",
-    )
-    .unwrap();
+    fs::write(temp.path().join(".kio/config.toml"), "").unwrap();
 
     fs::write(temp.path().join(".kio/scope.json"), "{}").unwrap();
     let out = kio()
@@ -757,7 +749,7 @@ fn n3_config_ignore_array_validates() {
     // of strings is the valid form and is accepted.
     fs::write(
         temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
+        "[scope]\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
     )
     .unwrap();
     kio()
@@ -773,7 +765,7 @@ fn n3_config_ignore_array_validates() {
     // no-op.
     fs::write(
         temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
+        "ignore = [\"*.tmp\", \"secret.pdf\"]\n",
     )
     .unwrap();
     kio()
@@ -785,7 +777,7 @@ fn n3_config_ignore_array_validates() {
     // A non-array `[scope] ignore` is a schema violation (exit 2).
     fs::write(
         temp.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nignore = \"not-an-array\"\n",
+        "[scope]\nignore = \"not-an-array\"\n",
     )
     .unwrap();
     kio()

@@ -403,7 +403,6 @@ pub enum CommitType {
     Manual,
     Auto,
     Imported,
-    Migrated,
     Repaired,
     Merged,
     Purged,
@@ -417,7 +416,6 @@ impl FromStr for CommitType {
             "manual" => Ok(Self::Manual),
             "auto" => Ok(Self::Auto),
             "imported" => Ok(Self::Imported),
-            "migrated" => Ok(Self::Migrated),
             "repaired" => Ok(Self::Repaired),
             "merged" => Ok(Self::Merged),
             "purged" => Ok(Self::Purged),
@@ -432,7 +430,6 @@ impl fmt::Display for CommitType {
             Self::Manual => "manual",
             Self::Auto => "auto",
             Self::Imported => "imported",
-            Self::Migrated => "migrated",
             Self::Repaired => "repaired",
             Self::Merged => "merged",
             Self::Purged => "purged",
@@ -450,7 +447,7 @@ pub enum GcPolicy {
 #[must_use]
 pub const fn gc_policy(commit_type: CommitType) -> GcPolicy {
     match commit_type {
-        CommitType::Auto | CommitType::Migrated | CommitType::Repaired => GcPolicy::Shallow,
+        CommitType::Auto | CommitType::Repaired => GcPolicy::Shallow,
         CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => {
             GcPolicy::None
         }
@@ -461,7 +458,7 @@ pub const fn gc_policy(commit_type: CommitType) -> GcPolicy {
 pub const fn protected(commit_type: CommitType) -> bool {
     match commit_type {
         CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => true,
-        CommitType::Auto | CommitType::Migrated | CommitType::Repaired => false,
+        CommitType::Auto | CommitType::Repaired => false,
     }
 }
 

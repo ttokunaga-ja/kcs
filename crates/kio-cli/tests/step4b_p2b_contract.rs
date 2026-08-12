@@ -1241,7 +1241,7 @@ fn pb45_historical_reindex_reads_the_pinned_manifest_not_the_working_copy() {
     // be appended under `commit`.
     fs::write(
         kio_dir(&dir).join("config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
     )
     .unwrap();
 

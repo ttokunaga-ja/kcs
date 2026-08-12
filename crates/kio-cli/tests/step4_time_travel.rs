@@ -1544,7 +1544,7 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
     // loses its persisted opt-in.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n[adapter.policy]\nallow_network = true\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
     let current_config = kio_index::chunking::chunking_config_hash("heading", 48).unwrap();

@@ -2001,16 +2001,8 @@ impl Repository {
         }
     }
 
-    /// QB8 §Z2 / 裁定2 (step4b-contract-tests-p3b.md): `kio_format_version`
-    /// compatibility is a `.kio/scope.json`-only concept (03 §2 L154 names
-    /// only that file as the field's storage location). `config.toml` no
-    /// longer carries or enforces its own copy — `Repository::init` stopped
-    /// writing it, and this function no longer reads it — so scope.json via
-    /// [`Self::validated_scope_id`] is the sole compatibility authority. Any
-    /// leftover `kio_format_version` key in an old `config.toml` on disk is
-    /// inert (the schema still accepts it, unread, for no-op backward
-    /// tolerance) rather than rejected, per the ruling's "no compat debt"
-    /// re-init stance (no migration is required either way).
+    /// `kio_format_version` is a `.kio/scope.json`-only concept. A config file
+    /// carrying that retired key is rejected by the strict config schema.
     fn validate_config(&self) -> Result<()> {
         let path = self.kio_dir.join("config.toml");
         let value = fs::read_to_string(&path).kio_io(&path)?;
@@ -4850,6 +4842,20 @@ mod tests {
         let policy = toml::Value::try_from(serde_json::json!({ "rules": [] })).unwrap();
 
         let error = super::persist_bound_generated_parent_policy(&retained, policy).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-CONFIG-SCHEMA-001");
+    }
+
+    #[test]
+    fn config_rejects_retired_format_version_key() {
+        let scope = tempfile::tempdir().unwrap();
+        let repo = Repository::init(scope.path()).unwrap();
+        std::fs::write(
+            repo.kio_dir().join("config.toml"),
+            "kio_format_version = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let error = Repository::open(scope.path()).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-CONFIG-SCHEMA-001");
     }
 

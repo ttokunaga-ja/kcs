@@ -692,7 +692,7 @@ fn ct3_embed_007_vector_only_without_index_is_an_error() {
 fn write_search_config(dir: &TempDir, body: &str) {
     fs::write(
         dir.path().join(".kio/config.toml"),
-        format!("kio_format_version = \"0.1.0\"\n[search]\n{body}"),
+        format!("[search]\n{body}"),
     )
     .unwrap();
 }
@@ -1253,7 +1253,7 @@ fn ct3_chunk_007_chunking_config_change_appends_new_generation_chunks() {
     let before = line_count(dir.path().join(".kio/index/chunks.jsonl"));
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 25\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 25\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1280,7 +1280,7 @@ fn ct3_chunk_007_search_only_serves_current_chunking_config_generation() {
     // stale one — this isn't a same-hash no-op reindex.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1331,7 +1331,7 @@ fn ct4_current_config_association_is_added_for_deleted_history() {
     json_success(&dir, &["index", "--approve"]);
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 5999\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 5999\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1394,7 +1394,7 @@ fn ct4_historical_only_current_config_chunks_enqueue_embeddings() {
     json_success_embed(&dir, "mock", &["index", "--yes"]);
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 24\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 24\n",
     )
     .unwrap();
     json_success_embed(&dir, "mock", &["index", "--yes"]);
@@ -1904,7 +1904,7 @@ fn ct3_multi_001_default_searches_participating_indexed_scopes() {
     // Scope c opts out of global search.
     fs::write(
         c.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
     for dir in [&a, &b, &c] {
@@ -1970,7 +1970,7 @@ fn ct3_repair_device_replica_rebuilds_all_indexed_scopes_outside_a_scope() {
     // This row must still be selected: repair is device-global, not search-global.
     fs::write(
         b.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
     for dir in [&a, &b] {
@@ -2765,7 +2765,7 @@ fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
     fs::create_dir_all(&user_config).unwrap();
     fs::write(
         user_config.join("config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
+        "[search.rrf]\ncandidate_depth = 2\n",
     )
     .unwrap();
 
@@ -3423,7 +3423,7 @@ fn ct3_multi_006_completion_order_does_not_change_results_or_cursor() {
     json_success_path(&b, &data_home, &["index", "--approve"]);
     fs::write(
         a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\n",
+        "[search.multi_scope]\nparallelism = 2\n",
     )
     .unwrap();
 
@@ -3470,7 +3470,7 @@ fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
     json_success_path(&b, &data_home, &["index", "--approve"]);
     fs::write(
         a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
+        "[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
     )
     .unwrap();
     let b_scope_id = read_scope_id(&b);
@@ -4676,7 +4676,7 @@ fn r23_21_hybrid_collection_candidates_are_truncated_to_candidate_depth() {
     // (a bare default search would use the user/device layer instead).
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 1\n",
+        "[search.rrf]\ncandidate_depth = 1\n",
     )
     .unwrap();
     let hybrid = json_success_embed(
@@ -5269,7 +5269,7 @@ fn ct3_l1_reindex_enriches_new_generation_embeddings() {
     // loses its persisted opt-in.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
     let out = json_success_embed(&dir, "mock", &["reindex", "--regenerate", "--yes"]);
@@ -5442,7 +5442,7 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
     // A zero folder cap pauses BOTH adapters on budget.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = 0\n",
+        "[budget]\nmonthly_usd_cap = 0\n",
     )
     .unwrap();
     // R11-2: the embedding enrichment DRIVEN inline by index budget-pauses here, so
@@ -6478,6 +6478,11 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
             "deadline": null,
             "heartbeat_at": null,
             "fallback_reason": null,
+            "bbox_annotation_enabled": true,
+            "hold_reason": null,
+            "reserved_usd": null,
+            "reserved_month": null,
+            "reservation_id": null,
             "created_at": "2026-04-25T12:00:00Z"
         });
         let mut line = serde_json::to_string(&poison).unwrap();
@@ -7240,7 +7245,7 @@ fn r6_default_search_rereads_current_global_opt_out() {
     json_success_path(b.path(), data_home.path(), &["index", "--approve"]);
     fs::write(
         a.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
 
@@ -7593,7 +7598,7 @@ fn r12_2_adapter_policy_full_default_block_all_commands_ok() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n\
+        "\
          [adapter.policy]\n\
          allow_network = false\n\
          allowed_scope = \".\"\n\
@@ -7620,7 +7625,7 @@ fn r12_2_allowed_scope_non_default_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nallowed_scope = \"sub\"\n",
+        "[adapter.policy]\nallowed_scope = \"sub\"\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7632,7 +7637,7 @@ fn r12_2_store_request_body_true_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nstore_request_body = true\n",
+        "[adapter.policy]\nstore_request_body = true\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7644,7 +7649,7 @@ fn r12_2_timeout_seconds_non_default_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 30\n",
+        "[adapter.policy]\ntimeout_seconds = 30\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7652,7 +7657,7 @@ fn r12_2_timeout_seconds_non_default_is_loud_rejected() {
     // The documented default (300) is accepted.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 300\n",
+        "[adapter.policy]\ntimeout_seconds = 300\n",
     )
     .unwrap();
     json_success(&dir, &["status"]);
@@ -7665,7 +7670,7 @@ fn r12_2_unknown_policy_key_is_schema_error() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nallow_netwrok = false\n",
+        "[adapter.policy]\nallow_netwrok = false\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 2);
@@ -7714,7 +7719,7 @@ fn r12_2_max_input_bytes_gates_oversized_input() {
     // Cap at 50 bytes; write a markdown file well over that.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nmax_input_bytes = 50\n",
+        "[adapter.policy]\nmax_input_bytes = 50\n",
     )
     .unwrap();
     fs::write(
@@ -7752,11 +7757,7 @@ fn multi_chunk_scope() -> TempDir {
 }
 
 fn write_scope_config(dir: &TempDir, body: &str) {
-    fs::write(
-        dir.path().join(".kio/config.toml"),
-        format!("kio_format_version = \"0.1.0\"\n{body}"),
-    )
-    .unwrap();
+    fs::write(dir.path().join(".kio/config.toml"), body).unwrap();
 }
 
 // strategy = "off" is a real no-op (no dedup); max_per_raw_hash caps the stream —
@@ -7953,7 +7954,7 @@ fn r12_3_reconcile_completes_committed_embedding_tasks() {
 }
 
 #[test]
-fn r23_materialized_embedding_completes_legacy_failed_task_without_charge() {
+fn r23_materialized_embedding_completes_failed_task_without_charge() {
     let dir = indexed_scope_embed("mock");
     let tasks_path = dir.path().join(".kio/tasks.jsonl");
     let original = fs::read_to_string(&tasks_path).unwrap();
@@ -7966,10 +7967,6 @@ fn r23_materialized_embedding_completes_legacy_failed_task_without_charge() {
             task["status"] = Value::from("failed");
             task["fallback_reason"] = Value::from("contract_violation");
             task["attempts"] = Value::from(1);
-            let object = task.as_object_mut().unwrap();
-            object.remove("reservation_id");
-            object.remove("reserved_month");
-            object.remove("reserved_usd");
         }
         rewritten.push_str(&serde_json::to_string(&task).unwrap());
         rewritten.push('\n');
@@ -8197,11 +8194,7 @@ fn r13_3_logs_retention_days_accepted_in_user_config() {
     let dir = indexed_scope();
     let user_cfg = dir.path().join(".test-config/kio");
     fs::create_dir_all(&user_cfg).unwrap();
-    fs::write(
-        user_cfg.join("config.toml"),
-        "kio_format_version = \"0.1.0\"\n[logs]\nretention_days = 7\n",
-    )
-    .unwrap();
+    fs::write(user_cfg.join("config.toml"), "[logs]\nretention_days = 7\n").unwrap();
     json_success(&dir, &["status"]);
     json_success(&dir, &["search", "トークン"]);
 }
@@ -11490,74 +11483,59 @@ fn r23_cand_014_status_fails_closed_on_corrupt_unsupported_store() {
     );
 }
 
-/// R22-5 [major]: a legacy `online:mistral_ocr_markdownize` task an OLDER build enqueued for
-/// an octet-stream TEXT file (`.yaml`/`.json`/`Dockerfile`) must be RETIRED at send time, not
-/// shipped to the OCR API and billed. R21-4 only stopped fresh enqueues; the send gate is the
-/// migration path for tasks already sitting in `tasks.jsonl` after an upgrade.
+/// A persisted online task without its required bbox stamp is rejected at the
+/// task-store boundary. It cannot survive to a resume/send path and therefore
+/// cannot cause an OCR charge.
 #[test]
-fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
-    use kio_pipeline::prepare::hash_bytes;
-    use kio_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+fn r22_5_missing_online_bbox_stamp_is_rejected_before_send() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
-        dir.path().join("config.yaml"),
-        "name: acme\nvalue: 42\nnested:\n  key: value\n",
+        dir.path().join("document.pdf"),
+        fake_pdf(&["online markdownize bbox stamp regression"]),
     )
     .unwrap();
     kio(&dir, &["init"]).assert().success();
-    // `index --approve` records the markdownize network opt-in and (R21-4) enqueues NO
-    // online task for the octet-stream text file.
-    json_success(&dir, &["index", "--approve"]);
-    assert_eq!(
-        markdown_ledger_rows(&dir),
-        0,
-        "R22-5 precondition: index must not charge markdownize for octet-stream text"
-    );
-    // Inject the legacy online task an older build would have enqueued (input_hash matches
-    // the current bytes so the only reason it can retire is the octet-stream-text gate).
-    let input_hash = hash_bytes(&fs::read(dir.path().join("config.yaml")).unwrap());
-    let legacy = TaskDescriptor {
-        task_id: "r22-5-legacy-markdownize".to_owned(),
-        task_type: TaskType::Markdownize,
-        mode: None,
-        input_path: "config.yaml".to_owned(),
-        input_hash,
-        previous_raw_hash: None,
-        parent_run_id: None,
-        changed_unit_keys: Vec::new(),
-        output_ref: "online:mistral_ocr_markdownize".to_owned(),
-        unit_keys: None,
-        status: TaskStatus::Pending,
-        attempts: 0,
-        next_retry_at: None,
-        deadline: None,
-        heartbeat_at: None,
-        fallback_reason: Some("ready_for_online_adapter".to_owned()),
-        created_at: "2026-07-01T00:00:00Z".to_owned(),
-        bbox_annotation_enabled: None,
-        hold_reason: None,
-        reserved_usd: None,
-        reserved_month: None,
-        reservation_id: None,
-    };
-    TaskStore::new(dir.path().join(".kio"))
-        .append(&legacy)
-        .unwrap();
-    // `batch resume` (with the OCR seam mocked) must RETIRE the legacy task without a send.
-    run_markdownize_seam(&dir, "mock", None, &["batch", "resume"]);
-    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    // Persist a valid current online task first, then simulate a torn/obsolete
+    // task record that omits the required current-format stamp.
+    run_markdownize_seam(&dir, "mock", None, &["index", "--online", "--approve"]);
+    let tasks_path = dir.path().join(".kio/tasks.jsonl");
+    let original = fs::read_to_string(&tasks_path).unwrap();
+    let mut rewritten = String::new();
+    let mut changed = false;
+    for line in original.lines() {
+        let mut task: Value = serde_json::from_str(line).unwrap();
+        if !changed && task["type"] == "markdownize" && task["status"] == "pending" {
+            task.as_object_mut()
+                .unwrap()
+                .remove("bbox_annotation_enabled");
+            changed = true;
+        }
+        rewritten.push_str(&serde_json::to_string(&task).unwrap());
+        rewritten.push('\n');
+    }
     assert!(
-        tasks_of_type(&status, "markdownize").iter().any(|t| {
-            t["output_ref"] == "online:mistral_ocr_markdownize"
-                && t["status"] == "failed"
-                && t["fallback_reason"] == "retired_non_live"
-        }),
-        "R22-5: the legacy octet-stream-text online task must be retired, not sent: {status}"
+        changed,
+        "fixture must contain a pending online markdownize task"
     );
+    fs::write(&tasks_path, rewritten).unwrap();
     assert_eq!(
         markdown_ledger_rows(&dir),
         0,
-        "R22-5: retiring the legacy task must add no markdownize charge row: {status}"
+        "precondition: indexing must not execute a queued markdownize task"
+    );
+    let stderr = kio(&dir, &["batch", "resume", "--json"])
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
+        .assert()
+        .code(4)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "a malformed task must add no markdownize charge row"
     );
 }
 

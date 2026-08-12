@@ -746,7 +746,7 @@ current schema で作成する。この gate は最初の書込みより前に�
 
 # 8. commit_type の固定 enum について
 
-現在の正本では、`commit_type` を `manual / auto / imported / migrated / repaired / merged / purged` の7種に閉じる方針である。
+現在の正本では、`commit_type` を `manual / auto / imported / repaired / merged / purged` の6種に閉じる方針である。Phase 3 受入前の `migrated` を含む store は旧形式であり、current reader は受理・変換せず §12.5 の clean recreation を適用する。
 
 この方針を採用する場合でも、実装では以下を守る。
 
@@ -757,7 +757,7 @@ metadata には schema_version を持たせる
 新 type が必要に見える場合は、まず既存 type + metadata で表現できないか確認する
 ```
 
-`commit_type` の値域は §12.5 のとおり**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
+release 後の `commit_type` の値域は**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
 
 ---
 

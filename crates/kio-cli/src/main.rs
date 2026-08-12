@@ -16412,7 +16412,7 @@ fn classify_online_markdownize_precondition(
             prepared_units,
         });
     }
-    // R22-5: retire a legacy task for octet-stream TEXT. The recovery is a re-index (which
+    // R22-5: retire a stale task for octet-stream TEXT. The recovery is a re-index (which
     // no longer enqueues it), not a retry — the deterministic pass already handled the file.
     if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
         return OnlineMarkdownizePrecondition::Retire;
@@ -20582,6 +20582,7 @@ fn enqueue_embedding_tasks(
                 {
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = Some(reason.to_owned());
+                    task.hold_reason = None;
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
@@ -20610,6 +20611,7 @@ fn enqueue_embedding_tasks(
                     };
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = Some(reason.to_owned());
+                    task.hold_reason = None;
                     task.input_path = current_path.clone();
                     task.attempts = 0;
                     task.next_retry_at = None;
@@ -20831,17 +20833,14 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
     }
 }
 
-/// QA4 (step4b-contract-tests-p3a.md §A, 10 §1 L117): `kio status`'s paused
-/// count broken down by the closed `hold_reason` enum (QA1) — `"unknown"`
-/// covers a Paused task with no `hold_reason` stamp (a legacy row from
-/// before QA1, or the still-unimplemented auth hold, QA2). The 3 named
-/// buckets always appear (even at 0) so a caller does not need to guard
-/// against a missing key.
+/// `kio status`'s paused count broken down by the closed `hold_reason` enum.
+/// A current task record always stamps one matching reason for a paused task,
+/// so the three named buckets always appear (even at 0) and there is no
+/// compatibility/unknown bucket.
 fn paused_tasks_by_hold_reason(tasks: &[TaskDescriptor]) -> Value {
     let mut budget = 0u64;
     let mut auth = 0u64;
     let mut tier_b_approval = 0u64;
-    let mut unknown = 0u64;
     for task in tasks {
         if task.status != TaskStatus::Paused {
             continue;
@@ -20850,14 +20849,13 @@ fn paused_tasks_by_hold_reason(tasks: &[TaskDescriptor]) -> Value {
             Some(HoldReason::Budget) => budget += 1,
             Some(HoldReason::Auth) => auth += 1,
             Some(HoldReason::TierBApproval) => tier_b_approval += 1,
-            None => unknown += 1,
+            None => unreachable!("TaskStore accepts only stamped paused tasks"),
         }
     }
     json!({
         "budget": budget,
         "auth": auth,
         "tier_b_approval": tier_b_approval,
-        "unknown": unknown,
     })
 }
 
@@ -25367,6 +25365,7 @@ fn release_secret_holds(repo: &Repository) -> Result<usize> {
             {
                 task.status = TaskStatus::Pending;
                 task.fallback_reason = None;
+                task.hold_reason = None;
                 true
             } else {
                 false
@@ -27120,13 +27119,13 @@ mod tests {
     }
 
     #[test]
-    fn r23_cand_001_legacy_duplicate_hold_cannot_override_terminal_failure() {
+    fn r23_cand_001_duplicate_hold_cannot_override_terminal_failure() {
         use super::{
             embedding_task_output_ref, filter_embeddable_by_task_state, release_secret_holds,
             EmbeddableChunk, SECRETS_TIER_B_HOLD,
         };
         use kio_core::scope::Repository;
-        use kio_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+        use kio_pipeline::task::{HoldReason, TaskDescriptor, TaskStatus, TaskStore, TaskType};
 
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
@@ -27134,7 +27133,7 @@ mod tests {
         let chunk_id = format!("sha256:{}", "c".repeat(64));
         let output_ref = embedding_task_output_ref(&chunk_id);
         let terminal = TaskDescriptor {
-            task_id: "task_terminal_legacy".to_owned(),
+            task_id: "task_terminal".to_owned(),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: "credentials_backup.md".to_owned(),
@@ -27157,23 +27156,21 @@ mod tests {
             reserved_month: None,
             reservation_id: None,
         };
-        // QA1: `legacy_hold` deliberately keeps `hold_reason: None` after the
-        // clone (a Paused row written before the field existed) to cover the
-        // backward-compat deserialization path.
-        let mut legacy_hold = terminal.clone();
-        legacy_hold.task_id = "task_later_hold".to_owned();
-        legacy_hold.status = TaskStatus::Paused;
-        legacy_hold.attempts = 0;
-        legacy_hold.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
-        legacy_hold.created_at = "2026-07-12T00:00:01Z".to_owned();
+        let mut later_hold = terminal.clone();
+        later_hold.task_id = "task_later_hold".to_owned();
+        later_hold.status = TaskStatus::Paused;
+        later_hold.attempts = 0;
+        later_hold.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+        later_hold.hold_reason = Some(HoldReason::TierBApproval);
+        later_hold.created_at = "2026-07-12T00:00:01Z".to_owned();
         store.append(&terminal).unwrap();
-        store.append(&legacy_hold).unwrap();
+        store.append(&later_hold).unwrap();
 
         assert_eq!(release_secret_holds(&repo).unwrap(), 1);
         let tasks = store.all().unwrap();
-        assert_eq!(tasks.len(), 1, "legacy duplicate hold should be removed");
+        assert_eq!(tasks.len(), 1, "duplicate hold should be removed");
         assert!(tasks.iter().any(|task| {
-            task.task_id == "task_terminal_legacy"
+            task.task_id == "task_terminal"
                 && task.status == TaskStatus::Failed
                 && task.fallback_reason.as_deref() == Some("contract_violation")
         }));
@@ -27450,7 +27447,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
-            bbox_annotation_enabled: None,
+            bbox_annotation_enabled: Some(true),
             hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
@@ -29139,7 +29136,7 @@ mod tests {
             heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
-            bbox_annotation_enabled: None,
+            bbox_annotation_enabled: Some(true),
             hold_reason: None,
             reserved_usd: None,
             reserved_month: None,

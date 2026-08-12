@@ -166,15 +166,13 @@ fn ct_tree_empty_vector_and_step1_entries_omit_normalize() {
 
 #[test]
 fn ct_commit_001_002_and_gc_mappings() {
-    for value in [
-        "manual", "auto", "imported", "migrated", "repaired", "merged", "purged",
-    ] {
+    for value in ["manual", "auto", "imported", "repaired", "merged", "purged"] {
         assert!(value.parse::<CommitType>().is_ok());
     }
     assert!("snapshot".parse::<CommitType>().is_err());
+    assert!("migrated".parse::<CommitType>().is_err());
 
     assert_eq!(gc_policy(CommitType::Auto), GcPolicy::Shallow);
-    assert_eq!(gc_policy(CommitType::Migrated), GcPolicy::Shallow);
     assert_eq!(gc_policy(CommitType::Repaired), GcPolicy::Shallow);
     assert_eq!(gc_policy(CommitType::Manual), GcPolicy::None);
     assert_eq!(gc_policy(CommitType::Imported), GcPolicy::None);
@@ -184,7 +182,6 @@ fn ct_commit_001_002_and_gc_mappings() {
         CommitType::Manual,
         CommitType::Auto,
         CommitType::Imported,
-        CommitType::Migrated,
         CommitType::Repaired,
         CommitType::Merged,
         CommitType::Purged,

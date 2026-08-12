@@ -120,12 +120,13 @@ fn qa1_qa4_status_reports_budget_paused_task_with_hold_reason() {
     json_success(&dir, &["index", "--approve"]);
     let status = json_success(&dir, &["status"]);
     let breakdown = &status["paused_by_hold_reason"];
-    for reason in ["budget", "auth", "tier_b_approval", "unknown"] {
+    for reason in ["budget", "auth", "tier_b_approval"] {
         assert!(
             breakdown.get(reason).is_some(),
-            "paused_by_hold_reason must always report all 4 buckets: {breakdown}"
+            "paused_by_hold_reason must always report all current-format buckets: {breakdown}"
         );
     }
+    assert!(breakdown.get("unknown").is_none(), "{breakdown}");
     // No paused task yet in this fresh scope.
     assert_eq!(breakdown["budget"], 0);
 }

@@ -806,10 +806,10 @@ Step 2 で Markdownize されたファイルから順に `normalize` 付き entr
 `commit_type` は固定 enum (詳細は [05-runtime.md §2](05-runtime.md)):
 
 ```
-manual | auto | imported | migrated | repaired | merged | purged
+manual | auto | imported | repaired | merged | purged
 ```
 
-commit object の schema 検証 (publication 時の loader — [05-runtime.md §2.1](05-runtime.md)。commit は CAS JSON object であり SQLite に commit 表は無い) で固定し、**この値域は永久に変更しない契約** (semver MAJOR でも bump しない)。
+commit object の schema 検証 (publication 時の loader — [05-runtime.md §2.1](05-runtime.md)。commit は CAS JSON object であり SQLite に commit 表は無い) で固定し、release 後は**この値域を永久に変更しない契約** (semver MAJOR でも bump しない) とする。Phase 3 受入前の廃止 enum を持つ store は互換 reader や in-place 変換の対象ではなく、[10-operations.md §12.5](10-operations.md) に従って clean recreation する。
 
 ## 8.2 tree のスケール前提 (flat entries)
 
