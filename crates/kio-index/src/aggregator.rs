@@ -216,6 +216,23 @@ pub struct AggProjectionCompletion {
     pub shallow_skipped: u64,
 }
 
+/// All source rows required to atomically replace one scope's replica
+/// projection.
+///
+/// The references must describe a single coherent source-index observation.
+/// [`Aggregator::refresh_scope_with_projection`] writes every field in this
+/// request in one transaction, so callers must not combine rows captured from
+/// different source generations.
+pub struct AggProjectionRequest<'a> {
+    pub scope_id: &'a str,
+    pub header: &'a AggScopeHeader,
+    pub chunks: &'a [AggChunk],
+    pub images: &'a [AggImage],
+    pub bindings: &'a [AggBinding],
+    pub completions: &'a [AggProjectionCompletion],
+    pub now_ms: i64,
+}
+
 /// A stored selector/snapshot completion marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggProjectionMarker {
@@ -910,14 +927,17 @@ impl Aggregator {
     /// that valid empty answer from a missing projection.
     pub fn refresh_scope_with_projection(
         &mut self,
-        scope_id: &str,
-        header: &AggScopeHeader,
-        chunks: &[AggChunk],
-        images: &[AggImage],
-        bindings: &[AggBinding],
-        completions: &[AggProjectionCompletion],
-        now_ms: i64,
+        request: AggProjectionRequest<'_>,
     ) -> Result<()> {
+        let AggProjectionRequest {
+            scope_id,
+            header,
+            chunks,
+            images,
+            bindings,
+            completions,
+            now_ms,
+        } = request;
         let embedding_profiles_json = encode_embedding_profiles(&header.embedding_profiles)?;
         let mut completion_details = BTreeMap::<(String, String), (Option<String>, u64)>::new();
         for completion in completions {
@@ -2210,28 +2230,28 @@ mod tests {
         // because their folders differ in size.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "tiny",
-                &header("gen1"),
-                &[chunk("a", "rollback window minutes")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "tiny",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "rollback window minutes")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let mut big = vec![chunk("b", "rollback window minutes")];
         big.extend((0..40).map(|i| chunk(&format!("f{i}"), "unrelated filler about invoices")));
         index
-            .refresh_scope_with_projection(
-                "big",
-                &header("gen1"),
-                &big,
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "big",
+                header: &header("gen1"),
+                chunks: &big,
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
 
         let scores = index
@@ -2262,18 +2282,18 @@ mod tests {
             binding("all_history", "head", "old", "renamed-old.md"),
         ];
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &chunks,
-                &[],
-                &bindings,
-                &[
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &chunks,
+                images: &[],
+                bindings: &bindings,
+                completions: &[
                     completion(AggSelector::Current, "head"),
                     completion(AggSelector::AllHistory, "head"),
                 ],
-                1,
-            )
+                now_ms: 1,
+            })
             .unwrap();
         let scopes = only(&["s"]);
         let snapshots = BTreeMap::from([("s".to_owned(), "head".to_owned())]);
@@ -2356,15 +2376,15 @@ mod tests {
             binding("all_history", "head", "current", "current.md"),
         ];
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &chunks,
-                &[],
-                &bindings,
-                &[completion(AggSelector::AllHistory, "head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &chunks,
+                images: &[],
+                bindings: &bindings,
+                completions: &[completion(AggSelector::AllHistory, "head")],
+                now_ms: 1,
+            })
             .unwrap();
         let scopes = only(&["s"]);
         let snapshots = BTreeMap::from([("s".to_owned(), "head".to_owned())]);
@@ -2443,15 +2463,15 @@ mod tests {
     fn a_binding_requires_an_explicit_completion_marker() {
         let (_dir, mut index) = store();
         let error = index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[binding("current", "head", "a", "a.md")],
-                &[],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[binding("current", "head", "a", "a.md")],
+                completions: &[],
+                now_ms: 1,
+            })
             .unwrap_err();
         assert!(
             error
@@ -2477,15 +2497,15 @@ mod tests {
         }];
         let bindings = [binding("current", "head", "z-chunk", "figure.md")];
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &chunks,
-                &images,
-                &bindings,
-                &[completion(AggSelector::Current, "head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &chunks,
+                images: &images,
+                bindings: &bindings,
+                completions: &[completion(AggSelector::Current, "head")],
+                now_ms: 1,
+            })
             .unwrap();
         let scopes = only(&["s"]);
         let snapshots = BTreeMap::from([("s".to_owned(), "head".to_owned())]);
@@ -2535,20 +2555,20 @@ mod tests {
             .embedding_profiles
             .push(source_header.embedding_profiles[0].clone());
         index
-            .refresh_scope_with_projection(
-                "empty",
-                &source_header,
-                &[],
-                &[],
-                &[],
-                &[AggProjectionCompletion {
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "empty",
+                header: &source_header,
+                chunks: &[],
+                images: &[],
+                bindings: &[],
+                completions: &[AggProjectionCompletion {
                     selector: AggSelector::Current,
                     snapshot_commit: "commit:head".to_owned(),
                     chunking_config_hash: Some("config:at-head".to_owned()),
                     shallow_skipped: 2,
                 }],
-                456,
-            )
+                now_ms: 456,
+            })
             .unwrap();
 
         let stored = index.scope_header("empty").unwrap().unwrap();
@@ -2627,15 +2647,15 @@ mod tests {
             shallow_skipped: 0,
         };
         index
-            .refresh_scope_with_projection(
-                "scope",
-                &first,
-                &[chunk("chunk", "retained replica row")],
-                &[],
-                &[binding("current", "commit:head", "chunk", "doc.md")],
-                &[completion],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "scope",
+                header: &first,
+                chunks: &[chunk("chunk", "retained replica row")],
+                images: &[],
+                bindings: &[binding("current", "commit:head", "chunk", "doc.md")],
+                completions: &[completion],
+                now_ms: 1,
+            })
             .unwrap();
         let before = index.collection_generation().unwrap();
 
@@ -2672,15 +2692,15 @@ mod tests {
         let (_dir, mut index) = store();
         let first = header("gen-1");
         index
-            .refresh_scope_with_projection(
-                "s",
-                &first,
-                &[chunk("a", "alpha")],
-                &[],
-                &[binding("current", "commit:head", "a", "a.md")],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &first,
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[binding("current", "commit:head", "a", "a.md")],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let before = index.collection_generation().unwrap();
 
@@ -2693,15 +2713,15 @@ mod tests {
             profile_hash: "profile:next".to_owned(),
         });
         index
-            .refresh_scope_with_projection(
-                "s",
-                &changed,
-                &[chunk("a", "alpha")],
-                &[],
-                &[binding("current", "commit:head", "a", "a.md")],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &changed,
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[binding("current", "commit:head", "a", "a.md")],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert_ne!(
             index.collection_generation().unwrap(),
@@ -2718,15 +2738,15 @@ mod tests {
         // unrelated rebuild happened to rotate the generation.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha"), chunk("b", "beta")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha"), chunk("b", "beta")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 0));
 
@@ -2767,31 +2787,31 @@ mod tests {
         // that actually runs.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[
                     vectored("a", "alpha secret", vec![1.0, 0.0]),
                     chunk("b", "beta public"),
                 ],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 1));
 
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen2"),
-                &[chunk("b", "beta public")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen2"),
+                chunks: &[chunk("b", "beta public")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(
@@ -2818,15 +2838,15 @@ mod tests {
         // orphan vector row would just be unreachable by every join.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let delta = ScopeDelta {
             vectors_added: vec![("not-yet-projected".to_owned(), vec![1.0, 0.0])],
@@ -2841,27 +2861,27 @@ mod tests {
         // every other chunk's IDF for those terms.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha"), chunk("b", "beta")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha"), chunk("b", "beta")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 0));
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen2"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen2"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(
@@ -2884,30 +2904,30 @@ mod tests {
         // no longer exists.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[
                     vectored("a", "alpha", vec![1.0, 0.0]),
                     vectored("b", "beta", vec![0.0, 1.0]),
                 ],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 2, 2));
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen2"),
-                &[vectored("a", "alpha", vec![1.0, 0.0])],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen2"),
+                chunks: &[vectored("a", "alpha", vec![1.0, 0.0])],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 1));
         let hits = index.vector_scores(&[0.0, 1.0], &only(&["s"]), 10).unwrap();
@@ -2923,26 +2943,26 @@ mod tests {
         // very next search, not at some later rebuild.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "live",
-                &header("g"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "live",
+                header: &header("g"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         index
-            .refresh_scope_with_projection(
-                "dead",
-                &header("g"),
-                &[vectored("b", "alpha", vec![1.0, 0.0])],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "dead",
+                header: &header("g"),
+                chunks: &[vectored("b", "alpha", vec![1.0, 0.0])],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(index.corpus_size().unwrap(), (2, 2, 1));
         let live: BTreeSet<String> = ["live".to_owned()].into_iter().collect();
@@ -2960,26 +2980,26 @@ mod tests {
     fn vectors_rank_by_cosine_across_scopes() {
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s1",
-                &header("g"),
-                &[vectored("near", "x", vec![1.0, 0.1])],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s1",
+                header: &header("g"),
+                chunks: &[vectored("near", "x", vec![1.0, 0.1])],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         index
-            .refresh_scope_with_projection(
-                "s2",
-                &header("g"),
-                &[vectored("far", "y", vec![0.0, 1.0])],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s2",
+                header: &header("g"),
+                chunks: &[vectored("far", "y", vec![0.0, 1.0])],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let scores = index
             .vector_scores(&[1.0, 0.0], &only(&["s1", "s2"]), 10)
@@ -3009,18 +3029,18 @@ mod tests {
     fn image_and_chunk_vectors_rank_in_one_sequence() {
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &[
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &[
                     vectored("near-chunk", "x", vec![1.0, 0.05]),
                     vectored("far-chunk", "y", vec![0.0, 1.0]),
                 ],
-                &[image("mid-image", vec![1.0, 0.5])],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+                images: &[image("mid-image", vec![1.0, 0.5])],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let mut scores = index.vector_scores(&[1.0, 0.0], &only(&["s"]), 10).unwrap();
         scores.extend(
@@ -3047,15 +3067,15 @@ mod tests {
     fn a_refresh_drops_the_images_the_scope_no_longer_has() {
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha")],
-                &[image("fig", vec![1.0, 0.0])],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[image("fig", vec![1.0, 0.0])],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert_eq!(
             index
@@ -3065,15 +3085,15 @@ mod tests {
             1
         );
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen2"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen2"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert!(
             index
@@ -3092,27 +3112,27 @@ mod tests {
     fn an_image_adds_nothing_to_the_text_collection() {
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let without = index.text_scores("alpha", &only(&["s"]), 10).unwrap();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen2"),
-                &[chunk("a", "alpha")],
-                &[image("fig", vec![1.0, 0.0])],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen2"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[image("fig", vec![1.0, 0.0])],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         let with = index.text_scores("alpha", &only(&["s"]), 10).unwrap();
         assert_eq!(with, without, "adding a figure must not move a text score");
@@ -3131,15 +3151,15 @@ mod tests {
         // projection, and the chunk is gone from the corpus for good.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("gen1"),
-                &[chunk("a", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("gen1"),
+                chunks: &[chunk("a", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
 
         // The scope has moved on to gen2 and grown a chunk `b` the replica
@@ -3172,29 +3192,29 @@ mod tests {
             .map(|n| chunk(&format!("b{n}"), "rollback rollback rollback"))
             .collect();
         index
-            .refresh_scope_with_projection(
-                "big",
-                &header("g"),
-                &big,
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "big",
+                header: &header("g"),
+                chunks: &big,
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         index
-            .refresh_scope_with_projection(
-                "small",
-                &header("g"),
-                &[chunk(
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "small",
+                header: &header("g"),
+                chunks: &[chunk(
                     "s0",
                     "rollback happened once in a much longer document",
                 )],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
 
         let device_wide = index
@@ -3227,26 +3247,26 @@ mod tests {
             .map(|n| chunk(&format!("b{n}"), "rollback rollback rollback"))
             .collect();
         index
-            .refresh_scope_with_projection(
-                "big",
-                &header("g"),
-                &big,
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "big",
+                header: &header("g"),
+                chunks: &big,
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         index
-            .refresh_scope_with_projection(
-                "small",
-                &header("g"),
-                &[chunk("s0", "rollback once")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "small",
+                header: &header("g"),
+                chunks: &[chunk("s0", "rollback once")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
 
         let whole = index
@@ -3270,28 +3290,28 @@ mod tests {
         // df/N/avgdl and therefore the ranks of the scopes they did search.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "a",
-                &header("gen1"),
-                &[chunk("x", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "a",
+                header: &header("gen1"),
+                chunks: &[chunk("x", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         let before = index.collection_generation().unwrap();
 
         index
-            .refresh_scope_with_projection(
-                "a",
-                &header("gen1"),
-                &[chunk("x", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                2,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "a",
+                header: &header("gen1"),
+                chunks: &[chunk("x", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 2,
+            })
             .unwrap();
         assert_eq!(
             index.collection_generation().unwrap(),
@@ -3300,15 +3320,15 @@ mod tests {
         );
 
         index
-            .refresh_scope_with_projection(
-                "unsearched",
-                &header("gen1"),
-                &[chunk("y", "beta")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                3,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "unsearched",
+                header: &header("gen1"),
+                chunks: &[chunk("y", "beta")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 3,
+            })
             .unwrap();
         let after_new_scope = index.collection_generation().unwrap();
         assert_ne!(
@@ -3317,15 +3337,15 @@ mod tests {
         );
 
         index
-            .refresh_scope_with_projection(
-                "a",
-                &header("gen2"),
-                &[chunk("x", "alpha")],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                4,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "a",
+                header: &header("gen2"),
+                chunks: &[chunk("x", "alpha")],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 4,
+            })
             .unwrap();
         assert_ne!(
             index.collection_generation().unwrap(),
@@ -3340,15 +3360,15 @@ mod tests {
         // then outranks a correctly-scored chunk.
         let (_dir, mut index) = store();
         index
-            .refresh_scope_with_projection(
-                "s",
-                &header("g"),
-                &[vectored("wrong", "x", vec![1.0, 0.0, 0.0])],
-                &[],
-                &[],
-                &[completion(AggSelector::Current, "commit:head")],
-                1,
-            )
+            .refresh_scope_with_projection(AggProjectionRequest {
+                scope_id: "s",
+                header: &header("g"),
+                chunks: &[vectored("wrong", "x", vec![1.0, 0.0, 0.0])],
+                images: &[],
+                bindings: &[],
+                completions: &[completion(AggSelector::Current, "commit:head")],
+                now_ms: 1,
+            })
             .unwrap();
         assert!(index
             .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)

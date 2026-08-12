@@ -39,6 +39,7 @@ fn fixed_now_override_millis() -> Option<i64> {
 }
 
 /// Parse `YYYY-MM-DDTHH:MM:SSZ` into Unix seconds. `None` on any shape mismatch.
+#[cfg(debug_assertions)]
 #[must_use]
 fn parse_utc_seconds(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();

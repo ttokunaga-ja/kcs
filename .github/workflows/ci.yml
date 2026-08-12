@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+# A push can fan out into long-running persona jobs. Keep the newest signal for
+# each branch or pull request and stop superseded runs from consuming runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # 宣言が無いと GITHUB_TOKEN はリポジトリ既定のスコープで配られる。2026-08-03 時点の
 # 既定は read なので**穴が開いていたわけではない** — 直しているのは、ワークフローの
 # 権限がワークフローの外の設定に依存していたことで、そこは誰かが 1 度クリックすれば
@@ -47,7 +53,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_contract
@@ -82,7 +88,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_bounded_body
@@ -106,7 +112,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_source_inventory_profile
@@ -120,7 +126,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_source_semantic_membership_package
@@ -130,7 +136,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_lifecycle_coverage_catalog
@@ -140,7 +146,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_concrete_overlay_membership_package
@@ -150,7 +156,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_source_parameter_assignment_package
@@ -160,7 +166,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_source_matched_lifecycle_inventory
@@ -170,7 +176,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_lifecycle_effective_membership_reconciliation
@@ -180,7 +186,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryContractTest
@@ -190,7 +196,7 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryLongAll113Test
@@ -200,7 +206,7 @@ jobs:
     timeout-minutes: 300
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryLongColdHashSeedTest
@@ -210,7 +216,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_global_content
@@ -229,7 +235,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryContractTest
@@ -242,7 +248,7 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryLongAll253Test
@@ -255,7 +261,7 @@ jobs:
     timeout-minutes: 300
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryLongColdHashSeedTest
@@ -267,7 +273,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           python3 -m unittest -v
           eval.test_persona_v2_corpus_semantic_namespace_v3.CorpusSemanticNamespaceV3FastContractTest
@@ -290,7 +296,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_FULL=1
           python3 -m unittest -v
@@ -302,7 +308,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_SOURCE_SEMANTIC_CAPACITY_AXIS_COLD=1
           python3 -m unittest -v
@@ -314,7 +320,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_FULL=1
           python3 -m unittest -v
@@ -326,7 +332,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_CAPACITY_FACT_TRUTH_OCCURRENCE_POLICY_COLD=1
           python3 -m unittest -v
@@ -339,7 +345,7 @@ jobs:
     timeout-minutes: 210
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_FULL=1
           python3 -m unittest -v
@@ -354,7 +360,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_HISTORY_PRESOLVE_CLOSURE_SLICE_COLD=1
           python3 -m unittest -v
@@ -364,8 +370,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
@@ -403,7 +411,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: >-
           KIO_RUN_PERSONA_FS_INTEGRATION=1
           python3 -m unittest -v
@@ -414,8 +422,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
       # Optional ranking features must take this same eval path; `--all-features`
       # prevents a default-off ranking lane from bypassing the only Recall gate.
       - run: cargo build --release --locked --all-features
@@ -438,7 +446,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.86.0
       - run: cargo check --workspace --all-targets --locked
 
@@ -446,8 +454,8 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
       - run: cargo test --workspace --all-targets --locked
       - run: >-
           python3 -m unittest
@@ -459,6 +467,6 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.0
       - run: cargo test --workspace --all-targets --locked

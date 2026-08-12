@@ -61,8 +61,9 @@ The evaluation harness is Python and runs without a Rust build:
 python3 -m unittest discover -s eval -t .
 ```
 
-Toolchain is `stable` (see `rust-toolchain.toml`); the workspace declares
-`rust-version = "1.86"`.
+The development and CI toolchain is pinned to Rust `1.97.0` (see
+`rust-toolchain.toml`); the workspace still declares an MSRV of
+`rust-version = "1.86"`, which CI verifies separately.
 
 ## Pull requests
 

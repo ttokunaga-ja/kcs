@@ -943,17 +943,14 @@ fn run(cli: Cli) -> Result<Value> {
                 // new snapshot Ready again, but only after proving that it merely
                 // removed no source content or normalization identity.
                 mark_replica_rebuilding_or_log(repo.kio_dir(), commit_hash);
-                match ready_replica_before_snapshot.as_ref() {
-                    Some(before) => {
-                        match republish_equivalent_manual_snapshot(&repo, before, commit_hash) {
-                            Ok(true) => {}
-                            Ok(false) => {}
-                            Err(reason) => log_aggregator_degraded(&format!(
-                                "manual snapshot replica reuse {commit_hash} failed: {reason}"
-                            )),
-                        }
+                if let Some(before) = ready_replica_before_snapshot.as_ref() {
+                    match republish_equivalent_manual_snapshot(&repo, before, commit_hash) {
+                        Ok(true) => {}
+                        Ok(false) => {}
+                        Err(reason) => log_aggregator_degraded(&format!(
+                            "manual snapshot replica reuse {commit_hash} failed: {reason}"
+                        )),
                     }
-                    None => {}
                 }
             }
             Ok(json!({
@@ -1496,17 +1493,17 @@ fn run_rebuild_db_locked(
         // write-command entry point. Device-global `repair all` disables this
         // entire block: its offline contract forbids provider polling and
         // remote-residue cleanup as well as new paid sends.
-        poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
-        poll_batch_embedding_jobs(&repo, &open_ledger_db()?)?;
+        poll_batch_markdownize_jobs(repo, &TaskStore::new(repo.kio_dir()), &open_ledger_db()?)?;
+        poll_batch_embedding_jobs(repo, &open_ledger_db()?)?;
     }
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kio_dir())?;
-    let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
+    let promotion_rebuild_pending = recover_pending_online_promotion(repo)?;
     let db = repo.kio_dir().join("index/sqlite.db");
     // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
     // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
     // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
-    let report = rebuild_step3_index(&repo)?;
+    let report = rebuild_step3_index(repo)?;
     // LC42-LC44 (item 2), same ordering rationale as `run_index`'s call.
     recover_index_generation(repo.kio_dir())?;
     if promotion_rebuild_pending {
@@ -1525,7 +1522,7 @@ fn run_rebuild_db_locked(
     let embedding_online = embedding_online_allowed(repo, offline, online_requested, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
     // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
-    let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
+    let enrichment = run_embedding_enrichment(repo, embedding_online, false, false)?;
     let mut output = json!({
         "status": "rebuilt",
         "rebuilt_chunks": report.rebuilt_chunks,
@@ -2445,6 +2442,28 @@ struct GlobalRanks {
     collection_generation: String,
 }
 
+/// Borrowed inputs to replica-only candidate selection for one search request.
+///
+/// The caller has already prepared every scope and opened the sole device
+/// replica. This keeps that coherent request boundary explicit without copying
+/// search state or reopening a source index.
+struct ReplicaCandidateRequest<'a> {
+    replica: &'a mut kio_index::aggregator::Aggregator,
+    searched: &'a [SearchedScopeInfo],
+    exec_scopes: &'a [ExecScope],
+    retainable_all_scopes: &'a BTreeSet<String>,
+    authoritative_all_scope_registry: bool,
+    scope_mode: ScopeSelectionMode,
+    is_cursor_replay: bool,
+    time_selector: &'a TimeSelector,
+    since_cutoff: Option<&'a str>,
+    match_expr: Option<&'a str>,
+    short_tokens: &'a [String],
+    mode: SearchMode,
+    query_vec: Option<&'a [f32]>,
+    config: RrfConfig,
+}
+
 fn aggregator_selector(time_selector: &TimeSelector) -> kio_index::aggregator::AggSelector {
     match time_selector {
         TimeSelector::Current => kio_index::aggregator::AggSelector::Current,
@@ -2460,21 +2479,24 @@ fn aggregator_selector(time_selector: &TimeSelector) -> kio_index::aggregator::A
 /// `kio search`.  All source-index projection happens on writer paths; this
 /// function never falls back to a per-scope SQLite read.
 fn replica_candidates_for(
-    replica: &mut kio_index::aggregator::Aggregator,
-    searched: &[SearchedScopeInfo],
-    exec_scopes: &[ExecScope],
-    retainable_all_scopes: &BTreeSet<String>,
-    authoritative_all_scope_registry: bool,
-    scope_mode: ScopeSelectionMode,
-    is_cursor_replay: bool,
-    time_selector: &TimeSelector,
-    since_cutoff: Option<&str>,
-    match_expr: Option<&str>,
-    short_tokens: &[String],
-    mode: SearchMode,
-    query_vec: Option<&[f32]>,
-    config: RrfConfig,
+    request: ReplicaCandidateRequest<'_>,
 ) -> std::result::Result<(GlobalRanks, Vec<ScoredCandidate>), String> {
+    let ReplicaCandidateRequest {
+        replica,
+        searched,
+        exec_scopes,
+        retainable_all_scopes,
+        authoritative_all_scope_registry,
+        scope_mode,
+        is_cursor_replay,
+        time_selector,
+        since_cutoff,
+        match_expr,
+        short_tokens,
+        mode,
+        query_vec,
+        config,
+    } = request;
     let participating = searched
         .iter()
         .map(|scope| scope.scope_id.clone())
@@ -2776,7 +2798,6 @@ fn collect_scope_projection(
     let mut at_snapshots = match HistoryReader::new(repo.kio_dir()).all_parents_tolerant(&head) {
         Ok((history, _)) => history
             .nodes_in_visit_order()
-            .into_iter()
             .map(|node| node.commit_hash.clone())
             .collect::<BTreeSet<_>>(),
         // Do not turn a current search with a cached shallow snapshot into a
@@ -3174,15 +3195,15 @@ fn write_through_projection_with_requested_at(
     let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
         .map_err(|error| format!("write-through open failed: {error}"))?;
     replica
-        .refresh_scope_with_projection(
-            &scope_id,
-            &header,
-            &projection.chunks,
-            &projection.images,
-            &projection.bindings,
-            &projection.completions,
-            replica_now_ms(),
-        )
+        .refresh_scope_with_projection(kio_index::aggregator::AggProjectionRequest {
+            scope_id: &scope_id,
+            header: &header,
+            chunks: &projection.chunks,
+            images: &projection.images,
+            bindings: &projection.bindings,
+            completions: &projection.completions,
+            now_ms: replica_now_ms(),
+        })
         .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
 }
 
@@ -4649,24 +4670,24 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     let query_vec_for_replica = matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid)
         .then(|| query_embedding.as_deref())
         .flatten();
-    let (global_ranks, replica_candidates) = replica_candidates_for(
-        replica
+    let (global_ranks, replica_candidates) = replica_candidates_for(ReplicaCandidateRequest {
+        replica: replica
             .as_mut()
             .expect("a nonempty direct search opens its replica once"),
-        &searched,
-        &exec_scopes,
-        &retainable_all_scopes,
+        searched: &searched,
+        exec_scopes: &exec_scopes,
+        retainable_all_scopes: &retainable_all_scopes,
         authoritative_all_scope_registry,
         scope_mode,
-        decoded_cursor.is_some(),
-        &time_selector,
-        since_cutoff.as_deref(),
-        query_plan.match_expr.as_deref(),
-        &query_plan.short_tokens,
-        mode.resolved,
-        query_vec_for_replica,
-        rrf_config,
-    )
+        is_cursor_replay: decoded_cursor.is_some(),
+        time_selector: &time_selector,
+        since_cutoff: since_cutoff.as_deref(),
+        match_expr: query_plan.match_expr.as_deref(),
+        short_tokens: &query_plan.short_tokens,
+        mode: mode.resolved,
+        query_vec: query_vec_for_replica,
+        config: rrf_config,
+    })
     .map_err(|reason| {
         KioError::new(
             "KIO-E-AGGREGATOR-001",
