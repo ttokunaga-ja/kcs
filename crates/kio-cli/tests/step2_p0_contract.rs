@@ -1193,11 +1193,23 @@ fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
     assert!(!object_text.contains(&child_hash));
     assert!(!object_text.contains("child private"));
 
+    // P2b indexes a discovered child as its own scope. The device ledger is
+    // intentionally global, so it now contains the parent's and child's
+    // independent baseline entries. Filter by scope identity before asserting
+    // the parent-boundary contract.
+    let parent_scope_id =
+        serde_json::from_slice::<Value>(&fs::read(dir.path().join(".kio/scope.json")).unwrap())
+            .unwrap()["scope_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
     let ledger = ledger_lines(&dir);
-    assert_eq!(ledger.len(), 1);
-    assert!(!serde_json::to_string(&ledger)
-        .unwrap()
-        .contains(&child_hash));
+    assert_eq!(ledger.len(), 2);
+    let parent_ledger = ledger
+        .iter()
+        .filter(|entry| entry["scope_id"] == parent_scope_id)
+        .collect::<Vec<_>>();
+    assert_eq!(parent_ledger.len(), 1);
 }
 
 #[test]
