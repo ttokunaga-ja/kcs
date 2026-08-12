@@ -754,10 +754,13 @@ dependencies = [
  "kio-index",
  "kio-search",
  "libc",
+ "rusqlite",
  "serde",
+ "serde_jcs",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
  "windows-sys 0.61.2",
 ]
 

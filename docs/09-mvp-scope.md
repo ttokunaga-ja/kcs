@@ -220,6 +220,13 @@ Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 �
                                        (研究メモ: 旧 research/markdown.md — git 履歴。単価改定時は本表を更新)
 ```
 
+Q_hard の Rust 計測は `kio-eval benchmark qhard` を正本とする。これは外部 fixture の
+attestation (tree / XDG environment / registered scopes / frozen golden digest) を要求し、fixture
+未配置・未 attest を pass や historical result の再利用として扱わない。Q_hard 8 問だけの
+report は測定値であり、M3-1 の 26 問 / 21 hit 合算判定には `--synthetic-corpus` により
+同一実行内で再測定された frozen synthetic M3-1 18 問が必要である。外部結果 artifact は
+受け付けない。
+
 ## 4.2 シナリオ凍結規律
 
 Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-3 完了までシナリオを動かさない。例外: 物理的に実装不可能と判明した場合のみ本書で撤回 + 代替採用。**一回限りの例外**: M3-1 の Q_hard を §4.1 の「20 問以上」へ増補する**追加のみ**、**Step 3 着手前**に限り認める (既存問の差し替えは不可 — 増補後に再凍結し、以後この例外は消滅する)。この増補に伴う #5 行の件数・digest 追記は本例外の完遂手続きであり、§6.2 のドキュメント凍結の対象外とする。

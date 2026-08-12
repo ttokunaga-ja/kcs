@@ -27,12 +27,14 @@ use kio_eval::{
     manifest::{
         load_corpus_manifest, load_golden_queries, load_history_manifest, Scenario, SCOPES,
     },
+    qhard::{self, QhardOptions},
     resolver::{validate_query, CorpusModel, Resolver},
     runner::{
         assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
         run_bounded_command, write_report, write_results, BoundedProcessOptions, HistoryEntryRef,
         HistoryManifestRef, RenameEntryRef, ResolvedQuery, ScoredRecord,
     },
+    scale::{self, ScaleOptions},
 };
 use thiserror::Error;
 
@@ -75,6 +77,57 @@ enum Commands {
         out: PathBuf,
         #[arg(long)]
         force: bool,
+    },
+    /// Measure deterministic search latency on an attested scale corpus.
+    Benchmark {
+        #[command(subcommand)]
+        command: BenchmarkCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchmarkCommands {
+    /// Run the 20-scope scale search measurement lane.
+    Scale {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        #[arg(long)]
+        attestation: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 5)]
+        warmups: usize,
+        #[arg(long, default_value_t = 100)]
+        samples: usize,
+    },
+    /// Measure the frozen external raster/vector Q_hard fixture.
+    Qhard {
+        #[arg(long, default_value = "eval/golden-queries-qhard.jsonl")]
+        golden: PathBuf,
+        #[arg(long)]
+        fixture_root: PathBuf,
+        #[arg(long, default_value = "qhard")]
+        tree: String,
+        #[arg(long, default_value = "qhard")]
+        env_name: String,
+        #[arg(long)]
+        attestation: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// Forward only the named query-embedding credentials, if present.
+        #[arg(long)]
+        online_query: bool,
+        /// Generated synthetic corpus measured in this same evaluator invocation.
+        #[arg(long)]
+        synthetic_corpus: Option<PathBuf>,
     },
 }
 
@@ -161,6 +214,24 @@ fn bundled_eval_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../eval")
         .join(name)
+}
+
+fn output_is_within_input_root(output: &Path, root: &Path) -> Result<bool, AppError> {
+    let absolute = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|e| AppError::Input(format!("cannot resolve output path: {e}")))?
+            .join(output)
+    };
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| AppError::Input("output has no parent".into()))?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|e| AppError::Input(format!("cannot canonicalize output parent: {e}")))?;
+    let root = fs::canonicalize(root)
+        .map_err(|e| AppError::Input(format!("cannot canonicalize synthetic corpus: {e}")))?;
+    Ok(parent.starts_with(root))
 }
 
 fn scenario_name(value: Scenario) -> &'static str {
@@ -478,6 +549,190 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
     if let Some(command) = args.command.as_ref() {
         return match command {
             Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
+            Commands::Benchmark { command } => match command {
+                BenchmarkCommands::Scale {
+                    corpus,
+                    manifest,
+                    attestation,
+                    bin,
+                    out,
+                    warmups,
+                    samples,
+                } => {
+                    let report = scale::run(ScaleOptions {
+                        corpus: corpus.clone(),
+                        manifest: manifest.clone(),
+                        attestation: attestation.clone(),
+                        bin: bin.clone(),
+                        warmups: *warmups,
+                        samples: *samples,
+                    })
+                    .map_err(|error| AppError::Input(error.to_string()))?;
+                    let rendered = serde_json::to_vec_pretty(&report).map_err(|error| {
+                        AppError::Input(format!("cannot serialize scale report: {error}"))
+                    })?;
+                    if let Some(path) = out {
+                        scale::write_report(path, corpus, &report)
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                    } else {
+                        println!("{}", String::from_utf8_lossy(&rendered));
+                        if report.acceptance_failed() {
+                            let fallback = std::env::temp_dir()
+                                .join(format!("kio-scale-failed-{}.json", std::process::id()));
+                            scale::write_report(&fallback, corpus, &report)
+                                .map_err(|error| AppError::Input(error.to_string()))?;
+                            eprintln!("saved failed scale report: {}", fallback.display());
+                        }
+                    }
+                    Ok(if report.acceptance_failed() {
+                        ExitCode::Failure
+                    } else {
+                        ExitCode::Success
+                    })
+                }
+                BenchmarkCommands::Qhard {
+                    golden,
+                    fixture_root,
+                    tree,
+                    env_name,
+                    attestation,
+                    bin,
+                    out,
+                    k,
+                    online_query,
+                    synthetic_corpus,
+                } => {
+                    // A combined acceptance run must use one immutable binary
+                    // for both lanes; normal evaluation otherwise resolves
+                    // its public `--bin` path immediately before each search.
+                    let combined_binary = synthetic_corpus
+                        .is_some()
+                        .then(|| qhard::snapshot_binary(bin))
+                        .transpose()
+                        .map_err(|error| AppError::Input(error.to_string()))?;
+                    let measurement_bin = combined_binary
+                        .as_ref()
+                        .map(|(_, path)| path)
+                        .unwrap_or(bin);
+                    let report = qhard::run(QhardOptions {
+                        golden: golden.clone(),
+                        fixture_root: fixture_root.clone(),
+                        tree: tree.clone(),
+                        env_name: env_name.clone(),
+                        attestation: attestation.clone(),
+                        bin: measurement_bin.to_path_buf(),
+                        k: *k,
+                        online_query: *online_query,
+                    })
+                    .map_err(|error| AppError::Input(error.to_string()))?;
+                    let mut report = report;
+                    let mut synthetic_input_root = None;
+                    if let Some(corpus) = synthetic_corpus {
+                        synthetic_input_root = Some(corpus.clone());
+                        let synthetic_snapshot = qhard::snapshot_regular_tree(corpus)
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                        let temporary = tempfile::tempdir().map_err(|error| {
+                            AppError::Input(format!(
+                                "cannot create combined measurement workspace: {error}"
+                            ))
+                        })?;
+                        let frozen_golden = bundled_eval_path("golden-queries.jsonl");
+                        let golden_bytes = fs::read(&frozen_golden).map_err(|error| {
+                            AppError::Input(format!("cannot read frozen synthetic golden: {error}"))
+                        })?;
+                        if golden_bytes.len() > 64 * 1024
+                            || kio_core::cas::hash_bytes(&golden_bytes)
+                                != qhard::FROZEN_SYNTHETIC_M3_1_GOLDEN_SHA256
+                        {
+                            return Err(AppError::Input(
+                                "synthetic M3-1 golden differs from the frozen contract".into(),
+                            ));
+                        }
+                        let synthetic_golden = temporary.path().join("golden-queries.jsonl");
+                        fs::write(&synthetic_golden, golden_bytes).map_err(|error| {
+                            AppError::Input(format!(
+                                "cannot snapshot frozen synthetic golden: {error}"
+                            ))
+                        })?;
+                        let synthetic_out = temporary.path().join("synthetic-results.json");
+                        let synthetic_report = temporary.path().join("synthetic-report.md");
+                        let outcome = run(Args {
+                            command: None,
+                            golden: Some(synthetic_golden.clone()),
+                            corpus: Some(synthetic_snapshot.path().to_path_buf()),
+                            corpus_manifest: None,
+                            history_manifest: None,
+                            bin: measurement_bin.to_path_buf(),
+                            out: Some(synthetic_out.clone()),
+                            report: Some(synthetic_report),
+                            scenario: vec!["M3-1".to_owned()],
+                            min_recall: 0.8,
+                            dry_run: false,
+                        })?;
+                        if outcome != ExitCode::Success {
+                            return Err(AppError::Input(
+                                "same-invocation synthetic M3-1 measurement did not pass".into(),
+                            ));
+                        }
+                        synthetic_snapshot
+                            .verify_source_unchanged()
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                        let results: kio_eval::runner::EvaluationResults =
+                            serde_json::from_slice(&fs::read(&synthetic_out).map_err(|error| {
+                                AppError::Input(format!(
+                                    "cannot read same-invocation synthetic result: {error}"
+                                ))
+                            })?)
+                            .map_err(|error| {
+                                AppError::Input(format!(
+                                    "invalid same-invocation synthetic result: {error}"
+                                ))
+                            })?;
+                        let m31 = results.scenarios.get("M3-1").ok_or_else(|| {
+                            AppError::Input("same-invocation result omitted M3-1".into())
+                        })?;
+                        if m31.n_queries != 18 || m31.n_scored != 18 {
+                            return Err(AppError::Input(
+                                "same-invocation synthetic M3-1 did not measure exactly 18 queries"
+                                    .into(),
+                            ));
+                        }
+                        let hits = results
+                            .queries
+                            .iter()
+                            .filter(|row| row.scenario == "M3-1" && row.recall_at_10 == Some(1.0))
+                            .count();
+                        report
+                            .combine_synthetic_m3_1(&synthetic_golden, hits, 18)
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                    }
+                    let rendered = serde_json::to_vec_pretty(&report).map_err(|error| {
+                        AppError::Input(format!("cannot serialize Q_hard report: {error}"))
+                    })?;
+                    if let Some(path) = out {
+                        if let Some(synthetic_root) = &synthetic_input_root {
+                            if output_is_within_input_root(path, synthetic_root)? {
+                                return Err(AppError::Input(
+                                    "Q_hard report must be outside synthetic corpus input".into(),
+                                ));
+                            }
+                        }
+                        qhard::write_report(path, fixture_root, &report)
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                    } else {
+                        println!("{}", String::from_utf8_lossy(&rendered));
+                    }
+                    // Q_hard-only reports are useful evidence, but they are
+                    // explicitly not the combined 26-query M3-1 acceptance
+                    // gate.  Never turn an ineligible measurement into a
+                    // successful acceptance exit status.
+                    Ok(if report.acceptance_passed() {
+                        ExitCode::Success
+                    } else {
+                        ExitCode::Failure
+                    })
+                }
+            },
         };
     }
     let golden = args
@@ -689,7 +944,9 @@ mod tests {
 
     use kio_eval::boundary::BoundCorpus;
 
-    use super::{bundled_eval_path, device_env, parse_recall, parse_scenario};
+    use super::{
+        bundled_eval_path, device_env, output_is_within_input_root, parse_recall, parse_scenario,
+    };
 
     #[test]
     fn cli_value_parsers_are_strict() {
@@ -705,6 +962,14 @@ mod tests {
         let golden = bundled_eval_path("golden-queries.jsonl");
         assert!(golden.ends_with(Path::new("eval/golden-queries.jsonl")));
         assert!(golden.is_absolute());
+    }
+
+    #[test]
+    fn output_inside_synthetic_input_is_rejected() {
+        let corpus = tempfile::tempdir().unwrap();
+        assert!(
+            output_is_within_input_root(&corpus.path().join("report.json"), corpus.path()).unwrap()
+        );
     }
 
     #[test]

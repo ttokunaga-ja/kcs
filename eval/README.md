@@ -26,12 +26,14 @@
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
 | `test_run_eval.py` | Python oracle の独立テストと Rust evaluator/generator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
+| `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
+| `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
 | `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
 | `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
 | `attest_scale_corpus.py` | HEAD・現行 chunk config・FTS coverage を照合し、検索可能 chunk の正確な総数を証明 |
-| `run_scale_eval.py` | full fixture に対して既定 `auto` 横断検索を反復。text fallback を確認し、内部/プロセス時間の p50 / p95 / p99 と生の標本を出力 |
+| `run_scale_eval.py` | Rust lane 移行前の legacy/reference 実装。fixture 生成・attestation 契約の参照用であり、新規の性能判定の正本ではない |
 | `test_scale_*.py`, `test_run_scale_eval.py` | 性能 fixture の形、所有権、排他、bounded read、registry 復旧、計測契約の単体テスト |
 
 ## 使い方
@@ -73,6 +75,36 @@ python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin tar
 | Recall 未達 / 実行失敗 (非 0 かつ非 3 exit・不正レスポンス・解決不能) | `1` | FAIL。当該クエリは recall 0 として集計に残す |
 
 exit `3` (部分成功) は stdout の JSON を採点対象にする (実装後の部分成功や実バグを未実装で握り潰さない)。
+
+## Q_hard の外部 fixture 計測
+
+Q_hard は raster PDF / PPTX 図表 / 画像を正解担体とするため、合成 corpus とは別の
+**明示的に attest された外部 fixture** でのみ計測する。fixture がない、attestation が
+ない、または tree / environment / golden digest / scope 一覧が一致しない場合、
+`kio-eval benchmark qhard` は失敗する。checked-in の `qhard-results.json` は歴史成果物であり、
+入力にも Done 判定にも用いない。
+
+```bash
+target/release/kio-eval benchmark qhard \
+  --fixture-root /private/tmp/kio-fixture-run \
+  --tree qhard --env-name qhard \
+  --attestation /private/tmp/kio-fixture-run/qhard-attestation.json \
+  --bin target/release/kio --out /tmp/kio-qhard.json
+```
+
+attestation は strict JSON の `{schema_version:1, fixture_id:"kio-qhard-v1", tree,
+env_name, golden_sha256, fixture_content_sha256, scopes}` である。`fixture_content_sha256` は
+fixture root の regular files/directories を名前・型・content digest で順序付きに列挙して
+hash した値で、root の `qhard-attestation.json` 自身は除外する（自己参照を避ける）。`scopes` は fixture root からの正規化相対 path
+で、実際に見つかる `.kio` scope と完全一致しなければならない。探索は symlink を辿らず、
+directory / scope 数に上限を設ける。検索 subprocess は fixture XDG state だけを使う。
+`--online-query` 時だけ `GEMINI_API_KEY` / `MISTRAL_API_KEY` を名前指定で転送し、値は report
+に出力しない。
+
+`--synthetic-corpus <generated-corpus>` を添えると、同じ `kio-eval` 呼出し内で frozen
+synthetic M3-1 18 問を再測定し、Q_hard 8 問と合算した 26 問 / 21 hit gate を report に
+記録する。外部の結果 artifact は受け付けない。指定なしの Q_hard-only 実行は evidence-only
+であり、acceptance success にはならない。
 
 ## シナリオと評価コーパスの対応 (docs/09 §4)
 
@@ -195,11 +227,12 @@ python3 eval/prepare_scale_corpus.py \
 # 任意時点で再検証 (read-only SQLite attestation)
 python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-full
 
-# current-text 横断検索の手動計測。各scenario 5 warmup + 100標本、nearest-rank p50/p95/p99。
-# 既定reportは corpus外の /tmp/kio-scale-full.latency.json。
-python3 eval/run_scale_eval.py \
+# Rust measurement lane: full だけが acceptance eligible。5 warmup + 100 samples
+# の M3-1 `search.latency_ms` p95 を判定に使う。--out は corpus 外の既存実体
+# directory にだけ原子的に書き出せる。
+cargo run -p kio-eval -- benchmark scale \
   --corpus /tmp/kio-scale-full --bin target/release/kio \
-  --warmups-per-scenario 5 --samples-per-scenario 100
+  --warmups 5 --samples 100 --out /tmp/kio-scale-full.latency.json
 ```
 
 `prepare_scale_corpus.py` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
@@ -218,7 +251,7 @@ query契約を版管理する `query_workload_id=exact-reference-v1`、
 - 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける。
   これは高選択性queryのlatency probeであり、広いqueryのmulti-scope ranking性能は証明しない
 
-`run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
+Rust の `kio-eval benchmark scale` は release binary・manifest・保存済みと実測前後の live attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
 主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、

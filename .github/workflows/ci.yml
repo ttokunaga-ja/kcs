@@ -80,6 +80,12 @@ jobs:
       - run: python3 eval/generate_scale_corpus.py --out /tmp/kio-scale-tiny --profile tiny
       - run: python3 eval/prepare_scale_corpus.py --corpus /tmp/kio-scale-tiny --bin target/release/kio
       - run: python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-tiny
+      # This is a contract smoke only: tiny fixtures are deliberately not
+      # performance-acceptance eligible.
+      - run: >-
+          target/release/kio-eval benchmark scale
+          --corpus /tmp/kio-scale-tiny --bin target/release/kio
+          --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
       - run: python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
       - run: python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
       - run: python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
