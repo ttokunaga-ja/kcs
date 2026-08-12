@@ -560,8 +560,9 @@ kio repair verify-objects
 2. 復元手段なし
    → missing として errors.jsonl に KIO-E-STORE-CORRUPT-001 を記録し、
      (normalized unit の done `unit_object_hash` CAS 欠落も同様 — same-gen 再生成は行わない (unit object は
-      immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
-      restore、または明示の新 gen (kio reindex --regenerate) で行う)
+      immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。**現行 schema の
+      store** の復元は backup restore、または明示の新 gen (`kio reindex --regenerate`) で行う。
+      pre-contract development store はこの経路の入力ではなく、source から clean recreate する)
      影響を受ける commit hash の bounded 一覧と
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
@@ -989,7 +990,15 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 **Kio は未リリースであり、外部に既存 store は存在しない。**したがって
 「本規則の導入以前に作られたデータ」を特別扱いする分岐を、仕様にも実装にも**置かない**。
-該当するのは開発機の store だけであり、それは `kio reindex --regenerate` か作り直しで足りる。
+旧 development store は current reader の入力ではなく、source files から clean recreate する。
+
+具体的には source を確認したうえで旧 `.kio` を隔離し、current binary で `kio init`、`kio index`
+（online enrichment が必要なら明示承認）、`kio batch resume` を実行して current schema の新しい
+store を作る。旧 `.kio` の history、task ledger、registry、normalized cache、derived SQLite、object
+はコピーも変換も混在もさせない。受け入れ後に隔離した旧 store を削除する。旧形式を発見した
+current binary は fail-closed に拒否し、reader / search / repair / historical 操作の例外は設けない。
+`kio reindex --regenerate` は current schema で検証済みの store にだけ使う recovery であり、
+pre-contract store の移行手段ではない。
 
 この規約が禁じるのは**後方**互換の分岐だけである。次は禁止対象ではない:
 
