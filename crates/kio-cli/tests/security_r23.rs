@@ -89,10 +89,12 @@ fn view_slice(viewed: &Value) -> String {
         .unwrap_or_else(|| panic!("view_path must be a resolvable path: {viewed}"));
     let start = viewed["view_byte_start"]
         .as_u64()
-        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}")) as usize;
+        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}"))
+        as usize;
     let end = viewed["view_byte_end"]
         .as_u64()
-        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}")) as usize;
+        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}"))
+        as usize;
     let bytes = fs::read(view_path)
         .unwrap_or_else(|err| panic!("failed to read view_path {view_path}: {err}"));
     String::from_utf8(bytes[start..end].to_vec()).unwrap()

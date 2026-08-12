@@ -99,10 +99,12 @@ fn view_slice(viewed: &Value) -> String {
         .unwrap_or_else(|| panic!("view_path must be a resolvable path: {viewed}"));
     let start = viewed["view_byte_start"]
         .as_u64()
-        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}")) as usize;
+        .unwrap_or_else(|| panic!("view_byte_start must be present: {viewed}"))
+        as usize;
     let end = viewed["view_byte_end"]
         .as_u64()
-        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}")) as usize;
+        .unwrap_or_else(|| panic!("view_byte_end must be present: {viewed}"))
+        as usize;
     let bytes = fs::read(view_path)
         .unwrap_or_else(|err| panic!("failed to read view_path {view_path}: {err}"));
     String::from_utf8(bytes[start..end].to_vec()).unwrap()
@@ -2311,7 +2313,9 @@ fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|result| result["snippet"].as_str().is_some_and(|text| text.contains("zephyrterm secret"))),
+            .any(|result| result["snippet"]
+                .as_str()
+                .is_some_and(|text| text.contains("zephyrterm secret"))),
         "fixture must start with a readable Ready replica: {ready:#?}"
     );
 
@@ -2460,16 +2464,21 @@ fn ct3_multi_021_replica_candidates_exclude_an_active_purge_scope() {
     let response: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(response["searched_scopes"].as_array().unwrap().len(), 1);
     assert!(
-        response["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
-            scope["scope_id"] == a_scope_id
-                && scope["reason"] == "purge_journal_active"
-        }),
+        response["excluded_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| {
+                scope["scope_id"] == a_scope_id && scope["reason"] == "purge_journal_active"
+            }),
         "the active scope must be excluded by the replica route: {response:#?}"
     );
     assert!(
-        response["results"].as_array().unwrap().iter().all(|hit| {
-            hit["evidence_pointer"]["scope_id"] != a_scope_id
-        }),
+        response["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| { hit["evidence_pointer"]["scope_id"] != a_scope_id }),
         "no candidate from the active-purge scope may survive: {response:#?}"
     );
     assert!(
@@ -2530,13 +2539,14 @@ fn ct3_multi_022_replica_response_boundary_rechecks_a_late_purge() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready.exists() {
         if let Some(status) = child.try_wait().unwrap() {
-            panic!(
-                "search exited before the response-boundary hook was reached: {status}"
-            );
+            panic!("search exited before the response-boundary hook was reached: {status}");
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("timed out waiting for response-boundary hook: {}", ready.display());
+            panic!(
+                "timed out waiting for response-boundary hook: {}",
+                ready.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -3041,12 +3051,7 @@ fn ct3_replica_001_direct_search_survives_a_temporarily_hidden_source_index() {
 
     let response = json_success(
         &dir,
-        &[
-            "search",
-            "replicaonlydirectneedle",
-            "--mode",
-            "text",
-        ],
+        &["search", "replicaonlydirectneedle", "--mode", "text"],
     );
     let _generation = replica_collection_generation(&response);
     let results = response["results"].as_array().unwrap();
@@ -3149,10 +3154,7 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
     )
     .unwrap();
     let stderr = kio(&dir, &["index", "--offline", "--approve"])
-        .env(
-            "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
-            "index_before_marker",
-        )
+        .env("KIO_TEST_REPLICA_AFTER_HEAD_FAULT", "index_before_marker")
         .arg("--json")
         .assert()
         .code(1)
@@ -3163,7 +3165,10 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
     assert_eq!(fault["error_code"], "KIO-E-REPLICA-AFTER-HEAD-FAULT-001");
 
     let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
-    assert_ne!(head_after, head_before, "the injected path must advance HEAD");
+    assert_ne!(
+        head_after, head_before,
+        "the injected path must advance HEAD"
+    );
     let header_after = Aggregator::open(&replica_path)
         .unwrap()
         .scope_header(&scope_id)
@@ -3187,20 +3192,10 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
         "index_rebuilding"
     );
     for selector in ["--all-history", "--include-deleted"] {
-        let selector_error = json_failure(
-            &dir,
-            &[
-                "search",
-                "認証仕様",
-                selector,
-                "--limit",
-                "1",
-            ],
-            3,
-        );
+        let selector_error =
+            json_failure(&dir, &["search", "認証仕様", selector, "--limit", "1"], 3);
         assert_eq!(
-            selector_error["error_code"],
-            "KIO-E-INDEX-REBUILDING-001",
+            selector_error["error_code"], "KIO-E-INDEX-REBUILDING-001",
             "{selector} must not trust the stale Ready header"
         );
     }
@@ -3311,10 +3306,7 @@ fn ct3_replica_007_regenerate_head_advance_fails_closed_before_source_rebuild() 
     let head_before = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
 
     let stderr = kio(&dir, &["reindex", "--regenerate", "--yes", "--offline"])
-        .env(
-            "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
-            "reindex_before_marker",
-        )
+        .env("KIO_TEST_REPLICA_AFTER_HEAD_FAULT", "reindex_before_marker")
         .arg("--json")
         .assert()
         .code(1)
@@ -3332,7 +3324,10 @@ fn ct3_replica_007_regenerate_head_advance_fails_closed_before_source_rebuild() 
         .unwrap()
         .unwrap();
     assert_eq!(header.index_status, AggIndexStatus::Ready);
-    assert_eq!(header.current_snapshot_commit.as_deref(), Some(head_before.trim()));
+    assert_eq!(
+        header.current_snapshot_commit.as_deref(),
+        Some(head_before.trim())
+    );
 
     let search_error = json_failure(&dir, &["search", "token", "--mode", "text"], 3);
     assert_eq!(search_error["error_code"], "KIO-E-INDEX-REBUILDING-001");
@@ -3365,12 +3360,18 @@ fn ct3_replica_005_same_content_snapshot_republishes_ready_projection() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(prior_tree_rows > 0, "indexed predecessor must have tree rows");
+    assert!(
+        prior_tree_rows > 0,
+        "indexed predecessor must have tree rows"
+    );
 
     let snapshot = json_success(&dir, &["snapshot", "--message", "checkpoint only"]);
     assert_eq!(snapshot["status"], "created", "{snapshot}");
     let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
-    assert_ne!(head_after, head_before, "manual checkpoint must create its own commit");
+    assert_ne!(
+        head_after, head_before,
+        "manual checkpoint must create its own commit"
+    );
 
     let header_after = Aggregator::open(&replica_path)
         .unwrap()
@@ -3466,9 +3467,13 @@ fn ct3_replica_003_temporarily_excluded_scope_keeps_its_replica_projection() {
         .clone();
     let partial: Value = serde_json::from_slice(&partial_stdout).unwrap();
     assert!(
-        partial["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
-            scope["scope_id"] == b_scope_id && scope["reason"] == "index_rebuilding"
-        }),
+        partial["excluded_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| {
+                scope["scope_id"] == b_scope_id && scope["reason"] == "index_rebuilding"
+            }),
         "B must be excluded only for this rebuilding request: {partial:#?}"
     );
 
@@ -3572,9 +3577,11 @@ fn ct3_replica_008_unresolvable_scope_identity_cannot_serve_a_ready_projection()
         .clone();
     let response: Value = serde_json::from_slice(&output).unwrap();
     assert!(
-        response["excluded_scopes"].as_array().unwrap().iter().any(|scope| {
-            scope["scope_id"] == a_scope_id && scope["reason"] == "unreachable"
-        }),
+        response["excluded_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| { scope["scope_id"] == a_scope_id && scope["reason"] == "unreachable" }),
         "the scope with no resolvable identity must be excluded: {response:#?}"
     );
     assert!(
@@ -7575,10 +7582,9 @@ fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
     );
 
     {
-        let replica = rusqlite::Connection::open(
-            dir.path().join(".test-cache/kio/aggregator.sqlite"),
-        )
-        .unwrap();
+        let replica =
+            rusqlite::Connection::open(dir.path().join(".test-cache/kio/aggregator.sqlite"))
+                .unwrap();
         replica.execute("DELETE FROM agg_image_refs", []).unwrap();
         replica
             .execute("DELETE FROM agg_image_embeddings", [])
@@ -7587,10 +7593,8 @@ fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
 
     json_success_local_embed(&dir, &["batch", "resume"]);
     let source_after = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
-    let replica = rusqlite::Connection::open(
-        dir.path().join(".test-cache/kio/aggregator.sqlite"),
-    )
-    .unwrap();
+    let replica =
+        rusqlite::Connection::open(dir.path().join(".test-cache/kio/aggregator.sqlite")).unwrap();
     let replica_images = count(&replica, "SELECT COUNT(*) FROM agg_image_embeddings");
     assert_eq!(
         source_after, source_images,

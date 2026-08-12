@@ -492,11 +492,7 @@ fn ct4_timetravel_013_disconnected_at_uses_writer_published_replica() {
     // Move HEAD back to C1, then publish a different C3. C2 remains a valid
     // CAS commit with source tree rows, but is no longer a HEAD ancestor.
     fs::write(dir.path().join(".kio/HEAD"), format!("{c1}\n")).unwrap();
-    fs::write(
-        dir.path().join(".kio/refs/heads/main"),
-        format!("{c1}\n"),
-    )
-    .unwrap();
+    fs::write(dir.path().join(".kio/refs/heads/main"), format!("{c1}\n")).unwrap();
     fs::write(
         dir.path().join("branch.md"),
         b"# Branch\n\nbranchfixture current sibling\n",
@@ -565,16 +561,15 @@ fn ct4_timetravel_014_historical_reindex_publishes_empty_disconnected_at_snapsho
     let c2_tree = repo
         .read_tree(&repo.read_commit(&c2).unwrap().tree)
         .unwrap();
-    assert!(c2_tree.entries.is_empty(), "C2 must be the empty target tree");
+    assert!(
+        c2_tree.entries.is_empty(),
+        "C2 must be the empty target tree"
+    );
 
     // Move back to C1 before making C3. C2 remains readable in CAS but has no
     // parent/child relation to the current branch and no source cache rows.
     fs::write(dir.path().join(".kio/HEAD"), format!("{c1}\n")).unwrap();
-    fs::write(
-        dir.path().join(".kio/refs/heads/main"),
-        format!("{c1}\n"),
-    )
-    .unwrap();
+    fs::write(dir.path().join(".kio/refs/heads/main"), format!("{c1}\n")).unwrap();
     fs::write(
         dir.path().join("sibling.md"),
         b"# Sibling\n\nemptyatfixture current sibling\n",

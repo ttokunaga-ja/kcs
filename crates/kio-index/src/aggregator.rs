@@ -332,9 +332,7 @@ impl CandidateSeed {
     /// hash, while a chunk is ranked by its chunk id; the citing chunk is only
     /// an Evidence Pointer anchor for an image result.
     fn row_identity(&self) -> &str {
-        self.image_id
-            .as_deref()
-            .unwrap_or(self.chunk_id.as_str())
+        self.image_id.as_deref().unwrap_or(self.chunk_id.as_str())
     }
 }
 
@@ -571,14 +569,12 @@ impl Aggregator {
     /// and a stamp that any of them could forget to bump is a stale-read bug
     /// waiting for the path that forgets.
     pub fn collection_generation(&self) -> Result<String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT scope_id, current_snapshot_commit, current_chunking_config_hash,
+        let mut stmt = self.conn.prepare(
+            "SELECT scope_id, current_snapshot_commit, current_chunking_config_hash,
                         index_generation, max_rowid, max_association_rowid, has_image_vec,
                         embedding_profiles_json, index_status
                  FROM agg_scopes ORDER BY scope_id",
-            )?;
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -607,7 +603,12 @@ impl Aggregator {
             ) = row?;
             hasher.update(scope_id.as_bytes());
             hasher.update(b"\t");
-            hasher.update(current_snapshot_commit.as_deref().unwrap_or_default().as_bytes());
+            hasher.update(
+                current_snapshot_commit
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
             hasher.update(b"\t");
             hasher.update(
                 current_chunking_config_hash
@@ -655,12 +656,7 @@ impl Aggregator {
                 "SELECT max_rowid, max_association_rowid
                  FROM agg_scopes WHERE scope_id = ?1",
                 params![scope_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as u64,
-                        row.get::<_, i64>(1)? as u64,
-                    ))
-                },
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
             )
             .optional()
             .map_err(Into::into)
@@ -832,19 +828,16 @@ impl Aggregator {
         selector: AggSelector,
         snapshot_commit: &str,
     ) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT EXISTS(
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
                      SELECT 1 FROM agg_bindings
                      WHERE scope_id = ?1
                        AND selector_kind = ?2
                        AND snapshot_commit = ?3
                  )",
-                params![scope_id, selector.as_str(), snapshot_commit],
-                |row| row.get::<_, i64>(0),
-            )?
-            != 0)
+            params![scope_id, selector.as_str(), snapshot_commit],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
     }
 
     /// The most recently projected snapshot that has bindings for this scope
@@ -926,15 +919,13 @@ impl Aggregator {
         now_ms: i64,
     ) -> Result<()> {
         let embedding_profiles_json = encode_embedding_profiles(&header.embedding_profiles)?;
-        let mut completion_details =
-            BTreeMap::<(String, String), (Option<String>, u64)>::new();
+        let mut completion_details = BTreeMap::<(String, String), (Option<String>, u64)>::new();
         for completion in completions {
             let key = (
                 completion.selector.as_str().to_owned(),
                 completion.snapshot_commit.clone(),
             );
-            if let Some((stored_config, stored_shallow_skipped)) =
-                completion_details.get_mut(&key)
+            if let Some((stored_config, stored_shallow_skipped)) = completion_details.get_mut(&key)
             {
                 if *stored_shallow_skipped != completion.shallow_skipped {
                     return Err(crate::IndexError::Schema(format!(
@@ -1629,7 +1620,8 @@ impl Aggregator {
                 bm25: row.get(2)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn replica_short_scores(
@@ -1691,7 +1683,8 @@ impl Aggregator {
                 bm25: 0.0,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn replica_vector_seeds(&self, query: &[f32]) -> Result<Vec<(CandidateSeed, f64)>> {
@@ -1821,7 +1814,18 @@ impl Aggregator {
                 },
             )
             .optional()?;
-        let Some((raw_hash, tool_profile_hash, gen, heading_path, section_id, byte_start, byte_end, text, unit_key)) = row else {
+        let Some((
+            raw_hash,
+            tool_profile_hash,
+            gen,
+            heading_path,
+            section_id,
+            byte_start,
+            byte_end,
+            text,
+            unit_key,
+        )) = row
+        else {
             return Ok(None);
         };
         let mut stmt = self.conn.prepare(
@@ -1841,26 +1845,31 @@ impl Aggregator {
                AND binding.selector_kind = ?3
              ORDER BY binding.path_at_commit, binding.pointer_commit",
         )?;
-        let rows = stmt.query_map(params![seed.scope_id, seed.chunk_id, selector.as_str()], |row| {
-            let current_paths = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(6)?)
-                .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
-                    6,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                ))?;
-            Ok(AggBinding {
-                selector_kind: selector.as_str().to_owned(),
-                snapshot_commit: row.get(0)?,
-                chunk_id: seed.chunk_id.clone(),
-                raw_hash: row.get(1)?,
-                tool_profile_hash: row.get(2)?,
-                gen: row.get::<_, i64>(3)? as u64,
-                path_at_commit: row.get(4)?,
-                pointer_commit: row.get(5)?,
-                current_paths,
-                is_live: row.get::<_, i64>(7)? != 0,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![seed.scope_id, seed.chunk_id, selector.as_str()],
+            |row| {
+                let current_paths = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(6)?)
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                Ok(AggBinding {
+                    selector_kind: selector.as_str().to_owned(),
+                    snapshot_commit: row.get(0)?,
+                    chunk_id: seed.chunk_id.clone(),
+                    raw_hash: row.get(1)?,
+                    tool_profile_hash: row.get(2)?,
+                    gen: row.get::<_, i64>(3)? as u64,
+                    path_at_commit: row.get(4)?,
+                    pointer_commit: row.get(5)?,
+                    current_paths,
+                    is_live: row.get::<_, i64>(7)? != 0,
+                })
+            },
+        )?;
         let bindings = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         if bindings.is_empty() {
             return Ok(None);
@@ -2303,7 +2312,11 @@ mod tests {
             .unwrap();
         assert_eq!(historical.len(), 2, "aliases do not duplicate rank rows");
         let old = historical.iter().find(|row| row.chunk_id == "old").unwrap();
-        assert_eq!(old.bindings.len(), 2, "aliases remain available after ranking");
+        assert_eq!(
+            old.bindings.len(),
+            2,
+            "aliases remain available after ranking"
+        );
 
         let forms = vec![vec!["xy".to_owned()]];
         let short = index
@@ -2321,7 +2334,13 @@ mod tests {
                 candidate_depth: 10,
             })
             .unwrap();
-        assert_eq!(short.iter().map(|row| row.chunk_id.as_str()).collect::<Vec<_>>(), ["current"]);
+        assert_eq!(
+            short
+                .iter()
+                .map(|row| row.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            ["current"]
+        );
     }
 
     #[test]
@@ -2533,7 +2552,10 @@ mod tests {
             .unwrap();
 
         let stored = index.scope_header("empty").unwrap().unwrap();
-        assert_eq!(stored.current_snapshot_commit.as_deref(), Some("commit:head"));
+        assert_eq!(
+            stored.current_snapshot_commit.as_deref(),
+            Some("commit:head")
+        );
         assert_eq!(
             stored.current_chunking_config_hash.as_deref(),
             Some("config:current")
@@ -2552,8 +2574,14 @@ mod tests {
             "profile summaries are a stable set, not source row order"
         );
 
-        assert_eq!(index.scope_generation("empty").unwrap().as_deref(), Some("gen-1"));
-        assert_eq!(index.scope_projection_bounds("empty").unwrap(), Some((17, 23)));
+        assert_eq!(
+            index.scope_generation("empty").unwrap().as_deref(),
+            Some("gen-1")
+        );
+        assert_eq!(
+            index.scope_projection_bounds("empty").unwrap(),
+            Some((17, 23))
+        );
         assert_eq!(index.scope_has_image_vec("empty").unwrap(), Some(true));
         assert!(
             !index

@@ -122,7 +122,6 @@ impl ScopeDeadline {
     pub(crate) fn is_expired(self) -> bool {
         Instant::now() >= self.expires_at
     }
-
 }
 
 #[derive(Debug, Eq, PartialEq)]

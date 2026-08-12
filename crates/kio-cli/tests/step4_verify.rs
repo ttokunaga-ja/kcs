@@ -277,8 +277,7 @@ fn ct4_fsck_recovers_identical_working_raw_and_records_repaired_commit() {
         serde_json::from_str(&fs::read_to_string(dir.path().join(".kio/scope.json")).unwrap())
             .unwrap();
     let scope_id = scope["scope_id"].as_str().unwrap();
-    let replica = Aggregator::open(&dir.path().join(".test-cache/kio/aggregator.sqlite"))
-        .unwrap();
+    let replica = Aggregator::open(&dir.path().join(".test-cache/kio/aggregator.sqlite")).unwrap();
     let header = replica.scope_header(scope_id).unwrap().unwrap();
     assert_eq!(header.index_status, AggIndexStatus::Ready);
     assert_eq!(

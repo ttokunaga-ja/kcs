@@ -129,9 +129,9 @@ use kio_search::query::{
     query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
     ScopeSelectionMode, SearchMode, TimeTravelSelector,
 };
-use kio_search::rrf::RrfConfig;
 #[cfg(test)]
 use kio_search::rrf::BackendRank;
+use kio_search::rrf::RrfConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1370,8 +1370,7 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
     validate_repo_tool_lock(&repo)?;
     if mode == RepairMode::VerifyObjects || mode == RepairMode::VerifyObjectsPruneOrphans {
         let report = verify_objects::verify_objects(&repo)?;
-        let projection_ready = if let Some(repaired_head) = report.repaired_commit_hash.as_deref()
-        {
+        let projection_ready = if let Some(repaired_head) = report.repaired_commit_hash.as_deref() {
             // A repaired commit keeps the tree but advances HEAD. Mark the old
             // replica corpus unavailable first; only publish Ready after the
             // source cache gains bindings for the new commit identity.
@@ -2172,8 +2171,7 @@ fn replica_candidates_for(
     }
     // Keep `Some(&[])`: an empty CAS plan is a verified empty historical
     // answer, not permission to use every durable replica alias.
-    let binding_filter =
-        has_runtime_binding_filter.then_some(runtime_binding_filters.as_slice());
+    let binding_filter = has_runtime_binding_filter.then_some(runtime_binding_filters.as_slice());
     let rows = replica
         .search_candidates(&kio_index::aggregator::AggSearchRequest {
             scopes: &participating,
@@ -2309,7 +2307,8 @@ fn collect_scope_projection(
     let conn = Connection::open(&db)
         .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
     let repo = Repository::open(kio_dir.parent().unwrap_or(kio_dir))?;
-    let embedding_profiles = embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
+    let embedding_profiles =
+        embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(ScopeProjection {
             chunks: Vec::new(),
@@ -2329,8 +2328,8 @@ fn collect_scope_projection(
     // never refreshes this replica; it validates its signed generation and uses
     // the already-published binding relation.
     let max_rowid = current_max_rowid(&conn)?;
-    let max_association_rowid = kio_index::fts::max_chunk_config_association_rowid(&conn)
-        .map_err(index_to_kio)?;
+    let max_association_rowid =
+        kio_index::fts::max_chunk_config_association_rowid(&conn).map_err(index_to_kio)?;
     let live_chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
     let current_plan = current_history_plan_from_cache(&conn, &head)?;
     let mut completions = vec![kio_index::aggregator::AggProjectionCompletion {
@@ -2546,9 +2545,7 @@ fn collect_scope_projection(
     let current_chunk_ids = bindings
         .iter()
         .filter(|binding| {
-            binding.selector_kind == "current"
-                && binding.snapshot_commit == head
-                && binding.is_live
+            binding.selector_kind == "current" && binding.snapshot_commit == head && binding.is_live
         })
         .map(|binding| binding.chunk_id.as_str())
         .collect::<BTreeSet<_>>();
@@ -2835,8 +2832,7 @@ fn write_through_projection_or_log_with_requested_at(
     kio_dir: &Path,
     requested_at_snapshots: &[&str],
 ) {
-    if let Err(reason) =
-        write_through_projection_with_requested_at(kio_dir, requested_at_snapshots)
+    if let Err(reason) = write_through_projection_with_requested_at(kio_dir, requested_at_snapshots)
     {
         log_aggregator_degraded(&reason);
         // A direct reader deliberately has no source-index fallback.  Once a
@@ -2875,15 +2871,14 @@ fn materialize_repaired_snapshot_entries(repo: &Repository, repaired_head: &str)
         )));
     }
     kio_index::vec::ensure_registered();
-    let conn = Connection::open(&db)
-        .map_err(|error| KioError::schema(format!("repair projection open {}: {error}", db.display())))?;
+    let conn = Connection::open(&db).map_err(|error| {
+        KioError::schema(format!("repair projection open {}: {error}", db.display()))
+    })?;
     match ensure_snapshot_tree_entries(repo, &conn, repaired_head)? {
         SnapshotTreeEntries::Projected => Ok(()),
-        SnapshotTreeEntries::ShallowCachedRows | SnapshotTreeEntries::ShallowNoRows => {
-            Err(KioError::schema(
-                "repair projection cannot materialize the repaired snapshot tree",
-            ))
-        }
+        SnapshotTreeEntries::ShallowCachedRows | SnapshotTreeEntries::ShallowNoRows => Err(
+            KioError::schema("repair projection cannot materialize the repaired snapshot tree"),
+        ),
     }
 }
 
@@ -2910,7 +2905,9 @@ fn mark_replica_rebuilding_or_log(kio_dir: &Path, snapshot_commit: &str) {
         }
         Ok(None) => return,
         Err(error) => {
-            log_aggregator_degraded(&format!("rebuilding header read {scope_id} failed: {error}"));
+            log_aggregator_degraded(&format!(
+                "rebuilding header read {scope_id} failed: {error}"
+            ));
             return;
         }
     };
@@ -2956,7 +2953,9 @@ fn mark_replica_unavailable_or_log(kio_dir: &Path) {
         }
         Ok(None) => return,
         Err(error) => {
-            log_aggregator_degraded(&format!("unavailable header read {scope_id} failed: {error}"));
+            log_aggregator_degraded(&format!(
+                "unavailable header read {scope_id} failed: {error}"
+            ));
             return;
         }
     };
@@ -3006,10 +3005,7 @@ fn capture_ready_replica_snapshot(repo: &Repository) -> Option<ReadyReplicaSnaps
 /// (the normal manual form) or byte-for-byte the prior reference.  Any new or
 /// changed normalization identity remains a normal unindexed snapshot and
 /// therefore stays Rebuilding.
-fn manual_snapshot_tree_matches_ready_projection(
-    prior: &TreeObject,
-    target: &TreeObject,
-) -> bool {
+fn manual_snapshot_tree_matches_ready_projection(prior: &TreeObject, target: &TreeObject) -> bool {
     prior.entries.len() == target.entries.len()
         && prior
             .entries
@@ -3063,12 +3059,15 @@ fn normalized_tree_entry_projections(tree: &TreeObject) -> Vec<TreeEntryProjecti
     tree.entries
         .iter()
         .filter_map(|entry| {
-            entry.normalize.as_ref().map(|normalize| TreeEntryProjection {
-                path: entry.path.clone(),
-                raw_hash: entry.raw_hash.clone(),
-                tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
-                gen: normalize.gen,
-            })
+            entry
+                .normalize
+                .as_ref()
+                .map(|normalize| TreeEntryProjection {
+                    path: entry.path.clone(),
+                    raw_hash: entry.raw_hash.clone(),
+                    tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
+                    gen: normalize.gen,
+                })
         })
         .collect()
 }
@@ -3151,8 +3150,8 @@ fn republish_equivalent_manual_snapshot(
     let db = sqlite_path(repo.kio_dir());
     let mut conn = Connection::open(&db)
         .map_err(|error| format!("open source index {}: {error}", db.display()))?;
-    let max_rowid = current_max_rowid(&conn)
-        .map_err(|error| format!("read source chunk bound: {error}"))?;
+    let max_rowid =
+        current_max_rowid(&conn).map_err(|error| format!("read source chunk bound: {error}"))?;
     let max_association_rowid = kio_index::fts::max_chunk_config_association_rowid(&conn)
         .map_err(|error| format!("read source association bound: {error}"))?;
     if before.header.max_rowid != max_rowid
@@ -3337,118 +3336,118 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     };
     let (scope_mode, exec_scopes, cursor_excluded, authoritative_all_scope_registry) =
         match &decoded_cursor {
-        Some(cursor) => {
-            // R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP → exit 3"): a live
-            // registry scope_id duplicate discovered while re-resolving a
-            // frozen cursor scope (`resolve_cursor_exec_scopes` ->
-            // `resolve_scope_id_in_registry`) is retryable (dedupe, then
-            // retry) -- the same search-domain classification §1.8's
-            // homogeneous-reason promotion and the multi-scope aggregation
-            // below give it. The SHARED `registry_duplicate_error`
-            // constructor keeps its own `PermanentFailure` (4) default for
-            // its other callers (open/view/restore's Evidence resolution,
-            // the write-path `registry_duplicate_guard` preflight -- both
-            // already exit 4 by design, per their own tests), so the
-            // remapping happens only here, at this search-specific call
-            // site, not in the constructor itself.
-            let (exec, excluded) = match resolve_cursor_exec_scopes(cursor) {
-                Ok(pair) => pair,
-                Err(error) if error.error_code() == "KIO-E-REGISTRY-DUP-001" => {
+            Some(cursor) => {
+                // R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP → exit 3"): a live
+                // registry scope_id duplicate discovered while re-resolving a
+                // frozen cursor scope (`resolve_cursor_exec_scopes` ->
+                // `resolve_scope_id_in_registry`) is retryable (dedupe, then
+                // retry) -- the same search-domain classification §1.8's
+                // homogeneous-reason promotion and the multi-scope aggregation
+                // below give it. The SHARED `registry_duplicate_error`
+                // constructor keeps its own `PermanentFailure` (4) default for
+                // its other callers (open/view/restore's Evidence resolution,
+                // the write-path `registry_duplicate_guard` preflight -- both
+                // already exit 4 by design, per their own tests), so the
+                // remapping happens only here, at this search-specific call
+                // site, not in the constructor itself.
+                let (exec, excluded) = match resolve_cursor_exec_scopes(cursor) {
+                    Ok(pair) => pair,
+                    Err(error) if error.error_code() == "KIO-E-REGISTRY-DUP-001" => {
+                        return Err(KioError::new(
+                            error.error_code().to_owned(),
+                            error.message().to_owned(),
+                            error.context().clone(),
+                            ExitCode::PartialFailure,
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                };
+                // O1(a): a cursor must not bypass the caller's --scope/--descendants
+                // restriction. Compute the scopes this invocation is allowed to reach
+                // and intersect the cursor's frozen scope set with it; a cursor scope
+                // outside the allowed set is excluded (scope_restriction_mismatch),
+                // never searched. For a plain page-2 replay (no --scope) the allowed
+                // set is every registered scope, so this is a no-op.
+                let (_allowed_mode, allowed_targets, _) = enumerate_scope_targets(&repo, &parsed)?;
+                let allowed_ids: BTreeSet<String> = allowed_targets
+                    .iter()
+                    .map(|target| target.scope_id.clone())
+                    .collect();
+                if let Some(restricted) = exec
+                    .iter()
+                    .find(|exec| !allowed_ids.contains(&exec.target.scope_id))
+                {
                     return Err(KioError::new(
-                        error.error_code().to_owned(),
-                        error.message().to_owned(),
-                        error.context().clone(),
-                        ExitCode::PartialFailure,
+                        "KIO-E-SEARCH-CURSOR-001",
+                        "search cursor active scope is outside the requested scope restriction",
+                        json!({
+                            "reason": "active_scope_unavailable",
+                            "scope_id": restricted.target.scope_id,
+                        }),
+                        ExitCode::InvalidUsage,
                     ));
                 }
-                Err(error) => return Err(error),
-            };
-            // O1(a): a cursor must not bypass the caller's --scope/--descendants
-            // restriction. Compute the scopes this invocation is allowed to reach
-            // and intersect the cursor's frozen scope set with it; a cursor scope
-            // outside the allowed set is excluded (scope_restriction_mismatch),
-            // never searched. For a plain page-2 replay (no --scope) the allowed
-            // set is every registered scope, so this is a no-op.
-            let (_allowed_mode, allowed_targets, _) = enumerate_scope_targets(&repo, &parsed)?;
-            let allowed_ids: BTreeSet<String> = allowed_targets
-                .iter()
-                .map(|target| target.scope_id.clone())
-                .collect();
-            if let Some(restricted) = exec
-                .iter()
-                .find(|exec| !allowed_ids.contains(&exec.target.scope_id))
-            {
-                return Err(KioError::new(
-                    "KIO-E-SEARCH-CURSOR-001",
-                    "search cursor active scope is outside the requested scope restriction",
-                    json!({
-                        "reason": "active_scope_unavailable",
-                        "scope_id": restricted.target.scope_id,
-                    }),
-                    ExitCode::InvalidUsage,
-                ));
+                (
+                    scope_selection_from_cursor(cursor.scope_mode),
+                    exec,
+                    excluded,
+                    false,
+                )
             }
-            (
-                scope_selection_from_cursor(cursor.scope_mode),
-                exec,
-                excluded,
-                false,
-            )
-        }
-        None => {
-            let (scope_mode, targets, authoritative_all_scope_registry) =
-                enumerate_scope_targets(&repo, &parsed)?;
-            let exec = targets
-                .into_iter()
-                .map(|target| ExecScope {
-                    target,
-                    snapshot_commit: None,
-                    max_rowid: None,
-                    max_association_rowid: None,
-                    chunking_config_hash: None,
-                    index_generation: None,
-                    from_cursor: false,
-                })
-                .collect::<Vec<_>>();
-            // R23-27 (10 §3 L284-299): report the scope_id groups
-            // `registry_all_targets` fail-closed out of the enumeration
-            // above, so a live clone pair is surfaced (excluded_scopes,
-            // reason=registry_duplicate, KIO-E-REGISTRY-DUP-001) instead of
-            // silently vanishing from the response. `--scope`/`--descendants`
-            // restrict enumeration by path, which this device-wide duplicate
-            // listing does not filter by — attaching it there would report
-            // an unrelated duplicate as if this search had tried to reach
-            // it, so it is scoped to the unrestricted default enumeration
-            // (registry open failure best-effort: `Ok(None)` is already
-            // reflected in `enumerate_scope_targets`'s own P6 fallback
-            // above, so this simply adds nothing in that case).
-            let dup_excluded = if parsed.scope.is_none() && !parsed.descendants {
-                registry_duplicate_groups()?
-                    .unwrap_or_default()
+            None => {
+                let (scope_mode, targets, authoritative_all_scope_registry) =
+                    enumerate_scope_targets(&repo, &parsed)?;
+                let exec = targets
                     .into_iter()
-                    .map(|(scope_id, candidates)| {
-                        json!({
-                            "scope_id": scope_id,
-                            "scope_path": Value::Null,
-                            "reason": "registry_duplicate",
-                            "candidates": candidates
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect::<Vec<_>>(),
-                        })
+                    .map(|target| ExecScope {
+                        target,
+                        snapshot_commit: None,
+                        max_rowid: None,
+                        max_association_rowid: None,
+                        chunking_config_hash: None,
+                        index_generation: None,
+                        from_cursor: false,
                     })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            (
-                scope_mode,
-                exec,
-                dup_excluded,
-                authoritative_all_scope_registry,
-            )
-        }
-    };
+                    .collect::<Vec<_>>();
+                // R23-27 (10 §3 L284-299): report the scope_id groups
+                // `registry_all_targets` fail-closed out of the enumeration
+                // above, so a live clone pair is surfaced (excluded_scopes,
+                // reason=registry_duplicate, KIO-E-REGISTRY-DUP-001) instead of
+                // silently vanishing from the response. `--scope`/`--descendants`
+                // restrict enumeration by path, which this device-wide duplicate
+                // listing does not filter by — attaching it there would report
+                // an unrelated duplicate as if this search had tried to reach
+                // it, so it is scoped to the unrestricted default enumeration
+                // (registry open failure best-effort: `Ok(None)` is already
+                // reflected in `enumerate_scope_targets`'s own P6 fallback
+                // above, so this simply adds nothing in that case).
+                let dup_excluded = if parsed.scope.is_none() && !parsed.descendants {
+                    registry_duplicate_groups()?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(scope_id, candidates)| {
+                            json!({
+                                "scope_id": scope_id,
+                                "scope_path": Value::Null,
+                                "reason": "registry_duplicate",
+                                "candidates": candidates
+                                    .iter()
+                                    .map(|path| path.display().to_string())
+                                    .collect::<Vec<_>>(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                (
+                    scope_mode,
+                    exec,
+                    dup_excluded,
+                    authoritative_all_scope_registry,
+                )
+            }
+        };
 
     // PC49/PC50 (05 §1.8 L384-387): folder config.toml applies only for a
     // single, non-`--descendants` `--scope <path>` — every other scope_mode
@@ -3521,11 +3520,13 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     };
     let replica_embedding_states = exec_scopes
         .iter()
-        .map(|exec| replica_embedding_state(
-            replica_headers
-                .get(&exec.target.scope_id)
-                .and_then(Option::as_ref),
-        ))
+        .map(|exec| {
+            replica_embedding_state(
+                replica_headers
+                    .get(&exec.target.scope_id)
+                    .and_then(Option::as_ref),
+            )
+        })
         .collect::<Vec<_>>();
 
     // Mode resolution (05 §1.1). O2: the query embedding is SENT to the online
@@ -5100,9 +5101,10 @@ fn prepare_scope_from_replica_header(
                 }
                 Err(error) => return Err(ScopeSearchError::Fatal(error)),
             },
-            None => header.current_snapshot_commit.clone().ok_or_else(|| {
-                ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned())
-            })?,
+            None => header
+                .current_snapshot_commit
+                .clone()
+                .ok_or_else(|| ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned()))?,
         },
     };
     // Fresh current search deliberately retains its established shallow-cache
@@ -5115,15 +5117,14 @@ fn prepare_scope_from_replica_header(
         if matches!(time_selector, TimeSelector::Current) && !exec.from_cursor {
             (None, 0)
         } else {
-            let plan =
-                plan_search_history(&repo, &snapshot_commit, time_selector, since_cutoff)
-                    .map_err(|error| match error.error_code() {
-                        "KIO-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
-                        "KIO-E-COMMIT-HISTORY-LIMIT-001" if !exec.from_cursor => {
-                            ScopeSearchError::Excluded("history_limit_exceeded".to_owned())
-                        }
-                        _ => ScopeSearchError::Fatal(error),
-                    })?;
+            let plan = plan_search_history(&repo, &snapshot_commit, time_selector, since_cutoff)
+                .map_err(|error| match error.error_code() {
+                    "KIO-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
+                    "KIO-E-COMMIT-HISTORY-LIMIT-001" if !exec.from_cursor => {
+                        ScopeSearchError::Excluded("history_limit_exceeded".to_owned())
+                    }
+                    _ => ScopeSearchError::Fatal(error),
+                })?;
             let shallow_skipped = plan.shallow_skipped.len() as u64;
             let filters = plan
                 .bindings
@@ -8667,11 +8668,7 @@ fn enumerate_scope_targets(
                 .unwrap_or_else(|| registry_unavailable_fallback(&root));
             return Ok((ScopeSelectionMode::Descendants, targets, false));
         }
-        return Ok((
-            ScopeSelectionMode::Scope,
-            vec![scope_target(&root)?],
-            false,
-        ));
+        return Ok((ScopeSelectionMode::Scope, vec![scope_target(&root)?], false));
     }
     if parsed.descendants {
         let targets = registry_targets_under(repo.root())?
@@ -23948,8 +23945,8 @@ mod tests {
         effective_invocation_lane, embedding_usd_per_token, estimate_embedding_cost,
         estimate_embedding_tokens, lane_rate, markdownize_send_lane, parsed_repair, parsed_search,
         query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
-        terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
-        write_through_projection_with_requested_at, RepairMode, SearchMode,
+        terminal_safe_text, write_through_projection_with_requested_at, Cli, Command, LaneOverride,
+        MarkdownizeSendLane, PreferredRequestKind, RepairMode, SearchMode,
     };
 
     #[test]

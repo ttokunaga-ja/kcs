@@ -631,10 +631,7 @@ fn project_selected_snapshot(
             // readily as it adds new ones.
             drop(fts);
             crate::rotate_index_generation_unconditionally(repo.kio_dir())?;
-            crate::write_through_projection_or_log_for_at_snapshot(
-                repo.kio_dir(),
-                selected_commit,
-            );
+            crate::write_through_projection_or_log_for_at_snapshot(repo.kio_dir(), selected_commit);
             Ok(())
         }
         Err(error) => {
