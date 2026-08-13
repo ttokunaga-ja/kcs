@@ -68,6 +68,7 @@ const MAX_WALK_DIRECTORIES: usize = 8_192;
 /// attacker-controlled fixture input, including entries we later reject.
 const MAX_DIRECTORY_ENTRIES: usize = MAX_LIVE_FIXTURE_FILES + MAX_WALK_DIRECTORIES;
 const RESULT_K: usize = 10;
+const ONLINE_QUERY_CREDENTIAL_NAMES: [&str; 2] = ["GEMINI_API_KEY", "MISTRAL_API_KEY"];
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -1555,7 +1556,7 @@ fn qhard_env(
     directories.push((OsString::from("HOME"), home));
     let mut forwarded = Vec::new();
     if online {
-        for name in ["GEMINI_API_KEY", "MISTRAL_API_KEY"] {
+        for name in ONLINE_QUERY_CREDENTIAL_NAMES {
             if let Some(value) = env::var_os(name) {
                 fixed.push((OsString::from(name), value));
                 forwarded.push(name);
@@ -1563,6 +1564,23 @@ fn qhard_env(
         }
     }
     Ok((ControlledEnvironment { fixed, directories }, forwarded))
+}
+
+/// Return the deterministic, name-only credential set that an online-query
+/// lane is eligible to forward.  Callers still obtain the value separately
+/// and record only entries that were actually put in the subprocess
+/// environment.
+fn available_online_query_credential_names(
+    online_query: bool,
+    mut is_available: impl FnMut(&'static str) -> bool,
+) -> Vec<&'static str> {
+    if !online_query {
+        return Vec::new();
+    }
+    ONLINE_QUERY_CREDENTIAL_NAMES
+        .into_iter()
+        .filter(|name| is_available(name))
+        .collect()
 }
 
 fn result_paths(stdout: &str, k: usize) -> Result<Vec<String>, QhardError> {
@@ -1924,11 +1942,20 @@ pub struct BaselineReport {
     indexed_fixture_sha256: String,
     pristine_corpus_sha256: String,
     source_equivalence_sha256: String,
+    configuration: BaselineConfiguration,
     tools: BTreeMap<String, BaselineTool>,
     rows: Vec<BaselineRow>,
     recall_at_10: BTreeMap<String, f64>,
     deltas: BTreeMap<String, f64>,
     gate: BaselineGate,
+}
+#[derive(Debug, Serialize)]
+struct BaselineConfiguration {
+    /// Whether the Kio lane was allowed to use online-query credentials.
+    online_query: bool,
+    /// Environment variable names actually forwarded to the Kio lane. Values
+    /// are deliberately never retained in the report or evaluator state.
+    forwarded_credential_names: Vec<&'static str>,
 }
 impl BaselineReport {
     #[must_use]
@@ -4687,7 +4714,7 @@ fn parse_kio_titles(stdout: &str) -> Result<Vec<String>, QhardError> {
 fn baseline_kio_context(
     indexed_snapshot: &RetainedDirectory,
     online_query: bool,
-) -> Result<(RetainedDirectory, ControlledEnvironment), QhardError> {
+) -> Result<(RetainedDirectory, ControlledEnvironment, Vec<&'static str>), QhardError> {
     let p01 = indexed_snapshot.child("p01", "private indexed p01 persona")?;
     let scope = discover_scopes(p01)?
         .into_iter()
@@ -4720,14 +4747,19 @@ fn baseline_kio_context(
         })
         .collect::<Result<Vec<_>, QhardError>>()?,
     };
-    if online_query {
-        for name in ["GEMINI_API_KEY", "MISTRAL_API_KEY"] {
-            if let Some(value) = env::var_os(name) {
-                environment.fixed.push((OsString::from(name), value));
-            }
+    let mut forwarded = Vec::new();
+    for name in
+        available_online_query_credential_names(online_query, |name| env::var_os(name).is_some())
+    {
+        // Re-read immediately before inserting: the report must contain only
+        // names that entered the controlled subprocess environment, never a
+        // merely available credential name.
+        if let Some(value) = env::var_os(name) {
+            environment.fixed.push((OsString::from(name), value));
+            forwarded.push(name);
         }
     }
-    Ok((scope, environment))
+    Ok((scope, environment, forwarded))
 }
 
 /// Recreate the disposable device replica once before the baseline queries.
@@ -4903,11 +4935,18 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
         .flatten()
         .collect::<Vec<_>>()
         .join("; ");
+    let mut configuration = BaselineConfiguration {
+        online_query: options.online_query,
+        // Empty until the controlled Kio subprocess environment is created.
+        // A lane blocked before that point did not forward credentials.
+        forwarded_credential_names: Vec::new(),
+    };
     let mut rows = Vec::new();
     let mut runtime_blocked = None;
     if !missing {
-        let (kio_scope, kio_environment) =
+        let (kio_scope, kio_environment, forwarded_credential_names) =
             baseline_kio_context(&indexed_snapshot, options.online_query)?;
+        configuration.forwarded_credential_names = forwarded_credential_names;
         rebuild_baseline_replica(&kio_path, &kio_scope, &kio_environment)?;
         'queries: for q in &golden_rows {
             let expected = q
@@ -5155,7 +5194,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
     deltas.insert("kio_minus_mdfind".into(), kr - mr);
     deltas.insert("kio_minus_rga".into(), kr - rr);
     Ok(BaselineReport {
-        schema_version: 1,
+        schema_version: 2,
         benchmark: "kio-baseline-fixture-b",
         platform: format!("{}-{}", env::consts::OS, env::consts::ARCH),
         measured_at_unix_ms: SystemTime::now()
@@ -5169,6 +5208,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
         indexed_fixture_sha256: computed.indexed_fixture_sha256,
         pristine_corpus_sha256: computed.pristine_corpus_sha256,
         source_equivalence_sha256: computed.source_equivalence_sha256,
+        configuration,
         tools,
         rows,
         recall_at_10: recalls,
@@ -6190,7 +6230,7 @@ mod tests {
         let root = RetainedDirectory::open(fixture.path(), "baseline fixture").unwrap();
         let expected_env = root.public_path.join("env/p01");
 
-        let (scope, environment) = baseline_kio_context(&root, false).unwrap();
+        let (scope, environment, forwarded) = baseline_kio_context(&root, false).unwrap();
 
         assert_eq!(
             scope.public_path,
@@ -6200,6 +6240,27 @@ mod tests {
             .directories
             .iter()
             .all(|(_, directory)| directory.public_path.starts_with(&expected_env)));
+        assert!(forwarded.is_empty());
+    }
+
+    #[test]
+    fn baseline_online_query_configuration_is_name_only_and_deterministic() {
+        assert!(available_online_query_credential_names(false, |_| true).is_empty());
+        assert_eq!(
+            available_online_query_credential_names(true, |name| name == "MISTRAL_API_KEY"),
+            vec!["MISTRAL_API_KEY"]
+        );
+
+        let rendered = serde_json::to_string(&BaselineConfiguration {
+            online_query: true,
+            forwarded_credential_names: vec!["GEMINI_API_KEY", "MISTRAL_API_KEY"],
+        })
+        .unwrap();
+        assert_eq!(
+            rendered,
+            r#"{"online_query":true,"forwarded_credential_names":["GEMINI_API_KEY","MISTRAL_API_KEY"]}"#
+        );
+        assert!(!rendered.contains("test-secret-value"));
     }
 
     #[cfg(unix)]
@@ -6215,7 +6276,7 @@ mod tests {
             fs::create_dir_all(fixture.path().join("env/p01").join(directory)).unwrap();
         }
         let root = RetainedDirectory::open(fixture.path(), "baseline fixture").unwrap();
-        let (scope, environment) = baseline_kio_context(&root, false).unwrap();
+        let (scope, environment, _) = baseline_kio_context(&root, false).unwrap();
 
         let error = rebuild_baseline_replica(false_binary, &scope, &environment).unwrap_err();
 

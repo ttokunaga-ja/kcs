@@ -126,6 +126,11 @@ target/release/kio-eval benchmark baseline \
 
 Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
 新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
+baseline report の `configuration` は `online_query` と、Kio subprocess に実際に転送した
+credential の**環境変数名だけ**を `forwarded_credential_names` として記録する。値は report に
+書き出さない。`--online-query` を指定しない限りこの配列は空である。比較器欠落などで Kio lane
+の起動前に block された場合は credential を転送していないため配列は空のままとし、
+`online_query` だけで online mode の要求を監査可能にする。
 
 ### macOS 比較器 runtime の管理者構築
 
