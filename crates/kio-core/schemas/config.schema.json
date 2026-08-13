@@ -121,8 +121,23 @@
         },
         "idle_threshold_seconds": { "type": "integer", "minimum": 0 },
         "max_runtime_seconds": { "type": "integer", "minimum": 1 },
-        "auto_retention": { "type": "object" },
-        "derived_retention": { "type": "object" }
+        "auto_retention": {
+          "type": "object",
+          "properties": {
+            "keep_last_hours": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "keep_hourly_days": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "keep_daily_weeks": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+            "keep_weekly_months": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+          },
+          "additionalProperties": false
+        },
+        "derived_retention": {
+          "type": "object",
+          "properties": {
+            "keep_repaired_per_branch": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

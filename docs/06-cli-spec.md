@@ -79,6 +79,7 @@ kio repair replica | kio repair -r                                # device repli
                                         # 破壊的 2 操作は削除前に**対象件数を提示して確認**する (--yes で省略)。
                                         # 対象 0 件はプロンプトなしの冪等成功。非対話 (isatty=false) で --yes 無しは
                                         # KIO-E-CONFIRM-REJECTED-001 で拒否し、**何も削除しない**。
+kio gc --dry-run                       # Phase 4 milestone 1: retention による shallow 候補のread-only plan (§6.1)
 kio commit -m "<message>"               # = kio snapshot create -m
 kio snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")
 kio snapshot create -m "<message>"      # 正規形
@@ -339,6 +340,27 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 
 > MVP の purge は raw 本文・派生 artifact の全履歴削除 + tombstone (既定) / `--erase-tombstone` (not_found) まで。tree/commit を書き換える完全な履歴書き換え (filename 秘匿ケース) は MVP 非対応で v2+ / Phase 4+ ([05-runtime.md §3.5](05-runtime.md), [09-mvp-scope.md §3.1](09-mvp-scope.md))。
 
+## 6.1 Read-only GC planner (Phase 4 milestone 1)
+
+この段階で公開する GC 操作は、retention による shallow 候補を読み取り専用で計算する次の形式だけとする。
+
+```bash
+kio gc --dry-run
+kio gc --dry-run --json
+```
+
+- `--dry-run` は必須。省略は invalid usage (exit 2) とし、削除を行う既定動作や未実装の破壊 mode は公開しない。
+- planner は `[gc.auto_retention]` / `[gc.derived_retention]` を読み、現在時刻・全 ref tip・全 commit object・既存 shallow receipt を同一の bounded read-only plan へ束縛する。計画後に同じ truth 一式を独立した bounded pass で再検証し、一致しなければ成功を返さない。`HEAD` / branch / tag の tip は常に候補外。
+- `auto` は UTC の半開区間で `all -> hourly -> daily -> weekly` と減衰させ、bucket 内では fractional seconds を含む `created_at` が最新の commit (同一 `created_at` なら commit hash の byte 順で先のもの) を保持する。hour は UTC hour、day は UTC civil day、week は月曜開始、`keep_weekly_months` の 1 month は retention 計算上 30 days とする。未来時刻は安全側で保持する。
+- `repaired` は branch ごとの到達履歴で最新 `keep_repaired_per_branch` 件を保持する。どの branch にも属さない `repaired` は安全側で保持する。`manual` / `imported` / `merged` / `purged` は常に候補外。
+- 全 ref root から到達しない commit は `unreachable_commit` として候補外にする。この milestone は `--prune-unreachable` を公開しないため、未到達 object を retention 候補へ読み替えない。
+- candidate は commit 単位で列挙するが、対象 object kind は `tree` だけである。同じ tree hash を候補外の非 shallow commit が 1 件でも参照する場合、その tree を共有する候補はすべて保護する。`estimated_bytes` は候補となる一意 tree の物理 byte 数で、commit / raw / chunk / toollock / manifest はこの plan に含めない。
+- `.kio/gc/shallowed/<commit64>` は厳格に検証し、receipt 済み commit を再候補化しない。receipt がない commit の tree 欠落、malformed receipt、探索上限超過、symlink / reparse point / 非 regular file / unsafe hardlink、走査中の identity 変更は候補 0 件へ縮退せず structured error とする。上限超過は `KIO-E-GC-PLAN-LIMIT-001` (exit 4)。
+- 成功結果は `status=\"dry_run\"`、適用時刻と policy、candidate commit/tree 数、一意 tree の推定 byte 数、commit-hash byte 順の候補、理由別の除外数、走査 limit/stat を返す。同じ store・policy・注入時刻に対する JSON / human output は決定的である。
+- 実行中は receipt・objects・refs・HEAD・index・chunks ledger を作成・更新・削除せず、index generation も進めない。この milestone は GC 実行系、`--prune-unreachable`、scheduled snapshot、`after_index`、`on_idle` を含まない。
+
+次の独立 milestone は **receipt を tree 削除より先に耐久化する shallow tree sweep と crash recovery** である。そこで初めて短い exclusive critical section と物理削除を導入し、dry-run plan を再検証してから適用する ([05-runtime.md §2.2-§2.6](05-runtime.md))。
+
 ---
 
 # 7. Exit Code (横断規約)
@@ -434,6 +456,8 @@ DOMAIN:
   STORE    object store / fs IO
   AUTH     認証・認可
 ```
+
+GC planner 固有の `KIO-E-GC-PLAN-LIMIT-001` は commit / tree entry / verified byte / ref / receipt / directory entry / path depth / graph traversal cap 超過を表し、exit 4 とする (§6.1)。
 
 例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-COMMIT-HISTORY-LIMIT-001` (bounded history walk の aggregate cap 超過、単独操作 exit 4 / multi-scope は既存 partial 規則、[05-runtime.md §1.6](05-runtime.md)), `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反 — **読み取り系** preflight の拒否 (書き込み系は journal 回復を再開 — [05-runtime.md §3.5](05-runtime.md)、直列化は `.kio/.lock` が担う)。**restore の rename 後再検査による publish 後巻き戻し終端にも用いる** (05 §3.5)、retryable exit 3), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しの no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む、retryable exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要、exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (Adapter spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KIO-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KIO-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md)), `KIO-E-EVIDENCE-RETARGET-AMBIG-001` (retarget 候補が複数で一意に定まらない、[08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md))、`KIO-E-REGISTRY-DUP-001` (同一 scope_id の複数 live clone — 検索 skip・解決 error、[10-operations.md §3](10-operations.md))、`KIO-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kio repair verify-objects`、[10-operations.md §7.5](10-operations.md))、`KIO-E-STORE-LOCKED-001` (`.kio/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KIO-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KIO-E-STORE-PATH-001` とは区別する)、`KIO-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kio` scope 外での実行、不正 hash 引数。schema violation の `KIO-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KIO-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)、`KIO-E-SEARCH-VEC-UNAUTHORIZED-001` (query embedding の embedding 承認なし — auto/`--mode hybrid` は text fallback、`--mode vector` 明示時のみ error、[05-runtime.md §1.1](05-runtime.md))、`KIO-E-STORE-VERSION-001` (自己の対応上限より新しい `kio_format_version` の store — 書き込み系は即時拒否・読み取り系は書込ゼロの read-only 縮退、正本 [10-operations.md §12.5](10-operations.md)。exit 8)、`KIO-E-PURGE-REPLICA-001` (purge 後の device replica 再射影に失敗 — 本文が cache root に読める状態で成功と報告しないための fail-closed 終端。exit 1、[05-runtime.md §3.5](05-runtime.md))、`KIO-E-CONFIG-OFFLINE-URL-001` (`execution_mode = "offline_api"` の Adapter の `url` が loopback リテラル以外 — tool-lock materialize / adapter 登録時に検証、[07-adapter-spec.md §3](07-adapter-spec.md)。exit 2)。
 

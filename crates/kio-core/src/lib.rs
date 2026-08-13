@@ -4,6 +4,7 @@ pub mod cas;
 pub mod dag;
 pub mod error;
 pub mod exit_code;
+pub mod gc;
 pub mod history;
 pub mod portable;
 pub mod purge;

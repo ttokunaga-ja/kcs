@@ -40,7 +40,7 @@
 - 高度な分類器の自動移動 (auto_organize は提案表示のみ)
 - 多デバイス同期 (synchronization は v2+)
 - Adapter の OS サンドボックス強制・第三者 Adapter の配布/署名 (07-adapter-spec.md §7.1)
-- GC の実装一式 (kio gc / tiered retention / CoW 並行 GC / power-loss sweep)
+- GC の実行系 (shallow sweep / prune-unreachable / tiered retention hook / CoW 並行 GC / power-loss sweep)。Phase 4 の最初の独立 milestone である `kio gc --dry-run` read-only planner は [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する
 - purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース。05-runtime.md §3.5)
 - export / import (.kioz bundle)
 - kio evidence verify --batch / kio evidence retarget の実装
@@ -137,7 +137,8 @@ Step 別の目安 (テスト除く):
 | `kio repair verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
-| on-demand / shallow / prune-unreachable GC | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (CLI は未公開) |
+| retention shallow 候補の read-only planner (`kio gc --dry-run`) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.2-2.4](05-runtime.md) | Phase 4 milestone 1 |
+| on-demand shallow sweep / `--prune-unreachable` GC 実行系 | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (破壊 mode は未公開) |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
 | CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |

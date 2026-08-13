@@ -1,3 +1,4 @@
+mod gc;
 mod historical_reindex;
 mod multi_scope;
 mod ocr_discovery;
@@ -215,6 +216,8 @@ enum Command {
     Ledger(LedgerArgs),
     /// Rebuild local acceleration tables.
     Repair(RepairArgs),
+    /// Plan retention-based shallow GC without changing the store.
+    Gc(GcArgs),
     /// Search indexed chunks.
     Search(SearchArgs),
     /// Open an Evidence Pointer target.
@@ -280,6 +283,13 @@ struct RestoreArgs {
     force: bool,
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct GcArgs {
+    /// Compute and report the plan without writing receipts or deleting objects.
+    #[arg(long, required = true)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1143,6 +1153,10 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Adapter(args) => run_adapter(args),
         Command::Ledger(args) => run_ledger(args),
         Command::Repair(args) => run_repair(args),
+        Command::Gc(args) => {
+            debug_assert!(args.dry_run, "clap requires --dry-run");
+            gc::run_gc_dry_run()
+        }
         Command::Search(args) => run_search(args),
         Command::Open(args) => run_open(args),
         Command::View(args) => run_view(args),
@@ -26210,6 +26224,17 @@ fn print_output(value: Value, json_mode: bool) {
         // nothing to open. `open` legitimately prints only its status because
         // it has already acted on the file; `view` has no such side effect.
         println!("{}", terminal_safe_text(view_path, false));
+    } else if value.get("status").and_then(Value::as_str) == Some("dry_run")
+        && value.get("candidate_count").is_some()
+        && value.get("object_kinds_planned").is_some()
+    {
+        // The GC dry-run result is itself the requested artifact. Printing only
+        // its `status` would hide the candidate counts, policy, exclusions and
+        // estimated bytes from human-mode users. Keep the ordinary structured
+        // field order, rendered readably and through the terminal sanitizer.
+        let rendered =
+            serde_json::to_string_pretty(&value).expect("serializing command output cannot fail");
+        println!("{}", terminal_safe_text(&rendered, true));
     } else if let Some(status) = value.get("status").and_then(Value::as_str) {
         println!("{}", terminal_safe_text(status, false));
     } else if let Some(commits) = value.get("commits").and_then(Value::as_array) {
@@ -26306,7 +26331,7 @@ mod tests {
         query_embedding_send_lane, read_chunk_publication_events, read_stored_chunks,
         realtime_lane_requested, replace_chunk_ledger_contents, resolve_invocation_lane,
         terminal_safe_text, truncate_torn_chunk_tail, unit_authorities_from_inputs,
-        write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command,
+        write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command, GcArgs,
         LaneOverride, MarkdownizeSendLane, NormalizedUnitInput, PreferredRequestKind, RepairMode,
         RepairOperation, RepositoryScopeId, SearchMode, StoredChunk,
     };
@@ -28164,6 +28189,18 @@ mod tests {
             "--override-budget",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn gc_exposes_only_the_mandatory_read_only_mode() {
+        assert!(Cli::try_parse_from(["kio", "gc"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "gc", "--prune-unreachable"]).is_err());
+        let parsed = Cli::try_parse_from(["kio", "gc", "--dry-run", "--json"]).unwrap();
+        assert!(parsed.json);
+        assert!(matches!(
+            parsed.command,
+            Command::Gc(GcArgs { dry_run: true })
+        ));
     }
 
     #[test]
