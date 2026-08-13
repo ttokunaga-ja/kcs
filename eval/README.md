@@ -127,8 +127,11 @@ Rust が計測の正本である。legacy の `run_baseline.py` は参照用に�
 新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
 
 比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
-入力に使うため、可変な public corpus path を再オープンしない。`kio` と `rga` は検査済み regular executable
-の private snapshot に束縛する。macOS の `mdfind` はコピー実行を許さない system tool のため、例外として
+入力に使うため、可変な public corpus path を再オープンしない。`kio` は検査済み regular executable
+の private snapshot に束縛する。`rga` は native helper と dynamic library を実行するため、macOS では
+root 所有かつ group/other 非書込みの Homebrew runtime prefix（`/opt/homebrew` または `/usr/local`）からのみ
+受け付ける。通常のユーザー所有 Homebrew は `blocked-unmeasured` であり、比較結果を合格証拠にしない。
+macOS の `mdfind` はコピー実行を許さない system tool のため、例外として
 正確な `/usr/bin/mdfind` のみを直接実行する。その場合も capability preflight、実体 digest の束縛、および
 各 query 後の再照合を必須にする。比較器の欠落・preflight failure・予期しない `mdfind` failure、または
 `rga` の 0/1 以外の終了は、miss として margin を有利にせず測定を block する。

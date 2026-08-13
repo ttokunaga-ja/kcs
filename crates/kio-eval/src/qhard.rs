@@ -6,7 +6,7 @@
 //! blocked measurement, never a zero-cost passing result.
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -234,7 +234,7 @@ impl QhardReport {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct FileBinding {
     path: String,
     sha256: String,
@@ -1749,6 +1749,12 @@ impl BaselineReport {
 struct BaselineTool {
     executable_path: String,
     sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    companion_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    helpers: Option<BTreeMap<String, FileBinding>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configuration: Option<FileBinding>,
     version: String,
     available: bool,
 }
@@ -1969,6 +1975,7 @@ fn resolve_tool(path: &Path) -> Option<PathBuf> {
         .map(|d| d.join(path))
         .find(|p| p.is_file())
 }
+#[cfg(test)]
 fn executable_tool(
     path: &Path,
     label: &str,
@@ -2040,30 +2047,393 @@ fn trusted_mdfind(path: &Path) -> Result<FileBinding, QhardError> {
     }
     Ok(binding)
 }
-fn allowed_homebrew_rga_target(path: &Path) -> bool {
+fn allowed_homebrew_cellar_tool(path: &Path, formula: &str, tool: &str) -> bool {
     [
-        "/opt/homebrew/Cellar/ripgrep-all/",
-        "/usr/local/Cellar/ripgrep-all/",
+        "/opt/homebrew/Cellar/",
+        "/usr/local/Cellar/",
     ]
     .iter()
-    .any(|root| path.starts_with(Path::new(root)))
+    .any(|root| {
+        let Ok(relative) = path.strip_prefix(Path::new(root)) else {
+            return false;
+        };
+        let mut components = relative.components();
+        matches!(
+            (
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+                components.next(),
+            ),
+            (
+                Some(Component::Normal(found_formula)),
+                Some(Component::Normal(version)),
+                Some(Component::Normal(bin)),
+                Some(Component::Normal(found_tool)),
+                None,
+            ) if found_formula == formula && !version.is_empty() && bin == "bin" && found_tool == tool
+        )
+    })
 }
-fn bound_rga(path: &Path) -> Result<(tempfile::TempDir, PathBuf, FileBinding), QhardError> {
-    let listed = fs::symlink_metadata(path)
-        .map_err(|e| QhardError::Input(format!("cannot inspect rga: {e}")))?;
-    let target = if listed.file_type().is_symlink() {
-        let canonical = fs::canonicalize(path)
-            .map_err(|e| QhardError::Input(format!("cannot canonicalize rga symlink: {e}")))?;
-        if !allowed_homebrew_rga_target(&canonical) {
+
+#[cfg(unix)]
+fn same_std_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn allowed_homebrew_rga_target(path: &Path) -> bool {
+    allowed_homebrew_cellar_tool(path, "ripgrep-all", "rga")
+}
+
+/// The native comparator is an external executable boundary, not fixture
+/// data. On macOS we cannot execute a retained descriptor, and rga's helper
+/// programs load Homebrew dynamic libraries by absolute or rpath lookup.
+/// Accept them only from a root-owned, POSIX-nonwritable runtime prefix so the
+/// caller cannot exchange code after provenance is recorded.
+#[cfg(unix)]
+fn sealed_runtime_metadata(metadata: &fs::Metadata) -> bool {
+    !metadata.file_type().is_symlink()
+        && metadata.uid() == 0
+        && metadata.permissions().mode() & 0o022 == 0
+}
+
+#[cfg(unix)]
+fn require_sealed_homebrew_runtime(path: &Path, label: &str) -> Result<(), QhardError> {
+    let prefix = [Path::new("/opt/homebrew"), Path::new("/usr/local")]
+        .into_iter()
+        .find(|prefix| path.starts_with(prefix))
+        .ok_or_else(|| {
+            QhardError::Input(format!(
+                "{label} is not under an approved Homebrew runtime prefix"
+            ))
+        })?;
+    let relative = path.strip_prefix(prefix).map_err(|_| {
+        QhardError::Input(format!(
+            "cannot bind {label} to its Homebrew runtime prefix"
+        ))
+    })?;
+    let mut current = prefix.to_path_buf();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(Component::Normal(name)) = component {
+            current.push(name);
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(|e| {
+            QhardError::Input(format!("cannot inspect {label} runtime component: {e}"))
+        })?;
+        if !sealed_runtime_metadata(&metadata) {
+            return Err(QhardError::Input(format!(
+                "{label} requires a root-owned, non-writable Homebrew runtime prefix"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_sealed_homebrew_runtime(_path: &Path, label: &str) -> Result<(), QhardError> {
+    Err(QhardError::Input(format!(
+        "{label} requires a sealed Homebrew comparator runtime on this platform"
+    )))
+}
+
+#[derive(Debug)]
+struct RetainedToolFile {
+    public_path: PathBuf,
+    handle: fs::File,
+    binding: FileBinding,
+}
+
+impl RetainedToolFile {
+    fn open_cellar(path: &Path, formula: &str, tool: &str) -> Result<Self, QhardError> {
+        let public_path = fs::canonicalize(path)
+            .map_err(|e| QhardError::Input(format!("cannot canonicalize {tool}: {e}")))?;
+        if !allowed_homebrew_cellar_tool(&public_path, formula, tool) {
+            return Err(QhardError::Input(format!(
+                "{tool} target is not an approved Homebrew {formula} Cellar path"
+            )));
+        }
+        let listed = fs::symlink_metadata(&public_path)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {tool}: {e}")))?;
+        if listed.file_type().is_symlink() || !listed.is_file() {
+            return Err(QhardError::Input(format!(
+                "{tool} must be a regular Cellar executable"
+            )));
+        }
+        #[cfg(unix)]
+        if listed.permissions().mode() & 0o111 == 0 {
+            return Err(QhardError::Input(format!("{tool} is not executable")));
+        }
+        let handle = fs::File::open(&public_path)
+            .map_err(|e| QhardError::Input(format!("cannot retain {tool}: {e}")))?;
+        let opened = handle
+            .metadata()
+            .map_err(|e| QhardError::Input(format!("cannot inspect retained {tool}: {e}")))?;
+        if !same_std_file(&listed, &opened) {
+            return Err(QhardError::Input(format!("{tool} changed while binding")));
+        }
+        let binding = tool_binding(&public_path, tool)?;
+        Ok(Self {
+            public_path,
+            handle,
+            binding,
+        })
+    }
+
+    fn recheck(&self, tool: &str) -> Result<(), QhardError> {
+        let listed = fs::symlink_metadata(&self.public_path)
+            .map_err(|e| QhardError::Input(format!("{tool} changed: {e}")))?;
+        let opened = self
+            .handle
+            .metadata()
+            .map_err(|e| QhardError::Input(format!("cannot inspect retained {tool}: {e}")))?;
+        if listed.file_type().is_symlink() || !listed.is_file() || !same_std_file(&listed, &opened)
+        {
+            return Err(QhardError::Input(format!("{tool} changed while bound")));
+        }
+        // The initial digest is report provenance. The enclosing Homebrew
+        // runtime is sealed before this object is accepted; retained
+        // descriptor plus inode/device checks detect deletion or replacement
+        // without making each query hash a large Mach-O executable again.
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PrivateRgaHelpers {
+    _temp: tempfile::TempDir,
+    directory: RetainedDirectory,
+    cache: RetainedDirectory,
+    config: FileBinding,
+    pandoc: RetainedToolFile,
+    pdftotext: RetainedToolFile,
+    rg: RetainedToolFile,
+}
+
+impl PrivateRgaHelpers {
+    fn new(pandoc_path: &Path, pdftotext_path: &Path, rg_path: &Path) -> Result<Self, QhardError> {
+        let pandoc = RetainedToolFile::open_cellar(pandoc_path, "pandoc", "pandoc")?;
+        let pdftotext = RetainedToolFile::open_cellar(pdftotext_path, "poppler", "pdftotext")?;
+        let rg = RetainedToolFile::open_cellar(rg_path, "ripgrep", "rg")?;
+        let temp = tempfile::Builder::new()
+            .prefix("kio-qhard-rga-helpers-")
+            .tempdir()
+            .map_err(|e| {
+                QhardError::Input(format!("cannot create private rga helper directory: {e}"))
+            })?;
+        #[cfg(unix)]
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).map_err(|e| {
+            QhardError::Input(format!("cannot secure private rga helper directory: {e}"))
+        })?;
+        for (name, target) in [
+            ("pandoc", &pandoc.public_path),
+            ("pdftotext", &pdftotext.public_path),
+            ("rg", &rg.public_path),
+        ] {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, temp.path().join(name)).map_err(|e| {
+                QhardError::Input(format!("cannot bind private {name} helper: {e}"))
+            })?;
+        }
+        let config_path = temp.path().join("rga-config.json");
+        // Passing this explicit config disables discovery of user custom adapters.
+        fs::write(&config_path, b"{\"custom_adapters\":[]}")
+            .map_err(|e| QhardError::Input(format!("cannot write private rga config: {e}")))?;
+        #[cfg(unix)]
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| QhardError::Input(format!("cannot secure private rga config: {e}")))?;
+        let (_, config) = binding(&config_path, MAX_GOLDEN_BYTES, "private rga config")?;
+        let directory = RetainedDirectory::open(temp.path(), "private rga helper directory")?;
+        let cache_path = temp.path().join("cache");
+        fs::create_dir(&cache_path)
+            .map_err(|e| QhardError::Input(format!("cannot create private rga cache: {e}")))?;
+        #[cfg(unix)]
+        fs::set_permissions(&cache_path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| QhardError::Input(format!("cannot secure private rga cache: {e}")))?;
+        let cache = RetainedDirectory::open(&cache_path, "private rga cache")?;
+        Ok(Self {
+            _temp: temp,
+            directory,
+            cache,
+            config,
+            pandoc,
+            pdftotext,
+            rg,
+        })
+    }
+
+    fn recheck(&self) -> Result<(), QhardError> {
+        let listed = fs::symlink_metadata(&self.directory.public_path)
+            .map_err(|e| QhardError::Input(format!("private rga helper directory changed: {e}")))?;
+        let opened = self.directory.handle.metadata().map_err(|e| {
+            QhardError::Input(format!("cannot inspect private rga helper directory: {e}"))
+        })?;
+        if listed.file_type().is_symlink() || !listed.is_dir() || !same_std_file(&listed, &opened) {
             return Err(QhardError::Input(
-                "rga symlink target is not an approved Homebrew ripgrep-all Cellar path".into(),
+                "private rga helper directory changed while bound".into(),
             ));
         }
-        canonical
+        let listed_cache = fs::symlink_metadata(&self.cache.public_path)
+            .map_err(|e| QhardError::Input(format!("private rga cache changed: {e}")))?;
+        let opened_cache = self
+            .cache
+            .handle
+            .metadata()
+            .map_err(|e| QhardError::Input(format!("cannot inspect private rga cache: {e}")))?;
+        if listed_cache.file_type().is_symlink()
+            || !listed_cache.is_dir()
+            || !same_std_file(&listed_cache, &opened_cache)
+        {
+            return Err(QhardError::Input(
+                "private rga cache changed while bound".into(),
+            ));
+        }
+        self.pandoc.recheck("pandoc")?;
+        self.pdftotext.recheck("pdftotext")?;
+        self.rg.recheck("rg")?;
+        if tool_binding(Path::new(&self.config.path), "private rga config")?.sha256
+            != self.config.sha256
+        {
+            return Err(QhardError::Input(
+                "private rga config changed while bound".into(),
+            ));
+        }
+        for (name, target) in [
+            ("pandoc", &self.pandoc.public_path),
+            ("pdftotext", &self.pdftotext.public_path),
+            ("rg", &self.rg.public_path),
+        ] {
+            let link = self.directory.public_path.join(name);
+            if fs::read_link(&link).ok().as_deref() != Some(target.as_path()) {
+                return Err(QhardError::Input(format!(
+                    "private {name} helper binding changed"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct BoundRga {
+    _snapshot: tempfile::TempDir,
+    rga: PathBuf,
+    rga_binding: FileBinding,
+    preproc_binding: FileBinding,
+    helpers: PrivateRgaHelpers,
+}
+fn snapshot_rga_pair(
+    parent: &RetainedDirectory,
+) -> Result<(tempfile::TempDir, PathBuf, FileBinding, FileBinding), QhardError> {
+    let (rga_bytes, _) = binding_at(parent, "rga", MAX_BINARY_BYTES, "rga")?;
+    let (preproc_bytes, _) = binding_at(
+        parent,
+        "rga-preproc",
+        MAX_BINARY_BYTES,
+        "rga-preproc companion",
+    )?;
+    let temp = tempfile::Builder::new()
+        .prefix("kio-qhard-rga-")
+        .tempdir()
+        .map_err(|e| QhardError::Input(format!("cannot create private rga snapshot: {e}")))?;
+    for (name, bytes) in [("rga", rga_bytes), ("rga-preproc", preproc_bytes)] {
+        let snapshot = temp.path().join(name);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&snapshot)
+            .map_err(|e| {
+                QhardError::Input(format!("cannot create private {name} snapshot: {e}"))
+            })?;
+        use io::Write;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| QhardError::Input(format!("cannot write private {name} snapshot: {e}")))?;
+        #[cfg(unix)]
+        fs::set_permissions(&snapshot, fs::Permissions::from_mode(0o700)).map_err(|e| {
+            QhardError::Input(format!(
+                "cannot mark private {name} snapshot executable: {e}"
+            ))
+        })?;
+    }
+    let rga = temp.path().join("rga");
+    let preproc = temp.path().join("rga-preproc");
+    let (_, rga_binding) = binding(&rga, MAX_BINARY_BYTES, "private rga")?;
+    let (_, preproc_binding) = binding(&preproc, MAX_BINARY_BYTES, "private rga-preproc")?;
+    let valid = run_tool(&rga, &["--version"]).is_ok_and(|output| {
+        output.status.success() && output.stdout.to_ascii_lowercase().contains("ripgrep-all")
+    });
+    if !valid {
+        return Err(QhardError::Input(
+            "rga failed semantic capability preflight".into(),
+        ));
+    }
+    Ok((temp, rga, rga_binding, preproc_binding))
+}
+
+fn bound_rga(path: &Path) -> Result<BoundRga, QhardError> {
+    let target = fs::canonicalize(path)
+        .map_err(|e| QhardError::Input(format!("cannot canonicalize rga: {e}")))?;
+    if !allowed_homebrew_rga_target(&target) {
+        return Err(QhardError::Input(
+            "rga target is not an approved Homebrew ripgrep-all Cellar path".into(),
+        ));
+    }
+    require_sealed_homebrew_runtime(&target, "rga")?;
+    let preproc_target = target
+        .parent()
+        .ok_or_else(|| QhardError::Input("rga target has no bin directory".into()))?
+        .join("rga-preproc");
+    require_sealed_homebrew_runtime(&preproc_target, "rga-preproc")?;
+    let parent = RetainedDirectory::open(
+        target
+            .parent()
+            .ok_or_else(|| QhardError::Input("rga target has no bin directory".into()))?,
+        "rga bin directory",
+    )?;
+    let (snapshot, rga, rga_binding, preproc_binding) = snapshot_rga_pair(&parent)?;
+    // These brew entry points are symlinks; retain their canonical Cellar
+    // targets and expose only those targets to rga through a private PATH.
+    // Keep every helper in the same Homebrew prefix as rga.  Falling back
+    // across prefixes would turn a missing or tampered selected-prefix tool
+    // into an unreported alternate comparison environment.
+    let helper_bin = if target.starts_with(Path::new("/opt/homebrew/Cellar/")) {
+        Path::new("/opt/homebrew/bin")
+    } else if target.starts_with(Path::new("/usr/local/Cellar/")) {
+        Path::new("/usr/local/bin")
     } else {
-        path.to_path_buf()
+        return Err(QhardError::Input(
+            "rga target has no approved Homebrew helper prefix".into(),
+        ));
     };
-    executable_tool(&target, "rga")
+    let helper_paths = [
+        ("pandoc", helper_bin.join("pandoc")),
+        ("pdftotext", helper_bin.join("pdftotext")),
+        ("rg", helper_bin.join("rg")),
+    ];
+    for (label, helper_path) in &helper_paths {
+        let canonical = fs::canonicalize(helper_path)
+            .map_err(|e| QhardError::Input(format!("cannot canonicalize {label}: {e}")))?;
+        require_sealed_homebrew_runtime(&canonical, label)?;
+    }
+    let helpers =
+        PrivateRgaHelpers::new(&helper_paths[0].1, &helper_paths[1].1, &helper_paths[2].1)?;
+    let bound = BoundRga {
+        _snapshot: snapshot,
+        rga,
+        rga_binding,
+        preproc_binding,
+        helpers,
+    };
+    // Preflight under the exact environment used for queries. This catches a
+    // malformed private config or helper binding before measurement begins.
+    let output = run_bound_rga(&bound, &["--version"], None)?;
+    if !output.status.success() || !output.stdout.to_ascii_lowercase().contains("ripgrep-all") {
+        return Err(QhardError::Input(
+            "rga failed private helper capability preflight".into(),
+        ));
+    }
+    Ok(bound)
 }
 fn tool_binding(path: &Path, label: &str) -> Result<FileBinding, QhardError> {
     let (_, binding) = binding(path, MAX_BINARY_BYTES, label)?;
@@ -2106,6 +2476,38 @@ fn run_tool_in_directory(
         &mut command,
         BoundedProcessOptions::default(),
     )?)
+}
+
+fn run_bound_rga(
+    bound: &BoundRga,
+    args: &[&str],
+    directory: Option<&RetainedDirectory>,
+) -> Result<crate::runner::BoundedProcessOutput, QhardError> {
+    bound.helpers.recheck()?;
+    let mut command = Command::new(&bound.rga);
+    let config_argument = format!("--rga-config-file={}", bound.helpers.config.path);
+    let cache_argument = format!(
+        "--rga-cache-path={}",
+        bound.helpers.cache.public_path.display()
+    );
+    command.args([
+        "--rga-adapters=pandoc,poppler",
+        &cache_argument,
+        &config_argument,
+    ]);
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", &bound.helpers.directory.public_path)
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("TZ", "UTC");
+    if let Some(directory) = directory {
+        directory.configure_command_cwd(&mut command)?;
+    }
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+    bound.helpers.recheck()?;
+    Ok(output)
 }
 fn query_fragments(query: &str) -> Vec<String> {
     // Exact counterpart of eval/run_baseline.py's four regexes.  Do not use
@@ -2322,14 +2724,35 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
     let rga_path = resolve_tool(&options.rga);
     // mdfind is a sealed macOS executable: copied snapshots are killed by
     // code-signing. Bind its exact system binary and execute that path.
-    let bound_mdfind = mdfind_path.as_ref().and_then(|p| trusted_mdfind(p).ok());
-    let bound_rga = rga_path.as_ref().and_then(|p| bound_rga(p).ok());
+    let (bound_mdfind, mdfind_unavailable_reason) = match mdfind_path.as_ref() {
+        Some(path) => match trusted_mdfind(path) {
+            Ok(bound) => (Some(bound), None),
+            Err(error) => (None, Some(format!("mdfind is unavailable: {error}"))),
+        },
+        None => (
+            None,
+            Some("mdfind is unavailable: executable was not found".into()),
+        ),
+    };
+    let (bound_rga, rga_unavailable_reason) = match rga_path.as_ref() {
+        Some(path) => match bound_rga(path) {
+            Ok(bound) => (Some(bound), None),
+            Err(error) => (None, Some(format!("rga is unavailable: {error}"))),
+        },
+        None => (
+            None,
+            Some("rga is unavailable: executable was not found".into()),
+        ),
+    };
     let mut tools = BTreeMap::new();
     tools.insert(
         "kio".into(),
         BaselineTool {
             executable_path: options.bin.display().to_string(),
             sha256: Some(kio_binding.sha256.clone()),
+            companion_sha256: None,
+            helpers: None,
+            configuration: None,
             version: "kio under test".into(),
             available: true,
         },
@@ -2342,6 +2765,9 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                 |p| p.display().to_string(),
             ),
             sha256: bound_mdfind.as_ref().map(|b| b.sha256.clone()),
+            companion_sha256: None,
+            helpers: None,
+            configuration: None,
             version: "macOS sealed-system Spotlight tool (mdfind has no version flag)".into(),
             available: bound_mdfind.is_some(),
         },
@@ -2353,7 +2779,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
         } else {
             bound
                 .as_ref()
-                .and_then(|(_, p, _)| run_tool(p, &["--version"]).ok())
+                .and_then(|bound| run_bound_rga(bound, &["--version"], None).ok())
                 .map(|o| o.stdout.lines().next().unwrap_or("rga").to_owned())
                 .unwrap_or_else(|| "unavailable".into())
         };
@@ -2364,13 +2790,29 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                     || requested.display().to_string(),
                     |p| p.display().to_string(),
                 ),
-                sha256: bound.as_ref().map(|(_, _, binding)| binding.sha256.clone()),
+                sha256: bound.as_ref().map(|bound| bound.rga_binding.sha256.clone()),
+                companion_sha256: bound
+                    .as_ref()
+                    .map(|bound| bound.preproc_binding.sha256.clone()),
+                helpers: bound.as_ref().map(|bound| {
+                    BTreeMap::from([
+                        ("pandoc".into(), bound.helpers.pandoc.binding.clone()),
+                        ("pdftotext".into(), bound.helpers.pdftotext.binding.clone()),
+                        ("rg".into(), bound.helpers.rg.binding.clone()),
+                    ])
+                }),
+                configuration: bound.as_ref().map(|bound| bound.helpers.config.clone()),
                 version,
                 available: bound.is_some(),
             },
         );
     }
     let missing = bound_mdfind.is_none() || bound_rga.is_none();
+    let missing_reason = [mdfind_unavailable_reason, rga_unavailable_reason]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
     let mut rows = Vec::new();
     let mut runtime_blocked = None;
     if !missing {
@@ -2437,8 +2879,8 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             let mut rga_returncode = 0;
             let mut rga_duration_ms = 0.0;
             for fragment in query_fragments(&q.query) {
-                let ro = run_tool_in_directory(
-                    &bound_rga.as_ref().unwrap().1,
+                let ro = run_bound_rga(
+                    bound_rga.as_ref().unwrap(),
                     &[
                         "-l",
                         "--no-messages",
@@ -2447,7 +2889,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                         &fragment,
                         ".",
                     ],
-                    &root,
+                    Some(&root),
                 )?;
                 rga_returncode = ro.status.code().unwrap_or(-1);
                 rga_duration_ms += ro.duration.as_secs_f64() * 1000.0;
@@ -2558,11 +3000,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
         } else {
             "fail"
         },
-        blocked_reason: runtime_blocked.or_else(|| {
-            missing.then(|| {
-                "mdfind and/or rga is unavailable; baseline comparison was not measured".into()
-            })
-        }),
+        blocked_reason: runtime_blocked.or_else(|| missing.then_some(missing_reason)),
         golden,
         attestation,
         indexed_fixture_sha256: computed.indexed_fixture_sha256,
@@ -2789,6 +3227,147 @@ mod tests {
         assert!(!allowed_homebrew_rga_target(Path::new(
             "/opt/homebrew/Cellar/other/bin/rga"
         )));
+        assert!(!allowed_homebrew_rga_target(Path::new(
+            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/libexec/rga"
+        )));
+        assert!(!allowed_homebrew_rga_target(Path::new(
+            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga/extra"
+        )));
+    }
+
+    #[test]
+    fn homebrew_helper_policy_rejects_non_cellar_or_wrong_formula_targets() {
+        assert!(allowed_homebrew_cellar_tool(
+            Path::new("/opt/homebrew/Cellar/pandoc/3.10.1/bin/pandoc"),
+            "pandoc",
+            "pandoc",
+        ));
+        assert!(allowed_homebrew_cellar_tool(
+            Path::new("/usr/local/Cellar/poppler/26.02/bin/pdftotext"),
+            "poppler",
+            "pdftotext",
+        ));
+        assert!(allowed_homebrew_cellar_tool(
+            Path::new("/opt/homebrew/Cellar/ripgrep/15.1/bin/rg"),
+            "ripgrep",
+            "rg",
+        ));
+        assert!(!allowed_homebrew_cellar_tool(
+            Path::new("/tmp/pandoc"),
+            "pandoc",
+            "pandoc"
+        ));
+        assert!(!allowed_homebrew_cellar_tool(
+            Path::new("/opt/homebrew/Cellar/evil/1/bin/pandoc"),
+            "pandoc",
+            "pandoc"
+        ));
+        assert!(!allowed_homebrew_cellar_tool(
+            Path::new("/opt/homebrew/Cellar/pandoc/3.10/bin/not-pandoc"),
+            "pandoc",
+            "pandoc"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_runtime_policy_rejects_evaluator_owned_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let metadata = fs::symlink_metadata(temporary.path()).unwrap();
+        assert!(!sealed_runtime_metadata(&metadata));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_rga_runtime_uses_only_bound_helpers_and_generated_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (pandoc, pdftotext, rg) = if Path::new("/opt/homebrew/bin/pandoc").is_file()
+            && Path::new("/opt/homebrew/bin/pdftotext").is_file()
+            && Path::new("/opt/homebrew/bin/rg").is_file()
+        {
+            (
+                "/opt/homebrew/bin/pandoc",
+                "/opt/homebrew/bin/pdftotext",
+                "/opt/homebrew/bin/rg",
+            )
+        } else if Path::new("/usr/local/bin/pandoc").is_file()
+            && Path::new("/usr/local/bin/pdftotext").is_file()
+            && Path::new("/usr/local/bin/rg").is_file()
+        {
+            (
+                "/usr/local/bin/pandoc",
+                "/usr/local/bin/pdftotext",
+                "/usr/local/bin/rg",
+            )
+        } else {
+            return;
+        };
+        let source = tempfile::tempdir().unwrap();
+        let rga = source.path().join("rga");
+        let preproc = source.path().join("rga-preproc");
+        fs::write(
+            &rga,
+            b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo ripgrep-all; exit 0; fi\nprintf 'PATH=%s\\nPANDOC=%s\\nRG=%s\\nARGS=%s\\n' \"$PATH\" \"$(command -v pandoc)\" \"$(command -v rg)\" \"$*\"\n",
+        ).unwrap();
+        fs::write(&preproc, b"#!/bin/sh\nexit 1\n").unwrap();
+        for path in [&rga, &preproc] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let parent = RetainedDirectory::open(source.path(), "rga test bin directory").unwrap();
+        let (snapshot, rga, rga_binding, preproc_binding) = snapshot_rga_pair(&parent).unwrap();
+        let helpers =
+            PrivateRgaHelpers::new(Path::new(pandoc), Path::new(pdftotext), Path::new(rg)).unwrap();
+        let helper_dir = helpers.directory.public_path.clone();
+        let config_path = helpers.config.path.clone();
+        let bound = BoundRga {
+            _snapshot: snapshot,
+            rga,
+            rga_binding,
+            preproc_binding,
+            helpers,
+        };
+
+        let output = run_bound_rga(&bound, &["needle"], None).unwrap();
+        assert!(output
+            .stdout
+            .contains(&format!("PATH={}", helper_dir.display())));
+        assert!(output
+            .stdout
+            .contains(&format!("PANDOC={}/pandoc", helper_dir.display())));
+        assert!(output
+            .stdout
+            .contains(&format!("RG={}/rg", helper_dir.display())));
+        assert!(output.stdout.contains("--rga-adapters=pandoc,poppler"));
+        assert!(output.stdout.contains("--rga-cache-path="));
+        assert!(output.stdout.contains(&config_path));
+        assert!(!output.stdout.contains("/usr/bin:/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_rga_pair_runs_no_match_without_companion_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let rga = source.path().join("rga");
+        let preproc = source.path().join("rga-preproc");
+        fs::write(
+            &rga,
+            b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo ripgrep-all; exit 0; fi\n$(dirname \"$0\")/rga-preproc \"$@\"\n",
+        )
+        .unwrap();
+        fs::write(&preproc, b"#!/bin/sh\nexit 1\n").unwrap();
+        for path in [&rga, &preproc] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let parent = RetainedDirectory::open(source.path(), "rga test bin directory").unwrap();
+
+        let (_snapshot, private_rga, _rga_binding, _preproc_binding) =
+            snapshot_rga_pair(&parent).unwrap();
+        let output = run_tool(&private_rga, &["-l", "--no-messages", "absent", "."]).unwrap();
+
+        assert_eq!(output.status.code(), Some(1));
     }
 
     #[test]
