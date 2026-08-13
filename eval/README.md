@@ -137,7 +137,7 @@ hash を記録し、管理者が同じ値を独立に照合してから、root-o
 
 ```bash
 /usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: 4293ef620d2d8ed7cb294bc1dca000e8b552780fde91686bb2c41c97cc0681c7
+# Expected for this revision: ff377e93369b011827f2708b4fa006324e10c62cbf056a79c91976ac59371072
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
@@ -147,7 +147,7 @@ sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
     cleanup() { /bin/rm -f "$script"; /bin/rmdir "$admin_dir"; }
     trap cleanup EXIT
-    readonly expected=4293ef620d2d8ed7cb294bc1dca000e8b552780fde91686bb2c41c97cc0681c7
+    readonly expected=ff377e93369b011827f2708b4fa006324e10c62cbf056a79c91976ac59371072
     readonly actual=$(/usr/bin/shasum -a 256 "$script")
     [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
     /bin/zsh -f "$script" build
@@ -162,9 +162,15 @@ sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
 
 macOS は通常ユーザーの checkout から `install` した固定コピーや新規作成物へ、SIP下で除去できない
 `com.apple.provenance` を付与することがある。SIPや他のsecurity controlは変更しない。builderと正式 evaluatorは
-xattr列挙失敗をfail-closedとし、属性が無い場合または名前が正確に`com.apple.provenance`だけの場合に限り受理する。
-値は実行・path解決に使わず、その他のxattr（`com.apple.quarantine`を含む）は拒否する。管理者固定コピー、
-staging、image/manifest、mounted runtimeの全treeで同じpolicyを確認し、manifest/reportにはpolicyを記録する。
+xattr列挙失敗をfail-closedとし、管理者固定コピー、staging、manifest、mounted runtimeの全treeでは、属性が無い場合
+または名前が正確に`com.apple.provenance`だけの場合に限り受理する。値は実行・path解決に使わず、その他のxattr
+（`com.apple.quarantine`を含む）は拒否する。
+
+`hdiutil`が生成するread-only DMG containerだけは別境界であり、属性なし、または名前が
+`com.apple.FinderInfo`と`com.apple.provenance`の部分集合である場合に限り受理する。この例外は
+DMG containerにだけ適用し、mounted runtime、payload、manifestには拡張しない。FinderInfoの値は読み取らず、
+image SHA-256は引き続きDMG本体のbytesを束縛する。builder manifestはimage/runtime両方のpolicyと観測した
+許可xattr名を記録し、正式evaluator reportはmounted runtimeの厳しいpolicyを記録する。
 ACLは上の`chmod -N`でroot-private固定コピーだけを正規化し、checkoutやHomebrew sourceには触れない。
 build script自身はownership、mode、ACL、xattr policy、およびSHA-256を再検証し、不一致なら実行前に停止する。
 

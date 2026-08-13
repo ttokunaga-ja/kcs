@@ -5675,6 +5675,9 @@ mod tests {
             "com.example.untrusted".to_owned(),
         ])));
         assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
+            "com.apple.FinderInfo".to_owned(),
+        ])));
+        assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
             "com.apple.provenance".to_owned(),
             "com.example.untrusted".to_owned(),
         ])));

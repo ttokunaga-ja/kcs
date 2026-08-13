@@ -13,6 +13,14 @@ require_safe_xattrs() {
   names=$(/usr/bin/xattr "$target_path") || die "cannot enumerate extended attributes: $target_path"
   [[ -z $names || $names == com.apple.provenance ]] || die "unexpected extended attributes: $target_path: ${names//$'\n'/,}"
 }
+require_safe_image_xattrs() {
+  local target_path=$1 names
+  names=$(/usr/bin/xattr "$target_path") || die "cannot enumerate disk image extended attributes: $target_path"
+  case $names in
+    ''|com.apple.FinderInfo|com.apple.provenance|$'com.apple.FinderInfo\ncom.apple.provenance'|$'com.apple.provenance\ncom.apple.FinderInfo') ;;
+    *) die "unexpected disk image extended attributes: $target_path: ${names//$'\n'/,}" ;;
+  esac
+}
 mode=${1:-build}
 [[ $mode == build || $mode == verify ]] || die "usage: $0 [build|verify]"
 if [[ $mode == verify ]]; then
@@ -455,7 +463,7 @@ PY
 created_image=1
 /usr/bin/hdiutil create -srcfolder "$BUILD_ROOT/payload" -format UDRO -fs "Case-sensitive APFS" -volname "$VOLUME_NAME" -srcowners on -noanyowners "$IMAGE"
 /usr/sbin/chown root:wheel "$IMAGE"; /bin/chmod 0444 "$IMAGE"
-/bin/chmod -N "$IMAGE"; require_safe_xattrs "$IMAGE"
+/bin/chmod -N "$IMAGE"; require_safe_image_xattrs "$IMAGE"
 /usr/bin/hdiutil attach -readonly -owners on -nobrowse -noautoopen -mountpoint "$RUNTIME_ROOT" "$IMAGE" >/dev/null; mounted=1
 
 created_manifest=1
@@ -503,6 +511,20 @@ def safe_xattrs(path):
  if not parts or parts[-1]!=b"": bad("malformed xattr name list: "+path)
  names=parts[:-1]
  if names not in ([b"com.apple.provenance"],): bad("unexpected xattrs: %s: %r"%(path,names))
+ return [name.decode("ascii") for name in names]
+def safe_image_xattrs(path):
+ raw=os.fsencode(path); size=libc.listxattr(raw,None,0,XATTR_NOFOLLOW)
+ if size<0: bad("cannot enumerate disk image xattrs: %s: %s"%(path,os.strerror(ctypes.get_errno())))
+ if size>4096: bad("disk image xattr name list exceeds cap: "+path)
+ if size==0: return []
+ buf=ctypes.create_string_buffer(size)
+ got=libc.listxattr(raw,buf,size,XATTR_NOFOLLOW)
+ if got!=size: bad("disk image xattr names changed during inspection: "+path)
+ encoded=bytes(buf.raw[:got]); parts=encoded.split(b"\0")
+ if not parts or parts[-1]!=b"": bad("malformed disk image xattr name list: "+path)
+ names=parts[:-1]
+ allowed={b"com.apple.FinderInfo",b"com.apple.provenance"}
+ if len(names)!=len(set(names)) or not set(names).issubset(allowed): bad("unexpected disk image xattrs: %s: %r"%(path,names))
  return [name.decode("ascii") for name in names]
 def fsinfo(path=None,fd=None):
  s=Statfs(); rc=libc.fstatfs(fd,ctypes.byref(s)) if fd is not None else libc.statfs(path.encode(),ctypes.byref(s))
@@ -568,7 +590,7 @@ for rel in d["closure_images"]:
    if not target.startswith(R+"/lib/") or not os.path.isfile(target): bad("rpath escape/unresolved: "+raw)
   elif system_load(raw): pass
   else: bad("external or unsealed dependency %s in %s"%(raw,p))
-d.update(image_sha256=dg(I),runtime_read_only=True,runtime_allowed_xattrs=runtime_xattrs)
+d.update(image_sha256=dg(I),image_xattr_policy="subset:com.apple.FinderInfo,com.apple.provenance",image_allowed_xattrs=safe_image_xattrs(I),runtime_read_only=True,runtime_allowed_xattrs=runtime_xattrs)
 with open(M,"w") as f: json.dump(d,f,sort_keys=True,separators=(",",":")); f.write("\n")
 os.chown(M,0,0); os.chmod(M,0o444)
 subprocess.check_call(["/bin/chmod","-N",M])
@@ -581,7 +603,11 @@ for p in "$MANAGED_ROOT" "$IMAGE" "$MANIFEST"; do
   artifact_stat=$(/usr/bin/stat -f '%u:%g:%p' "$p")
   [[ $artifact_stat == 0:0:* ]] || die "sealed runtime artifact is not root:wheel: $p"
   [[ $(( 8#${artifact_stat##*:} & 8#022 )) -eq 0 ]] || die "sealed runtime artifact is group/other writable: $p"
-  require_safe_xattrs "$p"
+  if [[ $p == $IMAGE ]]; then
+    require_safe_image_xattrs "$p"
+  else
+    require_safe_xattrs "$p"
+  fi
   [[ $(/bin/ls -lde "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "sealed runtime artifact has an ACL: $p"
 done
 # Never execute Homebrew-derived runtime images while privileged.  An ordinary

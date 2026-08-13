@@ -1,5 +1,8 @@
 import hashlib
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,83 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
         self.assertIn("names == com.apple.provenance", source)
         self.assertIn('"xattr_policy":"only-com.apple.provenance"', source)
         self.assertIn('names not in ([b"com.apple.provenance"],)', source)
+
+    def test_builder_scopes_finder_info_allowance_to_disk_image_container(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("require_safe_image_xattrs", source)
+        self.assertIn("com.apple.FinderInfo|com.apple.provenance", source)
+        self.assertIn(
+            'allowed={b"com.apple.FinderInfo",b"com.apple.provenance"}', source
+        )
+        self.assertIn(
+            'image_xattr_policy="subset:com.apple.FinderInfo,com.apple.provenance"',
+            source,
+        )
+        self.assertIn(
+            '/bin/chmod -N "$IMAGE"; require_safe_image_xattrs "$IMAGE"', source
+        )
+        self.assertIn('if [[ $p == $IMAGE ]]; then', source)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS xattr policy")
+    def test_macos_disk_image_xattr_policy_accepts_only_bounded_metadata(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        helpers = source.split("mode=${1:-build}", 1)[0]
+        with tempfile.NamedTemporaryFile() as handle:
+            subprocess.run(
+                [
+                    "/usr/bin/xattr",
+                    "-wx",
+                    "com.apple.FinderInfo",
+                    "01" + "00" * 31,
+                    handle.name,
+                ],
+                check=True,
+            )
+            accepted = subprocess.run(
+                [
+                    "/bin/zsh",
+                    "-fc",
+                    helpers + '\nrequire_safe_image_xattrs "$1"',
+                    "policy-test",
+                    handle.name,
+                ]
+            )
+            rejected_by_runtime = subprocess.run(
+                [
+                    "/bin/zsh",
+                    "-fc",
+                    helpers + '\nrequire_safe_xattrs "$1"',
+                    "policy-test",
+                    handle.name,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.assertEqual(accepted.returncode, 0)
+            self.assertNotEqual(rejected_by_runtime.returncode, 0)
+
+            subprocess.run(
+                [
+                    "/usr/bin/xattr",
+                    "-w",
+                    "com.example.untrusted",
+                    "blocked",
+                    handle.name,
+                ],
+                check=True,
+            )
+            rejected_mixed = subprocess.run(
+                [
+                    "/bin/zsh",
+                    "-fc",
+                    helpers + '\nrequire_safe_image_xattrs "$1"',
+                    "policy-test",
+                    handle.name,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.assertNotEqual(rejected_mixed.returncode, 0)
 
     def test_builder_uses_macos_bsd_cli_and_nonreserved_zsh_locals(self):
         source = SCRIPT.read_text(encoding="utf-8")
