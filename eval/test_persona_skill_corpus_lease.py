@@ -1,9 +1,20 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from eval.persona_skill_corpus_lease import claim, read_lease, recover, release
-from eval.scaffold_persona_skill_corpus import ScaffoldError, scaffold
+from eval.persona_fixture_spec import get_persona
+from eval.persona_skill_corpus_lease import (
+    claim,
+    read_lease,
+    read_scope_lease,
+    recover,
+    release,
+    scope_claim,
+    scope_recover,
+    scope_release,
+)
+from eval.scaffold_persona_skill_corpus import ScaffoldError, scaffold, scope_control_id
 
 
 class PersonaSkillCorpusLeaseTests(unittest.TestCase):
@@ -65,6 +76,53 @@ class PersonaSkillCorpusLeaseTests(unittest.TestCase):
             with self.assertRaises(ScaffoldError):
                 read_lease(root, "p01")
             self.assertFalse(root.exists())
+
+    def test_parent_can_assign_two_distinct_scopes_but_not_duplicate_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = scaffold(Path(directory) / "corpus")
+            parent = claim(root, "p01", "parent-one", "parent chat")
+            scopes = get_persona("p01")["primary_paths"]
+            first = scope_claim(root, "p01", scopes[0], "parent-one", "worker-a", "subagent a")
+            second = scope_claim(root, "p01", scopes[1], "parent-one", "worker-b", "subagent b")
+            self.assertEqual(first["parent_session"], "parent-one")
+            self.assertEqual(second["scope_path"], scopes[1])
+            self.assertNotIn("release_token", read_scope_lease(root, "p01", scopes[0]))
+            with self.assertRaises(ScaffoldError):
+                scope_claim(root, "p01", scopes[0], "parent-one", "worker-c", None)
+            with self.assertRaises(ScaffoldError):
+                release(root, "p01", parent["release_token"])
+            with self.assertRaises(ScaffoldError):
+                recover(root, "p01", "parent-one", "cannot abandon active workers")
+            scope_dir = root / "p01-software-engineer" / "_production" / "scopes" / scope_control_id(scopes[0])
+            self.assertTrue((scope_dir / "inventory.jsonl").is_file())
+            self.assertTrue((root / "p01-software-engineer" / "home" / scopes[0]).is_dir())
+
+    def test_scope_requires_its_active_parent_persona_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = scaffold(Path(directory) / "corpus")
+            scope = get_persona("p01")["primary_paths"][0]
+            claim(root, "p01", "parent-one", None)
+            with self.assertRaises(ScaffoldError):
+                scope_claim(root, "p01", scope, "wrong-parent", "worker", None)
+            with self.assertRaises(ScaffoldError):
+                scope_claim(root, "p02", scope, "parent-one", "worker", None)
+            lease = scope_claim(root, "p01", scope, "parent-one", "worker", None)
+            with self.assertRaises(ScaffoldError):
+                scope_release(root, "p01", scope, "wrong-parent", lease["release_token"])
+            receipt = scope_recover(root, "p01", scope, "parent-one", "worker", "parent verified worker stopped")
+            self.assertEqual(receipt["action"], "forced-recovery")
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "descriptor directory unavailable")
+    def test_repeated_scope_reads_do_not_leak_scope_directory_descriptors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = scaffold(Path(directory) / "corpus")
+            scope = get_persona("p01")["primary_paths"][0]
+            claim(root, "p01", "parent-one", None)
+            scope_claim(root, "p01", scope, "parent-one", "worker", None)
+            before = len(os.listdir("/dev/fd"))
+            for _ in range(100):
+                read_scope_lease(root, "p01", scope)
+            self.assertLessEqual(len(os.listdir("/dev/fd")), before + 1)
 
 
 if __name__ == "__main__":

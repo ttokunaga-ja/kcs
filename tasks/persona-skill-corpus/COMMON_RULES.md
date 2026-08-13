@@ -24,16 +24,27 @@
 7. Do not design product-search QA or assert searchability from raw artifacts.
    This workflow produces corpus files and artifact QA only; evaluator/index
    validation remains governed by the fixture and its existing tooling.
-8. The normal parallel unit is one worker per persona folder. Because each
-   worker/session owns one complete persona folder `<persona>/`, including its `home/`
-   and `_production/` trees. Distinct persona folders do not conflict and may
-   run concurrently. The worker must hold that persona's atomic `lease.json`; never run
-   multiple writers inside one persona. Do not alter another worker's folder or
-   shared planning files. A Markdown claim alone is not ownership.
-9. At each checkpoint update per-persona status, inventory, failures, decisions,
-   and the exact next action. A later session must be able to resume without
-   rediscovering what was generated or inspected.
-10. The lease prevents accidental double assignment among cooperating sessions.
-    It is not a security boundary against processes with direct write access as
-    the same OS user. Forced recovery is a trusted parent/user operation and
-    must never be delegated to an artifact-producing subagent.
+8. Ownership has two levels. One parent chat session owns one complete persona
+   and holds its persona lease. Within that chat, each artifact-producing
+   subagent owns exactly one fixture-defined leaf folder for the duration of an
+   assignment, for which the parent must hold a bound scope lease. Different leaf folders
+   in the same persona may run concurrently; the same folder may not have two
+   active writers. A Markdown claim alone is not ownership.
+9. Before dispatch, the parent records the exact relative filenames, format
+   families, artifact IDs, and narrative anchors assigned to each leaf folder.
+   A scope worker may write only those final files below its assigned `home/`
+   folder. Within its matching `_production/scopes/<scope-id>/`, it may update
+   only scope-local status, inventory, provenance, QA, prompts, temp, renders,
+   and evidence. It must not edit persona-wide controls or aggregates, another
+   scope, or the parent-owned scope `WORKSPACE.md`, `manifest.json`,
+   `assignment.json`, lease, lock, or recovery log.
+10. At each checkpoint the scope worker updates its scope-local status,
+    inventory, failures, decisions, and exact next action. After workers stop,
+    the parent chat validates and deterministically aggregates those records
+    into the persona-wide checkpoint. A later parent chat must be able to
+    resume without rediscovering what was generated or inspected.
+11. Persona and scope leases prevent accidental duplicate assignment among
+    cooperating sessions. They are not security boundaries against processes
+    with direct write access as the same OS user. Forced recovery is a trusted
+    parent/user operation and must never be delegated to an artifact-producing
+    subagent.

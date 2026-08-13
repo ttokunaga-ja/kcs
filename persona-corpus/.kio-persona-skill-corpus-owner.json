@@ -22,6 +22,6 @@
     "p19-educator-instructional-designer",
     "p20-investigative-journalist"
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "source_spec": "eval/persona_fixture_spec.py"
 }

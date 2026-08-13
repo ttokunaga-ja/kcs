@@ -29,11 +29,20 @@ Each persona is an independent synthetic PC. Produce its twelve fixture-defined
 primary scopes plus the eight shared secondary scopes; retain the fixture's
 75/25 primary/secondary weighting and all format percentages exactly.
 
-One subagent/session owns one complete persona folder: both its `home/` and
-`_production/` trees. Distinct persona folders may run concurrently without
-collision; never split one persona folder between writers. Subagents have the
-same artifact capabilities as the parent session and can
-produce routed files after reading the applicable skill instructions. They do
-not provide a permanent background workforce across closed sessions: every
-turn must finish or checkpoint its batch, release/retain the explicit lease as
-documented, and leave the next session a complete status record.
+Ownership has two levels:
+
+- One parent chat session coordinates exactly one complete persona folder and
+  holds that persona's parent lease.
+- Inside that chat, each artifact-producing subagent is assigned exactly one of
+  the persona's twenty fixture-defined leaf folders. It writes only the fixed
+  files in that folder and that folder's matching production-control area.
+
+Different folder assignments inside the same persona may run concurrently.
+Never assign two active subagents to the same leaf folder, and never let a
+subagent append to persona-wide shared journals. The parent chat owns narrative
+decisions, assignment planning, persona-wide status, and deterministic
+aggregation of the folder journals. Subagents have the same artifact
+capabilities as the parent session and may produce routed files after reading
+the applicable skill instructions. They do not provide a permanent background
+workforce across closed sessions: every turn must finish or checkpoint its
+folder batch and leave complete scope-local status.

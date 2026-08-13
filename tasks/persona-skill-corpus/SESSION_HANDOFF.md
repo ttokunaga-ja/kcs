@@ -1,15 +1,19 @@
 # Cross-session handoff
 
-At the end of every working interval, the coordinator collects each assigned
-persona's `<pXX-role>/_production/status.json`, inventory, and QA state. Mark
-unfinished work `blocked` or `generating` with a concrete next action; do not
-infer completion from directory existence. Reassign only personas with no
-active writer, and preserve all completed files and evidence.
+At the end of every working interval, the parent chat collects every assigned
+folder's scope-local status, inventory, and QA state, then rebuilds the one
+persona-wide checkpoint. Mark unfinished folder work `blocked` or `generating`
+with a concrete next action; do not infer completion from directory existence.
+Reassign only folders with no active scope writer, and preserve all completed
+files and evidence.
 
-Copy/paste this prompt into a future parent Codex session:
+Replace `<PERSONA_ID>` and `<PERSONA_SLUG>` and copy/paste this prompt into the
+future parent chat dedicated to that one persona:
 
 ```text
-このリポジトリで20 persona の高忠実度・完全合成 corpus production を再開してください。
+このリポジトリで `<PERSONA_ID>` / `<PERSONA_SLUG>` 1人分の高忠実度・完全合成
+corpus production を担当してください。このチャットはこの1ペルソナだけを調整し、
+別ペルソナの制作は行いません。
 最初に tasks/persona-skill-corpus/README.md、COMMON_RULES.md、BATCH_PROTOCOL.md、
 PERSONA_INDEX.md、PRODUCTION_LAYOUT.md、SESSION_HANDOFF.md と
 eval/persona_fixture_spec.py を読み、
@@ -17,20 +21,33 @@ fixture を唯一の topology/ratio/path authority としてください。produ
 repository-root/persona-corpus とし、python3 eval/scaffold_persona_skill_corpus.py
 --root <production-root>（既存のowned rootは --resume）で全20人分 skeleton を作成し、
 各persona直下の home 外 `_production` に status/inventory/provenance/narrative/qa metadata を置いてください。
-次に subagent を spawn し、各 worker へ重複しない persona を割り当て、各workerは
-eval/persona_skill_corpus_lease.py claim で固有session IDのleaseを取得してから作業してください。
-claimが一度だけ返すrelease_tokenはactive parent session内だけに保持し、production metadataへ書かないでください。
-既存leaseは show で確認し、status/inventory/tempを点検してください。中断したwriterが停止済みであることを
-ユーザーが確認した場合だけ、recover --expected-session ... --reason ... で回収記録を残して再割当してください。
-通常終了はclaimのrelease_tokenでreleaseします。同一 persona の同時 writer を禁止します。worker は必要な Documents/PDF/Spreadsheets/
-Presentations/ImageGen skill の SKILL.md を先に読み、final artifact を render/inspect して QA evidence
-を `<persona>/_production` に保存します。text/code/data は通常生成、scan PDF は ImageGen + PDF workflow を用います。
+まず eval/persona_skill_corpus_lease.py claim で `<PERSONA_ID>` の親leaseをこのチャット固有の
+session IDに対して取得してください。claimが一度だけ返すrelease_tokenは親チャット内だけに保持し、
+production metadataやSubagent promptへ書かないでください。既存leaseは show で確認し、
+persona-wide statusと全scope status/inventory/tempを点検してください。中断した親writerが停止済みであることを
+ユーザーが確認した場合だけ、recover --expected-session ... --reason ... で回収記録を残してください。
+
+次にこのペルソナの fixture-defined leaf folder 20個について、既存inventoryと目標比率から
+各フォルダで今回作る固定ファイル一覧（相対名、形式、artifact_id、日付・数値・用語アンカー）を先に決めてください。
+Subagentをspawnし、1 Subagent assignmentにつき重複しないleaf folderをちょうど1つ割り当てます。
+親チャットが各workerのspawn直前に、親leaseへ結合した `scope-claim --scope <exact-path>
+--parent-session <parent-id> --worker-session <worker-id>` を取得し、scope tokenは親だけが保持します。
+各workerは、割当 `home/<scope-path>/` と対応する
+`_production/scopes/<scope-id>/assignment.json` の `files` に列挙されたdirect filenameだけを作ってください。
+workerはassignment/manifest/WORKSPACE/leaseを変更せず、scope-local status/inventory/provenance/qaと
+prompts/temp/renders/evidenceだけを更新します。同じleaf folderへ2 workerを割り当ててはいけません。
+異なるleaf folderは並列制作して構いません。workerはpersona-wide status/narrative/manifest/aggregate JSONLや
+別scopeを編集してはいけません。
+
+各workerは必要な Documents/PDF/Spreadsheets/Presentations/ImageGen skill の SKILL.md を先に読み、
+final artifact をrender/inspectして、scope-local QA evidenceへ保存します。text/code/dataは通常生成、
+scan PDFはImageGen + PDF workflowを用います。完了または具体的blocked checkpointの後に親がscope-releaseし、
+親チャットは全worker停止後にscope-local inventory/provenance/qaを検証・集約してpersona-wide statusを更新します。
 実 PII/credential は一切使わず、cross-file narrative/numeric/date consistency と manifest/provenance を
 維持してください。product-search QA は設計しないでください。各 persona の status.json を確認して
 未完了の next_action から再開し、完了済み home file と evidence を上書き・削除しないでください。
 最初の物理 milestone は persona ごと200件で、各形式の件数は比率×2です。1 turnで全件を作らず、
-5〜20成果物のbatch単位で生成・visual QA・inventory/provenance/qa追記・status更新まで完結してください。
+各leaf folder内の5〜20成果物batch単位で生成・visual QA・scope-local inventory/provenance/qa追記・status更新まで完結してください。
 200件時点では family比率だけでなく manifest.json の format_variant_counts_200 も厳密に満たしてください。
-並列化はpersona単位に限定し、1 subagent/session = 1 complete persona folder `<persona>/`（home と _production）
-だけを所有させてください。別persona同士は独立しているため衝突なく並列実行できますが、同じpersonaを複数agentへ分割しないでください。
+この親チャットは1 persona、各Subagent assignmentはそのpersona内の1 leaf folderです。この二層境界を変更しないでください。
 ```

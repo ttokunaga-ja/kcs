@@ -9,8 +9,10 @@ symlinks, unexpected object types, foreign owners, and permissive directories.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path, PurePosixPath
@@ -21,10 +23,24 @@ if __package__ in (None, ""):
 from eval import persona_fixture_spec as spec
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 OWNER_FILE = ".kio-persona-skill-corpus-owner.json"
 WORKSPACE_FILE = "WORKSPACE.md"
 PRODUCTION_DIRS = (
+    "prompts",
+    "temp",
+    "renders/docx",
+    "renders/pdf",
+    "renders/xlsx",
+    "renders/pptx",
+    "renders/image",
+    "evidence/docx",
+    "evidence/pdf",
+    "evidence/xlsx",
+    "evidence/pptx",
+    "evidence/image",
+)
+SCOPE_PRODUCTION_DIRS = (
     "prompts",
     "temp",
     "renders/docx",
@@ -155,6 +171,41 @@ def _write_new_text_at(directory: int, name: str, text: str, label: str) -> None
     os.fsync(directory)
 
 
+def _replace_text_at(
+    directory: int, name: str, text: str, label: str, *, allow_read_only_public: bool = False
+) -> None:
+    """Atomically replace an already-validated, single-link control file."""
+    try:
+        metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except OSError as error:
+        raise ScaffoldError(f"cannot inspect control file {label}: {error}") from error
+    _validate_regular_file(
+        metadata, label, allow_read_only_public=allow_read_only_public
+    )
+    temporary_name = f".{name}.replace-{secrets.token_hex(16)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=directory)
+        _validate_regular_file(os.fstat(descriptor), f"{label} replacement")
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            descriptor = -1
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    except OSError as error:
+        raise ScaffoldError(f"cannot atomically update control file {label}: {error}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
 def _read_text_at(
     directory: int, name: str, label: str, *, allow_read_only_public: bool = False
 ) -> str:
@@ -215,16 +266,16 @@ def _validate_existing_control_file(
     return True
 
 
-def _owner_payload() -> dict[str, object]:
+def _owner_payload(version: int = SCHEMA_VERSION) -> dict[str, object]:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": version,
         "kind": "kio-persona-skill-corpus",
         "source_spec": "eval/persona_fixture_spec.py",
         "personas": [f"{row['id']}-{row['role']}" for row in spec.PERSONAS],
     }
 
 
-def _validate_owner(root_descriptor: int, root: Path) -> None:
+def _read_owner(root_descriptor: int, root: Path) -> dict[str, object]:
     label = os.fspath(root / OWNER_FILE)
     try:
         actual = json.loads(
@@ -237,8 +288,16 @@ def _validate_owner(root_descriptor: int, root: Path) -> None:
         )
     except ValueError as error:
         raise ScaffoldError(f"invalid owner marker: {label}") from error
-    if actual != _owner_payload():
-        raise ScaffoldError(f"owner marker does not match this scaffold version: {label}")
+    return actual
+
+
+def _validate_owner(root_descriptor: int, root: Path) -> int:
+    actual = _read_owner(root_descriptor, root)
+    if actual == _owner_payload():
+        return SCHEMA_VERSION
+    if actual == _owner_payload(2):
+        return 2
+    raise ScaffoldError(f"owner marker does not match this scaffold version: {root / OWNER_FILE}")
 
 
 def _open_existing_root(root: Path) -> int:
@@ -263,7 +322,7 @@ def _open_existing_root(root: Path) -> int:
         raise
 
 
-def _bind_root(root: Path, *, resume: bool) -> int:
+def _bind_root(root: Path, *, resume: bool) -> tuple[int, int]:
     if not root.name or root.name in (".", ".."):
         raise ScaffoldError(f"unsafe corpus root: {root}")
     try:
@@ -289,11 +348,11 @@ def _bind_root(root: Path, *, resume: bool) -> int:
             root_descriptor, OWNER_FILE, _owner_payload(), os.fspath(root / OWNER_FILE)
         )
     else:
-        _validate_owner(root_descriptor, root)
-    return root_descriptor
+        existing_version = _validate_owner(root_descriptor, root)
+    return root_descriptor, (SCHEMA_VERSION if created else existing_version)
 
 
-def _persona_initial_files(persona: dict[str, object]) -> dict[str, object]:
+def _persona_initial_files(persona: dict[str, object], *, version: int = SCHEMA_VERSION) -> dict[str, object]:
     return {
         "status.json": {
             "persona_id": persona["id"],
@@ -308,7 +367,7 @@ def _persona_initial_files(persona: dict[str, object]) -> dict[str, object]:
             "updated_at": None,
         },
         "manifest.json": {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": version,
             "persona_id": persona["id"],
             "role": persona["role"],
             "source_spec": "eval/persona_fixture_spec.py",
@@ -323,7 +382,7 @@ def _persona_initial_files(persona: dict[str, object]) -> dict[str, object]:
             "artifact_join_key": "artifact_id",
         },
         "narrative.json": {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": version,
             "persona_id": persona["id"],
             "fictional_entities": [],
             "timeline": [],
@@ -337,7 +396,10 @@ def _workspace_text(persona: dict[str, object]) -> str:
     slug = f"{persona['id']}-{persona['role']}"
     return (
         f"# {slug} workspace\n\n"
-        f"This session owns only the `{slug}/` persona folder.\n\n"
+        f"The parent chat session exclusively owns the `{slug}/` persona folder.\n"
+        "The parent holds each scope lease and assigns one authoritative `home/` leaf "
+        "folder to each subagent. A subagent creates only the fixed files listed for "
+        "that folder and updates only its permitted scope-local production records.\n\n"
         "Read the production rules before working:\n\n"
         "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
         "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
@@ -345,7 +407,7 @@ def _workspace_text(persona: dict[str, object]) -> str:
     )
 
 
-def _validate_workspace_file(directory: int, persona: dict[str, object], label: str) -> None:
+def _validate_workspace_file(directory: int, persona: dict[str, object], label: str, *, previous_version: int | None) -> None:
     if not _validate_existing_control_file(
         directory,
         WORKSPACE_FILE,
@@ -355,28 +417,159 @@ def _validate_workspace_file(directory: int, persona: dict[str, object], label: 
     ):
         _write_new_text_at(directory, WORKSPACE_FILE, _workspace_text(persona), label)
         return
-    if (
-        _read_text_at(
+    actual = _read_text_at(
+        directory,
+        WORKSPACE_FILE,
+        label,
+        allow_read_only_public=True,
+    )
+    if actual == _workspace_text(persona):
+        return
+    if actual in (_workspace_text_v2(persona), _workspace_text_v3_initial(persona)):
+        _replace_text_at(
             directory,
             WORKSPACE_FILE,
+            _workspace_text(persona),
             label,
             allow_read_only_public=True,
         )
-        != _workspace_text(persona)
-    ):
+        return
+    else:
         raise ScaffoldError(f"workspace file does not match this scaffold version: {label}")
+
+
+def _workspace_text_v2(persona: dict[str, object]) -> str:
+    slug = f"{persona['id']}-{persona['role']}"
+    return (
+        f"# {slug} workspace\n\n"
+        f"This session owns only the `{slug}/` persona folder.\n\n"
+        "Read the production rules before working:\n\n"
+        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
+        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
+        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
+    )
+
+
+def _workspace_text_v3_initial(persona: dict[str, object]) -> str:
+    """Return the exact first v3 text so resume can converge tracked scaffolds."""
+    slug = f"{persona['id']}-{persona['role']}"
+    return (
+        f"# {slug} workspace\n\n"
+        f"The parent chat session exclusively owns the `{slug}/` persona folder.\n"
+        "Each subagent claims one assigned authoritative `home/` scope and may write "
+        "only that folder plus its matching `_production/scopes/` control folder.\n\n"
+        "Read the production rules before working:\n\n"
+        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
+        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
+        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
+    )
+
+
+def scope_control_id(relative_path: str) -> str:
+    """Return the stable, safe on-disk ID for one authoritative scope path."""
+    try:
+        spec.validate_relative_scope(relative_path)
+    except ValueError as error:
+        raise ScaffoldError(f"invalid scope path: {relative_path}") from error
+    return "scope-" + hashlib.sha256(relative_path.encode("ascii")).hexdigest()
+
+
+def _scope_initial_files(persona: dict[str, object], relative_path: str) -> dict[str, object]:
+    return {
+        "status.json": {"schema_version": 1, "persona_id": persona["id"], "scope_path": relative_path, "state": "scaffolded", "completed_artifacts": 0},
+        "manifest.json": {"schema_version": 1, "persona_id": persona["id"], "scope_path": relative_path, "scope_id": scope_control_id(relative_path), "artifact_join_key": "artifact_id"},
+        "assignment.json": {
+            "schema_version": 1,
+            "persona_id": persona["id"],
+            "scope_path": relative_path,
+            "scope_id": scope_control_id(relative_path),
+            "assigned_parent_session": None,
+            "assigned_worker_session": None,
+            "state": "unassigned",
+            "files": [],
+        },
+    }
+
+
+def _upgrade_v2_persona_payload(
+    persona: dict[str, object], name: str, actual: object, current: dict[str, object]
+) -> dict[str, object] | None:
+    """Upgrade v2 shared JSON without discarding parent-authored metadata."""
+    if name == "status.json":
+        return None  # v2 status intentionally had no schema_version field.
+    if not isinstance(actual, dict):
+        raise ScaffoldError(f"v2 {name} is not an object for {persona['id']}")
+    if actual.get("persona_id") != persona["id"]:
+        raise ScaffoldError(f"v2 {name} has the wrong persona identity for {persona['id']}")
+    if name == "manifest.json" and actual.get("role") != persona["role"]:
+        raise ScaffoldError(f"v2 manifest has the wrong role identity for {persona['id']}")
+    version = actual.get("schema_version")
+    if version == SCHEMA_VERSION:
+        return None
+    if version != 2:
+        raise ScaffoldError(f"unsupported shared control schema in {name} for {persona['id']}")
+    upgraded = dict(actual)
+    for key, value in current.items():
+        upgraded.setdefault(key, value)
+    upgraded["schema_version"] = SCHEMA_VERSION
+    return upgraded
+
+
+def _scope_workspace_text(persona: dict[str, object], relative_path: str) -> str:
+    slug = f"{persona['id']}-{persona['role']}"
+    return (
+        f"# {slug} scope worker workspace\n\n"
+        f"Assigned home scope: `../../../home/{relative_path}/`\n\n"
+        "The parent chat owns persona-level shared metadata and this scope's immutable "
+        "`WORKSPACE.md`, `manifest.json`, `assignment.json`, and lease controls. Read "
+        "`assignment.json` before work. This worker may create only its listed final "
+        "files in the assigned home scope and may update only scope-local status, "
+        "inventory, provenance, QA, prompts, temp, renders, and evidence.\n"
+    )
+
+
+def _scope_workspace_text_initial(persona: dict[str, object], relative_path: str) -> str:
+    slug = f"{persona['id']}-{persona['role']}"
+    return (
+        f"# {slug} scope worker workspace\n\n"
+        f"Assigned home scope: `../../../home/{relative_path}/`\n\n"
+        "The parent chat owns persona-level shared metadata. This worker may write only "
+        "the assigned home scope and this `_production/scopes/` directory.\n"
+    )
+
+
+def _validate_scope_workspace_file(scope_control: int, persona: dict[str, object], relative_path: str, label: str) -> None:
+    expected = _scope_workspace_text(persona, relative_path)
+    if not _validate_existing_control_file(scope_control, WORKSPACE_FILE, label, expect_json=False, allow_read_only_public=True):
+        _write_new_text_at(scope_control, WORKSPACE_FILE, expected, label)
+        return
+    actual = _read_text_at(
+        scope_control, WORKSPACE_FILE, label, allow_read_only_public=True
+    )
+    if actual == expected:
+        return
+    if actual == _scope_workspace_text_initial(persona, relative_path):
+        _replace_text_at(
+            scope_control,
+            WORKSPACE_FILE,
+            expected,
+            label,
+            allow_read_only_public=True,
+        )
+        return
+    raise ScaffoldError(f"scope workspace file does not match authoritative scope: {label}")
 
 
 def scaffold(root: Path, *, resume: bool = False) -> Path:
     root = _absolute_lexical(root)
-    root_descriptor = _bind_root(root, resume=resume)
+    root_descriptor, previous_version = _bind_root(root, resume=resume)
     try:
         for persona in spec.PERSONAS:
             slug = f"{persona['id']}-{persona['role']}"
             persona_root = _ensure_directory_at(root_descriptor, slug, os.fspath(root / slug))
             try:
                 _validate_workspace_file(
-                    persona_root, persona, os.fspath(root / slug / WORKSPACE_FILE)
+                    persona_root, persona, os.fspath(root / slug / WORKSPACE_FILE), previous_version=previous_version
                 )
                 home = _ensure_directory_at(
                     persona_root, "home", os.fspath(root / slug / "home")
@@ -392,12 +585,72 @@ def scaffold(root: Path, *, resume: bool = False) -> Path:
                         descriptor = _ensure_directory_at(control, relative_path, relative_path)
                         os.close(descriptor)
 
+                    scopes = _ensure_directory_at(control, "scopes", f"{slug}/_production/scopes")
+                    try:
+                        for relative_path in spec.all_scope_paths(persona):
+                            scope_id = scope_control_id(relative_path)
+                            scope_control = _ensure_directory_at(scopes, scope_id, f"{slug}/_production/scopes/{scope_id}")
+                            try:
+                                _validate_scope_workspace_file(
+                                    scope_control,
+                                    persona,
+                                    relative_path,
+                                    f"{slug}/_production/scopes/{scope_id}/{WORKSPACE_FILE}",
+                                )
+                                for scope_dir in SCOPE_PRODUCTION_DIRS:
+                                    descriptor = _ensure_directory_at(scope_control, scope_dir, scope_dir)
+                                    os.close(descriptor)
+                                for name, payload in _scope_initial_files(persona, relative_path).items():
+                                    label = f"{slug}/_production/scopes/{scope_id}/{name}"
+                                    exists = _validate_existing_control_file(
+                                        scope_control, name, label, expect_json=True
+                                    )
+                                    if not exists:
+                                        _write_new_json_at(scope_control, name, payload, label)
+                                    elif name == "assignment.json":
+                                        actual = json.loads(
+                                            _read_text_at(scope_control, name, label)
+                                        )
+                                        legacy = {
+                                            key: value
+                                            for key, value in payload.items()
+                                            if key not in ("state", "files")
+                                        }
+                                        if actual == legacy:
+                                            _replace_text_at(
+                                                scope_control,
+                                                name,
+                                                json.dumps(
+                                                    payload,
+                                                    ensure_ascii=False,
+                                                    indent=2,
+                                                    sort_keys=True,
+                                                )
+                                                + "\n",
+                                                label,
+                                            )
+                                for name, initial in (("inventory.jsonl", ""), ("provenance.jsonl", ""), ("qa.jsonl", ""), (".lease.lock", "\0"), ("lease-recovery.jsonl", "")):
+                                    label = f"{slug}/_production/scopes/{scope_id}/{name}"
+                                    if not _validate_existing_control_file(scope_control, name, label, expect_json=False):
+                                        _write_new_text_at(scope_control, name, initial, label)
+                                _validate_existing_control_file(scope_control, "lease.json", f"{slug}/_production/scopes/{scope_id}/lease.json", expect_json=True)
+                            finally:
+                                os.close(scope_control)
+                    finally:
+                        os.close(scopes)
+
                     for name, payload in _persona_initial_files(persona).items():
                         label = os.fspath(root / slug / "_production" / name)
-                        if not _validate_existing_control_file(
+                        exists = _validate_existing_control_file(
                             control, name, label, expect_json=True
-                        ):
+                        )
+                        if not exists:
                             _write_new_json_at(control, name, payload, label)
+                        elif previous_version == 2:
+                            actual = json.loads(_read_text_at(control, name, label))
+                            upgraded = _upgrade_v2_persona_payload(persona, name, actual, payload)
+                            if upgraded is not None:
+                                _replace_text_at(control, name, json.dumps(upgraded, ensure_ascii=False, indent=2, sort_keys=True) + "\n", label)
                     for name in ("inventory.jsonl", "provenance.jsonl", "qa.jsonl"):
                         label = os.fspath(root / slug / "_production" / name)
                         if not _validate_existing_control_file(
@@ -424,6 +677,14 @@ def scaffold(root: Path, *, resume: bool = False) -> Path:
                     os.close(control)
             finally:
                 os.close(persona_root)
+        if previous_version == 2:
+            _replace_text_at(
+                root_descriptor,
+                OWNER_FILE,
+                json.dumps(_owner_payload(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                os.fspath(root / OWNER_FILE),
+                allow_read_only_public=True,
+            )
     finally:
         os.close(root_descriptor)
     return root

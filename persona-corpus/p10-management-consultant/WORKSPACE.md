@@ -1,6 +1,7 @@
 # p10-management-consultant workspace
 
-This session owns only the `p10-management-consultant/` persona folder.
+The parent chat session exclusively owns the `p10-management-consultant/` persona folder.
+The parent holds each scope lease and assigns one authoritative `home/` leaf folder to each subagent. A subagent creates only the fixed files listed for that folder and updates only its permitted scope-local production records.
 
 Read the production rules before working:
 

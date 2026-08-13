@@ -75,7 +75,7 @@ class PersonaSkillCorpusDocsTests(unittest.TestCase):
         )
         self.assertNotIn("JPEG", p17)
 
-    def test_runbooks_pin_direct_persona_layout_and_ownership_boundary(self):
+    def test_runbooks_pin_two_level_chat_and_scope_ownership_boundary(self):
         readme = (DOC_ROOT / "README.md").read_text(encoding="utf-8")
         rules = (DOC_ROOT / "COMMON_RULES.md").read_text(encoding="utf-8")
         batch = (DOC_ROOT / "BATCH_PROTOCOL.md").read_text(encoding="utf-8")
@@ -85,8 +85,17 @@ class PersonaSkillCorpusDocsTests(unittest.TestCase):
         self.assertIn("exactly twenty direct persona", layout)
         self.assertIn("no central `devices/` or `_production/`", layout)
         self.assertIn("<root>/<persona>/_production/", layout)
+        self.assertIn("One parent chat session", readme)
+        self.assertIn("exactly one fixture-defined leaf folder", rules)
+        self.assertIn("One subagent assignment owns one fixture-defined leaf folder", batch)
+        self.assertIn("_production/scopes/<scope-id>/", layout)
+        self.assertIn("各Subagent assignmentはそのpersona内の1 leaf folder", handoff)
+        self.assertIn("scope-claim", batch)
+        self.assertIn("scope-release", batch)
+        self.assertIn("--worker-session", batch)
+        self.assertIn("Parent `release` and `recover` fail", batch)
         for text in (readme, rules, batch, layout, handoff):
-            self.assertIn("complete persona folder", text)
+            self.assertIn("scope", text.lower())
 
 
 if __name__ == "__main__":
