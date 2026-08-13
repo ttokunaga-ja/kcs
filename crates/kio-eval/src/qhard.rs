@@ -19,8 +19,9 @@ use std::{
 };
 #[cfg(target_os = "macos")]
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
     os::raw::{c_char, c_int, c_void},
+    os::unix::ffi::OsStrExt,
 };
 
 use cap_primitives::{ambient_authority, fs as cap_fs};
@@ -50,6 +51,10 @@ const MAX_MACHO_RESOLUTION_CONTEXTS: usize = 4_096;
 const MAX_MACHO_LOAD_COMMANDS: usize = 256;
 const MAX_MACHO_PATH_BYTES: usize = 4 * 1024;
 const MAX_MACHO_INSPECT_OUTPUT_BYTES: usize = 256 * 1024;
+// Darwin's `MNT_RDONLY`.  Keep this as a policy constant rather than relying
+// on an ambient mount option: comparator measurements must be backed by an
+// immutable filesystem, not merely root-owned directory modes.
+const MACOS_MNT_RDONLY: u64 = 0x0000_0001;
 const MAX_LIVE_FIXTURE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_FIXTURE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIVE_FIXTURE_FILES: usize = 16_384;
@@ -266,6 +271,20 @@ struct RuntimeClosureEntry {
     binding: FileBinding,
 }
 
+/// The filesystem identity that held the administrator runtime at binding
+/// time.  `fsid`, mount point, source, and filesystem type together make a
+/// remount or a replacement volume observable; `read_only` is retained in the
+/// report rather than inferred from the successful bind.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RuntimeMountIdentity {
+    fsid: String,
+    mount_point: String,
+    mounted_from: String,
+    filesystem_type: String,
+    flags: u64,
+    read_only: bool,
+}
+
 /// Provenance for every executable image that dyld can load for fixture-B's
 /// rga comparison.  Entries are a canonical, sorted closure: each one is
 /// either beneath the administrator-supplied runtime root or is a terminal
@@ -273,6 +292,7 @@ struct RuntimeClosureEntry {
 #[derive(Debug, Clone, Serialize)]
 struct ComparatorRuntimeProvenance {
     root: String,
+    mount: RuntimeMountIdentity,
     inspector: FileBinding,
     closure_sha256: String,
     closure: Vec<RuntimeClosureEntry>,
@@ -322,6 +342,8 @@ struct RuntimeBoundFile {
 #[derive(Debug)]
 struct ComparatorRuntime {
     root: PathBuf,
+    root_handle: RetainedDirectory,
+    mount: RuntimeMountIdentity,
     bin_directory: PathBuf,
     config_path: PathBuf,
     config: RuntimeBoundFile,
@@ -2682,6 +2704,7 @@ fn add_runtime_closure_entry(
     files: &mut BTreeMap<PathBuf, RuntimeBoundFile>,
     path: &Path,
     trust: RuntimeTrust,
+    runtime_mount: &RuntimeMountIdentity,
     total_bytes: &mut u64,
 ) -> Result<(), QhardError> {
     if files.contains_key(path) {
@@ -2694,6 +2717,8 @@ fn add_runtime_closure_entry(
                 "macOS sealed-system closure entry is not in canonical form".into(),
             ));
         }
+    } else {
+        require_runtime_mount(runtime_mount, path, "comparator runtime closure image")?;
     }
     if files.len() >= MAX_RUNTIME_CLOSURE_ENTRIES {
         return Err(QhardError::Input(
@@ -2772,6 +2797,7 @@ enum ResolvedMachoRpath {
 
 fn resolve_runtime_rpath(
     root: &Path,
+    runtime_mount: &RuntimeMountIdentity,
     raw: &str,
     owner: &Path,
     executable: &Path,
@@ -2808,8 +2834,9 @@ fn resolve_runtime_rpath(
         path.to_path_buf()
     };
     if candidate.starts_with(root) {
-        return resolve_runtime_path(root, &candidate, "Mach-O rpath", false)
-            .map(ResolvedMachoRpath::Runtime);
+        let resolved = resolve_runtime_path(root, &candidate, "Mach-O rpath", false)?;
+        require_runtime_mount(runtime_mount, &resolved, "Mach-O runtime rpath")?;
+        return Ok(ResolvedMachoRpath::Runtime(resolved));
     }
     let canonical = fs::canonicalize(&candidate)
         .map_err(|e| QhardError::Input(format!("cannot resolve Mach-O rpath: {e}")))?;
@@ -2831,6 +2858,7 @@ fn resolve_runtime_rpath(
 
 fn expanded_rpaths(
     root: &Path,
+    runtime_mount: &RuntimeMountIdentity,
     inspection: &MachoInspection,
     owner: &Path,
     executable: &Path,
@@ -2838,7 +2866,7 @@ fn expanded_rpaths(
 ) -> Result<Vec<ResolvedMachoRpath>, QhardError> {
     let mut rpaths = Vec::new();
     for raw in &inspection.rpaths {
-        let resolved = resolve_runtime_rpath(root, raw, owner, executable)?;
+        let resolved = resolve_runtime_rpath(root, runtime_mount, raw, owner, executable)?;
         if !rpaths.contains(&resolved) {
             rpaths.push(resolved);
         }
@@ -3020,6 +3048,7 @@ where
 /// closure entry.
 fn resolve_runtime_closure(
     root: &Path,
+    runtime_mount: &RuntimeMountIdentity,
     entry_paths: &BTreeMap<String, PathBuf>,
 ) -> Result<ResolvedRuntimeClosure, QhardError> {
     let inspector = trusted_otool()?;
@@ -3039,6 +3068,7 @@ fn resolve_runtime_closure(
         |image, inspection| {
             expanded_rpaths(
                 root,
+                runtime_mount,
                 inspection,
                 &image.path,
                 &image.executable,
@@ -3048,7 +3078,9 @@ fn resolve_runtime_closure(
         |install_name, image, rpaths| {
             resolve_macho_dependency(root, install_name, &image.path, &image.executable, rpaths)
         },
-        |path, trust| add_runtime_closure_entry(&mut files, path, trust, &mut total_bytes),
+        |path, trust| {
+            add_runtime_closure_entry(&mut files, path, trust, runtime_mount, &mut total_bytes)
+        },
     )?;
     // `inspect_macho` invokes otool repeatedly.  Do not accept a closure
     // inspected by one system otool binary and attest a different one.
@@ -3088,6 +3120,141 @@ fn runtime_closure_matches(
         && resolved.closure == provenance.closure
 }
 
+fn runtime_mount_is_read_only(flags: u64) -> bool {
+    flags & MACOS_MNT_RDONLY != 0
+}
+
+fn runtime_mount_matches(expected: &RuntimeMountIdentity, current: &RuntimeMountIdentity) -> bool {
+    current.read_only && current == expected
+}
+
+fn runtime_mount_pair_matches(
+    expected: &RuntimeMountIdentity,
+    public_path: &RuntimeMountIdentity,
+    retained_fd: &RuntimeMountIdentity,
+) -> bool {
+    runtime_mount_matches(expected, public_path)
+        && runtime_mount_matches(expected, retained_fd)
+        && public_path == retained_fd
+}
+
+fn require_runtime_mount(
+    expected: &RuntimeMountIdentity,
+    path: &Path,
+    label: &str,
+) -> Result<(), QhardError> {
+    let actual = inspect_runtime_mount(path)?;
+    if !runtime_mount_matches(expected, &actual) {
+        return Err(QhardError::Input(format!(
+            "{label} is not on the bound comparator runtime read-only mount"
+        )));
+    }
+    Ok(())
+}
+
+fn runtime_public_root_matches_handle(
+    path: &Path,
+    handle: &RetainedDirectory,
+) -> Result<(), QhardError> {
+    let listed = fs::symlink_metadata(path)
+        .map_err(|e| QhardError::Input(format!("cannot inspect comparator runtime root: {e}")))?;
+    let retained = handle.handle.metadata().map_err(|e| {
+        QhardError::Input(format!(
+            "cannot inspect retained comparator runtime root: {e}"
+        ))
+    })?;
+    if listed.file_type().is_symlink() || !listed.is_dir() || !same_directory(&listed, &retained) {
+        return Err(QhardError::Input(
+            "comparator runtime public root changed while bound".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn mount_string(value: &[c_char], label: &str) -> Result<String, QhardError> {
+    // Darwin's statfs strings are fixed-size NUL-terminated arrays.  Reject a
+    // non-UTF-8 or unterminated value rather than collapsing it into a lossy
+    // mount identity that could compare equal across distinct mounts.
+    let nul = value.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        QhardError::Input(format!("comparator runtime {label} is not NUL-terminated"))
+    })?;
+    let bytes = unsafe { CStr::from_ptr(value.as_ptr()) }.to_bytes();
+    if bytes.len() != nul {
+        return Err(QhardError::Input(format!(
+            "comparator runtime {label} has an invalid mount string"
+        )));
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| QhardError::Input(format!("comparator runtime {label} is not UTF-8")))
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_mount_identity(details: &libc::statfs) -> Result<RuntimeMountIdentity, QhardError> {
+    let flags = u64::from(details.f_flags);
+    let mount = RuntimeMountIdentity {
+        // libc intentionally hides fsid_t's representation, but preserves
+        // Debug precisely so platform-specific opaque values remain
+        // comparable.  Retain it as reportable provenance rather than
+        // assuming a Linux-shaped public field.
+        fsid: format!("{:?}", details.f_fsid),
+        mount_point: mount_string(&details.f_mntonname, "mount point")?,
+        mounted_from: mount_string(&details.f_mntfromname, "mount source")?,
+        filesystem_type: mount_string(&details.f_fstypename, "filesystem type")?,
+        flags,
+        read_only: runtime_mount_is_read_only(flags),
+    };
+    if !mount.read_only {
+        return Err(QhardError::Input(
+            "comparator runtime must be on an MNT_RDONLY read-only mount".into(),
+        ));
+    }
+    Ok(mount)
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_runtime_mount(path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        QhardError::Input("comparator runtime path contains an interior NUL byte".into())
+    })?;
+    let mut details: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut details) } != 0 {
+        return Err(QhardError::Input(format!(
+            "cannot inspect comparator runtime mount: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    runtime_mount_identity(&details)
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_runtime_mount_fd(handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
+    use std::os::fd::AsRawFd;
+    let mut details: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(handle.as_raw_fd(), &mut details) } != 0 {
+        return Err(QhardError::Input(format!(
+            "cannot inspect retained comparator runtime mount: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    runtime_mount_identity(&details)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn inspect_runtime_mount(_path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
+    Err(QhardError::Input(
+        "comparator runtime measurements require macOS MNT_RDONLY mount verification".into(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn inspect_runtime_mount_fd(_handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
+    Err(QhardError::Input(
+        "comparator runtime measurements require macOS MNT_RDONLY mount verification".into(),
+    ))
+}
+
 impl ComparatorRuntime {
     fn bind(input: &Path) -> Result<Self, QhardError> {
         if !input.is_absolute() {
@@ -3111,35 +3278,56 @@ impl ComparatorRuntime {
             ));
         }
         require_sealed_absolute_path(&root, "comparator runtime root")?;
+        let root_handle = RetainedDirectory::open(&root, "comparator runtime root")?;
+        let mount = inspect_runtime_mount(&root)?;
+        let retained_mount = inspect_runtime_mount_fd(&root_handle.handle)?;
+        if !runtime_mount_pair_matches(&mount, &mount, &retained_mount) {
+            return Err(QhardError::Input(
+                "comparator runtime mount differs between public path and retained handle".into(),
+            ));
+        }
         let bin_directory = resolve_runtime_path(
             &root,
             &root.join("bin"),
             "comparator runtime bin directory",
             false,
         )?;
+        require_runtime_mount(&mount, &bin_directory, "comparator runtime bin directory")?;
         let config_path = resolve_runtime_path(
             &root,
             &root.join("config/rga-config.json"),
             "comparator runtime rga config",
             true,
         )?;
+        require_runtime_mount(&mount, &config_path, "comparator runtime rga config")?;
         let config = bind_runtime_rga_config(&config_path)?;
         let mut entry_paths = BTreeMap::new();
         for name in ["rga", "rga-preproc", "pandoc", "pdftotext", "rg"] {
             let requested = root.join("bin").join(name);
-            entry_paths.insert(
-                name.to_owned(),
-                resolve_runtime_path(&root, &requested, &format!("runtime bin/{name}"), true)?,
-            );
+            let path =
+                resolve_runtime_path(&root, &requested, &format!("runtime bin/{name}"), true)?;
+            require_runtime_mount(&mount, &path, &format!("runtime bin/{name}"))?;
+            entry_paths.insert(name.to_owned(), path);
         }
-        let resolved = resolve_runtime_closure(&root, &entry_paths)?;
+        let resolved = resolve_runtime_closure(&root, &mount, &entry_paths)?;
+        let final_mount = inspect_runtime_mount(&root)?;
+        let final_retained_mount = inspect_runtime_mount_fd(&root_handle.handle)?;
+        if !runtime_mount_pair_matches(&mount, &final_mount, &final_retained_mount) {
+            return Err(QhardError::Input(
+                "comparator runtime mount changed while binding".into(),
+            ));
+        }
+        runtime_public_root_matches_handle(&root, &root_handle)?;
         Ok(Self {
             root: root.clone(),
+            root_handle,
+            mount: mount.clone(),
             bin_directory,
             config_path,
             config,
             provenance: ComparatorRuntimeProvenance {
                 root: root.display().to_string(),
+                mount,
                 inspector: resolved.inspector,
                 closure_sha256: resolved.closure_sha256,
                 closure: resolved.closure,
@@ -3160,12 +3348,25 @@ impl ComparatorRuntime {
     }
 
     fn recheck(&self, hash_contents: bool) -> Result<(), QhardError> {
+        let mount = inspect_runtime_mount(&self.root)?;
+        let retained_mount = inspect_runtime_mount_fd(&self.root_handle.handle)?;
+        if !runtime_mount_pair_matches(&self.mount, &mount, &retained_mount) {
+            return Err(QhardError::Input(
+                "comparator runtime mount identity changed while bound".into(),
+            ));
+        }
+        runtime_public_root_matches_handle(&self.root, &self.root_handle)?;
         require_sealed_absolute_path(&self.root, "comparator runtime root")?;
         let bin_directory = resolve_runtime_path(
             &self.root,
             &self.root.join("bin"),
             "comparator runtime bin directory",
             false,
+        )?;
+        require_runtime_mount(
+            &self.mount,
+            &bin_directory,
+            "comparator runtime bin directory",
         )?;
         if bin_directory != self.bin_directory {
             return Err(QhardError::Input(
@@ -3178,6 +3379,7 @@ impl ComparatorRuntime {
             "comparator runtime rga config",
             true,
         )?;
+        require_runtime_mount(&self.mount, &config_path, "comparator runtime rga config")?;
         if config_path != self.config_path {
             return Err(QhardError::Input(
                 "comparator runtime rga config path changed while bound".into(),
@@ -3211,6 +3413,7 @@ impl ComparatorRuntime {
                     "comparator runtime bin/{name} changed while bound"
                 )));
             }
+            require_runtime_mount(&self.mount, &actual, &format!("runtime bin/{name}"))?;
         }
         for (path, file) in &self.files {
             match file.trust {
@@ -3226,6 +3429,11 @@ impl ComparatorRuntime {
                             "comparator runtime closure path changed while bound".into(),
                         ));
                     }
+                    require_runtime_mount(
+                        &self.mount,
+                        &resolved,
+                        "comparator runtime closure entry",
+                    )?;
                 }
                 RuntimeTrust::MacosSealedSystem => {
                     let resolved =
@@ -3262,7 +3470,7 @@ impl ComparatorRuntime {
         // and catches a newly introduced higher-priority `@rpath` candidate.
         // Always hash this fresh graph: callers invoke this before and after
         // each rga subprocess, so an altered image cannot improve a score.
-        let resolved = resolve_runtime_closure(&self.root, &self.entry_paths)?;
+        let resolved = resolve_runtime_closure(&self.root, &self.mount, &self.entry_paths)?;
         if resolved.inspector != self.provenance.inspector {
             return Err(QhardError::Input(
                 "otool changed during comparator measurement".into(),
@@ -3271,6 +3479,13 @@ impl ComparatorRuntime {
         if !runtime_closure_matches(&self.provenance, &resolved) {
             return Err(QhardError::Input(
                 "comparator runtime Mach-O closure changed while bound".into(),
+            ));
+        }
+        let final_mount = inspect_runtime_mount(&self.root)?;
+        let final_retained_mount = inspect_runtime_mount_fd(&self.root_handle.handle)?;
+        if !runtime_mount_pair_matches(&self.mount, &final_mount, &final_retained_mount) {
+            return Err(QhardError::Input(
+                "comparator runtime mount changed during revalidation".into(),
             ));
         }
         Ok(())
@@ -4497,6 +4712,14 @@ mod tests {
         };
         let provenance = ComparatorRuntimeProvenance {
             root: temporary.path().display().to_string(),
+            mount: RuntimeMountIdentity {
+                fsid: "fsid(7,11)".into(),
+                mount_point: "/sealed".into(),
+                mounted_from: "disk3s1".into(),
+                filesystem_type: "apfs".into(),
+                flags: MACOS_MNT_RDONLY,
+                read_only: true,
+            },
             inspector: binding(Path::new("/usr/bin/otool")),
             closure_sha256: "initial-closure".into(),
             closure: vec![initial_entry],
@@ -4513,6 +4736,51 @@ mod tests {
             closure: vec![fresh_entry],
         };
         assert!(!runtime_closure_matches(&provenance, &fresh));
+    }
+
+    #[test]
+    fn read_only_mount_policy_rejects_writable_nested_and_identity_changes() {
+        assert!(runtime_mount_is_read_only(MACOS_MNT_RDONLY));
+        assert!(!runtime_mount_is_read_only(0));
+        let bound = RuntimeMountIdentity {
+            fsid: "fsid(17,29)".into(),
+            mount_point: "/Library/KioComparatorRuntime/v1".into(),
+            mounted_from: "/dev/disk9s1".into(),
+            filesystem_type: "apfs".into(),
+            flags: MACOS_MNT_RDONLY,
+            read_only: true,
+        };
+        assert!(runtime_mount_matches(&bound, &bound));
+
+        let mut remounted = bound.clone();
+        remounted.fsid = "fsid(18,29)".into();
+        assert!(!runtime_mount_matches(&bound, &remounted));
+        // A nested APFS/UDIF mount can itself be read-only, yet must not be
+        // accepted: it can be unmounted independently of the bound runtime.
+        let mut nested_read_only = bound.clone();
+        nested_read_only.mount_point = "/Library/KioComparatorRuntime/v1/lib".into();
+        nested_read_only.mounted_from = "/dev/disk10s1".into();
+        assert!(!runtime_mount_matches(&bound, &nested_read_only));
+
+        let mut writable = bound.clone();
+        writable.flags = 0;
+        writable.read_only = false;
+        assert!(!runtime_mount_matches(&bound, &writable));
+
+        assert!(!runtime_mount_pair_matches(&bound, &bound, &remounted));
+        assert!(!runtime_mount_pair_matches(
+            &bound,
+            &bound,
+            &nested_read_only
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn comparator_runtime_rejects_writable_mount_before_measurement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let error = inspect_runtime_mount(temporary.path()).unwrap_err();
+        assert!(error.to_string().contains("MNT_RDONLY read-only mount"));
     }
 
     #[test]

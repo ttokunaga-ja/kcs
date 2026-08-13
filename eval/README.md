@@ -155,6 +155,10 @@ report は runtime root、固定 inspector、各 closure image の canonical pat
 各 rga subprocess の実行前後と計測 finalization では load command から closure を再帰的に再解決し、初期 binding の
 canonical path・trust class・SHA-256・closure digest と完全一致させる。途中で高優先度の `@rpath` 候補が追加された場合を
 含め、entry の追加・削除、解決先または内容の変化は `blocked-unmeasured` とする。
+runtime root は macOS `MNT_RDONLY` の read-only mount でなければならない。bind時、各 rga subprocess の直前・直後、
+計測 finalization で public canonical path と retained root descriptor の mount identity を再確認し、writable filesystem、
+unmount/remount、mount replacement、または確認不能は `blocked-unmeasured` とする。report には canonical runtime path、
+read-only 判定、filesystem ID・mount point・mount source・filesystem type・flags、および closure digest を保存する。
 `config/rga-config.json` は `{"custom_adapters":[]}` だけを含む root-owned sealed regular file とし、rga の
 ユーザー設定・任意 custom adapter を取り込ませない。helper lookup の `PATH` も private temporary directory ではなく
 sealed runtime の `bin/` だけに固定する。

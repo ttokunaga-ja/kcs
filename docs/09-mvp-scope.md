@@ -246,6 +246,9 @@ macOS の rga comparator は、ユーザー所有 package prefix を信頼根に
 `LC_DYLD_ENVIRONMENT` は拒否する。各 comparator subprocess の前後と計測 finalization で closure を再帰的に
 再解決し、初期 binding の canonical path・trust class・SHA-256・closure digest と完全一致しない場合は、
 高優先度の `@rpath` 候補追加を含めて `blocked-unmeasured` とする。
+さらに runtime root は macOS `MNT_RDONLY` の read-only mount に限定し、bind・各 comparator subprocess の前後・
+finalization で public path と retained root descriptor の mount identity が初期値と一致しなければ
+`blocked-unmeasured` とする。report は read-only 判定と mount identity を closure provenance に含める。
 
 ## 4.2 シナリオ凍結規律
 
