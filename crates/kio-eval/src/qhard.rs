@@ -1995,9 +1995,7 @@ fn executable_tool(
         "mdfind" => {
             path == Path::new("/usr/bin/mdfind")
                 && run_tool(&bound.1, &["-h"]).is_ok_and(|output| {
-                    output.status.code() == Some(5)
-                        && output.stdout.starts_with("Usage:")
-                        && output.stdout.contains("-onlyin")
+                    mdfind_capability_output(output.status.code(), &output.stdout)
                 })
         }
         _ => true,
@@ -2009,6 +2007,18 @@ fn executable_tool(
     }
     Ok(bound)
 }
+
+/// Validate the stable `mdfind -h` capability shape without treating a
+/// leading blank line from the system tool as an identity mismatch.
+fn mdfind_capability_output(exit_code: Option<i32>, stdout: &str) -> bool {
+    exit_code == Some(5)
+        // macOS `mdfind -h` currently prefixes its usage block with a blank
+        // line. Accept only leading whitespace, not an arbitrary banner, so
+        // this remains a capability/identity check.
+        && stdout.trim_start().starts_with("Usage:")
+        && stdout.contains("-onlyin")
+}
+
 fn trusted_mdfind(path: &Path) -> Result<FileBinding, QhardError> {
     if path != Path::new("/usr/bin/mdfind") {
         return Err(QhardError::Input(
@@ -2023,10 +2033,7 @@ fn trusted_mdfind(path: &Path) -> Result<FileBinding, QhardError> {
     }
     let binding = tool_binding(path, "mdfind")?;
     let output = run_tool(path, &["-h"])?;
-    if output.status.code() != Some(5)
-        || !output.stdout.starts_with("Usage:")
-        || !output.stdout.contains("-onlyin")
-    {
+    if !mdfind_capability_output(output.status.code(), &output.stdout) {
         return Err(QhardError::Input(
             "mdfind failed system capability preflight".into(),
         ));
@@ -2750,6 +2757,22 @@ mod tests {
             assert!(executable_tool(true_binary, "rga").is_err());
             assert!(executable_tool(true_binary, "mdfind").is_err());
         }
+    }
+
+    #[test]
+    fn mdfind_capability_accepts_the_system_help_preamble_only() {
+        assert!(mdfind_capability_output(
+            Some(5),
+            "\nUsage: /usr/bin/mdfind [-onlyin directory] query\n\t-onlyin <dir>\n",
+        ));
+        assert!(!mdfind_capability_output(
+            Some(0),
+            "\nUsage: /usr/bin/mdfind [-onlyin directory] query\n",
+        ));
+        assert!(!mdfind_capability_output(
+            Some(5),
+            "other tool\nUsage: /usr/bin/mdfind [-onlyin directory] query\n",
+        ));
     }
 
     #[test]
