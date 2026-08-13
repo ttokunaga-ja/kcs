@@ -137,7 +137,7 @@ hash を記録し、管理者が同じ値を独立に照合してから、root-o
 
 ```bash
 /usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: ff377e93369b011827f2708b4fa006324e10c62cbf056a79c91976ac59371072
+# Expected for this revision: 7a7261a84e61bb1305cfb8a643f8055ec6469a21ef3ff4777c6d2248e5437ff5
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
@@ -147,7 +147,7 @@ sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
     cleanup() { /bin/rm -f "$script"; /bin/rmdir "$admin_dir"; }
     trap cleanup EXIT
-    readonly expected=ff377e93369b011827f2708b4fa006324e10c62cbf056a79c91976ac59371072
+    readonly expected=7a7261a84e61bb1305cfb8a643f8055ec6469a21ef3ff4777c6d2248e5437ff5
     readonly actual=$(/usr/bin/shasum -a 256 "$script")
     [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
     /bin/zsh -f "$script" build
@@ -171,6 +171,9 @@ xattr列挙失敗をfail-closedとし、管理者固定コピー、staging、man
 DMG containerにだけ適用し、mounted runtime、payload、manifestには拡張しない。FinderInfoの値は読み取らず、
 image SHA-256は引き続きDMG本体のbytesを束縛する。builder manifestはimage/runtime両方のpolicyと観測した
 許可xattr名を記録し、正式evaluator reportはmounted runtimeの厳しいpolicyを記録する。
+`hdiutil attach`が`com.apple.diskimages.recentcksum`を生成した場合、builderはattach直後にその名前だけを
+確認して削除し、削除後にDMGの厳しいpolicyを再検証する。このchecksum cacheの値はKioのtrust inputにせず、
+manifestには削除policyだけを記録する。削除不能または他の属性が混在する場合はfail-closedとする。
 ACLは上の`chmod -N`でroot-private固定コピーだけを正規化し、checkoutやHomebrew sourceには触れない。
 build script自身はownership、mode、ACL、xattr policy、およびSHA-256を再検証し、不一致なら実行前に停止する。
 

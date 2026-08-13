@@ -5678,6 +5678,9 @@ mod tests {
             "com.apple.FinderInfo".to_owned(),
         ])));
         assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
+            "com.apple.diskimages.recentcksum".to_owned(),
+        ])));
+        assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
             "com.apple.provenance".to_owned(),
             "com.example.untrusted".to_owned(),
         ])));

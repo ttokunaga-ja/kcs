@@ -72,8 +72,15 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
             source,
         )
         self.assertIn(
+            'image_attach_cache_policy="delete:com.apple.diskimages.recentcksum"',
+            source,
+        )
+        self.assertIn(
             '/bin/chmod -N "$IMAGE"; require_safe_image_xattrs "$IMAGE"', source
         )
+        attach = source.index("/usr/bin/hdiutil attach")
+        normalize = source.index('normalize_attached_image_xattrs "$IMAGE"')
+        self.assertLess(attach, normalize)
         self.assertIn('if [[ $p == $IMAGE ]]; then', source)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS xattr policy")
@@ -113,6 +120,46 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
             )
             self.assertEqual(accepted.returncode, 0)
             self.assertNotEqual(rejected_by_runtime.returncode, 0)
+
+            subprocess.run(
+                [
+                    "/usr/bin/xattr",
+                    "-w",
+                    "com.apple.diskimages.recentcksum",
+                    "opaque-cache-state",
+                    handle.name,
+                ],
+                check=True,
+            )
+            rejected_before_attach_normalization = subprocess.run(
+                [
+                    "/bin/zsh",
+                    "-fc",
+                    helpers + '\nrequire_safe_image_xattrs "$1"',
+                    "policy-test",
+                    handle.name,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            normalized = subprocess.run(
+                [
+                    "/bin/zsh",
+                    "-fc",
+                    helpers + '\nnormalize_attached_image_xattrs "$1"',
+                    "policy-test",
+                    handle.name,
+                ]
+            )
+            remaining = subprocess.run(
+                ["/usr/bin/xattr", handle.name],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            self.assertNotEqual(rejected_before_attach_normalization.returncode, 0)
+            self.assertEqual(normalized.returncode, 0)
+            self.assertNotIn("com.apple.diskimages.recentcksum", remaining)
 
             subprocess.run(
                 [

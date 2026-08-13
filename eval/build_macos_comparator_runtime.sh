@@ -21,6 +21,20 @@ require_safe_image_xattrs() {
     *) die "unexpected disk image extended attributes: $target_path: ${names//$'\n'/,}" ;;
   esac
 }
+normalize_attached_image_xattrs() {
+  local target_path=$1 names name
+  names=$(/usr/bin/xattr "$target_path") || die "cannot enumerate attached disk image extended attributes: $target_path"
+  for name in ${(f)names}; do
+    case $name in
+      com.apple.FinderInfo|com.apple.provenance|com.apple.diskimages.recentcksum) ;;
+      *) die "unexpected attached disk image extended attribute: $target_path: $name" ;;
+    esac
+  done
+  if print -r -- "$names" | /usr/bin/grep -Fxq com.apple.diskimages.recentcksum; then
+    /usr/bin/xattr -d com.apple.diskimages.recentcksum "$target_path" || die "cannot remove disk image checksum cache: $target_path"
+  fi
+  require_safe_image_xattrs "$target_path"
+}
 mode=${1:-build}
 [[ $mode == build || $mode == verify ]] || die "usage: $0 [build|verify]"
 if [[ $mode == verify ]]; then
@@ -465,6 +479,7 @@ created_image=1
 /usr/sbin/chown root:wheel "$IMAGE"; /bin/chmod 0444 "$IMAGE"
 /bin/chmod -N "$IMAGE"; require_safe_image_xattrs "$IMAGE"
 /usr/bin/hdiutil attach -readonly -owners on -nobrowse -noautoopen -mountpoint "$RUNTIME_ROOT" "$IMAGE" >/dev/null; mounted=1
+normalize_attached_image_xattrs "$IMAGE"
 
 created_manifest=1
 /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 -I -E -s - "$RUNTIME_ROOT" "$BUILD_ROOT/manifest-preimage.json" "$MANIFEST" "$IMAGE" <<'PY'
@@ -590,7 +605,7 @@ for rel in d["closure_images"]:
    if not target.startswith(R+"/lib/") or not os.path.isfile(target): bad("rpath escape/unresolved: "+raw)
   elif system_load(raw): pass
   else: bad("external or unsealed dependency %s in %s"%(raw,p))
-d.update(image_sha256=dg(I),image_xattr_policy="subset:com.apple.FinderInfo,com.apple.provenance",image_allowed_xattrs=safe_image_xattrs(I),runtime_read_only=True,runtime_allowed_xattrs=runtime_xattrs)
+d.update(image_sha256=dg(I),image_xattr_policy="subset:com.apple.FinderInfo,com.apple.provenance",image_attach_cache_policy="delete:com.apple.diskimages.recentcksum",image_allowed_xattrs=safe_image_xattrs(I),runtime_read_only=True,runtime_allowed_xattrs=runtime_xattrs)
 with open(M,"w") as f: json.dump(d,f,sort_keys=True,separators=(",",":")); f.write("\n")
 os.chown(M,0,0); os.chmod(M,0o444)
 subprocess.check_call(["/bin/chmod","-N",M])
