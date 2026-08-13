@@ -9,9 +9,9 @@ readonly BUILD_ROOT=/private/tmp/kio-comparator-runtime-v1-build VOLUME_NAME=Kio
 readonly ADMIN_SCRIPT_PREFIX=/private/tmp/kio-comparator-runtime-v1-admin.
 die() { print -u2 -- "error: $*"; exit 1; }
 require_safe_xattrs() {
-  local path=$1 names
-  names=$(/usr/bin/xattr "$path") || die "cannot enumerate extended attributes: $path"
-  [[ -z $names || $names == com.apple.provenance ]] || die "unexpected extended attributes: $path: ${names//$'\n'/,}"
+  local target_path=$1 names
+  names=$(/usr/bin/xattr "$target_path") || die "cannot enumerate extended attributes: $target_path"
+  [[ -z $names || $names == com.apple.provenance ]] || die "unexpected extended attributes: $target_path: ${names//$'\n'/,}"
 }
 mode=${1:-build}
 [[ $mode == build || $mode == verify ]] || die "usage: $0 [build|verify]"
@@ -150,9 +150,9 @@ with open(config, "rb") as handle:
 PY
   readonly VERIFY_ROOT=/private/tmp/kio-comparator-runtime-v1-verify
   [[ ! -e $VERIFY_ROOT && ! -L $VERIFY_ROOT ]] || die "refusing to reuse verifier directory: $VERIFY_ROOT"
-  /bin/mkdir -m 0700 -- "$VERIFY_ROOT"
-  trap '/bin/rm -rf -- "$VERIFY_ROOT"' EXIT
-  /bin/mkdir -m 0700 -- "$VERIFY_ROOT/home" "$VERIFY_ROOT/config" "$VERIFY_ROOT/cache"
+  /bin/mkdir -m 0700 "$VERIFY_ROOT"
+  trap '/bin/rm -rf "$VERIFY_ROOT"' EXIT
+  /bin/mkdir -m 0700 "$VERIFY_ROOT/home" "$VERIFY_ROOT/config" "$VERIFY_ROOT/cache"
   readonly SMOKE_PDF="$VERIFY_ROOT/smoke.pdf" SMOKE_DOCX="$VERIFY_ROOT/smoke.docx" SMOKE_MD="$VERIFY_ROOT/smoke.md"
   /usr/bin/env -i HOME="$VERIFY_ROOT/home" PATH=/usr/bin:/bin /usr/bin/python3 -I -E -s - "$SMOKE_PDF" "$SMOKE_DOCX" "$SMOKE_MD" <<'PY'
 from pathlib import Path
@@ -187,7 +187,7 @@ with zipfile.ZipFile(docx, "w", compression=zipfile.ZIP_STORED) as archive:
 PY
   readonly CLEAN_HOME="HOME=$VERIFY_ROOT/home" CLEAN_CONFIG="XDG_CONFIG_HOME=$VERIFY_ROOT/config" CLEAN_CACHE="XDG_CACHE_HOME=$VERIFY_ROOT/cache"
   /usr/bin/env -i "$CLEAN_HOME" "$CLEAN_CONFIG" "$CLEAN_CACHE" PATH="$RUNTIME_ROOT/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-    "$RUNTIME_ROOT/bin/rga-preproc" "$SMOKE_PDF" | /usr/bin/grep -Fq -- "Kio comparator runtime smoke"
+    "$RUNTIME_ROOT/bin/rga-preproc" "$SMOKE_PDF" | /usr/bin/grep -Fq "Kio comparator runtime smoke"
   /usr/bin/env -i "$CLEAN_HOME" "$CLEAN_CONFIG" "$CLEAN_CACHE" PATH="$RUNTIME_ROOT/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
     "$RUNTIME_ROOT/bin/rga" --rga-config-file="$RUNTIME_ROOT/config/rga-config.json" --rga-adapters=pandoc,poppler \
     --rga-cache-path="$VERIFY_ROOT/cache" -F \
@@ -197,9 +197,9 @@ PY
     --rga-cache-path="$VERIFY_ROOT/cache" -F \
     "Kio comparator runtime smoke" "$SMOKE_DOCX" >/dev/null
   /usr/bin/env -i "$CLEAN_HOME" "$CLEAN_CONFIG" "$CLEAN_CACHE" PATH="$RUNTIME_ROOT/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-    "$RUNTIME_ROOT/bin/pandoc" -f docx -t plain "$SMOKE_DOCX" | /usr/bin/grep -Fq -- "Kio comparator runtime smoke"
+    "$RUNTIME_ROOT/bin/pandoc" -f docx -t plain "$SMOKE_DOCX" | /usr/bin/grep -Fq "Kio comparator runtime smoke"
   /usr/bin/env -i "$CLEAN_HOME" "$CLEAN_CONFIG" "$CLEAN_CACHE" PATH="$RUNTIME_ROOT/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-    "$RUNTIME_ROOT/bin/pdftotext" "$SMOKE_PDF" - | /usr/bin/grep -Fq -- "Kio comparator runtime smoke"
+    "$RUNTIME_ROOT/bin/pdftotext" "$SMOKE_PDF" - | /usr/bin/grep -Fq "Kio comparator runtime smoke"
   /usr/bin/env -i "$CLEAN_HOME" "$CLEAN_CONFIG" "$CLEAN_CACHE" PATH="$RUNTIME_ROOT/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
     "$RUNTIME_ROOT/bin/rg" -Fq -- "Kio comparator runtime smoke" "$SMOKE_MD"
   print -- "ordinary-user smoke verification passed: $RUNTIME_ROOT"
@@ -212,45 +212,45 @@ readonly ADMIN_SCRIPT_DIR=${ADMIN_SCRIPT:h}
 [[ ${${ADMIN_SCRIPT}:t} == build-script && $ADMIN_SCRIPT_DIR == ${ADMIN_SCRIPT_PREFIX}* ]] || die "root build must execute a root-private administrator-reviewed script copy"
 [[ "$0" == "$ADMIN_SCRIPT" && ${ADMIN_SCRIPT_DIR:A} == "$ADMIN_SCRIPT_DIR" && ! -L $ADMIN_SCRIPT && ! -L $ADMIN_SCRIPT_DIR ]] || die "administrator script path must be canonical and symlink-free"
 for p in "$ADMIN_SCRIPT_DIR" "$ADMIN_SCRIPT"; do
-  script_stat=$(/usr/bin/stat -f '%u:%g:%p' -- "$p")
+  script_stat=$(/usr/bin/stat -f '%u:%g:%p' "$p")
   [[ $script_stat == 0:0:* ]] || die "administrator script path must be root:wheel: $p"
   [[ $(( 8#${script_stat##*:} & 8#022 )) -eq 0 ]] || die "administrator script path is group/other writable: $p"
   require_safe_xattrs "$p"
-  [[ $(/bin/ls -lde -- "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "administrator script path has an ACL: $p"
+  [[ $(/bin/ls -lde "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "administrator script path has an ACL: $p"
 done
-admin_dir_mode=$(/usr/bin/stat -f '%p' -- "$ADMIN_SCRIPT_DIR")
+admin_dir_mode=$(/usr/bin/stat -f '%p' "$ADMIN_SCRIPT_DIR")
 [[ $(( 8#$admin_dir_mode & 8#077 )) -eq 0 ]] || die "administrator script directory must be mode 0700"
 for p in "$MANAGED_ROOT" "$RUNTIME_ROOT" "$IMAGE" "$MANIFEST" "$BUILD_ROOT"; do
  if [[ -e $p || -L $p ]]; then
   print -u2 -- "existing target (no writes): $p"
-  /usr/bin/stat -f 'realpath=%N uid=%u gid=%g mode=%Sp' -- "$p" 2>&1 || true
+  /usr/bin/stat -f 'realpath=%N uid=%u gid=%g mode=%Sp' "$p" 2>&1 || true
   print -u2 -r -- "canonical=${p:A}"
   exit 1
  fi
 done
 created=0 created_mountpoint=0 created_build=0 created_image=0 created_manifest=0 mounted=0
-rollback() { local status=$?; if (( status )); then
+rollback() { local rollback_rc=$?; if (( rollback_rc )); then
   print -u2 -- "build failed; rolling back only fixed paths created by this invocation"
   (( mounted )) && /usr/bin/hdiutil detach "$RUNTIME_ROOT" >/dev/null 2>&1 || true
-  (( created_image )) && [[ -e $IMAGE && ! -L $IMAGE ]] && /bin/rm -f -- "$IMAGE"
-  (( created_manifest )) && [[ -e $MANIFEST && ! -L $MANIFEST ]] && /bin/rm -f -- "$MANIFEST"
-  (( created_mountpoint )) && [[ -d $RUNTIME_ROOT && ! -L $RUNTIME_ROOT ]] && /bin/rmdir -- "$RUNTIME_ROOT" 2>/dev/null || true
-  (( created_build )) && [[ -d $BUILD_ROOT && ! -L $BUILD_ROOT ]] && /bin/rm -rf -- "$BUILD_ROOT"
-  (( created )) && /bin/rmdir -- "$MANAGED_ROOT" 2>/dev/null || true
- fi; exit $status; }
+  (( created_image )) && [[ -e $IMAGE && ! -L $IMAGE ]] && /bin/rm -f "$IMAGE"
+  (( created_manifest )) && [[ -e $MANIFEST && ! -L $MANIFEST ]] && /bin/rm -f "$MANIFEST"
+  (( created_mountpoint )) && [[ -d $RUNTIME_ROOT && ! -L $RUNTIME_ROOT ]] && /bin/rmdir "$RUNTIME_ROOT" 2>/dev/null || true
+  (( created_build )) && [[ -d $BUILD_ROOT && ! -L $BUILD_ROOT ]] && /bin/rm -rf "$BUILD_ROOT"
+  (( created )) && /bin/rmdir "$MANAGED_ROOT" 2>/dev/null || true
+ fi; exit $rollback_rc; }
 trap rollback EXIT
-/bin/mkdir -m 0755 -- "$MANAGED_ROOT"; created=1; /usr/sbin/chown root:wheel -- "$MANAGED_ROOT"
-/bin/mkdir -m 0755 -- "$RUNTIME_ROOT"; created_mountpoint=1; /usr/sbin/chown root:wheel -- "$RUNTIME_ROOT"
-/bin/mkdir -m 0700 -- "$BUILD_ROOT"; created_build=1; /usr/sbin/chown root:wheel -- "$BUILD_ROOT"
+/bin/mkdir -m 0755 "$MANAGED_ROOT"; created=1; /usr/sbin/chown root:wheel "$MANAGED_ROOT"
+/bin/mkdir -m 0755 "$RUNTIME_ROOT"; created_mountpoint=1; /usr/sbin/chown root:wheel "$RUNTIME_ROOT"
+/bin/mkdir -m 0700 "$BUILD_ROOT"; created_build=1; /usr/sbin/chown root:wheel "$BUILD_ROOT"
 for p in "$MANAGED_ROOT" "$RUNTIME_ROOT" "$BUILD_ROOT"; do
-  /bin/chmod -N -- "$p"
+  /bin/chmod -N "$p"
   require_safe_xattrs "$p"
 done
-[[ $(/usr/bin/stat -f '%u:%g:%p' -- "$MANAGED_ROOT") == 0:0:* ]] || die "managed root ownership is unsafe"
-managed_mode=$(/usr/bin/stat -f '%p' -- "$MANAGED_ROOT")
+[[ $(/usr/bin/stat -f '%u:%g:%p' "$MANAGED_ROOT") == 0:0:* ]] || die "managed root ownership is unsafe"
+managed_mode=$(/usr/bin/stat -f '%p' "$MANAGED_ROOT")
 [[ $(( 8#$managed_mode & 8#022 )) -eq 0 ]] || die "managed root is group/other writable"
 require_safe_xattrs "$MANAGED_ROOT"
-[[ $(/bin/ls -lde -- "$MANAGED_ROOT" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "managed root has an ACL"
+[[ $(/bin/ls -lde "$MANAGED_ROOT" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "managed root has an ACL"
 
 # The embedded resolver reads only the hard-coded Homebrew inputs.  It rejects
 # unresolved paths, non-system escapes, and basename collisions before copying.
@@ -454,8 +454,8 @@ json.dump({"schema_version":1,"runtime_root":"/Library/KioComparatorRuntime/v1",
 PY
 created_image=1
 /usr/bin/hdiutil create -srcfolder "$BUILD_ROOT/payload" -format UDRO -fs "Case-sensitive APFS" -volname "$VOLUME_NAME" -srcowners on -noanyowners "$IMAGE"
-/usr/sbin/chown root:wheel -- "$IMAGE"; /bin/chmod 0444 -- "$IMAGE"
-/bin/chmod -N -- "$IMAGE"; require_safe_xattrs "$IMAGE"
+/usr/sbin/chown root:wheel "$IMAGE"; /bin/chmod 0444 "$IMAGE"
+/bin/chmod -N "$IMAGE"; require_safe_xattrs "$IMAGE"
 /usr/bin/hdiutil attach -readonly -owners on -nobrowse -noautoopen -mountpoint "$RUNTIME_ROOT" "$IMAGE" >/dev/null; mounted=1
 
 created_manifest=1
@@ -578,15 +578,15 @@ PY
 # independently checked above through statfs/fstatfs and its complete tree.
 for p in "$MANAGED_ROOT" "$IMAGE" "$MANIFEST"; do
   [[ ! -L $p ]] || die "sealed runtime artifact is a symlink: $p"
-  artifact_stat=$(/usr/bin/stat -f '%u:%g:%p' -- "$p")
+  artifact_stat=$(/usr/bin/stat -f '%u:%g:%p' "$p")
   [[ $artifact_stat == 0:0:* ]] || die "sealed runtime artifact is not root:wheel: $p"
   [[ $(( 8#${artifact_stat##*:} & 8#022 )) -eq 0 ]] || die "sealed runtime artifact is group/other writable: $p"
   require_safe_xattrs "$p"
-  [[ $(/bin/ls -lde -- "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "sealed runtime artifact has an ACL: $p"
+  [[ $(/bin/ls -lde "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "sealed runtime artifact has an ACL: $p"
 done
 # Never execute Homebrew-derived runtime images while privileged.  An ordinary
 # user may run the explicit `verify` mode after this command returns.
-/bin/rm -rf -- "$BUILD_ROOT"; trap - EXIT
+/bin/rm -rf "$BUILD_ROOT"; trap - EXIT
 print -- "sealed comparator runtime ready: $RUNTIME_ROOT"
 print -- "image: $IMAGE"; print -- "manifest: $MANIFEST"
 print -- "ordinary-user smoke: run the reviewed checkout script with the verify argument"

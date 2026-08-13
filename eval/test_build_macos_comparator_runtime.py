@@ -23,7 +23,7 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
         )[0]
         preflight = verify.index("runtime is not built and mounted")
         read_only = verify.index("MNT_RDONLY is not set")
-        workspace = verify.index('/bin/mkdir -m 0700 -- "$VERIFY_ROOT"')
+        workspace = verify.index('/bin/mkdir -m 0700 "$VERIFY_ROOT"')
         first_tool = verify.index('"$RUNTIME_ROOT/bin/rga-preproc"')
         self.assertLess(preflight, workspace)
         self.assertLess(read_only, workspace)
@@ -56,6 +56,23 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
         self.assertIn("names == com.apple.provenance", source)
         self.assertIn('"xattr_policy":"only-com.apple.provenance"', source)
         self.assertIn('names not in ([b"com.apple.provenance"],)', source)
+
+    def test_builder_uses_macos_bsd_cli_and_nonreserved_zsh_locals(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("local status=", source)
+        self.assertNotIn("local path=", source)
+        self.assertIn("local rollback_rc=$?", source)
+        for command in (
+            "/usr/sbin/chown",
+            "/bin/chmod",
+            "/bin/mkdir",
+            "/bin/rmdir",
+            "/bin/rm",
+            "/usr/bin/stat",
+            "/bin/ls",
+            "/usr/bin/grep",
+        ):
+            self.assertNotRegex(source, rf"{command}[^\n]*\s--(?:\s|$)")
 
 
 if __name__ == "__main__":

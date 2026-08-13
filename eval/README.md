@@ -137,7 +137,7 @@ hash を記録し、管理者が同じ値を独立に照合してから、root-o
 
 ```bash
 /usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: 658be05db9a845e331bee00437ca8bf23a374ae381252fb9d8d131ad5736d51f
+# Expected for this revision: 4293ef620d2d8ed7cb294bc1dca000e8b552780fde91686bb2c41c97cc0681c7
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
@@ -145,15 +145,20 @@ sudo /usr/bin/install -o root -g wheel -m 0500 \
 sudo /bin/chmod -N "$admin_dir" "$admin_dir/build-script"
 sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
-    cleanup() { /bin/rm -f -- "$script"; /bin/rmdir -- "$admin_dir"; }
+    cleanup() { /bin/rm -f "$script"; /bin/rmdir "$admin_dir"; }
     trap cleanup EXIT
-    readonly expected=658be05db9a845e331bee00437ca8bf23a374ae381252fb9d8d131ad5736d51f
+    readonly expected=4293ef620d2d8ed7cb294bc1dca000e8b552780fde91686bb2c41c97cc0681c7
     readonly actual=$(/usr/bin/shasum -a 256 "$script")
     [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
     /bin/zsh -f "$script" build
     exit $?' build-runtime "$admin_dir" &&
 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify
 ```
+
+過去のbuilder失敗で`/Library/KioComparatorRuntime`だけが残った場合、builderは既存targetを
+上書きしない。`v1`、image、manifestが存在せず、管理rootが空でroot所有であることを読み取り確認した後に限り、
+`sudo /bin/rmdir /Library/KioComparatorRuntime`で空ディレクトリだけを除去して再実行する。
+再帰削除は使わない。
 
 macOS は通常ユーザーの checkout から `install` した固定コピーや新規作成物へ、SIP下で除去できない
 `com.apple.provenance` を付与することがある。SIPや他のsecurity controlは変更しない。builderと正式 evaluatorは
