@@ -51,6 +51,9 @@ const MAX_MACHO_RESOLUTION_CONTEXTS: usize = 4_096;
 const MAX_MACHO_LOAD_COMMANDS: usize = 256;
 const MAX_MACHO_PATH_BYTES: usize = 4 * 1024;
 const MAX_MACHO_INSPECT_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_DYLD_INFO_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DYLD_CACHE_IMAGES: usize = 16_384;
+const MAX_DYLD_CACHE_EDGES: usize = 262_144;
 // Darwin's `MNT_RDONLY`.  Keep this as a policy constant rather than relying
 // on an ambient mount option: comparator measurements must be backed by an
 // immutable filesystem, not merely root-owned directory modes.
@@ -262,13 +265,76 @@ struct FileBinding {
 enum RuntimeTrust {
     AdministratorRuntime,
     MacosSealedSystem,
+    MacosDyldSharedCache,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct RuntimeClosureEntry {
     path: String,
     trust: RuntimeTrust,
-    binding: FileBinding,
+    binding: RuntimeClosureBinding,
+}
+
+/// A physical file hash is deliberately not fabricated for an image which is
+/// supplied by the sealed dyld shared cache rather than the filesystem.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RuntimeClosureBinding {
+    File(FileBinding),
+    DyldSharedCache(DyldSharedCacheBinding),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DyldSharedCacheBinding {
+    install_name: String,
+    architecture: String,
+    uuid: String,
+    linked_dylibs: Vec<DyldSharedCacheEdge>,
+    inspector: FileBinding,
+    platform: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct DyldSharedCacheEdge {
+    attributes: String,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct DyldSharedCacheCatalog {
+    inspector: FileBinding,
+    architecture: String,
+    platform: String,
+    images: BTreeMap<String, DyldSharedCacheImage>,
+}
+
+#[derive(Debug, Clone)]
+struct DyldSharedCacheImage {
+    uuid: String,
+    linked_dylibs: Vec<DyldSharedCacheEdge>,
+}
+
+enum DyldCatalogRecord {
+    Ignored,
+    NeedUuid {
+        path: String,
+    },
+    NeedUuidValue {
+        path: String,
+    },
+    NeedLinkedDylibs {
+        path: String,
+        uuid: String,
+    },
+    NeedAttributes {
+        path: String,
+        uuid: String,
+    },
+    Edges {
+        path: String,
+        uuid: String,
+        edges: Vec<DyldSharedCacheEdge>,
+    },
 }
 
 /// The filesystem identity that held the administrator runtime at binding
@@ -2650,6 +2716,413 @@ fn trusted_otool() -> Result<FileBinding, QhardError> {
     tool_binding(path, "otool")
 }
 
+/// `dyld_info` is a CLT shim on current macOS releases.  Bind the final
+/// executable, not the shim, so a replacement indirection cannot alter the
+/// cache catalog between comparator subprocesses.
+fn trusted_dyld_info() -> Result<(PathBuf, FileBinding), QhardError> {
+    let selector = Path::new("/usr/bin/xcode-select");
+    require_sealed_absolute_path(selector, "xcode-select")?;
+    let metadata = fs::symlink_metadata(selector)
+        .map_err(|e| QhardError::Input(format!("cannot inspect xcode-select: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(QhardError::Input(
+            "xcode-select must be a sealed system executable".into(),
+        ));
+    }
+    let output = run_sealed_system_tool(selector, &["-p"], MAX_MACHO_INSPECT_OUTPUT_BYTES)?;
+    if !output.status.success() || output.stderr.len() > MAX_MACHO_INSPECT_OUTPUT_BYTES {
+        return Err(QhardError::Input(
+            "cannot determine active Apple developer directory".into(),
+        ));
+    }
+    let developer = output.stdout.trim();
+    if developer.is_empty() || developer.len() > MAX_MACHO_PATH_BYTES {
+        return Err(QhardError::Input(
+            "active Apple developer directory is malformed".into(),
+        ));
+    }
+    let path = fs::canonicalize(Path::new(developer).join("usr/bin/dyld_info"))
+        .map_err(|e| QhardError::Input(format!("cannot resolve dyld_info executable: {e}")))?;
+    // A full Xcode bundle is mutable by the interactive developer account on
+    // common installations. The evaluator intentionally supports only the
+    // administrator-managed CommandLineTools location.
+    if !path.starts_with("/Library/Developer/CommandLineTools/usr/bin/") {
+        return Err(QhardError::Input(
+            "dyld_info must resolve beneath the sealed CommandLineTools root".into(),
+        ));
+    }
+    require_sealed_absolute_path(&path, "dyld_info executable")?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|e| QhardError::Input(format!("cannot inspect dyld_info: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(QhardError::Input(
+            "dyld_info must resolve to a regular executable".into(),
+        ));
+    }
+    require_apple_code_signature(&path, "dyld_info")?;
+    Ok((path.clone(), tool_binding(&path, "dyld_info")?))
+}
+
+fn run_sealed_system_tool(
+    path: &Path,
+    args: &[&str],
+    maximum: usize,
+) -> Result<crate::runner::BoundedProcessOutput, QhardError> {
+    let mut command = Command::new(path);
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("TZ", "UTC");
+    Ok(run_bounded_command(
+        &mut command,
+        BoundedProcessOptions {
+            timeout: DEFAULT_PROCESS_TIMEOUT,
+            max_stdout_bytes: maximum,
+            max_stderr_bytes: maximum,
+        },
+    )?)
+}
+
+fn require_apple_code_signature(path: &Path, label: &str) -> Result<(), QhardError> {
+    let codesign = Path::new("/usr/bin/codesign");
+    require_sealed_absolute_path(codesign, "codesign")?;
+    let rendered = path
+        .to_str()
+        .ok_or_else(|| QhardError::Input(format!("{label} path is not UTF-8")))?;
+    let output = run_sealed_system_tool(
+        codesign,
+        &[
+            "-v",
+            "--strict",
+            "-R=identifier \"com.apple.dyld_info\" and anchor apple",
+            rendered,
+        ],
+        MAX_MACHO_INSPECT_OUTPUT_BYTES,
+    )?;
+    if !output.status.success() {
+        return Err(QhardError::Input(format!("{label} is not signed by Apple")));
+    }
+    Ok(())
+}
+
+fn shared_cache_path_allowed(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        && (path.starts_with("/usr/lib/") || path.starts_with("/System/Library/"))
+        && !path.contains("//")
+        && !Path::new(path)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn cache_architecture() -> Result<&'static str, QhardError> {
+    match macho_architecture()? {
+        // Apple Silicon caches may expose arm64e images even to an arm64
+        // process.  Probe the stronger ABI first, then use arm64 only if it
+        // is absent from the same bounded catalog.
+        "arm64" => Ok("arm64e"),
+        other => Ok(other),
+    }
+}
+
+fn dyld_cache_platform_tuple() -> Result<String, QhardError> {
+    let sysctl = Path::new("/usr/sbin/sysctl");
+    require_sealed_absolute_path(sysctl, "sysctl")?;
+    let metadata = fs::symlink_metadata(sysctl)
+        .map_err(|e| QhardError::Input(format!("cannot inspect sysctl: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(QhardError::Input(
+            "sysctl must be a sealed system executable".into(),
+        ));
+    }
+    let product = run_sealed_system_tool(sysctl, &["-n", "kern.osproductversion"], 1024)?;
+    let build = run_sealed_system_tool(sysctl, &["-n", "kern.osversion"], 1024)?;
+    let kernel = run_sealed_system_tool(sysctl, &["-n", "kern.osrelease"], 1024)?;
+    if !product.status.success() || !build.status.success() || !kernel.status.success() {
+        return Err(QhardError::Input(
+            "cannot determine macOS shared-cache platform".into(),
+        ));
+    }
+    let product = product.stdout.trim();
+    let build = build.stdout.trim();
+    let kernel = kernel.stdout.trim();
+    if product.is_empty()
+        || build.is_empty()
+        || kernel.is_empty()
+        || product.len() > 128
+        || build.len() > 128
+        || kernel.len() > 128
+    {
+        return Err(QhardError::Input(
+            "macOS shared-cache platform tuple is malformed".into(),
+        ));
+    }
+    Ok(format!(
+        "macos:{product}:{build}:{kernel}:{}",
+        env::consts::ARCH
+    ))
+}
+
+fn parse_dyld_cache_catalog_optional(
+    output: &str,
+    architecture: &str,
+    inspector: FileBinding,
+) -> Result<Option<DyldSharedCacheCatalog>, QhardError> {
+    if output.len() > MAX_DYLD_INFO_OUTPUT_BYTES || architecture.is_empty() {
+        return Err(QhardError::Input(
+            "dyld shared-cache catalog is unbounded or malformed".into(),
+        ));
+    }
+    let mut images = BTreeMap::new();
+    let mut current: Option<DyldCatalogRecord> = None;
+    let mut edges = 0_usize;
+    let finish = |current: &mut Option<DyldCatalogRecord>,
+                  images: &mut BTreeMap<String, DyldSharedCacheImage>|
+     -> Result<(), QhardError> {
+        let Some(record) = current.take() else {
+            return Ok(());
+        };
+        match record {
+            DyldCatalogRecord::Ignored => Ok(()),
+            DyldCatalogRecord::Edges {
+                path,
+                uuid,
+                mut edges,
+            } => {
+                edges.sort();
+                edges.dedup();
+                if images
+                    .insert(
+                        path,
+                        DyldSharedCacheImage {
+                            uuid,
+                            linked_dylibs: edges,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache catalog has duplicate image".into(),
+                    ));
+                }
+                if images.len() > MAX_DYLD_CACHE_IMAGES {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache has too many images".into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(QhardError::Input(
+                "dyld shared-cache record is truncated".into(),
+            )),
+        }
+    };
+    for line in output.lines() {
+        if let Some((path, arch)) = line.rsplit_once(" [") {
+            if let Some(arch) = arch.strip_suffix("]:") {
+                finish(&mut current, &mut images)?;
+                if arch.len() > 32 || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache image header is malformed".into(),
+                    ));
+                }
+                if arch != architecture || path.starts_with("/System/iOSSupport/") {
+                    current = Some(DyldCatalogRecord::Ignored);
+                    continue;
+                }
+                if !shared_cache_path_allowed(path) {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache image header escapes macOS sealed roots".into(),
+                    ));
+                }
+                current = Some(DyldCatalogRecord::NeedUuid {
+                    path: path.to_owned(),
+                });
+                continue;
+            }
+        }
+        let Some(record) = current.as_mut() else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            return Err(QhardError::Input(
+                "dyld shared-cache catalog has content before an image header".into(),
+            ));
+        };
+        if matches!(record, DyldCatalogRecord::Ignored) {
+            continue;
+        }
+        let trimmed = line.trim();
+        match record {
+            DyldCatalogRecord::NeedUuidValue { .. } => {
+                let DyldCatalogRecord::NeedUuidValue { path } =
+                    std::mem::replace(record, DyldCatalogRecord::Ignored)
+                else {
+                    unreachable!()
+                };
+                if trimmed.len() != 36
+                    || !trimmed.bytes().enumerate().all(|(i, b)| {
+                        matches!(i, 8 | 13 | 18 | 23) && b == b'-'
+                            || !matches!(i, 8 | 13 | 18 | 23) && b.is_ascii_hexdigit()
+                    })
+                {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache image UUID is malformed".into(),
+                    ));
+                }
+                *record = DyldCatalogRecord::NeedLinkedDylibs {
+                    path,
+                    uuid: trimmed.to_ascii_uppercase(),
+                };
+                continue;
+            }
+            DyldCatalogRecord::NeedUuid { .. } if trimmed == "-uuid:" => {
+                let DyldCatalogRecord::NeedUuid { path } =
+                    std::mem::replace(record, DyldCatalogRecord::Ignored)
+                else {
+                    unreachable!()
+                };
+                *record = DyldCatalogRecord::NeedUuidValue { path };
+                continue;
+            }
+            DyldCatalogRecord::NeedUuid { .. } => {
+                return Err(QhardError::Input(
+                    "dyld shared-cache record lacks -uuid marker".into(),
+                ))
+            }
+            DyldCatalogRecord::NeedLinkedDylibs { .. } if trimmed == "-linked_dylibs:" => {
+                let DyldCatalogRecord::NeedLinkedDylibs { path, uuid } =
+                    std::mem::replace(record, DyldCatalogRecord::Ignored)
+                else {
+                    unreachable!()
+                };
+                *record = DyldCatalogRecord::NeedAttributes { path, uuid };
+                continue;
+            }
+            DyldCatalogRecord::NeedLinkedDylibs { .. } => {
+                return Err(QhardError::Input(
+                    "dyld shared-cache record lacks -linked_dylibs marker".into(),
+                ))
+            }
+            DyldCatalogRecord::NeedAttributes { .. } if trimmed == "attributes     load path" => {
+                let DyldCatalogRecord::NeedAttributes { path, uuid } =
+                    std::mem::replace(record, DyldCatalogRecord::Ignored)
+                else {
+                    unreachable!()
+                };
+                *record = DyldCatalogRecord::Edges {
+                    path,
+                    uuid,
+                    edges: Vec::new(),
+                };
+                continue;
+            }
+            DyldCatalogRecord::NeedAttributes { .. } => {
+                return Err(QhardError::Input(
+                    "dyld shared-cache record lacks attributes/load header".into(),
+                ))
+            }
+            DyldCatalogRecord::Edges { edges: linked, .. } => {
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Some(path) = trimmed
+                    .split_whitespace()
+                    .last()
+                    .filter(|path| path.starts_with('/'))
+                else {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache edge is malformed".into(),
+                    ));
+                };
+                if !shared_cache_path_allowed(path) {
+                    // The complete cache catalog includes images with edges
+                    // into non-macOS support roots. Exclude the whole record;
+                    // an exact lookup of that image will then fail closed.
+                    *record = DyldCatalogRecord::Ignored;
+                    continue;
+                }
+                linked.push(DyldSharedCacheEdge {
+                    attributes: trimmed.strip_suffix(path).unwrap_or("").trim().to_owned(),
+                    path: path.to_owned(),
+                });
+                edges += 1;
+                if edges > MAX_DYLD_CACHE_EDGES {
+                    return Err(QhardError::Input(
+                        "dyld shared-cache has too many dependency edges".into(),
+                    ));
+                }
+                continue;
+            }
+            DyldCatalogRecord::Ignored => unreachable!(),
+        }
+    }
+    finish(&mut current, &mut images)?;
+    if images.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(DyldSharedCacheCatalog {
+        inspector,
+        architecture: architecture.to_owned(),
+        platform: dyld_cache_platform_tuple()?,
+        images,
+    }))
+}
+
+fn parse_dyld_cache_catalog(
+    output: &str,
+    architecture: &str,
+    inspector: FileBinding,
+) -> Result<DyldSharedCacheCatalog, QhardError> {
+    parse_dyld_cache_catalog_optional(output, architecture, inspector)?.ok_or_else(|| {
+        QhardError::Input("dyld shared-cache catalog has no matching architecture images".into())
+    })
+}
+
+fn load_dyld_cache_catalog() -> Result<DyldSharedCacheCatalog, QhardError> {
+    let (path, binding) = trusted_dyld_info()?;
+    let architecture = cache_architecture()?;
+    let run = |arch: &str| -> Result<String, QhardError> {
+        let mut command = Command::new(&path);
+        command
+            .args(["-arch", arch, "-uuid", "-linked_dylibs", "-all_dyld_cache"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
+            .env("TZ", "UTC");
+        let output = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: DEFAULT_PROCESS_TIMEOUT,
+                max_stdout_bytes: MAX_DYLD_INFO_OUTPUT_BYTES,
+                max_stderr_bytes: MAX_DYLD_INFO_OUTPUT_BYTES,
+            },
+        )?;
+        if !output.status.success() {
+            return Err(QhardError::Input(
+                "dyld_info shared-cache catalog command failed".into(),
+            ));
+        }
+        Ok(output.stdout)
+    };
+    let raw = run(architecture)?;
+    match parse_dyld_cache_catalog_optional(&raw, architecture, binding.clone()) {
+        Ok(Some(catalog)) => Ok(catalog),
+        Ok(None) if architecture == "arm64e" => {
+            let arm64 = run("arm64")?;
+            parse_dyld_cache_catalog(&arm64, "arm64", binding)
+        }
+        Ok(None) => Err(QhardError::Input(
+            "dyld shared-cache catalog has no matching architecture images".into(),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 fn inspect_macho(path: &Path) -> Result<MachoInspection, QhardError> {
     let _otool = trusted_otool()?;
     let architecture = macho_architecture()?;
@@ -2754,24 +3227,68 @@ fn add_runtime_closure_entry(
     Ok(())
 }
 
+fn add_shared_cache_closure(
+    cache: &DyldSharedCacheCatalog,
+    requested: &Path,
+    entries: &mut BTreeMap<String, DyldSharedCacheBinding>,
+    files: &mut BTreeMap<PathBuf, RuntimeBoundFile>,
+    runtime_mount: &RuntimeMountIdentity,
+    total_bytes: &mut u64,
+) -> Result<(), QhardError> {
+    let mut queue = vec![requested.display().to_string()];
+    while let Some(path) = queue.pop() {
+        if entries.contains_key(&path) {
+            continue;
+        }
+        let image = cache.images.get(&path).ok_or_else(|| {
+            QhardError::Input(format!(
+                "missing sealed-system library is not an exact dyld shared-cache image: {path}"
+            ))
+        })?;
+        if entries.len() >= MAX_DYLD_CACHE_IMAGES {
+            return Err(QhardError::Input(
+                "comparator runtime exceeds shared-cache entry limit".into(),
+            ));
+        }
+        let binding = DyldSharedCacheBinding {
+            install_name: path.clone(),
+            architecture: cache.architecture.clone(),
+            uuid: image.uuid.clone(),
+            linked_dylibs: image.linked_dylibs.clone(),
+            inspector: cache.inspector.clone(),
+            platform: cache.platform.clone(),
+        };
+        for edge in &binding.linked_dylibs {
+            // A cache dependency must also be in the chosen architecture's
+            // catalog.  Do not silently fall back to a filesystem image.
+            if cache.images.contains_key(&edge.path) {
+                queue.push(edge.path.clone());
+            } else {
+                let physical = validate_sealed_system_library(
+                    Path::new(&edge.path),
+                    "dyld shared-cache physical dependency",
+                )?;
+                // Optionality does not permit omission: if dyld may load a
+                // weak/delay edge, bind its exact sealed filesystem image.
+                add_runtime_closure_entry(
+                    files,
+                    &physical,
+                    RuntimeTrust::MacosSealedSystem,
+                    runtime_mount,
+                    total_bytes,
+                )?;
+            }
+        }
+        entries.insert(path, binding);
+    }
+    Ok(())
+}
+
 fn bind_runtime_rga_config(path: &Path) -> Result<RuntimeBoundFile, QhardError> {
     let (bytes, binding) = binding(path, MAX_GOLDEN_BYTES, "comparator runtime rga config")?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        QhardError::Input(format!(
-            "comparator runtime rga config is not JSON: {error}"
-        ))
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        QhardError::Input("comparator runtime rga config must be a JSON object".into())
-    })?;
-    if object.len() != 1
-        || object
-            .get("custom_adapters")
-            .and_then(Value::as_array)
-            .is_none_or(|adapters| !adapters.is_empty())
-    {
+    if bytes != br#"{"custom_adapters":[]}"# {
         return Err(QhardError::Input(
-            "comparator runtime rga config must be exactly an empty custom_adapters policy".into(),
+            "comparator runtime rga config bytes must be exactly {\"custom_adapters\":[]}".into(),
         ));
     }
     let metadata = fs::symlink_metadata(path).map_err(|e| {
@@ -2881,6 +3398,7 @@ fn expanded_rpaths(
 
 fn resolve_macho_dependency(
     root: &Path,
+    cache: &DyldSharedCacheCatalog,
     install_name: &str,
     owner: &Path,
     executable: &Path,
@@ -2936,7 +3454,19 @@ fn resolve_macho_dependency(
                             .map(ResolvedMachoDependency::SealedSystem)
                             .map(Some)
                     }
+                    RuntimeTrust::MacosDyldSharedCache => {
+                        unreachable!("cache images are not rpath directories")
+                    }
                 },
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        && *trust == RuntimeTrust::MacosSealedSystem
+                        && cache.images.contains_key(&candidate.display().to_string()) =>
+                {
+                    Ok(Some(ResolvedMachoDependency::SealedSystem(
+                        candidate.clone(),
+                    )))
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(QhardError::Input(format!(
                     "cannot inspect Mach-O @rpath dependency: {error}"
@@ -2958,9 +3488,20 @@ fn resolve_macho_dependency(
     if path.starts_with(root) {
         return runtime_file(path.to_path_buf(), "absolute Mach-O runtime dependency");
     }
-    Ok(ResolvedMachoDependency::SealedSystem(
-        validate_sealed_system_library(path, "absolute Mach-O system dependency")?,
-    ))
+    match validate_sealed_system_library(path, "absolute Mach-O system dependency") {
+        Ok(path) => Ok(ResolvedMachoDependency::SealedSystem(path)),
+        // Modern macOS exposes many exact `/usr/lib` install names only via
+        // the dyld shared cache.  Defer acceptance to the catalog-backed
+        // visitor; never turn an arbitrary missing system-looking path into
+        // a dependency.
+        Err(_error)
+            if sealed_system_root(path).is_some()
+                && matches!(fs::symlink_metadata(path), Err(ref missing) if missing.kind() == io::ErrorKind::NotFound) =>
+        {
+            Ok(ResolvedMachoDependency::SealedSystem(path.to_path_buf()))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Walk a dynamic-loader closure without assuming that one image has one
@@ -3052,7 +3593,9 @@ fn resolve_runtime_closure(
     entry_paths: &BTreeMap<String, PathBuf>,
 ) -> Result<ResolvedRuntimeClosure, QhardError> {
     let inspector = trusted_otool()?;
+    let cache = load_dyld_cache_catalog()?;
     let mut files = BTreeMap::new();
+    let mut shared_cache = BTreeMap::new();
     let mut total_bytes = 0_u64;
     let queue = entry_paths
         .values()
@@ -3076,10 +3619,29 @@ fn resolve_runtime_closure(
             )
         },
         |install_name, image, rpaths| {
-            resolve_macho_dependency(root, install_name, &image.path, &image.executable, rpaths)
+            resolve_macho_dependency(
+                root,
+                &cache,
+                install_name,
+                &image.path,
+                &image.executable,
+                rpaths,
+            )
         },
-        |path, trust| {
-            add_runtime_closure_entry(&mut files, path, trust, runtime_mount, &mut total_bytes)
+        |path, trust| match trust {
+            RuntimeTrust::MacosSealedSystem if matches!(fs::symlink_metadata(path), Err(ref error) if error.kind() == io::ErrorKind::NotFound) => {
+                add_shared_cache_closure(
+                    &cache,
+                    path,
+                    &mut shared_cache,
+                    &mut files,
+                    runtime_mount,
+                    &mut total_bytes,
+                )
+            }
+            _ => {
+                add_runtime_closure_entry(&mut files, path, trust, runtime_mount, &mut total_bytes)
+            }
         },
     )?;
     // `inspect_macho` invokes otool repeatedly.  Do not accept a closure
@@ -3090,14 +3652,20 @@ fn resolve_runtime_closure(
             "otool changed while resolving comparator runtime closure".into(),
         ));
     }
-    let closure = files
+    let mut closure = files
         .iter()
         .map(|(path, file)| RuntimeClosureEntry {
             path: path.display().to_string(),
             trust: file.trust.clone(),
-            binding: file.binding.clone(),
+            binding: RuntimeClosureBinding::File(file.binding.clone()),
         })
         .collect::<Vec<_>>();
+    closure.extend(shared_cache.values().map(|binding| RuntimeClosureEntry {
+        path: binding.install_name.clone(),
+        trust: RuntimeTrust::MacosDyldSharedCache,
+        binding: RuntimeClosureBinding::DyldSharedCache(binding.clone()),
+    }));
+    closure.sort_by(|left, right| left.path.cmp(&right.path));
     let closure_bytes = serde_jcs::to_vec(&closure).map_err(|error| {
         QhardError::Input(format!(
             "cannot canonically serialize comparator closure: {error}"
@@ -3443,6 +4011,12 @@ impl ComparatorRuntime {
                             "macOS sealed-system closure path changed while bound".into(),
                         ));
                     }
+                }
+                RuntimeTrust::MacosDyldSharedCache => {
+                    return Err(QhardError::Input(
+                        "shared-cache image was incorrectly treated as a filesystem closure entry"
+                            .into(),
+                    ));
                 }
             }
             let metadata = fs::symlink_metadata(path).map_err(|e| {
@@ -4556,6 +5130,148 @@ mod tests {
         assert!(environment);
     }
 
+    fn test_dyld_info_binding() -> FileBinding {
+        FileBinding {
+            path: "/Library/Developer/CommandLineTools/usr/bin/dyld_info".into(),
+            sha256: "catalog-tool".into(),
+            bytes: 1,
+        }
+    }
+
+    #[test]
+    fn dyld_shared_cache_catalog_is_strict_and_arch_specific() {
+        let catalog = parse_dyld_cache_catalog(
+            "/usr/lib/libSystem.B.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n    -linked_dylibs:\n        attributes     load path\n        upward         /usr/lib/libobjc.A.dylib\n/usr/lib/libobjc.A.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n    -linked_dylibs:\n        attributes     load path\n/usr/lib/libSystem.B.dylib [x86_64]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC62\n    -linked_dylibs:\n        attributes     load path\n",
+            "arm64e", test_dyld_info_binding()).unwrap();
+        assert_eq!(catalog.images.len(), 2);
+        assert_eq!(
+            catalog.images["/usr/lib/libSystem.B.dylib"].linked_dylibs[0].path,
+            "/usr/lib/libobjc.A.dylib"
+        );
+        assert!(parse_dyld_cache_catalog(
+            "/tmp/evil.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n",
+            "arm64e",
+            test_dyld_info_binding()
+        )
+        .is_err());
+        assert!(parse_dyld_cache_catalog(
+            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        invalid\n",
+            "arm64e",
+            test_dyld_info_binding()
+        )
+        .is_err());
+        assert!(parse_dyld_cache_catalog(
+            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n", "arm64e", test_dyld_info_binding()).is_err());
+        for malformed in [
+            "/usr/lib/a.dylib [arm64e]:\n",
+            "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n",
+            "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\n",
+            "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\nattributes load path\n",
+            "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\nattributes     load path\ngarbage\n",
+        ] {
+            assert!(parse_dyld_cache_catalog(malformed, "arm64e", test_dyld_info_binding()).is_err());
+        }
+    }
+
+    #[test]
+    fn dyld_shared_cache_closure_is_recursive_and_digest_sensitive() {
+        let mut images = BTreeMap::new();
+        images.insert(
+            "/usr/lib/a.dylib".into(),
+            DyldSharedCacheImage {
+                uuid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".into(),
+                linked_dylibs: vec![DyldSharedCacheEdge {
+                    attributes: "upward".into(),
+                    path: "/usr/lib/b.dylib".into(),
+                }],
+            },
+        );
+        images.insert(
+            "/usr/lib/b.dylib".into(),
+            DyldSharedCacheImage {
+                uuid: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB".into(),
+                linked_dylibs: vec![DyldSharedCacheEdge {
+                    attributes: "".into(),
+                    path: "/usr/lib/a.dylib".into(),
+                }],
+            },
+        );
+        let catalog = DyldSharedCacheCatalog {
+            inspector: test_dyld_info_binding(),
+            architecture: "arm64e".into(),
+            platform: "macos-aarch64".into(),
+            images,
+        };
+        let mut closure = BTreeMap::new();
+        let mut files = BTreeMap::new();
+        let mut bytes = 0;
+        let mount = RuntimeMountIdentity {
+            fsid: "test".into(),
+            mount_point: "/sealed".into(),
+            mounted_from: "test".into(),
+            filesystem_type: "test".into(),
+            flags: MACOS_MNT_RDONLY,
+            read_only: true,
+        };
+        add_shared_cache_closure(
+            &catalog,
+            Path::new("/usr/lib/a.dylib"),
+            &mut closure,
+            &mut files,
+            &mount,
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(closure.len(), 2);
+        let before = hash_bytes(&serde_jcs::to_vec(&closure).unwrap());
+        closure.get_mut("/usr/lib/b.dylib").unwrap().uuid =
+            "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC".into();
+        assert_ne!(before, hash_bytes(&serde_jcs::to_vec(&closure).unwrap()));
+    }
+
+    #[test]
+    fn macho_rpath_resolves_cache_only_candidate_exactly() {
+        let mut images = BTreeMap::new();
+        images.insert(
+            "/usr/lib/libcache-only-test.dylib".into(),
+            DyldSharedCacheImage {
+                uuid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".into(),
+                linked_dylibs: vec![],
+            },
+        );
+        let cache = DyldSharedCacheCatalog {
+            inspector: test_dyld_info_binding(),
+            architecture: "arm64e".into(),
+            platform: "test".into(),
+            images,
+        };
+        let resolved = resolve_macho_dependency(
+            Path::new("/sealed/runtime"),
+            &cache,
+            "@rpath/libcache-only-test.dylib",
+            Path::new("/sealed/runtime/bin/rga"),
+            Path::new("/sealed/runtime/bin/rga"),
+            &[ResolvedMachoRpath::SealedSystem(PathBuf::from("/usr/lib"))],
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved,
+            ResolvedMachoDependency::SealedSystem(path)
+                if path == Path::new("/usr/lib/libcache-only-test.dylib")
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dyld_shared_cache_covers_cache_only_libsystem_when_absent() {
+        let path = Path::new("/usr/lib/libSystem.B.dylib");
+        if fs::symlink_metadata(path).is_ok() {
+            return;
+        }
+        let catalog = load_dyld_cache_catalog().unwrap();
+        assert!(catalog.images.contains_key("/usr/lib/libSystem.B.dylib"));
+    }
+
     #[test]
     fn macho_token_paths_cannot_escape_the_runtime_root() {
         let root = Path::new("/sealed/runtime");
@@ -4708,7 +5424,7 @@ mod tests {
         let initial_entry = RuntimeClosureEntry {
             path: initially_resolved.display().to_string(),
             trust: RuntimeTrust::AdministratorRuntime,
-            binding: binding(&initially_resolved),
+            binding: RuntimeClosureBinding::File(binding(&initially_resolved)),
         };
         let provenance = ComparatorRuntimeProvenance {
             root: temporary.path().display().to_string(),
@@ -4727,7 +5443,7 @@ mod tests {
         let fresh_entry = RuntimeClosureEntry {
             path: freshly_resolved.display().to_string(),
             trust: RuntimeTrust::AdministratorRuntime,
-            binding: binding(&freshly_resolved),
+            binding: RuntimeClosureBinding::File(binding(&freshly_resolved)),
         };
         let fresh = ResolvedRuntimeClosure {
             inspector: binding(Path::new("/usr/bin/otool")),
@@ -4860,6 +5576,23 @@ mod tests {
         );
         assert_eq!(baseline_measurement_status(false, false, false), "fail");
         assert_eq!(baseline_measurement_status(false, false, true), "pass");
+    }
+
+    #[test]
+    fn comparator_runtime_config_requires_exact_frozen_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("rga-config.json");
+        fs::write(&path, br#"{"custom_adapters":[]}"#).unwrap();
+        assert!(bind_runtime_rga_config(&path).is_ok());
+
+        for noncanonical in [
+            br#"{"custom_adapters":[]}\n"#.as_slice(),
+            br#"{ "custom_adapters": [] }"#.as_slice(),
+            br#"{"custom_adapters":[],"extra":null}"#.as_slice(),
+        ] {
+            fs::write(&path, noncanonical).unwrap();
+            assert!(bind_runtime_rga_config(&path).is_err());
+        }
     }
 
     #[cfg(target_os = "macos")]
