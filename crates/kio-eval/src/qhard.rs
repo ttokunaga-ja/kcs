@@ -20,6 +20,7 @@ use std::{
 
 use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::hash_bytes;
+use kio_pipeline::task::rebase_normalized_output_refs_for_relocated_store;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -794,6 +795,47 @@ fn rewrite_snapshot_registry(
     Ok(())
 }
 
+/// The private measurement snapshot has a distinct absolute root, while
+/// current task journals bind completed normalized outputs to their owning
+/// store's canonical absolute path.  Rebase only the already-copied,
+/// attested scope journals through the pipeline's strict capability-safe
+/// relocation boundary; never parse or rewrite journal JSON here.
+fn rebase_snapshot_task_journals(
+    source_root: &Path,
+    snapshot_root: &Path,
+    source_scopes: impl IntoIterator<Item = PathBuf>,
+) -> Result<(), QhardError> {
+    let mut relatives = BTreeSet::new();
+    for scope in source_scopes {
+        let relative = scope
+            .strip_prefix(source_root)
+            .map_err(|_| QhardError::Input("fixture scope escaped its bound source root".into()))?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(QhardError::Input(
+                "fixture scope has a non-normal relative path".into(),
+            ));
+        }
+        relatives.insert(relative.to_path_buf());
+    }
+    for relative in relatives {
+        let source_kio = source_root.join(&relative).join(".kio");
+        let snapshot_kio = snapshot_root.join(&relative).join(".kio");
+        rebase_normalized_output_refs_for_relocated_store(&source_kio, &snapshot_kio).map_err(
+            |error| {
+                QhardError::Input(format!(
+                    "cannot rebase private fixture task journal for {}: {error}",
+                    relative.display()
+                ))
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn snapshot_fixture(fixture: &Fixture) -> Result<FixtureSnapshot, QhardError> {
     let temp = tempfile::Builder::new()
         .prefix("kio-qhard-fixture-")
@@ -811,12 +853,23 @@ fn snapshot_fixture(fixture: &Fixture) -> Result<FixtureSnapshot, QhardError> {
             "fixture changed while creating private snapshot".into(),
         ));
     }
-    rewrite_snapshot_registry(&root_path, &fixture.root.public_path, &fixture.env_name)?;
+    let snapshot_root = copied_root.public_path.clone();
+    rebase_snapshot_task_journals(
+        &fixture.root.public_path,
+        &snapshot_root,
+        fixture
+            .scope_relatives
+            .iter()
+            .map(|relative| fixture.root.public_path.join(relative)),
+    )?;
+    rewrite_snapshot_registry(&snapshot_root, &fixture.root.public_path, &fixture.env_name)?;
     let root = copied_root;
     let scopes = fixture
         .scope_relatives
         .iter()
-        .map(|relative| RetainedDirectory::open(&root_path.join(relative), "private fixture scope"))
+        .map(|relative| {
+            RetainedDirectory::open(&snapshot_root.join(relative), "private fixture scope")
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(FixtureSnapshot {
         _temp: temp,
@@ -851,8 +904,18 @@ fn snapshot_baseline_fixture(
             "indexed fixture changed while snapshotting".into(),
         ));
     }
+    let snapshot_root = root.public_path.clone();
+    let mut source_scopes = Vec::new();
     for persona in baseline_personas() {
-        rewrite_snapshot_registry(&path, &source.public_path, &persona)?;
+        source_scopes.extend(
+            discover_scopes(source.child(&persona, "indexed baseline persona")?)?
+                .into_iter()
+                .map(|scope| scope.public_path),
+        );
+    }
+    rebase_snapshot_task_journals(&source.public_path, &snapshot_root, source_scopes)?;
+    for persona in baseline_personas() {
+        rewrite_snapshot_registry(&snapshot_root, &source.public_path, &persona)?;
     }
     Ok((temp, root))
 }
@@ -2390,6 +2453,10 @@ pub fn write_baseline_attestation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kio_pipeline::{
+        markdownize::MarkdownizeMode,
+        task::{TaskDescriptor, TaskStatus, TaskStore, TaskType},
+    };
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -2623,6 +2690,171 @@ mod tests {
         assert!(path.starts_with(&snapshot.path().to_string_lossy().to_string()));
         assert!(!path.starts_with(&source.path().to_string_lossy().to_string()));
     }
+
+    #[test]
+    fn fixture_snapshot_rebases_current_task_output_refs() {
+        let source = tempfile::tempdir().unwrap();
+        let scope_relative = PathBuf::from("qhard/p01/home/work");
+        let source_root = fs::canonicalize(source.path()).unwrap();
+        let source_scope = source_root.join(&scope_relative);
+        let source_kio = source_scope.join(".kio");
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let source_output = kio_pipeline::markdownize::normalized_instance_dir(
+            &source_kio,
+            &raw_hash,
+            &tool_hash,
+            0,
+        );
+        fs::create_dir_all(&source_output).unwrap();
+        TaskStore::new(&source_kio)
+            .replace_all(&[TaskDescriptor {
+                task_id: "task_01H".into(),
+                task_type: TaskType::Markdownize,
+                mode: Some(MarkdownizeMode::Full),
+                input_path: "fixture.pdf".into(),
+                input_hash: raw_hash.clone(),
+                previous_raw_hash: None,
+                parent_run_id: None,
+                changed_unit_keys: Vec::new(),
+                output_ref: source_output.display().to_string(),
+                unit_keys: None,
+                status: TaskStatus::Done,
+                attempts: 1,
+                next_retry_at: None,
+                deadline: None,
+                heartbeat_at: None,
+                fallback_reason: None,
+                created_at: "2026-08-13T00:00:00Z".into(),
+                bbox_annotation_enabled: None,
+                hold_reason: None,
+                reserved_usd: None,
+                reserved_month: None,
+                reservation_id: None,
+            }])
+            .unwrap();
+        let registry = source
+            .path()
+            .join("env/qhard/xdg-data/kio/scope-registry.sqlite");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        let connection = Connection::open(&registry).unwrap();
+        connection
+            .execute_batch("CREATE TABLE scopes (kio_path TEXT, root_path TEXT);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scopes VALUES (?1, ?2)",
+                rusqlite::params![source_kio.to_string_lossy(), source_scope.to_string_lossy(),],
+            )
+            .unwrap();
+        drop(connection);
+
+        let root = RetainedDirectory::open(source.path(), "fixture").unwrap();
+        let live_sha256 = fixture_live_digest(&root).unwrap();
+        let fixture = Fixture {
+            root,
+            tree: "qhard".into(),
+            env_name: "qhard".into(),
+            scope_relatives: vec![scope_relative.to_string_lossy().into_owned()],
+            attestation: FileBinding {
+                path: "test-attestation".into(),
+                sha256: "sha256:test".into(),
+                bytes: 0,
+            },
+            live_sha256,
+        };
+
+        let snapshot = snapshot_fixture(&fixture).unwrap();
+        let snapshot_kio = snapshot.root.public_path.join(&scope_relative).join(".kio");
+        let tasks = TaskStore::new(&snapshot_kio).all().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].output_ref,
+            kio_pipeline::markdownize::normalized_instance_dir(
+                &snapshot_kio,
+                &raw_hash,
+                &tool_hash,
+                0,
+            )
+            .display()
+            .to_string(),
+        );
+    }
+
+    #[test]
+    fn baseline_snapshot_rebases_each_current_scope_journal() {
+        let source = tempfile::tempdir().unwrap();
+        let source_root = fs::canonicalize(source.path()).unwrap();
+        let p01_scope = source_root.join("p01/home/work");
+        let p01_kio = p01_scope.join(".kio");
+        let raw_hash = format!("sha256:{}", "c".repeat(64));
+        let tool_hash = format!("sha256:{}", "d".repeat(64));
+        let p01_output =
+            kio_pipeline::markdownize::normalized_instance_dir(&p01_kio, &raw_hash, &tool_hash, 0);
+        fs::create_dir_all(&p01_output).unwrap();
+        TaskStore::new(&p01_kio)
+            .replace_all(&[TaskDescriptor {
+                task_id: "task_01H".into(),
+                task_type: TaskType::Markdownize,
+                mode: Some(MarkdownizeMode::Full),
+                input_path: "fixture.pdf".into(),
+                input_hash: raw_hash.clone(),
+                previous_raw_hash: None,
+                parent_run_id: None,
+                changed_unit_keys: Vec::new(),
+                output_ref: p01_output.display().to_string(),
+                unit_keys: None,
+                status: TaskStatus::Done,
+                attempts: 1,
+                next_retry_at: None,
+                deadline: None,
+                heartbeat_at: None,
+                fallback_reason: None,
+                created_at: "2026-08-13T00:00:00Z".into(),
+                bbox_annotation_enabled: None,
+                hold_reason: None,
+                reserved_usd: None,
+                reserved_month: None,
+                reservation_id: None,
+            }])
+            .unwrap();
+        for persona in baseline_personas() {
+            let scope = source_root.join(&persona).join("home/work/.kio");
+            fs::create_dir_all(&scope).unwrap();
+            let registry = source_root
+                .join("env")
+                .join(&persona)
+                .join("xdg-data/kio/scope-registry.sqlite");
+            fs::create_dir_all(registry.parent().unwrap()).unwrap();
+            let connection = Connection::open(&registry).unwrap();
+            connection
+                .execute_batch("CREATE TABLE scopes (kio_path TEXT, root_path TEXT);")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO scopes VALUES (?1, ?2)",
+                    rusqlite::params![p01_kio.to_string_lossy(), p01_scope.to_string_lossy(),],
+                )
+                .unwrap();
+        }
+
+        let bound = RetainedDirectory::open(&source_root, "baseline fixture").unwrap();
+        let digest = fixture_live_digest(&bound).unwrap();
+        let (_temp, snapshot) = snapshot_baseline_fixture(&bound, &digest).unwrap();
+        let snapshot_kio = snapshot.public_path.join("p01/home/work/.kio");
+        assert_eq!(
+            TaskStore::new(&snapshot_kio).all().unwrap()[0].output_ref,
+            kio_pipeline::markdownize::normalized_instance_dir(
+                &snapshot_kio,
+                &raw_hash,
+                &tool_hash,
+                0,
+            )
+            .display()
+            .to_string(),
+        );
+    }
+
     #[test]
     fn regular_tree_snapshot_rejects_changed_copy() {
         let source = tempfile::tempdir().unwrap();

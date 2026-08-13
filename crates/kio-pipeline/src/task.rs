@@ -6,6 +6,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use cap_primitives::{ambient_authority, fs as cap_fs};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::markdownize::MarkdownizeMode;
@@ -348,6 +349,16 @@ impl TaskStore {
                 });
             }
         };
+        self.read_descriptors(file, |descriptor| {
+            validate_task_descriptor(self.kio_dir(), descriptor)
+        })
+    }
+
+    fn read_descriptors(
+        &self,
+        file: fs::File,
+        mut validate: impl FnMut(&TaskDescriptor) -> Result<()>,
+    ) -> Result<Vec<TaskDescriptor>> {
         let file_len = file.metadata().pipeline_io(&self.path)?.len();
         if file_len > MAX_TASK_STORE_BYTES {
             return Err(PipelineError::corrupt(
@@ -398,7 +409,7 @@ impl TaskStore {
             let descriptor: TaskDescriptor = serde_json::from_slice(&line).map_err(|err| {
                 PipelineError::corrupt(self.path.display().to_string(), err.to_string())
             })?;
-            validate_task_descriptor(self.kio_dir(), &descriptor)?;
+            validate(&descriptor)?;
             by_id.insert(descriptor.task_id.clone(), descriptor);
         }
         Ok(by_id.into_values().collect())
@@ -533,6 +544,303 @@ impl TaskStore {
     pub fn kio_dir(&self) -> &Path {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
+}
+
+/// Rebase normalized-instance task references after a private task-store copy.
+///
+/// `source_kio` is an already-canonical, lexical source identity; it is never
+/// opened. The destination store is read only after a bounded, no-follow store
+/// path check. If its task journal is absent, this is a no-op and does not
+/// create one.
+pub fn rebase_normalized_output_refs_for_relocated_store(
+    source_kio: &Path,
+    destination_kio: &Path,
+) -> Result<()> {
+    let destination_store = TaskStore::new(destination_kio);
+    // Retain this descriptor through the complete read/validate/replace
+    // sequence. A same-UID actor can rename the public `.kio` pathname after
+    // validation; resolving the journal through that pathname again would
+    // otherwise target a different store.
+    let destination_dir = open_checked_store_dir(destination_kio)?;
+    let task_name = Path::new("tasks.jsonl");
+    let listed = match cap_fs::stat(&destination_dir, task_name, cap_fs::FollowSymlinks::No) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).pipeline_io(&destination_store.path),
+    };
+    if !listed.file_type().is_file() {
+        return Err(PipelineError::corrupt(
+            destination_store.path.display().to_string(),
+            "store object has an unexpected filesystem type",
+        ));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let file =
+        cap_fs::open(&destination_dir, task_name, &options).pipeline_io(&destination_store.path)?;
+    let opened = cap_fs::Metadata::from_file(&file).pipeline_io(&destination_store.path)?;
+    if !opened.file_type().is_file() || !same_cap_file_identity(&listed, &opened) {
+        return Err(PipelineError::corrupt(
+            destination_store.path.display().to_string(),
+            "task journal changed while it was being opened",
+        ));
+    }
+    // Keep a descriptor for the post-read state check.  Reading by a clone
+    // shares the underlying immutable file identity without reopening its
+    // pathname.
+    let reader = file.try_clone().pipeline_io(&destination_store.path)?;
+    let mut tasks = destination_store.read_descriptors(reader, |descriptor| {
+        validate_task_descriptor_fields(destination_kio, descriptor)?;
+        let mut rebased = descriptor.clone();
+        rebase_task_output_ref(source_kio, destination_kio, &mut rebased)
+    })?;
+    let after_read = cap_fs::Metadata::from_file(&file).pipeline_io(&destination_store.path)?;
+    if !same_cap_file_state(&opened, &after_read) {
+        return Err(PipelineError::corrupt(
+            destination_store.path.display().to_string(),
+            "task journal changed while it was being read",
+        ));
+    }
+
+    for task in &mut tasks {
+        rebase_task_output_ref(source_kio, destination_kio, task)?;
+    }
+    replace_relocated_task_journal(&destination_dir, &destination_store, &opened, &tasks)
+}
+
+/// Bind the destination store once, without retaining its public pathname as
+/// authority for its children.
+fn open_checked_store_dir(destination_kio: &Path) -> Result<fs::File> {
+    let listed = fs::symlink_metadata(destination_kio).pipeline_io(destination_kio)?;
+    if listed.file_type().is_symlink() || !listed.file_type().is_dir() {
+        return Err(PipelineError::corrupt(
+            destination_kio.display().to_string(),
+            "Kio store root is not a real directory",
+        ));
+    }
+    let canonical = destination_kio
+        .canonicalize()
+        .pipeline_io(destination_kio)?;
+    let directory =
+        cap_fs::open_ambient_dir(&canonical, ambient_authority()).pipeline_io(destination_kio)?;
+    let opened = cap_fs::Metadata::from_file(&directory).pipeline_io(destination_kio)?;
+    if !opened.file_type().is_dir() || !same_store_directory_identity(&listed, &opened) {
+        return Err(PipelineError::corrupt(
+            destination_kio.display().to_string(),
+            "Kio store root changed while it was being opened",
+        ));
+    }
+    Ok(directory)
+}
+
+fn replace_relocated_task_journal(
+    destination_dir: &fs::File,
+    destination_store: &TaskStore,
+    expected_journal: &cap_fs::Metadata,
+    descriptors: &[TaskDescriptor],
+) -> Result<()> {
+    if descriptors.len() > MAX_TASK_RECORDS {
+        return Err(PipelineError::corrupt(
+            destination_store.path.display().to_string(),
+            format!("tasks.jsonl exceeds {MAX_TASK_RECORDS} record limit"),
+        ));
+    }
+    for descriptor in descriptors {
+        validate_task_descriptor(destination_store.kio_dir(), descriptor)?;
+    }
+    let (mut file, temporary_name) =
+        create_relocated_task_temp(destination_dir, destination_store)?;
+    let result = (|| -> Result<()> {
+        let mut total_bytes = 0u64;
+        for descriptor in descriptors {
+            let line = destination_store.framed_record(descriptor)?;
+            total_bytes = total_bytes.saturating_add(line.len() as u64);
+            if total_bytes > MAX_TASK_STORE_BYTES {
+                return Err(PipelineError::corrupt(
+                    destination_store.path.display().to_string(),
+                    format!("tasks.jsonl exceeds {MAX_TASK_STORE_BYTES} byte limit"),
+                ));
+            }
+            file.write_all(&line).pipeline_io(&destination_store.path)?;
+        }
+        file.sync_all().pipeline_io(&destination_store.path)?;
+        drop(file);
+        let current = cap_fs::stat(
+            destination_dir,
+            Path::new("tasks.jsonl"),
+            cap_fs::FollowSymlinks::No,
+        )
+        .pipeline_io(&destination_store.path)?;
+        if !current.file_type().is_file() || !same_cap_file_state(expected_journal, &current) {
+            return Err(PipelineError::corrupt(
+                destination_store.path.display().to_string(),
+                "task journal changed while it was being rebased",
+            ));
+        }
+        cap_fs::rename(
+            destination_dir,
+            Path::new(&temporary_name),
+            destination_dir,
+            Path::new("tasks.jsonl"),
+        )
+        .pipeline_io(&destination_store.path)?;
+        destination_dir
+            .sync_all()
+            .pipeline_io(&destination_store.path)
+    })();
+    if result.is_err() {
+        let _ = cap_fs::remove_file(destination_dir, Path::new(&temporary_name));
+    }
+    result
+}
+
+fn create_relocated_task_temp(
+    destination_dir: &fs::File,
+    destination_store: &TaskStore,
+) -> Result<(fs::File, String)> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..8 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".tasks.jsonl.{}.{nanos}.{sequence}.tmp", std::process::id());
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        match cap_fs::open(destination_dir, Path::new(&name), &options) {
+            Ok(file) => return Ok((file, name)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).pipeline_io(&destination_store.path),
+        }
+    }
+    Err(PipelineError::Io {
+        path: destination_store.path.display().to_string(),
+        message: "could not create a unique temp file for tasks.jsonl".to_owned(),
+    })
+}
+
+#[cfg(unix)]
+fn same_store_directory_identity(listed: &fs::Metadata, opened: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt as CapMetadataExt;
+    use std::os::unix::fs::MetadataExt as StdMetadataExt;
+    listed.dev() == opened.dev() && listed.ino() == opened.ino()
+}
+
+#[cfg(windows)]
+fn same_store_directory_identity(listed: &fs::Metadata, opened: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt as CapMetadataExt;
+    use std::os::windows::fs::MetadataExt as StdMetadataExt;
+    listed.volume_serial_number() == opened.volume_serial_number()
+        && listed.file_index() == opened.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_store_directory_identity(_listed: &fs::Metadata, opened: &cap_fs::Metadata) -> bool {
+    opened.file_type().is_dir()
+}
+
+#[cfg(unix)]
+fn same_cap_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(unix)]
+fn same_cap_file_state(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt;
+    same_cap_file_identity(left, right)
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn same_cap_file_state(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    same_cap_file_identity(left, right) && left.len() == right.len()
+}
+
+#[cfg(windows)]
+fn same_cap_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt;
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_cap_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+fn rebase_task_output_ref(
+    source_kio: &Path,
+    destination_kio: &Path,
+    descriptor: &mut TaskDescriptor,
+) -> Result<()> {
+    if descriptor.output_ref.starts_with("online:")
+        || descriptor.output_ref.starts_with("offline:")
+        || descriptor.output_ref.starts_with("embedding:")
+    {
+        validate_task_output_ref(destination_kio, descriptor)?;
+        return Ok(());
+    }
+
+    if descriptor.task_type != TaskType::Markdownize {
+        return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
+    }
+    let source_root = source_kio.join("objects/normalized_units");
+    let persisted = Path::new(&descriptor.output_ref);
+    let relative = persisted
+        .strip_prefix(&source_root)
+        .map_err(|_| invalid_output_ref(destination_kio, &descriptor.output_ref))?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => value.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?;
+    if components.len() != 3 {
+        return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
+    }
+    let digest = descriptor
+        .input_hash
+        .strip_prefix("sha256:")
+        .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?;
+    if components[0] != digest[0..2] || components[1] != digest[2..4] {
+        return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
+    }
+    let (tool_profile_hash, gen) =
+        parse_normalized_output_basename(&descriptor.input_hash, &components[2])
+            .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?;
+    let expected_source = crate::markdownize::normalized_instance_dir(
+        source_kio,
+        &descriptor.input_hash,
+        &tool_profile_hash,
+        gen,
+    );
+    if expected_source.to_str() != Some(descriptor.output_ref.as_str()) {
+        return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
+    }
+    descriptor.output_ref = crate::markdownize::normalized_instance_dir(
+        destination_kio,
+        &descriptor.input_hash,
+        &tool_profile_hash,
+        gen,
+    )
+    .to_str()
+    .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?
+    .to_owned();
+    validate_task_output_ref(destination_kio, descriptor)?;
+    Ok(())
 }
 
 /// Whether `input_path` names a direct child of the scope root: a single
@@ -832,6 +1140,20 @@ impl TaskDescriptor {
 }
 
 fn validate_task_descriptor(kio_dir: &Path, descriptor: &TaskDescriptor) -> Result<()> {
+    validate_task_descriptor_fields(kio_dir, descriptor)?;
+    let output = validate_task_output_ref(kio_dir, descriptor)?;
+    if matches!(output, TaskOutputRef::Online { .. })
+        && descriptor.bbox_annotation_enabled.is_none()
+    {
+        return Err(PipelineError::corrupt(
+            kio_dir.join("tasks.jsonl").display().to_string(),
+            "online Markdownize task is missing bbox_annotation_enabled policy stamp".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_descriptor_fields(kio_dir: &Path, descriptor: &TaskDescriptor) -> Result<()> {
     let corrupt = |message: String| {
         PipelineError::corrupt(kio_dir.join("tasks.jsonl").display().to_string(), message)
     };
@@ -883,14 +1205,6 @@ fn validate_task_descriptor(kio_dir: &Path, descriptor: &TaskDescriptor) -> Resu
     }
     if descriptor.output_ref.len() > MAX_TASK_PATH_BYTES {
         return Err(corrupt("task output_ref is oversized".to_owned()));
-    }
-    let output = validate_task_output_ref(kio_dir, descriptor)?;
-    if matches!(output, TaskOutputRef::Online { .. })
-        && descriptor.bbox_annotation_enabled.is_none()
-    {
-        return Err(corrupt(
-            "online Markdownize task is missing bbox_annotation_enabled policy stamp".to_owned(),
-        ));
     }
     match (descriptor.status, descriptor.hold_reason) {
         (TaskStatus::Paused, Some(hold_reason))
@@ -1752,6 +2066,105 @@ mod tests {
             task.output_ref = alias;
             assert!(validate_task_output_ref(dir.path(), &task).is_err());
         }
+    }
+
+    #[test]
+    fn relocated_store_rebases_only_exact_normalized_refs() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let source_ref =
+            crate::markdownize::normalized_instance_dir(source.path(), &raw_hash, &tool_hash, 7);
+        let destination_ref = crate::markdownize::normalized_instance_dir(
+            destination.path(),
+            &raw_hash,
+            &tool_hash,
+            7,
+        );
+        fs::create_dir_all(&destination_ref).unwrap();
+
+        let mut normalized = valid_task();
+        normalized.input_hash = raw_hash;
+        normalized.output_ref = source_ref.display().to_string();
+        let mut typed = valid_task();
+        typed.task_id = "task_02H".to_owned();
+        let typed_ref = typed.output_ref.clone();
+        let mut encoded = serde_json::to_vec(&normalized).unwrap();
+        encoded.push(b'\n');
+        encoded.extend(serde_json::to_vec(&typed).unwrap());
+        encoded.push(b'\n');
+        fs::write(destination.path().join("tasks.jsonl"), encoded).unwrap();
+
+        rebase_normalized_output_refs_for_relocated_store(source.path(), destination.path())
+            .unwrap();
+        let tasks = TaskStore::new(destination.path()).all().unwrap();
+        assert_eq!(tasks[0].output_ref, destination_ref.display().to_string());
+        assert_eq!(tasks[1].output_ref, typed_ref);
+    }
+
+    #[test]
+    fn relocated_store_rejects_malformed_or_foreign_refs_without_mutation() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let mut task = valid_task();
+        task.input_hash = raw_hash.clone();
+        task.output_ref =
+            crate::markdownize::normalized_instance_dir(foreign.path(), &raw_hash, &tool_hash, 1)
+                .display()
+                .to_string();
+        let path = destination.path().join("tasks.jsonl");
+        let mut bytes = serde_json::to_vec(&task).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).unwrap();
+        assert!(rebase_normalized_output_refs_for_relocated_store(
+            source.path(),
+            destination.path()
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        fs::write(&path, b"{ malformed\n").unwrap();
+        let malformed = fs::read(&path).unwrap();
+        assert!(rebase_normalized_output_refs_for_relocated_store(
+            source.path(),
+            destination.path()
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocated_store_never_follows_a_journal_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_journal = outside.path().join("tasks.jsonl");
+        let sentinel = b"must not be read or replaced";
+        fs::write(&outside_journal, sentinel).unwrap();
+        symlink(&outside_journal, destination.path().join("tasks.jsonl")).unwrap();
+
+        assert!(rebase_normalized_output_refs_for_relocated_store(
+            source.path(),
+            destination.path()
+        )
+        .is_err());
+        assert_eq!(fs::read(outside_journal).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn relocated_store_does_not_create_missing_task_journal() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        rebase_normalized_output_refs_for_relocated_store(source.path(), destination.path())
+            .unwrap();
+        assert!(!destination.path().join("tasks.jsonl").exists());
     }
 
     #[cfg(windows)]

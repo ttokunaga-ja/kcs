@@ -752,6 +752,7 @@ dependencies = [
  "clap",
  "kio-core",
  "kio-index",
+ "kio-pipeline",
  "kio-search",
  "libc",
  "rusqlite",
