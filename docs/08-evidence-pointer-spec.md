@@ -47,7 +47,7 @@ Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 }
 ```
 
-`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md)。**例外**: 03 §3 の forward 規則以前に作られた検証済み legacy tree 由来の entry に限り、区切り等を含む旧 path をそのまま保持する — 表示専用であり resolver 入力には使わない。物理化時の検査は現行どおり)。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
+`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md))。区切り等を含む path は表示専用としても受理せず schema violation として fail-closed にする。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
 
 ## 2.1 必須フィールド
 
@@ -57,7 +57,7 @@ Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `commit` | commit object の content hash (commit_hash, [03-data-model.md §8.1](03-data-model.md)) | append-only。GC (shallow 化) でも失われない |
 | `raw_hash` | 原文バイト列の identity | 移動・リネームで不変 |
 | `tool_profile_hash` | Markdownize Adapter capability の identity | tool 変更で別 chunk に飛ばない保証 |
-| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` から導出 (算出式は [03-data-model.md §8.1](03-data-model.md)) |
+| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` から導出。本文変更は分離し、同一本文の再取り込みは identity を維持 ([03-data-model.md §8.1](03-data-model.md)) |
 | `scope_id` | 正本 `.kio` の path 非依存 identity (`.kio/scope.json` 保持) | `.kio` の移動・export/import で不変 |
 
 ## 2.2 Optional フィールド
@@ -178,8 +178,8 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     終端) へ短絡する)
 5.  raw_hash の marker と raw object の存在を判定する。**まず、存在する全 marker (tombstone /
     erase receipt) の最終 event を 1 つに正本化する** — canonical final event = 全 marker 中で
-    `lifecycle_epoch` 最大の最終 event ([05-runtime.md §3.5](05-runtime.md)。legacy の epoch 欠落は
-    0 とみなし、同値は tombstone 側を優先する決定的 tie-break。resurrection link も canonical
+    `lifecycle_epoch` 最大の最終 event ([05-runtime.md §3.5](05-runtime.md)。`lifecycle_epoch` を欠く
+    event は malformed current record であり corruption とする。同値は tombstone 側を優先する決定的 tie-break。resurrection link も canonical
     final event のものを採用する)。**正本化の入力は event 検証 (kind 別必須 field・遷移文法・
     `in_commit` / `purged_raws` membership / `at` — [05-runtime.md §3.5](05-runtime.md) の validity、
     正本は [10-operations.md §7.5.1](10-operations.md)) を通過した marker のみ** — 検証失敗の marker は
@@ -202,10 +202,16 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     `kio repair verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)。
     **(i)〜(iv) のいずれにも該当しない場合** (marker が無い・または active な erase receipt が
     あっても raw object が存在する場合を含む) は raw object が存在する通常状態であり、手順 6 へ進む
-6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
-    (gen フィールド欠落は gen=0 と読む)
+6.  tree entry の normalize.(tool_profile_hash, gen) と `manifest_hash` で normalized instance を解決する。
+    historical / `--at` / Evidence 解決は manifest CAS の該当 done entry の non-null `unit_object_hash` から
+    immutable NormalizedUnitObject CAS を読む。path-named `normalized_units/` の current body や、同 gen の
+    後から更新された最新 body を読む経路はない。
+    `normalize` が存在する entry で gen が欠落する場合は current schema violation / corruption として
+    fail-closed にする (gen=0 へ補う reader は置かない)。
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
-    chunk の unit_key が当該 manifest で status=done であることを検証する (unit_key は chunk_hash から chunk object の header を読み取って得る — 手順 7 の本文取り出しに先行する read-only 参照) — done でない unit の
+    chunk の unit_key が当該 manifest で status=done かつ non-null `unit_object_hash` を持つことを検証し、
+    当該 hash の NormalizedUnitObject CAS から exact body を得て、その Markdown hash が chunk object の
+    `unit_content_hash` と一致することを検証する (unit_key は chunk_hash から chunk object の header を読み取って得る — 手順 7 の本文取り出しに先行する read-only 参照) — done でない unit の
     chunk は当該 commit 時点に存在しない (same-gen retry の後着 chunk を過去 commit の証拠として
     返さない → not_found)。**v2/v3 tree ではさらに、chunk の publication と config association の
     introduction ([04-pipeline.md §4.1](04-pipeline.md)) が pointer の commit の ancestor-or-equal で
@@ -361,7 +367,7 @@ kio evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
 status にこれらをそのまま用いる。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
 retryable error `KIO-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
-0 を返さない (再構築中でも旧 sqlite.db が読めるなら通常応答 — [05-runtime.md §6](05-runtime.md)。
+0 を返さない (再構築中に既存 sqlite.db が読めても通常応答へ戻らず fail-closed — [05-runtime.md §6](05-runtime.md)。
 [06-cli-spec.md §7](06-cli-spec.md)、[05-runtime.md §2.6](05-runtime.md))。
 非 strict では従来どおり alive + `commit_shallow: true` で返す。
 
@@ -493,15 +499,15 @@ commit hash の短縮表示は [03-data-model.md §8.1](03-data-model.md) の規
 `schema_version` の semver 規約:
 
 ```
-MAJOR  必須フィールド削除 / 既存フィールド意味変更    migration 必須
+MAJOR  必須フィールド削除 / 既存フィールド意味変更    公開後は migration / old-version read-only を release 計画に明記
 MINOR  新フィールド追加 (default で旧データを補える)
 PATCH  typo / コメント修正
 ```
 
-`path_at_commit` / `heading_path` 等の optional フィールドは **MINOR 互換** で追加してよい。`raw_hash` / `chunk_hash` / `commit` の意味変更は **MAJOR 扱い** (= migration plan + ユーザー通知)。
+`path_at_commit` / `heading_path` 等の optional フィールドは **MINOR 互換** で追加してよい。`raw_hash` / `chunk_hash` / `commit` の意味変更は **MAJOR 扱い** (= 公開後は release plan + ユーザー通知)。未公開期間に旧 pointer を読む migration branch は置かない。
 
 **未知 MAJOR の拒否は表現形式に依らない**: reader は自己の対応 MAJOR より新しい `schema_version` を、URI の `sv` (§2.3) と inline / batch JSON の `schema_version` field のどちらで受けても KIO-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する (未知フィールド無視則が担う前方互換は、既知 MAJOR 内の MINOR 追加に限る)。
 
 **既知 MAJOR 内の MINOR 追加による**新 schema は古い解決ロジックでもエラーなく扱えること (forward compatible) を要件とする (= 未知フィールドは無視。未知 MAJOR は上記のとおり拒否 — この要件の対象外)。
 
-本仕様の 2026-07 改訂 (`scope_id` 必須化・`scope_path` の optional 降格) は、実装・pointer 発行前の `schema_version = 1` の定義確定であり、MAJOR bump ではない。公開後に同種の変更を行う場合は上記規約どおり MAJOR (migration plan + ユーザー通知) となる。
+本仕様の 2026-07 改訂 (`scope_id` 必須化・`scope_path` の optional 降格) は、実装・pointer 発行前の `schema_version = 1` の定義確定であり、MAJOR bump ではない。公開後に同種の変更を行う場合は上記規約どおり MAJOR (release plan + ユーザー通知) となる。

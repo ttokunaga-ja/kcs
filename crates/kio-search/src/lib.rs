@@ -30,6 +30,4 @@ pub enum SearchError {
     Cursor(String),
     #[error("evidence error: {0}")]
     Evidence(String),
-    #[error("search feature not implemented: {0}")]
-    NotImplemented(&'static str),
 }

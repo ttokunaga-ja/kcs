@@ -1032,7 +1032,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 `time_travel` は query hash に入る canonical selector object (default のみ field 省略)、`since_cutoff` は
 `--since` のときだけ存在する。cursor はこの JSON の JCS と認証 tag を含む signed
 base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
-binding を持たない legacy `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
+binding を持たない obsolete `v=1` は `KIO-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではなく、これは旧 cursor を受理する後方互換 branch ではない)。
 
 - `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, query_vector_digest: <実効 mode が vector|hybrid のときのみ — page 1 の device-local query vector の canonical float32 little-endian bytes に対する sha256。text mode ではキー省略>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KIO-E-SEARCH-CURSOR-001` で拒否、§1.5)
 - page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。
@@ -1097,7 +1097,7 @@ aggregator の `agg_approvals` は**読み取り専用の投影**であり、用
 検証 (publication 時の loader)** である。値域 (JSON Schema enum 相当):
 
 ```text
-commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged', 'purged' }
+commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
 ```
 
 | type | 用途 | protected | GC policy |
@@ -1105,12 +1105,11 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 | manual | 明示 commit | true | none |
 | auto | 自動 snapshot (取り込み完了時 = MVP / 定期 = Phase 4、§8) | false | shallow (個数 / 時間で tree を減衰) |
 | imported | 外部 Kio から取り込んだ commit | true | none |
-| migrated | format 変換時の中間 commit | false | shallow |
 | repaired | repair 操作の中間 commit | false | shallow |
 | merged | 共有版マージ (Phase 5+) | true | none |
 | purged | 法務・秘匿削除後の commit | true | none |
 
-`semver MAJOR でも値域 bump しない` 契約は他フィールドより強い保証。
+`semver MAJOR でも値域 bump しない` 契約は release 後は他フィールドより強い保証である。Phase 3 受入前に廃止した enum を持つ store は current reader が拒否し、互換変換せず clean recreation する ([10-operations.md §12.5](10-operations.md))。
 
 ## 2.2 GC
 
@@ -1119,7 +1118,6 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 ```text
 gc_policy(commit_type):
   auto      → shallow   (tiered retention 満了で tree のみ破棄、commit object は残す)
-  migrated  → shallow
   repaired  → shallow
   manual    → none
   imported  → none
@@ -1169,7 +1167,7 @@ max_runtime_seconds = 60
 
 ## 2.4 Tiered Retention
 
-`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`migrated` / `repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_*_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
+`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_repaired_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
 **ref tip 除外**: HEAD・branch・tag が指す commit の tree は、retention 満了でも **shallow 化の対象にしない** — 無変更 scope では auto snapshot が no-op を続け HEAD が古い auto commit に留まり続けるため、除外しないと現在状態の基点 (bare search / restore / cursor) を失う。物理削除の直前にも、ref tip 非該当と「非 shallow commit からの参照ゼロ」を同一 exclusive critical section で再検証する (§2.5):
 
 ```toml
@@ -1179,7 +1177,6 @@ keep_hourly_days   = 7
 keep_daily_weeks   = 4
 keep_weekly_months = 6
 [gc.derived_retention]
-keep_migrated_per_branch = 5
 keep_repaired_per_branch = 5
 ```
 
@@ -1225,7 +1222,7 @@ GC が削除してはならないもの:
   未公開 finalize 由来の未参照 toollock のみ、全 commit 参照走査の後に回収可)
 - manifest object — 参照する tree object が存在する限り削除不可 (削除の唯一の経路は purge。shallow 化で
   未参照になったものの回収は Phase 4 GC の対象 — shallow 化を駆動した系統の retention (§2.2 表の
-  gc_policy: auto = tiered retention・migrated / repaired = `[gc.derived_retention]` — §2.4) に従う)
+  gc_policy: auto = tiered retention・repaired = `[gc.derived_retention]` — §2.4) に従う)
 ```
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。

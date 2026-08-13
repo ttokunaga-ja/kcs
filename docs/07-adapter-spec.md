@@ -209,14 +209,11 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         をそのまま publish する — 監査値を補完・捏造しない) — 途中で crash した中間
         (true × 行なし) は、次回実行の self-heal が **`approval_pending` と完全一致する場合に限り**
         行 publish を完遂する (pending 記録が無い・一致しない中間は自動生成せず明示承認 (対話 /
-        --approve) を要求する)。`approval_pending` の schema は
-        [10-operations.md §12.3](10-operations.md) — **approved_at / approval_method を欠く legacy
-        pending は schema error にしない**: 完全一致不成立として self-heal の対象外であり、次回
-        locked mutation で除去して明示承認を要求する (10 §12.3 の要素単位後方互換)。**この除去も
-        `approvals_initialized` marker が無ければ同一 atomic write で true 化する** (revoke の pending
-        除去と同型の初回 materialize 例外の消費 — 除去だけで marker を残さないと「true × 行ゼロ ×
-        marker 無し」= 真正初回条件が復活し、次回実行の (b) 初回 materialize が「明示承認を要求する」
-        を無音で迂回する。対象なしでは書かない)。**scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
+        --approve) を要求する)。`approval_pending` 全体の**不在**は有効であり pending intent 無しを表す。
+        ただし key が存在する場合は [10-operations.md §12.3](10-operations.md) の required field
+        (`approved_at` / `approval_method` を含む) を全て満たさなければならない。present malformed
+        pending は schema error / fail-closed とし、self-heal・自動 cleanup・監査値の補完の対象にしない。
+        **scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
         (revoked × true) は gate の AND で送信不能 (安全側) のまま恒久に安全であり、**boolean の
         false 化は kill switch 操作 (config 編集) 側の責務 — 自動整合はしない** (`kio adapter revoke
         --all` の終状態 (全行 revoked × true、[06-cli-spec.md §1](06-cli-spec.md) の「boolean は
@@ -1268,7 +1265,7 @@ Kio は要求しない)。**凍結保全と合成が適用されるのは transp
 
 ## 8.4 Capability 宣言なしの Adapter
 
-`capabilities` に `incremental_update` を含まない Adapter は、Kio が **常に full モード** で呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+`capabilities` に `incremental_update` を含まない Adapter は、Kio が **常に full モード** で呼ぶ。これは current capability contract の縮退であり、旧 store / object reader の後方互換ではない。
 
 ---
 

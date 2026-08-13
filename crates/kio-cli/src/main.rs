@@ -9,7 +9,10 @@ mod search_history;
 mod search_time;
 mod verify_objects;
 
-use crate::historical_reindex::{retained_history_instances, RetainedNormalizedInstance};
+use crate::historical_reindex::{
+    pinned_done_units, retained_history_instances, retained_history_instances_for_roots,
+    RetainedNormalizedInstance,
+};
 use crate::ocr_discovery::{prepared_units_from_ocr_discovery, supports_ocr_from_scratch};
 use crate::online_task::targets_standard_online_markdownize;
 
@@ -20,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
+use cap_primitives::fs as cap_fs;
 use clap::{Args, Parser, Subcommand};
 use kio_adapter::batch_client::{
     batch_input_line, batch_upload_filename, configured_mistral_batch_client, ocr_batch_body,
@@ -46,10 +50,10 @@ use kio_adapter::types::{
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kio_core::cas::{
-    canonical_json_bytes, fanout_path, hash_path_component, is_hash, read_bounded_regular_file,
-    ChunkObject, ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    canonical_json_bytes, fanout_path, is_hash, read_bounded_regular_file, ChunkObject,
+    ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
-use kio_core::dag::{CommitType, NormalizeRef, TreeObject};
+use kio_core::dag::{CommitObject, CommitType, NormalizeRef, TreeObject};
 use kio_core::history::HistoryReader;
 use kio_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
 use kio_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMode};
@@ -61,10 +65,13 @@ use kio_core::scope::{
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::chunking::{
-    chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+    chunk_hash, chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
 };
 use kio_index::embedding_store::{self, f32_from_le_bytes, f32_to_le_bytes};
-use kio_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
+use kio_index::fts::{
+    open_existing_source_index_connection, ExistingSourceIndexOpenMode, FtsSchemaConfig,
+    FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS,
+};
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_index::{
     ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
@@ -86,23 +93,26 @@ use kio_pipeline::ledger::ops::{
 };
 use kio_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kio_pipeline::ledger::{
-    migrate_jsonl_if_needed, BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind,
-    TaskKey as LedgerTaskKey,
+    BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
 };
 use kio_pipeline::markdownize::{
     build_normalized_view_layout, choose_markdownize_mode, load_validated_normalized_instance,
     normalized_view_path, persist_normalized_instance, validate_markdownize_response,
-    IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
-    NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
-    ValidatedNormalizedInstance,
+    validate_normalized_instance, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
+    MarkdownizeMode, NormalizedInstanceIdentity, NormalizedInstanceManifest,
+    NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus, ValidatedNormalizedInstance,
 };
 use kio_pipeline::prepare::{
     hash_bytes, map_units, pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
     PrepareStageBytesRequest, PreparedUnit, UnitFingerprint, UnitType,
 };
 use kio_pipeline::scan::{
-    build_scan_preview, classify_secret, current_scan_policy_allows_file, hash_verified_scan_input,
-    read_verified_scan_input, ScanCandidate, ScanPreview, ScanPreviewRequest,
+    build_bound_scan_preview, build_scan_preview, build_scan_preview_with_inherited_rules,
+    classify_secret, configure_planned_child_index_command, current_bound_scan_policy_allows_file,
+    current_scan_policy_allows_file, discover_child_scopes, generated_parent_policy_for_child,
+    generated_parent_policy_payload_for_child, hash_verified_scan_input,
+    parse_generated_parent_policy_payload, read_bound_verified_scan_input,
+    read_verified_scan_input, PlannedChildCommand, ScanCandidate, ScanPreview, ScanPreviewRequest,
 };
 use kio_pipeline::task::{
     hold_reason_for_reason, retry_policy, task_can_complete_from_materialized_output,
@@ -213,15 +223,11 @@ enum Command {
     View(PointerArgs),
     /// Restore historical raw bytes to an explicit destination.
     Restore(RestoreArgs),
-    /// Phase 4+ command placeholder.
-    Gc(PlaceholderArgs),
     /// Remove content from KIO-managed history after preview and confirmation.
     Purge(purge::PurgeArgs),
     /// Reindex normalized instances.
     Reindex(ReindexArgs),
-    /// Phase 4+ command placeholder.
-    Move(PlaceholderArgs),
-    /// Step 4 command placeholder.
+    /// Verify an Evidence Pointer.
     Evidence(EvidenceArgs),
 }
 
@@ -276,7 +282,7 @@ struct RestoreArgs {
     yes: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct IndexArgs {
     #[arg(long)]
     preview: bool,
@@ -313,6 +319,17 @@ struct IndexArgs {
     /// consent. Persisted so `batch resume` honors it (decisions #45).
     #[arg(long)]
     send_secrets: bool,
+    /// Internal only: parent index binds this process to a retained child
+    /// descriptor before exec. It is deliberately hidden from normal help.
+    #[arg(long, hide = true)]
+    internal_bound_child: bool,
+    #[arg(long, hide = true, requires = "internal_bound_child")]
+    internal_canonical_root: Option<PathBuf>,
+    /// Strict, bounded policy envelope emitted only by the retained-handle
+    /// parent.  It is persisted before the child scans so later child-only
+    /// reindex/current-policy checks retain ancestor ignore authorization.
+    #[arg(long, hide = true, requires = "internal_bound_child")]
+    internal_parent_ignore_policy: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -332,6 +349,12 @@ enum BatchCommand {
 
 #[derive(Debug, Args)]
 struct ResumeArgs {
+    /// Reconsider tasks paused by a prior hard-cap decision, while enforcing the
+    /// current configured cap before every new reservation. This is for an
+    /// operator who deliberately changed `[budget].monthly_usd_cap`; unlike
+    /// `--override-budget`, it never bypasses the current cap.
+    #[arg(long, conflicts_with = "override_budget")]
+    recheck_budget: bool,
     #[arg(long)]
     override_budget: bool,
     /// QA30 (06-cli-spec.md §1 L21-24, 07-adapter-spec.md §3): one-shot opt-in
@@ -444,12 +467,6 @@ enum LedgerCommand {
 
 #[derive(Debug, Args)]
 struct ReconcileArgs {}
-
-/// A command whose implementation is Phase 4+ (`gc` / `move`). Declared with
-/// no operands so `--help` says so plainly instead of silently swallowing
-/// whatever was typed.
-#[derive(Debug, Args)]
-struct PlaceholderArgs {}
 
 /// `kio open` / `kio view` — one Evidence Pointer operand (06 §1.1).
 #[derive(Debug, Args)]
@@ -727,6 +744,17 @@ fn clap_error_reason(err: &clap::Error) -> String {
 /// payload to stdout (multi-scope search partial failure, 05 §1.8).
 fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
     let code = output.as_object_mut()?.remove("__exit_code")?.as_u64()?;
+    exit_code_from_override(code)
+}
+
+fn peek_exit_override(output: &Value) -> Option<ExitCode> {
+    output
+        .get("__exit_code")
+        .and_then(Value::as_u64)
+        .and_then(exit_code_from_override)
+}
+
+fn exit_code_from_override(code: u64) -> Option<ExitCode> {
     match code {
         3 => Some(ExitCode::PartialFailure),
         4 => Some(ExitCode::PermanentFailure),
@@ -734,6 +762,40 @@ fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
         5 => Some(ExitCode::AuthError),
         6 => Some(ExitCode::BudgetExceeded),
         _ => None,
+    }
+}
+
+/// Merge the result of a parent index with every child-scope outcome. A child
+/// cannot make already-published parent work "all permanently failed", so any
+/// retryable/permanent child-only failure is a partial result. Auth and budget
+/// still retain the index command's documented user-action priority.
+fn merged_index_exit_override(
+    parent: Option<ExitCode>,
+    children: impl IntoIterator<Item = ExitCode>,
+    incomplete_child_discovery: bool,
+) -> Option<ExitCode> {
+    let mut auth = parent == Some(ExitCode::AuthError);
+    let mut budget = parent == Some(ExitCode::BudgetExceeded);
+    let mut partial = incomplete_child_discovery
+        || parent.is_some_and(|code| {
+            matches!(code, ExitCode::PartialFailure | ExitCode::PermanentFailure)
+        });
+    for code in children {
+        match code {
+            ExitCode::AuthError => auth = true,
+            ExitCode::BudgetExceeded => budget = true,
+            ExitCode::PartialFailure | ExitCode::PermanentFailure => partial = true,
+            _ => {}
+        }
+    }
+    if auth {
+        Some(ExitCode::AuthError)
+    } else if budget {
+        Some(ExitCode::BudgetExceeded)
+    } else if partial {
+        Some(ExitCode::PartialFailure)
+    } else {
+        None
     }
 }
 
@@ -1088,18 +1150,61 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Evidence(args) => verify_objects::run_evidence(args),
         Command::Restore(args) => restore::run(args),
         Command::Purge(args) => purge::run(args),
-        Command::Gc(_) | Command::Move(_) => Err(KioError::not_implemented("command")),
     }
 }
 
 fn run_index(args: IndexArgs) -> Result<Value> {
+    let internal = args.internal_bound_child;
+    let repo = if internal {
+        let canonical_root = args.internal_canonical_root.clone().ok_or_else(|| {
+            KioError::invalid_usage("internal bound child requires a canonical root")
+        })?;
+        let payload = args
+            .internal_parent_ignore_policy
+            .as_deref()
+            .ok_or_else(|| {
+                KioError::invalid_usage("internal bound child requires a parent ignore policy")
+            })?;
+        let rules = parse_generated_parent_policy_payload(payload).map_err(pipeline_to_kio)?;
+        let policy = toml::Value::try_from(serde_json::json!({ "rules": rules }))
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            Repository::init_bound_current_with_generated_parent_policy(
+                canonical_root,
+                Some(policy),
+            )?
+        }
+        #[cfg(windows)]
+        {
+            let _ = (canonical_root, policy);
+            return Err(KioError::new(
+                "KIO-E-SCOPE-BOUND-UNSUPPORTED-001",
+                "Windows child scope execution requires a retained-handle launcher",
+                json!({}),
+                ExitCode::Failure,
+            ));
+        }
+    } else {
+        Repository::open_current()?
+    };
+    run_index_for_repo(args, repo, !internal)
+}
+
+/// Index one scope. Only the user-invoked parent discovers children; child
+/// scopes stay direct-file-only and cannot recursively fan out a single run.
+fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool) -> Result<Value> {
     if args.online && args.offline {
         return Err(KioError::invalid_usage(
             "--online and --offline are mutually exclusive",
         ));
     }
     let lane_override = LaneOverride::new(args.realtime, args.batch);
-    let repo = Repository::open_current()?;
+    let child_plan = if discover_children {
+        Some(discover_child_scopes(repo.root()).map_err(pipeline_to_kio)?)
+    } else {
+        None
+    };
     // Resolve the invocation lane BEFORE anything plans or prices a send: the
     // OCR lane selection and both reservation estimates read it, and by ruling
     // OCR and embedding must never end up on different lanes.
@@ -1114,15 +1219,81 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         write_network_revoke_record(&repo)?;
         return Ok(json!({ "status": "network revoked" }));
     }
-    let preview = build_scan_preview(ScanPreviewRequest {
-        scope_path: repo.root().display().to_string(),
-        include_raw_hashes: !args.preview,
-        require_network_approval: !args.offline,
-    })
+    let preview = build_repository_scan_preview(
+        &repo,
+        ScanPreviewRequest {
+            scope_path: repo.root().display().to_string(),
+            include_raw_hashes: !args.preview,
+            require_network_approval: !args.offline,
+        },
+    )
     .map_err(pipeline_to_kio)?;
 
     if args.preview {
-        return Ok(index_preview_json(repo.root(), &preview));
+        let mut output = index_preview_json(repo.canonical_root(), &preview);
+        if let Some(plan) = child_plan {
+            let mut children = Vec::new();
+            let mut aggregate_files = preview
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.ignored)
+                .count();
+            let mut aggregate_bytes = preview
+                .candidates
+                .iter()
+                .filter(|candidate| !candidate.ignored)
+                .map(|candidate| candidate.size_bytes)
+                .sum::<u64>();
+            let mut aggregate_cost = preview
+                .estimated_cost
+                .as_ref()
+                .map(|cost| cost.estimated_usd)
+                .unwrap_or_default();
+            for child in plan.candidates.clone() {
+                let mut row = serde_json::to_value(&child)
+                    .unwrap_or_else(|_| json!({ "path": child.path, "status": child.status }));
+                if child.status == "planned" {
+                    let rules = generated_parent_policy_for_child(&plan, &child.path)
+                        .map_err(pipeline_to_kio)?;
+                    let child_preview = build_scan_preview_with_inherited_rules(
+                        ScanPreviewRequest {
+                            scope_path: repo.root().join(&child.path).display().to_string(),
+                            include_raw_hashes: false,
+                            require_network_approval: !args.offline,
+                        },
+                        &rules,
+                    )
+                    .map_err(pipeline_to_kio)?;
+                    let included = child_preview
+                        .candidates
+                        .iter()
+                        .filter(|candidate| !candidate.ignored)
+                        .collect::<Vec<_>>();
+                    let count = included.len();
+                    let bytes = included
+                        .iter()
+                        .map(|candidate| candidate.size_bytes)
+                        .sum::<u64>();
+                    let cost = child_preview
+                        .estimated_cost
+                        .as_ref()
+                        .map(|cost| cost.estimated_usd)
+                        .unwrap_or_default();
+                    row["estimated_file_count"] = json!(count);
+                    row["estimated_size_bytes"] = json!(bytes);
+                    row["estimated_cost_usd"] = json!(cost);
+                    aggregate_files += count;
+                    aggregate_bytes += bytes;
+                    aggregate_cost += cost;
+                }
+                children.push(row);
+            }
+            output["child_scopes"] = json!(children);
+            output["estimated_aggregate_file_count"] = json!(aggregate_files);
+            output["estimated_aggregate_size_bytes"] = json!(aggregate_bytes);
+            output["estimated_aggregate_cost_usd"] = json!(aggregate_cost);
+        }
+        return Ok(output);
     }
 
     let approved = approval_exists(&repo)?;
@@ -1272,21 +1443,269 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     if let Some(code) = exit_override {
         set_exit_override(&mut output, code);
     }
+    if let Some(plan) = child_plan {
+        let mut children = Vec::new();
+        let parent_exit_override = peek_exit_override(&output);
+        let mut child_exit_overrides = Vec::new();
+        let mut incomplete_child_discovery = plan.candidates.iter().any(|child| {
+            matches!(
+                child.status.as_str(),
+                "skipped_limit" | "skipped_unreadable"
+            )
+        });
+        for mut child in plan.candidates.clone() {
+            if child.status != "planned" {
+                children.push(child);
+                continue;
+            }
+            match run_bound_child_index(&plan, &child.path, &args) {
+                Ok(None) => {
+                    child.status = "skipped_vcs".to_owned();
+                    child.reason = Some("vcs_marker_added_after_discovery".to_owned());
+                }
+                Ok(Some(child_output)) if peek_exit_override(&child_output).is_none() => {
+                    child.status = "indexed".to_owned()
+                }
+                Ok(Some(child_output)) => {
+                    let child_exit = peek_exit_override(&child_output)
+                        .expect("guarded child output must carry a supported exit override");
+                    child_exit_overrides.push(child_exit);
+                    child.status = "indexed_partial".to_owned();
+                    child.error_code = child_output
+                        .get("error_code")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| Some(exit_override_error_code(child_exit).to_owned()));
+                    child.message = child_output
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            Some("child index completed with a non-success exit".to_owned())
+                        });
+                }
+                Err(error) => {
+                    incomplete_child_discovery = true;
+                    if matches!(
+                        error.exit_code(),
+                        ExitCode::AuthError
+                            | ExitCode::BudgetExceeded
+                            | ExitCode::PartialFailure
+                            | ExitCode::PermanentFailure
+                    ) {
+                        child_exit_overrides.push(error.exit_code());
+                    }
+                    child.status = "skipped_error".to_owned();
+                    child.error_code = Some(error.error_code().to_owned());
+                    child.message = Some(error.message().to_owned());
+                }
+            }
+            children.push(child);
+        }
+        output["child_scopes"] = serde_json::to_value(children).unwrap_or_else(|_| json!([]));
+        if let Some(code) = merged_index_exit_override(
+            parent_exit_override,
+            child_exit_overrides,
+            incomplete_child_discovery,
+        ) {
+            if output.get("error_code").is_none() {
+                output["error_code"] = json!(match code {
+                    ExitCode::AuthError => "KIO-E-ADAPTER-AUTH-001",
+                    ExitCode::BudgetExceeded => "KIO-E-BUDGET-EXCEEDED-001",
+                    _ => "KIO-E-INDEX-PARTIAL-001",
+                });
+            }
+            set_exit_override(&mut output, code);
+        }
+    }
     Ok(output)
 }
 
+/// Select the capability-bound scan path only for an internal child process.
+/// The public `Repository::root()` path is metadata-only in that process after
+/// it enters its retained `.kio` directory, so source reads must never fall
+/// back to it.
+fn build_repository_scan_preview(
+    repo: &Repository,
+    request: ScanPreviewRequest,
+) -> kio_pipeline::Result<ScanPreview> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(kio)) => return build_bound_scan_preview(root, kio, request, &[]),
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    build_scan_preview(request)
+}
+
+fn read_repository_scan_input(
+    repo: &Repository,
+    input_path: &str,
+    max_bytes: u64,
+) -> kio_pipeline::Result<kio_pipeline::scan::VerifiedScanInput> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(_)) => {
+                return read_bound_verified_scan_input(root, input_path, max_bytes)
+            }
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    read_verified_scan_input(repo.root(), input_path, max_bytes)
+}
+
+fn repository_scan_policy_allows_file(
+    repo: &Repository,
+    input_path: &str,
+) -> kio_pipeline::Result<bool> {
+    #[cfg(unix)]
+    {
+        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+            (Some(root), Some(kio)) => {
+                return current_bound_scan_policy_allows_file(root, kio, input_path, &[])
+            }
+            (None, None) => {}
+            _ => {
+                return Err(kio_pipeline::PipelineError::contract(
+                    "KIO-E-SCOPE-BOUND-STATE-001",
+                    "descriptor-bound repository is missing a retained scope or store handle",
+                ))
+            }
+        }
+    }
+    current_scan_policy_allows_file(repo.root(), input_path)
+}
+
+/// A stable presentation-only source path. Bound children use the retained
+/// descriptor for all I/O; this is never dereferenced after binding.
+fn repository_input_display_path(repo: &Repository, input_path: &str) -> PathBuf {
+    repo.canonical_root().join(input_path)
+}
+
+/// Spawn one planned child as a separate process. The pipeline configures the
+/// cwd from its retained capability handle; this function deliberately never
+/// constructs a child `Repository` from a public path.
+fn run_bound_child_index(
+    plan: &kio_pipeline::scan::ChildScopePlan,
+    relative: &str,
+    args: &IndexArgs,
+) -> Result<Option<Value>> {
+    let executable = std::env::current_exe()
+        .map_err(|err| KioError::io(err.to_string(), "current executable"))?;
+    let mut command = std::process::Command::new(executable);
+    command.arg("--json").arg("index");
+    append_index_child_flags(&mut command, args);
+    match configure_planned_child_index_command(plan, relative, &mut command)
+        .map_err(pipeline_to_kio)?
+    {
+        PlannedChildCommand::SkippedVcs => return Ok(None),
+        PlannedChildCommand::Spawn { canonical_root } => {
+            let payload = generated_parent_policy_payload_for_child(plan, relative)
+                .map_err(pipeline_to_kio)?;
+            command
+                .arg("--internal-bound-child")
+                .arg("--internal-canonical-root")
+                .arg(canonical_root)
+                .arg("--internal-parent-ignore-policy")
+                .arg(payload);
+        }
+    }
+    let output = command
+        .output()
+        .map_err(|err| KioError::io(err.to_string(), relative.to_owned()))?;
+    if !output.status.success() {
+        let mut value: Value = serde_json::from_slice(&output.stderr).map_err(|err| {
+            KioError::io(
+                format!(
+                    "bound child did not emit JSON error: {err}; stderr: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                relative.to_owned(),
+            )
+        })?;
+        if let Some(code) = output
+            .status
+            .code()
+            .and_then(|code| exit_code_from_override(code as u64))
+        {
+            set_exit_override(&mut value, code);
+        } else {
+            let code = value
+                .get("error_code")
+                .and_then(Value::as_str)
+                .unwrap_or("KIO-E-INDEX-PARTIAL-001");
+            return Err(KioError::new(
+                code,
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bound child failed"),
+                value
+                    .get("context")
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "path": relative })),
+                ExitCode::PartialFailure,
+            ));
+        }
+        return Ok(Some(value));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+        KioError::io(
+            format!("bound child did not emit JSON: {err}"),
+            relative.to_owned(),
+        )
+    })?;
+    Ok(Some(value))
+}
+
+fn append_index_child_flags(command: &mut std::process::Command, args: &IndexArgs) {
+    for (enabled, flag) in [
+        (args.approve, "--approve"),
+        (args.yes, "--yes"),
+        (args.online, "--online"),
+        (args.offline, "--offline"),
+        (args.revoke_network, "--revoke-network"),
+        (args.realtime, "--realtime"),
+        (args.batch, "--batch"),
+        (args.send_secrets, "--send-secrets"),
+    ] {
+        if enabled {
+            command.arg(flag);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredChunk {
     rowid: u64,
     /// Stable rowid of this `(chunk_id, chunking_config_hash)` association.
-    ///
-    /// Step 3 ledgers predate the many-to-many config relation and omit this
-    /// field. `read_stored_chunks` assigns those legacy records deterministic
-    /// rowids in ledger order before any replay or append.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    association_rowid: Option<u64>,
+    association_rowid: u64,
     #[serde(flatten)]
     row: ChunkRow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChunkPublicationEvent {
+    event: String,
+    chunk_id: String,
+    chunking_config_hash: String,
+    introduction_commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1519,10 +1938,35 @@ fn run_rebuild_db_locked(
     // L220-222): `--online`/`--offline` now reach the post-rebuild enrichment
     // pass instead of the hard-coded `(false, false, false)` this used to
     // pass unconditionally.
-    let embedding_online = embedding_online_allowed(repo, offline, online_requested, false)?;
+    // The rebuilt projection was selected by the persisted current tool-lock,
+    // not by whichever adapter happens to be active now.  In particular a
+    // text-only lock must stay text-only even if a local adapter is available;
+    // and an adapter from another profile must never repopulate the fresh DB
+    // with a second vector space.  `index` is the explicit operation that may
+    // materialize a new lock/profile.
+    let locked_embedding_profile = rebuild_embedding_profile_from_tool_lock(repo.kio_dir())?;
+    let enrichment_authorized = locked_embedding_profile.as_ref().is_some_and(|locked| {
+        embedding_execution()
+            .map(declared_embedding_profile)
+            .is_some_and(|active| {
+                active.dimensions == locked.dimensions
+                    && active.distance == locked.distance
+                    && active.modality == locked.modality
+                    && active.profile_hash == locked.profile_hash
+            })
+    });
+    let embedding_online = if enrichment_authorized {
+        embedding_online_allowed(repo, offline, online_requested, false)?
+    } else {
+        false
+    };
     // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
     // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
-    let enrichment = run_embedding_enrichment(repo, embedding_online, false, false)?;
+    let enrichment = if enrichment_authorized {
+        run_embedding_enrichment(repo, embedding_online, false, false)?
+    } else {
+        ExecOutcome::default()
+    };
     let mut output = json!({
         "status": "rebuilt",
         "rebuilt_chunks": report.rebuilt_chunks,
@@ -1548,6 +1992,17 @@ fn run_device_repair(rebuild_source: bool) -> Result<Value> {
         let registry = RegistryDb::open_default().map_err(index_to_kio)?;
         registry.all_entries().map_err(index_to_kio)?
     };
+    // This command is the explicit recovery boundary for the disposable
+    // device replica. Reset it once before projecting any scope so rows from a
+    // scope that later fails repair cannot remain searchable.
+    kio_index::aggregator::Aggregator::recreate(&aggregator_path()).map_err(|error| {
+        KioError::new(
+            "KIO-E-AGGREGATOR-001",
+            "the device search replica could not be recreated",
+            json!({ "reason": error.to_string() }),
+            ExitCode::PartialFailure,
+        )
+    })?;
     let mut entries: Vec<_> = entries.into_iter().filter(|entry| entry.indexed).collect();
     entries.sort_by(|left, right| {
         left.root_path
@@ -2408,9 +2863,6 @@ struct SearchedScopeInfo {
     /// PC19/PC21: this scope's `index_metadata.index_generation` ULID at the
     /// moment it was searched — frozen into the next page's cursor.
     index_generation: String,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    has_image_vec: bool,
     /// An active purge journal was observed only while admitting this scope's
     /// last coherent Ready header across a HEAD/header mismatch.  Candidate
     /// selection may use that older projection solely to reach the narrow
@@ -2616,6 +3068,7 @@ fn replica_candidates_for(
                     raw_hash: binding.raw_hash,
                     tool_profile_hash: binding.tool_profile_hash,
                     gen: binding.gen,
+                    manifest_hash: binding.manifest_hash,
                     path_at_commit: binding.path_at_commit,
                     pointer_commit: binding.pointer_commit,
                     current_paths: binding.current_paths,
@@ -2653,7 +3106,6 @@ struct ScopeProjection {
     completions: Vec<kio_index::aggregator::AggProjectionCompletion>,
     max_rowid: u64,
     max_association_rowid: u64,
-    has_image_vec: bool,
 }
 
 /// Project one scope's committed chunks and resolved visibility bindings into
@@ -2672,24 +3124,37 @@ struct ScopeProjection {
 /// relation and never reopen source SQLite to make it up.
 fn collect_scope_projection(
     kio_dir: &Path,
+    repository: Option<&Repository>,
+    completed_at_snapshots: &BTreeSet<String>,
     requested_at_snapshots: &[&str],
 ) -> Result<ScopeProjection> {
     let db = kio_dir.join("index/sqlite.db");
-    // `chunk_vec` is a vec0 virtual table, so the extension must be live on
-    // this connection before the table can be opened.
-    kio_index::vec::ensure_registered();
     // Read-write so the resolver's TEMP identity tables can be created. They
     // live only in this connection's temp schema and never touch the source
     // store.
-    let conn = Connection::open_with_flags(
+    let conn = open_existing_source_index_connection(
         &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
     )
     .map_err(|error| KioError::schema(format!("aggregator read {}: {error}", db.display())))?;
     // Projection is a derived-cache operation and must never repair source
     // refs as a side effect. In particular `repair replica` promises to leave
     // HEAD/CAS/source SQLite byte-for-byte under the source owner's control.
-    let repo = Repository::open_without_head_repair(kio_dir.parent().unwrap_or(kio_dir))?;
+    let owned_repository = if repository.is_none() {
+        Some(Repository::open_without_head_repair(
+            kio_dir.parent().unwrap_or(kio_dir),
+        )?)
+    } else {
+        None
+    };
+    let repo = repository.unwrap_or_else(|| {
+        owned_repository
+            .as_ref()
+            .expect("an absent projection repository is opened locally")
+    });
     let embedding_profiles =
         embedding_store::chunk_embedding_profiles(&conn).map_err(index_to_kio)?;
     // `head_commit_hash` resolves an empty/truncated HEAD through a verified
@@ -2706,7 +3171,6 @@ fn collect_scope_projection(
             completions: Vec::new(),
             max_rowid: 0,
             max_association_rowid: 0,
-            has_image_vec: false,
         });
     };
 
@@ -2716,7 +3180,7 @@ fn collect_scope_projection(
     let max_rowid = current_max_rowid(&conn)?;
     let max_association_rowid =
         kio_index::fts::max_chunk_config_association_rowid(&conn).map_err(index_to_kio)?;
-    let live_chunking_config_hash = read_chunking_config(&repo)?.chunking_config_hash;
+    let live_chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let current_plan = current_history_plan_from_cache(&conn, &head)?;
     let mut completions = vec![kio_index::aggregator::AggProjectionCompletion {
         selector: kio_index::aggregator::AggSelector::Current,
@@ -2725,6 +3189,7 @@ fn collect_scope_projection(
         shallow_skipped: current_plan.shallow_skipped.len() as u64,
     }];
     let mut bindings = projection_bindings_for_plan(
+        repo,
         &conn,
         &current_plan,
         "current",
@@ -2741,10 +3206,11 @@ fn collect_scope_projection(
     // current resolver answer remains usable while optional historical
     // snapshots are omitted. Direct readers never perform this refresh;
     // explicit history selectors are rejected during scope preparation.
-    match plan_search_history(&repo, &head, &TimeSelector::AllHistory, None) {
+    match plan_search_history(repo, &head, &TimeSelector::AllHistory, None) {
         Ok(all_history_plan) => {
             let shallow_skipped = all_history_plan.shallow_skipped.len() as u64;
             bindings.extend(projection_bindings_for_plan(
+                repo,
                 &conn,
                 &all_history_plan,
                 "all_history",
@@ -2763,10 +3229,11 @@ fn collect_scope_projection(
         Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {}
         Err(error) => return Err(error),
     }
-    match plan_search_history(&repo, &head, &TimeSelector::IncludeDeleted, None) {
+    match plan_search_history(repo, &head, &TimeSelector::IncludeDeleted, None) {
         Ok(include_deleted_plan) => {
             let shallow_skipped = include_deleted_plan.shallow_skipped.len() as u64;
             bindings.extend(projection_bindings_for_plan(
+                repo,
                 &conn,
                 &include_deleted_plan,
                 "include_deleted",
@@ -2808,6 +3275,13 @@ fn collect_scope_projection(
         Err(error) => return Err(error),
     };
     at_snapshots.extend(source_tree_entry_snapshot_commits(&conn)?);
+    // The device replica already carries completed `--at` answers that are
+    // outside this source's ordinary discovery set (notably valid empty,
+    // disconnected snapshots).  A normal writer must retain those answers
+    // without paying to re-plan them.  An explicit historical operation is
+    // different: it intentionally revalidates and republishes its selected
+    // target, even when a prior marker exists.
+    at_snapshots.retain(|snapshot_commit| !completed_at_snapshots.contains(snapshot_commit));
     at_snapshots.extend(
         requested_at_snapshots
             .iter()
@@ -2815,7 +3289,7 @@ fn collect_scope_projection(
     );
     for snapshot_commit in at_snapshots {
         let selector = TimeSelector::At(snapshot_commit.clone());
-        let plan = match plan_search_history(&repo, &snapshot_commit, &selector, None) {
+        let plan = match plan_search_history(repo, &snapshot_commit, &selector, None) {
             Ok(plan) => plan,
             // A retained source row can outlive a discarded CAS commit/tree.
             // It cannot form a valid replica marker, and direct `--at` will
@@ -2835,7 +3309,7 @@ fn collect_scope_projection(
         // including for a valid but empty snapshot where no previous planner
         // call happened to create the table.
         install_eligible_identities(&conn, &plan)?;
-        let (ancestors, _) = at_target_ancestors(&repo, &snapshot_commit)?;
+        let (ancestors, _) = at_target_ancestors(repo, &snapshot_commit)?;
         install_target_ancestors(&conn, &ancestors)?;
         let target_config = resolve_target_chunking_config_hash(
             &conn,
@@ -2845,6 +3319,7 @@ fn collect_scope_projection(
             max_association_rowid,
         )?;
         bindings.extend(projection_bindings_for_plan(
+            repo,
             &conn,
             &plan,
             "at",
@@ -2942,22 +3417,8 @@ fn collect_scope_projection(
 
     // Image vectors remain attached to every committed citing chunk. At query
     // time the same eligible chunk binding gates the image reference, so a
-    // historical image never needs a second visibility rule.
-    if !table_exists(&conn, "image_vec")? {
-        return Ok(ScopeProjection {
-            chunks,
-            images: Vec::new(),
-            bindings,
-            current_snapshot_commit: Some(head),
-            current_chunking_config_hash: Some(live_chunking_config_hash),
-            embedding_profiles,
-            completions,
-            max_rowid,
-            max_association_rowid,
-            has_image_vec: false,
-        });
-    }
-
+    // historical image never needs a second visibility rule. The strict
+    // source-index schema guarantees that `image_vec` is present.
     let mut image_vectors = BTreeMap::<String, Option<Vec<f32>>>::new();
     let mut seen_references = BTreeSet::<(String, String)>::new();
     let mut images = Vec::new();
@@ -2976,14 +3437,14 @@ fn collect_scope_projection(
             if !seen_references.insert((image_id.clone(), chunk.chunk_id.clone())) {
                 continue;
             }
-            let vector = image_vectors
-                .entry(image_id.clone())
-                .or_insert_with(|| {
-                    kio_index::embedding_store::read_image_vector(&conn, &image_id)
-                        .ok()
-                        .flatten()
-                })
-                .clone();
+            let vector = if let Some(vector) = image_vectors.get(&image_id) {
+                vector.clone()
+            } else {
+                let vector = kio_index::embedding_store::read_image_vector(&conn, &image_id)
+                    .map_err(index_to_kio)?;
+                image_vectors.insert(image_id.clone(), vector.clone());
+                vector
+            };
             if let Some(embedding) = vector {
                 images.push(kio_index::aggregator::AggImage {
                     image_id,
@@ -3004,7 +3465,6 @@ fn collect_scope_projection(
         completions,
         max_rowid,
         max_association_rowid,
-        has_image_vec: true,
     })
 }
 
@@ -3013,7 +3473,9 @@ fn collect_scope_projection(
 /// The SQL only maps resolved normalized identities to their already-indexed
 /// chunk rows and config association. It never decides which identity is live:
 /// that decision stays in `SearchHistoryPlan`.
+#[allow(clippy::too_many_arguments)]
 fn projection_bindings_for_plan(
+    repo: &Repository,
     conn: &Connection,
     plan: &SearchHistoryPlan,
     selector_kind: &str,
@@ -3022,14 +3484,113 @@ fn projection_bindings_for_plan(
     max_association_rowid: u64,
     ancestor_gated: bool,
 ) -> Result<Vec<kio_index::aggregator::AggBinding>> {
-    let grouped = plan.grouped_bindings();
+    let kio_dir = repo.kio_dir();
+    // Purge visibility is authoritative over immutable history.  Filter a
+    // blocked raw identity before opening its pinned manifest: purge removes
+    // that manifest/object closure deliberately, so attempting validation
+    // first would turn a successful purge into a replica-refresh failure.
+    let mut grouped = BTreeMap::new();
+    for (key, bindings) in plan.grouped_bindings() {
+        if purge_blocks_rebuild_raw(kio_dir, &key.raw_hash)? {
+            continue;
+        }
+        grouped.insert(key, bindings);
+    }
     if grouped.is_empty() {
         return Ok(Vec::new());
     }
     install_eligible_identities(conn, plan)?;
+    // Validate each immutable manifest once. The SQL below may yield many
+    // chunks for one identity, but a retry's Done set is an identity fact.
+    let mut done_units = BTreeMap::<SearchContentKey, BTreeSet<(String, String)>>::new();
+    for (key, bindings) in &grouped {
+        let binding = bindings
+            .first()
+            .expect("a grouped history identity always has a binding");
+        let normalize = NormalizeRef {
+            tool_profile_hash: key.tool_profile_hash.clone(),
+            gen: key.gen,
+            manifest_hash: key.manifest_hash.clone(),
+        };
+        match pinned_done_units(kio_dir, &binding.raw_hash, &normalize) {
+            Ok(done) => {
+                let done = done
+                    .into_iter()
+                    .map(|unit| {
+                        let content_hash = kio_core::cas::hash_bytes(unit.markdown.as_bytes());
+                        Ok((unit.unit_key, content_hash))
+                    })
+                    .collect::<Result<BTreeSet<_>>>()?;
+                done_units.insert(key.clone(), done);
+            }
+            Err(error) => {
+                if error.error_code() == "KIO-E-STORE-NOT-FOUND-001"
+                    && purge_explains_missing_pinned_manifest(
+                        repo,
+                        &binding.raw_hash,
+                        bindings
+                            .iter()
+                            .map(|binding| binding.pointer_commit.clone()),
+                    )?
+                {
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+    // Current and `--at` answer a target time point; one ancestry walk serves
+    // all chunks/bindings in this plan. Include-deleted's final appearances
+    // each need their own pointer ancestry; all-history alone has the exact
+    // canonical-introduction equality rule.
+    let target_ancestors = if matches!(selector_kind, "current" | "at") {
+        Some(at_target_ancestors(repo, &plan.snapshot_commit)?.0)
+    } else {
+        None
+    };
+    // All-history aliases keep their own path introduction as the Evidence
+    // pointer commit, while one byte-identical chunk can have been published
+    // earlier under another path (rename/copy). Walk the snapshot DAG once and
+    // memoize exact introduction→alias ancestry checks; exact equality alone
+    // would drop every later valid alias, while accepting a descendant or an
+    // incomparable publication would back-publish content.
+    let all_history_graph = if selector_kind == "all_history" {
+        Some(
+            HistoryReader::new(repo.kio_dir())
+                .all_parents_tolerant(&plan.snapshot_commit)?
+                .0,
+        )
+    } else {
+        None
+    };
+    let mut all_history_ancestry = BTreeMap::<(String, String), bool>::new();
+    let mut include_deleted_ranks = BTreeMap::<String, u64>::new();
+    let mut include_deleted_thresholds = BTreeMap::<String, u64>::new();
+    if selector_kind == "include_deleted" {
+        let (graph, skipped) =
+            HistoryReader::new(repo.kio_dir()).all_parents_tolerant(&plan.snapshot_commit)?;
+        let mut parents = graph
+            .nodes_in_visit_order()
+            .map(|node| (node.commit_hash.clone(), node.commit.parents.clone()))
+            .collect::<BTreeMap<_, _>>();
+        // Tolerant walks omit shallow tree nodes. Their readable commit object
+        // still supplies the parent edge that connects the retained graph.
+        for commit_hash in skipped {
+            if !parents.contains_key(&commit_hash) {
+                parents.insert(commit_hash.clone(), repo.read_commit(&commit_hash)?.parents);
+            }
+        }
+        (include_deleted_ranks, include_deleted_thresholds) =
+            first_parent_publication_index(&plan.snapshot_commit, &parents);
+    }
     let sql = format!(
-        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.gen
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.gen, c.unit_key, c.unit_content_hash,
+                eligible.manifest_hash
          FROM chunks c
+         JOIN kio_eligible_identity eligible
+           ON eligible.raw_hash = c.raw_hash
+          AND eligible.tool_profile_hash = c.tool_profile_hash
+          AND eligible.gen = c.gen
          WHERE c.first_seen_commit IS NOT NULL
            AND c.rowid <= ?2
            AND EXISTS (
@@ -3038,12 +3599,6 @@ fn projection_bindings_for_plan(
                  AND cg.chunking_config_hash = ?1
                  AND cg.association_rowid <= ?3
                  {config_ancestor_clause}
-           )
-           AND EXISTS (
-               SELECT 1 FROM kio_eligible_identity eligible
-               WHERE eligible.raw_hash = c.raw_hash
-                 AND eligible.tool_profile_hash = c.tool_profile_hash
-                 AND eligible.gen = c.gen
            )
            {ancestor_clause}
          ORDER BY c.chunk_id",
@@ -3063,23 +3618,75 @@ fn projection_bindings_for_plan(
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                     SearchContentKey {
                         raw_hash: row.get(1)?,
                         tool_profile_hash: row.get(2)?,
                         gen: row.get::<_, i64>(3)? as u64,
+                        manifest_hash: row.get(6)?,
                     },
                 ))
             },
         )
-        .map_err(|error| KioError::schema(format!("aggregator binding rows: {error}")))?;
+        .map_err(|error| KioError::schema(format!("aggregator binding rows: {error}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| KioError::schema(format!("aggregator binding row: {error}")))?;
+    drop(stmt);
+    // Source publication is append-only and chunk-specific. Load it once for
+    // the plan; missing rows are deliberately ineligible rather than falling
+    // back to `first_seen_commit`, which cannot express multi-introductions.
+    let mut publications = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut publication_stmt = conn
+        .prepare("SELECT chunk_id, introduction_commit FROM chunk_publications ORDER BY chunk_id, introduction_commit")
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    let publication_rows = publication_stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    for row in publication_rows {
+        let (chunk_id, introduction) = row.map_err(|error| KioError::schema(error.to_string()))?;
+        publications
+            .entry(chunk_id)
+            .or_default()
+            .insert(introduction);
+    }
     let mut projected = Vec::new();
     for row in rows {
-        let (chunk_id, key) =
-            row.map_err(|error| KioError::schema(format!("aggregator binding row: {error}")))?;
+        let (chunk_id, unit_key, unit_content_hash, key) = row;
         let Some(resolved) = grouped.get(&key) else {
             continue;
         };
         for binding in resolved {
+            // A chunk is searchable only when its specific unit is Done in
+            // this tree binding's immutable manifest, never in mutable
+            // `manifest.json` for a same-generation retry.
+            if !done_units
+                .get(&key)
+                .is_some_and(|units| units.contains(&(unit_key.clone(), unit_content_hash.clone())))
+            {
+                continue;
+            }
+            let publication_ok = if selector_kind == "include_deleted" {
+                publication_is_include_deleted_compatible(
+                    publications.get(&chunk_id),
+                    include_deleted_ranks.get(&binding.pointer_commit),
+                    &include_deleted_thresholds,
+                )
+            } else if let Some(graph) = all_history_graph.as_ref() {
+                publication_is_all_history_compatible(
+                    publications.get(&chunk_id),
+                    &binding.pointer_commit,
+                    graph,
+                    &mut all_history_ancestry,
+                )
+            } else {
+                publication_is_compatible(publications.get(&chunk_id), target_ancestors.as_ref())
+            };
+            if !publication_ok {
+                continue;
+            }
             projected.push(kio_index::aggregator::AggBinding {
                 selector_kind: selector_kind.to_owned(),
                 snapshot_commit: plan.snapshot_commit.clone(),
@@ -3087,6 +3694,7 @@ fn projection_bindings_for_plan(
                 raw_hash: binding.raw_hash.clone(),
                 tool_profile_hash: binding.tool_profile_hash.clone(),
                 gen: binding.gen,
+                manifest_hash: binding.manifest_hash.clone(),
                 path_at_commit: binding.path_at_commit.clone(),
                 pointer_commit: binding.pointer_commit.clone(),
                 current_paths: binding.current_paths.clone(),
@@ -3095,6 +3703,111 @@ fn projection_bindings_for_plan(
         }
     }
     Ok(projected)
+}
+
+/// Derive include-deleted publication compatibility in linear graph work.
+/// First-parent ranks count backwards from the snapshot (newest is zero).
+/// Thresholds propagate the greatest such descendant rank through every parent
+/// edge, including merge-side introductions.
+fn first_parent_publication_index(
+    snapshot_commit: &str,
+    parents: &BTreeMap<String, Vec<String>>,
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    let mut ranks = BTreeMap::new();
+    let mut cursor = Some(snapshot_commit.to_owned());
+    let mut rank = 0_u64;
+    while let Some(commit) = cursor {
+        if !parents.contains_key(&commit) || ranks.insert(commit.clone(), rank).is_some() {
+            break;
+        }
+        rank += 1;
+        cursor = parents.get(&commit).and_then(|node| node.first()).cloned();
+    }
+    let mut child_counts = parents
+        .keys()
+        .map(|commit| (commit.clone(), 0_u64))
+        .collect::<BTreeMap<_, _>>();
+    for node_parents in parents.values() {
+        for parent in node_parents {
+            if let Some(count) = child_counts.get_mut(parent) {
+                *count += 1;
+            }
+        }
+    }
+    let mut ready = child_counts
+        .iter()
+        .filter_map(|(commit, count)| (*count == 0).then_some(commit.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut thresholds = ranks.clone();
+    while let Some(child) = ready.pop_first() {
+        let threshold = thresholds.get(&child).copied();
+        for parent in parents.get(&child).into_iter().flatten() {
+            if let Some(threshold) = threshold {
+                thresholds
+                    .entry(parent.clone())
+                    .and_modify(|current| *current = (*current).max(threshold))
+                    .or_insert(threshold);
+            }
+            let Some(count) = child_counts.get_mut(parent) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0 {
+                ready.insert(parent.clone());
+            }
+        }
+    }
+    (ranks, thresholds)
+}
+
+fn publication_is_include_deleted_compatible(
+    introductions: Option<&BTreeSet<String>>,
+    pointer_rank: Option<&u64>,
+    thresholds: &BTreeMap<String, u64>,
+) -> bool {
+    let Some(pointer_rank) = pointer_rank else {
+        return false;
+    };
+    introductions.is_some_and(|introductions| {
+        introductions.iter().any(|introduction| {
+            thresholds
+                .get(introduction)
+                .is_some_and(|threshold| pointer_rank <= threshold)
+        })
+    })
+}
+
+/// Publication eligibility over the one preloaded plan map. `None` means the
+/// strict source publication contract was not met, so it cannot be projected.
+fn publication_is_compatible(
+    introductions: Option<&BTreeSet<String>>,
+    target_ancestors: Option<&BTreeSet<String>>,
+) -> bool {
+    let Some(introductions) = introductions else {
+        return false;
+    };
+    if let Some(ancestors) = target_ancestors {
+        return introductions
+            .iter()
+            .any(|commit| ancestors.contains(commit));
+    }
+    false
+}
+
+fn publication_is_all_history_compatible(
+    introductions: Option<&BTreeSet<String>>,
+    pointer_commit: &str,
+    graph: &kio_core::history::HistoryGraph,
+    memo: &mut BTreeMap<(String, String), bool>,
+) -> bool {
+    introductions.is_some_and(|introductions| {
+        introductions.iter().any(|introduction| {
+            let key = (introduction.clone(), pointer_commit.to_owned());
+            *memo
+                .entry(key)
+                .or_insert_with(|| graph.is_ancestor(introduction, pointer_commit))
+        })
+    })
 }
 
 /// Bookkeeping only — `index_generation` decides staleness, so a clock that
@@ -3122,7 +3835,14 @@ fn replica_scope_stamp(kio_dir: &Path) -> Option<(String, String)> {
     if !db.exists() {
         return None;
     }
-    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn = open_existing_source_index_connection(
+        &db,
+        ExistingSourceIndexOpenMode::ReadOnly,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .ok()?;
     let generation = kio_index::fts::read_index_metadata(&conn)
         .ok()
         .flatten()?
@@ -3147,7 +3867,7 @@ fn replica_scope_stamp(kio_dir: &Path) -> Option<(String, String)> {
 /// search fails closed until a later writer completes the projection. The
 /// replica remains a cache and must never make a write fail (03 §4).
 fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
-    match write_through_projection_with_requested_at(kio_dir, &[]) {
+    match write_through_projection_full(kio_dir) {
         Ok(()) => Ok(()),
         Err(reason) => {
             // This variant is used by purge, which needs the original error to
@@ -3160,6 +3880,13 @@ fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
     }
 }
 
+/// Full replacement used only by explicit replica repair and purge recovery.
+/// Normal writers use the preserving variant below so their routine HEAD
+/// refresh cannot discard completed disconnected `--at` projections.
+fn write_through_projection_full(kio_dir: &Path) -> std::result::Result<(), String> {
+    write_through_projection_inner(kio_dir, None, &[], false)
+}
+
 /// Writer-side variant for an operation that explicitly resolved one or more
 /// historical `--at` snapshots. Ordinary writers pass no extra snapshots: all
 /// discoverable history still comes from HEAD reachability or source cache
@@ -3168,6 +3895,15 @@ fn write_through_projection(kio_dir: &Path) -> std::result::Result<(), String> {
 fn write_through_projection_with_requested_at(
     kio_dir: &Path,
     requested_at_snapshots: &[&str],
+) -> std::result::Result<(), String> {
+    write_through_projection_inner(kio_dir, None, requested_at_snapshots, true)
+}
+
+fn write_through_projection_inner(
+    kio_dir: &Path,
+    repository: Option<&Repository>,
+    requested_at_snapshots: &[&str],
+    preserve_completed_at: bool,
 ) -> std::result::Result<(), String> {
     let Some((scope_id, generation)) = replica_scope_stamp(kio_dir) else {
         // A caller reaches this after changing (or attempting to publish) the
@@ -3180,37 +3916,74 @@ fn write_through_projection_with_requested_at(
             kio_dir.display()
         ));
     };
-    let projection = collect_scope_projection(kio_dir, requested_at_snapshots)
-        .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
+    // In preserve mode the existing completed `--at` set is read before the
+    // source collection. This makes candidate selection incremental and lets
+    // the refresh transaction retain the already-projected rows atomically.
+    let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
+        .map_err(|error| format!("write-through open failed: {error}"))?;
+    let completed_at_snapshots = if preserve_completed_at {
+        replica
+            .completed_projection_snapshots(&scope_id, kio_index::aggregator::AggSelector::At)
+            .map_err(|error| format!("write-through completed At read {scope_id} failed: {error}"))?
+            .into_iter()
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let projection = collect_scope_projection(
+        kio_dir,
+        repository,
+        &completed_at_snapshots,
+        requested_at_snapshots,
+    )
+    .map_err(|error| format!("write-through read {scope_id} failed: {error}"))?;
     let header = kio_index::aggregator::AggScopeHeader {
         current_snapshot_commit: projection.current_snapshot_commit,
         current_chunking_config_hash: projection.current_chunking_config_hash,
         index_generation: generation,
         max_rowid: projection.max_rowid,
         max_association_rowid: projection.max_association_rowid,
-        has_image_vec: projection.has_image_vec,
         embedding_profiles: projection.embedding_profiles,
         index_status: kio_index::aggregator::AggIndexStatus::Ready,
     };
-    let mut replica = kio_index::aggregator::Aggregator::open(&aggregator_path())
-        .map_err(|error| format!("write-through open failed: {error}"))?;
-    replica
-        .refresh_scope_with_projection(kio_index::aggregator::AggProjectionRequest {
-            scope_id: &scope_id,
-            header: &header,
-            chunks: &projection.chunks,
-            images: &projection.images,
-            bindings: &projection.bindings,
-            completions: &projection.completions,
-            now_ms: replica_now_ms(),
-        })
-        .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
+    // Keep the projection-failure contract testable without weakening the
+    // replica's strict schema gate through a SQLite trigger fixture.
+    if std::env::var("KIO_TEST_AGGREGATOR_PROJECTION_FAULT").as_deref() == Ok("refresh") {
+        return Err("injected aggregator projection refresh failure".to_owned());
+    }
+    let request = kio_index::aggregator::AggProjectionRequest {
+        scope_id: &scope_id,
+        header: &header,
+        chunks: &projection.chunks,
+        images: &projection.images,
+        bindings: &projection.bindings,
+        completions: &projection.completions,
+        now_ms: replica_now_ms(),
+    };
+    if preserve_completed_at {
+        replica
+            .refresh_scope_with_projection_preserving_at(request)
+            .map_err(|error| {
+                format!("write-through incremental At refresh {scope_id} failed: {error}")
+            })
+    } else {
+        replica
+            .refresh_scope_with_projection(request)
+            .map_err(|error| format!("write-through refresh {scope_id} failed: {error}"))
+    }
 }
 
 /// [`write_through_projection`] for the callers that treat a lost cache write
 /// as survivable — every one except purge.
 fn write_through_projection_or_log(kio_dir: &Path) {
     write_through_projection_or_log_with_requested_at(kio_dir, &[]);
+}
+
+fn write_through_projection_or_log_for_repo(repo: &Repository) {
+    if let Err(reason) = write_through_projection_inner(repo.kio_dir(), Some(repo), &[], true) {
+        log_aggregator_degraded(&reason);
+        mark_replica_unavailable_or_log(repo.kio_dir());
+    }
 }
 
 fn write_through_projection_or_log_with_requested_at(
@@ -3255,16 +4028,18 @@ fn materialize_repaired_snapshot_entries(repo: &Repository, repaired_head: &str)
             db.display()
         )));
     }
-    kio_index::vec::ensure_registered();
-    let conn = Connection::open(&db).map_err(|error| {
+    let conn = open_existing_source_index_connection(
+        &db,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(|error| {
         KioError::schema(format!("repair projection open {}: {error}", db.display()))
     })?;
-    match ensure_snapshot_tree_entries(repo, &conn, repaired_head)? {
-        SnapshotTreeEntries::Projected => Ok(()),
-        SnapshotTreeEntries::ShallowCachedRows | SnapshotTreeEntries::ShallowNoRows => Err(
-            KioError::schema("repair projection cannot materialize the repaired snapshot tree"),
-        ),
-    }
+    let _ = ensure_snapshot_tree_entries(repo, &conn, repaired_head)?;
+    Ok(())
 }
 
 /// Prevent strict replica-only reads from serving a projection whose source
@@ -3413,7 +4188,7 @@ fn source_tree_entry_projections(
 ) -> Result<Vec<TreeEntryProjection>> {
     let mut statement = conn
         .prepare(
-            "SELECT path, raw_hash, tool_profile_hash, gen
+            "SELECT path, raw_hash, tool_profile_hash, gen, manifest_hash
              FROM tree_entries
              WHERE commit_hash = ?1
              ORDER BY path",
@@ -3425,7 +4200,8 @@ fn source_tree_entry_projections(
                 path: row.get(0)?,
                 raw_hash: row.get(1)?,
                 tool_profile_hash: row.get(2)?,
-                gen: row.get::<_, i64>(3)? as u64,
+                gen: row.get(3)?,
+                manifest_hash: row.get(4)?,
             })
         })
         .map_err(|error| KioError::schema(error.to_string()))?;
@@ -3451,7 +4227,8 @@ fn normalized_tree_entry_projections(tree: &TreeObject) -> Vec<TreeEntryProjecti
                     path: entry.path.clone(),
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
-                    gen: normalize.gen,
+                    gen: Some(normalize.gen),
+                    manifest_hash: Some(normalize.manifest_hash.clone()),
                 })
         })
         .collect()
@@ -3533,8 +4310,14 @@ fn republish_equivalent_manual_snapshot(
     }
 
     let db = sqlite_path(repo.kio_dir());
-    let mut conn = Connection::open(&db)
-        .map_err(|error| format!("open source index {}: {error}", db.display()))?;
+    let mut conn = open_existing_source_index_connection(
+        &db,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(|error| format!("open source index {}: {error}", db.display()))?;
     let max_rowid =
         current_max_rowid(&conn).map_err(|error| format!("read source chunk bound: {error}"))?;
     let max_association_rowid = kio_index::fts::max_chunk_config_association_rowid(&conn)
@@ -3563,8 +4346,8 @@ fn republish_equivalent_manual_snapshot(
         .map_err(|error| format!("begin target tree materialization: {error}"))?;
     let copied = tx
         .execute(
-            "INSERT INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
-             SELECT ?1, path, raw_hash, tool_profile_hash, gen
+            "INSERT INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash)
+             SELECT ?1, path, raw_hash, tool_profile_hash, gen, manifest_hash
              FROM tree_entries
              WHERE commit_hash = ?2",
             rusqlite::params![target_snapshot, before.snapshot_commit],
@@ -3579,7 +4362,10 @@ fn republish_equivalent_manual_snapshot(
     tx.commit()
         .map_err(|error| format!("commit target tree materialization: {error}"))?;
 
-    write_through_projection(repo.kio_dir()).map(|()| true)
+    // This is a normal writer publication, not replica repair. Preserve any
+    // completed disconnected `--at` projections while publishing the reused
+    // current-tree cache.
+    write_through_projection_with_requested_at(repo.kio_dir(), &[]).map(|()| true)
 }
 
 /// Publish an in-place index change: rotate the scope's `index_generation`,
@@ -3873,7 +4659,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             kio_index::aggregator::Aggregator::open(&aggregator_path()).map_err(|error| {
                 KioError::new(
                     "KIO-E-AGGREGATOR-001",
-                    "the device search replica could not be opened; retry after indexing",
+                    "the device search replica could not be opened; run `kio repair replica` (or `kio repair all`) to recreate it, then retry",
                     json!({ "reason": error.to_string() }),
                     ExitCode::PartialFailure,
                 )
@@ -4278,8 +5064,6 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     max_association_rowid: outcome.max_association_rowid,
                     chunking_config_hash: outcome.chunking_config_hash.clone(),
                     index_generation: outcome.index_generation.clone(),
-                    #[cfg(test)]
-                    has_image_vec: false,
                     journal_active_at_prepare: outcome.journal_active_at_prepare,
                     shallow_skipped: outcome.shallow_skipped,
                     runtime_binding_filter: outcome.runtime_binding_filter,
@@ -5087,6 +5871,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     candidate.meta.raw_hash.clone(),
                     candidate.meta.tool_profile_hash.clone(),
                     candidate.meta.gen,
+                    binding.manifest_hash.clone(),
                 );
                 let instance = unit_figures.entry(key).or_insert_with(|| {
                     read_instance_figures(
@@ -5094,6 +5879,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                         &candidate.meta.raw_hash,
                         &candidate.meta.tool_profile_hash,
                         candidate.meta.gen,
+                        &binding.manifest_hash,
                     )
                 });
                 if let Some(figures) = instance.get(&candidate.meta.unit_key) {
@@ -5324,7 +6110,7 @@ fn purge_blocks_rebuild_raw(kio_dir: &Path, raw_hash: &str) -> Result<bool> {
     let receipt_tail = state
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
-    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?;
     Ok(canonical.is_some_and(|canonical| canonical.event.kind != EventKind::Retired))
 }
 
@@ -5357,8 +6143,148 @@ fn purge_blocks_historical_reindex_raw(kio_dir: &Path, raw_hash: &str) -> Result
     let receipt_tail = state
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
-    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?;
     Ok(canonical.is_some_and(|canonical| canonical.event.kind == EventKind::Purged))
+}
+
+/// An erase purge intentionally removes the immutable manifest/unit closure
+/// that an older snapshot pins.  Historical enrichment may therefore skip that
+/// one missing closure while the erase receipt is still active, but only when
+/// the receipt's own erased event is backed by a real purge commit at or after
+/// the selected snapshot.  This is deliberately separate from
+/// `purge_explains_missing_pinned_manifest`: normal rebuilds retain that
+/// stricter retired/resurrection-only rule.
+pub(crate) fn active_erase_purge_explains_historical_missing_manifest(
+    repo: &Repository,
+    raw_hash: &str,
+    selected_commit: &str,
+) -> Result<bool> {
+    let state = PurgeState::new(repo.kio_dir());
+    if state.barrier_blocks(raw_hash)? {
+        return Ok(false);
+    }
+    let Some(receipt) = state.read_erase_receipt(raw_hash)? else {
+        return Ok(false);
+    };
+    let erased = receipt.tail();
+    if erased.kind != EventKind::Erased {
+        return Ok(false);
+    }
+    let purge_commit = match repo.read_commit(&erased.in_commit) {
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if purge_commit.commit_type != CommitType::Purged
+        || !purge_commit
+            .purged_raws
+            .iter()
+            .any(|purged| purged == raw_hash)
+    {
+        return Ok(false);
+    }
+    is_ancestor_or_equal(repo, selected_commit, &erased.in_commit)
+}
+
+/// A purge deliberately removes the old manifest/unit closure. After a
+/// re-ingest the canonical lifecycle event is `Retired`, so that old closure
+/// is explainable only for bindings at-or-before the purge that removed it.
+/// Never use this for malformed/corrupt objects or for a binding newer than
+/// the explaining purge: those remain fail-closed store corruption.
+fn purge_explains_missing_pinned_manifest(
+    repo: &Repository,
+    raw_hash: &str,
+    relevant_commits: impl IntoIterator<Item = String>,
+) -> Result<bool> {
+    let state = PurgeState::new(repo.kio_dir());
+    // An in-flight purge owns visibility. Missing immutable closure bytes must
+    // never be reclassified as an explained, completed purge while its barrier
+    // is still active (including a torn/recoverable journal).
+    if state.barrier_blocks(raw_hash)? {
+        return Ok(false);
+    }
+    let tombstone = state.read_tombstone(raw_hash)?;
+    let receipt = state.read_erase_receipt(raw_hash)?;
+    let Some(canonical) = canonical_final_event(
+        tombstone.as_ref().map(|record| record.tail()),
+        receipt.as_ref().map(|receipt| receipt.tail()),
+    )?
+    else {
+        return Ok(false);
+    };
+    if canonical.event.kind != EventKind::Retired {
+        return Ok(false);
+    }
+    let events = match canonical.marker_kind {
+        TombstoneMode::Default => tombstone.as_ref().map(|record| &record.events),
+        TombstoneMode::Erase => receipt.as_ref().map(|receipt| &receipt.events),
+    };
+    let Some(explaining_purge) = events.and_then(|events| {
+        events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::Purged | EventKind::Erased))
+            .map(|event| event.in_commit.as_str())
+    }) else {
+        return Ok(false);
+    };
+    let explaining_commit = match repo.read_commit(explaining_purge) {
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if explaining_commit.commit_type != CommitType::Purged
+        || !explaining_commit
+            .purged_raws
+            .iter()
+            .any(|purged| purged == raw_hash)
+    {
+        return Ok(false);
+    }
+    let Some(resurrection) = canonical.event.resurrection_commit.as_deref() else {
+        return Ok(false);
+    };
+    if !is_ancestor_or_equal(repo, explaining_purge, resurrection)? {
+        return Ok(false);
+    }
+    let resurrection_commit = match repo.read_commit(resurrection) {
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let resurrection_tree = match repo.read_tree(&resurrection_commit.tree) {
+        Ok(tree) => tree,
+        Err(error) if is_store_not_found(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !resurrection_tree
+        .entries
+        .iter()
+        .any(|entry| entry.raw_hash == raw_hash)
+    {
+        return Ok(false);
+    }
+    let reachable_resurrection =
+        repo.current_ref_targets()?
+            .into_iter()
+            .try_fold(false, |reachable, root| {
+                if reachable {
+                    Ok(true)
+                } else {
+                    is_ancestor_or_equal(repo, resurrection, &root)
+                }
+            })?;
+    if !reachable_resurrection {
+        return Ok(false);
+    }
+    relevant_commits
+        .into_iter()
+        .try_fold(true, |all_explained, commit| {
+            if !all_explained {
+                return Ok(false);
+            }
+            is_ancestor_or_equal(repo, &commit, explaining_purge)
+        })
 }
 
 fn scope_deadline_check(
@@ -5521,6 +6447,7 @@ fn prepare_scope_from_replica_header(
                     raw_hash: binding.raw_hash,
                     tool_profile_hash: binding.tool_profile_hash,
                     gen: binding.gen,
+                    manifest_hash: binding.manifest_hash,
                     path_at_commit: binding.path_at_commit,
                     pointer_commit: binding.pointer_commit,
                     current_paths: binding.current_paths,
@@ -5565,10 +6492,8 @@ fn is_vector_capacity_message(message: &str) -> bool {
 /// independent imports, PC37/43) via a correlated `EXISTS` rather than a
 /// plain `JOIN`, so a chunk with several publication rows still matches this
 /// `WHERE` at most once (PC42's uniqueness — `c` is the outer chunk row, never
-/// duplicated by this predicate). A chunk with no `chunk_publications` row at
-/// all (nothing has written one for it yet, e.g. a pre-PC37 store) falls back
-/// to the legacy single-valued `chunks.first_seen_commit` column so
-/// older/untouched rows are never spuriously excluded.
+/// duplicated by this predicate). A chunk without a durable publication record
+/// is ineligible.
 fn ancestor_gate_sql(ancestor_gated: bool) -> &'static str {
     if ancestor_gated {
         "AND (
@@ -5580,13 +6505,6 @@ fn ancestor_gate_sql(ancestor_gated: bool) -> &'static str {
                        WHERE ta.commit_hash = p.introduction_commit
                    )
              )
-             OR (
-                 NOT EXISTS (SELECT 1 FROM chunk_publications p2 WHERE p2.chunk_id = c.chunk_id)
-                 AND EXISTS (
-                     SELECT 1 FROM kio_target_ancestors ta2
-                     WHERE ta2.commit_hash = c.first_seen_commit
-                 )
-             )
          )"
     } else {
         ""
@@ -5597,19 +6515,13 @@ fn ancestor_gate_sql(ancestor_gated: bool) -> &'static str {
 /// chunk/config ASSOCIATION, ANDed inside the very same correlated `cg`
 /// `EXISTS` both eligibility queries already use for
 /// `chunk_config_generations` — never a second top-level `EXISTS`, so it
-/// cannot fan out that join either. `cg.introduction_commit IS NULL` (a
-/// pre-PC40 association nothing has stamped yet) is treated as eligible
-/// rather than excluded: a fail-open default for legacy rows, safe because
-/// every newly-created association is now stamped
-/// (`record_chunk_config_association`, called from `index_chunk_with_rowids`).
+/// cannot fan out that join either. A missing introduction commit is never
+/// eligible: current durable associations are required to carry one.
 fn config_association_ancestor_sql(ancestor_gated: bool) -> &'static str {
     if ancestor_gated {
-        "AND (
-             cg.introduction_commit IS NULL
-             OR EXISTS (
-                 SELECT 1 FROM kio_target_ancestors ta3
-                 WHERE ta3.commit_hash = cg.introduction_commit
-             )
+        "AND EXISTS (
+             SELECT 1 FROM kio_target_ancestors ta3
+             WHERE ta3.commit_hash = cg.introduction_commit
          )"
     } else {
         ""
@@ -5788,18 +6700,6 @@ fn give_images_their_chunks_text_rank(
     *text_ranks = widened;
 }
 
-/// Whether this index has `name` at all — the question an index written by an
-/// older build makes necessary.
-fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1)",
-        rusqlite::params![name],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|found| found != 0)
-    .map_err(|error| KioError::schema(error.to_string()))
-}
-
 /// One image object that can be returned as a search result (05 §1.7).
 #[cfg(test)]
 #[allow(dead_code)]
@@ -5828,11 +6728,11 @@ struct UnitFigures {
 
 /// Memo of [`read_instance_figures`] across one search's result rows.
 ///
-/// Keyed by the normalized INSTANCE, not by the unit: a page of results from
-/// one scanned PDF is one instance and many units, and the loader validates a
-/// whole instance per call. Keying by unit would re-read and re-validate the
-/// same instance once per page that matched.
-type UnitFigureCache = BTreeMap<(String, String, u64), BTreeMap<String, UnitFigures>>;
+/// Keyed by the tree-pinned normalized INSTANCE, not by the unit: a page of
+/// results from one scanned PDF is one instance and many units, and the loader
+/// validates a whole instance per call. The manifest pin keeps a later
+/// same-generation retry's metadata from leaking into a historical result.
+type UnitFigureCache = BTreeMap<(String, String, u64, String), BTreeMap<String, UnitFigures>>;
 
 /// Read every unit's figure sizes out of one normalized instance.
 ///
@@ -5847,17 +6747,18 @@ fn read_instance_figures(
     raw_hash: &str,
     tool_profile_hash: &str,
     gen: u64,
+    manifest_hash: &str,
 ) -> BTreeMap<String, UnitFigures> {
-    let Ok(instance) = kio_pipeline::markdownize::load_validated_normalized_instance(
-        kio_dir,
-        raw_hash,
-        tool_profile_hash,
+    let normalize = NormalizeRef {
+        tool_profile_hash: tool_profile_hash.to_owned(),
         gen,
-    ) else {
+        manifest_hash: manifest_hash.to_owned(),
+    };
+    let Ok(units) = pinned_done_units(kio_dir, raw_hash, &normalize) else {
         return BTreeMap::new();
     };
     let mut by_unit = BTreeMap::new();
-    for unit in instance.units {
+    for unit in units {
         let Some(images) = unit.metadata.get("images").and_then(Value::as_array) else {
             continue;
         };
@@ -5958,33 +6859,14 @@ fn source_tree_entry_snapshot_commits(conn: &Connection) -> Result<BTreeSet<Stri
         .map_err(|error| KioError::schema(error.to_string()))
 }
 
-/// R16-3: the tri-state disposition of a commit's source-cache `tree_entries`
-/// availability. Distinguishing "shallow but serviceable from cache" from
-/// "shallow with nothing to materialize" lets source-cache consumers report the
-/// correct command-specific result. "Shallow" here covers BOTH a missing tree
-/// object AND a missing commit object (R16-1): a *deleted* object
-/// (KIO-E-STORE-NOT-FOUND-001). A *corrupt* object (hash mismatch,
-/// KIO-E-STORE-CORRUPT-001) is NOT folded in here and propagates as `Err`.
 enum SnapshotTreeEntries {
-    /// Rows are present (freshly projected or already cached) AND the backing
-    /// commit and tree objects are present.
     Projected,
-    /// The commit or tree object is gone, BUT `tree_entries` rows are already cached
-    /// in source SQLite. A local source-cache command may still use those rows;
-    /// direct search instead applies its CAS-derived binding filter to the replica.
-    ShallowCachedRows,
-    /// The commit or tree object is gone AND no `tree_entries` rows are cached, so
-    /// this source relation cannot be materialized. The caller decides its command-
-    /// specific error or partial-result policy.
-    ShallowNoRows,
 }
 
 /// Ensure `tree_entries` rows for `commit_hash` exist in `conn`, projecting them
-/// from the commit's tree object when absent (04 §4.5). Returns the tri-state
-/// [`SnapshotTreeEntries`] disposition: `Projected` when the snapshot is fully
-/// backed, or a `Shallow*` variant when the commit/tree object is gone (the caller
-/// decides fresh-vs-cursor policy). A *corrupt* (not merely missing) object still
-/// propagates as `Err`.
+/// from the commit's tree object when absent (04 §4.5). Both the commit and tree
+/// must be present in CAS even when cache rows already exist; SQLite is never a
+/// substitute for immutable history truth.
 fn ensure_snapshot_tree_entries(
     repo: &Repository,
     conn: &Connection,
@@ -6000,53 +6882,30 @@ fn ensure_snapshot_tree_entries(
             |row| row.get(0),
         )
         .map_err(|err| KioError::schema(err.to_string()))?;
-    // The shallow disposition when the commit/tree object is gone depends on whether
-    // rows are cached: with cache we can still serve (ShallowCachedRows), without it
-    // there is nothing to serve (ShallowNoRows). R16-1: a missing *commit* object is
-    // handled symmetrically to a missing tree — both are absorbed here (only when
-    // STORE-NOT-FOUND; a corrupt object propagates as Err for R16-2).
-    let shallow = if existing {
-        SnapshotTreeEntries::ShallowCachedRows
-    } else {
-        SnapshotTreeEntries::ShallowNoRows
-    };
-    let commit = match repo.read_commit(commit_hash) {
-        Ok(commit) => commit,
-        Err(error) if is_store_not_found(&error) => return Ok(shallow),
-        Err(error) => return Err(error),
-    };
+    let commit = repo.read_commit(commit_hash)?;
+    let tree = repo.read_tree(&commit.tree)?;
     if existing {
-        // Cached — but a cursor replay still needs the tree object to prove the
-        // snapshot is not shallow, so verify object presence regardless.
-        return match repo.read_tree(&commit.tree) {
-            Ok(_) => Ok(SnapshotTreeEntries::Projected),
-            Err(error) if is_store_not_found(&error) => Ok(SnapshotTreeEntries::ShallowCachedRows),
-            Err(error) => Err(error),
-        };
+        return Ok(SnapshotTreeEntries::Projected);
     }
-    let tree = match repo.read_tree(&commit.tree) {
-        Ok(tree) => tree,
-        Err(error) if is_store_not_found(&error) => return Ok(SnapshotTreeEntries::ShallowNoRows),
-        Err(error) => return Err(error),
-    };
-    // Resolve every row first (the `latest_normalize_ref` lookups do file I/O) so the
-    // insert transaction below stays tight and holds no I/O. Step 4 historical search
-    // uses its own exact CAS planner and does not treat this compatibility cache as
-    // truth.
     let mut rows: Vec<TreeEntryProjection> = Vec::new();
     for entry in &tree.entries {
-        let normalize = match &entry.normalize {
-            Some(normalize) => normalize.clone(),
-            None => match latest_normalize_ref(repo.kio_dir(), &entry.raw_hash)? {
-                Some(normalize) => normalize,
-                None => continue,
-            },
-        };
+        let (tool_profile_hash, gen, manifest_hash) =
+            entry
+                .normalize
+                .as_ref()
+                .map_or((None, None, None), |normalize| {
+                    (
+                        Some(normalize.tool_profile_hash.clone()),
+                        Some(normalize.gen),
+                        Some(normalize.manifest_hash.clone()),
+                    )
+                });
         rows.push(TreeEntryProjection {
             path: entry.path.clone(),
             raw_hash: entry.raw_hash.clone(),
-            tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
-            gen: normalize.gen,
+            tool_profile_hash,
+            gen,
+            manifest_hash,
         });
     }
     insert_snapshot_tree_entries(conn, commit_hash, &rows)?;
@@ -6059,7 +6918,8 @@ struct TreeEntryProjection {
     path: String,
     raw_hash: String,
     tool_profile_hash: Option<String>,
-    gen: u64,
+    gen: Option<u64>,
+    manifest_hash: Option<String>,
 }
 
 /// R10-8: insert a commit's projected `tree_entries` rows in ONE transaction.
@@ -6078,14 +6938,15 @@ fn insert_snapshot_tree_entries(
         .map_err(|err| KioError::schema(err.to_string()))?;
     for row in rows {
         tx.execute(
-            "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 commit_hash,
                 row.path,
                 row.raw_hash,
                 row.tool_profile_hash,
-                row.gen
+                row.gen,
+                row.manifest_hash
             ],
         )
         .map_err(|err| KioError::schema(err.to_string()))?;
@@ -7262,11 +8123,243 @@ fn held_secret_embedding_chunk_ids(kio_dir: &Path) -> Result<BTreeSet<String>> {
         .collect())
 }
 
+/// Publication introductions are unit-specific, not merely `(raw, profile,
+/// gen)` specific. A same-generation retry can change its pinned manifest from
+/// failed to done for one unit; collapsing manifests would attach that unit to
+/// an older commit that never attested it.
+type NormalizedUnitKey = (String, String, u64, String, String);
+
+#[derive(Debug, Clone)]
+struct AuthenticatedNormalizedUnit {
+    markdown: String,
+    introductions: BTreeSet<String>,
+}
+
+type AuthenticatedNormalizedUnits = BTreeMap<NormalizedUnitKey, AuthenticatedNormalizedUnit>;
+
+pub(crate) fn retained_unit_introductions(
+    repo: &Repository,
+    retained_instances: &[RetainedNormalizedInstance],
+) -> Result<AuthenticatedNormalizedUnits> {
+    let kio_dir = repo.kio_dir();
+    let mut units = AuthenticatedNormalizedUnits::new();
+    for instance in retained_instances {
+        let done = match pinned_done_units(kio_dir, &instance.raw_hash, &instance.normalize) {
+            Ok(done) => done,
+            Err(error) => {
+                if error.error_code() == "KIO-E-STORE-NOT-FOUND-001"
+                    && purge_explains_missing_pinned_manifest(
+                        repo,
+                        &instance.raw_hash,
+                        instance.introductions.clone(),
+                    )?
+                {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        for unit in done {
+            let unit_content_hash = kio_core::cas::hash_bytes(unit.markdown.as_bytes());
+            let key = (
+                instance.raw_hash.clone(),
+                instance.normalize.tool_profile_hash.clone(),
+                instance.normalize.gen,
+                unit.unit_key,
+                unit_content_hash,
+            );
+            match units.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(AuthenticatedNormalizedUnit {
+                        markdown: unit.markdown,
+                        introductions: instance.introductions.iter().cloned().collect(),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    if existing.markdown != unit.markdown {
+                        return Err(KioError::schema(
+                            "normalized units with the same immutable identity have different markdown",
+                        ));
+                    }
+                    existing
+                        .introductions
+                        .extend(instance.introductions.iter().cloned());
+                }
+            }
+        }
+    }
+    Ok(units)
+}
+
+fn unit_authorities_from_inputs(units: &[NormalizedUnitInput]) -> AuthenticatedNormalizedUnits {
+    units
+        .iter()
+        .map(|unit| {
+            (
+                (
+                    unit.raw_hash.clone(),
+                    unit.tool_profile_hash.clone(),
+                    unit.gen,
+                    unit.unit_key.clone(),
+                    unit.unit_content_hash.clone(),
+                ),
+                AuthenticatedNormalizedUnit {
+                    markdown: unit.markdown.clone(),
+                    introductions: BTreeSet::new(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Fail closed before a durable chunk row is appended, restored to CAS, or
+/// indexed. `chunks.jsonl` is only an acceleration ledger; its complete chunk
+/// content must still be attested by a pinned immutable normalized unit.
+pub(crate) fn authenticate_chunk_row(
+    row: &ChunkRow,
+    units: &AuthenticatedNormalizedUnits,
+) -> Result<()> {
+    let key = (
+        row.raw_hash.clone(),
+        row.tool_profile_hash.clone(),
+        row.gen,
+        row.unit_key.clone(),
+        row.unit_content_hash.clone(),
+    );
+    let unit = units.get(&key).ok_or_else(|| {
+        KioError::schema("chunk row identity is not present in a pinned normalized unit")
+    })?;
+    if kio_core::cas::hash_bytes(unit.markdown.as_bytes()) != row.unit_content_hash {
+        return Err(KioError::schema(
+            "pinned normalized unit content hash does not match chunk row",
+        ));
+    }
+    let start = usize::try_from(row.byte_start)
+        .map_err(|_| KioError::schema("chunk byte_start does not fit this platform"))?;
+    let end = usize::try_from(row.byte_end)
+        .map_err(|_| KioError::schema("chunk byte_end does not fit this platform"))?;
+    if start > end
+        || end > unit.markdown.len()
+        || !unit.markdown.is_char_boundary(start)
+        || !unit.markdown.is_char_boundary(end)
+    {
+        return Err(KioError::schema(
+            "chunk row byte range is not a UTF-8 boundary within its pinned normalized unit",
+        ));
+    }
+    if unit.markdown[start..end] != row.text {
+        return Err(KioError::schema(
+            "chunk row text is not the exact pinned normalized-unit markdown slice",
+        ));
+    }
+    if kio_core::cas::hash_bytes(row.text.as_bytes()) != row.text_hash {
+        return Err(KioError::schema(
+            "chunk row text_hash does not match exact text",
+        ));
+    }
+    if chunk_hash(row).map_err(index_to_kio)? != row.chunk_id {
+        return Err(KioError::schema(
+            "chunk row identity hash does not match its canonical identity fields",
+        ));
+    }
+    Ok(())
+}
+
+/// Current refs plus durable creation and tagged-publication introductions.
+/// Missing commits are only tolerated as the expected pre-commit crash residue;
+/// all other commit-store failures remain observable corruption.
+pub(crate) fn durable_history_roots(repo: &Repository) -> Result<BTreeSet<String>> {
+    let mut roots = repo.current_ref_targets()?;
+    let creations = read_stored_chunks(repo.kio_dir())?;
+    let events = read_chunk_publication_events(repo.kio_dir())?;
+    // Events are append-only and may name the same association repeatedly. Keep
+    // the first creation record, matching the previous linear lookup semantics,
+    // while making the event-to-creation join O(E log C).
+    let mut creations_by_association = BTreeMap::new();
+    for creation in &creations {
+        creations_by_association
+            .entry((
+                creation.row.chunk_id.clone(),
+                creation.row.chunking_config_hash.clone(),
+            ))
+            .or_insert(creation);
+    }
+    let mut authentication_cache = PublicationAuthenticationCache::default();
+
+    // Ledger values are candidates, never authority.  Authenticate every
+    // candidate directly against the claimed commit/tree/pinned unit before it
+    // can preserve a disconnected history root.  `false` is exclusively the
+    // expected missing-commit crash residue; an extant unattested candidate is
+    // rejected by `authenticate_publication_event`.
+    for creation in &creations {
+        for introduction_commit in [
+            creation.row.first_seen_commit.as_deref(),
+            Some(creation.row.chunking_config_introduction_commit.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let event = ChunkPublicationEvent {
+                event: "publication".to_owned(),
+                chunk_id: creation.row.chunk_id.clone(),
+                chunking_config_hash: creation.row.chunking_config_hash.clone(),
+                introduction_commit: introduction_commit.to_owned(),
+            };
+            if authenticate_publication_event_cached(
+                repo,
+                repo.kio_dir(),
+                &event,
+                creation,
+                &mut authentication_cache,
+            )? {
+                roots.insert(introduction_commit.to_owned());
+            }
+        }
+    }
+    for event in &events {
+        let creation = creations_by_association
+            .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+            .copied()
+            .ok_or_else(|| KioError::schema("publication event has no creation association"))?;
+        if authenticate_publication_event_cached(
+            repo,
+            repo.kio_dir(),
+            event,
+            creation,
+            &mut authentication_cache,
+        )? {
+            roots.insert(event.introduction_commit.clone());
+        }
+    }
+    Ok(roots)
+}
+
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     ensure_no_visible_purge_journal(repo.kio_dir())?;
-    let Some(head) = repo.head_commit_hash()? else {
+    // Do not use an empty HEAD as a proxy for an empty repository. A current
+    // canonical tag (or branch) can be the only root of retained history.
+    // Durable chunk publication/creation records are roots too: a writer can
+    // move every ref away from a still-valid commit, but explicit `--at` and
+    // Evidence remain allowed to address that disconnected commit while its
+    // commit object exists. A pre-commit crash can leave a dangling ledger
+    // hash; only that missing-commit case is ignored.
+    let head = repo.head_commit_hash()?;
+    // Preserve the recovery contract for the current HEAD before consulting
+    // ledger-derived candidates.  A forged or stale non-HEAD ledger candidate
+    // still fails closed below, but it must not mask an actual shallow HEAD
+    // with a raw store-not-found error.
+    let head_tree = head
+        .as_deref()
+        .map(|head| read_head_tree_for_rebuild(repo, head))
+        .transpose()?;
+    let existing = read_stored_chunks(repo.kio_dir())
+        .map_err(|error| annotate_index_stage(error, "read chunk ledger"))?;
+    let rebuild_roots = durable_history_roots(repo)
+        .map_err(|error| annotate_index_stage(error, "authenticate history roots"))?;
+    if rebuild_roots.is_empty() {
         return Ok(Step3RebuildReport::default());
-    };
+    }
     // R16-1/R16-4: `repair rebuild-db` (the only implemented recovery command),
     // `index`, and `reindex` all rebuild through here. A shallow HEAD (commit OR tree
     // object gone) must fail with a clear KIO-E-COMMIT-SHALLOW-001 + recovery guidance
@@ -7274,7 +8367,41 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // corruption it exists to recover from (R15-4 fixed reindex but missed the shared
     // rebuilder that repair uses). Placing the conversion in this shared function
     // covers all three commands at once.
-    let tree = read_head_tree_for_rebuild(repo, &head)?;
+    // SQLite is derived state. Rebuild every projection from the current ref
+    // roots and immutable CAS, not from whichever rows happened to survive in
+    // the old database. This also makes a tag-only/disconnected branch a first
+    // class root rather than an accidental cache survivor.
+    let mut tree_rows = BTreeMap::<(String, String), TreeEntryRow>::new();
+    let graph = HistoryReader::new(repo.kio_dir())
+        .all_parents_for_roots(&rebuild_roots)
+        .map_err(|error| annotate_index_stage(error, "walk retained history"))?;
+    for node in graph.nodes_in_visit_order() {
+        for entry in &node.tree.entries {
+            let (tool_profile_hash, gen, manifest_hash) =
+                entry
+                    .normalize
+                    .as_ref()
+                    .map_or((None, None, None), |normalize| {
+                        (
+                            Some(normalize.tool_profile_hash.clone()),
+                            Some(normalize.gen),
+                            Some(normalize.manifest_hash.clone()),
+                        )
+                    });
+            tree_rows.insert(
+                (node.commit_hash.clone(), entry.path.clone()),
+                TreeEntryRow {
+                    commit_hash: node.commit_hash.clone(),
+                    path: entry.path.clone(),
+                    raw_hash: entry.raw_hash.clone(),
+                    tool_profile_hash,
+                    gen,
+                    manifest_hash,
+                },
+            );
+        }
+    }
+    let tree_entries = tree_rows.into_values().collect::<Vec<_>>();
     // PC61/62 (04 §4.6, U145): deliberately NOT applied to `retained_history_instances`
     // itself — that shared function stays the untouched source both this rebuild AND
     // the embedding-task-generation path (`retained_history_chunks`) read from, per
@@ -7282,7 +8409,11 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // several `step3_p0_contract.rs` history/deleted-content tests). Instead this
     // rebuild-only set below narrows WHICH retained instances may receive a brand
     // NEW `chunk_config_generations` association this pass — see the loop below.
-    let retained_instances = retained_history_instances(repo.kio_dir(), &head)?;
+    let retained_instances =
+        retained_history_instances_for_roots(repo.kio_dir(), &rebuild_roots)
+            .map_err(|error| annotate_index_stage(error, "load retained instances"))?;
+    let retained_unit_introductions = retained_unit_introductions(repo, &retained_instances)
+        .map_err(|error| annotate_index_stage(error, "authenticate retained units"))?;
     let retained_instance_keys = retained_instances
         .iter()
         .map(|instance| {
@@ -7299,9 +8430,11 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // membership itself is unaffected (`retained_instance_keys` above, from the
     // untouched `retained_history_instances`, still governs the head-direct loop's
     // own dedup).
-    let head_identity_keys = tree
-        .entries
-        .iter()
+    let head_identity_keys = head_tree
+        .as_ref()
+        .map(|tree| &tree.entries)
+        .into_iter()
+        .flatten()
         .filter_map(|entry| {
             entry.normalize.as_ref().map(|normalize| {
                 (
@@ -7313,7 +8446,6 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         })
         .collect::<BTreeSet<(String, String, u64)>>();
     let config = read_chunking_config(repo)?;
-    let existing = read_stored_chunks(repo.kio_dir())?;
     // PC61/62: identities that already have AT LEAST ONE durable association
     // (under any config) as of the start of this rebuild. Combined with
     // `head_identity_keys` below, this distinguishes "a config change would
@@ -7354,12 +8486,12 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     let mut next_rowid = existing.iter().map(|chunk| chunk.rowid).max().unwrap_or(0) + 1;
     let mut next_association_rowid = existing
         .iter()
-        .filter_map(|chunk| chunk.association_rowid)
+        .map(|chunk| chunk.association_rowid)
         .max()
         .unwrap_or(0)
         + 1;
     let mut appended = Vec::<StoredChunk>::new();
-    let mut tree_entries = Vec::<TreeEntryRow>::new();
+    let mut pending_publication_events = Vec::<ChunkPublicationEvent>::new();
     // R16-4: documents whose normalized units are missing/corrupt are skipped and
     // reported here rather than aborting the whole rebuild (docs/10 §7.2: "最悪
     // objects/ と refs/ が保全されていれば復旧できる" — one bad unit must not veto
@@ -7392,14 +8524,39 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         {
             continue;
         }
-        let units = match load_normalized_units(
-            repo.kio_dir(),
-            &retained.raw_hash,
-            &retained.normalize.tool_profile_hash,
-            retained.normalize.gen,
-        ) {
-            Ok(units) => units,
-            Err(error) if is_rebuild_skippable_unit_error(&error) => {
+        // `manifest.json` is mutable working state. The commit/tree's pinned
+        // manifest is the only authority for which same-gen units existed at
+        // this retained introduction; otherwise a later failed→done retry can
+        // back-publish its chunk into an older snapshot.
+        let units = match pinned_done_units(repo.kio_dir(), &retained.raw_hash, &retained.normalize)
+        {
+            Ok(units) => units
+                .into_iter()
+                .map(|unit| {
+                    let unit_content_hash = kio_core::cas::hash_bytes(unit.markdown.as_bytes());
+                    Ok(NormalizedUnitInput {
+                        raw_hash: unit.raw_hash,
+                        tool_profile_hash: unit.tool_profile_hash,
+                        gen: unit.gen,
+                        unit_key: unit.unit_key,
+                        unit_content_hash,
+                        markdown: unit.markdown,
+                    })
+                })
+                .collect::<Result<Vec<_>>>(),
+            Err(error) => {
+                if error.error_code() == "KIO-E-STORE-NOT-FOUND-001"
+                    && purge_explains_missing_pinned_manifest(
+                        repo,
+                        &retained.raw_hash,
+                        retained.introductions.clone(),
+                    )?
+                {
+                    continue;
+                }
+                if !is_rebuild_skippable_unit_error(&error) {
+                    return Err(error);
+                }
                 skipped_units.push(json!({
                     "raw_hash": retained.raw_hash,
                     "path": retained.raw_path,
@@ -7408,23 +8565,27 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 }));
                 continue;
             }
-            Err(error) => return Err(error),
         };
         let input = ChunkingInput {
             raw_path: retained.raw_path.clone(),
-            units,
+            units: units?,
             config: config.clone(),
             created_at: now_utc_seconds(),
         };
+        let unit_authorities = unit_authorities_from_inputs(&input.units);
         for mut row in chunk_normalized_instance(input).map_err(index_to_kio)? {
             row.first_seen_commit = Some(retained.first_seen_commit.clone());
             // PC40 (05 §1.6 L266): a genuinely new (chunk_id, config)
-            // association is introduced now, at this rebuild's HEAD —
+            // association is introduced at this rebuild's HEAD.  A tag-only
+            // repository has no HEAD publication event, so retain the exact
+            // instance introduction instead of inventing one from a ref.
             // `append_new_chunk_association`'s `known_associations` dedup
             // discards this row untouched when the pair already exists, so
             // an already-durable association's real, earlier
             // `chunking_config_introduction_commit` is never overwritten.
-            row.chunking_config_introduction_commit = Some(head.clone());
+            row.chunking_config_introduction_commit = head
+                .clone()
+                .unwrap_or_else(|| retained.first_seen_commit.clone());
             append_new_chunk_association(
                 repo.kio_dir(),
                 row,
@@ -7433,25 +8594,25 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 &mut next_rowid,
                 &mut next_association_rowid,
                 &mut appended,
+                &mut pending_publication_events,
+                &unit_authorities,
+                false,
             )?;
         }
     }
 
-    for entry in &tree.entries {
+    for entry in head_tree
+        .as_ref()
+        .into_iter()
+        .flat_map(|tree| &tree.entries)
+    {
         let normalize = match &entry.normalize {
             Some(normalize) => normalize.clone(),
-            None => match latest_normalize_ref(repo.kio_dir(), &entry.raw_hash)? {
-                Some(normalize) => normalize,
-                None => continue,
-            },
+            // A tree's omitted normalized reference is immutable historical
+            // truth. Never fill it from the mutable current pointer while
+            // rebuilding a derived cache.
+            None => continue,
         };
-        tree_entries.push(TreeEntryRow {
-            commit_hash: head.clone(),
-            path: entry.path.clone(),
-            raw_hash: entry.raw_hash.clone(),
-            tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
-            gen: normalize.gen,
-        });
         if retained_instance_keys.contains(&(
             entry.raw_hash.clone(),
             normalize.tool_profile_hash.clone(),
@@ -7459,13 +8620,21 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         )) {
             continue;
         }
-        let units = match load_normalized_units(
-            repo.kio_dir(),
-            &entry.raw_hash,
-            &normalize.tool_profile_hash,
-            normalize.gen,
-        ) {
-            Ok(units) => units,
+        let units = match pinned_done_units(repo.kio_dir(), &entry.raw_hash, &normalize) {
+            Ok(units) => units
+                .into_iter()
+                .map(|unit| {
+                    let unit_content_hash = kio_core::cas::hash_bytes(unit.markdown.as_bytes());
+                    Ok(NormalizedUnitInput {
+                        raw_hash: unit.raw_hash,
+                        tool_profile_hash: unit.tool_profile_hash,
+                        gen: unit.gen,
+                        unit_key: unit.unit_key,
+                        unit_content_hash,
+                        markdown: unit.markdown,
+                    })
+                })
+                .collect::<Result<Vec<_>>>(),
             // A single document's missing/corrupt normalized instance (STORE-IO /
             // STORE-CORRUPT) is skipped so the rest of the scope still rebuilds; its
             // tree_entries row is kept (the tree structure is faithful — the document
@@ -7487,15 +8656,21 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         };
         let input = ChunkingInput {
             raw_path: entry.path.clone(),
-            units,
+            units: units?,
             config: config.clone(),
             created_at: now_utc_seconds(),
         };
+        let unit_authorities = unit_authorities_from_inputs(&input.units);
         for mut row in chunk_normalized_instance(input).map_err(index_to_kio)? {
-            row.first_seen_commit = Some(head.clone());
+            row.first_seen_commit = Some(
+                head.clone()
+                    .expect("a working-tree loop requires a non-empty HEAD"),
+            );
             // PC40: see the identical comment in the retained-instance loop
             // above.
-            row.chunking_config_introduction_commit = Some(head.clone());
+            row.chunking_config_introduction_commit = head
+                .clone()
+                .expect("a working-tree loop requires a non-empty HEAD");
             append_new_chunk_association(
                 repo.kio_dir(),
                 row,
@@ -7504,26 +8679,120 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 &mut next_rowid,
                 &mut next_association_rowid,
                 &mut appended,
+                &mut pending_publication_events,
+                &unit_authorities,
+                false,
             )?;
         }
     }
 
-    append_stored_chunks(repo.kio_dir(), &appended)?;
+    append_stored_chunks(repo.kio_dir(), &appended)
+        .map_err(|error| annotate_index_stage(error, "append chunk creations"))?;
+    // A creation record proves only that the chunk/config association is
+    // durable.  Publication is a separate fact: every retained manifest
+    // introduction that authenticates this exact immutable unit must be
+    // recorded after that creation fsync, including associations that already
+    // existed before this rebuild.  Otherwise removing the last ref could make
+    // a perfectly valid historical introduction disappear at the next SQLite
+    // loss/rebuild.
+    stage_retained_unit_publication_events(
+        repo,
+        repo.kio_dir(),
+        &retained_unit_introductions,
+        &mut pending_publication_events,
+    )
+    .map_err(|error| annotate_index_stage(error, "stage chunk publications"))?;
+    append_chunk_publication_events(repo.kio_dir(), &pending_publication_events)
+        .map_err(|error| annotate_index_stage(error, "append chunk publications"))?;
     // The source SQLite `tree_entries` table (below) is the writer-side cache for
     // live-chunk resolution and local short-hash resolution. Direct
     // search uses only replica corpus rows and bindings. The former JSON projection
     // went stale after a bare snapshot and is no longer written (L3).
     rebuild_sqlite_index(
-        repo.kio_dir(),
+        repo,
         &tree_entries,
         &retained_instances,
+        &retained_unit_introductions,
         &config.chunking_config_hash,
-    )?;
+    )
+    .map_err(|error| annotate_index_stage(error, "rebuild source index"))?;
     Ok(Step3RebuildReport {
         rebuilt_chunks: appended.len() as u64,
         rebuilt_tree_entries: tree_entries.len() as u64,
         skipped_units,
     })
+}
+
+fn annotate_index_stage(error: KioError, stage: &str) -> KioError {
+    KioError::new(
+        error.error_code(),
+        format!("{stage}: {}", error.message()),
+        error.context().clone(),
+        error.exit_code(),
+    )
+}
+
+/// Stage durable publication rows for every authenticated retained unit.  This
+/// runs only after [`append_stored_chunks`] has fsynced creation rows, so an
+/// event can never outlive the association it names.  `append_chunk_publication_events`
+/// owns final deduplication for retry safety.
+fn stage_retained_unit_publication_events(
+    repo: &Repository,
+    kio_dir: &Path,
+    retained_units: &AuthenticatedNormalizedUnits,
+    pending: &mut Vec<ChunkPublicationEvent>,
+) -> Result<()> {
+    let mut authentication_cache = PublicationAuthenticationCache::default();
+    for creation in read_stored_chunks(kio_dir)? {
+        let identity = (
+            creation.row.raw_hash.clone(),
+            creation.row.tool_profile_hash.clone(),
+            creation.row.gen,
+            creation.row.unit_key.clone(),
+            creation.row.unit_content_hash.clone(),
+        );
+        let Some(unit) = retained_units.get(&identity) else {
+            continue;
+        };
+        // The JSONL record is only an acceleration ledger.  Do not let it
+        // mint a durable root unless its exact row is authenticated by a
+        // pinned normalized body.
+        authenticate_chunk_row(&creation.row, retained_units)?;
+        for introduction_commit in &unit.introductions {
+            // A retained unit can have appeared before this particular
+            // chunk/config association was created (for example C1's body
+            // re-chunked under C3's config).  Its old publication must not
+            // manufacture an association at C1: doing so makes `--at C1`
+            // choose C3's shape. Explicit historical-reindex events remain
+            // durable inputs and are replayed separately below; this only
+            // constrains events synthesized by a general rebuild.
+            if !is_ancestor_or_equal(
+                repo,
+                &creation.row.chunking_config_introduction_commit,
+                introduction_commit,
+            )? {
+                continue;
+            }
+            let event = ChunkPublicationEvent {
+                event: "publication".to_owned(),
+                chunk_id: creation.row.chunk_id.clone(),
+                chunking_config_hash: creation.row.chunking_config_hash.clone(),
+                introduction_commit: introduction_commit.clone(),
+            };
+            // A missing commit is the expected pre-commit crash residue.  An
+            // existing but unrelated commit is a fail-closed ledger error.
+            if authenticate_publication_event_cached(
+                repo,
+                kio_dir,
+                &event,
+                &creation,
+                &mut authentication_cache,
+            )? {
+                pending.push(event);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7535,12 +8804,48 @@ fn append_new_chunk_association(
     next_rowid: &mut u64,
     next_association_rowid: &mut u64,
     appended: &mut Vec<StoredChunk>,
+    pending_publication_events: &mut Vec<ChunkPublicationEvent>,
+    unit_authorities: &AuthenticatedNormalizedUnits,
+    publish_duplicate_association: bool,
 ) -> Result<()> {
     if purge_blocks_rebuild_raw(kio_dir, &row.raw_hash)? {
         return Ok(());
     }
+    authenticate_chunk_row(&row, unit_authorities)?;
     let association = (row.chunk_id.clone(), row.chunking_config_hash.clone());
     if !known_associations.insert(association) {
+        // A chunk/config key can be shared by byte-identical chunk text from
+        // two distinct immutable normalized bodies.  Its existing creation
+        // may be published only at introductions that attest *that* body;
+        // defer general replay to `stage_retained_unit_publication_events`.
+        // Keep the targeted historical-reindex fast path for the exact same
+        // immutable unit, where the selected introduction is authenticated by
+        // the caller's pinned authority.
+        if !publish_duplicate_association {
+            return Ok(());
+        }
+        let same_immutable_unit = read_stored_chunks(kio_dir)?
+            .into_iter()
+            .find(|stored| {
+                stored.row.chunk_id == row.chunk_id
+                    && stored.row.chunking_config_hash == row.chunking_config_hash
+            })
+            .is_some_and(|stored| {
+                stored.row.raw_hash == row.raw_hash
+                    && stored.row.tool_profile_hash == row.tool_profile_hash
+                    && stored.row.gen == row.gen
+                    && stored.row.unit_key == row.unit_key
+                    && stored.row.unit_content_hash == row.unit_content_hash
+            });
+        if same_immutable_unit && !row.chunking_config_introduction_commit.is_empty() {
+            let introduction_commit = row.chunking_config_introduction_commit.as_str();
+            pending_publication_events.push(ChunkPublicationEvent {
+                event: "publication".to_owned(),
+                chunk_id: row.chunk_id.clone(),
+                chunking_config_hash: row.chunking_config_hash.clone(),
+                introduction_commit: introduction_commit.to_owned(),
+            });
+        }
         return Ok(());
     }
     let rowid = match chunk_rowids.get(&row.chunk_id).copied() {
@@ -7557,7 +8862,7 @@ fn append_new_chunk_association(
     persist_chunk_object(kio_dir, &row)?;
     appended.push(StoredChunk {
         rowid,
-        association_rowid: Some(*next_association_rowid),
+        association_rowid: *next_association_rowid,
         row,
     });
     *next_association_rowid = next_association_rowid
@@ -7678,61 +8983,6 @@ fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kio_dir
     }
 }
 
-/// R17-2: merge the reindex copy-loop's per-document skips into the rebuild report,
-/// deduplicated by raw_hash so a document reported by BOTH phases surfaces once.
-/// Split a normalized-instance directory leaf into the `(tool_profile_hash,
-/// gen)` it encodes. The leaf is `<raw64>.<tool64>.g<gen>` (03 §2 — digest-only
-/// components), so anything else in the fan-out directory is skipped rather
-/// than guessed at.
-fn parse_normalized_instance_leaf(name: &str, raw_digest: &str) -> Option<(String, u64)> {
-    let rest = name.strip_prefix(raw_digest)?.strip_prefix('.')?;
-    let (tool_digest, gen_part) = rest.rsplit_once(".g")?;
-    let gen = gen_part.parse::<u64>().ok()?;
-    let tool_profile_hash = format!("sha256:{tool_digest}");
-    is_hash(&tool_profile_hash).then_some((tool_profile_hash, gen))
-}
-
-fn latest_normalize_ref(kio_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
-    let digest = hash_path_component(raw_hash)?;
-    let dir = kio_dir
-        .join("objects/normalized_units")
-        .join(&digest[0..2])
-        .join(&digest[2..4]);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Ok(None);
-    };
-    let mut best: Option<NormalizeRef> = None;
-    for entry in entries {
-        let entry =
-            entry.map_err(|err| KioError::io(err.to_string(), dir.display().to_string()))?;
-        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some((tool_profile_hash, gen)) = parse_normalized_instance_leaf(&name, digest) else {
-            continue;
-        };
-        if best
-            .as_ref()
-            .map(|current| gen > current.gen)
-            .unwrap_or(true)
-        {
-            // PB04: the pin is what makes this ref resolvable point-in-time.
-            // A hashing fault here means the recovered instance cannot be
-            // pinned, which is a failure to report, not a ref to write.
-            let manifest_hash = compute_manifest_hash(kio_dir, raw_hash, &tool_profile_hash, gen)?;
-            best = Some(NormalizeRef {
-                tool_profile_hash,
-                gen,
-                manifest_hash,
-            });
-        }
-    }
-    Ok(best)
-}
-
 #[derive(Debug, Default)]
 struct Step3RebuildReport {
     rebuilt_chunks: u64,
@@ -7769,27 +9019,6 @@ fn read_chunking_config(repo: &Repository) -> Result<ChunkingConfig> {
     })
 }
 
-fn load_normalized_units(
-    kio_dir: &Path,
-    raw_hash: &str,
-    tool_profile_hash: &str,
-    gen: u64,
-) -> Result<Vec<NormalizedUnitInput>> {
-    let instance = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, gen)
-        .map_err(pipeline_to_kio)?;
-    Ok(instance
-        .units
-        .into_iter()
-        .map(|unit| NormalizedUnitInput {
-            raw_hash: unit.raw_hash,
-            tool_profile_hash: unit.tool_profile_hash,
-            gen: unit.gen,
-            unit_key: unit.unit_key,
-            markdown: unit.markdown,
-        })
-        .collect())
-}
-
 fn store_corrupt_error(path: &Path, message: impl Into<String>) -> KioError {
     let path_string = path.display().to_string();
     KioError::new(
@@ -7806,6 +9035,367 @@ fn index_dir(kio_dir: &Path) -> PathBuf {
 
 fn chunks_jsonl_path(kio_dir: &Path) -> PathBuf {
     index_dir(kio_dir).join("chunks.jsonl")
+}
+
+/// A capability for the repository-owned `index` directory.  Once this is
+/// open, all ledger leaf operations are relative to its handle, so replacing
+/// `.kio/index` with a symlink cannot redirect a read, truncate, or append.
+struct ChunkLedgerDir {
+    path: PathBuf,
+    // Retain `.kio` as the authority from which `index` was opened.  Holding
+    // `index` alone is insufficient if `.kio` itself is renamed and replaced
+    // by a symlink before the index handle is acquired.
+    _root: std::fs::File,
+    handle: std::fs::File,
+}
+
+fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return before.dev() == after.dev() && before.ino() == after.ino();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return before.volume_serial_number() == after.volume_serial_number()
+            && before.file_index() == after.file_index();
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Open the repository's `.kio` root through its parent and keep that handle.
+/// A path-string open of `.kio/index` can otherwise follow a `.kio` symlink
+/// installed between validation and open.
+fn open_kio_root_dir(kio_dir: &Path) -> Result<std::fs::File> {
+    let before = fs::symlink_metadata(kio_dir)
+        .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
+    if before.file_type().is_symlink() || !before.is_dir() {
+        return Err(KioError::io(
+            "repository .kio root must be a real directory, not a symlink",
+            kio_dir.display().to_string(),
+        ));
+    }
+    // A descriptor-bound child has already `fchdir`ed into the retained `.kio`
+    // directory, so `.` is both its only operational store spelling and an
+    // inode-stable authority. Do not recover a parent/leaf path in this case:
+    // doing so would either reject `.` syntactically or re-enter a replaceable
+    // public `.kio` pathname.
+    if kio_dir == Path::new(".") {
+        return cap_fs::open_ambient_dir(Path::new("."), cap_primitives::ambient_authority())
+            .map_err(|error| KioError::io(error.to_string(), "."));
+    }
+    let outer = kio_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let leaf = kio_dir.file_name().ok_or_else(|| {
+        KioError::io(
+            "repository .kio root has no final path component",
+            kio_dir.display().to_string(),
+        )
+    })?;
+    let outer_handle = cap_fs::open_ambient_dir(outer, cap_primitives::ambient_authority())
+        .map_err(|error| KioError::io(error.to_string(), outer.display().to_string()))?;
+    let root = cap_fs::open_dir_nofollow(&outer_handle, Path::new(leaf))
+        .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
+    let after = root
+        .metadata()
+        .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
+    if !same_directory_identity(&before, &after) {
+        return Err(KioError::io(
+            "repository .kio root changed while opening",
+            kio_dir.display().to_string(),
+        ));
+    }
+    Ok(root)
+}
+
+fn open_chunk_ledger_dir(kio_dir: &Path, create_missing: bool) -> Result<ChunkLedgerDir> {
+    let kio = open_kio_root_dir(kio_dir)?;
+    let path = index_dir(kio_dir);
+    let handle = match cap_fs::open_dir_nofollow(&kio, Path::new("index")) {
+        Ok(handle) => handle,
+        // macOS may report `ENOENT` from a no-follow `openat` through its
+        // capability wrapper with a non-NotFound Rust kind.  Authorize mkdir
+        // only after an independent non-follow metadata probe proves that the
+        // final component is absent; an existing symlink/reparse entry never
+        // reaches this branch.
+        Err(_error)
+            if create_missing
+                && matches!(
+                    cap_fs::stat(&kio, Path::new("index"), cap_fs::FollowSymlinks::No),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ) =>
+        {
+            let mut options = cap_fs::DirOptions::new();
+            #[cfg(unix)]
+            {
+                use cap_fs::DirBuilderExt;
+                options.mode(0o700);
+            }
+            let created = match cap_fs::create_dir(&kio, Path::new("index"), &options) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => {
+                    return Err(KioError::io(error.to_string(), path.display().to_string()))
+                }
+            };
+            if created {
+                // Persist the new `index` entry in `.kio` before its child
+                // ledger can be reported durable.
+                kio.sync_all().map_err(|error| {
+                    KioError::io(error.to_string(), kio_dir.display().to_string())
+                })?;
+            }
+            cap_fs::open_dir_nofollow(&kio, Path::new("index"))
+                .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
+        }
+        Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+    };
+    Ok(ChunkLedgerDir {
+        path,
+        _root: kio,
+        handle,
+    })
+}
+
+fn try_open_chunk_ledger_file(
+    directory: &ChunkLedgerDir,
+    read: bool,
+    write: bool,
+    append: bool,
+    create: bool,
+) -> std::io::Result<std::fs::File> {
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(read)
+        .write(write)
+        .append(append)
+        .create(create);
+    #[cfg(unix)]
+    {
+        use cap_fs::OpenOptionsExt;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        options.custom_flags(0x20_800);
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        options.custom_flags(0x104);
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        // Keep a no-delete-share handle for the entire ledger operation. A
+        // public-path replacement cannot win between this nofollow open and
+        // parsing/appending the durable record.
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = cap_fs::open(&directory.handle, Path::new("chunks.jsonl"), &options)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "chunks.jsonl must be a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "chunks.jsonl must have exactly one hard link",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn open_chunk_ledger_file(
+    directory: &ChunkLedgerDir,
+    read: bool,
+    write: bool,
+    append: bool,
+    create: bool,
+) -> Result<std::fs::File> {
+    try_open_chunk_ledger_file(directory, read, write, append, create).map_err(|error| {
+        KioError::io(
+            error.to_string(),
+            directory.path.join("chunks.jsonl").display().to_string(),
+        )
+    })
+}
+
+fn sync_chunk_ledger_dir(directory: &ChunkLedgerDir) -> Result<()> {
+    let mut options = cap_fs::OpenOptions::new();
+    options.read(true);
+    let syncable = cap_fs::open(&directory.handle, Path::new("."), &options)
+        .map_err(|error| KioError::io(error.to_string(), directory.path.display().to_string()))?;
+    syncable
+        .sync_all()
+        .map_err(|error| KioError::io(error.to_string(), directory.path.display().to_string()))
+}
+
+/// Atomically replace the complete chunk ledger using the already-validated
+/// repository-owned index-directory capability.  Purge compaction uses this
+/// instead of a path-based truncate/write sequence so `.kio/index` replacement
+/// cannot redirect the write outside the scope.
+pub(crate) fn replace_chunk_ledger_contents(kio_dir: &Path, bytes: &[u8]) -> Result<()> {
+    let directory = open_chunk_ledger_dir(kio_dir, true)?;
+    let target = Path::new("chunks.jsonl");
+    match cap_fs::stat(&directory.handle, target, cap_fs::FollowSymlinks::No) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(KioError::io(
+                    "chunks.jsonl must be a regular file",
+                    directory.path.join(target).display().to_string(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use cap_fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    return Err(KioError::io(
+                        "chunks.jsonl must have exactly one hard link",
+                        directory.path.join(target).display().to_string(),
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(KioError::io(
+                error.to_string(),
+                directory.path.join(target).display().to_string(),
+            ))
+        }
+    }
+
+    let temp_name_prefix = format!(
+        ".chunks.jsonl.replace.{}-{}",
+        process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    );
+    let mut temp_name = None;
+    let mut temp_file = None;
+    for attempt in 0..32_u8 {
+        let candidate = format!("{temp_name_prefix}-{attempt}");
+        let mut options = cap_fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use cap_fs::OpenOptionsExt;
+            options.mode(0o600);
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            options.custom_flags(0x20_800);
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "dragonfly"
+            ))]
+            options.custom_flags(0x104);
+        }
+        #[cfg(windows)]
+        {
+            use cap_fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        match cap_fs::open(&directory.handle, Path::new(&candidate), &options) {
+            Ok(file) => {
+                temp_name = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(KioError::io(
+                    error.to_string(),
+                    directory.path.join(candidate).display().to_string(),
+                ))
+            }
+        }
+    }
+    let temp_name = temp_name.ok_or_else(|| {
+        KioError::io(
+            "unable to allocate a unique temporary chunk ledger",
+            directory.path.display().to_string(),
+        )
+    })?;
+    let temp = Path::new(&temp_name);
+    let result = (|| -> Result<()> {
+        let mut file = temp_file.take().expect("temporary chunk ledger was opened");
+        let metadata = file.metadata().map_err(|error| {
+            KioError::io(
+                error.to_string(),
+                directory.path.join(temp).display().to_string(),
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(KioError::io(
+                "temporary chunk ledger must be a regular file",
+                directory.path.join(temp).display().to_string(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "macos")]
+            use std::os::darwin::fs::MetadataExt;
+            #[cfg(not(target_os = "macos"))]
+            use std::os::unix::fs::MetadataExt;
+            #[cfg(target_os = "macos")]
+            let nlink = metadata.st_nlink();
+            #[cfg(not(target_os = "macos"))]
+            let nlink = metadata.nlink();
+            if nlink != 1 {
+                return Err(KioError::io(
+                    "temporary chunk ledger must have exactly one hard link",
+                    directory.path.join(temp).display().to_string(),
+                ));
+            }
+        }
+        file.write_all(bytes).map_err(|error| {
+            KioError::io(
+                error.to_string(),
+                directory.path.join(temp).display().to_string(),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            KioError::io(
+                error.to_string(),
+                directory.path.join(temp).display().to_string(),
+            )
+        })?;
+        drop(file);
+        cap_fs::rename(&directory.handle, temp, &directory.handle, target).map_err(|error| {
+            KioError::io(
+                error.to_string(),
+                directory.path.join(target).display().to_string(),
+            )
+        })?;
+        sync_chunk_ledger_dir(&directory)
+    })();
+    if result.is_err() {
+        let _ = cap_fs::remove_file(&directory.handle, temp);
+    }
+    result
 }
 
 fn sqlite_path(kio_dir: &Path) -> PathBuf {
@@ -7957,8 +9547,14 @@ fn check_index_generation_current(kio_dir: &Path) -> Result<()> {
     if !db_path.exists() {
         return Ok(());
     }
-    let conn = Connection::open(&db_path)
-        .map_err(|error| KioError::io(error.to_string(), db_path.display().to_string()))?;
+    let conn = open_existing_source_index_connection(
+        &db_path,
+        ExistingSourceIndexOpenMode::ReadOnly,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
     let Some(metadata) = kio_index::fts::read_index_metadata(&conn).map_err(index_to_kio)? else {
         return Ok(());
     };
@@ -7974,78 +9570,185 @@ fn check_index_generation_current(kio_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
+struct ParsedChunkLedger {
+    creations: Vec<(usize, StoredChunk)>,
+    events: Vec<ChunkPublicationEvent>,
+}
+
+/// Parse the append-only ledger as framed raw bytes.  Only an unterminated final
+/// frame is crash residue: every newline-terminated frame must be valid UTF-8
+/// and valid JSON.  In particular, invalid UTF-8 is never silently accepted in
+/// an earlier record.
+fn parse_chunk_ledger(kio_dir: &Path) -> Result<ParsedChunkLedger> {
     let path = chunks_jsonl_path(kio_dir);
-    let Ok(bytes) = fs::read(&path) else {
-        return Ok(Vec::new());
-    };
-    // Q1: `chunks.jsonl` is append-only and never fsync'd (`append_stored_chunks`
-    // / `cas::append_jsonl`), so a crash / ENOSPC mid-`write_all` can leave the
-    // FINAL line torn. That chunk is regenerated from normalized_units /
-    // tree_entries on the next rebuild, so tolerate a torn tail (skip it) and let
-    // `index` / `reindex` / `repair rebuild-db` self-heal — rather than bricking
-    // every write path (and the sole recovery command) on exit 2.
-    //
-    // A torn cut can land mid multi-byte UTF-8 character (content routinely has
-    // non-ASCII text), not merely mid-JSON-token — `fs::read_to_string`'s
-    // whole-file UTF-8 requirement would then fail entirely, discarding every
-    // earlier, perfectly valid line along with the torn one (`Ok(Vec::new())`),
-    // which is not "tolerate a torn tail", it is losing the whole ledger. Read
-    // raw bytes and trim back to the longest valid-UTF-8 prefix first — the
-    // trailing torn remainder (now guaranteed not a `str` at all, or a partial
-    // JSON tail) still falls through to the existing torn-tail line tolerance
-    // below exactly like a torn-but-valid-UTF8 tail already did.
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => std::borrow::Cow::Borrowed(text),
-        Err(error) => {
-            let valid_up_to = error.valid_up_to();
-            std::borrow::Cow::Owned(
-                std::str::from_utf8(&bytes[..valid_up_to])
-                    .expect("prefix up to valid_up_to is valid UTF-8 by construction")
-                    .to_owned(),
-            )
+    let directory = match open_chunk_ledger_dir(kio_dir, false) {
+        Ok(directory) => directory,
+        Err(_error)
+            if matches!(
+                fs::symlink_metadata(index_dir(kio_dir)),
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(ParsedChunkLedger {
+                creations: Vec::new(),
+                events: Vec::new(),
+            });
         }
+        Err(error) => return Err(error),
     };
-    // A corrupt NON-final line cannot be a torn tail, so the store file is
-    // genuinely corrupt: classify it as `KIO-E-STORE-CORRUPT-001` (exit 4) with
-    // the file path, matching `TaskStore::all` (M1(c)) / cost-ledger — not the
-    // misleading `KIO-E-CONFIG-SCHEMA-001` (exit 2, no path) it used to emit.
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let last_index = lines.len().saturating_sub(1);
-    let mut chunks = Vec::with_capacity(lines.len());
-    for (index, line) in lines.iter().enumerate() {
-        match serde_json::from_str::<StoredChunk>(line) {
-            Ok(chunk) => chunks.push((index + 1, chunk)),
-            Err(_) if index == last_index => break,
-            Err(err) => {
-                return Err(KioError::new(
-                    "KIO-E-STORE-CORRUPT-001",
-                    "corrupt chunks.jsonl record",
-                    json!({
-                        "path": path.display().to_string(),
-                        "line": index + 1,
-                        "message": err.to_string(),
-                    }),
-                    ExitCode::PermanentFailure,
+    let mut file = match try_open_chunk_ledger_file(&directory, true, false, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ParsedChunkLedger {
+                creations: Vec::new(),
+                events: Vec::new(),
+            });
+        }
+        Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+    let complete_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
+    let complete = std::str::from_utf8(&bytes[..complete_len]).map_err(|error| {
+        corrupt_chunk_ledger_error(
+            &path,
+            bytes[..error.valid_up_to()]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count()
+                + 1,
+            "invalid UTF-8 in framed record",
+        )
+    })?;
+    // The bytes after the final newline are one incomplete frame.  Deliberately
+    // ignore it without decoding: it may end inside a multi-byte UTF-8 scalar.
+    let mut creations = Vec::new();
+    let mut events = Vec::new();
+    let mut event_keys = BTreeSet::new();
+    for (line_no, line) in complete.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .map_err(|e| corrupt_chunk_ledger_error(&path, line_no + 1, &e.to_string()))?;
+        if value.get("event").is_some() {
+            let event: ChunkPublicationEvent = serde_json::from_value(value)
+                .map_err(|e| corrupt_chunk_ledger_error(&path, line_no + 1, &e.to_string()))?;
+            if event.event != "publication"
+                || !is_hash(&event.chunk_id)
+                || !is_hash(&event.chunking_config_hash)
+                || !is_hash(&event.introduction_commit)
+            {
+                return Err(corrupt_chunk_ledger_error(
+                    &path,
+                    line_no + 1,
+                    "invalid publication event",
                 ));
             }
+            if event_keys.insert((
+                event.chunk_id.clone(),
+                event.chunking_config_hash.clone(),
+                event.introduction_commit.clone(),
+            )) {
+                events.push((line_no + 1, event));
+            }
+        } else {
+            let chunk: StoredChunk = serde_json::from_value(value)
+                .map_err(|e| corrupt_chunk_ledger_error(&path, line_no + 1, &e.to_string()))?;
+            validate_stored_chunk_ledger_row(&chunk)
+                .map_err(|error| corrupt_chunk_ledger_error(&path, line_no + 1, &error))?;
+            creations.push((line_no + 1, chunk));
         }
     }
 
-    // Legacy Step 3 records have no association rowid. Their one-config-per-
-    // chunk layout was replayed in chunk-row order, so stored chunk rowid is the
-    // deterministic migration order used by `migrate_legacy_chunk_config_column`.
-    // Assign the missing prefix here and persist explicit ids on every new append;
-    // this keeps a later SQLite rebuild from renumbering signed cursor bounds.
-    let mut used_association_rowids = chunks
+    let creation_pairs = creations
         .iter()
-        .filter_map(|(_, chunk)| chunk.association_rowid)
+        .map(|(_, chunk)| {
+            (
+                chunk.row.chunk_id.as_str(),
+                chunk.row.chunking_config_hash.as_str(),
+            )
+        })
         .collect::<BTreeSet<_>>();
+    for (line_no, event) in &events {
+        if !creation_pairs.contains(&(event.chunk_id.as_str(), event.chunking_config_hash.as_str()))
+        {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line_no,
+                "publication event has no creation association",
+            ));
+        }
+    }
+    Ok(ParsedChunkLedger {
+        creations,
+        events: events.into_iter().map(|(_, event)| event).collect(),
+    })
+}
+
+/// Validate every creation record before it participates in any durable-ledger
+/// relation.  This is intentionally independent of a history walk: parsing a
+/// complete framed row must reject malformed identity metadata even if the
+/// relevant commit has subsequently become unreachable.
+fn validate_stored_chunk_ledger_row(chunk: &StoredChunk) -> std::result::Result<(), String> {
+    if chunk.rowid == 0 || chunk.association_rowid == 0 {
+        return Err("chunk and association rowids must be positive".to_owned());
+    }
+    let row = &chunk.row;
+    for (name, value) in [
+        ("chunk_id", row.chunk_id.as_str()),
+        ("raw_hash", row.raw_hash.as_str()),
+        ("tool_profile_hash", row.tool_profile_hash.as_str()),
+        ("unit_content_hash", row.unit_content_hash.as_str()),
+        ("chunking_config_hash", row.chunking_config_hash.as_str()),
+        ("text_hash", row.text_hash.as_str()),
+    ] {
+        if !is_hash(value) {
+            return Err(format!("invalid {name}"));
+        }
+    }
+    let first_seen = row
+        .first_seen_commit
+        .as_deref()
+        .filter(|commit| !commit.is_empty())
+        .ok_or_else(|| "missing first_seen_commit".to_owned())?;
+    if !is_hash(first_seen) {
+        return Err("invalid first_seen_commit".to_owned());
+    }
+    if row.chunking_config_introduction_commit.is_empty()
+        || !is_hash(&row.chunking_config_introduction_commit)
+    {
+        return Err("invalid chunking_config_introduction_commit".to_owned());
+    }
+    if parse_utc_seconds(&row.created_at).is_none() {
+        return Err("invalid created_at timestamp".to_owned());
+    }
+    if row.unit_key.is_empty() || row.raw_path.is_empty() {
+        return Err("chunk identity fields must not be empty".to_owned());
+    }
+    if row.byte_start > row.byte_end {
+        return Err("chunk byte range is inverted".to_owned());
+    }
+    if kio_core::cas::hash_bytes(row.text.as_bytes()) != row.text_hash {
+        return Err("chunk text_hash does not match text".to_owned());
+    }
+    let canonical_chunk_id = chunk_hash(row).map_err(|error| error.to_string())?;
+    if canonical_chunk_id != row.chunk_id {
+        return Err("chunk identity hash does not match canonical row fields".to_owned());
+    }
+    Ok(())
+}
+
+fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
+    let path = chunks_jsonl_path(kio_dir);
+    let chunks = parse_chunk_ledger(kio_dir)?.creations;
+
     for (line, chunk) in &chunks {
-        if chunk.rowid == 0 || chunk.association_rowid == Some(0) {
+        if chunk.rowid == 0 || chunk.association_rowid == 0 {
             return Err(corrupt_chunk_ledger_error(
                 &path,
                 *line,
@@ -8053,22 +9756,6 @@ fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
             ));
         }
     }
-    let mut legacy_indices = chunks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (_, chunk))| chunk.association_rowid.is_none().then_some(index))
-        .collect::<Vec<_>>();
-    legacy_indices.sort_by_key(|index| (chunks[*index].1.rowid, chunks[*index].0));
-    let mut next_legacy_association_rowid = 1_u64;
-    for index in legacy_indices {
-        while used_association_rowids.contains(&next_legacy_association_rowid) {
-            next_legacy_association_rowid += 1;
-        }
-        chunks[index].1.association_rowid = Some(next_legacy_association_rowid);
-        used_association_rowids.insert(next_legacy_association_rowid);
-        next_legacy_association_rowid += 1;
-    }
-
     let mut association_owners = BTreeMap::<u64, (String, String)>::new();
     let mut known_associations = BTreeSet::<(String, String)>::new();
     let mut chunk_rowid_owners = BTreeMap::<u64, String>::new();
@@ -8085,7 +9772,7 @@ fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
                 "duplicate chunk/config association",
             ));
         }
-        let association_rowid = chunk.association_rowid.expect("assigned above");
+        let association_rowid = chunk.association_rowid;
         if association_owners
             .insert(association_rowid, association.clone())
             .is_some()
@@ -8120,6 +9807,13 @@ fn read_stored_chunks(kio_dir: &Path) -> Result<Vec<StoredChunk>> {
     Ok(chunks.into_iter().map(|(_, chunk)| chunk).collect())
 }
 
+/// Read durable publication event rows from the chunk ledger. Creation rows
+/// remain parsed by `read_stored_chunks`; publication rows are additive and do
+/// not create another chunk/config association.
+pub(crate) fn read_chunk_publication_events(kio_dir: &Path) -> Result<Vec<ChunkPublicationEvent>> {
+    Ok(parse_chunk_ledger(kio_dir)?.events)
+}
+
 fn corrupt_chunk_ledger_error(path: &Path, line: usize, message: &str) -> KioError {
     KioError::new(
         "KIO-E-STORE-CORRUPT-001",
@@ -8142,6 +9836,7 @@ fn persist_chunk_object(kio_dir: &Path, row: &ChunkRow) -> Result<()> {
         tool_profile_hash: row.tool_profile_hash.clone(),
         gen: row.gen,
         unit_key: row.unit_key.clone(),
+        unit_content_hash: row.unit_content_hash.clone(),
         heading_path: row.heading_path.clone().unwrap_or_default(),
         section_id: row.section_id.clone().filter(|value| !value.is_empty()),
         byte_start: row.byte_start,
@@ -8183,11 +9878,26 @@ fn persist_chunk_object(kio_dir: &Path, row: &ChunkRow) -> Result<()> {
 /// here, so real corruption is never silently truncated (multi-layer defense).
 fn truncate_torn_chunk_tail(kio_dir: &Path) -> Result<()> {
     let path = chunks_jsonl_path(kio_dir);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(KioError::io(err.to_string(), path.display().to_string())),
+    let directory = match open_chunk_ledger_dir(kio_dir, false) {
+        Ok(directory) => directory,
+        Err(_error)
+            if matches!(
+                fs::symlink_metadata(index_dir(kio_dir)),
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
     };
+    let mut file = match try_open_chunk_ledger_file(&directory, true, true, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     if bytes.is_empty() || bytes.last() == Some(&b'\n') {
         return Ok(());
     }
@@ -8196,10 +9906,6 @@ fn truncate_torn_chunk_tail(kio_dir: &Path) -> Result<()> {
         .iter()
         .rposition(|&byte| byte == b'\n')
         .map_or(0, |index| index + 1);
-    let file = OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     file.set_len(keep as u64)
         .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     file.sync_all()
@@ -8212,16 +9918,8 @@ fn append_stored_chunks(kio_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
         return Ok(());
     }
     let path = chunks_jsonl_path(kio_dir);
-    let parent = path
-        .parent()
-        .ok_or_else(|| KioError::io("path has no parent", path.display().to_string()))?;
-    fs::create_dir_all(parent)
-        .map_err(|err| KioError::io(err.to_string(), parent.display().to_string()))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
+    let directory = open_chunk_ledger_dir(kio_dir, true)?;
+    let mut file = open_chunk_ledger_file(&directory, false, true, true, true)?;
     for chunk in chunks {
         // M1(b): one framed record per single write_all (no interleaving).
         let mut line = serde_json::to_string(chunk)
@@ -8230,15 +9928,80 @@ fn append_stored_chunks(kio_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
         file.write_all(line.as_bytes())
             .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     }
+    file.sync_all()
+        .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
+    sync_chunk_ledger_dir(&directory)?;
+    Ok(())
+}
+
+pub(crate) fn append_chunk_publication_events(
+    kio_dir: &Path,
+    events: &[ChunkPublicationEvent],
+) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    // Idempotence belongs at the durable boundary, not only at individual
+    // callers: retries may re-enter after a successful append but before their
+    // next projection step.
+    let creations = read_stored_chunks(kio_dir)?
+        .into_iter()
+        .map(|chunk| (chunk.row.chunk_id, chunk.row.chunking_config_hash))
+        .collect::<BTreeSet<_>>();
+    let mut seen = read_chunk_publication_events(kio_dir)?
+        .into_iter()
+        .map(|event| {
+            (
+                event.chunk_id,
+                event.chunking_config_hash,
+                event.introduction_commit,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut to_append = Vec::new();
+    for event in events {
+        if event.event != "publication"
+            || !is_hash(&event.chunk_id)
+            || !is_hash(&event.chunking_config_hash)
+            || !is_hash(&event.introduction_commit)
+            || !creations.contains(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+        {
+            return Err(KioError::schema("invalid publication event"));
+        }
+        if seen.insert((
+            event.chunk_id.clone(),
+            event.chunking_config_hash.clone(),
+            event.introduction_commit.clone(),
+        )) {
+            to_append.push(event);
+        }
+    }
+    if to_append.is_empty() {
+        return Ok(());
+    }
+    let path = chunks_jsonl_path(kio_dir);
+    let directory = open_chunk_ledger_dir(kio_dir, true)?;
+    let mut file = open_chunk_ledger_file(&directory, false, true, true, true)?;
+    for event in to_append {
+        let mut line = serde_json::to_string(event).map_err(|e| KioError::schema(e.to_string()))?;
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .map_err(|e| KioError::io(e.to_string(), path.display().to_string()))?;
+    }
+    file.sync_all()
+        .map_err(|e| KioError::io(e.to_string(), path.display().to_string()))?;
+    sync_chunk_ledger_dir(&directory)?;
     Ok(())
 }
 
 fn rebuild_sqlite_index(
-    kio_dir: &Path,
+    repo: &Repository,
     tree_entries: &[TreeEntryRow],
     retained_instances: &[RetainedNormalizedInstance],
+    retained_unit_introductions: &AuthenticatedNormalizedUnits,
     chunking_config_hash: &str,
 ) -> Result<()> {
+    let kio_dir = repo.kio_dir();
     ensure_no_visible_purge_journal(kio_dir)?;
     let path = sqlite_path(kio_dir);
     // O5: a 0-chunk scope (empty folder / secrets-only / text-less PDF) skips
@@ -8246,33 +10009,12 @@ fn rebuild_sqlite_index(
     // snapshot still advances HEAD. Create the index dir unconditionally here so
     // opening `sqlite.db` cannot fail with a half-initialized "commit, no index"
     // state that makes every re-index exit 2.
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| KioError::io(err.to_string(), parent.display().to_string()))?;
-    }
-    // Vectors are replayed from `objects/embeddings/` — the CAS truth — and only
-    // then from the database being replaced (04 §4.3: `objects/` → `embeddings`
-    // → `chunk_vec`).
-    //
-    // R25-6: the db WAS the only source. `repair rebuild-db` snapshotted vectors
-    // out of the very database it was about to replace, so its guarantee held
-    // only while that database was intact — the one condition under which nobody
-    // runs it. Losing `sqlite.db` meant buying every vector from the API again.
-    //
-    // The db snapshot stays as a second source rather than being deleted,
-    // because it is what carries a store written before objects existed. Any row
-    // it contributes gets its object written on the way past, so a scope
-    // converges to object-backed after one rebuild and the fallback stops
-    // finding anything to do.
-    let (preserved, preserved_tree_entries) = if path.exists() {
-        let existing = Connection::open(&path).map_err(|err| KioError::schema(err.to_string()))?;
-        let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kio)?;
-        let tree_rows = snapshot_tree_entries(&existing)?;
-        drop(existing);
-        (backfill_embedding_objects(kio_dir, rows), tree_rows)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // Hold the repository-owned `index` directory for the entire build and
+    // publication.  The SQLite connection independently binds its open to the
+    // same directory identity; this handle is also the authority for cleanup
+    // and the final rename, so replacing `.kio/index` with a symlink cannot
+    // redirect either operation to another directory.
+    let directory = open_chunk_ledger_dir(kio_dir, true)?;
     // P5 (docs/05:564): build the new source index in a unique temp db and atomically
     // rename it over sqlite.db. Writer and local source-cache commands must see a
     // complete database — the old one until the rename, the new one after. Direct
@@ -8280,19 +10022,30 @@ fn rebuild_sqlite_index(
     // The unique temp name also stops two rebuilders from clobbering one shared
     // `sqlite.db.tmp`.
     let temp_path = unique_sqlite_temp_path(&path);
+    let temp_name = temp_path.file_name().ok_or_else(|| {
+        KioError::schema(format!(
+            "source index temp path has no file name: {}",
+            temp_path.display()
+        ))
+    })?;
     // A residual temp from a crashed rebuild would be reused (and corrupt the new
     // index) by `Connection::open`; start from a clean slate.
-    if temp_path.exists() {
-        fs::remove_file(&temp_path)
-            .map_err(|err| KioError::io(err.to_string(), temp_path.display().to_string()))?;
+    match cap_fs::remove_file(&directory.handle, Path::new(temp_name)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(KioError::io(
+                error.to_string(),
+                temp_path.display().to_string(),
+            ))
+        }
     }
     match build_sqlite_index_at(
         &temp_path,
-        kio_dir,
-        &preserved_tree_entries,
+        repo,
         tree_entries,
-        &preserved,
         retained_instances,
+        retained_unit_introductions,
         chunking_config_hash,
     ) {
         Ok(()) => {
@@ -8301,19 +10054,25 @@ fn rebuild_sqlite_index(
             // take the existing header out of service before publishing the
             // replacement and turn it Ready only with the full projection.
             mark_replica_unavailable_or_log(kio_dir);
-            fs::rename(&temp_path, &path)
-                .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
+            cap_fs::rename(
+                &directory.handle,
+                Path::new(temp_name),
+                &directory.handle,
+                Path::new("sqlite.db"),
+            )
+            .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
+            sync_chunk_ledger_dir(&directory)?;
             // 05 §1.8 write-through, placed on the rename rather than in each
             // command that triggers a rebuild: `index`, `reindex` and
             // `repair rebuild-db` all reach cross-scope search through this
             // one line, and a fourth caller would otherwise have to remember.
             // No rotation here: the rebuild minted a fresh `index_generation`
             // into the temp db moments ago (PB28), so the stamp already moved.
-            write_through_projection_or_log(kio_dir);
+            write_through_projection_or_log_for_repo(repo);
             Ok(())
         }
         Err(error) => {
-            let _ = fs::remove_file(&temp_path);
+            let _ = cap_fs::remove_file(&directory.handle, Path::new(temp_name));
             Err(error)
         }
     }
@@ -8345,14 +10104,16 @@ fn rebuild_sqlite_index(
 /// Simpler than the chunk replay in one way: an image object's `target_hash` IS
 /// the `image_vec` key, so there is no owner to rediscover and no `context_key`
 /// to disambiguate on (that rule is about chunk bodies).
-fn replay_image_embeddings_from_objects(kio_dir: &Path, conn: &Connection) -> Result<()> {
+fn replay_image_embeddings_from_objects(
+    kio_dir: &Path,
+    conn: &Connection,
+    expected_profile: Option<&embedding_store::EmbeddingProfileSummary>,
+) -> Result<()> {
     let store = ObjectStore::new(kio_dir);
     let hashes = store.embedding_hashes()?;
     if hashes.is_empty() {
         return Ok(());
     }
-    let live_profile =
-        embedding_execution().map(|execution| declared_embedding_profile(execution).profile_hash);
     for hash in hashes {
         let object = match store.read_embedding(&hash) {
             Ok(object) => object,
@@ -8366,9 +10127,13 @@ fn replay_image_embeddings_from_objects(kio_dir: &Path, conn: &Connection) -> Re
         if object.target_type != "image" {
             continue;
         }
-        if live_profile
-            .as_deref()
-            .is_some_and(|live| live != object.profile_hash)
+        let Some(expected) = expected_profile else {
+            continue;
+        };
+        if object.dimensions != expected.dimensions
+            || object.distance != expected.distance
+            || object.modality != expected.modality
+            || object.profile_hash != expected.profile_hash
         {
             continue;
         }
@@ -8387,24 +10152,35 @@ fn replay_image_embeddings_from_objects(kio_dir: &Path, conn: &Connection) -> Re
     Ok(())
 }
 
+/// A chunk-vector replay row derived solely from an embedding CAS object.
+/// It is local to rebuild; the old public snapshot type represented SQLite as
+/// an input source and was deliberately removed with that compatibility path.
+struct ReplayedChunkEmbedding {
+    embedding_hash: String,
+    text_hash: String,
+    chunk_id: String,
+    vector: Vec<u8>,
+    dimensions: u64,
+    distance: String,
+    modality: String,
+    profile_hash: String,
+    context_key: Option<String>,
+}
+
 fn embeddings_from_objects(
     kio_dir: &Path,
     conn: &Connection,
-) -> Result<Vec<embedding_store::ChunkEmbeddingSnapshotRow>> {
+    expected_profile: Option<&embedding_store::EmbeddingProfileSummary>,
+) -> Result<Vec<ReplayedChunkEmbedding>> {
     let store = ObjectStore::new(kio_dir);
     let hashes = store.embedding_hashes()?;
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
-    // The profile the device would embed with today. Objects from a superseded
-    // profile stay on disk (they are still truth for the commits that used
-    // them) but must not be replayed, because 04 §4.3 requires a rebuild to
-    // bind exactly ONE candidate per chunk and several profiles can legitimately
-    // coexist. `None` — no embedding adapter configured at all — replays
-    // whatever is there rather than nothing: a scope with vectors and no
-    // adapter is the ordinary offline rebuild.
-    let live_profile =
-        embedding_execution().map(|execution| declared_embedding_profile(execution).profile_hash);
+    // The persisted current tool-lock selects the one vector space this rebuilt
+    // projection may contain. It deliberately does not consult adapter
+    // activation: an offline repair must restore the space recorded at index
+    // time, while a lock without `embedding` is an explicitly text-only scope.
     let mut chunks_by_text: BTreeMap<String, Vec<(String, Option<String>)>> = BTreeMap::new();
     {
         let mut statement = conn
@@ -8446,9 +10222,13 @@ fn embeddings_from_objects(
         if object.target_type != "chunk" {
             continue;
         }
-        if live_profile
-            .as_deref()
-            .is_some_and(|live| live != object.profile_hash)
+        let Some(expected) = expected_profile else {
+            continue;
+        };
+        if object.dimensions != expected.dimensions
+            || object.distance != expected.distance
+            || object.modality != expected.modality
+            || object.profile_hash != expected.profile_hash
         {
             continue;
         }
@@ -8460,7 +10240,7 @@ fn embeddings_from_objects(
             if context.as_deref() != object.context.as_deref() {
                 continue;
             }
-            replayed.push(embedding_store::ChunkEmbeddingSnapshotRow {
+            replayed.push(ReplayedChunkEmbedding {
                 embedding_hash: hash.clone(),
                 text_hash: object.target_hash.clone(),
                 chunk_id: chunk_id.clone(),
@@ -8474,93 +10254,6 @@ fn embeddings_from_objects(
         }
     }
     Ok(replayed)
-}
-
-/// Make `objects/embeddings/` the complete record of this scope's vectors,
-/// then hand back the rows to replay.
-///
-/// Every vector the database holds and the object store does not is written out
-/// here. That covers two cases with one pass: a store written before embedding
-/// objects existed (R25-6), and a vector whose object write failed at send time
-/// while its SQLite row succeeded. After one rebuild the object store is
-/// authoritative and this finds nothing.
-///
-/// The returned rows carry the object's OWN vector wherever an object exists,
-/// so `objects/` beats the database on any disagreement — that is what "truth"
-/// means here, and it is the only way a corrupted `embeddings` BLOB gets
-/// corrected rather than copied forward.
-fn backfill_embedding_objects(
-    kio_dir: &Path,
-    rows: Vec<embedding_store::ChunkEmbeddingSnapshotRow>,
-) -> Vec<embedding_store::ChunkEmbeddingSnapshotRow> {
-    let store = ObjectStore::new(kio_dir);
-    rows.into_iter()
-        .map(|mut row| {
-            match store.read_embedding(&row.embedding_hash) {
-                Ok(object) => {
-                    row.vector = kio_index::embedding_store::f32_to_le_bytes(&object.vector);
-                    return row;
-                }
-                Err(error) if error.error_code() == "KIO-E-STORE-CORRUPT-001" => {
-                    // A corrupt object cannot be trusted and must not be
-                    // silently overwritten by the db copy either: say so, keep
-                    // the row, and let `repair verify-objects` be the place
-                    // that quarantines it.
-                    eprintln!(
-                        "kio: embedding object {} is corrupt ({error}); replaying the \
-                         database copy instead",
-                        row.embedding_hash
-                    );
-                    return row;
-                }
-                Err(_) => {}
-            }
-            let object = kio_core::cas::EmbeddingObject {
-                spec_version: 1,
-                target_type: "chunk".to_owned(),
-                target_hash: row.text_hash.clone(),
-                profile_hash: row.profile_hash.clone(),
-                modality: row.modality.clone(),
-                dimensions: row.dimensions,
-                distance: row.distance.clone(),
-                context: row.context_key.clone(),
-                vector: kio_index::embedding_store::f32_from_le_bytes(&row.vector),
-            };
-            if let Err(error) = store.write_embedding(&object) {
-                eprintln!(
-                    "kio: could not back-fill embedding object {}: {error}",
-                    row.embedding_hash
-                );
-            }
-            row
-        })
-        .collect()
-}
-
-/// Preserve immutable historical tree projections across an atomic rebuild.
-/// The current HEAD rows supplied by the caller are replayed afterward and win
-/// on the `(commit_hash,path)` key. Retaining older cache rows is contract-safe;
-/// history search still verifies commit/tree CAS before consulting a projection.
-fn snapshot_tree_entries(conn: &Connection) -> Result<Vec<TreeEntryRow>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT commit_hash, path, raw_hash, tool_profile_hash, gen
-             FROM tree_entries ORDER BY commit_hash, path",
-        )
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(TreeEntryRow {
-                commit_hash: row.get(0)?,
-                path: row.get(1)?,
-                raw_hash: row.get(2)?,
-                tool_profile_hash: row.get(3)?,
-                gen: row.get(4)?,
-            })
-        })
-        .map_err(|err| KioError::schema(err.to_string()))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| KioError::schema(err.to_string()))
 }
 
 /// A unique sibling temp path for the atomic sqlite rebuild
@@ -8578,19 +10271,167 @@ fn unique_sqlite_temp_path(path: &Path) -> PathBuf {
     }
 }
 
+/// A tagged introduction is authoritative only when its claimed commit pins the
+/// exact immutable normalized unit from which the creation chunk was derived.
+/// A missing commit is the normal pre-commit crash residue; an existing but
+/// unrelated commit is durable-ledger corruption and must fail closed.
+#[allow(dead_code)] // Kept as the one-shot crate API for non-batch callers.
+pub(crate) fn authenticate_publication_event(
+    repo: &Repository,
+    kio_dir: &Path,
+    event: &ChunkPublicationEvent,
+    creation: &StoredChunk,
+) -> Result<bool> {
+    authenticate_publication_event_cached(
+        repo,
+        kio_dir,
+        event,
+        creation,
+        &mut PublicationAuthenticationCache::default(),
+    )
+}
+
+/// Operation-local cache for authenticating append-only publication ledgers.
+/// The cache contains only immutable CAS reads, and its keys retain the exact
+/// creation unit tuple so a successful attestation is never reused for a
+/// different row.
+#[derive(Debug, Default)]
+pub(crate) struct PublicationAuthenticationCache {
+    commits: BTreeMap<String, Option<CommitObject>>,
+    trees: BTreeMap<String, BTreeMap<TreeNormalizedEntryKey, BTreeSet<NormalizeRef>>>,
+    pinned_unit_closures: BTreeMap<NormalizedInstanceCacheKey, BTreeSet<(String, String)>>,
+    attestations: BTreeMap<PublicationAttestationCacheKey, bool>,
+}
+
+type TreeNormalizedEntryKey = (String, String, u64);
+type NormalizedInstanceCacheKey = (String, String, u64, String);
+type PublicationAttestationCacheKey = (String, String, String, u64, String, String);
+
+pub(crate) fn authenticate_publication_event_cached(
+    repo: &Repository,
+    kio_dir: &Path,
+    event: &ChunkPublicationEvent,
+    creation: &StoredChunk,
+    cache: &mut PublicationAuthenticationCache,
+) -> Result<bool> {
+    if event.chunk_id != creation.row.chunk_id
+        || event.chunking_config_hash != creation.row.chunking_config_hash
+    {
+        return Err(KioError::schema(
+            "publication event does not match its creation chunk/config association",
+        ));
+    }
+    let attestation_key = (
+        event.introduction_commit.clone(),
+        creation.row.raw_hash.clone(),
+        creation.row.tool_profile_hash.clone(),
+        creation.row.gen,
+        creation.row.unit_key.clone(),
+        creation.row.unit_content_hash.clone(),
+    );
+    if let Some(attested) = cache.attestations.get(&attestation_key) {
+        return Ok(*attested);
+    }
+
+    let commit = match cache.commits.get(&event.introduction_commit) {
+        Some(Some(commit)) => commit.clone(),
+        Some(None) => return Ok(false),
+        None => match repo.read_commit(&event.introduction_commit) {
+            Ok(commit) => {
+                cache
+                    .commits
+                    .insert(event.introduction_commit.clone(), Some(commit.clone()));
+                commit
+            }
+            Err(error) if is_store_not_found(&error) => {
+                cache
+                    .commits
+                    .insert(event.introduction_commit.clone(), None);
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        },
+    };
+    if !cache.trees.contains_key(&commit.tree) {
+        let tree = repo.read_tree(&commit.tree)?;
+        let mut normalized_entries =
+            BTreeMap::<TreeNormalizedEntryKey, BTreeSet<NormalizeRef>>::new();
+        for entry in tree.entries {
+            let Some(normalize) = entry.normalize else {
+                continue;
+            };
+            normalized_entries
+                .entry((
+                    entry.raw_hash,
+                    normalize.tool_profile_hash.clone(),
+                    normalize.gen,
+                ))
+                .or_default()
+                .insert(normalize);
+        }
+        cache.trees.insert(commit.tree.clone(), normalized_entries);
+    }
+    let normalizes = cache
+        .trees
+        .get(&commit.tree)
+        .expect("cached tree index was just inserted")
+        .get(&(
+            creation.row.raw_hash.clone(),
+            creation.row.tool_profile_hash.clone(),
+            creation.row.gen,
+        ))
+        .cloned()
+        .unwrap_or_default();
+    for normalize in normalizes {
+        let unit_key = (
+            creation.row.raw_hash.clone(),
+            normalize.tool_profile_hash.clone(),
+            normalize.gen,
+            normalize.manifest_hash.clone(),
+        );
+        if !cache.pinned_unit_closures.contains_key(&unit_key) {
+            let closure = pinned_done_units(kio_dir, &creation.row.raw_hash, &normalize)?
+                .into_iter()
+                .map(|unit| {
+                    (
+                        unit.unit_key,
+                        kio_core::cas::hash_bytes(unit.markdown.as_bytes()),
+                    )
+                })
+                .collect();
+            cache.pinned_unit_closures.insert(unit_key.clone(), closure);
+        }
+        if cache
+            .pinned_unit_closures
+            .get(&unit_key)
+            .expect("cached pinned unit closure was just inserted")
+            .contains(&(
+                creation.row.unit_key.clone(),
+                creation.row.unit_content_hash.clone(),
+            ))
+        {
+            cache.attestations.insert(attestation_key, true);
+            return Ok(true);
+        }
+    }
+    Err(KioError::schema(
+        "publication event introduction commit does not attest its chunk's pinned normalized unit",
+    ))
+}
+
 /// Populate a fresh sqlite index at `temp_path` (chunks + FTS, tree_entries,
 /// preserved embeddings, chunk_vec) and close it. The caller renames it over
 /// sqlite.db (P5); the connection is dropped here so the rename sees no open
 /// handle / leftover journal.
 fn build_sqlite_index_at(
     temp_path: &Path,
-    kio_dir: &Path,
-    preserved_tree_entries: &[TreeEntryRow],
+    repository: &Repository,
     tree_entries: &[TreeEntryRow],
-    preserved: &[embedding_store::ChunkEmbeddingSnapshotRow],
     retained_instances: &[RetainedNormalizedInstance],
+    retained_unit_introductions: &AuthenticatedNormalizedUnits,
     chunking_config_hash: &str,
 ) -> Result<()> {
+    let kio_dir = repository.kio_dir();
     ensure_no_visible_purge_journal(kio_dir)?;
     let mut fts = SqliteFtsIndex::open(
         temp_path,
@@ -8613,34 +10454,57 @@ fn build_sqlite_index_at(
     fts.connection()
         .execute_batch("BEGIN")
         .map_err(|err| KioError::schema(err.to_string()))?;
-    // PC37/PC41/PC43 (05 §1.6 L265-266): every ancestor-most introduction
-    // commit this rebuild pass knows about for a content identity, keyed the
-    // same way `chunks`/`chunk_config_generations` key an identity. Absent
-    // from this map = an identity this pass did not (re-)derive from the live
-    // commit graph (e.g. a chunk whose owning instance no longer participates
-    // in `retained_instances` this round) — such a chunk still gets its
-    // durable `first_seen_commit` recorded as a fallback single introduction
-    // below, so `chunk_publications` never regresses relative to today's
-    // single-valued column.
-    let introductions_by_identity = retained_instances
+    let mut live_chunk_ids = BTreeSet::new();
+    let mut live_associations = BTreeSet::new();
+    let durable_publications = read_chunk_publication_events(kio_dir)?;
+    let stored_chunks = read_stored_chunks(kio_dir)?;
+    let creation_created_at = stored_chunks
         .iter()
-        .map(|instance| {
+        .map(|chunk| {
             (
                 (
-                    instance.raw_hash.clone(),
-                    instance.normalize.tool_profile_hash.clone(),
-                    instance.normalize.gen,
+                    chunk.row.chunk_id.clone(),
+                    chunk.row.chunking_config_hash.clone(),
                 ),
-                instance.introductions.clone(),
+                chunk.row.created_at.clone(),
             )
         })
-        .collect::<BTreeMap<(String, String, u64), Vec<String>>>();
-    let mut live_chunk_ids = BTreeSet::new();
-    for chunk in read_stored_chunks(kio_dir)? {
+        .collect::<BTreeMap<_, _>>();
+    let stored_chunks_by_association = stored_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                (
+                    chunk.row.chunk_id.clone(),
+                    chunk.row.chunking_config_hash.clone(),
+                ),
+                chunk.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for chunk in stored_chunks {
         if purge_blocks_rebuild_raw(kio_dir, &chunk.row.raw_hash)? {
             continue;
         }
+        let identity = (
+            chunk.row.raw_hash.clone(),
+            chunk.row.tool_profile_hash.clone(),
+            chunk.row.gen,
+            chunk.row.unit_key.clone(),
+            chunk.row.unit_content_hash.clone(),
+        );
+        let Some(unit) = retained_unit_introductions.get(&identity) else {
+            // A durable chunk ledger is not a historical authority. This unit
+            // is absent or non-Done in every manifest pinned by a current ref,
+            // so replaying its old row would back-publish stale content.
+            continue;
+        };
+        authenticate_chunk_row(&chunk.row, retained_unit_introductions)?;
         live_chunk_ids.insert(chunk.row.chunk_id.clone());
+        live_associations.insert((
+            chunk.row.chunk_id.clone(),
+            chunk.row.chunking_config_hash.clone(),
+        ));
         persist_chunk_object(kio_dir, &chunk.row)?;
         // PC40 (05 §1.6 L266): `chunk.row.chunking_config_introduction_commit`
         // is read straight from the durable `chunks.jsonl` record — it was
@@ -8650,25 +10514,9 @@ fn build_sqlite_index_at(
         // same row here must preserve it rather than re-deriving "this
         // rebuild's HEAD" (which would wrongly make an old association look
         // freshly introduced on every subsequent rebuild).
-        fts.index_chunk_with_rowids(&chunk.row, Some(chunk.rowid), chunk.association_rowid)
+        fts.index_chunk_with_rowids(&chunk.row, Some(chunk.rowid), Some(chunk.association_rowid))
             .map_err(index_to_kio)?;
-        let identity = (
-            chunk.row.raw_hash.clone(),
-            chunk.row.tool_profile_hash.clone(),
-            chunk.row.gen,
-        );
-        let introductions = introductions_by_identity
-            .get(&identity)
-            .cloned()
-            .or_else(|| {
-                chunk
-                    .row
-                    .first_seen_commit
-                    .clone()
-                    .map(|commit| vec![commit])
-            })
-            .unwrap_or_default();
-        for introduction_commit in &introductions {
+        for introduction_commit in &unit.introductions {
             kio_index::fts::record_chunk_publication(
                 fts.connection(),
                 &chunk.row.chunk_id,
@@ -8677,33 +10525,82 @@ fn build_sqlite_index_at(
             .map_err(index_to_kio)?;
         }
     }
-    for entry in preserved_tree_entries.iter().chain(tree_entries) {
+    // Replay event triples only after all creation associations received their
+    // durable explicit rowids.  Event rows intentionally use SQLite's auto
+    // rowid; doing this inside the loop could occupy a future explicit rowid.
+    let mut authentication_cache = PublicationAuthenticationCache::default();
+    for event in &durable_publications {
+        if !live_associations
+            .contains(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+        {
+            continue;
+        }
+        let created_at = creation_created_at
+            .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+            .expect("validated publication event has its creation association");
+        let creation = stored_chunks_by_association
+            .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
+            .expect("validated publication event has its creation association");
+        if !authenticate_publication_event_cached(
+            repository,
+            kio_dir,
+            event,
+            creation,
+            &mut authentication_cache,
+        )? {
+            continue;
+        }
+        // Durable historical-reindex publications can attest a selected,
+        // otherwise disconnected introduction for this config association.
+        // General rebuilds only stage temporally valid events (see
+        // `stage_retained_unit_publication_events`), so this replay cannot
+        // backdate a new association under a later chunking configuration.
+        kio_index::fts::record_chunk_config_association(
+            fts.connection(),
+            &event.chunk_id,
+            &event.chunking_config_hash,
+            created_at,
+            None,
+            &event.introduction_commit,
+        )
+        .map_err(index_to_kio)?;
+        kio_index::fts::record_chunk_publication(
+            fts.connection(),
+            &event.chunk_id,
+            &event.introduction_commit,
+        )
+        .map_err(index_to_kio)?;
+    }
+    for entry in tree_entries {
         if purge_blocks_rebuild_raw(kio_dir, &entry.raw_hash)? {
             continue;
         }
         fts.connection()
             .execute(
-                "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     entry.commit_hash,
                     entry.path,
                     entry.raw_hash,
                     entry.tool_profile_hash,
-                    entry.gen
+                    entry.gen,
+                    entry.manifest_hash
                 ],
             )
             .map_err(|err| KioError::schema(err.to_string()))?;
     }
     // Replay embeddings (source of truth) and re-derive chunk_vec.
     //
-    // `objects/` first (04 §4.3), which is what makes a rebuild survive the loss
-    // of `sqlite.db` — the case `rebuild-db` exists for and the one the old
-    // db-snapshot source could not serve (R25-6). The snapshot rows follow and
-    // fill anything the object store has no object for; `write_chunk_embedding`
-    // is idempotent on `embedding_hash`, so an id present in both is written
-    // once, from the object.
-    for row in embeddings_from_objects(kio_dir, fts.connection())? {
+    // `objects/` are the sole vector source.  An old SQLite row may be stale,
+    // malformed, or a remnant of a previous contract and must never be carried
+    // through a rebuild.
+    let expected_embedding_profile = rebuild_embedding_profile_from_tool_lock(kio_dir)?;
+    for row in embeddings_from_objects(
+        kio_dir,
+        fts.connection(),
+        expected_embedding_profile.as_ref(),
+    )? {
         if !live_chunk_ids.contains(&row.chunk_id) {
             continue;
         }
@@ -8717,27 +10614,6 @@ fn build_sqlite_index_at(
             &row.distance,
             &row.modality,
             &row.profile_hash,
-            row.context_key.as_deref(),
-        )
-        .map_err(index_to_kio)?;
-    }
-    for row in preserved {
-        if !live_chunk_ids.contains(&row.chunk_id) {
-            continue;
-        }
-        embedding_store::write_chunk_embedding(
-            fts.connection(),
-            &row.embedding_hash,
-            &row.text_hash,
-            &row.chunk_id,
-            &row.vector,
-            row.dimensions,
-            &row.distance,
-            &row.modality,
-            &row.profile_hash,
-            // Contextual-embedding addendum (07 §5.3, 2026-07-24): replay the
-            // recorded filename context so the rebuilt DB disambiguates a
-            // shared `text_hash` exactly as the original write did.
             row.context_key.as_deref(),
         )
         .map_err(index_to_kio)?;
@@ -8758,9 +10634,20 @@ fn build_sqlite_index_at(
             .map(|chunk| chunk.chunk_id),
         );
     }
-    embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kio)?;
+    embedding_store::rebuild_chunk_vec(
+        fts.connection(),
+        expected_embedding_profile.as_ref(),
+        &held_chunk_ids,
+    )
+    .map_err(index_to_kio)?;
     // 04 §4.3's rebuild order ends `… → chunk_vec → image_vec`.
-    replay_image_embeddings_from_objects(kio_dir, fts.connection())?;
+    replay_image_embeddings_from_objects(
+        kio_dir,
+        fts.connection(),
+        expected_embedding_profile.as_ref(),
+    )?;
+    embedding_store::rebuild_image_vec(fts.connection(), expected_embedding_profile.as_ref())
+        .map_err(index_to_kio)?;
     // PB28 (step4b-contract-tests-p2b.md §J, §Z ruling 4; 04-pipeline.md §5.7
     // L913 / 05-runtime.md §3.5 L760-761): mint a fresh `index_generation` and
     // initialize `last_lifecycle_epoch` to the CURRENT counter value, in the
@@ -9230,8 +11117,10 @@ fn register_scope(repo: &Repository, indexed: bool) {
     };
     let entry = RegistryEntry {
         scope_id,
-        kio_path: repo.kio_dir().display().to_string(),
-        root_path: repo.root().display().to_string(),
+        // Bound child processes operate via `.` / `..`; device-global state
+        // must retain the discovery-time canonical identity instead.
+        kio_path: repo.canonical_root().join(".kio").display().to_string(),
+        root_path: repo.canonical_root().display().to_string(),
         participates_in_global_search: participates_in_global_search(repo.kio_dir()),
         indexed,
         last_seen_at: now_utc_seconds(),
@@ -9330,7 +11219,14 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
             ExitCode::PartialFailure,
         ));
     }
-    let conn = Connection::open(&db_path).map_err(|err| KioError::schema(err.to_string()))?;
+    let conn = open_existing_source_index_connection(
+        &db_path,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
     ensure_snapshot_tree_entries(&repo, &conn, &head)?;
     let live = live_tree_entries_at(&conn, &head)?;
     Ok(read_stored_chunks(&target.kio_dir)?
@@ -9370,7 +11266,7 @@ fn live_tree_entries_at(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(2)?,
                 row.get::<_, String>(3)?,
             ))
         })
@@ -9379,7 +11275,7 @@ fn live_tree_entries_at(
     for row in rows {
         let (raw_hash, tool_profile_hash, gen, path) =
             row.map_err(|err| KioError::schema(err.to_string()))?;
-        if let Some(tool) = tool_profile_hash {
+        if let (Some(tool), Some(gen)) = (tool_profile_hash, gen) {
             map.insert((raw_hash, tool, gen as u64), path);
         }
     }
@@ -10166,19 +12062,16 @@ fn verify_point_in_time_attribution(
     if !path_entry_exists(&manifest_path)? {
         return resolve_manifest_missing(target, repo, raw_hash, chunk_hash, pointer_commit);
     }
-    let manifest_bytes = store.read_content_object_bytes(
-        ContentObjectKind::Manifest,
-        manifest_hash,
-        MAX_MANIFEST_OBJECT_READ_BYTES,
-    )?;
-    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| KioError::schema(error.to_string()))?;
-    let done = manifest
-        .units
-        .iter()
-        .find(|unit| unit.unit_key == chunk.unit_key)
-        .is_some_and(|unit| unit.status == UnitStatus::Done);
-    if !done {
+    // The tree's manifest hash is the point-in-time authority. Reuse the
+    // historical-reindex loader rather than inspecting only a manifest entry:
+    // it verifies the manifest CAS digest, canonical/schema/identity tuple,
+    // and every Done entry's immutable normalized-unit CAS object. A mutable
+    // normalized-unit cache therefore cannot make this pointer appear Alive.
+    let done_units = pinned_done_units(&target.kio_dir, raw_hash, normalize)?;
+    if !done_units.iter().any(|unit| {
+        unit.unit_key == chunk.unit_key
+            && hash_bytes(unit.markdown.as_bytes()) == chunk.unit_content_hash
+    }) {
         return Ok(PointInTimeAttribution::NotFound);
     }
     match check_publication_and_association(target, repo, chunk_hash, pointer_commit)? {
@@ -10205,7 +12098,8 @@ fn resolve_manifest_missing(
     let Some(canonical) = canonical_final_event(
         tombstone.as_ref().map(|record| record.tail()),
         receipt.as_ref().map(|record| record.tail()),
-    ) else {
+    )?
+    else {
         // No marker at all explains a missing manifest -- corruption.
         return Ok(PointInTimeAttribution::StoreCorrupt);
     };
@@ -10279,7 +12173,14 @@ fn check_publication_and_association(
     if !db_path.exists() {
         return Ok(AssociationCheck::IndexRebuilding);
     }
-    let conn = Connection::open(&db_path).map_err(|error| KioError::schema(error.to_string()))?;
+    let conn = open_existing_source_index_connection(
+        &db_path,
+        ExistingSourceIndexOpenMode::ReadOnly,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
 
     let introductions =
         kio_index::fts::chunk_publication_introductions(&conn, chunk_hash).map_err(index_to_kio)?;
@@ -10448,12 +12349,10 @@ fn point_in_time_index_rebuilding_error() -> KioError {
 
 /// 05 §1.7.2 / §4.2 (2026-08-11): translate a resolved chunk's unit-local
 /// `byte_start`/`byte_end` (03 §8.1) into a byte span within the full-text
-/// normalized view assembled from `(chunk.raw_hash, chunk.tool_profile_hash,
-/// chunk.gen)`. Returns `None` when that normalized instance cannot be read
-/// (GC'd, purged, or otherwise unavailable) so the caller can degrade the
-/// view fields to null instead of failing pointer resolution outright — the
-/// chunk and its raw document are independently resolvable CAS objects, and
-/// the view is only a rebuildable cache over them (03 §2.1).
+/// path-named current normalized view. Returns `None` when the chunk's unit
+/// content is not part of that current view, or when the cache bytes do not
+/// match the authenticated current manifest. Identical Markdown from a
+/// same-generation re-ingest is deliberately compatible.
 fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u64, u64)> {
     let instance = load_validated_normalized_instance(
         kio_dir,
@@ -10462,9 +12361,13 @@ fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u
         chunk.gen,
     )
     .ok()?;
+    let unit = instance.units.iter().find(|unit| {
+        unit.unit_key == chunk.unit_key
+            && hash_bytes(unit.markdown.as_bytes()) == chunk.unit_content_hash
+    })?;
     let layout = build_normalized_view_layout(&instance.manifest, &instance.units);
-    let unit_start = *layout.unit_starts.get(chunk.unit_key.as_str())?;
-    let unit_len = *layout.unit_lens.get(chunk.unit_key.as_str())?;
+    let unit_start = *layout.unit_starts.get(&unit.unit_key)? as u64;
+    let unit_len = *layout.unit_lens.get(&unit.unit_key)? as u64;
     // The chunk's byte_end can run past the trimmed unit length: chunk spans
     // are cut from the untrimmed `unit.markdown` (03 §8.1) and can include the
     // trailing newlines the view assembly trims off (03 §2.1 rule 2) — clamp
@@ -10473,14 +12376,17 @@ fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u
     // content-free-chunk guard can start inside the trailing newline run the
     // view assembly trims away, and an unclamped `byte_start` would then
     // report `start > end` — an out-of-order span a client would slice with.
-    let view_start = unit_start as u64 + chunk.byte_start.min(unit_len as u64);
-    let view_end = unit_start as u64 + chunk.byte_end.min(unit_len as u64);
+    let view_start = unit_start + chunk.byte_start.min(unit_len);
+    let view_end = unit_start + chunk.byte_end.min(unit_len);
     let view_path = normalized_view_path(
         kio_dir,
         &chunk.raw_hash,
         &chunk.tool_profile_hash,
         chunk.gen,
     );
+    if fs::read(&view_path).ok()?.as_slice() != layout.text.as_bytes() {
+        return None;
+    }
     Some((view_path, view_start, view_end))
 }
 
@@ -10881,14 +12787,14 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
 /// QB6: reads `scope.json` directly (no `Repository::open*` — deliberately
 /// skips JSON Schema validation and every other store check) for one
 /// resolution candidate, so `resolve_scope_target`'s final fallback can
-/// diagnose "found, but a newer kio_format_version than this build supports"
-/// distinctly from "does not exist" without paying for (or risking a false
-/// positive from) full validation. `candidate_root` may be either a scope
-/// root or its `.kio` directory (mirrors `open_scope_from_hint`). Returns
-/// the found version string only when the scope_id matches AND the version
-/// is incompatible — every other case (missing file, schema mismatch,
-/// scope_id mismatch, compatible version) returns `None`, so this can never
-/// invent a false STORE-VERSION-001 for a scope that is simply absent.
+/// diagnose "found, but its kio_format_version is incompatible" distinctly
+/// from "does not exist" without paying for (or risking a false positive
+/// from) full validation. `candidate_root` may be either a scope root or its
+/// `.kio` directory (mirrors `open_scope_from_hint`). Returns the persisted
+/// version—or an explicit missing/non-string marker—only when the scope_id
+/// matches and the version is not this build's exact current format. Missing
+/// file, unparsable JSON, scope_id mismatch, and the current version return
+/// `None`, so this cannot invent a STORE-VERSION error for an absent scope.
 fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Option<String> {
     let scope_json_path = if candidate_root.file_name() == Some(std::ffi::OsStr::new(".kio")) {
         candidate_root.join("scope.json")
@@ -10900,13 +12806,16 @@ fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Op
     if value.get("scope_id").and_then(Value::as_str) != Some(scope_id) {
         return None;
     }
-    let version = value.get("kio_format_version")?.as_str()?.to_owned();
-    // Mirrors `kio_core::scope`'s private `validate_format_version` (major
-    // component > 0 is beyond this build's supported ceiling) — not exported,
-    // so the trivial comparison is duplicated here rather than widening
-    // kio-core's public surface for one caller.
-    let major: u64 = version.split('.').next()?.parse().ok()?;
-    (major > 0).then_some(version)
+    let version = match value.get("kio_format_version") {
+        Some(Value::String(version)) => version.clone(),
+        Some(_) => "<non-string>".to_owned(),
+        None => "<missing>".to_owned(),
+    };
+    // Mirrors `kio_core::scope`'s private current-format equality check. This
+    // pre-stable reader understands only 0.1.0; an older, malformed, or newer
+    // value all take the same version-specific fail-closed path before current
+    // schema validation.
+    (version != kio_core::scope::KIO_FORMAT_VERSION).then_some(version)
 }
 
 /// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kio`
@@ -11307,17 +13216,6 @@ fn cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> 
     fanout_path(kio_dir.join("objects").join(subdir), hash)
 }
 
-#[cfg(not(windows))]
-fn legacy_cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
-    let digest = hash_path_component(hash)?;
-    Ok(kio_dir
-        .join("objects")
-        .join(subdir)
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(hash))
-}
-
 fn path_entry_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -11326,47 +13224,22 @@ fn path_entry_exists(path: &Path) -> Result<bool> {
     }
 }
 
-fn existing_cas_object_paths(kio_dir: &Path, subdir: &str, hash: &str) -> Result<Vec<PathBuf>> {
+fn existing_cas_object_path(kio_dir: &Path, subdir: &str, hash: &str) -> Result<Option<PathBuf>> {
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
-    let mut paths = Vec::with_capacity(2);
     if path_entry_exists(&canonical)? {
-        paths.push(canonical);
+        Ok(Some(canonical))
+    } else {
+        Ok(None)
     }
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        if path_entry_exists(&legacy)? {
-            paths.push(legacy);
-        }
-    }
-    Ok(paths)
 }
 
 fn cas_object_present(kio_dir: &Path, subdir: &str, hash: &str, max_bytes: u64) -> Result<bool> {
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
-    let canonical_present = path_entry_exists(&canonical)?;
-
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        let legacy_present = path_entry_exists(&legacy)?;
-        if canonical_present && legacy_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-        } else if canonical_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-        } else if legacy_present {
-            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-        }
-        Ok(canonical_present || legacy_present)
-    }
-
-    #[cfg(windows)]
-    {
-        if canonical_present {
-            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
-        }
-        Ok(canonical_present)
+    if path_entry_exists(&canonical)? {
+        verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -11379,23 +13252,7 @@ fn read_cas_byte_object(
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
     if path_entry_exists(&canonical)? {
         let bytes = read_bounded_cas_object(&canonical, hash, max_bytes)?;
-        #[cfg(not(windows))]
-        {
-            let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-            if path_entry_exists(&legacy)? {
-                verify_bounded_cas_object(&legacy, hash, max_bytes)?;
-            }
-        }
         return Ok(Some((canonical, bytes)));
-    }
-
-    #[cfg(not(windows))]
-    {
-        let legacy = legacy_cas_object_path(kio_dir, subdir, hash)?;
-        if path_entry_exists(&legacy)? {
-            let bytes = read_bounded_cas_object(&legacy, hash, max_bytes)?;
-            return Ok(Some((legacy, bytes)));
-        }
     }
     Ok(None)
 }
@@ -11644,7 +13501,7 @@ fn enforce_canonical_marker_barrier(
         .read_erase_receipt(raw_hash)?
         .map(|receipt| receipt.tail().clone());
     let canonical_event =
-        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()).map(|c| c.event);
+        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref())?.map(|c| c.event);
     match canonical_event {
         Some(event) if event.kind == EventKind::Purged => Err(tombstone_error(json!({
             "raw_hash": raw_hash,
@@ -11953,19 +13810,34 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     // QB5/QB6/裁定1: shared (1)+(3) preflight pair.
     let checkpoint = preflight_barrier_and_index(&target.kio_dir)?;
     if object.object_type == "chunk" {
-        let chunk = read_stored_chunks(&target.kio_dir)?
+        // Chunk JSONL rows are association truth, not trusted text bytes. Read
+        // the self-authenticating semantic object from CAS and require the
+        // ledger tuple to agree before returning content.
+        let chunk = ObjectStore::new(&target.kio_dir).read_chunk(&object.hash)?;
+        let association = read_stored_chunks(&target.kio_dir)?
             .into_iter()
-            .find(|chunk| chunk.row.chunk_id == object.hash)
+            .find(|stored| stored.row.chunk_id == object.hash)
             .ok_or_else(|| KioError::not_found(object.hash.clone()))?;
+        if association.row.raw_hash != chunk.raw_hash
+            || association.row.tool_profile_hash != chunk.tool_profile_hash
+            || association.row.gen != chunk.gen
+            || association.row.unit_key != chunk.unit_key
+            || association.row.unit_content_hash != chunk.unit_content_hash
+        {
+            return Err(store_corrupt_error(
+                &chunks_jsonl_path(&target.kio_dir),
+                "chunk association does not match its semantic CAS object",
+            ));
+        }
         // LC8-LC14 canonical dispatch (item 3) + §I checkpoint 2 (LC54/LC55).
-        let raw_present = raw_object_present(&target, &chunk.row.raw_hash)?;
-        enforce_canonical_marker_barrier(&target, &chunk.row.raw_hash, raw_present)?;
+        let raw_present = raw_object_present(&target, &chunk.raw_hash)?;
+        enforce_canonical_marker_barrier(&target, &chunk.raw_hash, raw_present)?;
         checkpoint.recheck()?;
         return Ok(json!({
             "status": status,
             "object_type": "chunk",
             "hash": object.hash,
-            "text": chunk.row.text,
+            "text": chunk.text,
         }));
     }
     // M7: dispatch each object_type to its correct CAS directory (03 §2 / 07 §5.2)
@@ -12104,6 +13976,7 @@ fn copy_normalized_instance_gen(
         unit.generated_at.clone_from(&generated_at);
     }
     persist_normalized_instance(kio_dir, &instance.manifest, &instance.units)
+        .map(|_| ())
         .map_err(pipeline_to_kio)
 }
 
@@ -12143,7 +14016,6 @@ fn search_to_kio(error: kio_search::SearchError) -> KioError {
         ),
         kio_search::SearchError::Evidence(message) => KioError::schema(message),
         kio_search::SearchError::Contract(message) => KioError::schema(message),
-        kio_search::SearchError::NotImplemented(feature) => KioError::not_implemented(feature),
     }
 }
 
@@ -12195,6 +14067,15 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     "--online and --offline are mutually exclusive",
                 ));
             }
+            // A recheck is an operator-requested state transition based on the
+            // *current* cap. Validate that policy before unpausing anything: a
+            // malformed replacement config must leave persisted budget holds
+            // intact rather than turning them into Pending work which a later
+            // invocation could send under an unknown policy.
+            if resume.recheck_budget {
+                read_budget_policy(user_config_toml_path(), repo.kio_dir().join("config.toml"))
+                    .map_err(pipeline_to_kio)?;
+            }
             let changed = store
                 .update_matching(|task| {
                     let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);
@@ -12205,6 +14086,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     // budget/tier_b.
                     if task.status == TaskStatus::Paused
                         && (resume.override_budget
+                            || resume.recheck_budget
                             || task.fallback_reason.as_deref() != Some("budget_exceeded"))
                         && (!held_secret || secrets_approved)
                     {
@@ -12228,6 +14110,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             outcome.add(batch_poll_outcome);
             let mut output = json!({
                 "status": "resumed",
+                "recheck_budget": resume.recheck_budget,
                 "override_budget": resume.override_budget,
                 "tasks_updated": changed,
                 "tasks_executed": outcome.executed,
@@ -12748,27 +14631,18 @@ fn job_is_accounted_for(
 }
 
 /// `$XDG_DATA_HOME/kio/cost-ledger.sqlite` (04 §5.4 / CL70) — the device-global
-/// ledger, sole store for every reservation/charge this CLI records (2026-07-21:
-/// the JSONL `budget::CostLedger`/`ReservationLedger` design this replaces is
-/// fully retired; see the implementation report for the migration's scope).
+/// ledger, sole store for every reservation/charge this CLI records.
 fn ledger_db_path() -> PathBuf {
     data_home().join("kio/cost-ledger.sqlite")
 }
 
-/// Open the device-global `cost-ledger.sqlite`, running the one-time JSONL
-/// cutover (10-operations.md §7.5.3 / CL09-CL12) first if it has not already
-/// happened on this device. Every ledger-touching command (`kio status`,
+/// Open the device-global `cost-ledger.sqlite`. Every ledger-touching command (`kio status`,
 /// `kio batch *`, `kio index`, `kio search --vector`/`--hybrid` page 1, `kio
-/// purge`) opens the ledger through this one function, so the cutover is
-/// guaranteed to run before any of them reads or writes it — there is no
-/// remaining code path that reads or writes the legacy JSONL files directly
-/// (CL71), so running the cutover here can never race a still-active old
-/// reader/writer.
+/// purge`) opens the ledger through this one function, so every command uses
+/// the current SQLite store. `LedgerDb::open` fails closed
+/// if retired JSONL ledger files are present, leaving their bytes untouched.
 fn open_ledger_db() -> Result<LedgerDb> {
-    let ledger = LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kio)?;
-    migrate_jsonl_if_needed(ledger.connection(), &data_home().join("kio"))
-        .map_err(pipeline_to_kio)?;
-    Ok(ledger)
+    LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kio)
 }
 
 /// CL45/§5.4 sync crash recovery — the write-command-entry pass 04 §5.8's
@@ -13398,7 +15272,7 @@ fn execute_pending_markdownize_tasks(
             .map_err(pipeline_to_kio)?;
     let ledger = open_ledger_db()?;
     let month = utc_month(&now_utc_seconds());
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     // N1a (defense in depth): even a Pending online markdownize task must not be
     // sent when its input is a Tier B (candidate-secret) file and the scope is not
     // `--send-secrets`-approved — in case the hold was cleared by some other path.
@@ -14025,8 +15899,8 @@ fn persistent_network_allowed_for(
 /// here would materialize a row for whatever `tool_id`/`tool_profile_hash`
 /// this call happens to carry — a possibly DIFFERENT identity than the one
 /// actually pending). `try_self_heal_network_approval` owns the entire
-/// pending-present branch (well-formed-and-matching / well-formed-but
-/// -mismatched / legacy).
+/// pending-present branch (matching / mismatched). A malformed current
+/// pending is rejected by the scope reader rather than cleaned up or inferred.
 fn persistent_network_allowed_for_kio_dir(
     kio_dir: &Path,
     tool_id: &str,
@@ -14126,20 +16000,10 @@ fn try_materialize_initial_network_approval(
 /// Re-reads `approval_pending` itself (rather than trusting the caller's
 /// presence check) — same defensive-independence style as
 /// `try_materialize_initial_network_approval` re-checking the boolean its
-/// own caller already checked. Three cases, checked in this order:
+/// own caller already checked. The scope reader has already enforced the
+/// complete current pending schema, leaving two cases:
 ///
-/// (a) **Malformed** — `approved_at`/`approval_method` absent or non-string,
-///     so it can never satisfy self-heal's exact-match. Cleaned up via
-///     `discard_network_approval_pending`, which removes the pending AND
-///     sets `approvals_initialized` in the same atomic write if it was not
-///     already set (07 §3 L202-205 — otherwise "true × 行ゼロ × marker 無
-///     し" reverts to a genuine first-time state and the NEXT call's
-///     initial-materialize exception would silently bypass the explicit
-///     -approval requirement this cleanup enforces). This check runs BEFORE
-///     the tuple-match check below regardless of what the tuple would have
-///     matched — a malformed pending is unconditionally self-heal-ineligible.
-///     Returns `Ok(false)`.
-/// (b) **Well-formed AND 4-tuple-matching** — `scope_id` (against THIS
+/// (a) **4-tuple-matching** — `scope_id` (against THIS
 ///     scope's current `scope.json`), `tool_id`, `execution_mode` (against
 ///     [`NETWORK_APPROVAL_EXECUTION_MODE`]), and `tool_profile_hash` all
 ///     equal the caller's current values exactly. Self-heal: publish the
@@ -14155,17 +16019,16 @@ fn try_materialize_initial_network_approval(
 ///     として非発火のままでよい" — only the EXPLICIT approval commands turn
 ///     this CAS conflict into a hard error/exit 5). Any other error
 ///     propagates via `?`.
-/// (c) **Well-formed but tuple-mismatched** — leave the pending untouched
+/// (b) **Tuple-mismatched** — leave the pending untouched
 ///     and return `Ok(false)`; explicit approval is required, and that
 ///     approval's own step (0) overwrites this stale pending (07 §3
 ///     L191-198).
 ///
 /// Locking posture: identical to `try_materialize_initial_network_approval`
 /// — no lock is acquired here. Both functions perform a single atomic-rename
-/// overwrite of `scope.json` (`publish_network_approval`/
-/// `discard_network_approval_pending`), the same durability unit
-/// `try_materialize_...` already relied on from this exact call path without
-/// a dedicated lock.
+/// overwrite of `scope.json` (`publish_network_approval`), the same durability
+/// unit `try_materialize_...` already relied on from this exact call path
+/// without a dedicated lock.
 fn try_self_heal_network_approval(
     kio_dir: &Path,
     tool_id: &str,
@@ -14174,15 +16037,6 @@ fn try_self_heal_network_approval(
     let Some(pending) = kio_core::scope::read_network_approval_pending(kio_dir)? else {
         return Ok(false);
     };
-    let has_audit_values = pending.get("approved_at").and_then(Value::as_str).is_some()
-        && pending
-            .get("approval_method")
-            .and_then(Value::as_str)
-            .is_some();
-    if !has_audit_values {
-        kio_core::scope::discard_network_approval_pending(kio_dir)?;
-        return Ok(false);
-    }
     let Ok(this_scope_id) = scope_id(kio_dir) else {
         return Ok(false);
     };
@@ -14221,11 +16075,7 @@ fn approval_row_present(repo: &Repository, tool_id: &str) -> Result<bool> {
 }
 
 fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> Result<bool> {
-    approval_row_present_in_kio_dir(repo.kio_dir(), tool_id)
-}
-
-fn approval_row_present_in_kio_dir(kio_dir: &Path, tool_id: Option<&str>) -> Result<bool> {
-    trusted_consent_present(kio_dir, tool_id, ConsentOperation::Network)
+    trusted_consent_present_for_repo(repo, tool_id, ConsentOperation::Network)
 }
 
 /// PC4 (05 §1.1 / 07 §3): the query-embedding send consent gate is an OR
@@ -14495,13 +16345,11 @@ fn classify_online_markdownize_precondition(
     if raw_ingest_is_purge_blocked(repo, &task.input_hash) {
         return OnlineMarkdownizePrecondition::Retire;
     }
-    let path = repo.root().join(&task.input_path);
+    let path = repository_input_display_path(repo, &task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
-    let Ok(verified) = read_verified_scan_input(
-        repo.root(),
-        &task.input_path,
-        effective_max_input_bytes(repo),
-    ) else {
+    let Ok(verified) =
+        read_repository_scan_input(repo, &task.input_path, effective_max_input_bytes(repo))
+    else {
         return OnlineMarkdownizePrecondition::Retire;
     };
     if verified.raw_hash != task.input_hash {
@@ -14512,7 +16360,7 @@ fn classify_online_markdownize_precondition(
     // then; a Pending task must not be sent to the online adapter if the operator has
     // since lowered the cap below the file's size — the same live re-check the sibling
     // `[adapter.policy]` key `allow_network` already gets at send time.
-    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
+    if !repository_scan_policy_allows_file(repo, &task.input_path).unwrap_or(false) {
         return OnlineMarkdownizePrecondition::Retire;
     }
     if is_text_native_media(&media_type) {
@@ -14581,7 +16429,7 @@ fn classify_online_markdownize_precondition(
             prepared_units,
         });
     }
-    // R22-5: retire a legacy task for octet-stream TEXT. The recovery is a re-index (which
+    // R22-5: retire a stale task for octet-stream TEXT. The recovery is a re-index (which
     // no longer enqueues it), not a retry — the deterministic pass already handled the file.
     if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
         return OnlineMarkdownizePrecondition::Retire;
@@ -14612,6 +16460,7 @@ fn classify_online_markdownize_precondition(
 fn execute_pending_offline_markdownize_tasks(
     repo: &Repository,
     store: &TaskStore,
+    normalize_by_path: &mut BTreeMap<String, PendingNormalizeRef>,
 ) -> Result<usize> {
     let Some(execution) = active_local_ocr_execution() else {
         return Ok(0);
@@ -14641,6 +16490,29 @@ fn execute_pending_offline_markdownize_tasks(
         let task_id = task.task_id.clone();
         match execute_offline_markdownize_task(repo, &task, prepared_input, execution) {
             Ok(outcome) => {
+                // `persist_normalized_instance` has just committed the immutable
+                // normalized-unit CAS objects.  Bind this pass's tree entry to the
+                // manifest selected from that authoritative representation before
+                // the later rebuild reads it.  The path-named normalized instance
+                // remains a cache; using its old pre-OCR manifest pin here would
+                // correctly make the CAS-aware rebuild see no units at all.
+                let manifest_hash = compute_manifest_hash(
+                    repo.kio_dir(),
+                    &task.input_hash,
+                    &profile.tool_profile_hash,
+                    0,
+                )?;
+                normalize_by_path.insert(
+                    task.input_path.clone(),
+                    PendingNormalizeRef {
+                        expected_raw_hash: task.input_hash.clone(),
+                        normalize: NormalizeRef {
+                            tool_profile_hash: profile.tool_profile_hash.clone(),
+                            gen: 0,
+                            manifest_hash,
+                        },
+                    },
+                );
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -14731,7 +16603,12 @@ fn execute_offline_markdownize_task(
         ..
     } = prepared_input;
     let profile = kio_adapter::local_ocr_markdownize::profile_for(execution);
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo
+        .scope_id_for_adapter()
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
+        })?;
     let adapter = local_ocr_markdownize_adapter(execution, &scope_id, repo.kio_dir(), &bytes)
         .map_err(task_failure_from_adapter)?;
     let hints = prepared_unit_hints(&prepared_units);
@@ -14808,7 +16685,7 @@ fn execute_online_markdownize_task(
     // machine has no dedicated "superseded" state). Distinct from R14-1 (which degrades
     // an unreadable PREVIOUS instance to a Full re-send of the CURRENT content): here the
     // CURRENT content itself no longer matches the task, so there is nothing to send.
-    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
+    if !repository_scan_policy_allows_file(repo, &task.input_path).unwrap_or(false) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
             retry_after_ms: None,
@@ -14833,7 +16710,12 @@ fn execute_online_markdownize_task(
             retry_after_ms: None,
         });
     }
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo
+        .scope_id_for_adapter()
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
+        })?;
     // R11-6: on a UNIT-SCOPED retry, `task.unit_keys` names the still-failed units.
     // Request ONLY those from the adapter (re-OCR + re-bill just the failed subset,
     // not the whole document); the full prepared set still drives the manifest so
@@ -14966,7 +16848,7 @@ fn materialize_online_markdownize_response(
         // No page artifact exists before OCR for a scanned PDF. The already-verified
         // immutable raw object is the bounded prepared source shared by each discovered
         // unit; publish it under the same content hash before the manifest can refer to it.
-        write_cas_object_or_reuse_legacy(repo.kio_dir(), "prepared", &task.input_hash, bytes)
+        write_canonical_cas_object_or_reuse(repo.kio_dir(), "prepared", &task.input_hash, bytes)
             .map_err(|_| TaskExecutionFailure {
                 retry_kind: persist_failure_retry_kind(),
                 retry_after_ms: None,
@@ -15077,7 +16959,7 @@ fn materialize_online_markdownize_response(
     } else {
         task_status_from_unit_counts(done, failed, false)
     };
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let manifest = manifest_from_units(
         &prepared_units,
         &units,
@@ -15093,12 +16975,11 @@ fn materialize_online_markdownize_response(
         // (max_attempts) instead of re-sending & re-billing it forever.
         RetryErrorKind::NetworkError,
     );
-    persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(|_| {
-        TaskExecutionFailure {
+    let _stamped_manifest = persist_normalized_instance(repo.kio_dir(), &manifest, &units)
+        .map_err(|_| TaskExecutionFailure {
             retry_kind: persist_failure_retry_kind(),
             retry_after_ms: None,
-        }
-    })?;
+        })?;
     Ok(OnlineExecutionOutcome::full(
         normalized_output_ref(repo, &task.input_hash, &profile_tool_hash, 0),
         status,
@@ -15307,7 +17188,7 @@ fn try_online_incremental_markdownize(
     {
         return Ok(None);
     }
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let manifest = manifest_from_units(
         prepared_units,
         &units,
@@ -15319,12 +17200,11 @@ fn try_online_incremental_markdownize(
         &generated_at,
         RetryErrorKind::NetworkError,
     );
-    persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(|_| {
-        TaskExecutionFailure {
+    let _stamped_manifest = persist_normalized_instance(repo.kio_dir(), &manifest, &units)
+        .map_err(|_| TaskExecutionFailure {
             retry_kind: persist_failure_retry_kind(),
             retry_after_ms: None,
-        }
-    })?;
+        })?;
     Ok(Some(OnlineExecutionOutcome {
         output_ref: normalized_output_ref(repo, &task.input_hash, &profile_tool_hash, 0),
         status: TaskStatus::Done,
@@ -15393,21 +17273,12 @@ fn consecutive_online_incremental_count(task_store: &TaskStore, input_path: &str
 }
 
 trait RepositoryScopeId {
-    fn scope_id_for_adapter(&self) -> String;
+    fn scope_id_for_adapter(&self) -> Result<String>;
 }
 
 impl RepositoryScopeId for Repository {
-    fn scope_id_for_adapter(&self) -> String {
-        fs::read_to_string(self.kio_dir().join("scope.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| {
-                value
-                    .get("scope_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| "unknown".to_owned())
+    fn scope_id_for_adapter(&self) -> Result<String> {
+        Ok(self.scope_identity()?.scope_id)
     }
 }
 
@@ -15874,23 +17745,31 @@ fn retained_history_chunks(
         }
     }
 
-    let identities = retained_instances
+    let mut identities = BTreeMap::<(String, String, u64), (String, bool)>::new();
+    for instance in retained_instances
         .iter()
         .filter(|instance| !blocked_raw_hashes.contains(&instance.raw_hash))
-        .map(|instance| {
-            (
-                (
-                    instance.raw_hash.clone(),
-                    instance.normalize.tool_profile_hash.clone(),
-                    instance.normalize.gen,
-                ),
-                (
-                    instance.embedding_path.clone(),
-                    classify_secret(&instance.embedding_path).is_some(),
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    {
+        let identity = (
+            instance.raw_hash.clone(),
+            instance.normalize.tool_profile_hash.clone(),
+            instance.normalize.gen,
+        );
+        let candidate = (
+            instance.embedding_path.clone(),
+            classify_secret(&instance.embedding_path).is_some(),
+        );
+        identities
+            .entry(identity)
+            .and_modify(|existing| {
+                if (candidate.1 && !existing.1)
+                    || (candidate.1 == existing.1 && candidate.0.as_bytes() < existing.0.as_bytes())
+                {
+                    *existing = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
     let mut statement = conn
         .prepare(
             "SELECT c.chunk_id, c.text, c.text_hash,
@@ -16014,7 +17893,14 @@ fn run_embedding_enrichment_for_instances(
     if !db_path.exists() {
         return Ok(ExecOutcome::default());
     }
-    let conn = Connection::open(&db_path).map_err(|err| KioError::schema(err.to_string()))?;
+    let conn = open_existing_source_index_connection(
+        &db_path,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let retained_instances_owned;
     let retained_instances = if let Some(selected) = selected_instances {
@@ -16109,7 +17995,7 @@ fn run_embedding_enrichment_for_instances(
         read_budget_policy(user_config_toml_path(), repo.kio_dir().join("config.toml"))
             .map_err(pipeline_to_kio)?;
     let month = utc_month(&now);
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
 
     // R11-5: accumulate every chunk's task-store transition in memory and write it
     // back in ONE `update_matching` after the loop, instead of a full all()+
@@ -17319,7 +19205,7 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
     else {
         return Ok(outcome);
     };
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let rows = batch_poll_candidates(ledger.connection(), &scope_id, EMBEDDING_ADAPTER_KIND)
         .map_err(pipeline_to_kio)?;
     if rows.is_empty() {
@@ -17329,7 +19215,14 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
     if !db_path.exists() {
         return Ok(outcome);
     }
-    let conn = Connection::open(&db_path).map_err(|err| KioError::schema(err.to_string()))?;
+    let conn = open_existing_source_index_connection(
+        &db_path,
+        ExistingSourceIndexOpenMode::ReadWrite,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(outcome);
     };
@@ -18241,7 +20134,7 @@ fn reconcile_committed_embedding_tasks(
     // skips these now-terminal tasks). Only Pending/Running/Failed STAMPED tasks are
     // eligible: a Done task's stamp is REAL spend (its vector is stored), never a
     // charge to release.
-    let reservation_scope_id = repo.scope_id_for_adapter();
+    let reservation_scope_id = repo.scope_id_for_adapter()?;
     #[derive(Clone, Copy)]
     enum ReconcileReservationAction {
         Revive,
@@ -18501,7 +20394,7 @@ fn hold_secret_embedding_tasks(
             continue;
         }
         let task = TaskDescriptor {
-            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_id: format!("task_{}", new_ulid(repo.canonical_root())),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: chunk.raw_path.clone(),
@@ -18558,7 +20451,7 @@ fn hold_secret_embedding_tasks(
     // send is blocked by the hold — so release it (settles `unknown_settled` at the
     // reservation estimate if a row is still open, a no-op otherwise).
     if !to_demote.is_empty() {
-        let reservation_scope_id = repo.scope_id_for_adapter();
+        let reservation_scope_id = repo.scope_id_for_adapter()?;
         for task in &all_tasks {
             if task.task_type == TaskType::Embedding && to_demote.contains_key(&task.output_ref) {
                 let key = task_ledger_key(
@@ -18669,7 +20562,7 @@ fn enqueue_embedding_tasks(
             continue;
         }
         let task = TaskDescriptor {
-            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_id: format!("task_{}", new_ulid(repo.canonical_root())),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: chunk.raw_path.clone(),
@@ -18706,6 +20599,7 @@ fn enqueue_embedding_tasks(
                 {
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = Some(reason.to_owned());
+                    task.hold_reason = None;
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
@@ -18734,6 +20628,7 @@ fn enqueue_embedding_tasks(
                     };
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = Some(reason.to_owned());
+                    task.hold_reason = None;
                     task.input_path = current_path.clone();
                     task.attempts = 0;
                     task.next_retry_at = None;
@@ -18955,17 +20850,14 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
     }
 }
 
-/// QA4 (step4b-contract-tests-p3a.md §A, 10 §1 L117): `kio status`'s paused
-/// count broken down by the closed `hold_reason` enum (QA1) — `"unknown"`
-/// covers a Paused task with no `hold_reason` stamp (a legacy row from
-/// before QA1, or the still-unimplemented auth hold, QA2). The 3 named
-/// buckets always appear (even at 0) so a caller does not need to guard
-/// against a missing key.
+/// `kio status`'s paused count broken down by the closed `hold_reason` enum.
+/// A current task record always stamps one matching reason for a paused task,
+/// so the three named buckets always appear (even at 0) and there is no
+/// compatibility/unknown bucket.
 fn paused_tasks_by_hold_reason(tasks: &[TaskDescriptor]) -> Value {
     let mut budget = 0u64;
     let mut auth = 0u64;
     let mut tier_b_approval = 0u64;
-    let mut unknown = 0u64;
     for task in tasks {
         if task.status != TaskStatus::Paused {
             continue;
@@ -18974,14 +20866,13 @@ fn paused_tasks_by_hold_reason(tasks: &[TaskDescriptor]) -> Value {
             Some(HoldReason::Budget) => budget += 1,
             Some(HoldReason::Auth) => auth += 1,
             Some(HoldReason::TierBApproval) => tier_b_approval += 1,
-            None => unknown += 1,
+            None => unreachable!("TaskStore accepts only stamped paused tasks"),
         }
     }
     json!({
         "budget": budget,
         "auth": auth,
         "tier_b_approval": tier_b_approval,
-        "unknown": unknown,
     })
 }
 
@@ -19002,7 +20893,7 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
     let now = now_utc_seconds();
     let month = utc_month(&now);
     let ledger = open_ledger_db()?;
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let conn = ledger.connection();
     let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kio)?;
     let folder_spent =
@@ -19046,7 +20937,7 @@ fn scope_budget_warning(repo: &Repository) -> Result<Option<String>> {
         .map_err(pipeline_to_kio)?;
     let month = utc_month(&now_utc_seconds());
     let ledger = open_ledger_db()?;
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let conn = ledger.connection();
     let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kio)?;
     let folder_spent =
@@ -19422,7 +21313,7 @@ fn run_index_pipeline(
     {
         let online_profile = online_markdownize_profile_for(repo)?;
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
-        let reservation_scope_id = repo.scope_id_for_adapter();
+        let reservation_scope_id = repo.scope_id_for_adapter()?;
         let live_paths: BTreeSet<&str> = preview
             .candidates
             .iter()
@@ -19523,9 +21414,9 @@ fn run_index_pipeline(
         // `!candidate.ignored` filter above skips it), so `.is_some()` newly gates only
         // lifted Tier A.
         let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();
-        let path = repo.root().join(&candidate.input_path);
+        let path = repository_input_display_path(repo, &candidate.input_path);
         let verified =
-            match read_verified_scan_input(repo.root(), &candidate.input_path, max_input_bytes) {
+            match read_repository_scan_input(repo, &candidate.input_path, max_input_bytes) {
                 Ok(verified) => verified,
                 Err(error) => {
                     append_event_log(
@@ -19561,7 +21452,7 @@ fn run_index_pipeline(
                 continue;
             }
         }
-        if !current_scan_policy_allows_file(repo.root(), &candidate.input_path)
+        if !repository_scan_policy_allows_file(repo, &candidate.input_path)
             .map_err(pipeline_to_kio)?
         {
             append_event_log(
@@ -19853,7 +21744,7 @@ fn run_index_pipeline(
                 raw: RawInput {
                     raw_hash: previous.manifest.raw_hash.clone(),
                     path: Some(
-                        repo.root()
+                        repo.canonical_root()
                             .join(&candidate.input_path)
                             .display()
                             .to_string(),
@@ -19974,7 +21865,7 @@ fn run_index_pipeline(
         }
 
         let generated_at = now_utc_seconds();
-        let run_id = format!("run_{}", new_ulid(repo.root()));
+        let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
         let units = normalized_units_from_response(
             &response,
             &prepare.prepared_units,
@@ -19999,10 +21890,12 @@ fn run_index_pipeline(
             // non-retryable library/contract fault rather than a transient.
             RetryErrorKind::ContractViolation,
         );
-        persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(pipeline_to_kio)?;
-        // PB04: `manifest` was just durably persisted above — hash the
-        // in-memory value directly rather than re-reading it from disk.
-        let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest)?;
+        let stamped_manifest = persist_normalized_instance(repo.kio_dir(), &manifest, &units)
+            .map_err(pipeline_to_kio)?;
+        // The returned manifest includes the immutable normalized-unit CAS
+        // pins that the writer just committed; derive the tree pin from those
+        // exact bytes rather than the pre-persist nullable manifest.
+        let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &stamped_manifest)?;
         let task = task_descriptor(
             repo,
             TaskType::Markdownize,
@@ -20092,7 +21985,11 @@ fn run_index_pipeline(
     // second command would be ceremony guarding nothing. The task is still
     // created first and drained second, so a crash mid-OCR leaves a Pending
     // task the next `index` picks up rather than a silently unenriched file.
-    let executed = execute_pending_offline_markdownize_tasks(repo, &task_store)?;
+    let executed = execute_pending_offline_markdownize_tasks(
+        repo,
+        &task_store,
+        &mut result.normalize_by_path,
+    )?;
     result.pending_online_tasks = result.pending_online_tasks.saturating_sub(executed);
     Ok(result)
 }
@@ -20279,7 +22176,7 @@ fn create_prepared_hash_drift_instance(
         return Ok(());
     }
     let generated_at = now_utc_seconds();
-    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let run_id = format!("run_{}", new_ulid(repo.canonical_root()));
     let units = normalized_units_from_response(
         &response,
         fresh_prepared_units,
@@ -20301,8 +22198,9 @@ fn create_prepared_hash_drift_instance(
         &generated_at,
         RetryErrorKind::ContractViolation,
     );
-    persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(pipeline_to_kio)?;
-    let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &manifest)?;
+    let stamped_manifest =
+        persist_normalized_instance(repo.kio_dir(), &manifest, &units).map_err(pipeline_to_kio)?;
+    let manifest_hash = hash_and_write_manifest_object(repo.kio_dir(), &stamped_manifest)?;
     let mut task = task_descriptor(
         repo,
         TaskType::Markdownize,
@@ -20502,43 +22400,44 @@ fn verify_exact_cas_object(path: &Path, expected: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn verify_existing_cas_objects(
+fn verify_existing_cas_object(
     kio_dir: &Path,
     subdir: &str,
     hash: &str,
     bytes: &[u8],
 ) -> Result<bool> {
-    let paths = existing_cas_object_paths(kio_dir, subdir, hash)?;
-    for path in &paths {
+    if let Some(path) = existing_cas_object_path(kio_dir, subdir, hash)? {
         let parent = path
             .parent()
             .ok_or_else(|| KioError::io("path has no parent", path.display().to_string()))?;
         ensure_contained_directory_chain(kio_dir, parent)?;
-        verify_exact_cas_object(path, bytes)?;
+        verify_exact_cas_object(&path, bytes)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(!paths.is_empty())
 }
 
-fn write_cas_object_or_reuse_legacy(
+fn write_canonical_cas_object_or_reuse(
     kio_dir: &Path,
     subdir: &str,
     hash: &str,
     bytes: &[u8],
 ) -> Result<()> {
-    if verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    if verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Ok(());
     }
 
     // Close the preflight/publication window as far as possible before entering the
     // atomic canonical writer. Its own create-new publication handles a canonical
-    // race; the postcondition below also catches a concurrently-created legacy leaf.
-    if verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    // race, which is re-verified below.
+    if verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Ok(());
     }
 
     let canonical = cas_object_path(kio_dir, subdir, hash)?;
     atomic_write_cas_object(kio_dir, &canonical, bytes)?;
-    if !verify_existing_cas_objects(kio_dir, subdir, hash, bytes)? {
+    if !verify_existing_cas_object(kio_dir, subdir, hash, bytes)? {
         return Err(KioError::not_found(hash));
     }
     Ok(())
@@ -20622,7 +22521,12 @@ fn write_prepared_objects(
                 "prepared object bytes do not match the declared hash",
             ));
         }
-        write_cas_object_or_reuse_legacy(repo.kio_dir(), "prepared", prepared_hash, object_bytes)?;
+        write_canonical_cas_object_or_reuse(
+            repo.kio_dir(),
+            "prepared",
+            prepared_hash,
+            object_bytes,
+        )?;
     }
     Ok(())
 }
@@ -20633,8 +22537,19 @@ fn normalized_output_ref(
     tool_profile_hash: &str,
     gen: u64,
 ) -> String {
+    // The child-index process keeps its operational store at `.` after
+    // entering a retained `.kio` descriptor.  A task reference is durable,
+    // however, and must remain valid when that child is later opened through
+    // its ordinary public scope path.  Persist the discovery-time canonical
+    // `.kio` spelling rather than the descriptor-local `./objects/...` alias.
+    // All actual child-store I/O continues to use `repo.kio_dir()`.
+    let output_root = if repo.kio_dir() == Path::new(".") {
+        repo.canonical_root().join(".kio")
+    } else {
+        repo.kio_dir().to_path_buf()
+    };
     kio_pipeline::markdownize::normalized_instance_dir(
-        repo.kio_dir(),
+        output_root,
         raw_hash,
         tool_profile_hash,
         gen,
@@ -20656,7 +22571,7 @@ fn task_descriptor(
     created_at: &str,
 ) -> TaskDescriptor {
     TaskDescriptor {
-        task_id: format!("task_{}", new_ulid(repo.root())),
+        task_id: format!("task_{}", new_ulid(repo.canonical_root())),
         task_type,
         mode,
         input_path: candidate.input_path.clone(),
@@ -21034,6 +22949,7 @@ fn manifest_from_units(
                     UnitStatus::Failed
                 },
                 prepared_hash: unit.prepared_hash.clone(),
+                unit_object_hash: None,
                 // R10-4: record the REAL retry kind for a failed unit (a fixed
                 // "missing_output" string is not a `RetryErrorKind`, so the §5.2
                 // permanent-vs-retryable gate could not be applied downstream). The
@@ -21951,7 +23867,7 @@ fn poll_batch_markdownize_jobs(
     let Some(client) = batch_markdownize_lane_client()? else {
         return Ok(counts);
     };
-    let scope_id = repo.scope_id_for_adapter();
+    let scope_id = repo.scope_id_for_adapter()?;
     let rows = batch_poll_candidates(ledger.connection(), &scope_id, "markdownize")
         .map_err(pipeline_to_kio)?;
     if !rows.is_empty() {
@@ -22748,7 +24664,7 @@ fn enqueue_online_placeholder_task(
     // (`repo.scope_id_for_adapter()`), so the release nets out at the
     // folder-scoped totals too, not just the device total.
     let markdownize_adapter_kind = "markdownize";
-    let reservation_scope_id = repo.scope_id_for_adapter();
+    let reservation_scope_id = repo.scope_id_for_adapter()?;
     let mut stale_ids = BTreeSet::new();
     for task in task_store.all().map_err(pipeline_to_kio)? {
         let stale = task.task_type == TaskType::Markdownize
@@ -23183,8 +25099,31 @@ fn consent_identity(kio_dir: &Path) -> Result<(String, String)> {
     ))
 }
 
+fn consent_identity_for_repo(repo: &Repository) -> Result<(String, String)> {
+    Ok((
+        scope_id(repo.kio_dir())?,
+        repo.canonical_root().to_string_lossy().into_owned(),
+    ))
+}
+
+fn trusted_consent_present_for_repo(
+    repo: &Repository,
+    tool_id: Option<&str>,
+    operation: ConsentOperation,
+) -> Result<bool> {
+    trusted_consent_present_for_identity(consent_identity_for_repo(repo)?, tool_id, operation)
+}
+
 fn trusted_consent_present(
     kio_dir: &Path,
+    tool_id: Option<&str>,
+    operation: ConsentOperation,
+) -> Result<bool> {
+    trusted_consent_present_for_identity(consent_identity(kio_dir)?, tool_id, operation)
+}
+
+fn trusted_consent_present_for_identity(
+    (expected_scope_id, expected_root): (String, String),
     tool_id: Option<&str>,
     operation: ConsentOperation,
 ) -> Result<bool> {
@@ -23208,7 +25147,6 @@ fn trusted_consent_present(
             ));
         }
     }
-    let (expected_scope_id, expected_root) = consent_identity(kio_dir)?;
     let text = fs::read_to_string(&path)
         .map_err(|err| KioError::io(err.to_string(), path.display().to_string()))?;
     Ok(text
@@ -23245,10 +25183,10 @@ fn write_device_consent(
             .map_err(|err| KioError::io(err.to_string(), parent.display().to_string()))?;
     }
     let _lock = StoreLock::acquire_path(device_consent_lock_path())?;
-    if trusted_consent_present(repo.kio_dir(), Some(tool_id), operation)? {
+    if trusted_consent_present_for_repo(repo, Some(tool_id), operation)? {
         return Ok(());
     }
-    let (scope_id, canonical_root) = consent_identity(repo.kio_dir())?;
+    let (scope_id, canonical_root) = consent_identity_for_repo(repo)?;
     let mut line = serde_json::to_string(&json!({
         "schema_version": DEVICE_CONSENT_SCHEMA_VERSION,
         "scope_id": scope_id,
@@ -23444,6 +25382,7 @@ fn release_secret_holds(repo: &Repository) -> Result<usize> {
             {
                 task.status = TaskStatus::Pending;
                 task.fallback_reason = None;
+                task.hold_reason = None;
                 true
             } else {
                 false
@@ -23649,7 +25588,7 @@ fn write_approval_record(
         .unwrap_or((0.0, 0.0));
     repo.record_scan_approval(json!({
         "scope_id": preview.scope_id,
-        "root_path": repo.root().display().to_string(),
+        "root_path": repo.canonical_root().display().to_string(),
         "approved_at": now_utc_seconds(),
         "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
         "approval_method": approval_method,
@@ -23702,7 +25641,7 @@ fn write_approval_record(
     }
     let base = json!({
         "scope_id": preview.scope_id,
-        "root_path": repo.root(),
+        "root_path": repo.canonical_root(),
         "approved_at": now_utc_seconds(),
         "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
         "approval_method": approval_method,
@@ -23972,6 +25911,33 @@ fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
     load_tool_lock(&bytes).map(|_| ()).map_err(adapter_to_kio)
 }
 
+/// The persisted current embedding profile that selects the one vector space a
+/// `repair rebuild-db` may replay.  This intentionally does not consult the
+/// active adapter: recovery must work while its environment is unavailable.
+/// A missing lock or a lock without `embedding` means text-only replay.
+fn rebuild_embedding_profile_from_tool_lock(
+    kio_dir: &Path,
+) -> Result<Option<embedding_store::EmbeddingProfileSummary>> {
+    let path = kio_dir.join("tool-lock.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(KioError::schema("tool-lock must be a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+    let lock = load_tool_lock(&bytes).map_err(adapter_to_kio)?;
+    Ok(lock
+        .embedding
+        .map(|embedding| embedding_store::EmbeddingProfileSummary {
+            dimensions: u64::from(embedding.dimensions),
+            distance: embedding.distance,
+            modality: embedding.modality,
+            profile_hash: embedding.profile_hash,
+        }))
+}
+
 fn require_repo_tool_lock(repo: &Repository) -> Result<()> {
     let path = repo.kio_dir().join("tool-lock.json");
     match fs::symlink_metadata(&path) {
@@ -24128,13 +26094,9 @@ fn random_key_32() -> Result<Vec<u8>> {
 /// same-gen finalize's repeated manifest updates (03 §8, "unit の failed →
 /// done 遷移で変わるため" — each transition yields a new manifest_hash).
 ///
-/// Deliberately best-effort (`Result` for the caller to `.ok()`): a
-/// normalize binding forward-compatibly carries `manifest_hash: None` (v1
-/// legacy semantics, 10 §7.5.1 L501) when the manifest cannot be hashed —
-/// e.g., because it belongs to a call site synthesizing a normalize ref this
-/// session did not target for eager computation. Callers that already carry
-/// a known-good `manifest_hash` forward (history-derived normalize refs)
-/// never call this.
+/// This is a strict provenance boundary: callers must propagate any failure.
+/// Every current-format `NormalizeRef` carries the returned manifest hash;
+/// there is no missing-hash compatibility shape.
 fn compute_manifest_hash(
     kio_dir: &Path,
     raw_hash: &str,
@@ -24325,16 +26287,346 @@ fn terminal_safe_text(input: &str, allow_newlines: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use clap::Parser;
     use kio_adapter::catalog::deterministic_embedding_vector;
+    use kio_index::ChunkRow;
 
     use super::{
+        append_chunk_publication_events, append_new_chunk_association, append_stored_chunks,
         effective_invocation_lane, embedding_usd_per_token, estimate_embedding_cost,
-        estimate_embedding_tokens, lane_rate, markdownize_send_lane, parsed_repair, parsed_search,
-        query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
-        terminal_safe_text, write_through_projection_with_requested_at, Cli, Command, LaneOverride,
-        MarkdownizeSendLane, PreferredRequestKind, RepairMode, RepairOperation, SearchMode,
+        estimate_embedding_tokens, first_parent_publication_index, lane_rate,
+        markdownize_send_lane, parse_chunk_ledger, parsed_repair, parsed_search,
+        publication_is_compatible, publication_is_include_deleted_compatible,
+        query_embedding_send_lane, read_chunk_publication_events, read_stored_chunks,
+        realtime_lane_requested, replace_chunk_ledger_contents, resolve_invocation_lane,
+        terminal_safe_text, truncate_torn_chunk_tail, unit_authorities_from_inputs,
+        write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command,
+        LaneOverride, MarkdownizeSendLane, NormalizedUnitInput, PreferredRequestKind, RepairMode,
+        RepairOperation, RepositoryScopeId, SearchMode, StoredChunk,
     };
+
+    fn ledger_test_chunk() -> StoredChunk {
+        let mut chunk = StoredChunk {
+            rowid: 1,
+            association_rowid: 1,
+            row: ChunkRow {
+                chunk_id: String::new(),
+                raw_hash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .into(),
+                tool_profile_hash:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                gen: 1,
+                unit_key: "unit".into(),
+                unit_content_hash:
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
+                chunking_config_hash:
+                    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
+                raw_path: "input.md".into(),
+                heading_path: None,
+                section_id: None,
+                byte_start: 0,
+                byte_end: 1,
+                text_hash: kio_core::cas::hash_bytes(b"x"),
+                text: "x".into(),
+                first_seen_commit: Some(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .into(),
+                ),
+                chunking_config_introduction_commit:
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+                created_at: "1970-01-01T00:00:00Z".into(),
+            },
+        };
+        chunk.row.chunk_id = kio_index::chunking::chunk_hash(&chunk.row).unwrap();
+        chunk
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chunk_ledger_symlink_never_reads_or_mutates_victim() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir(&kio_dir).unwrap();
+        let index = kio_dir.join("index");
+        fs::create_dir_all(&index).unwrap();
+        let victim = temp.path().join("victim");
+        let original = b"safe record\npartial victim bytes";
+        fs::write(&victim, original).unwrap();
+        symlink(&victim, index.join("chunks.jsonl")).unwrap();
+
+        assert!(parse_chunk_ledger(&kio_dir).is_err());
+        assert!(truncate_torn_chunk_tail(&kio_dir).is_err());
+        assert!(append_stored_chunks(&kio_dir, &[ledger_test_chunk()]).is_err());
+        assert_eq!(fs::read(victim).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chunk_ledger_hardlink_never_reads_or_mutates_victim() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        let index = kio_dir.join("index");
+        fs::create_dir_all(&index).unwrap();
+        let victim = temp.path().join("victim");
+        let original = b"safe record\npartial victim bytes";
+        fs::write(&victim, original).unwrap();
+        fs::hard_link(&victim, index.join("chunks.jsonl")).unwrap();
+
+        assert!(parse_chunk_ledger(&kio_dir).is_err());
+        assert!(truncate_torn_chunk_tail(&kio_dir).is_err());
+        assert!(append_stored_chunks(&kio_dir, &[ledger_test_chunk()]).is_err());
+        assert_eq!(fs::read(victim).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chunk_ledger_parent_symlink_never_reaches_victim_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir_all(&kio_dir).unwrap();
+        let victim = temp.path().join("victim-index");
+        fs::create_dir(&victim).unwrap();
+        let victim_ledger = victim.join("chunks.jsonl");
+        fs::write(&victim_ledger, b"victim record\n").unwrap();
+        symlink(&victim, kio_dir.join("index")).unwrap();
+
+        assert!(parse_chunk_ledger(&kio_dir).is_err());
+        assert!(truncate_torn_chunk_tail(&kio_dir).is_err());
+        assert!(append_stored_chunks(&kio_dir, &[ledger_test_chunk()]).is_err());
+        assert_eq!(fs::read(victim_ledger).unwrap(), b"victim record\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_chunk_ledger_never_follows_index_or_ledger_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir_all(&kio_dir).unwrap();
+        let index_victim = tempfile::tempdir().unwrap();
+        let index_ledger = index_victim.path().join("chunks.jsonl");
+        fs::write(&index_ledger, b"index victim\n").unwrap();
+        symlink(index_victim.path(), kio_dir.join("index")).unwrap();
+        assert!(replace_chunk_ledger_contents(&kio_dir, b"replacement\n").is_err());
+        assert_eq!(fs::read(&index_ledger).unwrap(), b"index victim\n");
+
+        fs::remove_file(kio_dir.join("index")).unwrap();
+        fs::create_dir(kio_dir.join("index")).unwrap();
+        let ledger_victim = temp.path().join("ledger-victim");
+        fs::write(&ledger_victim, b"ledger victim\n").unwrap();
+        symlink(&ledger_victim, kio_dir.join("index/chunks.jsonl")).unwrap();
+        assert!(replace_chunk_ledger_contents(&kio_dir, b"replacement\n").is_err());
+        assert_eq!(fs::read(&ledger_victim).unwrap(), b"ledger victim\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_chunk_ledger_root_survives_kio_replacement_without_touching_victim() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir_all(kio_dir.join("index")).unwrap();
+        let directory = super::open_chunk_ledger_dir(&kio_dir, false).unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let original = temp.path().join(".kio-original");
+        fs::rename(&kio_dir, &original).unwrap();
+        symlink(victim.path(), &kio_dir).unwrap();
+
+        let mut file = super::open_chunk_ledger_file(&directory, false, true, true, true)
+            .expect("held index handle must remain usable");
+        use std::io::Write;
+        file.write_all(b"held-root-record\n").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        super::sync_chunk_ledger_dir(&directory).unwrap();
+
+        assert!(!victim.path().join("index/chunks.jsonl").exists());
+        assert_eq!(
+            fs::read(original.join("index/chunks.jsonl")).unwrap(),
+            b"held-root-record\n"
+        );
+    }
+
+    #[test]
+    fn publication_event_can_follow_its_newly_durable_creation_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir(&kio_dir).unwrap();
+        let chunk = ledger_test_chunk();
+        let event = ChunkPublicationEvent {
+            event: "publication".to_owned(),
+            chunk_id: chunk.row.chunk_id.clone(),
+            chunking_config_hash: chunk.row.chunking_config_hash.clone(),
+            introduction_commit:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+        };
+
+        // This is the ordering used when two attested manifests introduce the
+        // same semantic chunk during one rebuild: fsync creation first, then
+        // append the tagged introduction.
+        append_stored_chunks(&kio_dir, &[chunk]).unwrap();
+        append_chunk_publication_events(&kio_dir, std::slice::from_ref(&event)).unwrap();
+        append_chunk_publication_events(&kio_dir, &[event]).unwrap();
+
+        assert_eq!(read_chunk_publication_events(&kio_dir).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_association_without_publication_does_not_read_the_chunk_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir_all(kio_dir.join("index")).unwrap();
+        // If the duplicate branch consults the ledger, this malformed row fails
+        // parsing. The normal rebuild path deliberately skips that read when it
+        // is not staging a targeted duplicate publication.
+        fs::write(kio_dir.join("index/chunks.jsonl"), b"not json\n").unwrap();
+
+        let mut row = ledger_test_chunk().row;
+        row.unit_content_hash = kio_core::cas::hash_bytes(b"x");
+        row.chunk_id = kio_index::chunking::chunk_hash(&row).unwrap();
+        let units = unit_authorities_from_inputs(&[NormalizedUnitInput {
+            raw_hash: row.raw_hash.clone(),
+            tool_profile_hash: row.tool_profile_hash.clone(),
+            gen: row.gen,
+            unit_key: row.unit_key.clone(),
+            unit_content_hash: row.unit_content_hash.clone(),
+            markdown: "x".to_owned(),
+        }]);
+        let mut known_associations =
+            BTreeSet::from([(row.chunk_id.clone(), row.chunking_config_hash.clone())]);
+        let mut chunk_rowids = BTreeMap::new();
+        let mut next_rowid = 1;
+        let mut next_association_rowid = 1;
+        let mut appended = Vec::new();
+        let mut pending_publication_events = Vec::new();
+
+        append_new_chunk_association(
+            &kio_dir,
+            row,
+            &mut known_associations,
+            &mut chunk_rowids,
+            &mut next_rowid,
+            &mut next_association_rowid,
+            &mut appended,
+            &mut pending_publication_events,
+            &units,
+            false,
+        )
+        .unwrap();
+
+        assert!(appended.is_empty());
+        assert!(pending_publication_events.is_empty());
+    }
+
+    #[test]
+    fn complete_chunk_ledger_rows_reject_missing_fields_unknown_fields_and_bad_hashes() {
+        let temp = tempfile::tempdir().unwrap();
+        let kio_dir = temp.path().join(".kio");
+        fs::create_dir_all(kio_dir.join("index")).unwrap();
+        let path = kio_dir.join("index/chunks.jsonl");
+        let valid = serde_json::to_value(ledger_test_chunk()).unwrap();
+
+        let mut missing_first_seen = valid.clone();
+        missing_first_seen
+            .as_object_mut()
+            .unwrap()
+            .remove("first_seen_commit");
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&missing_first_seen).unwrap()),
+        )
+        .unwrap();
+        let error = read_stored_chunks(&kio_dir).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+
+        let mut unknown_field = valid.clone();
+        unknown_field
+            .as_object_mut()
+            .unwrap()
+            .insert("forged".to_owned(), serde_json::json!(true));
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&unknown_field).unwrap()),
+        )
+        .unwrap();
+        let error = read_stored_chunks(&kio_dir).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+
+        let mut bad_hash = valid;
+        bad_hash.as_object_mut().unwrap().insert(
+            "raw_hash".to_owned(),
+            serde_json::json!("not-a-content-hash"),
+        );
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&bad_hash).unwrap()),
+        )
+        .unwrap();
+        let error = read_stored_chunks(&kio_dir).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn publication_compatibility_is_strict_and_uses_preloaded_relations() {
+        let mut publications = BTreeMap::new();
+        publications.insert(
+            "chunk".to_owned(),
+            BTreeSet::from(["c1".to_owned(), "side".to_owned()]),
+        );
+        let ancestors = BTreeSet::from(["c0".to_owned(), "c1".to_owned(), "c2".to_owned()]);
+
+        assert!(publication_is_compatible(
+            publications.get("chunk"),
+            Some(&ancestors),
+        ));
+        // Include-deleted uses its final appearance's ancestry, not exact
+        // equality: publication can have happened before deletion.
+        assert!(publication_is_compatible(
+            publications.get("chunk"),
+            Some(&BTreeSet::from(["c1".to_owned(), "deleted".to_owned()])),
+        ));
+        assert!(!publication_is_compatible(publications.get("chunk"), None));
+        assert!(!publication_is_compatible(None, Some(&ancestors)));
+    }
+
+    #[test]
+    fn include_deleted_publication_index_covers_merge_sides_in_linear_work() {
+        let mut parents = BTreeMap::new();
+        parents.insert("head".to_owned(), vec!["p2".to_owned(), "side".to_owned()]);
+        parents.insert("p2".to_owned(), vec!["p1".to_owned()]);
+        parents.insert("p1".to_owned(), vec!["root".to_owned()]);
+        parents.insert("side".to_owned(), vec!["root".to_owned()]);
+        parents.insert("root".to_owned(), Vec::new());
+        // A long first-parent chain exercises the graph algorithm's bounded
+        // one-pass shape without relying on wall-clock timing.
+        let mut child = "root".to_owned();
+        for index in 0..128 {
+            let commit = format!("old-{index:03}");
+            parents.insert(child.clone(), vec![commit.clone()]);
+            parents.insert(commit.clone(), Vec::new());
+            child = commit;
+        }
+        let (ranks, thresholds) = first_parent_publication_index("head", &parents);
+        assert_eq!(ranks.get("head"), Some(&0));
+        assert_eq!(ranks.get("p1"), Some(&2));
+        assert_eq!(thresholds.get("side"), Some(&0));
+        assert!(thresholds.get("root").is_some_and(|rank| *rank >= 3));
+        let publications = BTreeSet::from(["side".to_owned(), "root".to_owned()]);
+        assert!(publication_is_include_deleted_compatible(
+            Some(&publications),
+            ranks.get("p1"),
+            &thresholds,
+        ));
+        assert!(!publication_is_include_deleted_compatible(
+            Some(&BTreeSet::from(["side".to_owned()])),
+            ranks.get("p1"),
+            &thresholds,
+        ));
+    }
 
     #[test]
     fn replica_write_through_refuses_a_missing_source_index_stamp() {
@@ -24369,6 +26661,16 @@ mod tests {
             error.contains("source index stamp is unavailable"),
             "an unresolvable scope must never turn a failed projection into a successful no-op: {error}"
         );
+    }
+
+    #[test]
+    fn adapter_scope_id_refuses_malformed_scope_identity_instead_of_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = kio_core::scope::Repository::init(root.path()).unwrap();
+        fs::write(repo.kio_dir().join("scope.json"), "{not valid json").unwrap();
+
+        let error = repo.scope_id_for_adapter().unwrap_err();
+        assert_ne!(error.to_string(), "unknown");
     }
 
     /// R23-13 (06 §7 L343-344 "KIO-E-STORE-CONSTRAINT-001 ... permanent・
@@ -24693,7 +26995,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,
@@ -24707,7 +27008,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,
@@ -24721,7 +27021,6 @@ mod tests {
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
                 index_generation: "01TEST0000000000000000000".to_owned(),
-                has_image_vec: false,
                 journal_active_at_prepare: false,
                 shallow_skipped: 0,
                 runtime_binding_filter: None,
@@ -24837,13 +27136,13 @@ mod tests {
     }
 
     #[test]
-    fn r23_cand_001_legacy_duplicate_hold_cannot_override_terminal_failure() {
+    fn r23_cand_001_duplicate_hold_cannot_override_terminal_failure() {
         use super::{
             embedding_task_output_ref, filter_embeddable_by_task_state, release_secret_holds,
             EmbeddableChunk, SECRETS_TIER_B_HOLD,
         };
         use kio_core::scope::Repository;
-        use kio_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+        use kio_pipeline::task::{HoldReason, TaskDescriptor, TaskStatus, TaskStore, TaskType};
 
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
@@ -24851,7 +27150,7 @@ mod tests {
         let chunk_id = format!("sha256:{}", "c".repeat(64));
         let output_ref = embedding_task_output_ref(&chunk_id);
         let terminal = TaskDescriptor {
-            task_id: "task_terminal_legacy".to_owned(),
+            task_id: "task_terminal".to_owned(),
             task_type: TaskType::Embedding,
             mode: None,
             input_path: "credentials_backup.md".to_owned(),
@@ -24874,23 +27173,21 @@ mod tests {
             reserved_month: None,
             reservation_id: None,
         };
-        // QA1: `legacy_hold` deliberately keeps `hold_reason: None` after the
-        // clone (a Paused row written before the field existed) to cover the
-        // backward-compat deserialization path.
-        let mut legacy_hold = terminal.clone();
-        legacy_hold.task_id = "task_later_hold".to_owned();
-        legacy_hold.status = TaskStatus::Paused;
-        legacy_hold.attempts = 0;
-        legacy_hold.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
-        legacy_hold.created_at = "2026-07-12T00:00:01Z".to_owned();
+        let mut later_hold = terminal.clone();
+        later_hold.task_id = "task_later_hold".to_owned();
+        later_hold.status = TaskStatus::Paused;
+        later_hold.attempts = 0;
+        later_hold.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+        later_hold.hold_reason = Some(HoldReason::TierBApproval);
+        later_hold.created_at = "2026-07-12T00:00:01Z".to_owned();
         store.append(&terminal).unwrap();
-        store.append(&legacy_hold).unwrap();
+        store.append(&later_hold).unwrap();
 
         assert_eq!(release_secret_holds(&repo).unwrap(), 1);
         let tasks = store.all().unwrap();
-        assert_eq!(tasks.len(), 1, "legacy duplicate hold should be removed");
+        assert_eq!(tasks.len(), 1, "duplicate hold should be removed");
         assert!(tasks.iter().any(|task| {
-            task.task_id == "task_terminal_legacy"
+            task.task_id == "task_terminal"
                 && task.status == TaskStatus::Failed
                 && task.fallback_reason.as_deref() == Some("contract_violation")
         }));
@@ -25167,7 +27464,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
-            bbox_annotation_enabled: None,
+            bbox_annotation_enabled: Some(true),
             hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
@@ -25858,6 +28155,18 @@ mod tests {
     }
 
     #[test]
+    fn batch_resume_budget_recheck_and_override_are_exclusive() {
+        assert!(Cli::try_parse_from([
+            "kio",
+            "batch",
+            "resume",
+            "--recheck-budget",
+            "--override-budget",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn every_command_declares_its_arguments() {
         // B: `search`/`repair`/`reindex`/`open`/`view`/`gc`/`move`/`evidence`
         // used to swallow their operands into a `trailing_var_arg` catch-all, so
@@ -26114,6 +28423,48 @@ mod tests {
     }
 
     #[test]
+    fn qb15_parent_and_child_index_exits_keep_user_action_priority() {
+        use super::merged_index_exit_override;
+        use kio_core::ExitCode;
+
+        assert_eq!(
+            merged_index_exit_override(None, [], false),
+            None,
+            "a clean parent and child set exits successfully"
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [], true),
+            Some(ExitCode::PartialFailure)
+        );
+        assert_eq!(
+            merged_index_exit_override(
+                Some(ExitCode::PartialFailure),
+                [ExitCode::BudgetExceeded, ExitCode::AuthError],
+                true,
+            ),
+            Some(ExitCode::AuthError)
+        );
+        assert_eq!(
+            merged_index_exit_override(
+                Some(ExitCode::PartialFailure),
+                [ExitCode::BudgetExceeded],
+                false,
+            ),
+            Some(ExitCode::BudgetExceeded)
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [ExitCode::PermanentFailure], false),
+            Some(ExitCode::PartialFailure),
+            "a failed child cannot erase already-published parent work"
+        );
+        assert_eq!(
+            merged_index_exit_override(None, [ExitCode::AuthError], true),
+            Some(ExitCode::AuthError),
+            "a Result::Err child retains the same auth priority as an output marker"
+        );
+    }
+
+    #[test]
     fn r10_4_partial_retry_plan_gates_on_retryability_and_budget() {
         use super::{partial_retry_plan_from_manifest, unit_ref, NormalizedInstanceManifest};
         let manifest = |first_error: Option<&str>, second_error: Option<&str>| {
@@ -26124,8 +28475,8 @@ mod tests {
                 "parent_gen": null,
                 "run_id": "run_x",
                 "units": [
-                    {"order":0,"unit_key":"page:1","unit_ref":unit_ref("page:1"),"unit_type":"page","status":if first_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "c".repeat(64)),"error_kind":first_error},
-                    {"order":1,"unit_key":"page:2","unit_ref":unit_ref("page:2"),"unit_type":"page","status":if second_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "d".repeat(64)),"error_kind":second_error},
+                    {"order":0,"unit_key":"page:1","unit_ref":unit_ref("page:1"),"unit_type":"page","status":if first_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "c".repeat(64)),"error_kind":first_error,"unit_object_hash":first_error.is_none().then(|| format!("sha256:{}", "e".repeat(64)))},
+                    {"order":1,"unit_key":"page:2","unit_ref":unit_ref("page:2"),"unit_type":"page","status":if second_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "d".repeat(64)),"error_kind":second_error,"unit_object_hash":second_error.is_none().then(|| format!("sha256:{}", "f".repeat(64)))},
                 ],
                 "generated_at": "2026-07-05T00:00:00Z",
             }))
@@ -26242,7 +28593,8 @@ mod tests {
                  path TEXT NOT NULL,
                  raw_hash TEXT NOT NULL CHECK(raw_hash <> 'BAD'),
                  tool_profile_hash TEXT,
-                 gen INTEGER NOT NULL DEFAULT 0,
+                 gen INTEGER,
+                 manifest_hash TEXT,
                  PRIMARY KEY (commit_hash, path));",
         )
         .unwrap();
@@ -26261,13 +28613,15 @@ mod tests {
                 path: "a.md".to_owned(),
                 raw_hash: "sha256:aa".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: 0,
+                gen: Some(0),
+                manifest_hash: Some("sha256:manifest".to_owned()),
             },
             TreeEntryProjection {
                 path: "b.md".to_owned(),
                 raw_hash: "BAD".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: 0,
+                gen: Some(0),
+                manifest_hash: Some("sha256:manifest".to_owned()),
             },
         ];
         assert!(insert_snapshot_tree_entries(&conn, "c1", &torn).is_err());
@@ -26278,13 +28632,15 @@ mod tests {
                 path: "a.md".to_owned(),
                 raw_hash: "sha256:aa".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: 0,
+                gen: Some(0),
+                manifest_hash: Some("sha256:manifest".to_owned()),
             },
             TreeEntryProjection {
                 path: "b.md".to_owned(),
                 raw_hash: "sha256:bb".to_owned(),
                 tool_profile_hash: None,
-                gen: 1,
+                gen: Some(1),
+                manifest_hash: Some("sha256:manifest2".to_owned()),
             },
         ];
         insert_snapshot_tree_entries(&conn, "c1", &good).unwrap();
@@ -26538,25 +28894,16 @@ mod tests {
     }
 
     fn stored_chunk_line(rowid: u64, id: &str) -> String {
-        serde_json::json!({
-            "rowid": rowid,
-            "chunk_id": id,
-            "raw_hash": format!("sha256:{}", "a".repeat(64)),
-            "tool_profile_hash": format!("sha256:{}", "b".repeat(64)),
-            "gen": 0,
-            "unit_key": "doc:1",
-            "chunking_config_hash": format!("sha256:{}", "c".repeat(64)),
-            "raw_path": "a.md",
-            "heading_path": ["H"],
-            "section_id": "h",
-            "byte_start": 0,
-            "byte_end": 4,
-            "text_hash": format!("sha256:{}", "d".repeat(64)),
-            "text": "body",
-            "first_seen_commit": null,
-            "created_at": "2026-07-04T00:00:00Z"
-        })
-        .to_string()
+        let mut chunk = ledger_test_chunk();
+        chunk.rowid = rowid;
+        chunk.association_rowid = rowid;
+        chunk.row.unit_key = id.to_owned();
+        chunk.row.chunking_config_hash = kio_core::cas::hash_bytes(id.as_bytes());
+        chunk.row.text = id.to_owned();
+        chunk.row.text_hash = kio_core::cas::hash_bytes(id.as_bytes());
+        chunk.row.byte_end = id.len() as u64;
+        chunk.row.chunk_id = kio_index::chunking::chunk_hash(&chunk.row).unwrap();
+        serde_json::to_string(&chunk).unwrap()
     }
 
     #[test]
@@ -26604,27 +28951,19 @@ mod tests {
     }
 
     #[test]
-    fn ct4_legacy_chunk_ledger_assigns_stable_association_rowids() {
+    fn ct4_chunk_ledger_rejects_missing_association_rowid() {
         use super::{chunks_jsonl_path, read_stored_chunks};
         let dir = tempfile::tempdir().unwrap();
         let kio_dir = dir.path().join(".kio");
         let path = chunks_jsonl_path(&kio_dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n",
-                stored_chunk_line(42, "c42"),
-                stored_chunk_line(7, "c7")
-            ),
-        )
-        .unwrap();
+        let mut first: serde_json::Value =
+            serde_json::from_str(&stored_chunk_line(42, "c42")).unwrap();
+        first.as_object_mut().unwrap().remove("association_rowid");
+        std::fs::write(&path, format!("{first}\n")).unwrap();
 
-        let chunks = read_stored_chunks(&kio_dir).unwrap();
-        assert_eq!(chunks[0].association_rowid, Some(2));
-        assert_eq!(chunks[1].association_rowid, Some(1));
-        assert_eq!(chunks[0].rowid, 42);
-        assert_eq!(chunks[1].rowid, 7);
+        let err = read_stored_chunks(&kio_dir).unwrap_err();
+        assert_eq!(err.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
     #[test]
@@ -26639,15 +28978,18 @@ mod tests {
         first["association_rowid"] = serde_json::json!(11);
         let mut second = first.clone();
         second["association_rowid"] = serde_json::json!(29);
-        second["chunking_config_hash"] = serde_json::json!(format!("sha256:{}", "e".repeat(64)));
+        second["chunking_config_hash"] = serde_json::json!(format!("sha256:{}", "9".repeat(64)));
+        let mut second_chunk: StoredChunk = serde_json::from_value(second.clone()).unwrap();
+        second_chunk.row.chunk_id = kio_index::chunking::chunk_hash(&second_chunk.row).unwrap();
+        second = serde_json::to_value(second_chunk).unwrap();
         std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
 
         let chunks = read_stored_chunks(&kio_dir).unwrap();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].rowid, 7);
         assert_eq!(chunks[1].rowid, 7);
-        assert_eq!(chunks[0].association_rowid, Some(11));
-        assert_eq!(chunks[1].association_rowid, Some(29));
+        assert_eq!(chunks[0].association_rowid, 11);
+        assert_eq!(chunks[1].association_rowid, 29);
         assert_ne!(
             chunks[0].row.chunking_config_hash,
             chunks[1].row.chunking_config_hash
@@ -26697,109 +29039,103 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    fn historical_colon_leaf(
+        kio_dir: &std::path::Path,
+        subdir: &str,
+        hash: &str,
+    ) -> std::path::PathBuf {
+        let digest = hash.strip_prefix("sha256:").unwrap();
+        kio_dir
+            .join("objects")
+            .join(subdir)
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(hash)
+    }
+
+    #[cfg(not(windows))]
     #[test]
-    fn legacy_cas_leaf_is_verified_and_dual_conflict_fails_closed() {
-        use super::{
-            cas_object_path, hash_bytes, legacy_cas_object_path, read_cas_byte_object,
-            MAX_RAW_OBJECT_BYTES,
-        };
+    fn legacy_only_cas_leaf_is_ignored_as_not_found() {
+        use super::{cas_object_present, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
 
         let dir = tempfile::tempdir().unwrap();
-        let bytes = b"legacy object";
+        let bytes = b"historical legacy object";
         let hash = hash_bytes(bytes);
-        let legacy = legacy_cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        let legacy = historical_colon_leaf(dir.path(), "prepared", &hash);
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, bytes).unwrap();
+        std::fs::write(legacy, bytes).unwrap();
+
+        assert!(!cas_object_present(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap());
+        assert!(
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_cas_read_succeeds_and_hash_mismatch_fails_closed() {
+        use super::{cas_object_path, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"canonical object";
+        let hash = hash_bytes(bytes);
+        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, bytes).unwrap();
         let (resolved, loaded) =
             read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
                 .unwrap()
                 .unwrap();
-        assert_eq!(resolved, legacy);
+        assert_eq!(resolved, canonical);
         assert_eq!(loaded, bytes);
 
-        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
-        std::fs::write(&canonical, bytes).unwrap();
-        std::fs::write(&legacy, b"conflicting bytes").unwrap();
+        std::fs::write(&canonical, b"hash mismatch").unwrap();
         let error =
             read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn prepared_writer_reuses_verified_legacy_and_validates_both_slots() {
-        use super::{
-            cas_object_path, hash_bytes, legacy_cas_object_path, write_cas_object_or_reuse_legacy,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let kio_dir = dir.path().join(".kio");
-        std::fs::create_dir(&kio_dir).unwrap();
-        let bytes = b"prepared bytes";
-        let hash = hash_bytes(bytes);
-        let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
-        let legacy = legacy_cas_object_path(&kio_dir, "prepared", &hash).unwrap();
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, bytes).unwrap();
-
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
-        assert!(!canonical.exists(), "legacy reuse must not eagerly migrate");
-        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
-
-        std::fs::write(&canonical, bytes).unwrap();
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
-        std::fs::write(&legacy, b"conflict").unwrap();
-        let error =
-            write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
-    }
-
-    #[test]
-    fn prepared_writer_publishes_new_objects_to_portable_leaf() {
-        use super::{cas_object_path, hash_bytes, write_cas_object_or_reuse_legacy};
+    fn prepared_writer_publishes_new_objects_to_canonical_leaf() {
+        use super::{cas_object_path, hash_bytes, write_canonical_cas_object_or_reuse};
 
         let dir = tempfile::tempdir().unwrap();
         let kio_dir = dir.path().join(".kio");
         std::fs::create_dir(&kio_dir).unwrap();
         let bytes = b"new prepared bytes";
         let hash = hash_bytes(bytes);
-        write_cas_object_or_reuse_legacy(&kio_dir, "prepared", &hash, bytes).unwrap();
+        write_canonical_cas_object_or_reuse(&kio_dir, "prepared", &hash, bytes).unwrap();
         let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
         assert_eq!(std::fs::read(canonical).unwrap(), bytes);
     }
 
+    #[cfg(not(windows))]
     #[test]
-    fn normalized_instance_leaf_parses_only_the_digest_only_form() {
-        use super::{hash_bytes, parse_normalized_instance_leaf};
+    fn legacy_conflict_cannot_influence_canonical_read_or_write() {
+        use super::{
+            cas_object_path, hash_bytes, read_cas_byte_object, write_canonical_cas_object_or_reuse,
+            MAX_RAW_OBJECT_BYTES,
+        };
 
-        let raw_digest = hash_bytes(b"raw")
-            .strip_prefix("sha256:")
-            .unwrap()
-            .to_owned();
-        let tool_hash = hash_bytes(b"tool");
-        let tool_digest = tool_hash.strip_prefix("sha256:").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let kio_dir = dir.path().join(".kio");
+        std::fs::create_dir(&kio_dir).unwrap();
+        let bytes = b"canonical prepared bytes";
+        let hash = hash_bytes(bytes);
+        let legacy = historical_colon_leaf(&kio_dir, "prepared", &hash);
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"conflicting legacy bytes").unwrap();
 
-        assert_eq!(
-            parse_normalized_instance_leaf(&format!("{raw_digest}.{tool_digest}.g2"), &raw_digest),
-            Some((tool_hash.clone(), 2))
-        );
-        // A `sha256:`-prefixed leaf is not a form this store writes or reads.
-        assert_eq!(
-            parse_normalized_instance_leaf(
-                &format!("sha256:{raw_digest}.{tool_hash}.g3"),
-                &raw_digest
-            ),
-            None
-        );
-        // Another raw's instance, a malformed gen, and a non-hash tool
-        // component are all skipped rather than guessed at.
-        for leaf in [
-            format!("{}.{tool_digest}.g2", "f".repeat(64)),
-            format!("{raw_digest}.{tool_digest}.gX"),
-            format!("{raw_digest}.not-a-digest.g2"),
-        ] {
-            assert_eq!(parse_normalized_instance_leaf(&leaf, &raw_digest), None);
-        }
+        write_canonical_cas_object_or_reuse(&kio_dir, "prepared", &hash, bytes).unwrap();
+        let canonical = cas_object_path(&kio_dir, "prepared", &hash).unwrap();
+        let (resolved, loaded) =
+            read_cas_byte_object(&kio_dir, "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved, canonical);
+        assert_eq!(loaded, bytes);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"conflicting legacy bytes");
     }
 
     #[test]
@@ -26829,7 +29165,7 @@ mod tests {
             heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
-            bbox_annotation_enabled: None,
+            bbox_annotation_enabled: Some(true),
             hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
@@ -26844,5 +29180,40 @@ mod tests {
             tasks[0].heartbeat_at.is_none(),
             "stale heartbeat must be cleared on reclaim"
         );
+    }
+
+    #[test]
+    fn chunk_authentication_rejects_forged_text_with_a_valid_identity_hash() {
+        use super::{
+            authenticate_chunk_row, chunk_normalized_instance, hash_bytes,
+            unit_authorities_from_inputs, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+        };
+
+        let markdown = "# Heading\nattested text\n".to_owned();
+        let unit = NormalizedUnitInput {
+            raw_hash: hash_bytes(b"raw"),
+            tool_profile_hash: hash_bytes(b"profile"),
+            gen: 3,
+            unit_key: "document".to_owned(),
+            unit_content_hash: hash_bytes(markdown.as_bytes()),
+            markdown,
+        };
+        let authorities = unit_authorities_from_inputs(std::slice::from_ref(&unit));
+        let mut rows = chunk_normalized_instance(ChunkingInput {
+            raw_path: "doc.md".to_owned(),
+            units: vec![unit],
+            config: ChunkingConfig {
+                chunking_config_hash: hash_bytes(b"config"),
+                strategy: "heading".to_owned(),
+                max_chars: 100,
+            },
+            created_at: "2026-08-12T00:00:00Z".to_owned(),
+        })
+        .unwrap();
+        let mut forged = rows.pop().unwrap();
+        forged.text = "forged text".to_owned();
+        forged.text_hash = hash_bytes(forged.text.as_bytes());
+
+        assert!(authenticate_chunk_row(&forged, &authorities).is_err());
     }
 }

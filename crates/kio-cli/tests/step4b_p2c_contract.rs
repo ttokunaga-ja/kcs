@@ -182,7 +182,7 @@ fn pc2_fail_behavior_error_does_not_escalate_offline() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search]\nfail_behavior = \"error\"\n",
+        "[search]\nfail_behavior = \"error\"\n",
     )
     .unwrap();
     let search = success(
@@ -285,7 +285,7 @@ fn pc15_pc17_candidate_depth_configuration_is_not_hardcoded_to_200() {
 
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 205\n",
+        "[search.rrf]\ncandidate_depth = 205\n",
     )
     .unwrap();
     let raised = success(
@@ -358,7 +358,7 @@ fn r23_17_replica_filters_ineligible_rows_before_candidate_depth() {
     }
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
+        "[search.rrf]\ncandidate_depth = 2\n",
     )
     .unwrap();
     success(&dir, &["index", "--offline", "--approve"]);
@@ -1136,7 +1136,7 @@ fn pc49_multiscope_search_ignores_folder_default_mode() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search]\ndefault_mode = \"vector\"\n",
+        "[search]\ndefault_mode = \"vector\"\n",
     )
     .unwrap();
     // Bare default (no --scope): multi-scope enumeration, per 05 §1.8 — the
@@ -1155,7 +1155,7 @@ fn pc50_single_explicit_scope_search_applies_folder_default_mode() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search]\ndefault_mode = \"text\"\n",
+        "[search]\ndefault_mode = \"text\"\n",
     )
     .unwrap();
     let search = success(&dir, &["search", "tokentestterm", "--scope", "."]);
@@ -1197,7 +1197,7 @@ fn multi_scope_env(names: &[&str]) -> (TempDir, std::path::PathBuf, Vec<std::pat
     run_path(&runner, &["init"]);
     fs::write(
         runner.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
     run_path(&runner, &["index", "--offline", "--approve"]);
@@ -1580,7 +1580,7 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
     // PC32's ancestor-or-equal fallback nothing to distinguish).
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
     )
     .unwrap();
     fs::write(dir.path().join("b.md"), "# B\n\nunrelated filler content\n").unwrap();
@@ -1656,7 +1656,7 @@ fn pc61_pc62_pc63_head_limited_reassociation_still_leaves_at_searchable() {
 
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 42\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 42\n",
     )
     .unwrap();
     success(&dir, &["index", "--offline", "--approve"]);

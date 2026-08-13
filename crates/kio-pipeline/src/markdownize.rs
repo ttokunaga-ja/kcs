@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kio_adapter::types as adapter_types;
+use kio_core::cas::{
+    canonical_json_bytes, hash_bytes as cas_hash_bytes, ContentObjectKind, ObjectStore,
+    MAX_NORMALIZED_UNIT_OBJECT_BYTES,
+};
 use kio_core::scope::{new_ulid, now_utc_seconds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,7 +25,7 @@ use crate::{IoResultExt, PipelineError, Result};
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAX_NORMALIZED_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_NORMALIZED_UNIT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_NORMALIZED_UNIT_BYTES: u64 = MAX_NORMALIZED_UNIT_OBJECT_BYTES;
 const MAX_NORMALIZED_INSTANCE_BYTES: u64 = 256 * 1024 * 1024;
 // CT4-FSCK's invocation-wide object ceiling is also the outer bound for the
 // physical manifest/unit entries inspected before the loader can identify the
@@ -72,6 +76,7 @@ pub struct ReusedFrom {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedUnitObject {
     pub unit_key: String,
     pub unit_type: UnitType,
@@ -81,8 +86,8 @@ pub struct NormalizedUnitObject {
     pub gen: u64,
     pub mode: MarkdownizeMode,
     pub markdown: String,
-    /// Provider/layout metadata. Legacy unit objects deserialize as an empty map.
-    #[serde(default)]
+    /// Provider/layout metadata. This required object is part of the immutable
+    /// normalized-unit JSON schema.
     pub metadata: BTreeMap<String, Value>,
     pub reused_from: Option<ReusedFrom>,
     pub generated_at: String,
@@ -96,10 +101,14 @@ pub struct NormalizedUnitManifestEntry {
     pub unit_type: UnitType,
     pub status: UnitStatus,
     pub prepared_hash: String,
+    /// Required nullable pin to the immutable canonical JSON unit object.
+    /// `Done` entries carry a SHA-256 hash; `Failed` entries carry JSON null.
+    pub unit_object_hash: Option<String>,
     pub error_kind: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UncheckedNormalizedUnitManifestEntry {
     order: u64,
     unit_key: String,
@@ -107,6 +116,8 @@ struct UncheckedNormalizedUnitManifestEntry {
     unit_type: UnitType,
     status: UnitStatus,
     prepared_hash: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_unit_object_hash")]
+    unit_object_hash: Option<String>,
     error_kind: Option<String>,
 }
 
@@ -128,6 +139,20 @@ impl<'de> Deserialize<'de> for NormalizedUnitManifestEntry {
                 entry.unit_key
             )));
         }
+        match (entry.status, entry.unit_object_hash.as_deref()) {
+            (UnitStatus::Done, Some(hash)) if kio_core::cas::is_hash(hash) => {}
+            (UnitStatus::Done, _) => {
+                return Err(serde::de::Error::custom(
+                    "done manifest entry must pin a valid normalized unit object hash",
+                ));
+            }
+            (UnitStatus::Failed, None) => {}
+            (UnitStatus::Failed, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "failed manifest entry must have a null normalized unit object hash",
+                ));
+            }
+        }
         Ok(Self {
             order: entry.order,
             unit_key: entry.unit_key,
@@ -135,12 +160,26 @@ impl<'de> Deserialize<'de> for NormalizedUnitManifestEntry {
             unit_type: entry.unit_type,
             status: entry.status,
             prepared_hash: entry.prepared_hash,
+            unit_object_hash: entry.unit_object_hash,
             error_kind: entry.error_kind,
         })
     }
 }
 
+/// `Option<String>` normally treats a missing JSON field as null. This
+/// deserializer is deliberately attached without `default`, so serde calls it
+/// for an explicit null but reports a missing required key before this point.
+fn deserialize_required_nullable_unit_object_hash<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedInstanceManifest {
     pub raw_hash: String,
     pub tool_profile_hash: String,
@@ -280,6 +319,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
             unit_type: UnitType::File,
             status: UnitStatus::Done,
             prepared_hash,
+            unit_object_hash: None,
             error_kind: None,
         }],
         generated_at: generated_at.clone(),
@@ -748,38 +788,101 @@ fn load_validated_normalized_instance_at(
         })?;
     validate_manifest_identity(&manifest_path, identity, &manifest)?;
 
-    let mut units = Vec::new();
-    let mut total_bytes = manifest_bytes.len() as u64;
-    for entry in &manifest.units {
-        if entry.status != UnitStatus::Done {
-            continue;
-        }
-        let expected_ref = prepared_unit_ref(&entry.unit_key);
-        let unit_path = dir.join(format!("{expected_ref}.json"));
-        let bytes = read_contained_normalized_file(
-            kio_dir,
-            canonical_dir,
-            &unit_path,
-            MAX_NORMALIZED_UNIT_BYTES,
-        )?;
-        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-        if total_bytes > MAX_NORMALIZED_INSTANCE_BYTES {
-            return Err(PipelineError::corrupt(
-                dir.display().to_string(),
-                format!("normalized instance exceeds {MAX_NORMALIZED_INSTANCE_BYTES} byte limit"),
-            ));
-        }
-        let unit: NormalizedUnitObject = serde_json::from_slice(&bytes).map_err(|err| {
-            PipelineError::corrupt(unit_path.display().to_string(), err.to_string())
-        })?;
-        units.push(unit);
+    // The mutable per-instance files are a cache only. The manifest's exact
+    // CAS pins select the authoritative normalized unit bodies.
+    let (units, unit_bytes) = load_validated_normalized_units_from_manifest_with_size(
+        kio_dir,
+        &manifest_path,
+        &manifest,
+    )?;
+    let total_bytes = manifest_bytes.len() as u64 + unit_bytes;
+    if total_bytes > MAX_NORMALIZED_INSTANCE_BYTES {
+        return Err(PipelineError::corrupt(
+            dir.display().to_string(),
+            format!("normalized instance exceeds {MAX_NORMALIZED_INSTANCE_BYTES} byte limit"),
+        ));
     }
-    validate_normalized_instance(&manifest_path, identity, &manifest, &units)?;
     Ok(ValidatedNormalizedInstance {
         manifest,
         units,
         verified_bytes: total_bytes,
     })
+}
+
+/// Load the authoritative immutable normalized unit objects selected by an
+/// already supplied (and therefore externally pinned) manifest. Mutable
+/// `objects/normalized_units/.../<unit_ref>.json` files are deliberately not
+/// consulted.
+pub fn load_validated_normalized_units_from_manifest(
+    kio_dir: impl AsRef<Path>,
+    manifest: &NormalizedInstanceManifest,
+) -> Result<Vec<NormalizedUnitObject>> {
+    load_validated_normalized_units_from_manifest_with_size(
+        kio_dir.as_ref(),
+        Path::new("normalized manifest"),
+        manifest,
+    )
+    .map(|(units, _)| units)
+}
+
+fn load_validated_normalized_units_from_manifest_with_size(
+    kio_dir: &Path,
+    source_path: &Path,
+    manifest: &NormalizedInstanceManifest,
+) -> Result<(Vec<NormalizedUnitObject>, u64)> {
+    let identity = NormalizedInstanceIdentity {
+        raw_hash: manifest.raw_hash.clone(),
+        tool_profile_hash: manifest.tool_profile_hash.clone(),
+        gen: manifest.gen,
+    };
+    validate_manifest_identity(source_path, &identity, manifest)?;
+    validate_manifest_unit_object_pins(source_path, manifest)?;
+
+    let store = ObjectStore::new(kio_dir);
+    let mut total_bytes = 0_u64;
+    let mut units = Vec::new();
+    for entry in manifest
+        .units
+        .iter()
+        .filter(|entry| entry.status == UnitStatus::Done)
+    {
+        let hash = entry
+            .unit_object_hash
+            .as_deref()
+            .expect("validated done normalized-unit hash");
+        let bytes = store
+            .read_content_object_bytes(
+                ContentObjectKind::NormalizedUnit,
+                hash,
+                MAX_NORMALIZED_UNIT_BYTES,
+            )
+            .map_err(|err| normalized_corrupt(source_path, err.to_string()))?;
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        if total_bytes > MAX_NORMALIZED_INSTANCE_BYTES {
+            return Err(normalized_corrupt(
+                source_path,
+                format!("normalized instance exceeds {MAX_NORMALIZED_INSTANCE_BYTES} byte limit"),
+            ));
+        }
+        let unit: NormalizedUnitObject = serde_json::from_slice(&bytes)
+            .map_err(|err| normalized_corrupt(source_path, err.to_string()))?;
+        if normalized_unit_object_hash(&unit)? != hash {
+            return Err(normalized_corrupt(
+                source_path,
+                "normalized unit CAS object does not match its manifest hash",
+            ));
+        }
+        let canonical = canonical_normalized_unit_object_bytes(&unit)?;
+        if canonical != bytes {
+            return Err(normalized_corrupt(
+                source_path,
+                "normalized unit CAS object is not canonical JSON",
+            ));
+        }
+        units.push(unit);
+    }
+    validate_normalized_instance(source_path, &identity, manifest, &units)?;
+    Ok((units, total_bytes))
 }
 
 /// Validate already-deserialized normalized state. This is also used by the
@@ -819,6 +922,7 @@ pub fn validate_normalized_instance(
             ));
         }
     }
+    validate_manifest_unit_object_pins(source_path, manifest)?;
 
     if units.len() != done_by_key.len() {
         return Err(normalized_corrupt(
@@ -850,6 +954,53 @@ pub fn validate_normalized_instance(
         }
     }
     Ok(())
+}
+
+fn validate_manifest_unit_object_pins(
+    source_path: &Path,
+    manifest: &NormalizedInstanceManifest,
+) -> Result<()> {
+    for entry in &manifest.units {
+        match (entry.status, entry.unit_object_hash.as_deref()) {
+            (UnitStatus::Done, Some(hash)) if kio_core::cas::is_hash(hash) => {}
+            (UnitStatus::Done, _) => {
+                return Err(normalized_corrupt(
+                    source_path,
+                    "done manifest entry must pin a valid normalized unit object hash",
+                ));
+            }
+            (UnitStatus::Failed, None) => {}
+            (UnitStatus::Failed, Some(_)) => {
+                return Err(normalized_corrupt(
+                    source_path,
+                    "failed manifest entry must have a null normalized unit object hash",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_normalized_unit_object_bytes(unit: &NormalizedUnitObject) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(unit).map_err(|err| PipelineError::Schema(err.to_string()))?;
+    canonical_json_bytes(&value).map_err(|err| PipelineError::Schema(err.to_string()))
+}
+
+/// Hash the canonical immutable normalized-unit object bytes.
+///
+/// Chunk identity and every manifest pin must use this exact JCS computation;
+/// keeping it here prevents writers and loaders from silently drifting to
+/// different JSON representations.
+pub fn normalized_unit_object_hash(unit: &NormalizedUnitObject) -> Result<String> {
+    Ok(cas_hash_bytes(&canonical_normalized_unit_object_bytes(
+        unit,
+    )?))
+}
+
+fn canonical_normalized_manifest_bytes(manifest: &NormalizedInstanceManifest) -> Result<Vec<u8>> {
+    let value =
+        serde_json::to_value(manifest).map_err(|err| PipelineError::Schema(err.to_string()))?;
+    canonical_json_bytes(&value).map_err(|err| PipelineError::Schema(err.to_string()))
 }
 
 fn validate_manifest_identity(
@@ -983,12 +1134,52 @@ pub fn persist_normalized_instance(
     kio_dir: impl AsRef<Path>,
     manifest: &NormalizedInstanceManifest,
     units: &[NormalizedUnitObject],
-) -> Result<()> {
+) -> Result<NormalizedInstanceManifest> {
     let identity = NormalizedInstanceIdentity {
         raw_hash: manifest.raw_hash.clone(),
         tool_profile_hash: manifest.tool_profile_hash.clone(),
         gen: manifest.gen,
     };
+    // First prove the complete future manifest/unit tuple valid without
+    // publishing anything, then persist its immutable bodies before the
+    // mutable per-instance cache files.
+    let mut stamped = manifest.clone();
+    let mut canonical_units = Vec::new();
+    for entry in &mut stamped.units {
+        match entry.status {
+            UnitStatus::Done => {
+                let unit = units
+                    .iter()
+                    .find(|unit| unit.unit_key == entry.unit_key)
+                    .ok_or_else(|| {
+                        normalized_corrupt(
+                            kio_dir.as_ref(),
+                            "done manifest entry has no normalized unit object",
+                        )
+                    })?;
+                let bytes = canonical_normalized_unit_object_bytes(unit)?;
+                let hash = normalized_unit_object_hash(unit)?;
+                entry.unit_object_hash = Some(hash);
+                canonical_units.push(bytes);
+            }
+            UnitStatus::Failed => {
+                if entry.unit_object_hash.is_some() {
+                    return Err(normalized_corrupt(
+                        kio_dir.as_ref(),
+                        "failed manifest entry must have a null normalized unit object hash",
+                    ));
+                }
+            }
+        }
+    }
+    validate_normalized_instance(
+        kio_dir.as_ref().join("manifest.json"),
+        &identity,
+        &stamped,
+        units,
+    )?;
+    let canonical_manifest_bytes = canonical_normalized_manifest_bytes(&stamped)?;
+    let manifest = &stamped;
     validate_normalized_instance(
         kio_dir.as_ref().join("manifest.json"),
         &identity,
@@ -1045,6 +1236,19 @@ pub fn persist_normalized_instance(
         )?;
         serialized_units.push((name, bytes));
     }
+
+    // The mutable cache is published only after its complete representation
+    // fits the loader's bounds. The same preflight also prevents an oversized
+    // request from leaving otherwise unreachable immutable CAS objects behind.
+    let store = ObjectStore::new(kio_dir.as_ref());
+    for bytes in &canonical_units {
+        store
+            .write_content_object(ContentObjectKind::NormalizedUnit, bytes)
+            .map_err(|err| normalized_corrupt(kio_dir.as_ref(), err.to_string()))?;
+    }
+    store
+        .write_content_object(ContentObjectKind::Manifest, &canonical_manifest_bytes)
+        .map_err(|err| normalized_corrupt(kio_dir.as_ref(), err.to_string()))?;
 
     let expected_view = build_normalized_view(manifest, units);
 
@@ -1143,7 +1347,7 @@ pub fn persist_normalized_instance(
             "published normalized view does not match the request",
         ));
     }
-    Ok(())
+    Ok(stamped)
 }
 
 fn atomic_temp_path(path: &Path) -> PathBuf {
@@ -1563,7 +1767,7 @@ mod tests {
             tool_profile_hash: tool_profile_hash.clone(),
             gen: 7,
         };
-        let manifest = NormalizedInstanceManifest {
+        let mut manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: tool_profile_hash.clone(),
             gen: 7,
@@ -1576,6 +1780,7 @@ mod tests {
                 unit_type: UnitType::Page,
                 status: UnitStatus::Done,
                 prepared_hash: prepared_hash.clone(),
+                unit_object_hash: None,
                 error_kind: None,
             }],
             generated_at: "2026-07-12T00:00:00Z".to_owned(),
@@ -1601,6 +1806,7 @@ mod tests {
             reused_from: None,
             generated_at: "2026-07-12T00:00:00Z".to_owned(),
         }];
+        manifest.units[0].unit_object_hash = Some(normalized_unit_object_hash(&units[0]).unwrap());
         (identity, manifest, units)
     }
 
@@ -1619,8 +1825,8 @@ mod tests {
     }
 
     #[test]
-    fn ct4_bbox_006_legacy_normalized_unit_defaults_metadata_empty() {
-        let legacy = serde_json::json!({
+    fn ct4_bbox_006_normalized_unit_requires_metadata_but_accepts_empty_object() {
+        let valid = serde_json::json!({
             "unit_key": "page:1",
             "unit_type": "page",
             "raw_hash": format!("sha256:{}", "a".repeat(64)),
@@ -1629,11 +1835,20 @@ mod tests {
             "gen": 0,
             "mode": "full",
             "markdown": "legacy",
+            "metadata": {},
             "reused_from": null,
             "generated_at": "2026-07-13T00:00:00Z"
         });
-        let unit: NormalizedUnitObject = serde_json::from_value(legacy).unwrap();
+        let unit: NormalizedUnitObject = serde_json::from_value(valid.clone()).unwrap();
         assert!(unit.metadata.is_empty());
+
+        let mut missing_metadata = valid.clone();
+        missing_metadata.as_object_mut().unwrap().remove("metadata");
+        assert!(serde_json::from_value::<NormalizedUnitObject>(missing_metadata).is_err());
+
+        let mut unknown_field = valid;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<NormalizedUnitObject>(unknown_field).is_err());
     }
 
     #[test]
@@ -1692,6 +1907,7 @@ mod tests {
                     unit_type: UnitType::Page,
                     status: UnitStatus::Done,
                     prepared_hash: prepared_hash.clone(),
+                    unit_object_hash: None,
                     error_kind: None,
                 },
                 NormalizedUnitManifestEntry {
@@ -1701,6 +1917,7 @@ mod tests {
                     unit_type: UnitType::Page,
                     status: UnitStatus::Failed,
                     prepared_hash: prepared_hash.clone(),
+                    unit_object_hash: None,
                     error_kind: Some("invalid_input".to_owned()),
                 },
                 NormalizedUnitManifestEntry {
@@ -1710,6 +1927,7 @@ mod tests {
                     unit_type: UnitType::Page,
                     status: UnitStatus::Done,
                     prepared_hash: prepared_hash.clone(),
+                    unit_object_hash: None,
                     error_kind: None,
                 },
             ],
@@ -2365,12 +2583,46 @@ mod tests {
                 "unit_type": "page",
                 "status": "done",
                 "prepared_hash": format!("sha256:{}", "c".repeat(64)),
+                "unit_object_hash": format!("sha256:{}", "d".repeat(64)),
                 "error_kind": null
             })
         };
         let parsed: NormalizedUnitManifestEntry =
             serde_json::from_value(entry(&canonical)).unwrap();
         assert_eq!(parsed.unit_ref, canonical);
+
+        let mut missing_pin = entry(&canonical);
+        missing_pin
+            .as_object_mut()
+            .unwrap()
+            .remove("unit_object_hash");
+        assert!(serde_json::from_value::<NormalizedUnitManifestEntry>(missing_pin).is_err());
+
+        let mut done_with_null_pin = entry(&canonical);
+        done_with_null_pin["unit_object_hash"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<NormalizedUnitManifestEntry>(done_with_null_pin).is_err());
+
+        let mut done_with_invalid_pin = entry(&canonical);
+        done_with_invalid_pin["unit_object_hash"] = serde_json::json!("sha256:not-a-digest");
+        assert!(
+            serde_json::from_value::<NormalizedUnitManifestEntry>(done_with_invalid_pin).is_err()
+        );
+
+        let mut failed_with_pin = entry(&canonical);
+        failed_with_pin["status"] = serde_json::json!("failed");
+        assert!(serde_json::from_value::<NormalizedUnitManifestEntry>(failed_with_pin).is_err());
+
+        let mut failed_missing_pin = entry(&canonical);
+        failed_missing_pin["status"] = serde_json::json!("failed");
+        failed_missing_pin
+            .as_object_mut()
+            .unwrap()
+            .remove("unit_object_hash");
+        assert!(serde_json::from_value::<NormalizedUnitManifestEntry>(failed_missing_pin).is_err());
+
+        let mut unknown_field = entry(&canonical);
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<NormalizedUnitManifestEntry>(unknown_field).is_err());
 
         for bad in [
             "/tmp/foreign-unit".to_owned(),
@@ -2390,6 +2642,12 @@ mod tests {
     fn cand_061_provenance_validator_rebinds_complete_tuple() {
         let (identity, manifest, units) = normalized_fixture();
         validate_normalized_instance("manifest.json", &identity, &manifest, &units).unwrap();
+
+        let mut unknown_manifest_field = serde_json::to_value(&manifest).unwrap();
+        unknown_manifest_field["unexpected"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<NormalizedInstanceManifest>(unknown_manifest_field).is_err()
+        );
 
         let mut bad_manifest = manifest.clone();
         bad_manifest.raw_hash = format!("sha256:{}", "d".repeat(64));
@@ -2470,13 +2728,17 @@ mod tests {
         let mut poisoned = units[0].clone();
         poisoned.prepared_hash = format!("sha256:{}", "d".repeat(64));
         fs::write(&unit_path, serde_json::to_vec(&poisoned).unwrap()).unwrap();
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_err());
+        assert_eq!(
+            load_validated_normalized_instance(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.gen,
+            )
+            .unwrap()
+            .units,
+            units
+        );
     }
 
     #[test]
@@ -2498,7 +2760,7 @@ mod tests {
             identity.gen,
         )
         .unwrap();
-        assert_eq!(budget, loaded.verified_bytes);
+        assert!(budget > loaded.verified_bytes);
 
         let unit_path = normalized_instance_dir(
             dir.path(),
@@ -2528,7 +2790,7 @@ mod tests {
             &identity.tool_profile_hash,
             identity.gen,
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]
@@ -2541,6 +2803,7 @@ mod tests {
         manifest.generated_at = "2026-07-13T00:00:00Z".to_owned();
         units[0].markdown = "retry output".to_owned();
         units[0].generated_at = manifest.generated_at.clone();
+        manifest.units[0].unit_object_hash = Some(normalized_unit_object_hash(&units[0]).unwrap());
         persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
 
         let loaded = load_validated_normalized_instance(
@@ -2560,6 +2823,102 @@ mod tests {
         ))
         .unwrap()
         .contains("retry output"));
+    }
+
+    #[test]
+    fn persist_returns_stamped_manifest_and_publishes_its_canonical_cas_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, mut manifest, units) = normalized_fixture();
+        manifest.units[0].unit_object_hash = None;
+
+        let stamped = persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
+        assert_ne!(stamped, manifest);
+        assert_eq!(
+            stamped.units[0].unit_object_hash,
+            Some(normalized_unit_object_hash(&units[0]).unwrap())
+        );
+
+        let bytes = canonical_normalized_manifest_bytes(&stamped).unwrap();
+        let hash = cas_hash_bytes(&bytes);
+        assert_eq!(
+            ObjectStore::new(dir.path())
+                .read_content_object_bytes(ContentObjectKind::Manifest, &hash, 1024 * 1024)
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn normalized_unit_object_hash_binds_canonical_body_and_identity_fields() {
+        let (_, _, units) = normalized_fixture();
+        let original = normalized_unit_object_hash(&units[0]).unwrap();
+        assert_eq!(
+            original,
+            cas_hash_bytes(&canonical_normalized_unit_object_bytes(&units[0]).unwrap())
+        );
+
+        let mut changed_body = units[0].clone();
+        changed_body.markdown.push_str("\nchanged");
+        assert_ne!(
+            normalized_unit_object_hash(&changed_body).unwrap(),
+            original
+        );
+
+        let mut retargeted = units[0].clone();
+        retargeted.raw_hash = format!("sha256:{}", "f".repeat(64));
+        assert_ne!(normalized_unit_object_hash(&retargeted).unwrap(), original);
+    }
+
+    #[test]
+    fn normalized_unit_pins_are_immutable_and_mutable_cache_is_not_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, mut manifest, mut units) = normalized_fixture();
+        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
+        let old_hash = manifest.units[0].unit_object_hash.clone().unwrap();
+
+        units[0].markdown = "changed same-generation markdown".to_owned();
+        manifest.units[0].unit_object_hash = Some(normalized_unit_object_hash(&units[0]).unwrap());
+        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
+        let new_hash = manifest.units[0].unit_object_hash.clone().unwrap();
+        assert_ne!(old_hash, new_hash);
+        assert!(ObjectStore::new(dir.path())
+            .read_content_object_bytes(
+                ContentObjectKind::NormalizedUnit,
+                &old_hash,
+                MAX_NORMALIZED_UNIT_BYTES
+            )
+            .is_ok());
+
+        let cache_path = normalized_instance_dir(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .join(format!("{}.json", prepared_unit_ref(&units[0].unit_key)));
+        fs::write(&cache_path, b"not authoritative").unwrap();
+        assert_eq!(
+            load_validated_normalized_units_from_manifest(dir.path(), &manifest).unwrap(),
+            units
+        );
+
+        let mut missing_metadata = serde_json::to_value(&units[0]).unwrap();
+        missing_metadata.as_object_mut().unwrap().remove("metadata");
+        let missing_metadata_bytes = canonical_json_bytes(&missing_metadata).unwrap();
+        let missing_metadata_hash = ObjectStore::new(dir.path())
+            .write_content_object(ContentObjectKind::NormalizedUnit, &missing_metadata_bytes)
+            .unwrap();
+        manifest.units[0].unit_object_hash = Some(missing_metadata_hash);
+        assert!(load_validated_normalized_units_from_manifest(dir.path(), &manifest).is_err());
+        manifest.units[0].unit_object_hash = Some(new_hash.clone());
+
+        let cas_path = ObjectStore::new(dir.path())
+            .content_path(ContentObjectKind::NormalizedUnit, &new_hash)
+            .unwrap();
+        fs::write(&cas_path, b"tampered").unwrap();
+        assert!(load_validated_normalized_units_from_manifest(dir.path(), &manifest).is_err());
+        fs::remove_file(&cas_path).unwrap();
+        assert!(load_validated_normalized_units_from_manifest(dir.path(), &manifest).is_err());
     }
 
     #[test]
@@ -2698,7 +3057,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cand_049_validated_loader_rejects_symlinked_unit() {
+    fn cand_049_validated_loader_ignores_symlinked_unit_cache() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2723,11 +3082,11 @@ mod tests {
             &identity.tool_profile_hash,
             identity.gen,
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]
-    fn cand_061_missing_manifest_bound_unit_remains_an_io_error() {
+    fn cand_061_missing_mutable_unit_cache_does_not_affect_pinned_load() {
         let dir = tempfile::tempdir().unwrap();
         let (identity, manifest, units) = normalized_fixture();
         persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
@@ -2740,14 +3099,12 @@ mod tests {
         let name = format!("{}.json", prepared_unit_ref(&manifest.units[0].unit_key));
         fs::remove_file(instance_dir.join(name)).unwrap();
 
-        assert!(matches!(
-            load_validated_normalized_instance(
-                dir.path(),
-                &identity.raw_hash,
-                &identity.tool_profile_hash,
-                identity.gen,
-            ),
-            Err(PipelineError::Io { .. })
-        ));
+        assert!(load_validated_normalized_instance(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .is_ok());
     }
 }

@@ -36,6 +36,7 @@
 //! need QB33/34/64/65's infra first).
 
 use std::fs;
+use std::str::FromStr;
 
 use assert_cmd::Command;
 use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
@@ -685,21 +686,150 @@ fn qb14b_xdg_data_home_fallback_resolves_under_home() {
     );
 }
 
-/// QB15 (weak subset — the child-`.kio`-generation mechanism itself does not
-/// exist yet, per the task's own note): `[scope] index_vcs_repos` is not yet
-/// declared in `config.schema.json`, confirming the spec-gap's premise this
-/// contract pins for later implementation.
+/// QB15: parent scopes remain direct-file-only, while bounded child discovery
+/// makes separate scopes for file-bearing ordinary directories. VCS roots and
+/// their descendants are skipped by default, including a regular `.git`
+/// gitfile; opt-in permits them. Preview reports its plan without mutation.
 #[test]
-fn qb15_index_vcs_repos_schema_key_not_yet_declared() {
-    let schema = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-core/schemas/config.schema.json"
-    ))
-    .unwrap();
+fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("ordinary/nested")).unwrap();
+    fs::create_dir_all(dir.path().join("ignored")).unwrap();
+    fs::write(dir.path().join("ordinary/note.md"), "ordinary").unwrap();
+    fs::write(dir.path().join("ordinary/nested/deep.md"), "nested").unwrap();
+    fs::write(dir.path().join("ignored/private.md"), "ignore me").unwrap();
+    fs::create_dir_all(dir.path().join("git-dir/.git")).unwrap();
+    fs::write(dir.path().join("git-dir/readme.md"), "git dir").unwrap();
+    fs::create_dir_all(dir.path().join("git-file/inner")).unwrap();
+    fs::write(dir.path().join("git-file/.git"), "gitdir: elsewhere\n").unwrap();
+    fs::write(dir.path().join("git-file/inner/readme.md"), "git file").unwrap();
+    #[cfg(unix)]
+    let symlink_victim = {
+        let victim = tempfile::tempdir().unwrap();
+        fs::write(victim.path().join("outside.md"), "must stay outside").unwrap();
+        std::os::unix::fs::symlink(victim.path(), dir.path().join("linked-child")).unwrap();
+        victim
+    };
+    success(&dir, &["init"]);
+    fs::write(dir.path().join(".kioignore"), "ignored\n").unwrap();
+
+    let preview = success(&dir, &["index", "--preview", "--offline"]);
     assert!(
-        !schema.contains("index_vcs_repos"),
-        "index_vcs_repos is not implemented yet; this test must be updated when it lands"
+        !dir.path().join("ordinary/.kio").exists(),
+        "preview must not initialize children"
     );
+    assert!(preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["input_path"] != "ordinary/note.md"));
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ordinary" && row["status"] == "planned"));
+    assert_eq!(preview["estimated_aggregate_file_count"], 2);
+    assert_eq!(preview["estimated_aggregate_size_bytes"], 14);
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ordinary"
+            && row["estimated_file_count"] == 1
+            && row["estimated_size_bytes"] == 8));
+    #[cfg(unix)]
+    assert!(preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "linked-child" && row["status"] == "skipped_symlink"));
+    let indexed = success(&dir, &["index", "--offline", "--approve"]);
+    assert!(dir.path().join("ordinary/.kio").is_dir());
+    assert!(dir.path().join("ordinary/nested/.kio").is_dir());
+    assert!(!dir.path().join("git-dir/.kio").exists());
+    assert!(!dir.path().join("git-file/.kio").exists());
+    assert!(!dir.path().join("ignored/.kio").exists());
+    assert!(!dir.path().join(".test-config/.kio").exists());
+    assert!(!dir.path().join(".test-data/.kio").exists());
+    assert!(!dir.path().join(".test-cache/.kio").exists());
+    #[cfg(unix)]
+    assert!(
+        !symlink_victim.path().join(".kio").exists(),
+        "child discovery must not follow a directory symlink into the victim"
+    );
+    assert!(indexed["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
+    assert!(indexed["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-file" && row["status"] == "skipped_vcs"));
+    let nested = success(&dir, &["search", "nested", "--mode", "text"]);
+    assert!(nested["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["title"] == "deep.md"));
+
+    fs::write(
+        kio_dir(&dir).join("config.toml"),
+        "[scope]\nindex_vcs_repos = true\nignore = [\"ignored\"]\n",
+    )
+    .unwrap();
+    let opted_in = success(&dir, &["index", "--offline", "--approve"]);
+    assert!(dir.path().join("git-dir/.kio").is_dir());
+    assert!(dir.path().join("git-file/inner/.kio").is_dir());
+    assert!(opted_in["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "git-dir" && row["status"] == "indexed"));
+    assert!(opted_in["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["path"] == "ignored" && row["status"] == "skipped_ignored"));
+    assert!(
+        !dir.path().join("git-file/.kio").exists(),
+        "a gitfile marker alone is not file-bearing"
+    );
+}
+
+#[test]
+fn qb15_parent_ignore_is_persisted_and_excludes_child_cas() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("project")).unwrap();
+    fs::write(dir.path().join("project/private.md"), "private").unwrap();
+    fs::write(dir.path().join("project/public.md"), "public").unwrap();
+    success(&dir, &["init"]);
+    fs::write(
+        kio_dir(&dir).join("config.toml"),
+        "[scope]\nignore = [\"project/private.md\"]\n",
+    )
+    .unwrap();
+
+    success(&dir, &["index", "--offline", "--approve"]);
+    let child_kio = dir.path().join("project/.kio");
+    let child_config = fs::read_to_string(child_kio.join("config.toml")).unwrap();
+    assert!(child_config.contains("generated_parent_policy"));
+    assert!(child_config.contains("scope_prefix = \"project\""));
+    let store = ObjectStore::new(&child_kio);
+    assert!(store
+        .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
+        .unwrap()
+        .exists());
+    assert!(!store
+        .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
+        .unwrap()
+        .exists());
 }
 
 /// QB19 [regression-lock, structural]: scope-local `access.jsonl` and
@@ -726,32 +856,20 @@ fn qb19_access_jsonl_shares_device_global_rotation_writer() {
     assert_eq!(append_search_logs.matches("append_jsonl_cli(").count(), 2);
 }
 
-/// QB20 [regression-lock]: a symlink inside the scope is never ingested —
-/// `open_scope_file_nofollow`'s lstat -> `O_NOFOLLOW` open -> fstat-identity
-/// 3-stage check (scope.rs) backs this; functionally, an existing sibling
-/// test (`contract_cli.rs::s5_symlink_is_skipped_with_warning`) already
-/// covers the CLI-visible half. This test pins the structural mechanism.
+/// QB20: a symlink inside the scope is never ingested.
+#[cfg(unix)]
 #[test]
-fn qb20_symlink_ingest_uses_lstat_then_nofollow_open_then_fstat_identity() {
-    let source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-core/src/scope.rs"
-    ))
-    .unwrap();
-    let body = source
-        .split("fn open_scope_file_nofollow(")
-        .nth(1)
-        .and_then(|rest| rest.split("\nfn ").next())
-        .expect("open_scope_file_nofollow body");
-    assert!(body.contains("symlink_metadata"), "must lstat first");
-    assert!(
-        body.contains("configure_scope_no_follow"),
-        "must open with O_NOFOLLOW semantics"
-    );
-    assert!(
-        body.contains("same_scope_file_identity") || body.contains("same_identity"),
-        "must verify post-open identity (fstat-equivalent) before trusting the read"
-    );
+fn qb20_symlink_ingest_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("outside.md");
+    fs::write(&target, "# Outside\n\nsymlink-only token\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("linked.md")).unwrap();
+    success(&dir, &["init"]);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(&dir, &["search", "symlink-only", "--mode", "text"]);
+    assert!(search["results"].as_array().unwrap().is_empty(), "{search}");
 }
 
 /// QB23: `kio index` and `kio open` both refuse a bare, argument-less
@@ -778,63 +896,79 @@ fn qb23_index_and_open_reject_bare_invocation_exit_2() {
 // §C — J 領域 (QB25-QB49, exit/error/log/config/CAS-schema slice)
 // ===========================================================================
 
-/// QB31 [regression-lock]: `chunk_fts`'s `tokenize=` clause is always an
-/// interpolated, executable value (never a literal placeholder string), and
-/// `chunk_vec`'s embedding column is a fixed `float[768] distance_metric=cosine`.
+/// QB31: a newly initialized source index has executable FTS/vector tables
+/// with the frozen tokenizer and embedding schema.
 #[test]
-fn qb31_chunk_fts_and_chunk_vec_ddl_are_executable() {
-    let source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-index/src/fts.rs"
-    ))
-    .unwrap();
-    assert!(source.contains("tokenize='{tokenizer}'"));
+fn qb31_chunk_fts_and_chunk_vec_schema_is_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    success(&dir, &["init"]);
+    success(&dir, &["index", "--offline", "--approve"]);
+    let conn = rusqlite::Connection::open(kio_dir(&dir).join("index/sqlite.db")).unwrap();
+    let table_sql = |name: &str| {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    let fts = table_sql("chunk_fts");
+    assert!(fts.contains("tokenize='trigram'"), "{fts}");
+    let vectors = table_sql("chunk_vec");
     assert!(
-        !source.contains("tokenize='<"),
-        "no literal placeholder token"
+        vectors.contains("embedding float[768] distance_metric=cosine"),
+        "{vectors}"
     );
-    assert!(source.contains("embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine"));
-    assert!(source.contains("pub const CHUNK_VEC_DIMENSIONS: usize = 768;"));
+    assert!(table_sql("image_vec").contains("embedding float[768]"));
 }
 
-/// QB37 [regression-lock, 3 subclaims compressed into 1]: (a) the legacy
-/// `files`/`normalization_runs`/`prepared_units`/`commits` SQLite tables are
-/// not defined anywhere in the schema; (b) `unit_ref` hashes
-/// `unit_key.as_bytes()` directly (Rust `&str`'s UTF-8 guarantee IS the
-/// "regulated normalization, then UTF-8 bytes" preimage rule); (c)
-/// `CommitObject::validate` is the sole `commit_type` enforcement point —
-/// there is no SQLite `commits` table to carry a parallel CHECK constraint.
+/// QB37: retired tables stay absent, while unit and commit-type contracts are
+/// enforced by their public runtime APIs.
 #[test]
-fn qb37_legacy_tables_absent_unit_ref_is_utf8_bytes_commit_type_single_validator() {
-    let fts_source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-index/src/fts.rs"
-    ))
-    .unwrap();
+fn qb37_legacy_tables_are_absent_from_runtime_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    success(&dir, &["init"]);
+    success(&dir, &["index", "--offline", "--approve"]);
+    let conn = rusqlite::Connection::open(kio_dir(&dir).join("index/sqlite.db")).unwrap();
     for table in ["files", "normalization_runs", "prepared_units", "commits"] {
-        assert!(
-            !fts_source.contains(&format!("CREATE TABLE IF NOT EXISTS {table} "))
-                && !fts_source.contains(&format!("CREATE TABLE {table} ")),
-            "table {table} must not exist"
-        );
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!exists, "retired table {table} must not exist");
     }
 
-    let prepare_source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-pipeline/src/prepare.rs"
-    ))
-    .unwrap();
-    assert!(prepare_source.contains("unit_key.as_bytes()"));
-
-    let dag_source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-core/src/dag.rs"
-    ))
-    .unwrap();
-    assert!(dag_source.contains("pub fn validate(&self) -> Result<()>"));
+    assert_eq!(
+        kio_pipeline::prepare::unit_ref("ページ:1"),
+        "92a7e22e53c4cde7",
+        "unit references are frozen SHA-256 prefixes of UTF-8 unit keys"
+    );
     assert!(
-        !fts_source.contains("commit_type"),
-        "SQLite side must not carry a parallel commit_type constraint"
+        kio_core::dag::CommitType::from_str("invalid").is_err(),
+        "invalid commit types must be rejected before a commit is constructed"
+    );
+    let hash = format!("sha256:{}", "a".repeat(64));
+    let invalid_purged = kio_core::dag::CommitObject {
+        commit_type: kio_core::dag::CommitType::Purged,
+        created_at: "2026-01-01T00:00:00Z".to_owned(),
+        message: "purge".to_owned(),
+        object_type: "commit".to_owned(),
+        parents: Vec::new(),
+        stats: kio_core::dag::CommitStats {
+            files_added: 0,
+            files_modified: 0,
+            files_deleted: 0,
+        },
+        tool_lock_hash: hash.clone(),
+        tree: hash,
+        purged_raws: Vec::new(),
+    };
+    assert!(
+        invalid_purged.validate().is_err(),
+        "commit-type-specific invariants are validated at the public object boundary"
     );
 }
 

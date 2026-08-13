@@ -15,7 +15,8 @@ pub const MAX_COMMIT_PARENTS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NormalizeRef {
     pub tool_profile_hash: String,
-    #[serde(default)]
+    /// Generation is part of the normalized-instance identity. It is required
+    /// whenever `normalize` is present; raw-only entries omit `normalize`.
     pub gen: u64,
     /// PB04 (step4b-contract-tests-p2b.md §B; 03-data-model.md §8, tree
     /// schema v2): content hash of this (raw_hash, tool_profile_hash,
@@ -402,7 +403,6 @@ pub enum CommitType {
     Manual,
     Auto,
     Imported,
-    Migrated,
     Repaired,
     Merged,
     Purged,
@@ -416,7 +416,6 @@ impl FromStr for CommitType {
             "manual" => Ok(Self::Manual),
             "auto" => Ok(Self::Auto),
             "imported" => Ok(Self::Imported),
-            "migrated" => Ok(Self::Migrated),
             "repaired" => Ok(Self::Repaired),
             "merged" => Ok(Self::Merged),
             "purged" => Ok(Self::Purged),
@@ -431,7 +430,6 @@ impl fmt::Display for CommitType {
             Self::Manual => "manual",
             Self::Auto => "auto",
             Self::Imported => "imported",
-            Self::Migrated => "migrated",
             Self::Repaired => "repaired",
             Self::Merged => "merged",
             Self::Purged => "purged",
@@ -449,7 +447,7 @@ pub enum GcPolicy {
 #[must_use]
 pub const fn gc_policy(commit_type: CommitType) -> GcPolicy {
     match commit_type {
-        CommitType::Auto | CommitType::Migrated | CommitType::Repaired => GcPolicy::Shallow,
+        CommitType::Auto | CommitType::Repaired => GcPolicy::Shallow,
         CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => {
             GcPolicy::None
         }
@@ -460,7 +458,7 @@ pub const fn gc_policy(commit_type: CommitType) -> GcPolicy {
 pub const fn protected(commit_type: CommitType) -> bool {
     match commit_type {
         CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => true,
-        CommitType::Auto | CommitType::Migrated | CommitType::Repaired => false,
+        CommitType::Auto | CommitType::Repaired => false,
     }
 }
 
@@ -542,19 +540,23 @@ mod tests {
 
     #[test]
     fn semantic_tree_validation_accepts_portable_controls() {
-        // `gen` defaults to 0 when omitted; `manifest_hash` does not default.
+        // A normalized entry names all three identity fields. Raw-only entries
+        // instead omit `normalize` entirely.
         let tree: TreeObject = serde_json::from_value(json!({
             "object_type": "tree",
             "entries": [{
                 "path": "notes.md",
                 "type": "file",
                 "raw_hash": RAW_HASH,
-                "normalize": { "tool_profile_hash": TOOL_HASH, "manifest_hash": MANIFEST_HASH }
+                "normalize": {
+                    "tool_profile_hash": TOOL_HASH,
+                    "gen": 0,
+                    "manifest_hash": MANIFEST_HASH
+                }
             }]
         }))
         .unwrap();
 
-        assert_eq!(tree.entries[0].normalize.as_ref().unwrap().gen, 0);
         assert!(tree.validate().is_ok());
         assert!(build_tree(Vec::new()).unwrap().validate().is_ok());
         assert!(build_tree(vec![valid_entry("raw.txt", RAW_HASH)])

@@ -398,10 +398,33 @@ impl HistoryReader {
     }
 
     pub fn all_parents(&self, start_commit: &str) -> Result<HistoryGraph> {
-        let walk = self.walk(start_commit, ParentMode::All)?;
+        let walk = self.walk_many([start_commit], ParentMode::All)?;
         validate_acyclic(&walk.nodes)?;
         Ok(HistoryGraph {
             start_commit: start_commit.to_owned(),
+            nodes: walk.nodes,
+            visit_order: walk.order,
+            stats: walk.stats,
+        })
+    }
+
+    /// Read the strict all-parent union reachable from every supplied root.
+    ///
+    /// Shared ancestors are decoded and verified once.  Unlike invoking
+    /// [`Self::all_parents`] once per root, the bounds apply to the union and
+    /// any corrupt root or ancestor still fails the entire operation.
+    pub fn all_parents_for_roots(&self, roots: &BTreeSet<String>) -> Result<HistoryGraph> {
+        let start_commit = roots
+            .first()
+            .cloned()
+            .ok_or_else(|| KioError::schema("history root set is empty"))?;
+        let walk = self.walk_many(roots.iter().map(String::as_str), ParentMode::All)?;
+        validate_acyclic(&walk.nodes)?;
+        Ok(HistoryGraph {
+            // `start_commit` remains the legacy single-root accessor. For a
+            // multi-root graph it is the bytewise-first root; callers that
+            // need a particular root must use `node(root)`.
+            start_commit,
             nodes: walk.nodes,
             visit_order: walk.order,
             stats: walk.stats,
@@ -468,9 +491,21 @@ impl HistoryReader {
     }
 
     fn walk(&self, start_commit: &str, mode: ParentMode) -> Result<WalkState> {
+        self.walk_many([start_commit], mode)
+    }
+
+    fn walk_many<'a>(
+        &self,
+        starts: impl IntoIterator<Item = &'a str>,
+        mode: ParentMode,
+    ) -> Result<WalkState> {
         let mut state = WalkState::default();
-        let mut pending = vec![start_commit.to_owned()];
-        let mut scheduled = BTreeSet::from([start_commit.to_owned()]);
+        let scheduled = starts
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let mut pending = scheduled.iter().rev().cloned().collect::<Vec<_>>();
+        let mut scheduled = scheduled;
 
         while let Some(commit_hash) = pending.pop() {
             let (node, next_stats) = self.read_node(&commit_hash, state.stats)?;
@@ -917,6 +952,7 @@ fn history_shallow_error(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1045,6 +1081,37 @@ mod tests {
         let historical = graph.canonical_introduction(&binding).unwrap();
         assert_eq!(historical.commit_hash, side);
         assert_eq!(historical.binding.path, "side.md");
+    }
+
+    #[test]
+    fn all_parent_union_walk_deduplicates_shared_ancestors_and_keeps_all_roots() {
+        let fixture = Fixture::new();
+        let empty = fixture.tree(Vec::new());
+        let root = fixture.commit("root", &empty, Vec::new());
+        let left = fixture.commit("left", &empty, vec![root.clone()]);
+        let right = fixture.commit("right", &empty, vec![root]);
+        let roots = BTreeSet::from([left.clone(), right.clone()]);
+
+        let graph = HistoryReader::new(&fixture.kio_dir)
+            .all_parents_for_roots(&roots)
+            .unwrap();
+
+        assert_eq!(graph.stats().commits, 3);
+        assert!(graph.node(&left).is_some());
+        assert!(graph.node(&right).is_some());
+        assert_eq!(
+            graph
+                .nodes_in_visit_order()
+                .map(|node| node.commit_hash.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+
+        let roots_with_missing = BTreeSet::from([left, hash_bytes(b"missing-root")]);
+        assert!(HistoryReader::new(&fixture.kio_dir)
+            .all_parents_for_roots(&roots_with_missing)
+            .is_err());
     }
 
     #[test]

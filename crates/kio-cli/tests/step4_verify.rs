@@ -1,8 +1,8 @@
 use std::fs;
 
 use assert_cmd::Command;
-use kio_core::cas::{ObjectKind, ObjectStore};
-use kio_core::dag::{CommitObject, CommitStats, CommitType};
+use kio_core::cas::{canonical_json_bytes, ContentObjectKind, ObjectKind, ObjectStore};
+use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_index::aggregator::{AggIndexStatus, AggSelector, Aggregator};
 use serde_json::Value;
@@ -48,25 +48,6 @@ fn fixture() -> (TempDir, Value, String) {
         .unwrap()
         .to_owned();
     (dir, pointer, uri)
-}
-
-fn files_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.file_name().and_then(|leaf| leaf.to_str()) == Some(name) {
-                found.push(path);
-            }
-        }
-    }
-    found
 }
 
 fn write_purged_commit(dir: &TempDir, timestamp: &str, purged_raws: &[String]) -> String {
@@ -473,35 +454,83 @@ fn ct4_verify_and_fsck_accept_valid_tombstone_terminal() {
 
 #[test]
 fn ct4_fsck_checks_failed_prepared_and_metadata_only_image_references() {
-    let (dir, _, _) = fixture();
-    let normalized = dir.path().join(".kio/objects/normalized_units");
-    let manifest_path = files_named(&normalized, "manifest.json").remove(0);
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let (dir, pointer, _) = fixture();
+    let repo = kio_core::scope::Repository::open(dir.path()).unwrap();
+    let parent_hash = pointer["commit"].as_str().unwrap().to_owned();
+    let parent = repo.read_commit(&parent_hash).unwrap();
+    let mut tree = repo.read_tree(&parent.tree).unwrap();
+    let entry = tree
+        .entries
+        .iter_mut()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .unwrap();
+    let normalize = entry.normalize.as_mut().unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &normalize.manifest_hash,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
     let template = manifest["units"][0].clone();
     let failed_key = "failed:image";
     let mut failed = template;
     failed["unit_key"] = Value::from(failed_key);
     failed["unit_ref"] = Value::from(kio_pipeline::prepare::unit_ref(failed_key));
     failed["status"] = Value::from("failed");
+    failed["unit_object_hash"] = Value::Null;
     failed["prepared_hash"] = Value::from(format!("sha256:{}", "e".repeat(64)));
     failed["error_kind"] = Value::from("contract_violation");
     manifest["units"].as_array_mut().unwrap().push(failed);
-    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
-    let unit_path = fs::read_dir(manifest_path.parent().unwrap())
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.extension().and_then(|ext| ext.to_str()) == Some("json") && path != &manifest_path
-        })
+    let unit_hash = manifest["units"][0]["unit_object_hash"].as_str().unwrap();
+    let unit_bytes = store
+        .read_content_object_bytes(
+            ContentObjectKind::NormalizedUnit,
+            unit_hash,
+            8 * 1024 * 1024,
+        )
         .unwrap();
-    let mut unit: Value = serde_json::from_slice(&fs::read(&unit_path).unwrap()).unwrap();
+    let mut unit: Value = serde_json::from_slice(&unit_bytes).unwrap();
     unit["metadata"]["images"] = serde_json::json!([{
         "hash": format!("sha256:{}", "f".repeat(64)),
         "media_type": "image/png"
     }]);
-    fs::write(&unit_path, serde_json::to_vec(&unit).unwrap()).unwrap();
+    let unit_bytes = canonical_json_bytes(&unit).unwrap();
+    let replacement_unit_hash = store
+        .write_content_object(ContentObjectKind::NormalizedUnit, &unit_bytes)
+        .unwrap();
+    manifest["units"][0]["unit_object_hash"] = Value::from(replacement_unit_hash);
+    let manifest_bytes = canonical_json_bytes(&manifest).unwrap();
+    normalize.manifest_hash = store
+        .write_content_object(ContentObjectKind::Manifest, &manifest_bytes)
+        .unwrap();
+
+    let tree = build_tree(tree.entries).unwrap();
+    let (tree_hash, _) = store
+        .write_json(ObjectKind::Tree, &serde_json::to_value(&tree).unwrap())
+        .unwrap();
+    let commit = CommitObject::new(
+        tree_hash,
+        vec![parent_hash],
+        "2026-08-12T00:00:00Z".to_owned(),
+        "fixture: immutable failed and image references".to_owned(),
+        parent.tool_lock_hash,
+        CommitStats {
+            files_added: 0,
+            files_modified: 1,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let (commit_hash, _) = store
+        .write_json(ObjectKind::Commit, &serde_json::to_value(&commit).unwrap())
+        .unwrap();
+    fs::write(repo.kio_dir().join("refs/heads/main"), &commit_hash).unwrap();
+    fs::write(repo.kio_dir().join("HEAD"), &commit_hash).unwrap();
 
     let stdout = kio(&dir, &["repair", "verify-objects"])
         .arg("--json")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_eval.py の軽量単体テスト (Python 標準ライブラリのみ).
+"""Python oracle と Rust evaluator shim の軽量単体テスト.
 
 実行:
     python3 -m unittest eval/test_run_eval.py
@@ -15,7 +15,9 @@
 import hashlib
 import copy
 import json
+import math
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,9 +25,216 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
-import generate_corpus  # noqa: E402
 import replay_history  # noqa: E402
-import run_eval  # noqa: E402
+import python_eval_oracle as run_eval  # noqa: E402
+import run_eval as run_eval_shim  # noqa: E402
+
+
+def _strict_object(value, required, optional=()):
+    if type(value) is not dict:
+        raise ValueError("golden vector object must be a JSON object")
+    actual = set(value)
+    allowed = set(required) | set(optional)
+    if not set(required) <= actual or actual - allowed:
+        raise ValueError("golden vector object has missing or unknown fields")
+
+
+def _strict_string(value):
+    if type(value) is not str:
+        raise ValueError("golden vector string field must be a string")
+
+
+def _strict_u64(value, label):
+    if type(value) is not int or not 0 <= value <= 2**64 - 1:
+        raise ValueError(f"{label} must be a u64")
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _validate_finite_json(value):
+    if type(value) is float and not math.isfinite(value):
+        raise ValueError("golden vectors may only contain finite JSON numbers")
+    if type(value) is list:
+        for item in value:
+            _validate_finite_json(item)
+    elif type(value) is dict:
+        for item in value.values():
+            _validate_finite_json(item)
+
+
+def _validate_golden_vectors(vectors):
+    """Mirror the Rust vector structs' `deny_unknown_fields` boundary."""
+    _strict_object(vectors, {
+        "schema_version", "canonical_json", "slugs", "chunk_identity",
+        "recall", "percentiles",
+    })
+    _validate_finite_json(vectors)
+    if type(vectors["schema_version"]) is not int or vectors["schema_version"] != 1:
+        raise ValueError("unsupported golden vector schema_version")
+    collections = ("canonical_json", "slugs", "chunk_identity", "recall", "percentiles")
+    if any(type(vectors[name]) is not list for name in collections):
+        raise ValueError("golden vector collections must be arrays")
+
+    for case in vectors["canonical_json"]:
+        _strict_object(case, {"name", "value", "canonical_utf8", "sha256", "python_compatible"})
+        for name in ("name", "canonical_utf8", "sha256"):
+            _strict_string(case[name])
+        if type(case["python_compatible"]) is not bool:
+            raise ValueError("python_compatible must be a boolean")
+    for case in vectors["slugs"]:
+        _strict_object(case, {"name", "input", "expected"})
+        for value in case.values():
+            _strict_string(value)
+    chunk_required = {
+        "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
+        "unit_content_hash", "heading_path", "byte_start", "byte_end", "text_hash", "text",
+    }
+    for case in vectors["chunk_identity"]:
+        _strict_object(case, {"name", "chunk", "expected_hash"})
+        _strict_string(case["name"])
+        _strict_string(case["expected_hash"])
+        _strict_object(case["chunk"], chunk_required, {"section_id"})
+        for name in ("raw_hash", "tool_profile_hash", "unit_key", "unit_content_hash", "text_hash", "text"):
+            _strict_string(case["chunk"][name])
+        for name in ("spec_version", "gen", "byte_start", "byte_end"):
+            _strict_u64(case["chunk"][name], f"chunk {name}")
+        if "section_id" in case["chunk"] and case["chunk"]["section_id"] is not None:
+            _strict_string(case["chunk"]["section_id"])
+        if case["chunk"]["spec_version"] != 1:
+            raise ValueError("chunk spec_version must be exactly 1")
+        for name in ("raw_hash", "tool_profile_hash", "unit_content_hash", "text_hash"):
+            if not run_eval.HASH_RE.fullmatch(case["chunk"][name]):
+                raise ValueError(f"chunk {name} must be canonical sha256")
+        if not case["chunk"]["unit_key"]:
+            raise ValueError("chunk unit_key must not be empty")
+        if case["chunk"]["byte_start"] > case["chunk"]["byte_end"]:
+            raise ValueError("chunk byte span must be ordered")
+        if run_eval._hash_bytes(case["chunk"]["text"].encode("utf-8")) != case["chunk"]["text_hash"]:
+            raise ValueError("chunk text_hash must match exact text")
+        if type(case["chunk"]["heading_path"]) is not list or not all(
+                type(value) is str for value in case["chunk"]["heading_path"]):
+            raise ValueError("chunk heading_path must be an array of strings")
+    for case in vectors["recall"]:
+        _strict_object(case, {"name", "expected", "results", "k", "expected_recall"})
+        _strict_string(case["name"])
+        if type(case["expected"]) is not list or type(case["results"]) is not list:
+            raise ValueError("recall expected and results must be arrays")
+        if (type(case["k"]) is not int or case["k"] < 0
+                or type(case["expected_recall"]) not in (int, float)
+                or (type(case["expected_recall"]) is float
+                    and not math.isfinite(case["expected_recall"]))):
+            raise ValueError("recall k and expected_recall have invalid types")
+        for key in case["expected"]:
+            if type(key) is not list or len(key) != 3 or type(key[0]) is not str or any(
+                    value is not None and type(value) is not str for value in key[1:]):
+                raise ValueError("recall expected key must be a 3-tuple")
+        for result in case["results"]:
+            _strict_object(result, {"raw_hash"}, {"section_id", "heading_path", "path_at_commit"})
+            _strict_string(result["raw_hash"])
+            for name in ("section_id", "path_at_commit"):
+                if name in result and result[name] is not None:
+                    _strict_string(result[name])
+            if "heading_path" in result and (
+                    result["heading_path"] is not None and (
+                        type(result["heading_path"]) is not list or not all(
+                            type(value) is str for value in result["heading_path"]))):
+                raise ValueError("recall heading_path must be an array of strings or null")
+    for case in vectors["percentiles"]:
+        _strict_object(case, {"name", "values", "percentile", "expected"})
+        _strict_string(case["name"])
+        if type(case["values"]) is not list:
+            raise ValueError("percentile values must be integer array")
+        for value in case["values"]:
+            _strict_u64(value, "percentile value")
+        if (type(case["percentile"]) not in (int, float)
+                or (type(case["percentile"]) is float and not math.isfinite(case["percentile"]))
+                or not 0 < case["percentile"] <= 1):
+            raise ValueError("percentile must be in the interval (0, 1]")
+        if type(case["expected"]) not in (int, type(None)):
+            raise ValueError("percentile case has invalid numeric fields")
+        if case["expected"] is not None:
+            _strict_u64(case["expected"], "percentile expected")
+
+
+class TestGoldenVectors(unittest.TestCase):
+    """Shared Rust/Python evaluation vectors; Python is only a differential oracle."""
+
+    def test_shared_vectors_match_python_compatible_contracts(self):
+        path = os.path.join(os.path.dirname(__file__), "golden-vectors.json")
+        with open(path, encoding="utf-8") as fh:
+            vectors = json.load(fh, parse_constant=_reject_json_constant)
+        _validate_golden_vectors(vectors)
+
+        for case in vectors["canonical_json"]:
+            self.assertEqual(
+                "sha256:" + hashlib.sha256(case["canonical_utf8"].encode("utf-8")).hexdigest(),
+                case["sha256"], case["name"])
+            # stdlib JSON differs from JCS for floats, so only explicitly
+            # compatible shapes compare serializer output.
+            if case["python_compatible"]:
+                self.assertEqual(
+                    run_eval._canonical_json_bytes(case["value"]),
+                    case["canonical_utf8"].encode("utf-8"), case["name"])
+
+        for case in vectors["slugs"]:
+            self.assertEqual(run_eval.slugify(case["input"]), case["expected"], case["name"])
+        for case in vectors["chunk_identity"]:
+            self.assertEqual(
+                run_eval._chunk_identity_hash(case["chunk"]), case["expected_hash"], case["name"])
+
+        for case in vectors["recall"]:
+            response = {"results": [{"evidence_pointer": result} for result in case["results"]]}
+            expected = {tuple(value) for value in case["expected"]}
+            self.assertEqual(
+                run_eval.recall_at_k(response, expected, case["k"]),
+                case["expected_recall"], case["name"])
+        for case in vectors["percentiles"]:
+            self.assertEqual(
+                run_eval.percentile_nearest_rank(case["values"], case["percentile"]),
+                case["expected"], case["name"])
+
+    def test_vector_schema_rejects_unknown_nested_field(self):
+        with self.assertRaises(ValueError):
+            _validate_golden_vectors({
+                "schema_version": 1,
+                "canonical_json": [], "slugs": [], "chunk_identity": [], "recall": [],
+                "percentiles": [{"name": "bad", "values": [], "percentile": .95,
+                                 "expected": None, "unexpected": True}],
+            })
+
+    def test_vector_schema_rejects_invalid_chunk_contract(self):
+        path = os.path.join(os.path.dirname(__file__), "golden-vectors.json")
+        with open(path, encoding="utf-8") as fh:
+            vectors = json.load(fh, parse_constant=_reject_json_constant)
+        for field, value in (
+                ("spec_version", 2),
+                ("raw_hash", "sha256:not-a-hash"),
+                ("unit_key", ""),
+                ("byte_start", 6),
+                ("text_hash", "sha256:" + "0" * 64)):
+            invalid = copy.deepcopy(vectors)
+            invalid["chunk_identity"][0]["chunk"][field] = value
+            with self.assertRaises(ValueError, msg=field):
+                _validate_golden_vectors(invalid)
+
+    def test_non_finite_json_constants_are_rejected(self):
+        with self.assertRaises(ValueError):
+            json.loads('{"number": NaN}', parse_constant=_reject_json_constant)
+        vectors = {
+            "schema_version": 1,
+            "canonical_json": [{"name": "nonfinite", "value": float("nan"),
+                                "canonical_utf8": "", "sha256": "", "python_compatible": False}],
+            "slugs": [], "chunk_identity": [], "recall": [], "percentiles": [],
+        }
+        with self.assertRaises(ValueError):
+            _validate_golden_vectors(vectors)
+
+    def test_percentile_rejects_out_of_range_values(self):
+        for percentile in (0, -.1, 1.1, float("nan")):
+            with self.assertRaises(ValueError):
+                run_eval.percentile_nearest_rank([1], percentile)
 
 
 class TestSlugify(unittest.TestCase):
@@ -91,6 +300,7 @@ class TestPointerAttestation(unittest.TestCase):
             "tool_profile_hash": self.profile_hash,
             "gen": 3,
             "unit_key": "section:old",
+            "unit_content_hash": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
             "heading_path": ["Old Document", "Historical"],
             "section_id": "old-document/historical",
             "byte_start": 0,
@@ -293,8 +503,8 @@ class TestRecallAtK(unittest.TestCase):
 
 class TestResolver(unittest.TestCase):
     def setUp(self):
-        # generate_corpus.build_manifest() は disk 不要で決定論的に manifest を返す。
-        self.corpus_manifest = generate_corpus.build_manifest()
+        # Rust generator の凍結 fixture に含まれる manifest を使用する。
+        self.corpus_manifest = copy.deepcopy(spec._MANIFEST)
         # history は編集/リネーム/削除の旧内容 (raw_sha256 + sections) を持つ形。
         self.history_manifest = self._synth_history()
         self.resolver = run_eval.Resolver(self.corpus_manifest, self.history_manifest)
@@ -305,9 +515,9 @@ class TestResolver(unittest.TestCase):
                     for s in anchor["sections"]]
 
         def h(scope, file_):
-            a = next(a for a in spec.ANCHORS
-                     if a["scope"] == scope and a["file"] == file_)
-            raw = hashlib.sha256(spec.render_anchor(a).encode("utf-8")).hexdigest()
+            a = spec.anchor_by_key(scope, file_)
+            self.assertIsNotNone(a)
+            raw = a["raw_sha256"]
             return raw, secs(a)
 
         renamed = []
@@ -329,10 +539,9 @@ class TestResolver(unittest.TestCase):
         return {"renamed": renamed, "edited": edited, "deleted": deleted}
 
     def _expected_raw(self, scope, file_):
-        a = next(a for a in spec.ANCHORS
-                 if a["scope"] == scope and a["file"] == file_)
-        return "sha256:" + hashlib.sha256(
-            spec.render_anchor(a).encode("utf-8")).hexdigest()
+        a = spec.anchor_by_key(scope, file_)
+        self.assertIsNotNone(a)
+        return "sha256:" + a["raw_sha256"]
 
     def test_m3_1_stable(self):
         # QB24/裁定4: resolve_one は (raw_hash, section_id, path_at_commit) の
@@ -456,162 +665,138 @@ class TestUtf8KioSubprocesses(unittest.TestCase):
         self.assertEqual(kwargs["errors"], "strict")
 
 
-class TestStep4EvalGates(unittest.TestCase):
-    @staticmethod
-    def _record(results, expected_set=None):
-        if expected_set is None:
-            # QB24/裁定4: 3 要素射影 (raw_hash, section, path_at_commit).
-            expected_set = {
-                (result["evidence_pointer"]["raw_hash"],
-                 run_eval._pointer_section(result["evidence_pointer"]),
-                 result["evidence_pointer"].get("path_at_commit"))
-                for result in results
-            }
-        return {"response": {"results": results}, "expected_set": expected_set}
+class TestRustEvaluatorWrapper(unittest.TestCase):
+    """The legacy Python entry point must only forward to Rust."""
 
-    def _history(self):
-        history = {
-            "replay": "eval/replay_history.py",
-            "seed": spec.SEED,
-            "scopes": list(spec.SCOPES),
-            "renamed": copy.deepcopy(spec.HISTORY["renames"]),
-            "edited": copy.deepcopy(spec.HISTORY["edits"]),
-            "deleted": copy.deepcopy(spec.HISTORY["deletes"]),
-            "verified": {},
-        }
-        for manifest_key in ("edited", "renamed", "deleted"):
-            file_field = "old_file" if manifest_key == "renamed" else "file"
-            for entry in history[manifest_key]:
-                anchor = run_eval._history_anchor(entry["scope"], entry[file_field])
-                entry["raw_sha256"] = hashlib.sha256(
-                    spec.render_anchor(anchor).encode("utf-8")).hexdigest()
-                entry["sections"] = [
-                    {"slug": section["slug"], "heading": section["heading"]}
-                    for section in anchor["sections"]
-                ]
-        for scope in spec.SCOPES:
-            steps = ["baseline"]
-            if any(item["scope"] == scope for item in spec.HISTORY["edits"]):
-                steps.append("edit")
-            if any(item["scope"] == scope for item in spec.HISTORY["renames"]):
-                steps.append("rename")
-            if any(item["scope"] == scope for item in spec.HISTORY["deletes"]):
-                steps.append("delete")
-            count = 2 * len(steps)
-            history["verified"][scope] = {
-                "steps": steps,
-                "commit_count": count,
-                "messages": run_eval._expected_history_messages(scope),
-            }
-        return history
+    def _stub(self, directory, exit_code=17):
+        path = os.path.join(directory, "evaluator-stub")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "print('stdout:' + '|'.join(sys.argv[1:]))\n"
+                "print('stderr:' + '|'.join(sys.argv[1:]), file=sys.stderr)\n"
+                f"raise SystemExit({exit_code})\n")
+        os.chmod(path, 0o755)
+        return path
 
-    def test_history_manifest_structure_accepts_exact_and_rejects_stale(self):
-        history = self._history()
-        self.assertEqual(run_eval.validate_history_manifest(history), [])
-        stale = copy.deepcopy(history)
-        stale["seed"] += 1
-        stale["verified"].pop(spec.SCOPES[-1])
-        problems = run_eval.validate_history_manifest(stale)
-        self.assertTrue(any("seed" in problem for problem in problems))
-        self.assertTrue(any("scope set" in problem for problem in problems))
+    def _run_wrapper(self, cwd, env, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "run_eval.py"), *args],
+            cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
 
-        corrupt = copy.deepcopy(history)
-        corrupt["edited"][0]["raw_sha256"] = "not-a-hash"
-        corrupt["renamed"][0]["sections"][0]["slug"] = "stale"
-        corrupt["verified"][spec.SCOPES[0]]["messages"][0] = "wrong"
-        problems = run_eval.validate_history_manifest(corrupt)
-        self.assertTrue(any("raw_sha256" in problem for problem in problems))
-        self.assertTrue(any("sections" in problem for problem in problems))
-        self.assertTrue(any("messages" in problem for problem in problems))
+    def test_override_forwards_argv_streams_exit_and_works_from_other_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            stub = self._stub(directory)
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = stub
+            completed = self._run_wrapper(directory, env, "--scenario", "M3-1", "--dry-run")
+        self.assertEqual(completed.returncode, 17)
+        self.assertEqual(completed.stdout, "stdout:--scenario|M3-1|--dry-run\n")
+        self.assertEqual(completed.stderr, "stderr:--scenario|M3-1|--dry-run\n")
 
-    def test_head_only_point_eight_one_two_five_cannot_false_pass_m3_2(self):
-        history = self._history()
-        # The aggregate score 13/16 = .8125 clears the numeric threshold, but none
-        # of the three edited-away old identities appears.
-        self.assertGreaterEqual(13 / 16, run_eval.RECALL_TARGET)
-        coverage = run_eval.assess_history_coverage({"M3-2": []}, history)
-        self.assertEqual(len(coverage["edited_old_missing"]), 3)
-        self.assertFalse(coverage["passes_m3_2"])
+    def test_missing_override_fails_without_python_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = os.path.join(directory, "missing")
+            completed = self._run_wrapper(directory, env, "--dry-run")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Rust evaluator kio-eval", completed.stderr)
 
-    def test_all_edited_old_identities_are_required(self):
-        history = self._history()
-        results = []
-        for entry in history["edited"]:
-            results.append(_pointer("sha256:" + entry["raw_sha256"], section_id="x/y"))
-        coverage = run_eval.assess_history_coverage(
-            {"M3-2": [self._record(results)]}, history)
-        self.assertEqual(coverage["edited_old_missing"], [])
+    def test_repository_binary_resolves_from_foreign_cwd(self):
+        # Keep the unit test independent of an existing Cargo build while
+        # proving resolution is repository-rooted rather than cwd-rooted.
+        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
+            executable = "kio-eval.exe" if os.name == "nt" else "kio-eval"
+            binary = os.path.join(directory, "target", "debug", executable)
+            os.makedirs(os.path.dirname(binary))
+            with open(binary, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(binary, 0o755)
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(run_eval_shim, "REPO_ROOT", directory):
+                self.assertEqual(run_eval_shim.evaluator_binary(), binary)
 
-        noise = run_eval.assess_history_coverage(
-            {"M3-2": [self._record(results, {("sha256:other", "y", None)})]}, history)
-        self.assertEqual(len(noise["edited_old_missing"]), 3)
 
-    def test_rename_requires_old_and_new_snapshot_paths_with_current_alias(self):
-        history = self._history()
-        responses = []
-        for entry in history["renamed"]:
-            raw_hash = "sha256:" + entry["raw_sha256"]
-            results = []
-            for path_at_commit in (entry["old_file"], entry["new_file"]):
-                result = _pointer(raw_hash, section_id="x/y")
-                result["evidence_pointer"]["path_at_commit"] = path_at_commit
-                result["current_paths"] = [entry["new_file"]]
-                result["current_path"] = entry["new_file"]
-                results.append(result)
-            responses.append(self._record(results))
-        coverage = run_eval.assess_history_coverage(
-            {"M3-2": responses}, history)
-        self.assertEqual(coverage["rename_failures"], [])
+class TestRustGeneratorWrapper(unittest.TestCase):
+    """The legacy corpus command must be a transparent Rust subcommand shim."""
 
-        responses[0]["response"]["results"][0]["current_paths"] = [
-            history["renamed"][0]["old_file"]]
-        stale = run_eval.assess_history_coverage(
-            {"M3-2": responses}, history)
-        self.assertTrue(stale["rename_failures"])
+    def _stub(self, directory, exit_code=17):
+        path = os.path.join(directory, "evaluator-stub")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "print('stdout:' + '|'.join(sys.argv[1:]))\n"
+                "print('stderr:' + '|'.join(sys.argv[1:]), file=sys.stderr)\n"
+                f"raise SystemExit({exit_code})\n")
+        os.chmod(path, 0o755)
+        return path
 
-    def test_every_deleted_identity_is_required(self):
-        history = self._history()
-        results = [
-            _pointer("sha256:" + entry["raw_sha256"], section_id="x/y")
-            for entry in history["deleted"]
-        ]
-        coverage = run_eval.assess_history_coverage(
-            {"M3-3": [self._record(results)]}, history)
-        self.assertEqual(coverage["deleted_missing"], [])
-        self.assertTrue(coverage["passes_m3_3"])
+    def _run_wrapper(self, cwd, env, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "generate_corpus.py"), *args],
+            cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
 
-        incomplete = run_eval.assess_history_coverage(
-            {"M3-3": [self._record(results[:-1])]}, history)
-        self.assertEqual(len(incomplete["deleted_missing"]), 1)
-        self.assertFalse(incomplete["passes_m3_3"])
+    def test_override_forwards_subcommand_argv_streams_and_exit(self):
+        with tempfile.TemporaryDirectory(prefix="kio-generator-wrapper-") as directory:
+            stub = self._stub(directory)
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = stub
+            completed = self._run_wrapper(directory, env, "--out", "target", "--force")
+        self.assertEqual(completed.returncode, 17)
+        self.assertEqual(completed.stdout, "stdout:generate-corpus|--out|target|--force\n")
+        self.assertEqual(completed.stderr, "stderr:generate-corpus|--out|target|--force\n")
 
-    def test_evidence_fields(self):
-        bad = {"results": [_pointer("sha256:a", section_id="x/y")]}
-        self.assertTrue(run_eval.evidence_problems(bad))
-        pointer = {
-            "schema_version": 1,
-            "commit": "sha256:c",
-            "raw_hash": "sha256:r",
-            "tool_profile_hash": "sha256:t",
-            "chunk_hash": "sha256:h",
-            "scope_id": "scope_1",
-        }
-        self.assertEqual(run_eval.evidence_problems(
-            {"results": [{"evidence_pointer": pointer}]}), [])
+    def test_missing_override_fails_without_python_generator_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="kio-generator-wrapper-") as directory:
+            env = os.environ.copy()
+            env["KIO_EVAL_BIN"] = os.path.join(directory, "missing")
+            completed = self._run_wrapper(directory, env, "--out", "target")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Rust evaluator kio-eval", completed.stderr)
 
-    def test_scenario_specific_latency_boundaries(self):
-        self.assertEqual(run_eval.percentile_nearest_rank([1, 2, 3, 4, 5], .95), 5)
-        self.assertEqual(run_eval.LATENCY_TARGET_MS, {
-            "M3-1": 5_000.0,
-            "M3-2": 7_000.0,
-            "M3-3": 7_000.0,
-        })
-        self.assertTrue(run_eval.passes_latency_target("M3-1", 4_999.9))
-        self.assertFalse(run_eval.passes_latency_target("M3-1", 5_000.0))
-        for scenario in ("M3-2", "M3-3"):
-            self.assertTrue(run_eval.passes_latency_target(scenario, 6_999.9))
-            self.assertFalse(run_eval.passes_latency_target(scenario, 7_000.0))
-        self.assertFalse(run_eval.passes_latency_target("M3-1", None))
+
+class TestRustGeneratorBinaryContract(unittest.TestCase):
+    """Exercise the Rust CLI contract when the repository binary is available."""
+
+    def _binary(self):
+        try:
+            return run_eval_shim.evaluator_binary()
+        except SystemExit:
+            self.skipTest("kio-eval binary is not built in this Python-only test environment")
+
+    def test_success_and_nonempty_error_match_the_legacy_generator(self):
+        binary = self._binary()
+        with tempfile.TemporaryDirectory(prefix="kio-generator-binary-") as directory:
+            corpus = os.path.join(directory, "corpus")
+            success = subprocess.run(
+                [binary, "generate-corpus", "--out", corpus],
+                capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(success.returncode, 0, success.stderr)
+            self.assertEqual(success.stderr, "")
+            self.assertEqual(success.stdout, "\n".join([
+                f"[ok] コーパス生成: {corpus}",
+                "     files=305 anchors=31 scopes=7",
+                "       - research    : 45 files",
+                "       - notes       : 45 files",
+                "       - downloads   : 45 files",
+                "       - projects-a  : 44 files",
+                "       - projects-b  : 43 files",
+                "       - specs       : 42 files",
+                "       - journal     : 41 files",
+                f"     manifest: {os.path.join(corpus, 'corpus-manifest.json')}",
+                "",
+            ]))
+
+            nonempty = subprocess.run(
+                [binary, "generate-corpus", "--out", corpus],
+                capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(nonempty.returncode, 1)
+            self.assertEqual(nonempty.stdout, "")
+            self.assertEqual(
+                nonempty.stderr,
+                f"[error] 出力先が空でない: {corpus} (--force で上書き)\n")
 
 
 if __name__ == "__main__":

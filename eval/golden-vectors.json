@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "canonical_json": [
+    {"name": "ascii-integer-only", "value": {"z": 2, "a": 1}, "canonical_utf8": "{\"a\":1,\"z\":2}", "sha256": "sha256:99168216144c7fed5d4c54916cf98d9c66096280c04a499822a99b6658bd177a", "python_compatible": true},
+    {"name": "float-jcs-exponent", "value": {"n": 1e-7}, "canonical_utf8": "{\"n\":1e-7}", "sha256": "sha256:747d6d23b64d1b2d579adb832b44de31c91c875bbef7a8e397f5d183a746b54b", "python_compatible": false},
+    {"name": "safe-large-integer", "value": {"n": 9007199254740991}, "canonical_utf8": "{\"n\":9007199254740991}", "sha256": "sha256:e1da48c6a6089f06ecb4e0a2259e658e3786b2420f52baccdf929ec6460d7b41", "python_compatible": true},
+    {"name": "unicode-key-and-value", "value": {"あ": "値", "é": "café"}, "canonical_utf8": "{\"é\":\"café\",\"あ\":\"値\"}", "sha256": "sha256:b86c0f59e9c8f31276b365dcf5692aa244564840a6d09b750623d439e3a53d1c", "python_compatible": true},
+    {"name": "explicit-null", "value": {"present": null}, "canonical_utf8": "{\"present\":null}", "sha256": "sha256:924c481da1aca4bbd856f20e4aaef20f67c34fccd0b5e27cb2647b8c45ee21ac", "python_compatible": true},
+    {"name": "omitted-field", "value": {}, "canonical_utf8": "{}", "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "python_compatible": true}
+  ],
+  "slugs": [
+    {"name": "unicode-nfc-and-japanese", "input": "Café 回収率と精度", "expected": "caf-回収率と精度"},
+    {"name": "symbols-and-dashes", "input": "  API -- Token!! ", "expected": "api-token"},
+    {"name": "rust-whitespace-excludes-information-separator", "input": "A\u001cB", "expected": "ab"}
+  ],
+  "chunk_identity": [
+    {"name": "absent-section-id", "chunk": {"spec_version": 1, "raw_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "tool_profile_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "gen": 1, "unit_key": "section:one", "unit_content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "heading_path": ["Document", "Section"], "byte_start": 0, "byte_end": 5, "text_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "text": "hello"}, "expected_hash": "sha256:1faef27e8109d93f5a4a9f2707bab3b827e46669db532c42c2453ce70a44f9aa"},
+    {"name": "empty-section-id-is-omitted", "chunk": {"spec_version": 1, "raw_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "tool_profile_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "gen": 1, "unit_key": "section:one", "unit_content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "heading_path": ["Document", "Section"], "section_id": "", "byte_start": 0, "byte_end": 5, "text_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "text": "hello"}, "expected_hash": "sha256:1faef27e8109d93f5a4a9f2707bab3b827e46669db532c42c2453ce70a44f9aa"},
+    {"name": "unit-content-hash-changes-identity", "chunk": {"spec_version": 1, "raw_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "tool_profile_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "gen": 1, "unit_key": "section:one", "unit_content_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444", "heading_path": ["Document", "Section"], "byte_start": 0, "byte_end": 5, "text_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "text": "hello"}, "expected_hash": "sha256:716360a9c8682f88ae9703c417ac10229fdd0fad51ba6b57451033a77a7a5d9c"}
+  ],
+  "recall": [
+    {"name": "three-tuple-section-leaf", "expected": [["sha256:a", "leaf", "old.md"], ["sha256:b", "other", "b.md"]], "results": [{"raw_hash": "sha256:a", "section_id": "parent/leaf", "path_at_commit": "old.md"}, {"raw_hash": "sha256:x", "section_id": "noise/x", "path_at_commit": "x.md"}], "k": 10, "expected_recall": 0.5},
+    {"name": "heading-path-fallback-and-dedup", "expected": [["sha256:a", "leaf", "a.md"], ["sha256:b", "other", "b.md"]], "results": [{"raw_hash": "sha256:a", "heading_path": ["Parent", "Leaf"], "path_at_commit": "a.md"}, {"raw_hash": "sha256:a", "heading_path": ["Parent", "Leaf"], "path_at_commit": "a.md"}, {"raw_hash": "sha256:b", "section_id": "parent/other", "path_at_commit": "b.md"}], "k": 10, "expected_recall": 1.0},
+    {"name": "k-cut", "expected": [["sha256:hit", "leaf", "hit.md"]], "results": [{"raw_hash": "sha256:noise", "section_id": "n/x", "path_at_commit": "n.md"}, {"raw_hash": "sha256:hit", "section_id": "p/leaf", "path_at_commit": "hit.md"}], "k": 1, "expected_recall": 0.0},
+    {"name": "empty-section-id-falls-back-to-heading-leaf", "expected": [["sha256:a", "leaf", "a.md"]], "results": [{"raw_hash": "sha256:a", "section_id": "", "heading_path": ["Parent", "Leaf"], "path_at_commit": "a.md"}], "k": 1, "expected_recall": 1.0},
+    {"name": "empty-raw-hash-is-excluded", "expected": [["", "leaf", "a.md"]], "results": [{"raw_hash": "", "section_id": "p/leaf", "path_at_commit": "a.md"}], "k": 1, "expected_recall": 0.0}
+  ],
+  "percentiles": [
+    {"name": "nearest-rank-p95", "values": [1, 2, 3, 4, 5], "percentile": 0.95, "expected": 5},
+    {"name": "nearest-rank-median", "values": [5, 1, 3, 2, 4], "percentile": 0.5, "expected": 3},
+    {"name": "empty", "values": [], "percentile": 0.95, "expected": null}
+  ]
+}

@@ -18,12 +18,21 @@ pub const MAX_TREE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_COMMIT_OBJECT_BYTES: u64 = 1024 * 1024;
 /// Semantic chunk objects contain bounded normalized text, never raw file bytes.
 pub const MAX_CHUNK_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
+/// Normalized-unit objects are canonical JSON representations of a single
+/// markdownized prepared unit. They share the existing normalized unit size
+/// ceiling and are read as one bounded immutable CAS body.
+pub const MAX_NORMALIZED_UNIT_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 
 /// An embedding object is an identity header plus one base64 vector line.
 /// The adopted profile is 768 f32 (03 §7), so a real object runs ~4.4 KB; the
 /// cap is generous enough for any plausible future width and still small enough
 /// that a corrupt length is rejected before it is read.
 pub const MAX_EMBEDDING_OBJECT_BYTES: u64 = 1024 * 1024;
+/// A normalized-instance manifest is deliberately much smaller than a raw or
+/// prepared object. Keeping the limit at the CAS boundary prevents inventory
+/// and fsck from hashing a pathologically large object before the semantic
+/// manifest reader can apply its own bound.
+pub const MAX_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentObjectKind {
@@ -39,6 +48,9 @@ pub enum ContentObjectKind {
     /// PB02 (10 §7.5.1 L489): content-addressed tool-lock object (canonical
     /// JCS bytes content hash — 03 §5.2), stored under `objects/toollocks/`.
     Toollock,
+    /// Immutable normalized-unit JSON object, stored under
+    /// `objects/normalized_unit_objects/`.
+    NormalizedUnit,
 }
 
 impl ContentObjectKind {
@@ -50,6 +62,7 @@ impl ContentObjectKind {
             Self::Embedding => "embeddings",
             Self::Manifest => "manifests",
             Self::Toollock => "toollocks",
+            Self::NormalizedUnit => "normalized_unit_objects",
         }
     }
 
@@ -61,6 +74,17 @@ impl ContentObjectKind {
             Self::Embedding => "embedding",
             Self::Manifest => "manifest",
             Self::Toollock => "toollock",
+            Self::NormalizedUnit => "normalized_unit",
+        }
+    }
+
+    #[must_use]
+    const fn max_bytes(self) -> u64 {
+        match self {
+            Self::Embedding => MAX_EMBEDDING_OBJECT_BYTES,
+            Self::Manifest => MAX_MANIFEST_OBJECT_BYTES,
+            Self::NormalizedUnit => MAX_NORMALIZED_UNIT_OBJECT_BYTES,
+            Self::Prepared | Self::Image | Self::Toollock => MAX_RAW_OBJECT_BYTES,
         }
     }
 }
@@ -85,6 +109,10 @@ pub struct ChunkObject {
     pub tool_profile_hash: String,
     pub gen: u64,
     pub unit_key: String,
+    /// Hash of the exact normalized Markdown bytes. This is the stable content
+    /// axis in chunk identity: a same-gen body correction gets a new chunk,
+    /// while a byte-identical resurrection retains the old pointer identity.
+    pub unit_content_hash: String,
     pub heading_path: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
@@ -337,6 +365,10 @@ impl ChunkObject {
             Value::from(self.tool_profile_hash.clone()),
         );
         value.insert("unit_key".to_owned(), Value::from(self.unit_key.clone()));
+        value.insert(
+            "unit_content_hash".to_owned(),
+            Value::from(self.unit_content_hash.clone()),
+        );
         // Null / absent fields are omitted from the identity object.
         value.retain(|_, value| !value.is_null());
         hash_json(&Value::Object(value))
@@ -351,6 +383,7 @@ impl ChunkObject {
         }
         if !is_hash(&self.raw_hash)
             || !is_hash(&self.tool_profile_hash)
+            || !is_hash(&self.unit_content_hash)
             || !is_hash(&self.text_hash)
         {
             return Err(chunk_corrupt_error(
@@ -1125,12 +1158,20 @@ impl ObjectStore {
         ensure_real_directory(&second, true)
     }
 
-    /// PB01/PB02: write a content-addressed embedding/manifest/toollock
+    /// PB01/PB02: write a content-addressed embedding/manifest/toollock/
+    /// normalized-unit
     /// object, keyed by `hash_bytes(bytes)`. Idempotent (matching
     /// [`Self::write_object_bytes`]'s "verify existing, don't overwrite"
     /// contract) — used by tests to construct fsck fixtures directly, and is
     /// the storage primitive a future write-path integration would call.
     pub fn write_content_object(&self, kind: ContentObjectKind, bytes: &[u8]) -> Result<String> {
+        if bytes.len() as u64 > kind.max_bytes() {
+            return Err(content_object_size_error(
+                kind,
+                kind.max_bytes(),
+                bytes.len() as u64,
+            ));
+        }
         let hash = hash_bytes(bytes);
         self.ensure_content_parent(kind, &hash)?;
         if let Some(existing) = self.existing_content_path(kind, &hash)? {
@@ -1175,7 +1216,12 @@ impl ObjectStore {
         if !is_hash(hash) {
             return Err(KioError::invalid_usage("invalid content object hash"));
         }
-        let path = self.content_path(kind, hash)?;
+        if !self.validate_content_parent(kind, hash)? {
+            return Err(KioError::not_found(hash));
+        }
+        let Some(path) = self.existing_content_path(kind, hash)? else {
+            return Err(KioError::not_found(hash));
+        };
         read_bounded_regular_file(&path, max_bytes)
     }
 
@@ -1485,18 +1531,9 @@ fn verify_content_object_path_accounted(
     let result = (|| -> Result<u64> {
         let mut file = open_regular_nofollow(path)?;
         let metadata = file.metadata().kio_io(path)?;
-        let limit = MAX_RAW_OBJECT_BYTES;
+        let limit = kind.max_bytes();
         if metadata.len() > limit {
-            return Err(KioError::new(
-                "KIO-E-STORE-OBJECT-OVERSIZED-001",
-                "content object exceeds its byte limit",
-                serde_json::json!({
-                    "object_type": kind.object_type(),
-                    "max_bytes": limit,
-                    "actual_bytes": metadata.len(),
-                }),
-                crate::ExitCode::PermanentFailure,
-            ));
+            return Err(content_object_size_error(kind, limit, metadata.len()));
         }
         let mut hasher = Sha256::new();
         let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
@@ -1536,6 +1573,23 @@ fn verify_content_object_path_accounted(
         Ok(consumed)
     })();
     (result, consumed)
+}
+
+fn content_object_size_error(
+    kind: ContentObjectKind,
+    max_bytes: u64,
+    actual_bytes: u64,
+) -> KioError {
+    KioError::new(
+        "KIO-E-STORE-OBJECT-OVERSIZED-001",
+        "content object exceeds its byte limit",
+        serde_json::json!({
+            "object_type": kind.object_type(),
+            "max_bytes": max_bytes,
+            "actual_bytes": actual_bytes,
+        }),
+        crate::ExitCode::PermanentFailure,
+    )
 }
 
 fn copy_verified_object<W: Write>(
@@ -1964,7 +2018,10 @@ fn create_private_temp(parent: &Path) -> Result<(PathBuf, File)> {
     ))
 }
 
-fn ensure_real_directory(path: &Path, create: bool) -> Result<()> {
+/// Require a real directory at `path`, optionally creating that one missing
+/// component.  Callers creating a nested path must validate every component
+/// independently; `create_dir_all` would otherwise follow a hostile link.
+pub fn ensure_real_directory(path: &Path, create: bool) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
             Ok(())
@@ -2029,6 +2086,92 @@ pub fn open_regular_nofollow(path: &Path) -> Result<File> {
         }
     }
     Ok(file)
+}
+
+/// Open an existing metadata file for reading and mutation through the same
+/// no-follow, single-link, identity-checked boundary as [`open_regular_nofollow`].
+pub fn open_regular_nofollow_read_write(path: &Path) -> Result<File> {
+    let before = fs::symlink_metadata(path).kio_io(path)?;
+    if !before.file_type().is_file() || before.file_type().is_symlink() {
+        return Err(non_regular_object_error(path));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).kio_io(path)?;
+    validate_open_regular_nofollow(path, &file)?;
+    Ok(file)
+}
+
+/// Open an existing ledger for append, or atomically create a new real regular
+/// single-link ledger.  In particular, a dangling symlink is an existing path,
+/// not a missing ledger to be created through.
+pub fn open_or_create_regular_nofollow_append(path: &Path) -> Result<File> {
+    for _ in 0..4 {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                    return Err(non_regular_object_error(path));
+                }
+                let mut options = OpenOptions::new();
+                options.append(true);
+                configure_no_follow(&mut options);
+                let file = options.open(path).kio_io(path)?;
+                validate_open_regular_nofollow(path, &file)?;
+                return Ok(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut options = OpenOptions::new();
+                options.write(true).append(true).create_new(true);
+                configure_no_follow(&mut options);
+                match options.open(path) {
+                    Ok(file) => {
+                        validate_open_regular_nofollow(path, &file)?;
+                        return Ok(file);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error).kio_io(path),
+                }
+            }
+            Err(error) => return Err(error).kio_io(path),
+        }
+    }
+    Err(KioError::io(
+        "could not safely create ledger file after concurrent path changes",
+        path.display().to_string(),
+    ))
+}
+
+fn validate_open_regular_nofollow(path: &Path, file: &File) -> Result<()> {
+    let opened = file.metadata().kio_io(path)?;
+    let after = fs::symlink_metadata(path).kio_io(path)?;
+    #[cfg(windows)]
+    let same_identity = {
+        let mut verification_options = OpenOptions::new();
+        verification_options.read(true);
+        configure_no_follow(&mut verification_options);
+        let verification = verification_options.open(path).kio_io(path)?;
+        verification.metadata().kio_io(path)?.is_file()
+            && same_windows_cas_file(file, &verification)
+    };
+    #[cfg(not(windows))]
+    let same_identity = same_file_identity(&opened, &after);
+    if !opened.is_file()
+        || !after.file_type().is_file()
+        || after.file_type().is_symlink()
+        || !same_identity
+    {
+        return Err(non_regular_object_error(path));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.nlink() != 1 {
+            return Err(non_regular_object_error(path));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -3162,6 +3305,7 @@ mod tests {
             tool_profile_hash: format!("sha256:{}", "b".repeat(64)),
             gen: 3,
             unit_key: "page:12".to_owned(),
+            unit_content_hash: format!("sha256:{}", "c".repeat(64)),
             heading_path: vec!["Auth".to_owned()],
             section_id: Some("auth".to_owned()),
             byte_start: 0,
@@ -3182,6 +3326,28 @@ mod tests {
             .unwrap()
             .windows(b"chunk_hash".len())
             .any(|window| window == b"chunk_hash"));
+    }
+
+    #[test]
+    fn chunk_identity_binds_normalized_unit_content() {
+        let chunk = chunk_object("stable text");
+        let original = chunk.identity_hash().unwrap();
+
+        let mut retargeted = chunk.clone();
+        retargeted.unit_content_hash = format!("sha256:{}", "d".repeat(64));
+        assert_ne!(retargeted.identity_hash().unwrap(), original);
+
+        let mut changed_body = chunk.clone();
+        changed_body.text.push('!');
+        changed_body.text_hash = hash_bytes(changed_body.text.as_bytes());
+        assert_eq!(changed_body.identity_hash().unwrap(), original);
+    }
+
+    #[test]
+    fn chunk_object_rejects_legacy_missing_unit_content_hash() {
+        let mut value = serde_json::to_value(chunk_object("stable text")).unwrap();
+        value.as_object_mut().unwrap().remove("unit_content_hash");
+        assert!(serde_json::from_value::<ChunkObject>(value).is_err());
     }
 
     /// A corrupt content object is charged for every byte it made fsck read,
@@ -3225,6 +3391,44 @@ mod tests {
                 .error_code(),
             "KIO-E-STORE-CORRUPT-001"
         );
+    }
+
+    #[test]
+    fn normalized_unit_content_objects_use_the_dedicated_immutable_namespace() {
+        let (_dir, store) = object_store();
+        let bytes = br#"{"markdown":"immutable normalized unit"}"#;
+        let hash = store
+            .write_content_object(ContentObjectKind::NormalizedUnit, bytes)
+            .unwrap();
+        assert_eq!(
+            store
+                .read_content_object_bytes(ContentObjectKind::NormalizedUnit, &hash, 1024)
+                .unwrap(),
+            bytes
+        );
+        assert!(store
+            .content_path(ContentObjectKind::NormalizedUnit, &hash)
+            .unwrap()
+            .to_string_lossy()
+            .contains("objects/normalized_unit_objects"));
+    }
+
+    #[test]
+    fn manifest_content_objects_enforce_the_semantic_read_limit_at_cas_boundary() {
+        let (_dir, store) = object_store();
+        let hash = hash_bytes(b"manifest-size-fixture");
+        let path = store
+            .content_path(ContentObjectKind::Manifest, &hash)
+            .unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_MANIFEST_OBJECT_BYTES + 1).unwrap();
+
+        let error = store
+            .inspect_content_accounted(ContentObjectKind::Manifest, &hash)
+            .unwrap_err();
+        assert_eq!(error.error.error_code(), "KIO-E-STORE-OBJECT-OVERSIZED-001");
+        assert_eq!(error.consumed_bytes, 0);
     }
 
     #[test]

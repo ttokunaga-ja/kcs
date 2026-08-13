@@ -186,7 +186,7 @@ def replay(corpus_dir, bin_path):
 
 def build_manifest(per_scope, old_hashes):
     # rename/edit/delete 対象の「旧内容」raw_sha256 と heading を記録する。
-    # run_eval の解決層が expected {scope,file,section} -> (raw_hash, section_id) を導くのに使う。
+    # 評価器の解決層が expected {scope,file,section} -> (raw_hash, section_id) を導くのに使う。
     def _renamed(r):
         return {
             "scope": r["scope"], "old_file": r["old_file"], "new_file": r["new_file"],

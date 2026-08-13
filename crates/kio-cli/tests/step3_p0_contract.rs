@@ -7,6 +7,12 @@ use assert_cmd::Command;
 use kio_adapter::catalog::{
     TEST_ADOPTED_EMBEDDING_ENV, TEST_LOCAL_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
 };
+use kio_core::scope::Repository;
+use kio_core::{
+    cas::{ContentObjectKind, ObjectKind, ObjectStore},
+    dag::CommitObject,
+    portable::portable_tag_leaf,
+};
 use kio_index::aggregator::{AggIndexStatus, Aggregator};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -27,6 +33,7 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_TEST_HOLD_LOCK_MS",
     "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
     "KIO_TEST_SCOPE_SEARCH_DELAY_MS",
+    "KIO_TEST_AGGREGATOR_PROJECTION_FAULT",
     "KIO_TEST_REPLICA_AFTER_HEAD_FAULT",
     "KIO_TEST_SEARCH_RESPONSE_BARRIER_READY",
     "KIO_TEST_R13_2_AUTH",
@@ -311,7 +318,10 @@ fn ranking_fixture() -> &'static RankingFixture {
             ("target-mixed.md", "# API v2 認証\n\nAPI v2 認証 API v2 認証は service-token ヘッダーを使います。\n"),
             ("target-number.md", "# 請求上限\n\n請求上限は 3,600 件です。請求上限は 3,600 件です。\n"),
             ("legacy-format-v0.md", "# 旧フォーマット v0 仕様\n\n## 廃止バージョン\n\nv0.1.0 は廃止済み。kio_format_version に統一された。\n\n## 廃止フィールド\n\n旧フィールド tree_id / commit_id は廃止された。\n"),
-            ("deprecated-approach.md", "# 廃止した検索手法\n\n## 旧手法\n\n旧手法は TF-IDF、語彙次元は 30,000 だった。\n\n## 結果\n\n旧手法の Recall@10 は 0.52 に留まった。\n"),
+            // Pure-short ranking first orders by the token's position. Keep
+            // this a genuine competing hit without tying that observable and
+            // accidentally making the assertion depend on chunk-hash order.
+            ("deprecated-approach.md", "# 検索で廃止した手法\n\n## 旧手法\n\n旧手法は TF-IDF、語彙次元は 30,000 だった。\n\n## 結果\n\n旧手法の Recall@10 は 0.52 に留まった。\n"),
             ("vendor-eval.md", "# ベンダー評価メモ\n\n## コスト評価\n\nベンダー A の年間見積は 320万円 だった。\n\n## SLA 評価\n\n提示 SLA は 99.9%、クレジットは 10%。\n"),
             ("leaked-draft-pricing.md", "# 価格改定ドラフト (誤取込)\n\n## 旧価格\n\n旧価格は 1,000 トークンあたり 0.30 USD だった。\n\n## 割引\n\n年契約割引は 40% を提示していた。\n"),
             ("falcon-old-schema.md", "# Falcon 旧スキーマ\n\n## 旧テーブル\n\n旧スキーマは 28 テーブル構成だった。\n\n## 旧インデックス\n\n旧インデックスは B-tree のみで 9 本。\n"),
@@ -682,7 +692,7 @@ fn ct3_embed_007_vector_only_without_index_is_an_error() {
 fn write_search_config(dir: &TempDir, body: &str) {
     fs::write(
         dir.path().join(".kio/config.toml"),
-        format!("kio_format_version = \"0.1.0\"\n[search]\n{body}"),
+        format!("[search]\n{body}"),
     )
     .unwrap();
 }
@@ -1243,7 +1253,7 @@ fn ct3_chunk_007_chunking_config_change_appends_new_generation_chunks() {
     let before = line_count(dir.path().join(".kio/index/chunks.jsonl"));
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 25\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 25\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1270,7 +1280,7 @@ fn ct3_chunk_007_search_only_serves_current_chunking_config_generation() {
     // stale one — this isn't a same-hash no-op reindex.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1321,7 +1331,7 @@ fn ct4_current_config_association_is_added_for_deleted_history() {
     json_success(&dir, &["index", "--approve"]);
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 5999\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 5999\n",
     )
     .unwrap();
     json_success(&dir, &["index", "--approve"]);
@@ -1384,7 +1394,7 @@ fn ct4_historical_only_current_config_chunks_enqueue_embeddings() {
     json_success_embed(&dir, "mock", &["index", "--yes"]);
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 24\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 24\n",
     )
     .unwrap();
     json_success_embed(&dir, "mock", &["index", "--yes"]);
@@ -1431,7 +1441,7 @@ fn ct4_historical_only_current_config_chunks_enqueue_embeddings() {
 }
 
 #[test]
-fn ct4_rebuild_preserves_historical_tree_projection_cache() {
+fn ct4_rebuild_rederives_historical_tree_projection_from_cas() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("cached.md"), "# C1\n\nfirst snapshot\n").unwrap();
     kio(&dir, &["init"]).assert().success();
@@ -1443,6 +1453,10 @@ fn ct4_rebuild_preserves_historical_tree_projection_cache() {
     let second_commit = second["commit_hash"].as_str().unwrap();
     assert_ne!(first_commit, second_commit);
 
+    // The old database is deliberately unavailable: both the ancestor and
+    // current rows below must come from commit/tree CAS, not a copied cache.
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
     let conn = rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
     for commit in [&first_commit, second_commit] {
         assert_eq!(
@@ -1457,6 +1471,362 @@ fn ct4_rebuild_preserves_historical_tree_projection_cache() {
             "atomic rebuild must retain immutable historical tree cache rows"
         );
     }
+}
+
+#[test]
+fn ct4_rebuild_replaces_garbage_sqlite_without_using_it_as_truth() {
+    let dir = indexed_scope();
+    let path = dir.path().join(".kio/index/sqlite.db");
+    fs::write(&path, b"not a sqlite database and not a recovery source").unwrap();
+
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count = conn
+        .query_row("SELECT COUNT(*) FROM tree_entries", [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap();
+    assert!(
+        count > 0,
+        "fresh derived projection must replace garbage sqlite"
+    );
+}
+
+#[test]
+fn ct4_rebuild_does_not_carry_tree_rows_that_exist_only_in_old_sqlite() {
+    let dir = indexed_scope();
+    let path = dir.path().join(".kio/index/sqlite.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
+         VALUES (?1, 'sqlite-only.md', ?2, NULL, 0)",
+        rusqlite::params![
+            format!("sha256:{}", "f".repeat(64)),
+            format!("sha256:{}", "e".repeat(64))
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let rebuilt = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        rebuilt
+            .query_row(
+                "SELECT COUNT(*) FROM tree_entries WHERE path = 'sqlite-only.md'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        0,
+        "SQLite-only projection rows must not become rebuild input"
+    );
+}
+
+#[test]
+fn ct4_rebuild_rederives_tag_only_tree_projection_from_cas() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let base = repo.read_commit(&head).unwrap();
+    // This commit is deliberately disconnected from HEAD. Its tree is real
+    // immutable CAS, and the sole current ref is a canonical tag.
+    let detached = CommitObject::new(
+        base.tree.clone(),
+        Vec::new(),
+        base.created_at.clone(),
+        "tag-only detached projection root".to_owned(),
+        base.tool_lock_hash.clone(),
+        base.stats.clone(),
+        base.commit_type,
+    )
+    .unwrap();
+    let (tag_only, _) = ObjectStore::new(repo.kio_dir())
+        .write_json(ObjectKind::Commit, &serde_json::to_value(detached).unwrap())
+        .unwrap();
+    let tag_path = repo
+        .kio_dir()
+        .join("refs/tags-v1")
+        .join(portable_tag_leaf("detached-root"));
+    fs::write(tag_path, &tag_only).unwrap();
+
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let conn = rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            rusqlite::params![tag_only],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn ct4_rebuild_uses_canonical_tag_when_head_and_main_are_unborn() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let tagged_commit = repo.head_commit_hash().unwrap().unwrap();
+    let tag_path = repo
+        .kio_dir()
+        .join("refs/tags-v1")
+        .join(portable_tag_leaf("sole-root"));
+    fs::write(tag_path, &tagged_commit).unwrap();
+    // A valid tag remains a current root even after the branch is deliberately
+    // unborn.  Rebuild must not return early merely because HEAD is empty.
+    fs::write(repo.kio_dir().join("HEAD"), b"").unwrap();
+    fs::write(repo.kio_dir().join("refs/heads/main"), b"").unwrap();
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let conn = rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            rusqlite::params![tagged_commit],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn ct4_rebuild_uses_pinned_manifest_unit_status_not_current_working_manifest() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap();
+    let normalize = entry.normalize.as_ref().unwrap();
+    // A physical edit without a new tree reference is not a historical
+    // snapshot: the manifest's filename hash must still authenticate it.
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for unit in manifest["units"].as_array_mut().unwrap() {
+        unit["status"] = Value::from("failed");
+        unit["unit_object_hash"] = Value::Null;
+    }
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001", "{error}");
+}
+
+#[test]
+fn ct4_rebuild_uses_immutable_pinned_unit_body_not_mutable_cache_body() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap();
+    let normalize = entry.normalize.as_ref().unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    let unit_ref = manifest["units"].as_array().unwrap()[0]["unit_ref"]
+        .as_str()
+        .unwrap();
+    let mutable_unit = mutable_unit_path_for(
+        &dir.path().join(".kio/objects/normalized_units"),
+        &entry.raw_hash,
+        &normalize.tool_profile_hash,
+        normalize.gen,
+        unit_ref,
+    );
+    assert!(
+        mutable_unit.exists(),
+        "test must modify the current cache unit"
+    );
+    let mut cache: Value = serde_json::from_slice(&fs::read(&mutable_unit).unwrap()).unwrap();
+    cache["markdown"] = Value::from("# forged\n\nMUTABLE-CACHE-ATTACK\n");
+    fs::write(&mutable_unit, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+    // Force chunk derivation rather than retaining an old ledger row.
+    fs::remove_file(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
+
+    let forged = json_success(&dir, &["search", "MUTABLE-CACHE-ATTACK", "--mode", "text"]);
+    assert!(forged["results"].as_array().unwrap().is_empty(), "{forged}");
+    let original = json_success(&dir, &["search", "3600", "--mode", "text"]);
+    assert!(
+        !original["results"].as_array().unwrap().is_empty(),
+        "rebuild must use the pinned immutable unit body: {original}"
+    );
+}
+
+#[test]
+fn ct4_rebuild_missing_pinned_unit_cas_skips_without_reading_mutable_cache() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap();
+    let normalize = entry.normalize.as_ref().unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(
+            store
+                .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unit = &manifest["units"].as_array().unwrap()[0];
+    let unit_hash = unit["unit_object_hash"].as_str().unwrap();
+    let unit_ref = unit["unit_ref"].as_str().unwrap();
+    let mutable_unit = mutable_unit_path_for(
+        &dir.path().join(".kio/objects/normalized_units"),
+        &entry.raw_hash,
+        &normalize.tool_profile_hash,
+        normalize.gen,
+        unit_ref,
+    );
+    let mut cache: Value = serde_json::from_slice(&fs::read(&mutable_unit).unwrap()).unwrap();
+    cache["markdown"] = Value::from("# forged\n\nMISSING-CAS-ATTACK\n");
+    fs::write(&mutable_unit, serde_json::to_vec(&cache).unwrap()).unwrap();
+    fs::remove_file(
+        store
+            .content_path(ContentObjectKind::NormalizedUnit, unit_hash)
+            .unwrap(),
+    )
+    .unwrap();
+
+    fs::remove_file(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001", "{error}");
+    assert!(
+        !dir.path().join(".kio/index/chunks.jsonl").exists(),
+        "a missing immutable unit must fail before a mutable-cache body can be projected"
+    );
+}
+
+#[test]
+fn ct4_reindex_at_does_not_publish_later_same_gen_unit_into_failed_snapshot() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap();
+    let normalize = entry.normalize.as_ref().unwrap();
+    // A physical mutation of the pinned object without a new tree binding is
+    // corrupt, even if it looks like a same-gen retry state.
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for unit in manifest["units"].as_array_mut().unwrap() {
+        unit["status"] = Value::from("failed");
+        unit["unit_object_hash"] = Value::Null;
+    }
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let error = json_failure(&dir, &["reindex", "--at", &head], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001", "{error}");
+}
+
+#[test]
+fn ct4_rebuild_rejects_pinned_manifest_for_a_different_raw_identity() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let normalize = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap()
+        .normalize
+        .as_ref()
+        .unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["raw_hash"] = Value::from(format!("sha256:{}", "f".repeat(64)));
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+}
+
+#[test]
+fn ct4_rebuild_rejects_pinned_done_unit_with_mismatched_prepared_hash() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let tree = repo
+        .read_tree(&repo.read_commit(&head).unwrap().tree)
+        .unwrap();
+    let normalize = tree
+        .entries
+        .iter()
+        .find(|entry| entry.path == "auth.md")
+        .unwrap()
+        .normalize
+        .as_ref()
+        .unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let manifest_path = store
+        .content_path(ContentObjectKind::Manifest, &normalize.manifest_hash)
+        .unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["units"].as_array_mut().unwrap()[0]["prepared_hash"] =
+        Value::from(format!("sha256:{}", "e".repeat(64)));
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+}
+
+#[test]
+fn ct4_rebuild_fails_closed_when_a_current_tag_targets_a_missing_commit() {
+    let dir = indexed_scope();
+    let repo = Repository::open(dir.path()).unwrap();
+    let tag_path = repo
+        .kio_dir()
+        .join("refs/tags-v1")
+        .join(portable_tag_leaf("missing-root"));
+    fs::write(tag_path, format!("sha256:{}", "d".repeat(64))).unwrap();
+
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 1);
+    assert_eq!(error["error_code"], "KIO-E-COMMIT-SHALLOW-001");
 }
 
 #[test]
@@ -1534,7 +1904,7 @@ fn ct3_multi_001_default_searches_participating_indexed_scopes() {
     // Scope c opts out of global search.
     fs::write(
         c.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
     for dir in [&a, &b, &c] {
@@ -1600,7 +1970,7 @@ fn ct3_repair_device_replica_rebuilds_all_indexed_scopes_outside_a_scope() {
     // This row must still be selected: repair is device-global, not search-global.
     fs::write(
         b.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
     for dir in [&a, &b] {
@@ -1733,6 +2103,15 @@ fn ct3_repair_device_unreachable_registry_scope_is_partial_without_cwd_fallback(
             .as_ref()
     );
     assert_eq!(failed["stage"], "open");
+    let replica = Aggregator::open(&data_home.join("cache/kio/aggregator.sqlite")).unwrap();
+    assert!(
+        replica.scope_header(&read_scope_id(&a)).unwrap().is_some(),
+        "the healthy scope is reprojected after the explicit reset"
+    );
+    assert!(
+        replica.scope_header(&b_scope).unwrap().is_none(),
+        "a scope that fails before projection must not retain stale replica rows"
+    );
 }
 
 #[test]
@@ -1791,7 +2170,7 @@ fn ct3_repair_device_all_failed_homogeneous_promotes_scope_error() {
 }
 
 #[test]
-fn ct3_repair_device_active_purge_is_partial_and_never_leaves_ready_replica() {
+fn ct3_repair_device_active_purge_is_partial_and_leaves_no_stale_replica_rows() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let blocked = parent.path().join("blocked");
@@ -1859,9 +2238,11 @@ fn ct3_repair_device_active_purge_is_partial_and_never_leaves_ready_replica() {
     let header = Aggregator::open(&data_home.join("cache/kio/aggregator.sqlite"))
         .unwrap()
         .scope_header(&blocked_scope)
-        .unwrap()
-        .expect("blocked scope header remains visible but unavailable");
-    assert_ne!(header.index_status, AggIndexStatus::Ready);
+        .unwrap();
+    assert!(
+        header.is_none(),
+        "the reset must not leave a failed scope searchable from its prior projection"
+    );
 }
 
 // R15-3: a `.kio` deleted and re-`init`ed at the SAME path mints a fresh scope_id.
@@ -2384,7 +2765,7 @@ fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
     fs::create_dir_all(&user_config).unwrap();
     fs::write(
         user_config.join("config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
+        "[search.rrf]\ncandidate_depth = 2\n",
     )
     .unwrap();
 
@@ -2581,10 +2962,9 @@ fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
     let a = parent.path().join("a");
     fs::create_dir_all(&a).unwrap();
     fs::write(a.join("a.md"), "# A\n\n## Sec\nzephyrterm secret\n").unwrap();
-    // Keep one non-purged chunk so a failed full replacement reaches the
-    // `agg_chunks` insert below. The trigger rolls that transaction back,
-    // preserving the formerly Ready secret row unless the writer explicitly
-    // marks the header Rebuilding afterwards.
+    // Keep one non-purged chunk so the test begins with a non-empty, readable
+    // Ready replica. A failed refresh must still take that old replica out of
+    // service.
     fs::write(a.join("survivor.md"), "# Survivor\n\nprojection survivor\n").unwrap();
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&a, &data_home, &["index", "--offline", "--approve"]);
@@ -2606,30 +2986,25 @@ fn ct3_multi_019_purge_fails_closed_when_the_replica_cannot_be_cleared() {
     // aggregator impossible to open: after the failed purge, the stale secret
     // row must still be made ineligible to direct search.
     let replica_path = data_home.join("cache/kio/aggregator.sqlite");
-    let replica_conn = Connection::open(&replica_path).unwrap();
-    replica_conn
-        .execute_batch(
-            "CREATE TRIGGER reject_test_projection\n\
-             BEFORE INSERT ON agg_chunks\n\
-             BEGIN\n\
-               SELECT RAISE(FAIL, 'injected replica projection failure');\n\
-             END;",
-        )
-        .unwrap();
-    drop(replica_conn);
 
     let stderr = hermetic_kio_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
         .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KIO_TEST_AGGREGATOR_PROJECTION_FAULT", "refresh")
         .args(["purge", "a.md", "--reason", "legal", "--yes", "--json"])
         .assert()
         .failure()
         .get_output()
         .stderr
         .clone();
-    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    let error: Value = serde_json::from_slice(&stderr).unwrap_or_else(|parse_error| {
+        panic!(
+            "purge failure must be structured JSON ({parse_error}): {}",
+            String::from_utf8_lossy(&stderr)
+        )
+    });
     assert_eq!(error["error_code"], "KIO-E-PURGE-REPLICA-001");
 
     let scope_id = read_scope_id(&a);
@@ -3048,7 +3423,7 @@ fn ct3_multi_006_completion_order_does_not_change_results_or_cursor() {
     json_success_path(&b, &data_home, &["index", "--approve"]);
     fs::write(
         a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\n",
+        "[search.multi_scope]\nparallelism = 2\n",
     )
     .unwrap();
 
@@ -3095,7 +3470,7 @@ fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
     json_success_path(&b, &data_home, &["index", "--approve"]);
     fs::write(
         a.join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
+        "[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
     )
     .unwrap();
     let b_scope_id = read_scope_id(&b);
@@ -3339,6 +3714,63 @@ fn ct3_embed_009_rebuild_db_restores_vectors_from_objects_after_the_db_is_lost()
     );
     assert_eq!(after["fallback"], false);
     assert_eq!(after["diversify"]["strategy"], "mmr");
+}
+
+/// 04 §4.3: the persisted lock is the rebuild selector.  Removing its
+/// `embedding` entry makes the current scope text-only even when old vector
+/// objects remain in CAS; a repair must not adopt them by discovery.
+#[test]
+fn rebuild_db_without_embedding_lock_does_not_replay_vectors() {
+    let dir = indexed_scope_embed("mock");
+    let lock_path = dir.path().join(".kio/tool-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    lock.as_object_mut().unwrap().remove("embedding");
+    fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
+
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(after["resolved_mode"], "text");
+    assert_eq!(after["fallback"], true);
+}
+
+/// The post-rebuild enrichment pass is also lock-selected: an active local
+/// adapter must not repopulate a scope whose persisted current lock is
+/// text-only.
+#[test]
+fn rebuild_db_with_active_adapter_and_no_embedding_lock_stays_text_only() {
+    let dir = indexed_scope_embed("mock");
+    let lock_path = dir.path().join(".kio/tool-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+    lock.as_object_mut().unwrap().remove("embedding");
+    fs::write(&lock_path, serde_json::to_vec_pretty(&lock).unwrap()).unwrap();
+
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    let rebuilt = json_success_embed(&dir, "mock", &["repair", "rebuild-db"]);
+    assert_eq!(rebuilt["embedding_tasks_executed"], 0);
+    let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(after["resolved_mode"], "text");
+    assert_eq!(after["fallback"], true);
+}
+
+/// An adapter profile drift cannot overwrite the persisted lock profile during
+/// repair; it is skipped until an explicit `index` accepts and materializes it.
+#[test]
+fn rebuild_db_with_active_mismatched_profile_skips_enrichment() {
+    let dir = indexed_scope_embed("mock");
+    let lock_path = dir.path().join(".kio/tool-lock.json");
+    let before_lock = fs::read(&lock_path).unwrap();
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+
+    let rebuilt = json_success_embed(&dir, "incompatible_profile", &["repair", "rebuild-db"]);
+    assert_eq!(rebuilt["embedding_tasks_executed"], 0);
+    assert_eq!(fs::read(&lock_path).unwrap(), before_lock);
+
+    let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(after["resolved_mode"], "hybrid");
+    assert_eq!(after["fallback"], false);
 }
 
 #[test]
@@ -4244,7 +4676,7 @@ fn r23_21_hybrid_collection_candidates_are_truncated_to_candidate_depth() {
     // (a bare default search would use the user/device layer instead).
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 1\n",
+        "[search.rrf]\ncandidate_depth = 1\n",
     )
     .unwrap();
     let hybrid = json_success_embed(
@@ -4837,7 +5269,7 @@ fn ct3_l1_reindex_enriches_new_generation_embeddings() {
     // loses its persisted opt-in.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
     let out = json_success_embed(&dir, "mock", &["reindex", "--regenerate", "--yes"]);
@@ -4990,11 +5422,11 @@ fn r11_2_index_embedding_auth_error_exits_5() {
     );
 }
 
-// Scenario (b) — L2: budget-exceeded Paused tasks are sticky under `batch resume`
-// and only run under `--override-budget`, SYMMETRICALLY for markdownize and
-// embedding. Before L2, `resume --override-budget` re-paused markdownize (the
-// override never reached the executor's budget judgement) while embedding, being
-// DB-driven, ran even a Paused task without any override.
+// Scenario (b) — L2: budget-exceeded Paused tasks are sticky under a plain
+// `batch resume`, and `--override-budget` runs both adapters symmetrically.
+// Before L2, `resume --override-budget` re-paused markdownize (the override never
+// reached the executor's budget judgement) while embedding, being DB-driven, ran
+// even a Paused task without any override.
 #[test]
 fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
     let dir = tempfile::tempdir().unwrap();
@@ -5010,7 +5442,7 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
     // A zero folder cap pauses BOTH adapters on budget.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = 0\n",
+        "[budget]\nmonthly_usd_cap = 0\n",
     )
     .unwrap();
     // R11-2: the embedding enrichment DRIVEN inline by index budget-pauses here, so
@@ -5056,6 +5488,65 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
             .iter()
             .all(|task| task["status"] == "done"),
         "override must run embedding: {status}"
+    );
+}
+
+// An operator who raises a hard cap must be able to recheck the previously
+// paused work without using the cap-bypassing `--override-budget`.  The first
+// recheck deliberately leaves the cap at zero: it proves the command re-enters
+// the normal atomic reservation path and re-pauses both adapters without a send.
+// The second recheck raises the configured folder cap and completes both paths.
+#[test]
+fn ct3_l2_recheck_budget_enforces_the_current_cap_for_both_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("budget-recheck.pdf"),
+        fake_pdf(&["現在の上限を再判定する対称性テスト本文です。"]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[budget]\nmonthly_usd_cap = 0\n",
+    )
+    .unwrap();
+    json_both_mock_code(&dir, &["index", "--approve"], 6);
+
+    let denied = json_both_mock_code(
+        &dir,
+        &["batch", "resume", "--recheck-budget", "--realtime"],
+        6,
+    );
+    assert_eq!(denied["recheck_budget"], true);
+    assert_eq!(denied["override_budget"], false);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        is_budget_paused(&status, "markdownize") && is_budget_paused(&status, "embedding"),
+        "the unchanged zero cap must keep both adapters paused: {status}"
+    );
+
+    // Change only the configured cap, retaining `hard_stop = true`.  The CLI
+    // re-evaluates each reservation under this cap; it has no override bit.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[budget]\nmonthly_usd_cap = 1\nhard_stop = true\n[adapter.policy]\nallow_network = true\n",
+    )
+    .unwrap();
+    let resumed = json_both_mock(&dir, &["batch", "resume", "--recheck-budget", "--realtime"]);
+    assert_eq!(resumed["recheck_budget"], true);
+    assert_eq!(resumed["override_budget"], false);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        tasks_of_type(&status, "markdownize")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "rechecked markdownize must complete under the raised cap: {status}"
+    );
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "rechecked embedding must complete under the raised cap: {status}"
     );
 }
 
@@ -5453,22 +5944,6 @@ fn pc60_search_at_with_descendants_is_invalid_usage() {
         2,
     );
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001");
-}
-
-/// R9-6: every remaining KIO-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the
-/// canonical class 1. Step 4 implements search-at, historical reindex, and object
-/// verification, so none of those completed paths belongs here.
-#[test]
-fn r9_6_not_implemented_exit_code_is_uniform() {
-    // QB50-58 (step4b-contract-tests-p3b.md §D) implemented `kio log
-    // --at/--since` (see step4b_p3b_contract.rs's qb5x tests) — this
-    // regression now exercises `kio gc`, a still-genuine Phase 4+ command
-    // placeholder (`Command::Gc`'s own doc comment), to keep pinning the
-    // not-implemented exit-code convention itself.
-    let dir = indexed_scope();
-    let args = ["gc"];
-    let err = json_failure(&dir, &args, 1);
-    assert_eq!(err["error_code"], "KIO-E-CONFIG-NOT-IMPLEMENTED-001");
 }
 
 // step4b-contract-tests-p2b.md PB21/22: a scope_id registered against two
@@ -6062,6 +6537,11 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
             "deadline": null,
             "heartbeat_at": null,
             "fallback_reason": null,
+            "bbox_annotation_enabled": true,
+            "hold_reason": null,
+            "reserved_usd": null,
+            "reserved_month": null,
+            "reservation_id": null,
             "created_at": "2026-04-25T12:00:00Z"
         });
         let mut line = serde_json::to_string(&poison).unwrap();
@@ -6709,6 +7189,12 @@ fn q1_torn_chunk_tail_fully_self_heals_across_index_repair_index() {
         let value: Value = serde_json::from_str(line).unwrap_or_else(|err| {
             panic!("every chunks.jsonl line must be valid JSON ({err}): {line}")
         });
+        // Publication rows are additive ledger events for an existing creation,
+        // so they intentionally repeat its chunk id. This torn-tail check is
+        // about duplicate creation records only.
+        if value.get("event").is_some() {
+            continue;
+        }
         let id = value["chunk_id"].as_str().unwrap().to_owned();
         assert!(ids.insert(id), "chunk_id must not be duplicated: {line}");
         count += 1;
@@ -6818,7 +7304,7 @@ fn r6_default_search_rereads_current_global_opt_out() {
     json_success_path(b.path(), data_home.path(), &["index", "--approve"]);
     fs::write(
         a.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+        "[scope]\nparticipates_in_global_search = false\n",
     )
     .unwrap();
 
@@ -6859,23 +7345,13 @@ fn r6_corrupt_normalized_unit_is_store_corrupt_not_config_schema() {
     .unwrap();
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--yes"]);
-    let unit_path = first_normalized_unit_json(&dir.path().join(".kio/objects/normalized_units"));
+    let unit_path = first_immutable_normalized_unit_object(&dir.path().join(".kio"));
     fs::write(&unit_path, r#"{"torn":"#).unwrap();
 
-    // R16-4: a corrupt normalized unit no longer aborts the whole rebuild — repair
-    // SKIPS that document, recording it under KIO-E-STORE-CORRUPT-001 (the original R6
-    // concern: NOT a CONFIG-SCHEMA misclassification) with recovery guidance, instead
-    // of the former whole-scope exit-4 failure.
-    let out = json_success(&dir, &["repair", "rebuild-db"]);
-    let skipped = out["skipped_units"].as_array().unwrap();
-    assert_eq!(
-        skipped.len(),
-        1,
-        "the corrupt unit's document is skipped: {out}"
-    );
-    assert_eq!(skipped[0]["reason"], "KIO-E-STORE-CORRUPT-001");
-    assert_ne!(skipped[0]["reason"], "KIO-E-CONFIG-SCHEMA-001");
-    assert_eq!(skipped[0]["path"], "note.md");
+    // A historical manifest transitively authenticates this body. Corruption
+    // therefore fails closed rather than using its mutable cache counterpart.
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
 }
 
 // ---------------------------------------------------------------------------
@@ -7040,6 +7516,51 @@ fn first_manifest_json(root: &Path) -> std::path::PathBuf {
     );
 }
 
+fn mutable_unit_path_for(
+    root: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+    unit_ref: &str,
+) -> std::path::PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) != Some("manifest.json") {
+                continue;
+            }
+            let manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if manifest["raw_hash"] == raw_hash
+                && manifest["tool_profile_hash"] == tool_profile_hash
+                && manifest["gen"] == gen
+            {
+                return path.parent().unwrap().join(format!("{unit_ref}.json"));
+            }
+        }
+    }
+    panic!("normalized cache instance not found for {raw_hash}/{tool_profile_hash}/g{gen}");
+}
+
+fn first_immutable_normalized_unit_object(kio_dir: &Path) -> std::path::PathBuf {
+    let manifest_path = first_manifest_json(&kio_dir.join("objects/normalized_units"));
+    let manifest: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    let unit_hash = manifest["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|unit| unit["unit_object_hash"].as_str())
+        .expect("indexed manifest must pin a done immutable unit");
+    ObjectStore::new(kio_dir)
+        .content_path(ContentObjectKind::NormalizedUnit, unit_hash)
+        .unwrap()
+}
+
 /// R9-5: a normalized gen dir polluted with crash/OS junk — a torn `.tmp-*` left
 /// by a killed atomic writer and a `.DS_Store` — must not brick `reindex`. Before
 /// the fix, `copy_normalized_instance_gen` read every non-manifest entry as a unit
@@ -7136,7 +7657,7 @@ fn r12_2_adapter_policy_full_default_block_all_commands_ok() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n\
+        "\
          [adapter.policy]\n\
          allow_network = false\n\
          allowed_scope = \".\"\n\
@@ -7163,7 +7684,7 @@ fn r12_2_allowed_scope_non_default_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nallowed_scope = \"sub\"\n",
+        "[adapter.policy]\nallowed_scope = \"sub\"\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7175,7 +7696,7 @@ fn r12_2_store_request_body_true_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nstore_request_body = true\n",
+        "[adapter.policy]\nstore_request_body = true\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7187,7 +7708,7 @@ fn r12_2_timeout_seconds_non_default_is_loud_rejected() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 30\n",
+        "[adapter.policy]\ntimeout_seconds = 30\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 1);
@@ -7195,7 +7716,7 @@ fn r12_2_timeout_seconds_non_default_is_loud_rejected() {
     // The documented default (300) is accepted.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 300\n",
+        "[adapter.policy]\ntimeout_seconds = 300\n",
     )
     .unwrap();
     json_success(&dir, &["status"]);
@@ -7208,7 +7729,7 @@ fn r12_2_unknown_policy_key_is_schema_error() {
     let dir = indexed_scope();
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nallow_netwrok = false\n",
+        "[adapter.policy]\nallow_netwrok = false\n",
     )
     .unwrap();
     let err = json_failure(&dir, &["status"], 2);
@@ -7257,7 +7778,7 @@ fn r12_2_max_input_bytes_gates_oversized_input() {
     // Cap at 50 bytes; write a markdown file well over that.
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "kio_format_version = \"0.1.0\"\n[adapter.policy]\nmax_input_bytes = 50\n",
+        "[adapter.policy]\nmax_input_bytes = 50\n",
     )
     .unwrap();
     fs::write(
@@ -7295,11 +7816,7 @@ fn multi_chunk_scope() -> TempDir {
 }
 
 fn write_scope_config(dir: &TempDir, body: &str) {
-    fs::write(
-        dir.path().join(".kio/config.toml"),
-        format!("kio_format_version = \"0.1.0\"\n{body}"),
-    )
-    .unwrap();
+    fs::write(dir.path().join(".kio/config.toml"), body).unwrap();
 }
 
 // strategy = "off" is a real no-op (no dedup); max_per_raw_hash caps the stream —
@@ -7496,7 +8013,7 @@ fn r12_3_reconcile_completes_committed_embedding_tasks() {
 }
 
 #[test]
-fn r23_materialized_embedding_completes_legacy_failed_task_without_charge() {
+fn r23_materialized_embedding_completes_failed_task_without_charge() {
     let dir = indexed_scope_embed("mock");
     let tasks_path = dir.path().join(".kio/tasks.jsonl");
     let original = fs::read_to_string(&tasks_path).unwrap();
@@ -7509,10 +8026,6 @@ fn r23_materialized_embedding_completes_legacy_failed_task_without_charge() {
             task["status"] = Value::from("failed");
             task["fallback_reason"] = Value::from("contract_violation");
             task["attempts"] = Value::from(1);
-            let object = task.as_object_mut().unwrap();
-            object.remove("reservation_id");
-            object.remove("reserved_month");
-            object.remove("reserved_usd");
         }
         rewritten.push_str(&serde_json::to_string(&task).unwrap());
         rewritten.push('\n');
@@ -7740,11 +8253,7 @@ fn r13_3_logs_retention_days_accepted_in_user_config() {
     let dir = indexed_scope();
     let user_cfg = dir.path().join(".test-config/kio");
     fs::create_dir_all(&user_cfg).unwrap();
-    fs::write(
-        user_cfg.join("config.toml"),
-        "kio_format_version = \"0.1.0\"\n[logs]\nretention_days = 7\n",
-    )
-    .unwrap();
+    fs::write(user_cfg.join("config.toml"), "[logs]\nretention_days = 7\n").unwrap();
     json_success(&dir, &["status"]);
     json_success(&dir, &["search", "トークン"]);
 }
@@ -8380,50 +8889,6 @@ fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
     );
 }
 
-/// A completed image projection remains searchable if a legacy source later
-/// lacks `image_vec`.  Direct search reads only the device replica; it must not
-/// reopen or repair the per-scope source index merely to answer this query.
-#[test]
-fn a_scope_indexed_before_image_vec_existed_still_searches() {
-    let dir = indexed_scope_local_embed_with_images();
-    {
-        let conn = index_db(&dir);
-        conn.execute_batch("DROP TABLE image_vec;").unwrap();
-    }
-    let search = json_success_local_embed(
-        &dir,
-        &["search", "figure page one", "--scope", ".", "--limit", "20"],
-    );
-    assert!(
-        !search["results"].as_array().unwrap().is_empty(),
-        "chunk results must survive a missing image_vec: {search}"
-    );
-    assert!(
-        !image_rows(&search).is_empty(),
-        "the already-published replica image relation must remain searchable: {search}"
-    );
-    let source_image_table_count: i64 = index_db(&dir)
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'image_vec'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        source_image_table_count, 0,
-        "direct search must not recreate the source image_vec table"
-    );
-
-    // A writer repairs the source and republishes it, without changing the
-    // searchable replica result contract.
-    json_success_local_embed(&dir, &["index"]);
-    let restored = json_success_local_embed(
-        &dir,
-        &["search", "figure page one", "--scope", ".", "--limit", "20"],
-    );
-    assert!(!image_rows(&restored).is_empty(), "{restored}");
-}
-
 /// U5 / §4.2 問題 A: an image is not in the FTS index, so RRF would add two
 /// reciprocal terms for a chunk and one for an image and sink every figure
 /// structurally. The image inherits the text-lane standing of the chunk that
@@ -8988,10 +9453,8 @@ fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
     );
 }
 
-// R16-4(b): a single document's missing normalized unit must not abort the whole
-// rebuild. `repair rebuild-db` skips that document (reporting it under skipped_units
-// with KIO-E-STORE-IO-001 + recovery guidance) and rebuilds the rest. Before the fix
-// one missing unit failed the entire scope (STORE-IO exit 1).
+// An absent immutable normalized-unit CAS object is a broken historical closure.
+// It must fail closed rather than let repair substitute mutable cache content.
 #[test]
 fn r16_4_repair_skips_missing_unit_and_rebuilds_the_rest() {
     let dir = tempfile::tempdir().unwrap();
@@ -9008,29 +9471,12 @@ fn r16_4_repair_skips_missing_unit_and_rebuilds_the_rest() {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--yes"]);
 
-    // Delete ONE document's normalized unit file (a missing unit → KIO-E-STORE-IO-001).
-    let unit_path = first_normalized_unit_json(&dir.path().join(".kio/objects/normalized_units"));
+    // Delete one immutable normalized-unit CAS object.
+    let unit_path = first_immutable_normalized_unit_object(&dir.path().join(".kio"));
     fs::remove_file(&unit_path).unwrap();
 
-    // repair completes (exit 0): it rebuilds the healthy document and reports the
-    // skipped one loudly, rather than aborting the whole scope.
-    let out = json_success(&dir, &["repair", "rebuild-db"]);
-    let skipped = out["skipped_units"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "exactly one document is skipped: {out}");
-    assert_eq!(skipped[0]["reason"], "KIO-E-STORE-IO-001");
-    assert!(
-        out["skipped_units_guidance"]
-            .as_str()
-            .unwrap()
-            .contains("reindex --force"),
-        "the recovery guidance must be surfaced: {out}"
-    );
-    // The scope still searches — the rebuild completed rather than bricking.
-    let search = json_success(&dir, &["search", "token"]);
-    assert!(
-        !search["results"].as_array().unwrap().is_empty(),
-        "the rebuilt scope must still search: {search}"
-    );
+    let error = json_failure(&dir, &["repair", "rebuild-db"], 4);
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001", "{error}");
 }
 
 // R16-5: `kio diff` with a shallow side (its commit or tree object discarded) must
@@ -9301,13 +9747,10 @@ fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
     );
 }
 
-// R17-6: a document whose normalized unit is corrupt but whose persisted chunks survive
-// in chunks.jsonl is STILL searchable — `build_sqlite_index_at` re-serves the cached
-// chunks. Its skipped_units entry must be flagged searchable with a soft "stale source"
-// note, not the emergency "re-normalize now" push (which points at the reindex --force
-// R17-2 just un-bricked). Before the fix every skip got the emergency guidance.
+// The path-named normalized unit is only a mutable cache. Its corruption must
+// neither influence reconstruction nor produce a false stale-source warning.
 #[test]
-fn r17_6_repair_softens_guidance_for_searchable_cached_document() {
+fn r17_6_repair_ignores_corrupt_mutable_cache_when_chunks_survive() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("a.md"),
@@ -9317,38 +9760,13 @@ fn r17_6_repair_softens_guidance_for_searchable_cached_document() {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--yes"]);
 
-    // Corrupt the normalized unit (→ skipped during rebuild) AND delete sqlite so repair
-    // must rebuild. The cached chunks in chunks.jsonl survive → the document stays
-    // searchable and its skip is a stale-source note, not an emergency.
+    // Corrupt only the mutable cache and force a derived SQLite rebuild.
     let unit = first_normalized_unit_json(&dir.path().join(".kio/objects/normalized_units"));
     fs::write(&unit, r#"{"torn":"#).unwrap();
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
 
     let out = json_success(&dir, &["repair", "rebuild-db"]);
-    let skipped = out["skipped_units"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "{out}");
-    assert_eq!(
-        skipped[0]["searchable"],
-        Value::Bool(true),
-        "the cached document is flagged still-searchable: {out}"
-    );
-    assert!(
-        skipped[0]["guidance"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("stale"),
-        "the searchable document's per-entry guidance is a stale note: {out}"
-    );
-    // Top-level guidance is the softened (non-emergency) form.
-    assert!(
-        out["skipped_units_guidance"]
-            .as_str()
-            .unwrap()
-            .contains("when convenient"),
-        "top-level guidance is softened, not the emergency push: {out}"
-    );
-    // The document is genuinely searchable after the rebuild (the false alarm was false).
+    assert!(out["skipped_units"].as_array().unwrap().is_empty(), "{out}");
     let search = json_success(&dir, &["search", "cachedserving"]);
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
@@ -9356,11 +9774,10 @@ fn r17_6_repair_softens_guidance_for_searchable_cached_document() {
     );
 }
 
-// R17-6 discriminator: a skipped document with NO surviving chunks (chunks.jsonl gone) is
-// genuinely unsearchable and MUST keep the emergency re-normalization guidance — softening
-// is scoped to documents that are actually still being served.
+// Even without persisted chunks, reconstruction must derive from the immutable
+// unit CAS rather than a mutable cache body.
 #[test]
-fn r17_6_repair_keeps_emergency_guidance_when_no_cached_chunks_survive() {
+fn r17_6_repair_rebuilds_from_immutable_unit_when_no_cached_chunks_survive() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("only.md"),
@@ -9370,33 +9787,17 @@ fn r17_6_repair_keeps_emergency_guidance_when_no_cached_chunks_survive() {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--yes"]);
 
-    // Corrupt the unit AND remove the persisted chunks — nothing can be re-served, so the
-    // document is genuinely unsearchable.
+    // Corrupt the cache and remove persisted chunks, forcing CAS-based chunking.
     let unit = first_normalized_unit_json(&dir.path().join(".kio/objects/normalized_units"));
     fs::write(&unit, r#"{"torn":"#).unwrap();
     fs::remove_file(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
 
     let out = json_success(&dir, &["repair", "rebuild-db"]);
-    let skipped = out["skipped_units"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "{out}");
-    assert_eq!(
-        skipped[0]["searchable"],
-        Value::Bool(false),
-        "no live chunks → not searchable: {out}"
-    );
-    assert!(
-        !skipped[0]["guidance"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("stale"),
-        "an unsearchable document keeps the emergency guidance, not the stale note: {out}"
-    );
-    // The document truly cannot be served — the emergency guidance is warranted.
+    assert!(out["skipped_units"].as_array().unwrap().is_empty(), "{out}");
     let search = json_success(&dir, &["search", "onlydoc"]);
     assert!(
-        search["results"].as_array().unwrap().is_empty(),
-        "no chunks remain → no results: {search}"
+        !search["results"].as_array().unwrap().is_empty(),
+        "immutable unit CAS must restore chunks without reading the cache: {search}"
     );
 }
 
@@ -11141,74 +11542,59 @@ fn r23_cand_014_status_fails_closed_on_corrupt_unsupported_store() {
     );
 }
 
-/// R22-5 [major]: a legacy `online:mistral_ocr_markdownize` task an OLDER build enqueued for
-/// an octet-stream TEXT file (`.yaml`/`.json`/`Dockerfile`) must be RETIRED at send time, not
-/// shipped to the OCR API and billed. R21-4 only stopped fresh enqueues; the send gate is the
-/// migration path for tasks already sitting in `tasks.jsonl` after an upgrade.
+/// A persisted online task without its required bbox stamp is rejected at the
+/// task-store boundary. It cannot survive to a resume/send path and therefore
+/// cannot cause an OCR charge.
 #[test]
-fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
-    use kio_pipeline::prepare::hash_bytes;
-    use kio_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+fn r22_5_missing_online_bbox_stamp_is_rejected_before_send() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
-        dir.path().join("config.yaml"),
-        "name: acme\nvalue: 42\nnested:\n  key: value\n",
+        dir.path().join("document.pdf"),
+        fake_pdf(&["online markdownize bbox stamp regression"]),
     )
     .unwrap();
     kio(&dir, &["init"]).assert().success();
-    // `index --approve` records the markdownize network opt-in and (R21-4) enqueues NO
-    // online task for the octet-stream text file.
-    json_success(&dir, &["index", "--approve"]);
-    assert_eq!(
-        markdown_ledger_rows(&dir),
-        0,
-        "R22-5 precondition: index must not charge markdownize for octet-stream text"
-    );
-    // Inject the legacy online task an older build would have enqueued (input_hash matches
-    // the current bytes so the only reason it can retire is the octet-stream-text gate).
-    let input_hash = hash_bytes(&fs::read(dir.path().join("config.yaml")).unwrap());
-    let legacy = TaskDescriptor {
-        task_id: "r22-5-legacy-markdownize".to_owned(),
-        task_type: TaskType::Markdownize,
-        mode: None,
-        input_path: "config.yaml".to_owned(),
-        input_hash,
-        previous_raw_hash: None,
-        parent_run_id: None,
-        changed_unit_keys: Vec::new(),
-        output_ref: "online:mistral_ocr_markdownize".to_owned(),
-        unit_keys: None,
-        status: TaskStatus::Pending,
-        attempts: 0,
-        next_retry_at: None,
-        deadline: None,
-        heartbeat_at: None,
-        fallback_reason: Some("ready_for_online_adapter".to_owned()),
-        created_at: "2026-07-01T00:00:00Z".to_owned(),
-        bbox_annotation_enabled: None,
-        hold_reason: None,
-        reserved_usd: None,
-        reserved_month: None,
-        reservation_id: None,
-    };
-    TaskStore::new(dir.path().join(".kio"))
-        .append(&legacy)
-        .unwrap();
-    // `batch resume` (with the OCR seam mocked) must RETIRE the legacy task without a send.
-    run_markdownize_seam(&dir, "mock", None, &["batch", "resume"]);
-    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    // Persist a valid current online task first, then simulate a torn/obsolete
+    // task record that omits the required current-format stamp.
+    run_markdownize_seam(&dir, "mock", None, &["index", "--online", "--approve"]);
+    let tasks_path = dir.path().join(".kio/tasks.jsonl");
+    let original = fs::read_to_string(&tasks_path).unwrap();
+    let mut rewritten = String::new();
+    let mut changed = false;
+    for line in original.lines() {
+        let mut task: Value = serde_json::from_str(line).unwrap();
+        if !changed && task["type"] == "markdownize" && task["status"] == "pending" {
+            task.as_object_mut()
+                .unwrap()
+                .remove("bbox_annotation_enabled");
+            changed = true;
+        }
+        rewritten.push_str(&serde_json::to_string(&task).unwrap());
+        rewritten.push('\n');
+    }
     assert!(
-        tasks_of_type(&status, "markdownize").iter().any(|t| {
-            t["output_ref"] == "online:mistral_ocr_markdownize"
-                && t["status"] == "failed"
-                && t["fallback_reason"] == "retired_non_live"
-        }),
-        "R22-5: the legacy octet-stream-text online task must be retired, not sent: {status}"
+        changed,
+        "fixture must contain a pending online markdownize task"
     );
+    fs::write(&tasks_path, rewritten).unwrap();
     assert_eq!(
         markdown_ledger_rows(&dir),
         0,
-        "R22-5: retiring the legacy task must add no markdownize charge row: {status}"
+        "precondition: indexing must not execute a queued markdownize task"
+    );
+    let stderr = kio(&dir, &["batch", "resume", "--json"])
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
+        .assert()
+        .code(4)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "a malformed task must add no markdownize charge row"
     );
 }
 

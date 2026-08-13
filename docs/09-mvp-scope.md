@@ -137,14 +137,14 @@ Step 別の目安 (テスト除く):
 | `kio repair verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
-| `kio gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
+| on-demand / shallow / prune-unreachable GC | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (CLI は未公開) |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
 | CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |
 | export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |
 | `kio evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
-| `kio move` (scope 内移動の明示追跡。現状は lock 対象として予約のみ、full spec は未定) | [05-runtime.md §6](05-runtime.md) | Phase 4+ (予約) |
+| scope 内移動の明示追跡 | [05-runtime.md §6](05-runtime.md) | Phase 4+ (CLI は未公開) |
 | agent API の外部公開・発見導線 / navigation | [06-cli-spec.md §9](06-cli-spec.md) | Phase 5 |
 | GUI 用語翻訳マッピング | [06-cli-spec.md §14](06-cli-spec.md) | Phase 4+ |
 
@@ -219,6 +219,36 @@ Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 �
 試算根拠          Markdownize 単価      Mistral OCR 4 Batch $2 / 1,000 pages 前提
                                        (研究メモ: 旧 research/markdown.md — git 履歴。単価改定時は本表を更新)
 ```
+
+Q_hard の Rust 計測は `kio-eval benchmark qhard` を正本とする。これは外部 fixture の
+attestation (tree / XDG environment / registered scopes / frozen golden digest) を要求し、fixture
+未配置・未 attest を pass や historical result の再利用として扱わない。Q_hard 8 問だけの
+report は測定値であり、M3-1 の 26 問 / 21 hit 合算判定には `--synthetic-corpus` により
+同一実行内で再測定された frozen synthetic M3-1 18 問が必要である。外部結果 artifact は
+受け付けない。
+
+Spotlight/rga との baseline 比較は、Q_hard 8 問や synthetic M3-1 18 問とは混同しない
+別の凍結母集団 `eval/golden-queries-fixture-b.jsonl`（hard1/2/3 各8、24問、
+`sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45`）で行う。
+正本は Rust の `kio-eval benchmark baseline` である。実行前に
+`kio-eval benchmark baseline-attest` が indexed fixture と `.kio` を除いた pristine
+tree の同値性、p01..p20、golden を束縛する attestation を生成する。Python
+`eval/run_baseline.py` は歴史的な reference であり、新規判定の正本ではない。保存済み JSON は
+計測証拠ではなく、実測の pass を主張しない。
+
+macOS の rga comparator は、ユーザー所有 package prefix を信頼根にしてはならない。baseline 実行は
+管理者提供の root-owned / group-other 非書込み runtime root を明示し、rga、rga-preproc、pandoc、pdftotext、rg
+と custom adapter を空に固定した設定ファイル、および Mach-O dynamic dependency closure を canonical path・digest
+とともに束縛する。`@loader_path`、
+`@executable_path`、`@rpath`、symlink の runtime 外 escape、未解決または非sealed dependency は
+`blocked-unmeasured` とし、比較の pass を成立させない。明示的に sealed と検証した macOS system library root
+だけを runtime 外 terminal dependency として許し、dynamic loader は sealed `/usr/lib/dyld` に固定し
+`LC_DYLD_ENVIRONMENT` は拒否する。各 comparator subprocess の前後と計測 finalization で closure を再帰的に
+再解決し、初期 binding の canonical path・trust class・SHA-256・closure digest と完全一致しない場合は、
+高優先度の `@rpath` 候補追加を含めて `blocked-unmeasured` とする。
+さらに runtime root は macOS `MNT_RDONLY` の read-only mount に限定し、bind・各 comparator subprocess の前後・
+finalization で public path と retained root descriptor の mount identity が初期値と一致しなければ
+`blocked-unmeasured` とする。report は read-only 判定と mount identity を closure provenance に含める。
 
 ## 4.2 シナリオ凍結規律
 

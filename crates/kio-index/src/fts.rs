@@ -1,13 +1,19 @@
 //! FTS5 external-content index contracts.
 
 use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::ffi::CStr;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::{Once, OnceLock};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use cap_primitives::fs as cap_fs;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::search_projection::resolve_markdown_escapes;
-use crate::{ChunkRow, IndexError, Result};
+use crate::{chunking::validate_unit_hash, ChunkRow, IndexError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +58,543 @@ pub struct PurgeRawIndexReport {
 
 pub struct SqliteFtsIndex {
     conn: Connection,
+    _source: Option<BoundSourceIndex>,
+}
+
+pub struct SourceIndexConnection {
+    conn: Connection,
+    _source: BoundSourceIndex,
+}
+impl std::ops::Deref for SourceIndexConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+impl std::ops::DerefMut for SourceIndexConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.conn
+    }
+}
+impl std::fmt::Debug for SourceIndexConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceIndexConnection")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Access mode for [`open_existing_source_index_connection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingSourceIndexOpenMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// Resolve an index parent before passing the untrusted leaf to SQLite.
+///
+/// `SQLITE_OPEN_NOFOLLOW` applies to every component SQLite receives.  The
+/// parent therefore needs to be resolved separately: Kio must accept an
+/// OS-owned ancestor symlink, but it must never follow a link installed at the
+/// final `sqlite.db` component.
+fn source_index_path_in_resolved_parent(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    // The immediate `.kio/index` parent is repository-controlled. Do not
+    // canonicalize through a replacement symlink here: unlike an OS-owned
+    // ancestor such as `/var`, that would redirect a fresh sqlite.db bootstrap
+    // into an attacker-selected directory.
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        IndexError::Schema(format!(
+            "inspect source index parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(IndexError::Schema(format!(
+            "source index parent must be a real directory, not a symlink: {}",
+            parent.display()
+        )));
+    }
+    let file_name = path.file_name().ok_or_else(|| {
+        IndexError::Schema(format!(
+            "source index path has no file name: {}",
+            path.display()
+        ))
+    })?;
+    Ok(parent.join(file_name))
+}
+
+struct BoundSourceIndex {
+    // Keep the repository-owned root (normally `.kio`) as well as `index`.
+    // Opening `index` relative to this descriptor is what keeps a concurrent
+    // replacement of `.kio` from changing the authority used for SQLite.
+    _root: std::fs::File,
+    _parent: std::fs::File,
+    file: std::fs::File,
+    public_path: PathBuf,
+}
+
+fn bind_source_index(
+    path: &Path,
+    writable: bool,
+    create_missing: bool,
+) -> Result<BoundSourceIndex> {
+    let path = source_index_path_in_resolved_parent(path)?;
+    let parent = path.parent().expect("source index has a parent");
+    let root = parent.parent().filter(|root| !root.as_os_str().is_empty());
+    let (root_handle, parent_handle) = if let Some(root) = root {
+        // A descriptor-bound child index has already changed cwd to the
+        // retained `.kio` directory, which is represented as `.`. Treat that
+        // current directory as the root capability directly instead of trying
+        // to split `.` into a public parent/leaf path.
+        if root == Path::new(".") {
+            let root_handle =
+                cap_fs::open_ambient_dir(Path::new("."), cap_primitives::ambient_authority())
+                    .map_err(|e| {
+                        IndexError::Schema(format!("open descriptor-bound source index root: {e}"))
+                    })?;
+            let parent_leaf = parent.file_name().expect("source index parent has a leaf");
+            let parent_handle = cap_fs::open_dir_nofollow(&root_handle, Path::new(parent_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index parent {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            (root_handle, parent_handle)
+        } else {
+            let root_leaf = root.file_name().ok_or_else(|| {
+                IndexError::Schema(format!(
+                    "source index parent has no repository root component: {}",
+                    parent.display()
+                ))
+            })?;
+            let outer = root
+                .parent()
+                .filter(|outer| !outer.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let before_root = std::fs::symlink_metadata(root).map_err(|e| {
+                IndexError::Schema(format!("inspect source index root {}: {e}", root.display()))
+            })?;
+            if before_root.file_type().is_symlink() || !before_root.is_dir() {
+                return Err(IndexError::Schema(format!(
+                    "source index root must be a real directory, not a symlink: {}",
+                    root.display()
+                )));
+            }
+            let outer_handle = cap_fs::open_ambient_dir(outer, cap_primitives::ambient_authority())
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index root ancestor {}: {e}",
+                        outer.display()
+                    ))
+                })?;
+            let root_handle = cap_fs::open_dir_nofollow(&outer_handle, Path::new(root_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!("open source index root {}: {e}", root.display()))
+                })?;
+            let opened_root = root_handle.metadata().map_err(|e| {
+                IndexError::Schema(format!(
+                    "inspect opened source index root {}: {e}",
+                    root.display()
+                ))
+            })?;
+            if !same_std_and_cap_directory(&before_root, &opened_root) {
+                return Err(IndexError::Schema(format!(
+                    "source index root changed while opening: {}",
+                    root.display()
+                )));
+            }
+            let parent_leaf = parent.file_name().expect("source index parent has a leaf");
+            let parent_handle = cap_fs::open_dir_nofollow(&root_handle, Path::new(parent_leaf))
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "open source index parent {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            (root_handle, parent_handle)
+        }
+    } else {
+        // A bare relative path has no repository-root component to bind. Keep
+        // the old lstat/open/identity check for that API convenience case.
+        let before = std::fs::symlink_metadata(parent).map_err(|e| {
+            IndexError::Schema(format!(
+                "inspect source index parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+        let handle = cap_fs::open_ambient_dir(parent, cap_primitives::ambient_authority())
+            .map_err(|e| {
+                IndexError::Schema(format!(
+                    "open source index parent {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        let after = handle.metadata().map_err(|e| {
+            IndexError::Schema(format!(
+                "inspect opened source index parent {}: {e}",
+                parent.display()
+            ))
+        })?;
+        if !same_std_and_cap_directory(&before, &after) {
+            return Err(IndexError::Schema(format!(
+                "source index parent changed while opening: {}",
+                parent.display()
+            )));
+        }
+        (
+            handle.try_clone().map_err(|e| {
+                IndexError::Schema(format!(
+                    "retain source index parent {}: {e}",
+                    parent.display()
+                ))
+            })?,
+            handle,
+        )
+    };
+    let before = parent_handle.metadata().map_err(|e| {
+        IndexError::Schema(format!(
+            "inspect opened source index parent {}: {e}",
+            parent.display()
+        ))
+    })?;
+    if !before.is_dir() {
+        return Err(IndexError::Schema(format!(
+            "source index parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    let leaf = path.file_name().expect("source index has a leaf");
+    let before_leaf = cap_source_leaf_identity(&parent_handle, Path::new(leaf))?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(writable)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        // SQLite's public-path open below cannot be passed this capability
+        // handle. Keep this leaf handle open without FILE_SHARE_DELETE so a
+        // concurrent rename/delete (and therefore path replacement) is denied
+        // until SQLite has completed its own open and the connection closes.
+        // cap-primitives gives directory handles this policy by default, but
+        // ordinary file OpenOptions intentionally default to allowing delete.
+        use cap_fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    if create_missing && before_leaf.is_none() {
+        options.create_new(true);
+    }
+    let file = cap_fs::open(&parent_handle, Path::new(leaf), &options)
+        .map_err(|e| IndexError::Schema(format!("inspect source index {}: {e}", path.display())))?;
+    validate_bound_source_file(&file, &path)?;
+    if let Some(before_leaf) = before_leaf {
+        if source_file_identity(&file)? != before_leaf {
+            return Err(IndexError::Schema(format!(
+                "source index leaf changed while opening: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(BoundSourceIndex {
+        _root: root_handle,
+        _parent: parent_handle,
+        file,
+        public_path: path,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceFileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    volume_serial_number: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+}
+#[cfg(unix)]
+fn cap_source_leaf_identity(
+    parent: &std::fs::File,
+    leaf: &Path,
+) -> Result<Option<SourceFileIdentity>> {
+    use cap_fs::MetadataExt;
+    match cap_fs::stat(parent, leaf, cap_fs::FollowSymlinks::No) {
+        Ok(metadata) if metadata.is_file() && metadata.nlink() == 1 => {
+            Ok(Some(SourceFileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }))
+        }
+        Ok(metadata) if metadata.is_file() => Err(IndexError::Schema(format!(
+            "source index target must have exactly one hard link (found {}): {}",
+            metadata.nlink(),
+            leaf.display()
+        ))),
+        Ok(_) => Err(IndexError::Schema(format!(
+            "source index target is not a regular file: {}",
+            leaf.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(IndexError::Schema(format!(
+            "inspect source index {}: {error}",
+            leaf.display()
+        ))),
+    }
+}
+#[cfg(windows)]
+fn cap_source_leaf_identity(
+    parent: &std::fs::File,
+    leaf: &Path,
+) -> Result<Option<SourceFileIdentity>> {
+    use cap_fs::MetadataExt;
+    match cap_fs::stat(parent, leaf, cap_fs::FollowSymlinks::No) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(SourceFileIdentity {
+            volume_serial_number: metadata.volume_serial_number(),
+            file_index: metadata.file_index(),
+        })),
+        Ok(_) => Err(IndexError::Schema(format!(
+            "source index target is not a regular file: {}",
+            leaf.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(IndexError::Schema(format!(
+            "inspect source index {}: {error}",
+            leaf.display()
+        ))),
+    }
+}
+#[cfg(not(any(unix, windows)))]
+fn cap_source_leaf_identity(
+    _parent: &std::fs::File,
+    _leaf: &Path,
+) -> Result<Option<SourceFileIdentity>> {
+    Err(IndexError::Schema(
+        "source SQLite capability binding is unsupported on this platform".to_owned(),
+    ))
+}
+#[cfg(unix)]
+fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let m = file
+        .metadata()
+        .map_err(|e| IndexError::Schema(format!("inspect opened source index: {e}")))?;
+    Ok(SourceFileIdentity {
+        dev: m.dev(),
+        ino: m.ino(),
+    })
+}
+#[cfg(not(any(unix, windows)))]
+fn source_file_identity(_: &std::fs::File) -> Result<SourceFileIdentity> {
+    Ok(SourceFileIdentity {})
+}
+#[cfg(windows)]
+fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|e| IndexError::Schema(format!("inspect opened source index: {e}")))?;
+    Ok(SourceFileIdentity {
+        volume_serial_number: metadata.volume_serial_number(),
+        file_index: metadata.file_index(),
+    })
+}
+
+#[cfg(unix)]
+fn same_std_and_cap_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    before.dev() == after.dev() && before.ino() == after.ino()
+}
+#[cfg(windows)]
+fn same_std_and_cap_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    before.volume_serial_number() == after.volume_serial_number()
+        && before.file_index() == after.file_index()
+}
+#[cfg(not(any(unix, windows)))]
+fn same_std_and_cap_directory(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn validate_bound_source_file(file: &std::fs::File, path: &Path) -> Result<()> {
+    let metadata = file.metadata().map_err(|e| {
+        IndexError::Schema(format!(
+            "inspect opened source index {}: {e}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(IndexError::Schema(format!(
+            "source index target is not a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(IndexError::Schema(format!(
+                "source index target must have exactly one hard link (found {}): {}",
+                metadata.nlink(),
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+impl BoundSourceIndex {
+    #[cfg(unix)]
+    fn sqlite_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()))
+    }
+    #[cfg(not(unix))]
+    fn sqlite_path(&self) -> PathBuf {
+        self.public_path.clone()
+    }
+}
+
+#[cfg(unix)]
+const BOUND_SOURCE_VFS_NAME: &CStr = c"kio-bound-source-unix";
+#[cfg(unix)]
+static BOUND_SOURCE_VFS_INIT: Once = Once::new();
+#[cfg(unix)]
+static BOUND_SOURCE_VFS_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+#[cfg(unix)]
+static BOUND_SOURCE_DEFAULT_VFS: OnceLock<usize> = OnceLock::new();
+
+#[cfg(unix)]
+fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
+    BOUND_SOURCE_VFS_INIT.call_once(|| {
+        let result = unsafe {
+            let original = rusqlite::ffi::sqlite3_vfs_find(std::ptr::null());
+            if original.is_null() {
+                Err("SQLite has no default VFS".to_owned())
+            } else {
+                let _ = BOUND_SOURCE_DEFAULT_VFS.set(original as usize);
+                let mut wrapped = Box::new(*original);
+                wrapped.zName = BOUND_SOURCE_VFS_NAME.as_ptr();
+                wrapped.xFullPathname = Some(bound_source_x_full_pathname);
+                let code = rusqlite::ffi::sqlite3_vfs_register(Box::into_raw(wrapped), 0);
+                if code == rusqlite::ffi::SQLITE_OK {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "register bound source SQLite VFS: SQLite error {code}"
+                    ))
+                }
+            }
+        };
+        let _ = BOUND_SOURCE_VFS_RESULT.set(result);
+    });
+    BOUND_SOURCE_VFS_RESULT
+        .get()
+        .expect("VFS initializer sets result")
+        .as_ref()
+        .map_err(|e| IndexError::Schema(e.clone()))?;
+    Ok(Connection::open_with_flags_and_vfs(
+        path,
+        flags,
+        "kio-bound-source-unix",
+    )?)
+}
+#[cfg(not(unix))]
+fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
+    Ok(Connection::open_with_flags(path, flags)?)
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn bound_source_x_full_pathname(
+    _: *mut rusqlite::ffi::sqlite3_vfs,
+    name: *const std::ffi::c_char,
+    output_len: std::ffi::c_int,
+    output: *mut std::ffi::c_char,
+) -> std::ffi::c_int {
+    if name.is_null() || output.is_null() || output_len <= 0 {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    }
+    let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
+    if is_bound_source_fd_name(bytes) {
+        if bytes.len() + 1 > output_len as usize {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr().cast::<std::ffi::c_char>(),
+                output,
+                bytes.len(),
+            );
+            *output.add(bytes.len()) = 0;
+        }
+        return rusqlite::ffi::SQLITE_OK;
+    }
+    let Some(default_vfs) = BOUND_SOURCE_DEFAULT_VFS.get() else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    let default_vfs = *default_vfs as *mut rusqlite::ffi::sqlite3_vfs;
+    let Some(callback) = (unsafe { (*default_vfs).xFullPathname }) else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    unsafe { callback(default_vfs, name, output_len, output) }
+}
+#[cfg(unix)]
+fn is_bound_source_fd_name(value: &[u8]) -> bool {
+    value
+        .strip_prefix(b"/dev/fd/")
+        .is_some_and(|fd| !fd.is_empty() && fd.iter().all(u8::is_ascii_digit))
+}
+
+/// Open an existing, current source index without following its final path
+/// component or creating a missing database.
+///
+/// This is for callers that need the raw SQLite connection rather than the FTS
+/// wrapper. It validates the complete public schema before returning, so it
+/// cannot accidentally adopt an empty, partial, or legacy `sqlite.db`.
+pub fn open_existing_source_index_connection(
+    path: impl AsRef<std::path::Path>,
+    mode: ExistingSourceIndexOpenMode,
+    config: &FtsSchemaConfig,
+) -> Result<SourceIndexConnection> {
+    crate::vec::ensure_registered();
+    let source = bind_source_index(
+        path.as_ref(),
+        mode == ExistingSourceIndexOpenMode::ReadWrite,
+        false,
+    )?;
+
+    let flags = match mode {
+        ExistingSourceIndexOpenMode::ReadOnly => {
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        }
+        ExistingSourceIndexOpenMode::ReadWrite => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        }
+    };
+    let conn = open_bound_source_connection(&source.sqlite_path(), flags)?;
+    // The pre-open metadata check is not a lock. Recheck the visible leaf
+    // after SQLite's NOFOLLOW lookup to catch the common replacement races
+    // without making unsafe assumptions about raw file descriptors.
+    validate_bound_source_file(&source.file, &source.public_path)?;
+    if mode == ExistingSourceIndexOpenMode::ReadWrite {
+        // Keep mutable raw-connection users subject to the same sidecar policy
+        // as `SqliteFtsIndex::open`.
+        conn.pragma_update(None, "journal_mode", "MEMORY")?;
+    }
+    if !validate_current_schema(&conn, config)? {
+        return Err(schema_rebuild_error(
+            "source index has no current index schema".to_owned(),
+        ));
+    }
+    Ok(SourceIndexConnection {
+        conn,
+        _source: source,
+    })
 }
 
 impl SqliteFtsIndex {
@@ -59,16 +602,41 @@ impl SqliteFtsIndex {
         // The `vec0` module must be registered before the connection opens, else
         // the `chunk_vec` virtual table cannot be created or queried (04 §4.3).
         crate::vec::ensure_registered();
-        let conn = Connection::open(path)?;
+        let source = bind_source_index(path.as_ref(), true, true)?;
+        // The source index is durable, but its SQLite journal is not an
+        // independently validated Kio artifact.  Keep the rollback journal in
+        // memory so SQLite never opens a `-journal`, `-wal`, or `-shm` sidecar
+        // through a pathname that is not protected by this primary-file
+        // `NOFOLLOW` open.  This is a derived database and can be rebuilt from
+        // Kio's durable commit/tree/CAS sources if a process or power failure
+        // interrupts a write; it deliberately does not promise crash recovery
+        // from an on-disk SQLite journal.
+        //
+        // Resolve the parent first (rather than rejecting every ancestor
+        // symlink): OS-owned directories such as `/var` can legitimately be
+        // symlinked.  SQLite then performs the security-sensitive final lookup
+        // with `SQLITE_OPEN_NOFOLLOW`, closing the validation/open race.
+        let conn = open_bound_source_connection(
+            &source.sqlite_path(),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        validate_bound_source_file(&source.file, &source.public_path)?;
+        conn.pragma_update(None, "journal_mode", "MEMORY")?;
         ensure_schema_on_connection(&conn, config)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _source: Some(source),
+        })
     }
 
     pub fn in_memory(config: FtsSchemaConfig) -> Result<Self> {
         crate::vec::ensure_registered();
         let conn = Connection::open_in_memory()?;
         ensure_schema_on_connection(&conn, config)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _source: None,
+        })
     }
 
     #[must_use]
@@ -91,8 +659,7 @@ impl SqliteFtsIndex {
     /// increasing association rowid. Durable-ledger replay may pass the recorded
     /// rowid so a rebuilt database preserves cursor ordering exactly.
     /// `row.chunking_config_introduction_commit` (PC40) is recorded exactly as
-    /// [`Self::index_chunk_with_rowids`] does — `None` unless the caller's
-    /// `row` carries one.
+    /// [`Self::index_chunk_with_rowids`] does — the caller must provide it.
     pub fn index_chunk_with_association_rowid(
         &mut self,
         row: &ChunkRow,
@@ -109,13 +676,13 @@ impl SqliteFtsIndex {
     /// a malformed ledger cannot partially publish either side of the relation.
     ///
     /// `row.chunking_config_introduction_commit` (PC40, 05 §1.6 L266) is the
-    /// commit at which THIS `(chunk_id, chunking_config_hash)` association was
-    /// created — read from the row rather than taken as a separate parameter
+    /// commit at which THIS `(chunk_id, chunking_config_hash, introduction_commit)` association
+    /// was created — read from the row rather than taken as a separate parameter
     /// so a rebuild replaying an already-durable `chunks.jsonl` record cannot
     /// accidentally re-stamp it with "today's HEAD" (it is stamped only when
-    /// the association is genuinely new, matching
+    /// the association triple is genuinely new, matching
     /// `record_chunk_config_association`'s existing-row branch, which never
-    /// touches an already-existing row's `introduction_commit`). Chunk-level
+    /// touches an already-existing triple's immutable columns). Chunk-level
     /// publication events (PC37, potentially several per chunk) are a
     /// separate, caller-driven concern — see [`record_chunk_publication`].
     pub fn index_chunk_with_rowids(
@@ -124,7 +691,13 @@ impl SqliteFtsIndex {
         chunk_rowid: Option<u64>,
         association_rowid: Option<u64>,
     ) -> Result<(u64, u64)> {
-        let association_introduction_commit = row.chunking_config_introduction_commit.as_deref();
+        validate_unit_hash("unit_content_hash", &row.unit_content_hash)?;
+        if row.chunking_config_introduction_commit.is_empty() {
+            return Err(IndexError::Contract(
+                "chunk/config association introduction commit is required".to_owned(),
+            ));
+        }
+        let association_introduction_commit = row.chunking_config_introduction_commit.as_str();
         if chunk_rowid == Some(0) {
             return Err(IndexError::Contract(
                 "chunk rowid must be positive".to_owned(),
@@ -198,9 +771,10 @@ impl SqliteFtsIndex {
                         self.conn.execute(
                             "INSERT INTO chunks(
                                 rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                                unit_content_hash,
                                 raw_path, heading_path, section_id, byte_start, byte_end,
                                 text_hash, text, first_seen_commit, created_at
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                             params![
                                 requested,
                                 row.chunk_id,
@@ -208,6 +782,7 @@ impl SqliteFtsIndex {
                                 row.tool_profile_hash,
                                 row.gen,
                                 row.unit_key,
+                                row.unit_content_hash,
                                 row.raw_path,
                                 heading_path,
                                 row.section_id,
@@ -224,15 +799,17 @@ impl SqliteFtsIndex {
                         self.conn.execute(
                             "INSERT INTO chunks(
                                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                                unit_content_hash,
                                 raw_path, heading_path, section_id, byte_start, byte_end,
                                 text_hash, text, first_seen_commit, created_at
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                             params![
                                 row.chunk_id,
                                 row.raw_hash,
                                 row.tool_profile_hash,
                                 row.gen,
                                 row.unit_key,
+                                row.unit_content_hash,
                                 row.raw_path,
                                 heading_path,
                                 row.section_id,
@@ -403,26 +980,33 @@ impl SqliteFtsIndex {
 
 /// Append a chunk/config generation association and return its stable rowid.
 ///
-/// The `(chunk_id, chunking_config_hash)` relation is idempotent. When an
-/// explicit rowid is supplied (during durable-ledger rebuild), both the pair and
-/// rowid must agree with an existing record; a collision is a contract error
-/// rather than a silent renumbering that could invalidate signed cursors.
+/// The `(chunk_id, chunking_config_hash, introduction_commit)` relation is
+/// idempotent. A config may be introduced for the same chunk more than once on
+/// incomparable histories, and each introduction remains independently visible
+/// to time-bounded search. When an explicit rowid is supplied (during
+/// durable-ledger rebuild), the complete triple and rowid must agree with an
+/// existing record; a collision is a contract error rather than a silent
+/// renumbering that could invalidate signed cursors.
 ///
 /// `introduction_commit` (PC40, 05 §1.6 L266) is stamped only on a genuinely
-/// new association row — an already-existing pair's `introduction_commit`
-/// never changes on replay, matching every other immutable-once-set column
-/// this function's existing-row branch already leaves untouched.
+/// new association row — an already-existing triple's immutable fields never
+/// change on replay.
 pub fn record_chunk_config_association(
     conn: &Connection,
     chunk_id: &str,
     chunking_config_hash: &str,
     created_at: &str,
     association_rowid: Option<u64>,
-    introduction_commit: Option<&str>,
+    introduction_commit: &str,
 ) -> Result<u64> {
     if association_rowid == Some(0) {
         return Err(IndexError::Contract(
             "chunk/config association rowid must be positive".to_owned(),
+        ));
+    }
+    if introduction_commit.is_empty() {
+        return Err(IndexError::Contract(
+            "chunk/config association introduction commit is required".to_owned(),
         ));
     }
     let chunk_exists = conn
@@ -440,22 +1024,24 @@ pub fn record_chunk_config_association(
     }
 
     let requested_rowid = association_rowid.map(sql_rowid).transpose()?;
-    let existing_for_pair = conn
+    let existing_for_triple = conn
         .query_row(
             "SELECT association_rowid
              FROM chunk_config_generations
-             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
-            params![chunk_id, chunking_config_hash],
+             WHERE chunk_id = ?1
+               AND chunking_config_hash = ?2
+               AND introduction_commit = ?3",
+            params![chunk_id, chunking_config_hash, introduction_commit],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
 
-    if let Some(existing_rowid) = existing_for_pair {
+    if let Some(existing_rowid) = existing_for_triple {
         if let Some(requested_rowid) = requested_rowid {
             if existing_rowid != requested_rowid {
                 return Err(IndexError::Contract(format!(
-                    "chunk/config association {chunk_id}/{chunking_config_hash} has rowid \
-                     {existing_rowid}, not requested rowid {requested_rowid}"
+                    "chunk/config association {chunk_id}/{chunking_config_hash}/{introduction_commit} \
+                     has rowid {existing_rowid}, not requested rowid {requested_rowid}"
                 )));
             }
         }
@@ -465,17 +1051,23 @@ pub fn record_chunk_config_association(
     if let Some(requested_rowid) = requested_rowid {
         let occupied = conn
             .query_row(
-                "SELECT chunk_id, chunking_config_hash
+                "SELECT chunk_id, chunking_config_hash, introduction_commit
                  FROM chunk_config_generations
                  WHERE association_rowid = ?1",
                 params![requested_rowid],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((occupied_chunk, occupied_config)) = occupied {
+        if let Some((occupied_chunk, occupied_config, occupied_introduction)) = occupied {
             return Err(IndexError::Contract(format!(
                 "chunk/config association rowid {requested_rowid} is already occupied by \
-                 {occupied_chunk}/{occupied_config}"
+                 {occupied_chunk}/{occupied_config}/{occupied_introduction}"
             )));
         }
         conn.execute(
@@ -561,6 +1153,10 @@ pub fn current_config_eligible_chunk_ids(
            AND c.rowid <= ?1
            AND g.chunking_config_hash = ?2
            AND g.association_rowid <= ?3
+           AND EXISTS (
+               SELECT 1 FROM chunk_publications p
+               WHERE p.chunk_id = c.chunk_id
+           )
          ORDER BY c.chunk_id",
     )?;
     let rows = stmt.query_map(
@@ -593,10 +1189,8 @@ pub fn record_chunk_publication(
 /// Every recorded introduction commit for `chunk_id`, in byte order (PC32's
 /// deterministic tie-break for a "no directly-matching current value"
 /// fallback selects the byte-order-minimum among these). Empty when the chunk
-/// has no `chunk_publications` row yet — search callers fall back to
-/// `chunks.first_seen_commit` in that case (04 §4.1's "便宜列" — the single-
-/// valued convenience column `chunk_publications` supersedes as the time-point
-/// source of truth once populated).
+/// has no `chunk_publications` row yet. Such a chunk is ineligible for search;
+/// callers must not fall back to the single-valued `chunks.first_seen_commit`.
 pub fn chunk_publication_introductions(conn: &Connection, chunk_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT introduction_commit FROM chunk_publications
@@ -608,8 +1202,15 @@ pub fn chunk_publication_introductions(conn: &Connection, chunk_id: &str) -> Res
 }
 
 pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -> Result<()> {
-    let fts_existed = table_exists(conn, "chunk_fts")?;
-    let migrated_legacy_chunks = migrate_legacy_chunk_config_column(conn)?;
+    // A derived database is disposable, but it is not a migration target.  Do
+    // this read-only fingerprint before *any* DDL: a partial or older sqlite.db
+    // must be rebuilt from the durable commit/tree/CAS sources, never repaired
+    // in place.  Besides making the boundary explicit, this keeps the failed
+    // open byte-for-byte non-mutating for `kio repair rebuild-db` to replace.
+    let has_current_objects = validate_current_schema(conn, &config)?;
+    if has_current_objects {
+        return Ok(());
+    }
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS chunks (
@@ -621,6 +1222,11 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             tool_profile_hash TEXT NOT NULL,
             gen INTEGER NOT NULL,
             unit_key TEXT NOT NULL,
+            unit_content_hash TEXT NOT NULL CHECK (
+                length(unit_content_hash) = 71
+                AND substr(unit_content_hash, 1, 7) = 'sha256:'
+                AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
             raw_path TEXT NOT NULL,
             heading_path TEXT NOT NULL,
             section_id TEXT,
@@ -632,14 +1238,14 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_ident
-            ON chunks(raw_hash, tool_profile_hash, gen);
+            ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash);
         CREATE TABLE IF NOT EXISTS chunk_config_generations (
             association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
             chunk_id TEXT NOT NULL,
             chunking_config_hash TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            introduction_commit TEXT,
-            UNIQUE(chunk_id, chunking_config_hash)
+            introduction_commit TEXT NOT NULL,
+            UNIQUE(chunk_id, chunking_config_hash, introduction_commit)
         );
         CREATE TABLE IF NOT EXISTS chunk_publications (
             publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -675,9 +1281,12 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             path TEXT NOT NULL,
             raw_hash TEXT NOT NULL,
             tool_profile_hash TEXT,
-            gen INTEGER NOT NULL DEFAULT 0,
+            gen INTEGER,
+            manifest_hash TEXT,
             PRIMARY KEY (commit_hash, path)
         );
+        CREATE INDEX IF NOT EXISTS idx_tree_entries_ident
+            ON tree_entries(commit_hash, raw_hash, tool_profile_hash, gen);
         CREATE TABLE IF NOT EXISTS index_metadata (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             index_generation TEXT NOT NULL,
@@ -685,15 +1294,6 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         );
         "#,
     )?;
-
-    // 2026-07-24 (07 §5.3 contextual-embedding addendum): a pre-addendum store's
-    // `embeddings` table predates `context_key`; `CREATE TABLE IF NOT EXISTS`
-    // above leaves it untouched, so add the column in place. Idempotent (guarded
-    // by the column probe); existing rows read back as NULL (non-contextual),
-    // which the single-candidate rebuild path handles unchanged.
-    if table_exists(conn, "embeddings")? && !table_has_column(conn, "embeddings", "context_key")? {
-        conn.execute_batch("ALTER TABLE embeddings ADD COLUMN context_key TEXT;")?;
-    }
 
     let tokenizer = match config.tokenizer {
         FtsTokenizer::Trigram => "trigram",
@@ -722,9 +1322,7 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         END;
         "#
     ))?;
-    if migrated_legacy_chunks || !fts_existed {
-        conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')", [])?;
-    }
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')", [])?;
 
     // `chunk_vec` is a sqlite-vec `vec0` virtual table (04 §4.3): the KNN
     // acceleration layer derived from the `embeddings` table. Fixed at the adopted
@@ -752,6 +1350,289 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         );"
     ))?;
     Ok(())
+}
+
+/// Verify a pre-existing public derived-index schema without modifying it.
+///
+/// `Ok(false)` means this connection contains no Kio index objects and can be
+/// initialized as a fresh store. `Ok(true)` means every required current object
+/// matches the public fingerprint. Any partial, legacy, or incompatible Kio
+/// shape returns [`IndexError::Schema`] with rebuild guidance. Callers that
+/// intentionally open SQLite directly (notably repair) can use this check
+/// before selecting from the database.
+pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> Result<bool> {
+    const REQUIRED_OBJECTS: &[&str] = &[
+        "chunks",
+        "chunk_config_generations",
+        "chunk_publications",
+        "embeddings",
+        "tree_entries",
+        "index_metadata",
+        "chunk_fts",
+        "chunk_vec",
+        "image_vec",
+        "idx_chunks_ident",
+        "idx_chunk_publications_chunk_id",
+        "idx_embeddings_type",
+        "idx_tree_entries_ident",
+        "chunks_ai",
+        "chunks_ad",
+        "chunks_au",
+    ];
+    let present = REQUIRED_OBJECTS
+        .iter()
+        .map(|name| object_exists(conn, name))
+        .collect::<Result<Vec<_>>>()?;
+    if present.iter().all(|present| !present) {
+        if has_non_internal_user_objects(conn)? {
+            return Err(schema_rebuild_error(
+                "sqlite.db contains unknown user objects rather than a fresh index",
+            ));
+        }
+        return Ok(false);
+    }
+    if present.iter().any(|present| !present) {
+        return Err(schema_rebuild_error(
+            "missing required current index object",
+        ));
+    }
+    validate_no_unknown_user_objects(conn, REQUIRED_OBJECTS)?;
+
+    validate_table(
+        conn,
+        "chunks",
+        &[
+            ("chunk_id", "TEXT", true, 1),
+            ("raw_hash", "TEXT", true, 0),
+            ("tool_profile_hash", "TEXT", true, 0),
+            ("gen", "INTEGER", true, 0),
+            ("unit_key", "TEXT", true, 0),
+            ("unit_content_hash", "TEXT", true, 0),
+            ("raw_path", "TEXT", true, 0),
+            ("heading_path", "TEXT", true, 0),
+            ("section_id", "TEXT", false, 0),
+            ("byte_start", "INTEGER", true, 0),
+            ("byte_end", "INTEGER", true, 0),
+            ("text_hash", "TEXT", true, 0),
+            ("text", "TEXT", true, 0),
+            ("first_seen_commit", "TEXT", false, 0),
+            ("created_at", "TEXT", true, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "table", "chunks", CURRENT_CHUNKS_SQL)?;
+    validate_table(
+        conn,
+        "chunk_config_generations",
+        &[
+            ("association_rowid", "INTEGER", false, 1),
+            ("chunk_id", "TEXT", true, 0),
+            ("chunking_config_hash", "TEXT", true, 0),
+            ("created_at", "TEXT", true, 0),
+            ("introduction_commit", "TEXT", true, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "table",
+        "chunk_config_generations",
+        CURRENT_CHUNK_CONFIG_GENERATIONS_SQL,
+    )?;
+    validate_table(
+        conn,
+        "chunk_publications",
+        &[
+            ("publication_rowid", "INTEGER", false, 1),
+            ("chunk_id", "TEXT", true, 0),
+            ("introduction_commit", "TEXT", true, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "table",
+        "chunk_publications",
+        CURRENT_CHUNK_PUBLICATIONS_SQL,
+    )?;
+    validate_table(
+        conn,
+        "embeddings",
+        &[
+            ("id", "TEXT", true, 1),
+            ("target_type", "TEXT", true, 0),
+            ("target_id", "TEXT", true, 0),
+            ("modality", "TEXT", true, 0),
+            ("vector", "BLOB", true, 0),
+            ("dimensions", "INTEGER", true, 0),
+            ("distance", "TEXT", true, 0),
+            ("profile_hash", "TEXT", true, 0),
+            ("context_key", "TEXT", false, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "table", "embeddings", CURRENT_EMBEDDINGS_SQL)?;
+    validate_table(
+        conn,
+        "tree_entries",
+        &[
+            ("commit_hash", "TEXT", true, 1),
+            ("path", "TEXT", true, 2),
+            ("raw_hash", "TEXT", true, 0),
+            ("tool_profile_hash", "TEXT", false, 0),
+            ("gen", "INTEGER", false, 0),
+            ("manifest_hash", "TEXT", false, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "table", "tree_entries", CURRENT_TREE_ENTRIES_SQL)?;
+    let partial_tree_entry: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM tree_entries
+             WHERE NOT (
+                 tool_profile_hash IS NULL AND gen IS NULL AND manifest_hash IS NULL
+                 OR tool_profile_hash IS NOT NULL AND gen IS NOT NULL AND manifest_hash IS NOT NULL
+             )
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if partial_tree_entry {
+        return Err(schema_rebuild_error(
+            "tree_entries has a partial normalize projection",
+        ));
+    }
+    validate_table(
+        conn,
+        "index_metadata",
+        &[
+            ("id", "INTEGER", false, 1),
+            ("index_generation", "TEXT", true, 0),
+            ("last_lifecycle_epoch", "INTEGER", true, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "table", "index_metadata", CURRENT_INDEX_METADATA_SQL)?;
+    validate_index(
+        conn,
+        "idx_chunks_ident",
+        "chunks",
+        &[
+            "raw_hash",
+            "tool_profile_hash",
+            "gen",
+            "unit_key",
+            "unit_content_hash",
+        ],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "index",
+        "idx_chunks_ident",
+        CURRENT_IDX_CHUNKS_IDENT_SQL,
+    )?;
+    validate_index(
+        conn,
+        "idx_chunk_publications_chunk_id",
+        "chunk_publications",
+        &["chunk_id"],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "index",
+        "idx_chunk_publications_chunk_id",
+        CURRENT_IDX_CHUNK_PUBLICATIONS_SQL,
+    )?;
+    validate_index(conn, "idx_embeddings_type", "embeddings", &["target_type"])?;
+    validate_exact_schema_sql(
+        conn,
+        "index",
+        "idx_embeddings_type",
+        CURRENT_IDX_EMBEDDINGS_TYPE_SQL,
+    )?;
+    validate_index(
+        conn,
+        "idx_tree_entries_ident",
+        "tree_entries",
+        &["commit_hash", "raw_hash", "tool_profile_hash", "gen"],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "index",
+        "idx_tree_entries_ident",
+        CURRENT_IDX_TREE_ENTRIES_IDENT_SQL,
+    )?;
+    let vector_column = format!("embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine");
+    validate_virtual_table(
+        conn,
+        "chunk_fts",
+        "fts5",
+        &[
+            "text",
+            "heading_path",
+            "content='chunks'",
+            "content_rowid='rowid'",
+            tokenizer_sql(config),
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "table", "chunk_fts", &current_chunk_fts_sql(config))?;
+    validate_virtual_table(
+        conn,
+        "chunk_vec",
+        "vec0",
+        &["chunk_id text primary key", &vector_column],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "table",
+        "chunk_vec",
+        &current_chunk_vec_sql("chunk_id"),
+    )?;
+    validate_virtual_table(
+        conn,
+        "image_vec",
+        "vec0",
+        &["image_id text primary key", &vector_column],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "table",
+        "image_vec",
+        &current_chunk_vec_sql("image_id"),
+    )?;
+    validate_trigger(
+        conn,
+        "chunks_ai",
+        &[
+            "after insert on chunks",
+            "insert into chunk_fts",
+            "new.rowid",
+            "new.text",
+            "new.heading_path",
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "trigger", "chunks_ai", CURRENT_CHUNKS_AI_SQL)?;
+    validate_trigger(
+        conn,
+        "chunks_ad",
+        &[
+            "after delete on chunks",
+            "insert into chunk_fts",
+            "'delete'",
+            "old.rowid",
+            "old.text",
+            "old.heading_path",
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "trigger", "chunks_ad", CURRENT_CHUNKS_AD_SQL)?;
+    validate_trigger(
+        conn,
+        "chunks_au",
+        &[
+            "after update of text, heading_path on chunks",
+            "'delete'",
+            "old.rowid",
+            "new.rowid",
+            "new.text",
+            "new.heading_path",
+        ],
+    )?;
+    validate_exact_schema_sql(conn, "trigger", "chunks_au", CURRENT_CHUNKS_AU_SQL)?;
+    Ok(true)
 }
 
 /// `index_metadata`'s single row (04-pipeline.md §4.1 / Step4b LC42-45): the
@@ -837,73 +1718,6 @@ pub fn rotate_index_generation(
     Ok(())
 }
 
-fn migrate_legacy_chunk_config_column(conn: &Connection) -> Result<bool> {
-    if !table_exists(conn, "chunks")? || !table_has_column(conn, "chunks", "chunking_config_hash")?
-    {
-        return Ok(false);
-    }
-
-    with_savepoint(conn, "kio_migrate_chunk_config", || {
-        conn.execute_batch(
-            r#"
-            DROP TRIGGER IF EXISTS chunks_ai;
-            DROP TRIGGER IF EXISTS chunks_ad;
-            DROP TRIGGER IF EXISTS chunks_au;
-            DROP TABLE IF EXISTS chunk_fts;
-
-            ALTER TABLE chunks RENAME TO chunks_legacy_chunk_config;
-            CREATE TABLE chunks (
-                -- QB29: matches ensure_schema_on_connection's corrected DDL —
-                -- a migrated table gets the same NOT NULL fix a fresh one does.
-                chunk_id TEXT NOT NULL PRIMARY KEY,
-                raw_hash TEXT NOT NULL,
-                tool_profile_hash TEXT NOT NULL,
-                gen INTEGER NOT NULL,
-                unit_key TEXT NOT NULL,
-                raw_path TEXT NOT NULL,
-                heading_path TEXT NOT NULL,
-                section_id TEXT,
-                byte_start INTEGER NOT NULL,
-                byte_end INTEGER NOT NULL,
-                text_hash TEXT NOT NULL,
-                text TEXT NOT NULL,
-                first_seen_commit TEXT,
-                created_at TEXT NOT NULL
-            );
-            INSERT INTO chunks(
-                rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                raw_path, heading_path, section_id, byte_start, byte_end,
-                text_hash, text, first_seen_commit, created_at
-            )
-            SELECT
-                rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                raw_path, heading_path, section_id, byte_start, byte_end,
-                text_hash, text, first_seen_commit, created_at
-            FROM chunks_legacy_chunk_config
-            ORDER BY rowid;
-
-            CREATE TABLE IF NOT EXISTS chunk_config_generations (
-                association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-                chunk_id TEXT NOT NULL,
-                chunking_config_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(chunk_id, chunking_config_hash)
-            );
-            INSERT OR IGNORE INTO chunk_config_generations(
-                chunk_id, chunking_config_hash, created_at
-            )
-            SELECT chunk_id, chunking_config_hash, created_at
-            FROM chunks_legacy_chunk_config
-            ORDER BY rowid;
-
-            DROP TABLE chunks_legacy_chunk_config;
-            "#,
-        )?;
-        Ok(())
-    })?;
-    Ok(true)
-}
-
 fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -915,16 +1729,288 @@ fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
         .is_some())
 }
 
-fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
-    let quoted_table_name = format!("'{}'", table_name.replace('\'', "''"));
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table_name})"))?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for column in columns {
-        if column? == column_name {
-            return Ok(true);
+fn object_exists(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE name = ?1 LIMIT 1",
+            params![name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn has_non_internal_user_objects(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn validate_no_unknown_user_objects(conn: &Connection, required: &[&str]) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT type, name FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (object_type, name) in objects {
+        if required.contains(&name.as_str()) {
+            continue;
+        }
+        let recognized_shadow = object_type == "table" && is_current_virtual_shadow(&name);
+        if !recognized_shadow {
+            return Err(schema_rebuild_error(format!(
+                "unknown user object {name} is present in sqlite.db"
+            )));
         }
     }
-    Ok(false)
+    Ok(())
+}
+
+fn is_current_virtual_shadow(name: &str) -> bool {
+    [
+        "chunk_fts_data",
+        "chunk_fts_idx",
+        "chunk_fts_docsize",
+        "chunk_fts_config",
+    ]
+    .contains(&name)
+        || ["chunk_vec", "image_vec"].iter().any(|base| {
+            name == format!("{base}_info")
+                || name == format!("{base}_rowids")
+                || name == format!("{base}_chunks")
+                || name == format!("{base}_vector_chunks00")
+        })
+}
+
+fn schema_rebuild_error(detail: impl std::fmt::Display) -> IndexError {
+    IndexError::Schema(format!(
+        "incompatible derived sqlite.db ({detail}); run `kio repair rebuild-db`"
+    ))
+}
+
+// `PRAGMA table_info` cannot observe AUTOINCREMENT, CHECK, UNIQUE, trigger
+// WHEN clauses, or virtual-table options. These public definitions therefore
+// form the compatibility fingerprint; canonicalization below intentionally
+// ignores only case, whitespace, and SQL comments.
+const CURRENT_CHUNKS_SQL: &str = "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, first_seen_commit TEXT, created_at TEXT NOT NULL)";
+const CURRENT_CHUNK_CONFIG_GENERATIONS_SQL: &str = "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))";
+const CURRENT_CHUNK_PUBLICATIONS_SQL: &str = "CREATE TABLE chunk_publications (publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, introduction_commit))";
+const CURRENT_EMBEDDINGS_SQL: &str = "CREATE TABLE embeddings (id TEXT NOT NULL PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL, modality TEXT NOT NULL, vector BLOB NOT NULL, dimensions INTEGER NOT NULL, distance TEXT NOT NULL, profile_hash TEXT NOT NULL, context_key TEXT)";
+const CURRENT_TREE_ENTRIES_SQL: &str = "CREATE TABLE tree_entries (commit_hash TEXT NOT NULL, path TEXT NOT NULL, raw_hash TEXT NOT NULL, tool_profile_hash TEXT, gen INTEGER, manifest_hash TEXT, PRIMARY KEY (commit_hash, path))";
+const CURRENT_INDEX_METADATA_SQL: &str = "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), index_generation TEXT NOT NULL, last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0)";
+const CURRENT_IDX_CHUNKS_IDENT_SQL: &str =
+    "CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash)";
+const CURRENT_IDX_CHUNK_PUBLICATIONS_SQL: &str =
+    "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id)";
+const CURRENT_IDX_EMBEDDINGS_TYPE_SQL: &str =
+    "CREATE INDEX idx_embeddings_type ON embeddings(target_type)";
+const CURRENT_IDX_TREE_ENTRIES_IDENT_SQL: &str = "CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_profile_hash, gen)";
+const CURRENT_CHUNKS_AI_SQL: &str = "CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN INSERT INTO chunk_fts(rowid, text, heading_path) VALUES (new.rowid, new.text, new.heading_path); END";
+const CURRENT_CHUNKS_AD_SQL: &str = "CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN INSERT INTO chunk_fts(chunk_fts, rowid, text, heading_path) VALUES ('delete', old.rowid, old.text, old.heading_path); END";
+const CURRENT_CHUNKS_AU_SQL: &str = "CREATE TRIGGER chunks_au AFTER UPDATE OF text, heading_path ON chunks BEGIN INSERT INTO chunk_fts(chunk_fts, rowid, text, heading_path) VALUES ('delete', old.rowid, old.text, old.heading_path); INSERT INTO chunk_fts(rowid, text, heading_path) VALUES (new.rowid, new.text, new.heading_path); END";
+
+fn current_chunk_fts_sql(config: &FtsSchemaConfig) -> String {
+    format!(
+        "CREATE VIRTUAL TABLE chunk_fts USING fts5(text, heading_path, content='chunks', content_rowid='rowid', tokenize='{}')",
+        match config.tokenizer {
+            FtsTokenizer::Trigram => "trigram",
+            FtsTokenizer::Unicode61RemoveDiacritics2 => "unicode61 remove_diacritics 2",
+        }
+    )
+}
+
+fn current_chunk_vec_sql(id_column: &str) -> String {
+    format!(
+        "CREATE VIRTUAL TABLE {} USING vec0({id_column} TEXT PRIMARY KEY, embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine)",
+        if id_column == "chunk_id" { "chunk_vec" } else { "image_vec" }
+    )
+}
+
+fn validate_exact_schema_sql(
+    conn: &Connection,
+    object_type: &str,
+    name: &str,
+    expected: &str,
+) -> Result<()> {
+    let actual: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual
+        .as_deref()
+        .is_none_or(|actual| canonical_sql(actual) != canonical_sql(expected))
+    {
+        return Err(schema_rebuild_error(format!(
+            "{object_type} {name} definition does not match current schema"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_table(
+    conn: &Connection,
+    table: &str,
+    expected: &[(&str, &str, bool, i64)],
+) -> Result<()> {
+    let quoted = format!("'{}'", table.replace('\'', "''"));
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?.to_ascii_uppercase(),
+            row.get::<_, i64>(3)? != 0,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    let actual = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .any(|(index, (actual, expected))| {
+                actual.0 != index as i64
+                    || actual.1 != expected.0
+                    || actual.2 != expected.1
+                    || actual.3 != expected.2
+                    || actual.4 != expected.3
+            })
+    {
+        return Err(schema_rebuild_error(format!(
+            "{table} columns do not match current schema"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_index(conn: &Connection, index: &str, table: &str, columns: &[&str]) -> Result<()> {
+    let actual_table: Option<String> = conn
+        .query_row(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![index],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual_table.as_deref() != Some(table) {
+        return Err(schema_rebuild_error(format!(
+            "missing required index {index}"
+        )));
+    }
+    let quoted = format!("'{}'", index.replace('\'', "''"));
+    let mut statement = conn.prepare(&format!("PRAGMA index_info({quoted})"))?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if actual.len() != columns.len()
+        || actual
+            .iter()
+            .zip(columns)
+            .enumerate()
+            .any(|(position, (actual, expected))| {
+                actual.0 != position as i64 || actual.1 != *expected
+            })
+    {
+        return Err(schema_rebuild_error(format!(
+            "index {index} does not match current schema"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_virtual_table(
+    conn: &Connection,
+    table: &str,
+    module: &str,
+    fragments: &[&str],
+) -> Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let sql = sql
+        .map(|sql| canonical_sql(&sql))
+        .ok_or_else(|| schema_rebuild_error(format!("missing virtual table {table}")))?;
+    if !sql.contains(&canonical_sql(&format!(
+        "create virtual table {table} using {module}"
+    ))) || fragments
+        .iter()
+        .any(|fragment| !sql.contains(&canonical_sql(fragment)))
+    {
+        return Err(schema_rebuild_error(format!(
+            "virtual table {table} does not match current schema"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_trigger(conn: &Connection, trigger: &str, fragments: &[&str]) -> Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            params![trigger],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let sql = sql
+        .map(|sql| canonical_sql(&sql))
+        .ok_or_else(|| schema_rebuild_error(format!("missing required trigger {trigger}")))?;
+    if fragments
+        .iter()
+        .any(|fragment| !sql.contains(&canonical_sql(fragment)))
+    {
+        return Err(schema_rebuild_error(format!(
+            "trigger {trigger} does not match current schema"
+        )));
+    }
+    Ok(())
+}
+
+fn canonical_sql(sql: &str) -> String {
+    sql.lines()
+        .map(|line| line.split_once("--").map_or(line, |(before, _)| before))
+        .collect::<String>()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<String>()
+}
+
+#[cfg(test)]
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let quoted = format!("'{}'", table_name.replace('\'', "''"));
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({quoted})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column_name))
+}
+
+fn tokenizer_sql(config: &FtsSchemaConfig) -> &'static str {
+    match config.tokenizer {
+        FtsTokenizer::Trigram => "tokenize='trigram'",
+        FtsTokenizer::Unicode61RemoveDiacritics2 => "tokenize='unicode61 remove_diacritics 2'",
+    }
 }
 
 fn with_savepoint<T>(
@@ -978,6 +2064,8 @@ mod tests {
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             gen: 0,
             unit_key: "doc:1".to_owned(),
+            unit_content_hash:
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
             chunking_config_hash:
                 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
             raw_path: "a.md".to_owned(),
@@ -989,7 +2077,7 @@ mod tests {
                 .to_owned(),
             text: text.to_owned(),
             first_seen_commit: None,
-            chunking_config_introduction_commit: None,
+            chunking_config_introduction_commit: "sha256:commit".to_owned(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }
@@ -1321,6 +2409,485 @@ mod tests {
     }
 
     #[test]
+    fn current_file_schema_reopens_without_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let reopened = SqliteFtsIndex::open(&path, config).unwrap();
+        assert!(validate_current_schema(
+            reopened.connection(),
+            &FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram
+            }
+        )
+        .unwrap());
+        drop(reopened);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn existing_source_connection_opens_only_a_current_real_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+
+        let conn = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .expect("current source index must open read-only");
+        assert!(validate_current_schema(&conn, &config).unwrap());
+        drop(conn);
+
+        let missing = directory.path().join("missing.sqlite");
+        let error = open_existing_source_index_connection(
+            &missing,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .expect_err("helper must never create a missing source index");
+        assert!(error.to_string().contains("inspect source index"));
+        assert!(!missing.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_symlink_source_index_without_touching_its_destination() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.sqlite");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&target, config.clone()).unwrap());
+        let before = std::fs::read(&target).unwrap();
+        let path = directory.path().join("sqlite.db");
+        symlink(&target, &path).unwrap();
+
+        let error = SqliteFtsIndex::open(&path, config)
+            .err()
+            .expect("source index symlink must be rejected");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_index_hardlinks_are_rejected_without_touching_the_other_path() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.sqlite");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&target, config.clone()).unwrap());
+        let before = std::fs::read(&target).unwrap();
+        let path = directory.path().join("sqlite.db");
+        std::fs::hard_link(&target, &path).unwrap();
+
+        let error = SqliteFtsIndex::open(&path, config.clone())
+            .err()
+            .expect("hardlinked source index must be rejected");
+        assert!(error.to_string().contains("exactly one hard link"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+
+        let error = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadWrite,
+            &config,
+        )
+        .expect_err("helper must reject a hardlinked source index");
+        assert!(error.to_string().contains("exactly one hard link"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_symlink_source_index_parent_without_creating_a_victim_database() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("index");
+        symlink(victim.path(), &parent).unwrap();
+        let path = parent.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+
+        let error = SqliteFtsIndex::open(&path, config.clone())
+            .err()
+            .expect("source index parent symlink must be rejected");
+        assert!(error
+            .to_string()
+            .contains("parent must be a real directory"));
+        assert!(
+            !victim.path().join("sqlite.db").exists(),
+            "fresh source-index bootstrap must not create a database through a parent symlink"
+        );
+
+        let error = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .expect_err("existing-source helper must reject a symlink parent too");
+        assert!(error
+            .to_string()
+            .contains("parent must be a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_source_fd_survives_parent_replacement_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let index = directory.path().join("index");
+        std::fs::create_dir(&index).unwrap();
+        let path = index.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        let index_connection = SqliteFtsIndex::open(&path, config).unwrap();
+
+        let original = directory.path().join("index-original");
+        std::fs::rename(&index, &original).unwrap();
+        symlink(victim.path(), &index).unwrap();
+        index_connection
+            .connection()
+            .execute("CREATE TABLE post_parent_replace (id INTEGER)", [])
+            .unwrap();
+        drop(index_connection);
+
+        assert!(!victim.path().join("sqlite.db").exists());
+        let original_db = original.join("sqlite.db");
+        let reopened = Connection::open(&original_db).unwrap();
+        assert!(table_exists(&reopened, "post_parent_replace").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_source_fd_survives_repository_root_replacement_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let kio = directory.path().join(".kio");
+        let index = kio.join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        let path = index.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        let index_connection = SqliteFtsIndex::open(&path, config).unwrap();
+
+        let original = directory.path().join(".kio-original");
+        std::fs::rename(&kio, &original).unwrap();
+        symlink(victim.path(), &kio).unwrap();
+        index_connection
+            .connection()
+            .execute("CREATE TABLE post_root_replace (id INTEGER)", [])
+            .unwrap();
+        drop(index_connection);
+
+        assert!(!victim.path().join("index/sqlite.db").exists());
+        let reopened = Connection::open(original.join("index/sqlite.db")).unwrap();
+        assert!(table_exists(&reopened, "post_root_replace").unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bound_source_leaf_blocks_rename_and_delete_until_connection_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        let index = SqliteFtsIndex::open(&path, config).unwrap();
+        let moved = directory.path().join("sqlite-moved.db");
+
+        let rename_error = std::fs::rename(&path, &moved)
+            .expect_err("the retained no-delete-share leaf must block rename");
+        assert_eq!(rename_error.kind(), std::io::ErrorKind::PermissionDenied);
+        let delete_error = std::fs::remove_file(&path)
+            .expect_err("the retained no-delete-share leaf must block deletion");
+        assert_eq!(delete_error.kind(), std::io::ErrorKind::PermissionDenied);
+
+        drop(index);
+        std::fs::rename(&path, &moved)
+            .expect("rename must succeed after the bound SQLite connection drops");
+        std::fs::remove_file(&moved)
+            .expect("deletion must succeed after the bound SQLite connection drops");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_source_connection_refuses_a_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.sqlite");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&target, config.clone()).unwrap());
+        let before = std::fs::read(&target).unwrap();
+        let path = directory.path().join("sqlite.db");
+        symlink(&target, &path).unwrap();
+
+        let error = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadWrite,
+            &config,
+        )
+        .expect_err("source index symlink must be rejected");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn existing_writable_source_connection_uses_memory_journal_without_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadWrite,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .unwrap()
+                .to_ascii_lowercase(),
+            "memory"
+        );
+        conn.execute(
+            "INSERT INTO index_metadata (id, index_generation, last_lifecycle_epoch)
+             VALUES (1, 'test-generation', 0)
+             ON CONFLICT(id) DO UPDATE SET index_generation = excluded.index_generation",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        for suffix in ["-journal", "-wal", "-shm"] {
+            assert!(
+                !std::path::PathBuf::from(format!("{}{}", path.display(), suffix)).exists(),
+                "memory journal must not leave a {suffix} sidecar"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_user_object_is_rejected_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated_application_state (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = SqliteFtsIndex::open(
+            &path,
+            FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram,
+            },
+        )
+        .err()
+        .expect("unknown sqlite objects must not be adopted as a Kio index");
+        assert!(error.to_string().contains("kio repair rebuild-db"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn current_schema_with_extra_user_object_is_rejected_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE obsolete_cache (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = SqliteFtsIndex::open(&path, config)
+            .err()
+            .expect("a complete schema must not conceal legacy objects");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown user object obsolete_cache"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn missing_unique_constraint_is_rejected_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+        conn.execute(
+            "UPDATE sqlite_master
+             SET sql = replace(sql, 'UNIQUE(chunk_id, chunking_config_hash, introduction_commit)', 'UNIQUE(chunk_id, chunking_config_hash)')
+             WHERE type = 'table' AND name = 'chunk_config_generations'",
+            [],
+        )
+        .unwrap();
+        let schema_version: i64 = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        conn.pragma_update(None, "schema_version", schema_version + 1)
+            .unwrap();
+        conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = SqliteFtsIndex::open(&path, config)
+            .err()
+            .expect("weakened table constraint must be rejected");
+        assert!(error
+            .to_string()
+            .contains("chunk_config_generations definition"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn disabled_trigger_is_rejected_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+        conn.execute(
+            "UPDATE sqlite_master
+             SET sql = replace(sql, 'AFTER INSERT ON chunks', 'AFTER INSERT ON chunks WHEN 0')
+             WHERE type = 'trigger' AND name = 'chunks_ai'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = SqliteFtsIndex::open(&path, config)
+            .err()
+            .expect("disabled trigger must be rejected");
+        assert!(error.to_string().contains("chunks_ai definition"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn tree_entries_distinguish_raw_only_from_normalized_entries() {
+        let fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let conn = fts.connection();
+        conn.execute(
+            "INSERT INTO tree_entries(
+                 commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash
+             ) VALUES ('c1', 'raw-only.md', 'sha256:raw', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tree_entries(
+                 commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash
+             ) VALUES ('c1', 'normalized.md', 'sha256:normalized', 'sha256:tool', 4, 'sha256:manifest')",
+            [],
+        )
+        .unwrap();
+        let rows = conn
+            .prepare(
+                "SELECT path, tool_profile_hash, gen, manifest_hash
+                 FROM tree_entries ORDER BY path",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows[0],
+            (
+                "normalized.md".to_owned(),
+                Some("sha256:tool".to_owned()),
+                Some(4),
+                Some("sha256:manifest".to_owned())
+            )
+        );
+        assert_eq!(rows[1], ("raw-only.md".to_owned(), None, None, None));
+        assert!(validate_current_schema(
+            conn,
+            &FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram
+            }
+        )
+        .unwrap());
+
+        conn.execute(
+            "INSERT INTO tree_entries(
+                 commit_hash, path, raw_hash, tool_profile_hash, gen, manifest_hash
+             ) VALUES ('c1', 'partial.md', 'sha256:partial', 'sha256:tool', 5, NULL)",
+            [],
+        )
+        .unwrap();
+        let error = validate_current_schema(
+            conn,
+            &FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram,
+            },
+        )
+        .expect_err("partial normalize projection must be rejected");
+        assert!(error.to_string().contains("partial normalize projection"));
+    }
+
+    #[test]
     fn ct4_chunk_config_schema_is_an_append_only_association() {
         let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
             tokenizer: FtsTokenizer::Trigram,
@@ -1335,8 +2902,9 @@ mod tests {
         first.first_seen_commit = Some("sha256:commit".to_owned());
         fts.index_chunk_with_association_rowid(&first, Some(17))
             .unwrap();
-        // Replaying the same durable association is idempotent and does not burn
-        // another AUTOINCREMENT value.
+        record_chunk_publication(fts.connection(), "c1", "sha256:commit").unwrap();
+        // Replaying the same durable association triple is idempotent and does
+        // not burn another AUTOINCREMENT value.
         fts.index_chunk_with_association_rowid(&first, Some(17))
             .unwrap();
 
@@ -1420,6 +2988,54 @@ mod tests {
     }
 
     #[test]
+    fn config_associations_preserve_incomparable_same_config_introductions() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let mut first = row("c1", "same config on two branches");
+        first.chunking_config_introduction_commit = "sha256:introduction-a".to_owned();
+        assert_eq!(
+            fts.index_chunk_with_association_rowid(&first, Some(17))
+                .unwrap(),
+            17
+        );
+
+        let mut incomparable = first.clone();
+        incomparable.chunking_config_introduction_commit = "sha256:introduction-b".to_owned();
+        assert_eq!(
+            fts.index_chunk_with_association_rowid(&incomparable, None)
+                .unwrap(),
+            18,
+            "a distinct introduction of the same config gets its own association row"
+        );
+        assert_eq!(
+            fts.index_chunk_with_association_rowid(&incomparable, None)
+                .unwrap(),
+            18,
+            "an automatic replay of the exact triple does not append another row"
+        );
+        assert_eq!(
+            fts.index_chunk_with_association_rowid(&incomparable, Some(18))
+                .unwrap(),
+            18,
+            "replaying the exact triple remains idempotent"
+        );
+        let error = fts
+            .index_chunk_with_association_rowid(&incomparable, Some(17))
+            .unwrap_err();
+        assert!(error.to_string().contains("not requested rowid"));
+        assert_eq!(
+            fts.connection()
+                .query_row("SELECT COUNT(*) FROM chunk_config_generations", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn ct4_durable_replay_preserves_chunk_and_association_rowids() {
         let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
             tokenizer: FtsTokenizer::Trigram,
@@ -1458,7 +3074,7 @@ mod tests {
     }
 
     #[test]
-    fn ct4_legacy_chunk_config_column_migrates_without_changing_chunk_rowids() {
+    fn ct4_legacy_chunk_config_column_is_rejected_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sqlite.db");
         {
@@ -1520,57 +3136,17 @@ mod tests {
             .unwrap();
         }
 
-        let fts = SqliteFtsIndex::open(
+        let before = std::fs::read(&path).unwrap();
+        let error = SqliteFtsIndex::open(
             &path,
             FtsSchemaConfig {
                 tokenizer: FtsTokenizer::Trigram,
             },
         )
-        .unwrap();
-        let conn = fts.connection();
-        assert!(!table_has_column(conn, "chunks", "chunking_config_hash").unwrap());
-        assert_eq!(
-            conn.query_row(
-                "SELECT rowid FROM chunks WHERE chunk_id = 'c7'",
-                [],
-                |row| { row.get::<_, u64>(0) }
-            )
-            .unwrap(),
-            7
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT rowid FROM chunks WHERE chunk_id = 'c42'",
-                [],
-                |row| row.get::<_, u64>(0)
-            )
-            .unwrap(),
-            42
-        );
-        let associations = conn
-            .prepare(
-                "SELECT association_rowid, chunk_id, chunking_config_hash
-                 FROM chunk_config_generations ORDER BY association_rowid",
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            associations,
-            vec![
-                (1, "c7".to_owned(), "sha256:cfg7".to_owned()),
-                (2, "c42".to_owned(), "sha256:cfg42".to_owned())
-            ]
-        );
-        assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c7");
+        .err()
+        .expect("legacy schema must be rejected");
+        assert!(error.to_string().contains("kio repair rebuild-db"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

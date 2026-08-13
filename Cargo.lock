@@ -730,7 +730,32 @@ dependencies = [
 name = "kio-core"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "jsonschema",
+ "libc",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "unicode-normalization",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "kio-eval"
+version = "0.1.0"
+dependencies = [
+ "cap-primitives",
+ "clap",
+ "kio-core",
+ "kio-index",
+ "kio-pipeline",
+ "kio-search",
+ "libc",
+ "rusqlite",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -746,6 +771,7 @@ dependencies = [
 name = "kio-index"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "kio-core",
  "rusqlite",
  "serde",
@@ -756,14 +782,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "unicode-normalization",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "kio-pipeline"
 version = "0.1.0"
 dependencies = [
+ "cap-primitives",
  "kio-adapter",
  "kio-core",
+ "libc",
  "rusqlite",
  "serde",
  "serde_jcs",

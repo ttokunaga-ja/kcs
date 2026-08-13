@@ -382,24 +382,27 @@ hidden directory      OS の hidden 属性・dotfile は通常どおり対象 (�
                       行う — 隠しであることは機微性の根拠にしない)
 system directory      built-in ignore (Tier A 相当) に含め既定除外
 .kio 自身             ignore 評価より前に必ず prune (自己再帰の禁止)
-VCS リポジトリ root   既定で子 .kio を生成しない。既存子 .kio は grandfathered で継続有効 ([03-data-model.md §3](03-data-model.md))
+VCS リポジトリ root   既定で子 .kio を生成しない。既存子 .kio を grandfather する分岐は置かない ([03-data-model.md §3](03-data-model.md))
 ```
 
 ---
 
 # 5. 物理レイアウト統一
 
-内部正本は `.kio/objects/normalized_units/` (unit object 群 + manifest) に統一する
-([03-data-model.md §2.1](03-data-model.md))。全文 Markdown は unit を決定論的に結合した
+内部正本は immutable manifest CAS と `.kio/objects/normalized_unit_objects/` (full NormalizedUnitObject CAS)
+に統一する ([03-data-model.md §2.1](03-data-model.md))。path-named `.kio/objects/normalized_units/` は current
+working projection であり、全文 Markdown は unit を決定論的に結合した
 view (再生成可能な cache) であり正本ではない。
 
 過去メモにある `.kio/normalized/` は、bootstrap 時の簡略表記または仮想表示パスとして扱う。実装・契約ドキュメントでは、hash ベースの object store を正とする。
 
 ```text
 truth:
-  .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
+  .kio/objects/manifests/ab/cd/<manifest64>
+  .kio/objects/normalized_unit_objects/ab/cd/<unit-object64>
 
 materialized view (cache):
+  .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
   .kio/objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md
 
 virtual view:
@@ -515,22 +518,27 @@ retryability 規則で返す。いずれも冪等であり、2 回目は同じ�
 kio repair verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
+- `objects/` 配下の全 CAS object (raw / prepared / image / normalized_unit_object / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
   保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
   と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
   ([03-data-model.md §8.1](03-data-model.md))。**embedding も chunk と同じく content hash ではなく identity hash と照合する**
   — 保存 key は「この vector が何の vector か」(target / profile / context) の hash であり、bytes の hash ではない。
   したがって「別の identity の下に置かれた object」は identity 再計算でしか検出できず、
   **vector 本体の bit flip は末尾の vector digest でしか検出できない** (保存 key は本体について何も言わない)
-- normalized の unit bytes は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
-  参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する。**manifest object
+- path-named normalized working projection の unit bytes は content hash を持たないため hash 検証対象外とし、
+  current loader が CAS から再生成できる cache とする。**manifest object
   (objects/manifests/ — [03-data-model.md §2.1](03-data-model.md)) は content-addressed であり再 hash 検証の対象**:
   各 tree entry の `normalize.manifest_hash` が実在する manifest object を指し、**かつ当該 manifest の
   (raw_hash, tool_profile_hash, gen) が entry 側と一致する**こと (hash が正しいだけの別 instance
   manifest への誤配線検出) (**tombstone / erase
   receipt が説明する purge 済み raw の entry を除く** — 下記 dead terminal 規則。purge は manifest object を
   削除するが tree は書き換えないため、この例外なしには正規 purge 直後の store が必ず corruption になる)、
-  HEAD tree の entry については作業コピー manifest.json の canonical JCS hash が一致することも検査する
+  manifest の各 done entry が required non-null `unit_object_hash` を持ち、当該 `normalized_unit_object` CAS の
+  JCS re-hash、full schema、unit_key / raw_hash / prepared_hash / tool_profile_hash / gen の manifest との一致を
+  検査する。failed entry は explicit null でなければならず、field 欠落・done null・failed non-null は
+  current-schema corruption として fail-closed にする。tree `manifest_hash` からこの closure を辿るため、
+  `--at` / historical rebuild / Evidence Pointer は mutable projection を参照しない。HEAD tree の entry については
+  作業コピー manifest.json の canonical JCS hash が一致することも検査する
   (不一致 = 破損ではなく「**未 finalize の進行状態**」として incomplete (exit 3) — manifest finalize と
   次回 snapshot の間のクラッシュ窓で正常に生じる。次回 index / batch resume が同期する。corruption と
   するのは manifest object 自体の再 hash 不一致のみ)
@@ -551,14 +559,14 @@ kio repair verify-objects
      (復元した raw object は GC 対象外、05-runtime.md §2.6)
 2. 復元手段なし
    → missing として errors.jsonl に KIO-E-STORE-CORRUPT-001 を記録し、
-     (normalized unit の done object 欠落も同様 — same-gen 再生成は行わない (unit object は
-      immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
-      restore、または明示の新 gen (kio reindex --regenerate) で行う)
+     (normalized unit の done `unit_object_hash` CAS 欠落も同様 — same-gen 再生成は行わない (unit object は
+      immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。**現行 schema の
+      store** の復元は backup restore、または明示の新 gen (`kio reindex --regenerate`) で行う。
+      pre-contract development store はこの経路の入力ではなく、source から clean recreate する)
      影響を受ける commit hash の bounded 一覧と
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
 3. exit code: 破損 0 件 または 全件復元 = 0 / missing 残あり = 3
-   (legacy 警告 (path / reason) は exit に影響しない — 破損とは別に種別ごとの件数を表示する)
 ```
 
 purge との整合: validated tombstone (lifecycle の event が purged / retired の**いずれでも** — retire は
@@ -589,9 +597,9 @@ manifest 欠落を説明するものが消える。**commit がまだ無い場�
 erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
 identity に加え、各 event が kind 別の必須 field を持つこと (**完全列挙**: purged = `at`・`in_commit`・
 `reason`・`actor` / erased = `at`・`in_commit`・`actor` / retired = `at`・`in_commit`・`actor`・
-`resurrection_commit`。2026-07-19 以降の新規 event は、purged / erased が `epoch` (purge counter)、
-**erased が `reason` (5 値 enum — [02-philosophy.md §2.4](02-philosophy.md) の「どの正当事由で」を
-erase 後も保存する監査要件)**、全種が `lifecycle_epoch` (lifecycle counter — 別系統) も必須。
+`resurrection_commit`。**すべての current event で** `lifecycle_epoch` (lifecycle counter — 別系統) を必須とし、
+purged / erased event では `epoch` (purge counter) も必須とする。**erased は `reason` (5 値 enum —
+[02-philosophy.md §2.4](02-philosophy.md) の「どの正当事由で」を erase 後も保存する監査要件)** も必須。
 reason は 5 値 enum であり、enum 外の値は corruption とする)、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、当該 commit の `purged_raws` に対象
 raw_hash が含まれること ([03-data-model.md §8](03-data-model.md) — `purged_raws` は store format の
@@ -602,10 +610,8 @@ raw_hash が含まれること ([03-data-model.md §8](03-data-model.md) — `pu
 ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする (**resurrection_commit の
 verified tree が同一 raw_hash の leaf を含むことを tree 存置時に限り検証する** — auto 型 publication
 commit は shallow 化で tree を失い得るため tree 不在時は本検証を省略する。defense-in-depth、
-[08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) 手順 8 と同型)。**v1 flat (`erased_at` /
-`purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す (v1 に reason は無い —
-変換で `reason: "other"` を合成し legacy 警告として報告、[05-runtime.md §3.5](05-runtime.md) と同一規則)
-([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証を適用する**
+[08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) 手順 8 と同型)。v1 flat (`erased_at` /
+`purged_in_commit`) record は current lifecycle schema では受理せず corruption / incompatible format として fail-closed にする。reason 等を合成する conversion は置かない。**tombstone lifecycle にも同じ event 検証を適用する**
 (kind 別必須 field・末尾 event 規則・torn / malformed = corruption に加え、**purged event の
 `in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指すこと・
 当該 commit の `purged_raws` への raw_hash membership・各 `at` の commit `created_at` 一致
@@ -644,7 +650,9 @@ manifest 進行状態・active な purge journal のいずれかが存在する�
 blocker の種別と対象 (intent_token または 4 組キー) を含め、次操作 (`kio batch resume` /
 `kio batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
 
-**purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
+**purge closure** は raw とその prepared / image / manifest / normalized_unit_object / chunk / embedding の
+到達 object、および current projection / view cache を含む。purge / verify の marker による dead-terminal
+説明も、この immutable unit-object closure に及ぶ。**purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
 `purged` **または `erased`** である各 raw_hash について `~/.cache/kio/open/<raw_hash digest64>/` の
 残存も検査し、存在すれば同じ locked repair の削除対象に含める ([06-cli-spec.md §1.1](06-cli-spec.md) の
 cache publish と起動直前検査の間の crash は、publish 済み cache を除去主体なしに残し得る —
@@ -717,54 +725,28 @@ sqlite.db / scope-registry.sqlite / aggregator.sqlite は正本から再構築�
 したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
 (sqlite.db は `kio repair rebuild-db`、registry は各 `.kio` の rescan、aggregator は writer / repair の完全射影)。
 
-**`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
-intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
-要件に従う (既存行の保全が必須。旧 JSONL 3 ファイル構成からの移行も同要件で一度だけ行う —
-追加列は NULL / DEFAULT で backfill。**例外 = `stale_after_at`** ([04-pipeline.md §5.4](04-pipeline.md) DDL):
-列追加の migration は既存の未終端 (state 0/1) sync 行へ「移行時刻 + 600 秒」を backfill する —
-NULL 残置は「期限を過ぎた行に限る」回収から恒久に漏れ、当該 key が `embedding_in_flight` のまま
-封鎖される。**移行は 2 相**: (1) SQLite への import と **`schema_migrations` 表
-(SQL 正本 — [04-pipeline.md §5.4](04-pipeline.md)) への marker 行 (name='jsonl-cutover')** の確定を
-同一 Tx で行い → (2) 旧 JSONL を `.migrated` へ rename する。再開時は marker の存在で
-import を skip し rename のみ再試行する — savepoint は外部ファイルの rename を含められない。
-空の旧 JSONL でも marker が「0 行 import 済み」と「未 import」を判別する)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
-含む) の canonical 比較で行う — 対象は `cost_ledger` / `batch_requests` / `schema_migrations` の
-3 表すべて** ([04-pipeline.md §5.4](04-pipeline.md) の SQL 正本と同数)。列存在検査だけでは CHECK 制約の追加・変更を識別できない。
-**必須 index (04 §5.4 の CREATE INDEX 文 — `idx_cost_ledger_month`・`idx_batch_requests_inflight`) も
-検出対象とする**: sqlite_master の index 行を同様に canonical 比較し、欠落は同一 savepoint 内で
-`CREATE INDEX IF NOT EXISTS` により補完して `schema_migrations` へ記録する (table が一致し index
-だけ欠ける store を「正常形状」と誤判定して migration を素通りさせない)。**同名で定義が canonical と
-一致しない index は、同一 savepoint 内で `DROP INDEX` → canonical `CREATE INDEX` の再作成で収束させ、
-同様に記録する** (`IF NOT EXISTS` は同名異形を修復しない — index は導出物であり drop は安全)。
+**`cost-ledger.sqlite` はこのデフォルトの対象外** — 課金記録と in-flight Batch intent の再構築不可な
+運用上の truth である ([04-pipeline.md §5.4](04-pipeline.md))。そのため旧 JSONL importer、`.migrated`
+rename、**JSONL cutover 用** marker、列 default/backfill を用いる後方互換 migration は置かない。current
+operational action (例: restore-reconcile) の durable marker として `schema_migrations` を使うことは維持する。
 
-例外として in-place migration を書いてよいのは次の場合のみ:
+起動時は `cost_ledger` / `batch_requests` / `schema_migrations` の **3 表すべて**の table 定義、および
+`idx_cost_ledger_month` / `idx_batch_requests_inflight` を canonical DDL と比較する。空の新規 ledger
+だけは current schema で初期化できる。既存 ledger が不一致・欠損・読取不能なら、**bytes を保存した
+まま一切 rename / ALTER / DROP / import せず fail-closed** にする。エラーは ledger が non-rebuildable
+であることと、明示的な operator recovery が必要なことを示す。推測変換や startup の自動修復で課金額・
+intent・監査履歴を失わせてはならない。current-schema ledger の torn write / provider crash recovery は
+§5.4 / §5.8 の既存の recovery 契約として維持するが、旧 shape を current shape と見なす契約ではない。
 
-```text
-1. append-only データの保全が必要な場合
-   例: chunks 行は time-travel 検索の実体 (04-pipeline.md §4.1) で、rebuild は履歴 commit の
-   再展開を伴い高価。旧 `chunks.chunking_config_hash` 列 → `chunk_config_generations` relation
-   への分離 (Step 3) は in-place migration とした (実装済みの先例)
-2. 起動のたびに全再構築するのが非現実的な大規模 store
-```
-
-in-place migration の要件:
-
-```text
-- 冪等であること。旧形状の検出は表 / 列の存在検査で行い (**cost-ledger.sqlite は例外 — 上記の
-   sqlite_master CREATE 文 canonical 比較のみを用いる。CHECK 差分は列存在では見えない**)、
-   再実行しても結果が変わらない
-- 全体を単一 savepoint で包み、失敗時は rollback して torn state を残さない
-- 移行後に FTS 等の導出インデックスを rebuild する
-```
-
-`PRAGMA user_version` による schema version 管理は MVP では**採用しない** (旧形状の判別は存在検査で
-足りる)。存在検査で表現できない互換性判断が必要になった時点で導入を再検討する。
+`PRAGMA user_version` は互換 reader のために導入しない。derived SQLite cache は schema fingerprint が
+current と一致しない既存 DB を無変更で `kio repair rebuild-db` へ誘導し、fresh / missing DB だけを
+current schema で作成する。この gate は最初の書込みより前に評価する。
 
 ---
 
 # 8. commit_type の固定 enum について
 
-現在の正本では、`commit_type` を `manual / auto / imported / migrated / repaired / merged / purged` の7種に閉じる方針である。
+現在の正本では、`commit_type` を `manual / auto / imported / repaired / merged / purged` の6種に閉じる方針である。Phase 3 受入前の `migrated` を含む store は旧形式であり、current reader は受理・変換せず §12.5 の clean recreation を適用する。
 
 この方針を採用する場合でも、実装では以下を守る。
 
@@ -775,7 +757,7 @@ metadata には schema_version を持たせる
 新 type が必要に見える場合は、まず既存 type + metadata で表現できないか確認する
 ```
 
-`commit_type` の値域は §12.5 のとおり**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
+release 後の `commit_type` の値域は**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
 
 ---
 
@@ -864,7 +846,7 @@ Markdownize Adapter:
   - 軽微でないと判断したら fallback_to_full=true を返す
 ```
 
-Adapter が `incremental_update` capability を宣言しない場合は、Kio は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+Adapter が `incremental_update` capability を宣言しない場合は、Kio は常に full モードで Adapter を呼ぶ。これは current capability contract の縮退であり、旧 store / object reader の後方互換ではない。
 
 詳細仕様: [04-pipeline.md §2, §3](04-pipeline.md), [07-adapter-spec.md §8](07-adapter-spec.md)
 
@@ -979,9 +961,9 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 .kio/manifest.json (簡易管理時)    → schemas/manifest.schema.json
 ```
 
-validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
+validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理する。公開後の breaking change は release 計画で migration / old-version read-only を定義するが、未公開期間に旧 development store を読む migration branch は置かない (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kio` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kio/.lock` で直列化され並存しない)**。required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する)。**approved_at / approval_method を欠く pending は self-heal の完全一致条件を満たさないため publish されず、次回 locked mutation で除去して明示承認を要求する**。**この除去は `approvals_initialized` marker が無ければ同一 atomic write で true 化する** (revoke の pending 除去と同型 — 除去だけでは真正初回条件が復活し、次回の初回 materialize が明示承認要求を無音で迂回する。[07-adapter-spec.md §3](07-adapter-spec.md))。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke、または malformed pending の locked cleanup と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kio_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kio_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く scope.json は valid であり、欠落 = 当該承認なしとして扱う。`status` は approvals[] 行の required field であり、**欠落行は送信を許可しない** (既定値で active と読む経路は持たない — fail-closed)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kio` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kio/.lock` で直列化され並存しない)**。存在する場合の required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する))・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**`approval_pending` key 全体の不在は valid で pending intent 無しを表す。一方、存在する pending の required field 欠落・型不正は schema error / fail-closed** であり、self-heal、locked cleanup、監査値の補完の対象にしない。`approvals[]` が存在する場合の各行も同じく strict に検証し、`status` 欠落行は送信を許可しない (既定値で active と読む経路は持たない)。**未知 key は schema error** (fail-closed)。この検証は `kio_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kio_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。`approvals[]`・`approval_pending`・`approvals_initialized` の**全て**を欠く scope.json は valid であり、欠落 = 当該承認なしとして扱う。
 
 `folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kio init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。これを欠く `.kio/config.toml` は schema error (exit 2) とする — required field に既定値の代替経路は持たない。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
@@ -991,7 +973,7 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 ## 12.4 時刻・タイムゾーン
 
-すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / stale_after_at / completed_at / created_at / schema_migrations.applied_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。**暦の演算も UTC で行う** — `cost_ledger.month` ('YYYY-MM') は `recorded_at` の UTC 暦月から導出し、[04-pipeline.md §5.4](04-pipeline.md) の剪定の「前月以前」判定も UTC 暦月の月初 epoch ms を境界とする (local TZ は UI 表示限定 — 下記)。
+すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / stale_after_at / completed_at / created_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。**暦の演算も UTC で行う** — `cost_ledger.month` ('YYYY-MM') は `recorded_at` の UTC 暦月から導出し、[04-pipeline.md §5.4](04-pipeline.md) の剪定の「前月以前」判定も UTC 暦月の月初 epoch ms を境界とする (local TZ は UI 表示限定 — 下記)。
 
 ```text
 正:   2026-04-25T12:00:00Z
@@ -1008,7 +990,15 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 **Kio は未リリースであり、外部に既存 store は存在しない。**したがって
 「本規則の導入以前に作られたデータ」を特別扱いする分岐を、仕様にも実装にも**置かない**。
-該当するのは開発機の store だけであり、それは `kio reindex --regenerate` か作り直しで足りる。
+旧 development store は current reader の入力ではなく、source files から clean recreate する。
+
+具体的には source を確認したうえで旧 `.kio` を隔離し、current binary で `kio init`、`kio index`
+（online enrichment が必要なら明示承認）、`kio batch resume` を実行して current schema の新しい
+store を作る。旧 `.kio` の history、task ledger、registry、normalized cache、derived SQLite、object
+はコピーも変換も混在もさせない。受け入れ後に隔離した旧 store を削除する。旧形式を発見した
+current binary は fail-closed に拒否し、reader / search / repair / historical 操作の例外は設けない。
+`kio reindex --regenerate` は current schema で検証済みの store にだけ使う recovery であり、
+pre-contract store の移行手段ではない。
 
 この規約が禁じるのは**後方**互換の分岐だけである。次は禁止対象ではない:
 
@@ -1016,6 +1006,26 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
   これは未来の版が書いた store を今の binary が読む話であり、公開前後を問わず必要
 - **移植性** — Windows で物理化できない名前、digest-only 物理名など。旧データではなく OS 差の吸収
 - **Unicode 正規化** — NFC / case folding。世代とは無関係
+- **現行 format の corruption recovery** — torn write、欠損した lifecycle / purge counter の
+  fail-closed recovery。旧 event の欠落 field を補う reader とは別契約である
+
+この規約の実装上の境界は次のとおりである。
+
+```text
+derived SQLite cache:
+  fresh / missing DB                 → current schema で初期化
+  existing incompatible schema       → bytes を変更せず rebuild-db を案内
+  historical cache                   → current commit / tree / CAS から再構築
+
+cost-ledger.sqlite (non-rebuildable truth):
+  current schema の crash recovery   → 維持
+  old / missing / incompatible shape  → bytes を保存して fail-closed
+                                      （startup importer・rename・推測変換は禁止）
+```
+
+canonical digest-only physical names、Unicode/NFC、Windows write/read/hash verification は残す。ただし
+colon 名、raw leaf、旧 tree/path 等の第二物理表現を探す fallback は portability ではなく pre-release
+backward compatibility であり、除去対象である。
 
 除去対象の一覧と進捗は [tasks/pre-release-legacy-removal.md](../tasks/pre-release-legacy-removal.md)。
 **公開後に初めて後方互換を設計する** — 存在しないユーザーのために分岐を先に書くと、
@@ -1038,19 +1048,20 @@ adapter_io_spec_version  Adapter 入出力 schema (incremental Markdownize 含�
 
 ```text
 MAJOR bump:
-  - 既存データの非互換破壊。migration 必須。
+  - 公開後の既存データを非互換にする変更。migration / old-version read-only のいずれを提供するかを
+    release 計画で明示する。未公開期間には旧 development store の migration reader を書かない。
   - 該当 spec と CHANGELOG への明示記載が必要。
-  - 既存ユーザーは旧バージョンの read-only モード または migrate のいずれかを選択。
+  - 公開後の既存ユーザーは old-version read-only モード または migrate のいずれかを選択。
 
 MINOR bump:
-  - 新フィールド追加 (default 値で旧データを補える場合)
+  - 公開後に新フィールドを追加し、公開済み format との相互運用を release 計画で定義する場合
   - 既存値の意味は不変。
 
 PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-**前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
+**前方互換 (旧 reader × 新 store) の規約**: reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱う ([03-data-model.md §2](03-data-model.md)、schema validation より先)。**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
 
 **read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kio/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KIO-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — `kio search` は当該 scope の source SQLite を読み書きしない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error)。cursor replay は scope SQLite に依存せず、device-local query-vector cache が欠落・不一致なら `KIO-E-SEARCH-CURSOR-001` とし再検索を要求する。
 
@@ -1058,9 +1069,7 @@ PATCH bump:
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した
 ([03-data-model.md §8](03-data-model.md)) — hash/identity 規約の変更だが、
 [08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md) の 2026-07 改訂と同じく
-**実装・store 公開前の schema 確定であり MAJOR bump ではない**。既存 dev store の v1/v2 tree
-(該当フィールド欠落) は legacy として読取可 (欠落 = 旧 semantics)。Step 1-2 実装の tree hashing は
-v2/v3 対応の rework が必要 ([09-mvp-scope.md](09-mvp-scope.md))。
+**実装・store 公開前の schema 確定であり MAJOR bump ではない**。current tree ではこれらの field は必須であり、欠落は legacy semantics へ縮退せず corruption / incompatible format として fail-closed にする。Step 1-2 実装の tree hashing は v2/v3 対応の rework が必要 ([09-mvp-scope.md](09-mvp-scope.md))。
 
 **Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗する ([07-adapter-spec.md §8.1](07-adapter-spec.md))。**full fallback が有効なのは incremental capability だけが非互換な場合に限る** — spec_version 自体の非互換は full で呼び直しても同じ拒否を再生するため、当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) とし、同梱 deterministic Adapter のベースラインは影響なく継続する ([07-adapter-spec.md §8.1](07-adapter-spec.md) と同旨)。index 全体の停止を引き起こさないという保証は、このベースライン継続が担う。
 
@@ -1118,7 +1127,7 @@ canonical_text_hash              | (廃止)                               | rese
 canonical_hash                   | (廃止)                               | research/diff.md §17
 markdown_hash                    | (廃止)                               | research/diff.md §3
 Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | research/read_only.md §2
-.kio/normalized/<path>.md        | .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/ (正本) | research/kio.md §11
+.kio/normalized/<path>.md        | manifest CAS → normalized_unit_object CAS (正本。`normalized_units/` は current projection) | research/kio.md §11
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
 last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kio.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3

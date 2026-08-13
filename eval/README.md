@@ -4,31 +4,38 @@
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
 (`docs/09-mvp-scope.md` §5.5、**Step 3 着手前ゲート**) の成果物。
 
-- 依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
-- 決定論: すべて固定 seed (`corpus_spec.SEED`) + hashlib 由来の seed。2 回実行で byte 同一。
-- `crates/` の `kio` バイナリ (Step 1-2 実装済み) を使う。`cargo build --release` 済み前提。
+- Python 補助スクリプトの依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
+- 決定論: 凍結済み `corpus-fixture.json` を Rust generator が materialize する。2 回実行で byte 同一。
+- 通常評価は Rust の `kio-eval` と評価対象の `kio` を使う。
+  `cargo build --release --locked --all-features` 済み前提。
 
 ## ファイル構成
 
 | ファイル | 役割 |
 | --- | --- |
-| `corpus_spec.py` | **正本**。scope / anchor 文書 / 履歴シナリオ (編集・リネーム・削除) の単一定義。他スクリプトが共有し drift を防ぐ |
-| `generate_corpus.py` | 合成コーパス生成 (200-500 ファイル / 複数 scope)。`corpus-manifest.json` を出力 |
+| `corpus-fixture.json` | **生成物の凍結正本**。305 文書の bytes と manifest を保持し、Rust `kio-eval generate-corpus` が検証して materialize する |
+| `corpus_spec.py` | Python replay/oracle 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
+| `generate_corpus.py` | 旧 CLI 互換 shim。`kio-eval generate-corpus` を exec するだけで、Python/Cargo fallback は持たない |
 | `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `run_eval.py` | 評価ランナー。`kio search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
+| `run_eval.py` | 互換 CLI shim。リポジトリ内の Rust `kio-eval` をそのまま起動する。評価・report・exit code の正本は Rust であり、Python へ暗黙に fallback しない。`KIO_EVAL_BIN` で明示的に evaluator binary を差し替えられる |
+| `python_eval_oracle.py` | Python の独立 differential/security oracle。共有 golden vectors、pointer CAS attestation、crossscope/reranker の限定的な補助だけを持つ。通常の full evaluator・履歴ゲート・report 生成は持たない |
 | `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
-| `run_crossscope.py` | 横断増補の専用ランナー。`run_eval.py` の `HISTORY_QUERY_COUNT` / `assess_history_coverage` は**セット全体**の契約であり部分集合には当てられないため別立て。診断値 `worst_expected_rank` を併記する (Recall@10 は横断融合の欠陥をほぼ検出できない — 実測で replica 有無ともに 1.000) |
+| `run_crossscope.py` | 横断増補の専用ランナー。`python_eval_oracle.py` の限定的な補助を明示利用する。full Rust evaluator のセット全体ゲートは部分集合に当てられないため別立て。診断値 `worst_expected_rank` を併記する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
+| `test_run_eval.py` | Python oracle の独立テストと Rust evaluator/generator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
+| `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
+| `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
+| `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
+| `run_baseline.py` | 歴史的/reference runner。新規の baseline 判定は Rust `kio-eval benchmark baseline` が正本 |
 | `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
 | `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
 | `attest_scale_corpus.py` | HEAD・現行 chunk config・FTS coverage を照合し、検索可能 chunk の正確な総数を証明 |
-| `run_scale_eval.py` | full fixture に対して既定 `auto` 横断検索を反復。text fallback を確認し、内部/プロセス時間の p50 / p95 / p99 と生の標本を出力 |
+| `run_scale_eval.py` | Rust lane 移行前の legacy/reference 実装。fixture 生成・attestation 契約の参照用であり、新規の性能判定の正本ではない |
 | `test_scale_*.py`, `test_run_scale_eval.py` | 性能 fixture の形、所有権、排他、bounded read、registry 復旧、計測契約の単体テスト |
 
 ## 使い方
@@ -37,10 +44,11 @@
 
 ```bash
 # 0. バイナリ (未ビルドなら)
-cargo build --release
+cargo build --release --locked --all-features
 
-# 1. 合成コーパス生成 (決定論的)
+# 1. 合成コーパス生成 (Rust 正本。Python entry point は互換 shim)
 python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
+# 直接実行する場合: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
 
 # 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
 python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
@@ -49,12 +57,10 @@ python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/releas
 python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run
 python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
-# 3a. dry-run: golden-queries の expected {scope,file,section} が
-#     corpus-manifest.json / history-manifest.json に実在し、かつ
-#     (raw_hash, section_id) へ解決できる (slugify が空でない) か検証 (Step 3 前でも通る)
+# 3a. dry-run: Rust の正本 evaluator が golden-queries / manifest を検証する
 python3 eval/run_eval.py --dry-run --corpus /tmp/kio-eval-corpus
 
-# 3b. 本評価: Recall@10 をシナリオ別に集計。
+# 3b. 本評価: Rust の正本 evaluator が Recall@10 をシナリオ別に集計。
 #     kio search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
 python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
@@ -71,6 +77,146 @@ python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin tar
 | Recall 未達 / 実行失敗 (非 0 かつ非 3 exit・不正レスポンス・解決不能) | `1` | FAIL。当該クエリは recall 0 として集計に残す |
 
 exit `3` (部分成功) は stdout の JSON を採点対象にする (実装後の部分成功や実バグを未実装で握り潰さない)。
+
+## Q_hard の外部 fixture 計測
+
+Q_hard は raster PDF / PPTX 図表 / 画像を正解担体とするため、合成 corpus とは別の
+**明示的に attest された外部 fixture** でのみ計測する。fixture がない、attestation が
+ない、または tree / environment / golden digest / scope 一覧が一致しない場合、
+`kio-eval benchmark qhard` は失敗する。checked-in の `qhard-results.json` は歴史成果物であり、
+入力にも Done 判定にも用いない。
+
+```bash
+target/release/kio-eval benchmark qhard \
+  --fixture-root /private/tmp/kio-fixture-run \
+  --tree qhard --env-name qhard \
+  --attestation /private/tmp/kio-fixture-run/qhard-attestation.json \
+  --bin target/release/kio --out /tmp/kio-qhard.json
+```
+
+attestation は strict JSON の `{schema_version:1, fixture_id:"kio-qhard-v1", tree,
+env_name, golden_sha256, fixture_content_sha256, scopes}` である。`fixture_content_sha256` は
+fixture root の regular files/directories を名前・型・content digest で順序付きに列挙して
+hash した値で、root の `qhard-attestation.json` 自身は除外する（自己参照を避ける）。`scopes` は fixture root からの正規化相対 path
+で、実際に見つかる `.kio` scope と完全一致しなければならない。探索は symlink を辿らず、
+directory / scope 数に上限を設ける。検索 subprocess は fixture XDG state だけを使う。
+`--online-query` 時だけ `GEMINI_API_KEY` / `MISTRAL_API_KEY` を名前指定で転送し、値は report
+に出力しない。
+
+`--synthetic-corpus <generated-corpus>` を添えると、同じ `kio-eval` 呼出し内で frozen
+synthetic M3-1 18 問を再測定し、Q_hard 8 問と合算した 26 問 / 21 hit gate を report に
+記録する。外部の結果 artifact は受け付けない。指定なしの Q_hard-only 実行は evidence-only
+であり、acceptance success にはならない。
+
+## fixture-B baseline 比較
+
+fixture-B の24問は Q_hard 8問 + synthetic M3-1 18問の26/21 gateとは別の、Spotlight/rga
+比較だけの凍結母集団である。まず `.kio` を除く indexed/pristine source が p01..p20 で等価な
+ことを安全に束縛し、その attestation を測定に渡す。
+
+```bash
+target/release/kio-eval benchmark baseline-attest \
+  --fixture-root /private/tmp/kio-fixture-run --baseline-corpus /path/to/pristine \
+  --out /tmp/kio-fixture-b-attestation.json
+target/release/kio-eval benchmark baseline \
+  --fixture-root /private/tmp/kio-fixture-run --baseline-corpus /path/to/pristine \
+  --attestation /tmp/kio-fixture-b-attestation.json --bin target/release/kio \
+  --comparator-runtime /Library/KioComparatorRuntime/v1 --out /tmp/kio-baseline.json
+```
+
+Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
+新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
+
+### macOS 比較器 runtime の管理者構築
+
+正式 baseline 用の runtime は、既存の Homebrew tree を変更せず、専用の read-only image として
+構築する。checkout 内の script を直接 root 実行してはならない。通常ユーザーがまず commit/worktree の
+hash を記録し、管理者が同じ値を独立に照合してから、root-owned 固定コピーを install する。スクリプト
+自身は `sudo` を呼ばず、パスワードを読まない。下の SHA-256 はこの revision の script 用であり、更新時は
+必ず再記録・再照合する。
+
+```bash
+/usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
+# Expected for this revision: 7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
+sudo /bin/chmod 0700 "$admin_dir"
+sudo /usr/bin/install -o root -g wheel -m 0500 \
+  /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh "$admin_dir/build-script"
+sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
+    cleanup() { /bin/rm -f -- "$script"; /bin/rmdir -- "$admin_dir"; }
+    trap cleanup EXIT
+    readonly expected=7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+    readonly actual=$(/usr/bin/shasum -a 256 "$script")
+    [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
+    /bin/zsh -f "$script" build
+    exit $?' build-runtime "$admin_dir"
+```
+
+対象は `/Library/KioComparatorRuntime/v1`、image は
+`/Library/KioComparatorRuntime/v1.dmg`、一時 build directory は
+`/private/tmp/kio-comparator-runtime-v1-build` に固定される。いずれかが既に存在すれば上書きせず停止する。
+`/opt/homebrew` は読み取り専用の入力としてだけ利用し、`rga`、`rga-preproc`、`pandoc`、`pdftotext`、
+`rg` と再帰的な非 system Mach-O closure を staging へ複製する。load command は
+runtime 内の `@rpath` と `@loader_path` に再束縛され、解決不能、外部 escape、basename collision、
+runtime 外 rpath は fail-closed
+である。UDRO case-sensitive APFS image を read-only mount してから、canonical path、root ownership、
+mode、ACL/xattr、symlink 不在、payload/source digest、固定 config bytes を静的検証し、
+`/Library/KioComparatorRuntime/v1.manifest.json` に記録する。
+
+失敗時は、その invocation が作成した固定 target だけを rollback する。成功後に version を廃止する
+場合の手順は script が表示する `hdiutil detach`、image/manifest の削除、空の mountpoint/managed root の
+`rmdir` に限定する。既存の `v1` を上書きして更新することはない。
+
+構築後の tool smoke は root で実行してはならない。管理者 shell を終了してから、通常ユーザーで
+`/absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify` を実行する。これは限定的な
+smoke であり、5 executable と PDF/DOCX adapter の helper lookup を sealed runtime の `bin/` だけで
+実行する。rga 0.10.10 の PDF adapter は `--rga-no-cache` では失敗するため、verify と正式 evaluator は
+ambient cache ではなく evaluator 所有の一時 0700 cache を明示する。smoke は baseline evaluator の
+authoritative preflight を置き換えない。
+
+比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
+入力に使うため、可変な public corpus path を再オープンしない。`kio` は検査済み regular executable
+の private snapshot に束縛する。`rga` lane は、ユーザー所有の Homebrew tree を比較器 runtime として
+受け付けない。代わりに `--comparator-runtime` で、管理者が提供した専用の **canonical absolute** runtime root を
+明示する。root とその path component、runtime 内の file/directory、runtime 内 symlink の最終 target はすべて
+root 所有かつ group/other 非書込みで、symlink target は root の外へ出てはならない。root には少なくとも次を
+含める。
+
+```text
+bin/rga
+bin/rga-preproc
+bin/pandoc
+bin/pdftotext
+bin/rg
+config/rga-config.json
+```
+
+macOS では evaluator が固定された sealed system `otool` を使って、この5 executable の Mach-O load command
+closure を再帰的に解決する。`@loader_path`、`@executable_path`、`@rpath`、runtime 内 symlink を解決した後、
+すべての runtime image が当該 root 内に残ることを要求する。terminal として許す root 外 dependency は、
+root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library、
+または Apple-signed `dyld_info` の strict catalog で UUID と全依存 edge を束縛した dyld shared-cache image
+だけである。catalog の形式不整合、途中切断、未解決 edge は fail-closed にする。
+実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。
+未解決の `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
+report は runtime root、固定 inspector、各 closure image の canonical path・trust class・SHA-256 と closure digest を
+記録する。従って runtime verification failure や comparator 欠落は `blocked-unmeasured` であり、pass にはならない。
+各 rga subprocess の実行前後と計測 finalization では load command から closure を再帰的に再解決し、初期 binding の
+canonical path・trust class・SHA-256・closure digest と完全一致させる。途中で高優先度の `@rpath` 候補が追加された場合を
+含め、entry の追加・削除、解決先または内容の変化は `blocked-unmeasured` とする。
+runtime root は macOS `MNT_RDONLY` の read-only mount でなければならない。bind時、各 rga subprocess の直前・直後、
+計測 finalization で public canonical path と retained root descriptor の mount identity を再確認し、writable filesystem、
+unmount/remount、mount replacement、または確認不能は `blocked-unmeasured` とする。report には canonical runtime path、
+read-only 判定、filesystem ID・mount point・mount source・filesystem type・flags、および closure digest を保存する。
+`config/rga-config.json` は `{"custom_adapters":[]}` だけを含む root-owned sealed regular file とし、rga の
+ユーザー設定・任意 custom adapter を取り込ませない。helper lookup の `PATH` も private temporary directory ではなく
+sealed runtime の `bin/` だけに固定する。
+
+macOS の `mdfind` はコピー実行を許さない system tool のため、例外として
+正確な `/usr/bin/mdfind` のみを直接実行する。その場合も capability preflight、実体 digest の束縛、および
+各 query 後の再照合を必須にする。比較器の欠落・preflight failure・予期しない `mdfind` failure、または
+`rga` の 0/1 以外の終了は、miss として margin を有利にせず測定を block する。
 
 ## シナリオと評価コーパスの対応 (docs/09 §4)
 
@@ -124,7 +270,7 @@ Done 条件 = **synthetic で各シナリオ Recall@10 >= 0.8** + **dogfood で 
 - ゴールデンクエリの追加は **Step 3 着手前まで**。
 - **Step 3 着手後は `golden-queries.jsonl` の追加・差し替え・削除を禁止** (シナリオ凍結規律に準ずる)。
   悪化を隠すためのクエリ削除は禁止。物理的に実装不可能と判明した場合のみ docs 側で撤回 + 代替採用。
-- コーパス定義 (`corpus_spec.py`) と履歴シナリオも同様に凍結対象。変更は Recall 数値の連続性を壊すため、
+- 凍結 corpus fixture (`corpus-fixture.json`) と履歴シナリオも同様に凍結対象。変更は Recall 数値の連続性を壊すため、
   Step 3 着手後は原則行わない。
 
 ## 決定論の検証
@@ -193,11 +339,12 @@ python3 eval/prepare_scale_corpus.py \
 # 任意時点で再検証 (read-only SQLite attestation)
 python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-full
 
-# current-text 横断検索の手動計測。各scenario 5 warmup + 100標本、nearest-rank p50/p95/p99。
-# 既定reportは corpus外の /tmp/kio-scale-full.latency.json。
-python3 eval/run_scale_eval.py \
+# Rust measurement lane: full だけが acceptance eligible。5 warmup + 100 samples
+# の M3-1 `search.latency_ms` p95 を判定に使う。--out は corpus 外の既存実体
+# directory にだけ原子的に書き出せる。
+cargo run -p kio-eval -- benchmark scale \
   --corpus /tmp/kio-scale-full --bin target/release/kio \
-  --warmups-per-scenario 5 --samples-per-scenario 100
+  --warmups 5 --samples 100 --out /tmp/kio-scale-full.latency.json
 ```
 
 `prepare_scale_corpus.py` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
@@ -216,14 +363,17 @@ query契約を版管理する `query_workload_id=exact-reference-v1`、
 - 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける。
   これは高選択性queryのlatency probeであり、広いqueryのmulti-scope ranking性能は証明しない
 
-`run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
+Rust の `kio-eval benchmark scale` は release binary・manifest・保存済みと実測前後の live attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
 主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
-両方の生標本とp50/p95/p99を保存する。M3-1の `< 5秒` 判定は
+両方の生標本とp50/p95/p99を保存する。full の acceptance は M3-1 の `< 5秒` と
+M3-2/M3-3 の `< 7秒` を全て判定する（tiny は pass fields を出さない）。M3-1の `< 5秒` 判定は
 **high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
 (`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
-編集・rename・deleteを含まないため、結果は **execution-path-only** であり正式な履歴性能値ではない。
+編集・rename・deleteを含まないため、結果は **execution-path-only** であり、履歴データの品質・母集団の
+代表性を示す正式な履歴性能値ではない。ただし selected execution path に対する full Scale の合否契約には、
+両シナリオの `< 7秒` p95 を含める。
 
 ### このfixtureで証明しないもの
 

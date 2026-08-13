@@ -5,19 +5,19 @@
 `eval/golden-queries.jsonl` の 50 問は digest ごと不変のまま、増補はこのファイルが
 自分の digest で持つ。
 
-## なぜ run_eval.py に相乗りしないのか
+## なぜ Rust の full evaluator に相乗りしないのか
 
-`run_eval.py` は**セット全体**の性質を 2 つ検査する。どちらも 50 問セットの契約であって、
+Rust `kio-eval` は**セット全体**の性質を 2 つ検査する。どちらも 50 問セットの契約であって、
 増補の契約ではない:
 
 - `HISTORY_QUERY_COUNT` — M3-2 / M3-3 はきっかり 16 問であること。
 - `assess_history_coverage` — その run が rename 7 / edit 3 / delete 9 の**全 anchor** を
   集合として掘り起こしたこと。
 
-増補 12 問を足せば前者は 20 になって落ち、増補だけを流せば後者が落ちる。どちらも
+増補 16 問を足せば前者は 20 になって落ち、増補だけを流せば後者が落ちる。どちらも
 増補の欠陥ではなく「セット全体の検査を部分集合に当てた」だけなので、本ランナーは
 **部分集合に意味のあるゲートだけ**を適用する: Recall@10 目標、レイテンシ目標、
-Evidence Pointer の必須フィールド。
+Evidence Pointer の必須フィールド。Python oracle はこの専用診断に必要な独立補助だけを提供する。
 
 ## このセットが測るもの
 
@@ -40,7 +40,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import corpus_spec as spec  # noqa: E402
-import run_eval  # noqa: E402
+import python_eval_oracle as eval_oracle  # noqa: E402
 
 
 def worst_expected_rank(response, expected_set, limit=50):
@@ -57,12 +57,12 @@ def worst_expected_rank(response, expected_set, limit=50):
 
     expected のいずれかが `limit` 件以内に現れない場合は None。
     """
-    keys = run_eval._result_keys(response, limit)
+    keys = eval_oracle._result_keys(response, limit)
     if not expected_set or not (expected_set <= keys):
         return None
     ordered = []
     for index in range(1, limit + 1):
-        prefix = run_eval._result_keys(response, index)
+        prefix = eval_oracle._result_keys(response, index)
         if expected_set <= prefix:
             ordered.append(index)
             break
@@ -81,19 +81,19 @@ def main(argv=None):
                     help="search を叩かず expected の実在 + 解決を検証")
     args = ap.parse_args(argv)
 
-    queries = run_eval.load_golden(args.golden)
+    queries = eval_oracle.load_golden(args.golden)
     corpus_dir = os.path.abspath(args.corpus)
-    corpus_manifest = run_eval.load_json(
+    corpus_manifest = eval_oracle.load_json(
         os.path.join(corpus_dir, spec.CORPUS_MANIFEST_NAME), "corpus-manifest.json")
-    history_manifest = run_eval.load_json(
+    history_manifest = eval_oracle.load_json(
         os.path.join(corpus_dir, "history-manifest.json"), "history-manifest.json")
-    model = run_eval.CorpusModel(corpus_manifest, history_manifest)
-    resolver = run_eval.Resolver(corpus_manifest, history_manifest)
-    active = [s for s in run_eval.SCENARIOS
+    model = eval_oracle.CorpusModel(corpus_manifest, history_manifest)
+    resolver = eval_oracle.Resolver(corpus_manifest, history_manifest)
+    active = [s for s in eval_oracle.SCENARIOS
               if any(q.get("scenario") == s for q in queries)]
 
     counts = {s: sum(1 for q in queries if q.get("scenario") == s)
-              for s in run_eval.SCENARIOS}
+              for s in eval_oracle.SCENARIOS}
     print(f"crossscope queries: {len(queries)} 件 (M3-1/M3-2/M3-3 = "
           f"{counts['M3-1']}/{counts['M3-2']}/{counts['M3-3']})")
 
@@ -107,7 +107,7 @@ def main(argv=None):
         return 1
 
     if args.dry_run:
-        return run_eval.run_dry_run(queries, model, resolver, active)
+        return eval_oracle.run_dry_run(queries, model, resolver, active)
 
     bin_path = os.path.abspath(args.bin)
     if not os.path.exists(bin_path):
@@ -126,8 +126,8 @@ def main(argv=None):
             rows.append({"scenario": scenario, "query": q["query"], "status": "failed",
                          "recall_at_10": 0.0, "detail": "; ".join(resolve_errors)})
             continue
-        outcome = run_eval.run_search(bin_path, corpus_dir, q["query"], q.get("flags", []))
-        kind, response, error_code, detail = run_eval.classify_outcome(outcome)
+        outcome = eval_oracle.run_search(bin_path, corpus_dir, q["query"], q.get("flags", []))
+        kind, response, error_code, detail = eval_oracle.classify_outcome(outcome)
         duration_ms = float(outcome.get("duration_ms", 0.0))
         latencies[scenario].append(duration_ms)
         if kind != "scored":
@@ -137,7 +137,7 @@ def main(argv=None):
                          "recall_at_10": 0.0, "error_code": error_code, "detail": detail,
                          "duration_ms": duration_ms})
             continue
-        problems = run_eval.evidence_problems(response)
+        problems = eval_oracle.evidence_problems(response)
         if problems:
             n_failed += 1
             scored[scenario].append(0.0)
@@ -145,7 +145,7 @@ def main(argv=None):
                          "recall_at_10": 0.0, "detail": "; ".join(problems),
                          "duration_ms": duration_ms})
             continue
-        recall = run_eval.recall_at_k(response, expected_set, k=10)
+        recall = eval_oracle.recall_at_k(response, expected_set, k=10)
         scored[scenario].append(recall)
         rows.append({
             "scenario": scenario, "query": q["query"], "status": "ok",
@@ -154,19 +154,19 @@ def main(argv=None):
             "worst_expected_rank": worst_expected_rank(response, expected_set),
         })
 
-    results = {"target_recall_at_10": run_eval.RECALL_TARGET,
+    results = {"target_recall_at_10": eval_oracle.RECALL_TARGET,
                "scenarios": {}, "queries": rows,
                "counts": {"n_queries": len(queries), "n_failed": n_failed}}
     all_pass = n_failed == 0
     for scenario in active:
         values = scored[scenario]
         recall = sum(values) / len(values) if values else None
-        p95 = run_eval.percentile_nearest_rank(latencies[scenario], 0.95)
-        passes_target = recall is not None and recall >= run_eval.RECALL_TARGET
-        passes_latency = run_eval.passes_latency_target(scenario, p95)
+        p95 = eval_oracle.percentile_nearest_rank(latencies[scenario], 0.95)
+        passes_target = recall is not None and recall >= eval_oracle.RECALL_TARGET
+        passes_latency = eval_oracle.passes_latency_target(scenario, p95)
         results["scenarios"][scenario] = {
             "n_queries": len(values), "recall_at_10": recall, "p95_ms": p95,
-            "latency_target_ms": run_eval.LATENCY_TARGET_MS[scenario],
+            "latency_target_ms": eval_oracle.LATENCY_TARGET_MS[scenario],
             "passes_target": passes_target, "passes_latency": passes_latency,
         }
         if not (passes_target and passes_latency):

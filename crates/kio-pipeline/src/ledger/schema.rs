@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::ledger::time::now_millis;
 use crate::{PipelineError, Result};
 
 /// `04-pipeline.md §5.4` SQL-of-record, copied verbatim (comments included —
@@ -107,13 +108,26 @@ pub const CREATE_BATCH_REQUESTS_SQL: &str = "CREATE TABLE batch_requests (      
 pub const CREATE_IDX_BATCH_REQUESTS_INFLIGHT_SQL: &str =
     "CREATE INDEX idx_batch_requests_inflight ON batch_requests(state) WHERE state IN (0, 1);";
 
-pub const CREATE_SCHEMA_MIGRATIONS_SQL: &str = "CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 §7.5.3 — JSONL cutover 等)
-    name        TEXT NOT NULL PRIMARY KEY, -- 例: 'jsonl-cutover' (rowid 表の TEXT PRIMARY KEY は NULL を拒否しないため NOT NULL 必須)
+pub const CREATE_SCHEMA_MIGRATIONS_SQL: &str =
+    "CREATE TABLE schema_migrations (         -- durable operational markers
+    name        TEXT NOT NULL PRIMARY KEY,
     applied_at  INTEGER NOT NULL         -- UTC ミリ秒
 );";
 
-/// Marker name for the one-time JSONL → SQLite cutover (10 §7.5.3).
-pub const JSONL_CUTOVER_MARKER: &str = "jsonl-cutover";
+/// Retired pre-release ledger files, including the abandoned cutover's
+/// `.migrated` outputs. Their bytes have no lossless mapping to the current
+/// SQLite schema, so startup refuses them rather than importing, renaming, or
+/// otherwise modifying them.
+pub const RETIRED_LEDGER_BASENAMES: &[&str] = &[
+    "cost-ledger.jsonl",
+    "cost-ledger-reservations.jsonl",
+    "cost-ledger-reclaimed.jsonl",
+    "cost-ledger.lock",
+    "cost-ledger.jsonl.migrated",
+    "cost-ledger-reservations.jsonl.migrated",
+    "cost-ledger-reclaimed.jsonl.migrated",
+    "cost-ledger.lock.migrated",
+];
 
 /// `$XDG_DATA_HOME/kio/cost-ledger.sqlite`, falling back to
 /// `$HOME/.local/share/kio/cost-ledger.sqlite` (04 §5.4: "デバイスグローバル 1 個").
@@ -138,6 +152,8 @@ pub struct LedgerDb {
 impl LedgerDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        reject_retired_ledger_files(parent)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| PipelineError::Io {
                 path: parent.display().to_string(),
@@ -151,6 +167,14 @@ impl LedgerDb {
                 let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
             }
         }
+        // The detector above catches a pre-existing retired store before this
+        // function creates or opens SQLite. Recheck immediately before
+        // `Connection::open` to narrow the race with an external writer. A
+        // process that can mutate this device-global directory without using
+        // Kio's lifecycle remains outside this store's synchronization/trust
+        // boundary; Rust/SQLite offer no atomic "directory is clean + create DB"
+        // primitive across these distinct pathnames.
+        reject_retired_ledger_files(parent)?;
         let conn = Connection::open(path)?;
         // CL70: WAL + busy_timeout, the same precedent as scope-registry.sqlite.
         conn.busy_timeout(Duration::from_millis(5000))?;
@@ -209,8 +233,8 @@ impl LedgerDb {
             // is PRIMARY KEY) — guard with `marker_present` so a marker already
             // persisted by an earlier detection (not yet cleared by `kio ledger
             // reconcile`) cannot cause a duplicate-key error on a later `open`.
-            if !crate::ledger::migrate::marker_present(&conn, RESTORE_RECONCILE_PENDING_MARKER)? {
-                crate::ledger::migrate::record_marker(&conn, RESTORE_RECONCILE_PENDING_MARKER)?;
+            if !marker_present(&conn, RESTORE_RECONCILE_PENDING_MARKER)? {
+                record_marker(&conn, RESTORE_RECONCILE_PENDING_MARKER)?;
             }
         }
         // Refresh the companion to the DB's current value in every case
@@ -241,17 +265,15 @@ impl LedgerDb {
 // detection (10-operations.md §7.5.2, step4b-contract-tests-p3a.md L307-321)
 // ---------------------------------------------------------------------------
 
-/// Marker recorded in `schema_migrations` (reusing `migrate.rs`'s generic
-/// `marker_present`/`record_marker` — both already take a `name: &str`, so no
-/// new SQL/table is needed here) when [`LedgerDb::open`] detects a
-/// restored-from-backup DB. `schema_migrations` is this store's one existing
-/// generic "operational marker" table (see `JSONL_CUTOVER_MARKER`), and this
-/// marker is exactly that shape: a durable, idempotent completion flag — not
+/// Marker recorded in `schema_migrations` when [`LedgerDb::open`] detects a
+/// restored-from-backup DB. `schema_migrations` is this store's generic
+/// operational-marker table, and this marker is exactly that shape: a durable,
+/// idempotent completion flag — not
 /// ledger row DATA, so it does not belong in `cost_ledger`/`batch_requests`.
 /// While present, `ops::phase1_intent` refuses new online submissions
 /// (`KIO-E-BATCH-RESTORE-RECONCILE-001`). Cleared by `kio ledger reconcile`
 /// (`clear_restore_reconcile_marker`) once the 10 §7.5.2 recovery walk
-/// completes — unlike [`JSONL_CUTOVER_MARKER`], which is permanent.
+/// completes.
 pub const RESTORE_RECONCILE_PENDING_MARKER: &str = "restore-reconcile-pending";
 
 /// Clear the QA14 restore-reconcile marker (idempotent — `false` when it was
@@ -266,11 +288,60 @@ pub fn clear_restore_reconcile_marker(conn: &Connection) -> Result<bool> {
 }
 
 /// Whether the QA14 restore-reconcile marker is currently set — the gate
-/// `ops::phase1_intent` checks before issuing a new submission. A thin,
-/// crate-public wrapper over `migrate::marker_present` so `ops.rs` does not
-/// need to depend on `migrate.rs`'s module path directly for this one call.
+/// `ops::phase1_intent` checks before issuing a new submission.
 pub(crate) fn restore_reconcile_marker_present(conn: &Connection) -> Result<bool> {
-    crate::ledger::migrate::marker_present(conn, RESTORE_RECONCILE_PENDING_MARKER)
+    marker_present(conn, RESTORE_RECONCILE_PENDING_MARKER)
+}
+
+/// Returns whether a named operational marker is durable in this database.
+pub(crate) fn marker_present(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Persist a named operational marker. Callers requiring idempotency should
+/// first use [`marker_present`], since the marker name is the primary key.
+pub(crate) fn record_marker(conn: &Connection, name: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
+        params![name, now_millis()],
+    )?;
+    Ok(())
+}
+
+fn reject_retired_ledger_files(dir: &Path) -> Result<()> {
+    let mut present = Vec::new();
+    for basename in RETIRED_LEDGER_BASENAMES {
+        let candidate = dir.join(basename);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => present.push(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(PipelineError::Io {
+                    path: candidate.display().to_string(),
+                    message: err.to_string(),
+                });
+            }
+        }
+    }
+    if present.is_empty() {
+        return Ok(());
+    }
+    let paths = present
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(PipelineError::contract(
+        "KIO-E-LEDGER-LEGACY-JSONL-001",
+        format!(
+            "retired pre-release cost-ledger files were found ({paths}); they were left untouched because their contents cannot be losslessly imported into cost-ledger.sqlite. Preserve these files and resolve the ledger manually before retrying."
+        ),
+    ))
 }
 
 /// Runs `PRAGMA integrity_check`, returning the raw result string (`"ok"` on
@@ -996,7 +1067,7 @@ mod tests {
     fn qa14_clear_restore_reconcile_marker_is_idempotent() {
         let (_dir, db) = open_temp();
         assert!(!clear_restore_reconcile_marker(&db.conn).unwrap());
-        crate::ledger::migrate::record_marker(&db.conn, RESTORE_RECONCILE_PENDING_MARKER).unwrap();
+        record_marker(&db.conn, RESTORE_RECONCILE_PENDING_MARKER).unwrap();
         assert!(restore_reconcile_marker_present(&db.conn).unwrap());
         assert!(clear_restore_reconcile_marker(&db.conn).unwrap());
         assert!(!restore_reconcile_marker_present(&db.conn).unwrap());
