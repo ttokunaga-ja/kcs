@@ -25,7 +25,10 @@ kio index [--preview|--approve|--yes] [--online|--offline] [--realtime|--batch] 
                                         # 優先順位: CLI > scope config > user config — ただし**明示 revoke
                                         # (allow_network = false・行の revoked) は --online より優先** (kill switch、07 §3)。
                                         # --online が開くのは未設定の既定閉鎖のみ)
-kio batch resume [--override-budget] [--online|--offline]  # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
+kio batch resume [--recheck-budget|--override-budget] [--online|--offline]
+                                        # 中断タスクの再開。--recheck-budget は上限を変更した後に
+                                        # 現在の hard cap を再判定して budget pause を再開する。
+                                        # --override-budget は current cap 自体を無視するため別用途。
                                         # --online は当該実行限りの一時 opt-in、--offline は当該実行の新規送信を禁止する逆向き上書き
                                         # (online 作業は据え置き。07 §3 — resume/retry/reindex も online 作業を駆動するため)。
                                         # in-flight の照会・出力取得・upload 掃除は新規送信に当たらず opt-in 不要 (04 §5.8 回復)。

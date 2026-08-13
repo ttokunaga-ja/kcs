@@ -349,6 +349,12 @@ enum BatchCommand {
 
 #[derive(Debug, Args)]
 struct ResumeArgs {
+    /// Reconsider tasks paused by a prior hard-cap decision, while enforcing the
+    /// current configured cap before every new reservation. This is for an
+    /// operator who deliberately changed `[budget].monthly_usd_cap`; unlike
+    /// `--override-budget`, it never bypasses the current cap.
+    #[arg(long, conflicts_with = "override_budget")]
+    recheck_budget: bool,
     #[arg(long)]
     override_budget: bool,
     /// QA30 (06-cli-spec.md §1 L21-24, 07-adapter-spec.md §3): one-shot opt-in
@@ -14061,6 +14067,15 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     "--online and --offline are mutually exclusive",
                 ));
             }
+            // A recheck is an operator-requested state transition based on the
+            // *current* cap. Validate that policy before unpausing anything: a
+            // malformed replacement config must leave persisted budget holds
+            // intact rather than turning them into Pending work which a later
+            // invocation could send under an unknown policy.
+            if resume.recheck_budget {
+                read_budget_policy(user_config_toml_path(), repo.kio_dir().join("config.toml"))
+                    .map_err(pipeline_to_kio)?;
+            }
             let changed = store
                 .update_matching(|task| {
                     let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);
@@ -14071,6 +14086,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     // budget/tier_b.
                     if task.status == TaskStatus::Paused
                         && (resume.override_budget
+                            || resume.recheck_budget
                             || task.fallback_reason.as_deref() != Some("budget_exceeded"))
                         && (!held_secret || secrets_approved)
                     {
@@ -14094,6 +14110,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             outcome.add(batch_poll_outcome);
             let mut output = json!({
                 "status": "resumed",
+                "recheck_budget": resume.recheck_budget,
                 "override_budget": resume.override_budget,
                 "tasks_updated": changed,
                 "tasks_executed": outcome.executed,
@@ -28135,6 +28152,18 @@ mod tests {
     #[test]
     fn lane_override_rejects_asking_for_both_lanes() {
         assert!(resolve_invocation_lane(LaneOverride::new(true, true), None).is_err());
+    }
+
+    #[test]
+    fn batch_resume_budget_recheck_and_override_are_exclusive() {
+        assert!(Cli::try_parse_from([
+            "kio",
+            "batch",
+            "resume",
+            "--recheck-budget",
+            "--override-budget",
+        ])
+        .is_err());
     }
 
     #[test]

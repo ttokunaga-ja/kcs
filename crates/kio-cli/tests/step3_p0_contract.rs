@@ -5422,11 +5422,11 @@ fn r11_2_index_embedding_auth_error_exits_5() {
     );
 }
 
-// Scenario (b) — L2: budget-exceeded Paused tasks are sticky under `batch resume`
-// and only run under `--override-budget`, SYMMETRICALLY for markdownize and
-// embedding. Before L2, `resume --override-budget` re-paused markdownize (the
-// override never reached the executor's budget judgement) while embedding, being
-// DB-driven, ran even a Paused task without any override.
+// Scenario (b) — L2: budget-exceeded Paused tasks are sticky under a plain
+// `batch resume`, and `--override-budget` runs both adapters symmetrically.
+// Before L2, `resume --override-budget` re-paused markdownize (the override never
+// reached the executor's budget judgement) while embedding, being DB-driven, ran
+// even a Paused task without any override.
 #[test]
 fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
     let dir = tempfile::tempdir().unwrap();
@@ -5488,6 +5488,65 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
             .iter()
             .all(|task| task["status"] == "done"),
         "override must run embedding: {status}"
+    );
+}
+
+// An operator who raises a hard cap must be able to recheck the previously
+// paused work without using the cap-bypassing `--override-budget`.  The first
+// recheck deliberately leaves the cap at zero: it proves the command re-enters
+// the normal atomic reservation path and re-pauses both adapters without a send.
+// The second recheck raises the configured folder cap and completes both paths.
+#[test]
+fn ct3_l2_recheck_budget_enforces_the_current_cap_for_both_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("budget-recheck.pdf"),
+        fake_pdf(&["現在の上限を再判定する対称性テスト本文です。"]),
+    )
+    .unwrap();
+    kio(&dir, &["init"]).assert().success();
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[budget]\nmonthly_usd_cap = 0\n",
+    )
+    .unwrap();
+    json_both_mock_code(&dir, &["index", "--approve"], 6);
+
+    let denied = json_both_mock_code(
+        &dir,
+        &["batch", "resume", "--recheck-budget", "--realtime"],
+        6,
+    );
+    assert_eq!(denied["recheck_budget"], true);
+    assert_eq!(denied["override_budget"], false);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        is_budget_paused(&status, "markdownize") && is_budget_paused(&status, "embedding"),
+        "the unchanged zero cap must keep both adapters paused: {status}"
+    );
+
+    // Change only the configured cap, retaining `hard_stop = true`.  The CLI
+    // re-evaluates each reservation under this cap; it has no override bit.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[budget]\nmonthly_usd_cap = 1\nhard_stop = true\n[adapter.policy]\nallow_network = true\n",
+    )
+    .unwrap();
+    let resumed = json_both_mock(&dir, &["batch", "resume", "--recheck-budget", "--realtime"]);
+    assert_eq!(resumed["recheck_budget"], true);
+    assert_eq!(resumed["override_budget"], false);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        tasks_of_type(&status, "markdownize")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "rechecked markdownize must complete under the raised cap: {status}"
+    );
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "rechecked embedding must complete under the raised cap: {status}"
     );
 }
 
