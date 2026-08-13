@@ -120,7 +120,8 @@ target/release/kio-eval benchmark baseline-attest \
   --out /tmp/kio-fixture-b-attestation.json
 target/release/kio-eval benchmark baseline \
   --fixture-root /private/tmp/kio-fixture-run --baseline-corpus /path/to/pristine \
-  --attestation /tmp/kio-fixture-b-attestation.json --bin target/release/kio --out /tmp/kio-baseline.json
+  --attestation /tmp/kio-fixture-b-attestation.json --bin target/release/kio \
+  --comparator-runtime /Library/KioComparatorRuntime/v1 --out /tmp/kio-baseline.json
 ```
 
 Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
@@ -128,9 +129,33 @@ Rust が計測の正本である。legacy の `run_baseline.py` は参照用に�
 
 比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
 入力に使うため、可変な public corpus path を再オープンしない。`kio` は検査済み regular executable
-の private snapshot に束縛する。`rga` は native helper と dynamic library を実行するため、macOS では
-root 所有かつ group/other 非書込みの Homebrew runtime prefix（`/opt/homebrew` または `/usr/local`）からのみ
-受け付ける。通常のユーザー所有 Homebrew は `blocked-unmeasured` であり、比較結果を合格証拠にしない。
+の private snapshot に束縛する。`rga` lane は、ユーザー所有の Homebrew tree を比較器 runtime として
+受け付けない。代わりに `--comparator-runtime` で、管理者が提供した専用の **canonical absolute** runtime root を
+明示する。root とその path component、runtime 内の file/directory、runtime 内 symlink の最終 target はすべて
+root 所有かつ group/other 非書込みで、symlink target は root の外へ出てはならない。root には少なくとも次を
+含める。
+
+```text
+bin/rga
+bin/rga-preproc
+bin/pandoc
+bin/pdftotext
+bin/rg
+config/rga-config.json
+```
+
+macOS では evaluator が固定された sealed system `otool` を使って、この5 executable の Mach-O load command
+closure を再帰的に解決する。`@loader_path`、`@executable_path`、`@rpath`、runtime 内 symlink を解決した後、
+すべての runtime image が当該 root 内に残ることを要求する。terminal として許す root 外 dependency は、
+root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library だけである。
+実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。未解決・
+曖昧な `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
+report は runtime root、固定 inspector、各 closure image の canonical path・trust class・SHA-256 と closure digest を
+記録する。従って runtime verification failure や comparator 欠落は `blocked-unmeasured` であり、pass にはならない。
+`config/rga-config.json` は `{"custom_adapters":[]}` だけを含む root-owned sealed regular file とし、rga の
+ユーザー設定・任意 custom adapter を取り込ませない。helper lookup の `PATH` も private temporary directory ではなく
+sealed runtime の `bin/` だけに固定する。
+
 macOS の `mdfind` はコピー実行を許さない system tool のため、例外として
 正確な `/usr/bin/mdfind` のみを直接実行する。その場合も capability preflight、実体 digest の束縛、および
 各 query 後の再照合を必須にする。比較器の欠落・preflight failure・予期しない `mdfind` failure、または

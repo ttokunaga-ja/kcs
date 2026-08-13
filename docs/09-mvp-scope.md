@@ -236,6 +236,15 @@ tree の同値性、p01..p20、golden を束縛する attestation を生成す�
 `eval/run_baseline.py` は歴史的な reference であり、新規判定の正本ではない。保存済み JSON は
 計測証拠ではなく、実測の pass を主張しない。
 
+macOS の rga comparator は、ユーザー所有 package prefix を信頼根にしてはならない。baseline 実行は
+管理者提供の root-owned / group-other 非書込み runtime root を明示し、rga、rga-preproc、pandoc、pdftotext、rg
+と custom adapter を空に固定した設定ファイル、および Mach-O dynamic dependency closure を canonical path・digest
+とともに束縛する。`@loader_path`、
+`@executable_path`、`@rpath`、symlink の runtime 外 escape、未解決または非sealed dependency は
+`blocked-unmeasured` とし、比較の pass を成立させない。明示的に sealed と検証した macOS system library root
+だけを runtime 外 terminal dependency として許し、dynamic loader は sealed `/usr/lib/dyld` に固定し
+`LC_DYLD_ENVIRONMENT` は拒否する。
+
 ## 4.2 シナリオ凍結規律
 
 Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-3 完了までシナリオを動かさない。例外: 物理的に実装不可能と判明した場合のみ本書で撤回 + 代替採用。**一回限りの例外**: M3-1 の Q_hard を §4.1 の「20 問以上」へ増補する**追加のみ**、**Step 3 着手前**に限り認める (既存問の差し替えは不可 — 増補後に再凍結し、以後この例外は消滅する)。この増補に伴う #5 行の件数・digest 追記は本例外の完遂手続きであり、§6.2 のドキュメント凍結の対象外とする。

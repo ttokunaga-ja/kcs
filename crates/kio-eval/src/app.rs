@@ -112,8 +112,10 @@ enum BenchmarkCommands {
         bin: PathBuf,
         #[arg(long, default_value = "mdfind")]
         mdfind: PathBuf,
-        #[arg(long, default_value = "rga")]
-        rga: PathBuf,
+        /// Administrator-provided sealed runtime containing bin/{rga,
+        /// rga-preproc,pandoc,pdftotext,rg} and its Mach-O closure.
+        #[arg(long)]
+        comparator_runtime: Option<PathBuf>,
         #[arg(long)]
         online_query: bool,
         #[arg(long)]
@@ -605,7 +607,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     attestation,
                     bin,
                     mdfind,
-                    rga,
+                    comparator_runtime,
                     online_query,
                     out,
                 } => {
@@ -616,7 +618,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                         attestation: Some(attestation.clone()),
                         bin: bin.clone(),
                         mdfind: mdfind.clone(),
-                        rga: rga.clone(),
+                        comparator_runtime: comparator_runtime.clone(),
                         online_query: *online_query,
                     })
                     .map_err(|e| AppError::Input(e.to_string()))?;

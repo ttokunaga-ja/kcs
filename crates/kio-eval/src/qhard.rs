@@ -17,6 +17,11 @@ use std::{
     sync::atomic::AtomicU64,
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::CString,
+    os::raw::{c_char, c_int, c_void},
+};
 
 use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::hash_bytes;
@@ -27,7 +32,7 @@ use serde_json::Value;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::runner::{run_bounded_command, BoundedProcessOptions};
+use crate::runner::{run_bounded_command, BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT};
 
 pub const FROZEN_GOLDEN_SHA256: &str =
     "sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163";
@@ -39,6 +44,12 @@ pub const FROZEN_BASELINE_GOLDEN_SHA256: &str =
 const MAX_GOLDEN_BYTES: u64 = 64 * 1024;
 const MAX_ATTESTATION_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RUNTIME_CLOSURE_ENTRIES: usize = 512;
+const MAX_RUNTIME_CLOSURE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_MACHO_RESOLUTION_CONTEXTS: usize = 4_096;
+const MAX_MACHO_LOAD_COMMANDS: usize = 256;
+const MAX_MACHO_PATH_BYTES: usize = 4 * 1024;
+const MAX_MACHO_INSPECT_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_LIVE_FIXTURE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_FIXTURE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LIVE_FIXTURE_FILES: usize = 16_384;
@@ -239,6 +250,84 @@ struct FileBinding {
     path: String,
     sha256: String,
     bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeTrust {
+    AdministratorRuntime,
+    MacosSealedSystem,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeClosureEntry {
+    path: String,
+    trust: RuntimeTrust,
+    binding: FileBinding,
+}
+
+/// Provenance for every executable image that dyld can load for fixture-B's
+/// rga comparison.  Entries are a canonical, sorted closure: each one is
+/// either beneath the administrator-supplied runtime root or is a terminal
+/// macOS sealed-system library beneath an explicitly allowed system root.
+#[derive(Debug, Clone, Serialize)]
+struct ComparatorRuntimeProvenance {
+    root: String,
+    inspector: FileBinding,
+    closure_sha256: String,
+    closure: Vec<RuntimeClosureEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeFileIdentity {
+    len: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl RuntimeFileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        }
+    }
+
+    fn matches(self, metadata: &fs::Metadata) -> bool {
+        self.len == metadata.len() && {
+            #[cfg(unix)]
+            {
+                self.dev == metadata.dev() && self.ino == metadata.ino()
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeBoundFile {
+    trust: RuntimeTrust,
+    binding: FileBinding,
+    identity: RuntimeFileIdentity,
+}
+
+#[derive(Debug)]
+struct ComparatorRuntime {
+    root: PathBuf,
+    bin_directory: PathBuf,
+    config_path: PathBuf,
+    config: RuntimeBoundFile,
+    provenance: ComparatorRuntimeProvenance,
+    files: BTreeMap<PathBuf, RuntimeBoundFile>,
+    entry_paths: BTreeMap<String, PathBuf>,
 }
 #[derive(Debug, Serialize)]
 struct FixtureBinding {
@@ -1681,7 +1770,7 @@ pub struct BaselineOptions {
     pub attestation: Option<PathBuf>,
     pub bin: PathBuf,
     pub mdfind: PathBuf,
-    pub rga: PathBuf,
+    pub comparator_runtime: Option<PathBuf>,
     pub online_query: bool,
 }
 
@@ -1755,6 +1844,8 @@ struct BaselineTool {
     helpers: Option<BTreeMap<String, FileBinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     configuration: Option<FileBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparator_runtime: Option<ComparatorRuntimeProvenance>,
     version: String,
     available: bool,
 }
@@ -2032,6 +2123,7 @@ fn trusted_mdfind(path: &Path) -> Result<FileBinding, QhardError> {
             "mdfind must be the sealed macOS /usr/bin/mdfind".into(),
         ));
     }
+    require_sealed_absolute_path(path, "mdfind")?;
     let metadata = fs::symlink_metadata(path).map_err(|e| QhardError::Input(e.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return Err(QhardError::Input(
@@ -2047,94 +2139,1090 @@ fn trusted_mdfind(path: &Path) -> Result<FileBinding, QhardError> {
     }
     Ok(binding)
 }
-fn allowed_homebrew_cellar_tool(path: &Path, formula: &str, tool: &str) -> bool {
-    [
-        "/opt/homebrew/Cellar/",
-        "/usr/local/Cellar/",
-    ]
-    .iter()
-    .any(|root| {
-        let Ok(relative) = path.strip_prefix(Path::new(root)) else {
-            return false;
+
+#[derive(Debug, Clone)]
+struct MachoInspection {
+    loads: Vec<String>,
+    rpaths: Vec<String>,
+    dylinker: Option<String>,
+    has_dyld_environment: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingMachoImage {
+    path: PathBuf,
+    executable: PathBuf,
+    inherited_rpaths: Vec<ResolvedMachoRpath>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedMachoDependency {
+    Runtime(PathBuf),
+    SealedSystem(PathBuf),
+}
+
+fn checked_macho_path(value: &str, label: &str) -> Result<(), QhardError> {
+    if value.is_empty()
+        || value.len() > MAX_MACHO_PATH_BYTES
+        || value.contains('\0')
+        || value.contains('\r')
+        || value.contains('\n')
+    {
+        return Err(QhardError::Input(format!(
+            "{label} is not a bounded Mach-O path"
+        )));
+    }
+    Ok(())
+}
+
+fn is_dylib_load_command(command: &str) -> bool {
+    matches!(
+        command,
+        "LC_LOAD_DYLIB"
+            | "LC_LOAD_WEAK_DYLIB"
+            | "LC_REEXPORT_DYLIB"
+            | "LC_LOAD_UPWARD_DYLIB"
+            | "LC_LAZY_LOAD_DYLIB"
+    )
+}
+
+/// Parse the actual `LC_LOAD_*_DYLIB` commands rather than `otool -L`'s
+/// presentation output.  A dylib's `otool -L` output starts with its own
+/// `LC_ID_DYLIB`, which is not an image that dyld loads as a dependency.
+fn parse_otool_load_commands(
+    output: &str,
+) -> Result<(Vec<String>, Option<String>, bool), QhardError> {
+    let mut loads = Vec::new();
+    let mut pending_load_name = false;
+    let mut pending_dylinker_name = false;
+    let mut dylinker = None;
+    let mut has_dyld_environment = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Load command ") {
+            if pending_load_name || pending_dylinker_name {
+                return Err(QhardError::Input(
+                    "otool -l loader command lacks an install name".into(),
+                ));
+            }
+            continue;
+        }
+        if let Some(command) = trimmed.strip_prefix("cmd ") {
+            if pending_load_name || pending_dylinker_name {
+                return Err(QhardError::Input(
+                    "otool -l loader command lacks an install name".into(),
+                ));
+            }
+            pending_load_name = is_dylib_load_command(command);
+            pending_dylinker_name = command == "LC_LOAD_DYLINKER";
+            has_dyld_environment |= command == "LC_DYLD_ENVIRONMENT";
+            continue;
+        }
+        if (pending_load_name || pending_dylinker_name) && trimmed.starts_with("name ") {
+            let path = trimmed
+                .strip_prefix("name ")
+                .and_then(|value| value.split_once(" (offset ").map(|(path, _)| path))
+                .ok_or_else(|| QhardError::Input("otool -l dependency name is malformed".into()))?;
+            checked_macho_path(path, "otool -l loader name")?;
+            if pending_load_name {
+                loads.push(path.to_owned());
+                if loads.len() > MAX_MACHO_LOAD_COMMANDS {
+                    return Err(QhardError::Input("Mach-O has too many dependencies".into()));
+                }
+            } else if dylinker.replace(path.to_owned()).is_some() {
+                return Err(QhardError::Input(
+                    "Mach-O has more than one dynamic loader command".into(),
+                ));
+            }
+            pending_load_name = false;
+            pending_dylinker_name = false;
+        }
+    }
+    if pending_load_name || pending_dylinker_name {
+        return Err(QhardError::Input(
+            "otool -l loader command lacks an install name".into(),
+        ));
+    }
+    Ok((loads, dylinker, has_dyld_environment))
+}
+
+fn parse_otool_rpaths(output: &str) -> Result<Vec<String>, QhardError> {
+    let mut rpaths = Vec::new();
+    let mut awaiting_path = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "cmd LC_RPATH" {
+            if awaiting_path {
+                return Err(QhardError::Input("otool -l rpath is malformed".into()));
+            }
+            awaiting_path = true;
+            continue;
+        }
+        if awaiting_path && trimmed.starts_with("Load command ") {
+            return Err(QhardError::Input("otool -l rpath lacks a path".into()));
+        }
+        if awaiting_path && trimmed.starts_with("path ") {
+            let value = trimmed
+                .strip_prefix("path ")
+                .and_then(|value| value.split_once(" (offset ").map(|(path, _)| path))
+                .ok_or_else(|| QhardError::Input("otool -l rpath line is malformed".into()))?;
+            checked_macho_path(value, "otool -l rpath")?;
+            rpaths.push(value.to_owned());
+            if rpaths.len() > MAX_MACHO_LOAD_COMMANDS {
+                return Err(QhardError::Input("Mach-O has too many rpaths".into()));
+            }
+            awaiting_path = false;
+        }
+    }
+    if awaiting_path {
+        return Err(QhardError::Input("otool -l rpath lacks a path".into()));
+    }
+    Ok(rpaths)
+}
+
+fn safe_macho_join(
+    base: &Path,
+    suffix: &str,
+    root: &Path,
+    label: &str,
+) -> Result<PathBuf, QhardError> {
+    checked_macho_path(suffix, label)?;
+    let mut output = base.to_path_buf();
+    if !output.starts_with(root) {
+        return Err(QhardError::Input(format!(
+            "{label} base escapes comparator runtime"
+        )));
+    }
+    for component in Path::new(suffix).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => output.push(part),
+            Component::ParentDir => {
+                if output == root {
+                    return Err(QhardError::Input(format!(
+                        "{label} escapes comparator runtime"
+                    )));
+                }
+                if !output.pop() || !output.starts_with(root) {
+                    return Err(QhardError::Input(format!(
+                        "{label} escapes comparator runtime"
+                    )));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(QhardError::Input(format!(
+                    "{label} is not a relative Mach-O suffix"
+                )));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn canonical_path_within(
+    root: &Path,
+    candidate: &Path,
+    label: &str,
+) -> Result<PathBuf, QhardError> {
+    let canonical = fs::canonicalize(candidate)
+        .map_err(|e| QhardError::Input(format!("cannot resolve {label}: {e}")))?;
+    if !canonical.starts_with(root) {
+        return Err(QhardError::Input(format!(
+            "{label} resolves outside the comparator runtime root"
+        )));
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    use super::*;
+
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+
+    unsafe extern "C" {
+        fn acl_get_file(path: *const c_char, acl_type: c_int) -> *mut c_void;
+        fn acl_get_link_np(path: *const c_char, acl_type: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+
+    /// Return whether an object has an extended ACL.  The Darwin ACL API
+    /// reports a missing extended ACL as `NULL` + `ENOENT`, even when the
+    /// filesystem object itself exists; every other error is unsafe to
+    /// interpret as sealed and is therefore propagated.
+    pub(super) fn has_extended_acl(path: &Path, nofollow: bool) -> Result<bool, QhardError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            QhardError::Input("comparator runtime path contains an interior NUL".into())
+        })?;
+        // SAFETY: `encoded` is NUL-terminated for this FFI call. The returned
+        // ACL allocation, when non-null, is released exactly once below. The
+        // no-follow variant is required for administrator-owned symlink
+        // aliases: following it would miss an ACL that permits replacing the
+        // link itself.
+        let acl = unsafe {
+            if nofollow {
+                acl_get_link_np(encoded.as_ptr(), ACL_TYPE_EXTENDED)
+            } else {
+                acl_get_file(encoded.as_ptr(), ACL_TYPE_EXTENDED)
+            }
         };
-        let mut components = relative.components();
-        matches!(
-            (
-                components.next(),
-                components.next(),
-                components.next(),
-                components.next(),
-                components.next(),
-            ),
-            (
-                Some(Component::Normal(found_formula)),
-                Some(Component::Normal(version)),
-                Some(Component::Normal(bin)),
-                Some(Component::Normal(found_tool)),
-                None,
-            ) if found_formula == formula && !version.is_empty() && bin == "bin" && found_tool == tool
-        )
-    })
+        if acl.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                return Ok(false);
+            }
+            return Err(QhardError::Input(format!(
+                "cannot inspect comparator runtime ACL: {error}"
+            )));
+        }
+        let mut entry = std::ptr::null_mut();
+        // SAFETY: `acl` is a valid allocation returned by `acl_get_file`, and
+        // `entry` provides the output storage required by the API.
+        let result = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+        // SAFETY: `acl` was returned by `acl_get_file` and has not yet been
+        // released. The return code cannot make this cleanup unsafe.
+        let _ = unsafe { acl_free(acl) };
+        match result {
+            0 => Ok(true),
+            _ => Err(QhardError::Input(format!(
+                "cannot enumerate comparator runtime ACL: {}",
+                io::Error::last_os_error()
+            ))),
+        }
+    }
 }
 
-#[cfg(unix)]
-fn same_std_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.dev() == right.dev() && left.ino() == right.ino()
+#[cfg(target_os = "macos")]
+fn require_no_extended_acl(path: &Path, label: &str) -> Result<(), QhardError> {
+    if macos_acl::has_extended_acl(path, false)? {
+        return Err(QhardError::Input(format!(
+            "{label} has an extended ACL; comparator runtime paths must not grant ACL-based access"
+        )));
+    }
+    Ok(())
 }
 
-fn allowed_homebrew_rga_target(path: &Path) -> bool {
-    allowed_homebrew_cellar_tool(path, "ripgrep-all", "rga")
+#[cfg(target_os = "macos")]
+fn require_no_extended_acl_link(path: &Path, label: &str) -> Result<(), QhardError> {
+    if macos_acl::has_extended_acl(path, true)? {
+        return Err(QhardError::Input(format!(
+            "{label} symlink has an extended ACL; comparator runtime aliases must not grant ACL-based access"
+        )));
+    }
+    Ok(())
 }
 
-/// The native comparator is an external executable boundary, not fixture
-/// data. On macOS we cannot execute a retained descriptor, and rga's helper
-/// programs load Homebrew dynamic libraries by absolute or rpath lookup.
-/// Accept them only from a root-owned, POSIX-nonwritable runtime prefix so the
-/// caller cannot exchange code after provenance is recorded.
-#[cfg(unix)]
+#[cfg(not(target_os = "macos"))]
+fn require_no_extended_acl(_path: &Path, label: &str) -> Result<(), QhardError> {
+    Err(QhardError::Input(format!(
+        "{label} requires a sealed macOS comparator runtime"
+    )))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn require_no_extended_acl_link(_path: &Path, label: &str) -> Result<(), QhardError> {
+    Err(QhardError::Input(format!(
+        "{label} requires a sealed macOS comparator runtime"
+    )))
+}
+
+#[cfg(target_os = "macos")]
 fn sealed_runtime_metadata(metadata: &fs::Metadata) -> bool {
     !metadata.file_type().is_symlink()
         && metadata.uid() == 0
         && metadata.permissions().mode() & 0o022 == 0
 }
 
-#[cfg(unix)]
-fn require_sealed_homebrew_runtime(path: &Path, label: &str) -> Result<(), QhardError> {
-    let prefix = [Path::new("/opt/homebrew"), Path::new("/usr/local")]
-        .into_iter()
-        .find(|prefix| path.starts_with(prefix))
-        .ok_or_else(|| {
-            QhardError::Input(format!(
-                "{label} is not under an approved Homebrew runtime prefix"
-            ))
-        })?;
-    let relative = path.strip_prefix(prefix).map_err(|_| {
-        QhardError::Input(format!(
-            "cannot bind {label} to its Homebrew runtime prefix"
-        ))
-    })?;
-    let mut current = prefix.to_path_buf();
-    for component in std::iter::once(None).chain(relative.components().map(Some)) {
-        if let Some(Component::Normal(name)) = component {
+#[cfg(not(target_os = "macos"))]
+fn sealed_runtime_metadata(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn require_sealed_absolute_path(path: &Path, label: &str) -> Result<(), QhardError> {
+    if !path.is_absolute() {
+        return Err(QhardError::Input(format!("{label} must be absolute")));
+    }
+    let mut current = PathBuf::from("/");
+    let root_metadata = fs::symlink_metadata(&current)
+        .map_err(|e| QhardError::Input(format!("cannot inspect {label} root: {e}")))?;
+    if !sealed_runtime_metadata(&root_metadata) {
+        return Err(QhardError::Input(format!(
+            "{label} requires a root-owned, non-writable path"
+        )));
+    }
+    require_no_extended_acl(&current, label)?;
+    for component in path.components() {
+        if let Component::Normal(name) = component {
             current.push(name);
-        }
-        let metadata = fs::symlink_metadata(&current).map_err(|e| {
-            QhardError::Input(format!("cannot inspect {label} runtime component: {e}"))
-        })?;
-        if !sealed_runtime_metadata(&metadata) {
-            return Err(QhardError::Input(format!(
-                "{label} requires a root-owned, non-writable Homebrew runtime prefix"
-            )));
+            let metadata = fs::symlink_metadata(&current).map_err(|e| {
+                QhardError::Input(format!("cannot inspect {label} path component: {e}"))
+            })?;
+            if !sealed_runtime_metadata(&metadata) {
+                return Err(QhardError::Input(format!(
+                    "{label} requires root-owned, non-writable path components"
+                )));
+            }
+            require_no_extended_acl(&current, label)?;
         }
     }
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn require_sealed_homebrew_runtime(_path: &Path, label: &str) -> Result<(), QhardError> {
+#[cfg(not(target_os = "macos"))]
+fn require_sealed_absolute_path(_path: &Path, label: &str) -> Result<(), QhardError> {
     Err(QhardError::Input(format!(
-        "{label} requires a sealed Homebrew comparator runtime on this platform"
+        "{label} requires a sealed macOS comparator runtime"
     )))
+}
+
+#[cfg(target_os = "macos")]
+fn sealed_system_root(path: &Path) -> Option<&'static Path> {
+    [Path::new("/usr/lib"), Path::new("/System/Library")]
+        .into_iter()
+        .find(|root| path.starts_with(root))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sealed_system_root(_path: &Path) -> Option<&'static Path> {
+    None
+}
+
+fn validate_sealed_system_library(path: &Path, label: &str) -> Result<PathBuf, QhardError> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|e| QhardError::Input(format!("cannot canonicalize {label}: {e}")))?;
+    if sealed_system_root(&canonical).is_none() {
+        return Err(QhardError::Input(format!(
+            "{label} is outside the explicitly allowed macOS sealed-system roots"
+        )));
+    }
+    require_sealed_absolute_path(&canonical, label)?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
+    if !metadata.is_file() {
+        return Err(QhardError::Input(format!("{label} must be a regular file")));
+    }
+    Ok(canonical)
+}
+
+fn resolve_runtime_path(
+    root: &Path,
+    requested: &Path,
+    label: &str,
+    require_file: bool,
+) -> Result<PathBuf, QhardError> {
+    if !requested.starts_with(root) {
+        return Err(QhardError::Input(format!(
+            "{label} is outside the comparator runtime root"
+        )));
+    }
+    let relative = requested.strip_prefix(root).map_err(|_| {
+        QhardError::Input(format!("{label} is outside the comparator runtime root"))
+    })?;
+    let mut raw = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(QhardError::Input(format!(
+                "{label} is not a normalized comparator runtime path"
+            )));
+        };
+        raw.push(name);
+        let metadata = fs::symlink_metadata(&raw)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
+        if metadata.file_type().is_symlink() {
+            require_no_extended_acl_link(&raw, label)?;
+            // Symlinks are permitted only as administrator-owned aliases that
+            // resolve back into this exact runtime root. The resolved target
+            // is then checked below as a sealed canonical path.
+            #[cfg(unix)]
+            if metadata.uid() != 0 {
+                return Err(QhardError::Input(format!(
+                    "{label} symlink is not administrator-owned"
+                )));
+            }
+            let target = fs::canonicalize(&raw)
+                .map_err(|e| QhardError::Input(format!("cannot resolve {label} symlink: {e}")))?;
+            if !target.starts_with(root) {
+                return Err(QhardError::Input(format!(
+                    "{label} symlink resolves outside the comparator runtime root"
+                )));
+            }
+        } else if !sealed_runtime_metadata(&metadata) {
+            return Err(QhardError::Input(format!(
+                "{label} has a non-sealed comparator runtime component"
+            )));
+        } else {
+            require_no_extended_acl(&raw, label)?;
+        }
+    }
+    let canonical = canonical_path_within(root, requested, label)?;
+    require_sealed_absolute_path(&canonical, label)?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
+    if (require_file && !metadata.is_file()) || (!require_file && !metadata.is_dir()) {
+        return Err(QhardError::Input(format!(
+            "{label} has the wrong filesystem type"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn macho_architecture() -> Result<&'static str, QhardError> {
+    match env::consts::ARCH {
+        "aarch64" => Ok("arm64"),
+        "x86_64" => Ok("x86_64"),
+        other => Err(QhardError::Input(format!(
+            "unsupported Mach-O evaluator architecture: {other}"
+        ))),
+    }
+}
+
+fn trusted_otool() -> Result<FileBinding, QhardError> {
+    let path = Path::new("/usr/bin/otool");
+    require_sealed_absolute_path(path, "otool")?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| QhardError::Input(format!("cannot inspect otool: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(QhardError::Input(
+            "otool must be the sealed macOS system executable".into(),
+        ));
+    }
+    tool_binding(path, "otool")
+}
+
+fn inspect_macho(path: &Path) -> Result<MachoInspection, QhardError> {
+    let _otool = trusted_otool()?;
+    let architecture = macho_architecture()?;
+    let render = path
+        .to_str()
+        .ok_or_else(|| QhardError::Input("Mach-O path is not UTF-8".into()))?;
+    let inspect = |flag: &str| -> Result<crate::runner::BoundedProcessOutput, QhardError> {
+        let mut command = Command::new("/usr/bin/otool");
+        command
+            .args(["-arch", architecture, flag, render])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
+            .env("TZ", "UTC");
+        Ok(run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: DEFAULT_PROCESS_TIMEOUT,
+                max_stdout_bytes: MAX_MACHO_INSPECT_OUTPUT_BYTES,
+                max_stderr_bytes: MAX_MACHO_INSPECT_OUTPUT_BYTES,
+            },
+        )?)
+    };
+    let load_commands = inspect("-l")?;
+    if !load_commands.status.success() {
+        return Err(QhardError::Input(format!(
+            "otool -l failed for {} with exit {}",
+            path.display(),
+            load_commands.status.code().unwrap_or(-1)
+        )));
+    }
+    let (loads, dylinker, has_dyld_environment) = parse_otool_load_commands(&load_commands.stdout)?;
+    Ok(MachoInspection {
+        loads,
+        rpaths: parse_otool_rpaths(&load_commands.stdout)?,
+        dylinker,
+        has_dyld_environment,
+    })
+}
+#[cfg(unix)]
+fn same_std_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_std_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    true
+}
+
+fn add_runtime_closure_entry(
+    files: &mut BTreeMap<PathBuf, RuntimeBoundFile>,
+    path: &Path,
+    trust: RuntimeTrust,
+    total_bytes: &mut u64,
+) -> Result<(), QhardError> {
+    if files.contains_key(path) {
+        return Ok(());
+    }
+    if trust == RuntimeTrust::MacosSealedSystem {
+        let canonical = validate_sealed_system_library(path, "macOS sealed-system closure entry")?;
+        if canonical != path {
+            return Err(QhardError::Input(
+                "macOS sealed-system closure entry is not in canonical form".into(),
+            ));
+        }
+    }
+    if files.len() >= MAX_RUNTIME_CLOSURE_ENTRIES {
+        return Err(QhardError::Input(
+            "comparator runtime exceeds dynamic dependency entry limit".into(),
+        ));
+    }
+    let binding = tool_binding(path, "comparator runtime image")?;
+    let bytes = u64::try_from(binding.bytes)
+        .map_err(|_| QhardError::Input("comparator runtime image size overflows".into()))?;
+    *total_bytes = total_bytes
+        .checked_add(bytes)
+        .ok_or_else(|| QhardError::Input("comparator runtime byte total overflows".into()))?;
+    if *total_bytes > MAX_RUNTIME_CLOSURE_BYTES {
+        return Err(QhardError::Input(
+            "comparator runtime exceeds dynamic dependency byte limit".into(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| QhardError::Input(format!("cannot inspect comparator runtime image: {e}")))?;
+    if !metadata.is_file() {
+        return Err(QhardError::Input(
+            "comparator runtime image must be a regular file".into(),
+        ));
+    }
+    files.insert(
+        path.to_path_buf(),
+        RuntimeBoundFile {
+            trust,
+            binding,
+            identity: RuntimeFileIdentity::from_metadata(&metadata),
+        },
+    );
+    Ok(())
+}
+
+fn bind_runtime_rga_config(path: &Path) -> Result<RuntimeBoundFile, QhardError> {
+    let (bytes, binding) = binding(path, MAX_GOLDEN_BYTES, "comparator runtime rga config")?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        QhardError::Input(format!(
+            "comparator runtime rga config is not JSON: {error}"
+        ))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        QhardError::Input("comparator runtime rga config must be a JSON object".into())
+    })?;
+    if object.len() != 1
+        || object
+            .get("custom_adapters")
+            .and_then(Value::as_array)
+            .is_none_or(|adapters| !adapters.is_empty())
+    {
+        return Err(QhardError::Input(
+            "comparator runtime rga config must be exactly an empty custom_adapters policy".into(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        QhardError::Input(format!("cannot inspect comparator runtime rga config: {e}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(QhardError::Input(
+            "comparator runtime rga config must be a regular file".into(),
+        ));
+    }
+    Ok(RuntimeBoundFile {
+        trust: RuntimeTrust::AdministratorRuntime,
+        binding,
+        identity: RuntimeFileIdentity::from_metadata(&metadata),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ResolvedMachoRpath {
+    Runtime(PathBuf),
+    SealedSystem(PathBuf),
+}
+
+fn resolve_runtime_rpath(
+    root: &Path,
+    raw: &str,
+    owner: &Path,
+    executable: &Path,
+) -> Result<ResolvedMachoRpath, QhardError> {
+    let candidate = if let Some(suffix) = raw.strip_prefix("@loader_path/") {
+        safe_macho_join(
+            owner.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O loader image has no parent directory".into())
+            })?,
+            suffix,
+            root,
+            "Mach-O @loader_path rpath",
+        )?
+    } else if let Some(suffix) = raw.strip_prefix("@executable_path/") {
+        safe_macho_join(
+            executable.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O executable has no parent directory".into())
+            })?,
+            suffix,
+            root,
+            "Mach-O @executable_path rpath",
+        )?
+    } else if raw.starts_with("@rpath/") {
+        return Err(QhardError::Input(
+            "LC_RPATH must not itself use @rpath".into(),
+        ));
+    } else {
+        let path = Path::new(raw);
+        if !path.is_absolute() {
+            return Err(QhardError::Input(
+                "LC_RPATH must be absolute, @loader_path, or @executable_path".into(),
+            ));
+        }
+        path.to_path_buf()
+    };
+    if candidate.starts_with(root) {
+        return resolve_runtime_path(root, &candidate, "Mach-O rpath", false)
+            .map(ResolvedMachoRpath::Runtime);
+    }
+    let canonical = fs::canonicalize(&candidate)
+        .map_err(|e| QhardError::Input(format!("cannot resolve Mach-O rpath: {e}")))?;
+    if sealed_system_root(&canonical).is_none() {
+        return Err(QhardError::Input(
+            "Mach-O rpath is outside the comparator runtime and sealed-system roots".into(),
+        ));
+    }
+    require_sealed_absolute_path(&canonical, "Mach-O sealed-system rpath")?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|e| QhardError::Input(format!("cannot inspect Mach-O rpath: {e}")))?;
+    if !metadata.is_dir() {
+        return Err(QhardError::Input(
+            "Mach-O sealed-system rpath must be a directory".into(),
+        ));
+    }
+    Ok(ResolvedMachoRpath::SealedSystem(canonical))
+}
+
+fn expanded_rpaths(
+    root: &Path,
+    inspection: &MachoInspection,
+    owner: &Path,
+    executable: &Path,
+    inherited: &[ResolvedMachoRpath],
+) -> Result<Vec<ResolvedMachoRpath>, QhardError> {
+    let mut rpaths = Vec::new();
+    for raw in &inspection.rpaths {
+        let resolved = resolve_runtime_rpath(root, raw, owner, executable)?;
+        if !rpaths.contains(&resolved) {
+            rpaths.push(resolved);
+        }
+    }
+    for inherited_path in inherited {
+        if !rpaths.contains(inherited_path) {
+            rpaths.push(inherited_path.clone());
+        }
+    }
+    Ok(rpaths)
+}
+
+fn resolve_macho_dependency(
+    root: &Path,
+    install_name: &str,
+    owner: &Path,
+    executable: &Path,
+    rpaths: &[ResolvedMachoRpath],
+) -> Result<ResolvedMachoDependency, QhardError> {
+    checked_macho_path(install_name, "Mach-O install name")?;
+    let runtime_file = |candidate: PathBuf, label: &str| {
+        resolve_runtime_path(root, &candidate, label, true).map(ResolvedMachoDependency::Runtime)
+    };
+    if let Some(suffix) = install_name.strip_prefix("@loader_path/") {
+        let base = owner.parent().ok_or_else(|| {
+            QhardError::Input("Mach-O loader image has no parent directory".into())
+        })?;
+        return runtime_file(
+            safe_macho_join(base, suffix, root, "Mach-O @loader_path dependency")?,
+            "Mach-O @loader_path dependency",
+        );
+    }
+    if let Some(suffix) = install_name.strip_prefix("@executable_path/") {
+        let base = executable
+            .parent()
+            .ok_or_else(|| QhardError::Input("Mach-O executable has no parent directory".into()))?;
+        return runtime_file(
+            safe_macho_join(base, suffix, root, "Mach-O @executable_path dependency")?,
+            "Mach-O @executable_path dependency",
+        );
+    }
+    if let Some(suffix) = install_name.strip_prefix("@rpath/") {
+        let mut candidates = BTreeMap::new();
+        for rpath in rpaths {
+            let (candidate, trust) = match rpath {
+                ResolvedMachoRpath::Runtime(path) => (
+                    safe_macho_join(path, suffix, root, "Mach-O @rpath dependency")?,
+                    RuntimeTrust::AdministratorRuntime,
+                ),
+                ResolvedMachoRpath::SealedSystem(path) => (
+                    safe_macho_join(path, suffix, path, "Mach-O @rpath dependency")?,
+                    RuntimeTrust::MacosSealedSystem,
+                ),
+            };
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => {
+                    let resolved = match trust {
+                        RuntimeTrust::AdministratorRuntime => {
+                            ResolvedMachoDependency::Runtime(resolve_runtime_path(
+                                root,
+                                &candidate,
+                                "Mach-O @rpath dependency",
+                                true,
+                            )?)
+                        }
+                        RuntimeTrust::MacosSealedSystem => {
+                            ResolvedMachoDependency::SealedSystem(validate_sealed_system_library(
+                                &candidate,
+                                "Mach-O @rpath system dependency",
+                            )?)
+                        }
+                    };
+                    let (path, trust) = match resolved {
+                        ResolvedMachoDependency::Runtime(path) => {
+                            (path, RuntimeTrust::AdministratorRuntime)
+                        }
+                        ResolvedMachoDependency::SealedSystem(path) => {
+                            (path, RuntimeTrust::MacosSealedSystem)
+                        }
+                    };
+                    candidates.insert(path, trust);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(QhardError::Input(format!(
+                        "cannot inspect Mach-O @rpath dependency: {error}"
+                    )));
+                }
+            }
+        }
+        return match candidates.len() {
+            0 => Err(QhardError::Input(format!(
+                "Mach-O @rpath dependency is unresolved: {install_name}"
+            ))),
+            1 => {
+                let (path, trust) = candidates.into_iter().next().expect("checked singleton");
+                Ok(match trust {
+                    RuntimeTrust::AdministratorRuntime => ResolvedMachoDependency::Runtime(path),
+                    RuntimeTrust::MacosSealedSystem => ResolvedMachoDependency::SealedSystem(path),
+                })
+            }
+            _ => Err(QhardError::Input(format!(
+                "Mach-O @rpath dependency is ambiguous: {install_name}"
+            ))),
+        };
+    }
+    let path = Path::new(install_name);
+    if !path.is_absolute() {
+        return Err(QhardError::Input(format!(
+            "Mach-O dependency is not absolute or tokenized: {install_name}"
+        )));
+    }
+    if path.starts_with(root) {
+        return runtime_file(path.to_path_buf(), "absolute Mach-O runtime dependency");
+    }
+    Ok(ResolvedMachoDependency::SealedSystem(
+        validate_sealed_system_library(path, "absolute Mach-O system dependency")?,
+    ))
+}
+
+/// Walk a dynamic-loader closure without assuming that one image has one
+/// global resolution context.  A shared dylib can be reached from multiple
+/// executables with different inherited runpaths, so the visited key includes
+/// both the image and the executable that established its `@executable_path`.
+///
+/// Keeping this traversal separate from filesystem inspection gives tests a
+/// way to exercise cyclic and recursively sealed graphs without pretending a
+/// user-owned temporary directory is an administrator runtime.
+fn traverse_macho_closure<Inspect, Expand, Resolve, Visit>(
+    initial: Vec<PendingMachoImage>,
+    mut inspect: Inspect,
+    mut expand_rpaths: Expand,
+    mut resolve: Resolve,
+    mut visit: Visit,
+) -> Result<(), QhardError>
+where
+    Inspect: FnMut(&Path) -> Result<MachoInspection, QhardError>,
+    Expand:
+        FnMut(&PendingMachoImage, &MachoInspection) -> Result<Vec<ResolvedMachoRpath>, QhardError>,
+    Resolve: FnMut(
+        &str,
+        &PendingMachoImage,
+        &[ResolvedMachoRpath],
+    ) -> Result<ResolvedMachoDependency, QhardError>,
+    Visit: FnMut(&Path, RuntimeTrust) -> Result<(), QhardError>,
+{
+    let mut queue = initial;
+    let mut visited = BTreeSet::new();
+    while let Some(image) = queue.pop() {
+        if !visited.insert((
+            image.path.clone(),
+            image.executable.clone(),
+            image.inherited_rpaths.clone(),
+        )) {
+            continue;
+        }
+        if visited.len() > MAX_MACHO_RESOLUTION_CONTEXTS {
+            return Err(QhardError::Input(
+                "comparator runtime exceeds Mach-O resolution-context limit".into(),
+            ));
+        }
+        visit(&image.path, RuntimeTrust::AdministratorRuntime)?;
+        let inspection = inspect(&image.path)?;
+        if inspection.has_dyld_environment {
+            return Err(QhardError::Input(
+                "Mach-O LC_DYLD_ENVIRONMENT is forbidden in comparator runtime".into(),
+            ));
+        }
+        if image.path == image.executable {
+            if inspection.dylinker.as_deref() != Some("/usr/lib/dyld") {
+                return Err(QhardError::Input(
+                    "comparator executable must use exactly the sealed /usr/lib/dyld loader".into(),
+                ));
+            }
+            visit(Path::new("/usr/lib/dyld"), RuntimeTrust::MacosSealedSystem)?;
+        } else if inspection.dylinker.is_some() {
+            return Err(QhardError::Input(
+                "comparator dylib must not contain an LC_LOAD_DYLINKER command".into(),
+            ));
+        }
+        let rpaths = expand_rpaths(&image, &inspection)?;
+        for install_name in inspection.loads {
+            match resolve(&install_name, &image, &rpaths)? {
+                ResolvedMachoDependency::Runtime(path) => queue.push(PendingMachoImage {
+                    path,
+                    executable: image.executable.clone(),
+                    inherited_rpaths: rpaths.clone(),
+                }),
+                ResolvedMachoDependency::SealedSystem(path) => {
+                    visit(&path, RuntimeTrust::MacosSealedSystem)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+impl ComparatorRuntime {
+    fn bind(input: &Path) -> Result<Self, QhardError> {
+        if !input.is_absolute() {
+            return Err(QhardError::Input(
+                "--comparator-runtime must be an absolute canonical path".into(),
+            ));
+        }
+        let listed = fs::symlink_metadata(input)
+            .map_err(|e| QhardError::Input(format!("cannot inspect --comparator-runtime: {e}")))?;
+        if listed.file_type().is_symlink() || !listed.is_dir() {
+            return Err(QhardError::Input(
+                "--comparator-runtime must be a real directory, not a symlink".into(),
+            ));
+        }
+        let root = fs::canonicalize(input).map_err(|e| {
+            QhardError::Input(format!("cannot canonicalize --comparator-runtime: {e}"))
+        })?;
+        if root != input {
+            return Err(QhardError::Input(
+                "--comparator-runtime must use its canonical path spelling".into(),
+            ));
+        }
+        require_sealed_absolute_path(&root, "comparator runtime root")?;
+        let inspector = trusted_otool()?;
+        let bin_directory = resolve_runtime_path(
+            &root,
+            &root.join("bin"),
+            "comparator runtime bin directory",
+            false,
+        )?;
+        let config_path = resolve_runtime_path(
+            &root,
+            &root.join("config/rga-config.json"),
+            "comparator runtime rga config",
+            true,
+        )?;
+        let config = bind_runtime_rga_config(&config_path)?;
+        let mut entry_paths = BTreeMap::new();
+        for name in ["rga", "rga-preproc", "pandoc", "pdftotext", "rg"] {
+            let requested = root.join("bin").join(name);
+            entry_paths.insert(
+                name.to_owned(),
+                resolve_runtime_path(&root, &requested, &format!("runtime bin/{name}"), true)?,
+            );
+        }
+        let mut files = BTreeMap::new();
+        let mut total_bytes = 0_u64;
+        let mut queue = Vec::new();
+        for path in entry_paths.values() {
+            queue.push(PendingMachoImage {
+                path: path.clone(),
+                executable: path.clone(),
+                inherited_rpaths: Vec::new(),
+            });
+        }
+        traverse_macho_closure(
+            queue,
+            inspect_macho,
+            |image, inspection| {
+                expanded_rpaths(
+                    &root,
+                    inspection,
+                    &image.path,
+                    &image.executable,
+                    &image.inherited_rpaths,
+                )
+            },
+            |install_name, image, rpaths| {
+                resolve_macho_dependency(
+                    &root,
+                    install_name,
+                    &image.path,
+                    &image.executable,
+                    rpaths,
+                )
+            },
+            |path, trust| add_runtime_closure_entry(&mut files, path, trust, &mut total_bytes),
+        )?;
+        let closure = files
+            .iter()
+            .map(|(path, file)| RuntimeClosureEntry {
+                path: path.display().to_string(),
+                trust: file.trust.clone(),
+                binding: file.binding.clone(),
+            })
+            .collect::<Vec<_>>();
+        let closure_bytes = serde_jcs::to_vec(&closure).map_err(|error| {
+            QhardError::Input(format!(
+                "cannot canonically serialize comparator closure: {error}"
+            ))
+        })?;
+        Ok(Self {
+            root: root.clone(),
+            bin_directory,
+            config_path,
+            config,
+            provenance: ComparatorRuntimeProvenance {
+                root: root.display().to_string(),
+                inspector,
+                closure_sha256: hash_bytes(&closure_bytes),
+                closure,
+            },
+            files,
+            entry_paths,
+        })
+    }
+
+    fn entry(&self, name: &str) -> Result<(&Path, &RuntimeBoundFile), QhardError> {
+        let path = self.entry_paths.get(name).ok_or_else(|| {
+            QhardError::Input(format!("comparator runtime has no required bin/{name}"))
+        })?;
+        let file = self.files.get(path).ok_or_else(|| {
+            QhardError::Input(format!("comparator runtime closure omitted bin/{name}"))
+        })?;
+        Ok((path, file))
+    }
+
+    fn recheck(&self, hash_contents: bool) -> Result<(), QhardError> {
+        require_sealed_absolute_path(&self.root, "comparator runtime root")?;
+        let bin_directory = resolve_runtime_path(
+            &self.root,
+            &self.root.join("bin"),
+            "comparator runtime bin directory",
+            false,
+        )?;
+        if bin_directory != self.bin_directory {
+            return Err(QhardError::Input(
+                "comparator runtime bin directory changed while bound".into(),
+            ));
+        }
+        let config_path = resolve_runtime_path(
+            &self.root,
+            &self.root.join("config/rga-config.json"),
+            "comparator runtime rga config",
+            true,
+        )?;
+        if config_path != self.config_path {
+            return Err(QhardError::Input(
+                "comparator runtime rga config path changed while bound".into(),
+            ));
+        }
+        let config_metadata = fs::symlink_metadata(&self.config_path).map_err(|e| {
+            QhardError::Input(format!("cannot inspect comparator runtime rga config: {e}"))
+        })?;
+        if !config_metadata.is_file() || !self.config.identity.matches(&config_metadata) {
+            return Err(QhardError::Input(
+                "comparator runtime rga config changed while bound".into(),
+            ));
+        }
+        if hash_contents
+            && bind_runtime_rga_config(&self.config_path)?.binding.sha256
+                != self.config.binding.sha256
+        {
+            return Err(QhardError::Input(
+                "comparator runtime rga config content changed while bound".into(),
+            ));
+        }
+        for (name, expected) in &self.entry_paths {
+            let actual = resolve_runtime_path(
+                &self.root,
+                &self.root.join("bin").join(name),
+                &format!("runtime bin/{name}"),
+                true,
+            )?;
+            if &actual != expected {
+                return Err(QhardError::Input(format!(
+                    "comparator runtime bin/{name} changed while bound"
+                )));
+            }
+        }
+        for (path, file) in &self.files {
+            match file.trust {
+                RuntimeTrust::AdministratorRuntime => {
+                    let resolved = resolve_runtime_path(
+                        &self.root,
+                        path,
+                        "comparator runtime closure entry",
+                        true,
+                    )?;
+                    if &resolved != path {
+                        return Err(QhardError::Input(
+                            "comparator runtime closure path changed while bound".into(),
+                        ));
+                    }
+                }
+                RuntimeTrust::MacosSealedSystem => {
+                    let resolved =
+                        validate_sealed_system_library(path, "macOS sealed-system closure entry")?;
+                    if &resolved != path {
+                        return Err(QhardError::Input(
+                            "macOS sealed-system closure path changed while bound".into(),
+                        ));
+                    }
+                }
+            }
+            let metadata = fs::symlink_metadata(path).map_err(|e| {
+                QhardError::Input(format!(
+                    "cannot inspect comparator runtime closure entry: {e}"
+                ))
+            })?;
+            if !metadata.is_file() || !file.identity.matches(&metadata) {
+                return Err(QhardError::Input(
+                    "comparator runtime closure entry changed while bound".into(),
+                ));
+            }
+            if hash_contents
+                && tool_binding(path, "comparator runtime closure entry")?.sha256
+                    != file.binding.sha256
+            {
+                return Err(QhardError::Input(
+                    "comparator runtime closure content changed while bound".into(),
+                ));
+            }
+        }
+        if hash_contents && trusted_otool()?.sha256 != self.provenance.inspector.sha256 {
+            return Err(QhardError::Input(
+                "otool changed during comparator measurement".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -2145,38 +3233,32 @@ struct RetainedToolFile {
 }
 
 impl RetainedToolFile {
-    fn open_cellar(path: &Path, formula: &str, tool: &str) -> Result<Self, QhardError> {
-        let public_path = fs::canonicalize(path)
-            .map_err(|e| QhardError::Input(format!("cannot canonicalize {tool}: {e}")))?;
-        if !allowed_homebrew_cellar_tool(&public_path, formula, tool) {
-            return Err(QhardError::Input(format!(
-                "{tool} target is not an approved Homebrew {formula} Cellar path"
-            )));
-        }
+    fn open_runtime(runtime: &ComparatorRuntime, name: &str) -> Result<Self, QhardError> {
+        let (public_path, expected) = runtime.entry(name)?;
+        let public_path = public_path.to_path_buf();
         let listed = fs::symlink_metadata(&public_path)
-            .map_err(|e| QhardError::Input(format!("cannot inspect {tool}: {e}")))?;
+            .map_err(|e| QhardError::Input(format!("cannot inspect {name}: {e}")))?;
         if listed.file_type().is_symlink() || !listed.is_file() {
             return Err(QhardError::Input(format!(
-                "{tool} must be a regular Cellar executable"
+                "{name} must be a regular comparator runtime executable"
             )));
         }
         #[cfg(unix)]
         if listed.permissions().mode() & 0o111 == 0 {
-            return Err(QhardError::Input(format!("{tool} is not executable")));
+            return Err(QhardError::Input(format!("{name} is not executable")));
         }
         let handle = fs::File::open(&public_path)
-            .map_err(|e| QhardError::Input(format!("cannot retain {tool}: {e}")))?;
+            .map_err(|e| QhardError::Input(format!("cannot retain {name}: {e}")))?;
         let opened = handle
             .metadata()
-            .map_err(|e| QhardError::Input(format!("cannot inspect retained {tool}: {e}")))?;
+            .map_err(|e| QhardError::Input(format!("cannot inspect retained {name}: {e}")))?;
         if !same_std_file(&listed, &opened) {
-            return Err(QhardError::Input(format!("{tool} changed while binding")));
+            return Err(QhardError::Input(format!("{name} changed while binding")));
         }
-        let binding = tool_binding(&public_path, tool)?;
         Ok(Self {
             public_path,
             handle,
-            binding,
+            binding: expected.binding.clone(),
         })
     }
 
@@ -2191,7 +3273,7 @@ impl RetainedToolFile {
         {
             return Err(QhardError::Input(format!("{tool} changed while bound")));
         }
-        // The initial digest is report provenance. The enclosing Homebrew
+        // The initial digest is report provenance. The enclosing comparator
         // runtime is sealed before this object is accepted; retained
         // descriptor plus inode/device checks detect deletion or replacement
         // without making each query hash a large Mach-O executable again.
@@ -2202,19 +3284,17 @@ impl RetainedToolFile {
 #[derive(Debug)]
 struct PrivateRgaHelpers {
     _temp: tempfile::TempDir,
-    directory: RetainedDirectory,
     cache: RetainedDirectory,
-    config: FileBinding,
     pandoc: RetainedToolFile,
     pdftotext: RetainedToolFile,
     rg: RetainedToolFile,
 }
 
 impl PrivateRgaHelpers {
-    fn new(pandoc_path: &Path, pdftotext_path: &Path, rg_path: &Path) -> Result<Self, QhardError> {
-        let pandoc = RetainedToolFile::open_cellar(pandoc_path, "pandoc", "pandoc")?;
-        let pdftotext = RetainedToolFile::open_cellar(pdftotext_path, "poppler", "pdftotext")?;
-        let rg = RetainedToolFile::open_cellar(rg_path, "ripgrep", "rg")?;
+    fn new(runtime: &ComparatorRuntime) -> Result<Self, QhardError> {
+        let pandoc = RetainedToolFile::open_runtime(runtime, "pandoc")?;
+        let pdftotext = RetainedToolFile::open_runtime(runtime, "pdftotext")?;
+        let rg = RetainedToolFile::open_runtime(runtime, "rg")?;
         let temp = tempfile::Builder::new()
             .prefix("kio-qhard-rga-helpers-")
             .tempdir()
@@ -2225,25 +3305,6 @@ impl PrivateRgaHelpers {
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).map_err(|e| {
             QhardError::Input(format!("cannot secure private rga helper directory: {e}"))
         })?;
-        for (name, target) in [
-            ("pandoc", &pandoc.public_path),
-            ("pdftotext", &pdftotext.public_path),
-            ("rg", &rg.public_path),
-        ] {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(target, temp.path().join(name)).map_err(|e| {
-                QhardError::Input(format!("cannot bind private {name} helper: {e}"))
-            })?;
-        }
-        let config_path = temp.path().join("rga-config.json");
-        // Passing this explicit config disables discovery of user custom adapters.
-        fs::write(&config_path, b"{\"custom_adapters\":[]}")
-            .map_err(|e| QhardError::Input(format!("cannot write private rga config: {e}")))?;
-        #[cfg(unix)]
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| QhardError::Input(format!("cannot secure private rga config: {e}")))?;
-        let (_, config) = binding(&config_path, MAX_GOLDEN_BYTES, "private rga config")?;
-        let directory = RetainedDirectory::open(temp.path(), "private rga helper directory")?;
         let cache_path = temp.path().join("cache");
         fs::create_dir(&cache_path)
             .map_err(|e| QhardError::Input(format!("cannot create private rga cache: {e}")))?;
@@ -2253,9 +3314,7 @@ impl PrivateRgaHelpers {
         let cache = RetainedDirectory::open(&cache_path, "private rga cache")?;
         Ok(Self {
             _temp: temp,
-            directory,
             cache,
-            config,
             pandoc,
             pdftotext,
             rg,
@@ -2263,16 +3322,6 @@ impl PrivateRgaHelpers {
     }
 
     fn recheck(&self) -> Result<(), QhardError> {
-        let listed = fs::symlink_metadata(&self.directory.public_path)
-            .map_err(|e| QhardError::Input(format!("private rga helper directory changed: {e}")))?;
-        let opened = self.directory.handle.metadata().map_err(|e| {
-            QhardError::Input(format!("cannot inspect private rga helper directory: {e}"))
-        })?;
-        if listed.file_type().is_symlink() || !listed.is_dir() || !same_std_file(&listed, &opened) {
-            return Err(QhardError::Input(
-                "private rga helper directory changed while bound".into(),
-            ));
-        }
         let listed_cache = fs::symlink_metadata(&self.cache.public_path)
             .map_err(|e| QhardError::Input(format!("private rga cache changed: {e}")))?;
         let opened_cache = self
@@ -2291,139 +3340,29 @@ impl PrivateRgaHelpers {
         self.pandoc.recheck("pandoc")?;
         self.pdftotext.recheck("pdftotext")?;
         self.rg.recheck("rg")?;
-        if tool_binding(Path::new(&self.config.path), "private rga config")?.sha256
-            != self.config.sha256
-        {
-            return Err(QhardError::Input(
-                "private rga config changed while bound".into(),
-            ));
-        }
-        for (name, target) in [
-            ("pandoc", &self.pandoc.public_path),
-            ("pdftotext", &self.pdftotext.public_path),
-            ("rg", &self.rg.public_path),
-        ] {
-            let link = self.directory.public_path.join(name);
-            if fs::read_link(&link).ok().as_deref() != Some(target.as_path()) {
-                return Err(QhardError::Input(format!(
-                    "private {name} helper binding changed"
-                )));
-            }
-        }
         Ok(())
     }
 }
 
 #[derive(Debug)]
 struct BoundRga {
-    _snapshot: tempfile::TempDir,
-    rga: PathBuf,
-    rga_binding: FileBinding,
-    preproc_binding: FileBinding,
+    runtime: ComparatorRuntime,
+    rga: RetainedToolFile,
+    preproc: RetainedToolFile,
     helpers: PrivateRgaHelpers,
+    version: String,
 }
-fn snapshot_rga_pair(
-    parent: &RetainedDirectory,
-) -> Result<(tempfile::TempDir, PathBuf, FileBinding, FileBinding), QhardError> {
-    let (rga_bytes, _) = binding_at(parent, "rga", MAX_BINARY_BYTES, "rga")?;
-    let (preproc_bytes, _) = binding_at(
-        parent,
-        "rga-preproc",
-        MAX_BINARY_BYTES,
-        "rga-preproc companion",
-    )?;
-    let temp = tempfile::Builder::new()
-        .prefix("kio-qhard-rga-")
-        .tempdir()
-        .map_err(|e| QhardError::Input(format!("cannot create private rga snapshot: {e}")))?;
-    for (name, bytes) in [("rga", rga_bytes), ("rga-preproc", preproc_bytes)] {
-        let snapshot = temp.path().join(name);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&snapshot)
-            .map_err(|e| {
-                QhardError::Input(format!("cannot create private {name} snapshot: {e}"))
-            })?;
-        use io::Write;
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|e| QhardError::Input(format!("cannot write private {name} snapshot: {e}")))?;
-        #[cfg(unix)]
-        fs::set_permissions(&snapshot, fs::Permissions::from_mode(0o700)).map_err(|e| {
-            QhardError::Input(format!(
-                "cannot mark private {name} snapshot executable: {e}"
-            ))
-        })?;
-    }
-    let rga = temp.path().join("rga");
-    let preproc = temp.path().join("rga-preproc");
-    let (_, rga_binding) = binding(&rga, MAX_BINARY_BYTES, "private rga")?;
-    let (_, preproc_binding) = binding(&preproc, MAX_BINARY_BYTES, "private rga-preproc")?;
-    let valid = run_tool(&rga, &["--version"]).is_ok_and(|output| {
-        output.status.success() && output.stdout.to_ascii_lowercase().contains("ripgrep-all")
-    });
-    if !valid {
-        return Err(QhardError::Input(
-            "rga failed semantic capability preflight".into(),
-        ));
-    }
-    Ok((temp, rga, rga_binding, preproc_binding))
-}
-
-fn bound_rga(path: &Path) -> Result<BoundRga, QhardError> {
-    let target = fs::canonicalize(path)
-        .map_err(|e| QhardError::Input(format!("cannot canonicalize rga: {e}")))?;
-    if !allowed_homebrew_rga_target(&target) {
-        return Err(QhardError::Input(
-            "rga target is not an approved Homebrew ripgrep-all Cellar path".into(),
-        ));
-    }
-    require_sealed_homebrew_runtime(&target, "rga")?;
-    let preproc_target = target
-        .parent()
-        .ok_or_else(|| QhardError::Input("rga target has no bin directory".into()))?
-        .join("rga-preproc");
-    require_sealed_homebrew_runtime(&preproc_target, "rga-preproc")?;
-    let parent = RetainedDirectory::open(
-        target
-            .parent()
-            .ok_or_else(|| QhardError::Input("rga target has no bin directory".into()))?,
-        "rga bin directory",
-    )?;
-    let (snapshot, rga, rga_binding, preproc_binding) = snapshot_rga_pair(&parent)?;
-    // These brew entry points are symlinks; retain their canonical Cellar
-    // targets and expose only those targets to rga through a private PATH.
-    // Keep every helper in the same Homebrew prefix as rga.  Falling back
-    // across prefixes would turn a missing or tampered selected-prefix tool
-    // into an unreported alternate comparison environment.
-    let helper_bin = if target.starts_with(Path::new("/opt/homebrew/Cellar/")) {
-        Path::new("/opt/homebrew/bin")
-    } else if target.starts_with(Path::new("/usr/local/Cellar/")) {
-        Path::new("/usr/local/bin")
-    } else {
-        return Err(QhardError::Input(
-            "rga target has no approved Homebrew helper prefix".into(),
-        ));
-    };
-    let helper_paths = [
-        ("pandoc", helper_bin.join("pandoc")),
-        ("pdftotext", helper_bin.join("pdftotext")),
-        ("rg", helper_bin.join("rg")),
-    ];
-    for (label, helper_path) in &helper_paths {
-        let canonical = fs::canonicalize(helper_path)
-            .map_err(|e| QhardError::Input(format!("cannot canonicalize {label}: {e}")))?;
-        require_sealed_homebrew_runtime(&canonical, label)?;
-    }
-    let helpers =
-        PrivateRgaHelpers::new(&helper_paths[0].1, &helper_paths[1].1, &helper_paths[2].1)?;
+fn bound_rga(runtime_root: &Path) -> Result<BoundRga, QhardError> {
+    let runtime = ComparatorRuntime::bind(runtime_root)?;
+    let rga = RetainedToolFile::open_runtime(&runtime, "rga")?;
+    let preproc = RetainedToolFile::open_runtime(&runtime, "rga-preproc")?;
+    let helpers = PrivateRgaHelpers::new(&runtime)?;
     let bound = BoundRga {
-        _snapshot: snapshot,
+        runtime,
         rga,
-        rga_binding,
-        preproc_binding,
+        preproc,
         helpers,
+        version: String::new(),
     };
     // Preflight under the exact environment used for queries. This catches a
     // malformed private config or helper binding before measurement begins.
@@ -2433,7 +3372,10 @@ fn bound_rga(path: &Path) -> Result<BoundRga, QhardError> {
             "rga failed private helper capability preflight".into(),
         ));
     }
-    Ok(bound)
+    Ok(BoundRga {
+        version: output.stdout.lines().next().unwrap_or("rga").to_owned(),
+        ..bound
+    })
 }
 fn tool_binding(path: &Path, label: &str) -> Result<FileBinding, QhardError> {
     let (_, binding) = binding(path, MAX_BINARY_BYTES, label)?;
@@ -2483,9 +3425,10 @@ fn run_bound_rga(
     args: &[&str],
     directory: Option<&RetainedDirectory>,
 ) -> Result<crate::runner::BoundedProcessOutput, QhardError> {
+    bound.runtime.recheck(false)?;
     bound.helpers.recheck()?;
-    let mut command = Command::new(&bound.rga);
-    let config_argument = format!("--rga-config-file={}", bound.helpers.config.path);
+    let mut command = Command::new(&bound.rga.public_path);
+    let config_argument = format!("--rga-config-file={}", bound.runtime.config_path.display());
     let cache_argument = format!(
         "--rga-cache-path={}",
         bound.helpers.cache.public_path.display()
@@ -2498,7 +3441,11 @@ fn run_bound_rga(
     command
         .args(args)
         .env_clear()
-        .env("PATH", &bound.helpers.directory.public_path)
+        // The helper lookup directory is inside the sealed administrator
+        // runtime. Do not create a user-owned symlink farm: rga-preproc
+        // resolves pandoc/pdftotext/rg by PATH and a private directory would
+        // reopen a same-UID path-swap window.
+        .env("PATH", &bound.runtime.bin_directory)
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
         .env("TZ", "UTC");
@@ -2507,6 +3454,7 @@ fn run_bound_rga(
     }
     let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
     bound.helpers.recheck()?;
+    bound.runtime.recheck(false)?;
     Ok(output)
 }
 fn query_fragments(query: &str) -> Vec<String> {
@@ -2683,6 +3631,26 @@ fn rebuild_baseline_replica(
     Ok(())
 }
 
+fn mark_runtime_blocked(slot: &mut Option<String>, message: impl Into<String>) {
+    if slot.is_none() {
+        *slot = Some(message.into());
+    }
+}
+
+fn baseline_measurement_status(
+    missing: bool,
+    runtime_blocked: bool,
+    passed_gate: bool,
+) -> &'static str {
+    if passed_gate {
+        "pass"
+    } else if missing || runtime_blocked {
+        "blocked-unmeasured"
+    } else {
+        "fail"
+    }
+}
+
 pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardError> {
     let attest_opts = BaselineAttestOptions {
         golden: options.golden.clone(),
@@ -2721,7 +3689,6 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
     let (_indexed_snapshot_temp, indexed_snapshot) =
         snapshot_baseline_fixture(&indexed, &computed.indexed_fixture_sha256)?;
     let mdfind_path = resolve_tool(&options.mdfind);
-    let rga_path = resolve_tool(&options.rga);
     // mdfind is a sealed macOS executable: copied snapshots are killed by
     // code-signing. Bind its exact system binary and execute that path.
     let (bound_mdfind, mdfind_unavailable_reason) = match mdfind_path.as_ref() {
@@ -2734,14 +3701,14 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             Some("mdfind is unavailable: executable was not found".into()),
         ),
     };
-    let (bound_rga, rga_unavailable_reason) = match rga_path.as_ref() {
-        Some(path) => match bound_rga(path) {
+    let (bound_rga, rga_unavailable_reason) = match options.comparator_runtime.as_ref() {
+        Some(root) => match bound_rga(root) {
             Ok(bound) => (Some(bound), None),
             Err(error) => (None, Some(format!("rga is unavailable: {error}"))),
         },
         None => (
             None,
-            Some("rga is unavailable: executable was not found".into()),
+            Some("rga is unavailable: --comparator-runtime was not supplied".into()),
         ),
     };
     let mut tools = BTreeMap::new();
@@ -2753,6 +3720,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             companion_sha256: None,
             helpers: None,
             configuration: None,
+            comparator_runtime: None,
             version: "kio under test".into(),
             available: true,
         },
@@ -2768,45 +3736,45 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             companion_sha256: None,
             helpers: None,
             configuration: None,
+            comparator_runtime: None,
             version: "macOS sealed-system Spotlight tool (mdfind has no version flag)".into(),
             available: bound_mdfind.is_some(),
         },
     );
-    #[allow(clippy::single_element_loop)]
-    for (name, candidate, bound, requested) in [("rga", &rga_path, &bound_rga, &options.rga)] {
-        let version = if name == "mdfind" {
-            "macOS Spotlight system tool (mdfind has no version flag)".into()
-        } else {
-            bound
+    let rga_version = bound_rga
+        .as_ref()
+        .map(|bound| bound.version.clone())
+        .unwrap_or_else(|| "unavailable".into());
+    tools.insert(
+        "rga".into(),
+        BaselineTool {
+            executable_path: options.comparator_runtime.as_ref().map_or_else(
+                || "<no comparator runtime supplied>".into(),
+                |root| root.join("bin/rga").display().to_string(),
+            ),
+            sha256: bound_rga
                 .as_ref()
-                .and_then(|bound| run_bound_rga(bound, &["--version"], None).ok())
-                .map(|o| o.stdout.lines().next().unwrap_or("rga").to_owned())
-                .unwrap_or_else(|| "unavailable".into())
-        };
-        tools.insert(
-            name.into(),
-            BaselineTool {
-                executable_path: candidate.as_ref().map_or_else(
-                    || requested.display().to_string(),
-                    |p| p.display().to_string(),
-                ),
-                sha256: bound.as_ref().map(|bound| bound.rga_binding.sha256.clone()),
-                companion_sha256: bound
-                    .as_ref()
-                    .map(|bound| bound.preproc_binding.sha256.clone()),
-                helpers: bound.as_ref().map(|bound| {
-                    BTreeMap::from([
-                        ("pandoc".into(), bound.helpers.pandoc.binding.clone()),
-                        ("pdftotext".into(), bound.helpers.pdftotext.binding.clone()),
-                        ("rg".into(), bound.helpers.rg.binding.clone()),
-                    ])
-                }),
-                configuration: bound.as_ref().map(|bound| bound.helpers.config.clone()),
-                version,
-                available: bound.is_some(),
-            },
-        );
-    }
+                .map(|bound| bound.rga.binding.sha256.clone()),
+            companion_sha256: bound_rga
+                .as_ref()
+                .map(|bound| bound.preproc.binding.sha256.clone()),
+            helpers: bound_rga.as_ref().map(|bound| {
+                BTreeMap::from([
+                    ("pandoc".into(), bound.helpers.pandoc.binding.clone()),
+                    ("pdftotext".into(), bound.helpers.pdftotext.binding.clone()),
+                    ("rg".into(), bound.helpers.rg.binding.clone()),
+                ])
+            }),
+            configuration: bound_rga
+                .as_ref()
+                .map(|bound| bound.runtime.config.binding.clone()),
+            comparator_runtime: bound_rga
+                .as_ref()
+                .map(|bound| bound.runtime.provenance.clone()),
+            version: rga_version,
+            available: bound_rga.is_some(),
+        },
+    );
     let missing = bound_mdfind.is_none() || bound_rga.is_none();
     let missing_reason = [mdfind_unavailable_reason, rga_unavailable_reason]
         .into_iter()
@@ -2845,23 +3813,58 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             };
             let root = pristine.child(&q.persona, "pristine persona")?;
             let before = digest_persona_tree(&root, false)?;
-            let mo = run_tool_in_directory(
-                mdfind_path.as_ref().unwrap(),
+            let mo = match run_tool_in_directory(
+                mdfind_path
+                    .as_ref()
+                    .expect("checked comparator availability"),
                 &["-onlyin", ".", &q.query],
                 &root,
-            )?;
-            if tool_binding(mdfind_path.as_ref().unwrap(), "mdfind")?.sha256
-                != bound_mdfind.as_ref().unwrap().sha256
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    mark_runtime_blocked(
+                        &mut runtime_blocked,
+                        format!("mdfind could not run for {}: {error}", q.query_id),
+                    );
+                    break 'queries;
+                }
+            };
+            let mdfind_current = match tool_binding(
+                mdfind_path
+                    .as_ref()
+                    .expect("checked comparator availability"),
+                "mdfind",
+            ) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    mark_runtime_blocked(
+                        &mut runtime_blocked,
+                        format!(
+                            "mdfind could not be revalidated for {}: {error}",
+                            q.query_id
+                        ),
+                    );
+                    break 'queries;
+                }
+            };
+            if mdfind_current.sha256
+                != bound_mdfind
+                    .as_ref()
+                    .expect("checked comparator availability")
+                    .sha256
             {
-                runtime_blocked = Some("mdfind changed during measurement".into());
+                mark_runtime_blocked(&mut runtime_blocked, "mdfind changed during measurement");
                 break 'queries;
             }
             if !mo.status.success() {
-                runtime_blocked = Some(format!(
-                    "mdfind failed for {} with exit {}",
-                    q.query_id,
-                    mo.status.code().unwrap_or(-1)
-                ));
+                mark_runtime_blocked(
+                    &mut runtime_blocked,
+                    format!(
+                        "mdfind failed for {} with exit {}",
+                        q.query_id,
+                        mo.status.code().unwrap_or(-1)
+                    ),
+                );
                 break 'queries;
             }
             let mt: Vec<String> = mo
@@ -2879,8 +3882,8 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             let mut rga_returncode = 0;
             let mut rga_duration_ms = 0.0;
             for fragment in query_fragments(&q.query) {
-                let ro = run_bound_rga(
-                    bound_rga.as_ref().unwrap(),
+                let ro = match run_bound_rga(
+                    bound_rga.as_ref().expect("checked comparator availability"),
                     &[
                         "-l",
                         "--no-messages",
@@ -2890,14 +3893,26 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                         ".",
                     ],
                     Some(&root),
-                )?;
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        mark_runtime_blocked(
+                            &mut runtime_blocked,
+                            format!(
+                                "rga runtime verification failed for {}: {error}",
+                                q.query_id
+                            ),
+                        );
+                        break 'queries;
+                    }
+                };
                 rga_returncode = ro.status.code().unwrap_or(-1);
                 rga_duration_ms += ro.duration.as_secs_f64() * 1000.0;
                 if rga_returncode != 0 && rga_returncode != 1 {
-                    runtime_blocked = Some(format!(
-                        "rga failed for {} with exit {}",
-                        q.query_id, rga_returncode
-                    ));
+                    mark_runtime_blocked(
+                        &mut runtime_blocked,
+                        format!("rga failed for {} with exit {}", q.query_id, rga_returncode),
+                    );
                     break 'queries;
                 }
                 for line in ro.stdout.lines() {
@@ -2950,6 +3965,38 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             });
         }
     }
+    if let Some(bound) = &bound_rga {
+        // The runtime root is sealed against the invoking user; this full
+        // content check closes the measurement interval for administrator
+        // maintenance or corruption without hashing its large Mach-O closure
+        // once per query.
+        if let Err(error) = bound
+            .helpers
+            .recheck()
+            .and_then(|_| bound.runtime.recheck(true))
+        {
+            mark_runtime_blocked(
+                &mut runtime_blocked,
+                format!("rga runtime changed during measurement: {error}"),
+            );
+        }
+    }
+    if let Some(bound) = &bound_mdfind {
+        match mdfind_path.as_ref().map(|path| trusted_mdfind(path)) {
+            Some(Ok(current)) if current.sha256 == bound.sha256 => {}
+            Some(Ok(_)) => {
+                mark_runtime_blocked(&mut runtime_blocked, "mdfind changed during measurement")
+            }
+            Some(Err(error)) => mark_runtime_blocked(
+                &mut runtime_blocked,
+                format!("mdfind could not be revalidated after measurement: {error}"),
+            ),
+            None => mark_runtime_blocked(
+                &mut runtime_blocked,
+                "mdfind path disappeared during measurement",
+            ),
+        }
+    }
     if fixture_live_digest(&indexed)? != computed.indexed_fixture_sha256
         || fixture_live_digest(&pristine)? != computed.pristine_corpus_sha256
         || tool_binding(&options.bin, "kio binary")?.sha256 != kio_binding.sha256
@@ -2993,13 +4040,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             .duration_since(UNIX_EPOCH)
             .map_err(|e| QhardError::Input(format!("system clock is before Unix epoch: {e}")))?
             .as_millis(),
-        status: if gate.pass {
-            "pass"
-        } else if missing || runtime_blocked.is_some() {
-            "blocked-unmeasured"
-        } else {
-            "fail"
-        },
+        status: baseline_measurement_status(missing, runtime_blocked.is_some(), gate.pass),
         blocked_reason: runtime_blocked.or_else(|| missing.then_some(missing_reason)),
         golden,
         attestation,
@@ -3214,160 +4255,255 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_rga_symlink_policy_is_prefix_limited() {
-        assert!(allowed_homebrew_rga_target(Path::new(
-            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga"
-        )));
-        assert!(allowed_homebrew_rga_target(Path::new(
-            "/usr/local/Cellar/ripgrep-all/0.10.10/bin/rga"
-        )));
-        assert!(!allowed_homebrew_rga_target(Path::new(
-            "/tmp/ripgrep-all/bin/rga"
-        )));
-        assert!(!allowed_homebrew_rga_target(Path::new(
-            "/opt/homebrew/Cellar/other/bin/rga"
-        )));
-        assert!(!allowed_homebrew_rga_target(Path::new(
-            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/libexec/rga"
-        )));
-        assert!(!allowed_homebrew_rga_target(Path::new(
-            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga/extra"
-        )));
+    fn macho_parsers_accept_bounded_loads_and_rpaths() {
+        let load_commands = "Load command 1\n          cmd LC_LOAD_DYLINKER\n      cmdsize 32\n         name /usr/lib/dyld (offset 12)\nLoad command 2\n          cmd LC_ID_DYLIB\n      cmdsize 56\n         name @rpath/librga.dylib (offset 24)\nLoad command 3\n          cmd LC_LOAD_DYLIB\n      cmdsize 72\n         name @loader_path/../lib/liba.dylib (offset 24)\nLoad command 4\n          cmd LC_REEXPORT_DYLIB\n      cmdsize 64\n         name /usr/lib/libSystem.B.dylib (offset 24)\nLoad command 5\n          cmd LC_RPATH\n      cmdsize 40\n         path @loader_path/../lib (offset 12)\nLoad command 6\n          cmd LC_RPATH\n      cmdsize 40\n         path /sealed/runtime/lib (offset 12)\n";
+        let (loads, dylinker, has_environment) = parse_otool_load_commands(load_commands).unwrap();
+        assert_eq!(
+            loads,
+            vec![
+                "@loader_path/../lib/liba.dylib",
+                "/usr/lib/libSystem.B.dylib"
+            ]
+        );
+        assert_eq!(dylinker.as_deref(), Some("/usr/lib/dyld"));
+        assert!(!has_environment);
+        assert_eq!(
+            parse_otool_rpaths(load_commands).unwrap(),
+            vec!["@loader_path/../lib", "/sealed/runtime/lib"]
+        );
     }
 
     #[test]
-    fn homebrew_helper_policy_rejects_non_cellar_or_wrong_formula_targets() {
-        assert!(allowed_homebrew_cellar_tool(
-            Path::new("/opt/homebrew/Cellar/pandoc/3.10.1/bin/pandoc"),
-            "pandoc",
-            "pandoc",
-        ));
-        assert!(allowed_homebrew_cellar_tool(
-            Path::new("/usr/local/Cellar/poppler/26.02/bin/pdftotext"),
-            "poppler",
-            "pdftotext",
-        ));
-        assert!(allowed_homebrew_cellar_tool(
-            Path::new("/opt/homebrew/Cellar/ripgrep/15.1/bin/rg"),
-            "ripgrep",
-            "rg",
-        ));
-        assert!(!allowed_homebrew_cellar_tool(
-            Path::new("/tmp/pandoc"),
-            "pandoc",
-            "pandoc"
-        ));
-        assert!(!allowed_homebrew_cellar_tool(
-            Path::new("/opt/homebrew/Cellar/evil/1/bin/pandoc"),
-            "pandoc",
-            "pandoc"
-        ));
-        assert!(!allowed_homebrew_cellar_tool(
-            Path::new("/opt/homebrew/Cellar/pandoc/3.10/bin/not-pandoc"),
-            "pandoc",
-            "pandoc"
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sealed_runtime_policy_rejects_evaluator_owned_directories() {
-        let temporary = tempfile::tempdir().unwrap();
-        let metadata = fs::symlink_metadata(temporary.path()).unwrap();
-        assert!(!sealed_runtime_metadata(&metadata));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn private_rga_runtime_uses_only_bound_helpers_and_generated_config() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let (pandoc, pdftotext, rg) = if Path::new("/opt/homebrew/bin/pandoc").is_file()
-            && Path::new("/opt/homebrew/bin/pdftotext").is_file()
-            && Path::new("/opt/homebrew/bin/rg").is_file()
-        {
-            (
-                "/opt/homebrew/bin/pandoc",
-                "/opt/homebrew/bin/pdftotext",
-                "/opt/homebrew/bin/rg",
-            )
-        } else if Path::new("/usr/local/bin/pandoc").is_file()
-            && Path::new("/usr/local/bin/pdftotext").is_file()
-            && Path::new("/usr/local/bin/rg").is_file()
-        {
-            (
-                "/usr/local/bin/pandoc",
-                "/usr/local/bin/pdftotext",
-                "/usr/local/bin/rg",
-            )
-        } else {
-            return;
-        };
-        let source = tempfile::tempdir().unwrap();
-        let rga = source.path().join("rga");
-        let preproc = source.path().join("rga-preproc");
-        fs::write(
-            &rga,
-            b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo ripgrep-all; exit 0; fi\nprintf 'PATH=%s\\nPANDOC=%s\\nRG=%s\\nARGS=%s\\n' \"$PATH\" \"$(command -v pandoc)\" \"$(command -v rg)\" \"$*\"\n",
-        ).unwrap();
-        fs::write(&preproc, b"#!/bin/sh\nexit 1\n").unwrap();
-        for path in [&rga, &preproc] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let parent = RetainedDirectory::open(source.path(), "rga test bin directory").unwrap();
-        let (snapshot, rga, rga_binding, preproc_binding) = snapshot_rga_pair(&parent).unwrap();
-        let helpers =
-            PrivateRgaHelpers::new(Path::new(pandoc), Path::new(pdftotext), Path::new(rg)).unwrap();
-        let helper_dir = helpers.directory.public_path.clone();
-        let config_path = helpers.config.path.clone();
-        let bound = BoundRga {
-            _snapshot: snapshot,
-            rga,
-            rga_binding,
-            preproc_binding,
-            helpers,
-        };
-
-        let output = run_bound_rga(&bound, &["needle"], None).unwrap();
-        assert!(output
-            .stdout
-            .contains(&format!("PATH={}", helper_dir.display())));
-        assert!(output
-            .stdout
-            .contains(&format!("PANDOC={}/pandoc", helper_dir.display())));
-        assert!(output
-            .stdout
-            .contains(&format!("RG={}/rg", helper_dir.display())));
-        assert!(output.stdout.contains("--rga-adapters=pandoc,poppler"));
-        assert!(output.stdout.contains("--rga-cache-path="));
-        assert!(output.stdout.contains(&config_path));
-        assert!(!output.stdout.contains("/usr/bin:/bin"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn private_rga_pair_runs_no_match_without_companion_failure() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let source = tempfile::tempdir().unwrap();
-        let rga = source.path().join("rga");
-        let preproc = source.path().join("rga-preproc");
-        fs::write(
-            &rga,
-            b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo ripgrep-all; exit 0; fi\n$(dirname \"$0\")/rga-preproc \"$@\"\n",
+    fn macho_parsers_reject_malformed_or_unbounded_closure_text() {
+        assert!(parse_otool_load_commands("Load command 1\n  cmd LC_LOAD_DYLIB\n").is_err());
+        assert!(parse_otool_load_commands(
+            "Load command 1\n  cmd LC_LOAD_DYLIB\n  name lib.dylib\n"
+        )
+        .is_err());
+        assert!(parse_otool_rpaths("cmd LC_RPATH\nLoad command 2\n").is_err());
+        assert!(checked_macho_path(&"x".repeat(MAX_MACHO_PATH_BYTES + 1), "test").is_err());
+        let (_, _, environment) = parse_otool_load_commands(
+            "Load command 1\n  cmd LC_DYLD_ENVIRONMENT\n  cmdsize 48\n     name DYLD_INSERT_LIBRARIES=/tmp/evil.dylib (offset 24)\n",
         )
         .unwrap();
-        fs::write(&preproc, b"#!/bin/sh\nexit 1\n").unwrap();
-        for path in [&rga, &preproc] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let parent = RetainedDirectory::open(source.path(), "rga test bin directory").unwrap();
+        assert!(environment);
+    }
 
-        let (_snapshot, private_rga, _rga_binding, _preproc_binding) =
-            snapshot_rga_pair(&parent).unwrap();
-        let output = run_tool(&private_rga, &["-l", "--no-messages", "absent", "."]).unwrap();
+    #[test]
+    fn macho_token_paths_cannot_escape_the_runtime_root() {
+        let root = Path::new("/sealed/runtime");
+        assert_eq!(
+            safe_macho_join(
+                Path::new("/sealed/runtime/bin"),
+                "../lib/liba.dylib",
+                root,
+                "test",
+            )
+            .unwrap(),
+            PathBuf::from("/sealed/runtime/lib/liba.dylib")
+        );
+        assert!(safe_macho_join(
+            Path::new("/sealed/runtime/bin"),
+            "../../outside.dylib",
+            root,
+            "test",
+        )
+        .is_err());
+        assert!(safe_macho_join(
+            Path::new("/sealed/runtime/bin"),
+            "/outside.dylib",
+            root,
+            "test",
+        )
+        .is_err());
+    }
 
-        assert_eq!(output.status.code(), Some(1));
+    #[test]
+    fn macho_traversal_accepts_complete_sealed_closure() {
+        let root = PathBuf::from("/sealed/runtime");
+        let rga = root.join("bin/rga");
+        let library_a = root.join("lib/liba.dylib");
+        let library_b = root.join("lib/libb.dylib");
+        let graph = BTreeMap::from([
+            (
+                rga.clone(),
+                MachoInspection {
+                    loads: vec!["@loader_path/../lib/liba.dylib".into()],
+                    rpaths: vec![],
+                    dylinker: Some("/usr/lib/dyld".into()),
+                    has_dyld_environment: false,
+                },
+            ),
+            (
+                library_a.clone(),
+                MachoInspection {
+                    loads: vec!["@rpath/libb.dylib".into()],
+                    rpaths: vec!["@loader_path".into()],
+                    dylinker: None,
+                    has_dyld_environment: false,
+                },
+            ),
+            (
+                library_b.clone(),
+                MachoInspection {
+                    loads: vec![
+                        "@rpath/liba.dylib".into(),
+                        "/usr/lib/libSystem.B.dylib".into(),
+                    ],
+                    rpaths: vec!["@loader_path".into()],
+                    dylinker: None,
+                    has_dyld_environment: false,
+                },
+            ),
+        ]);
+        let mut visited = Vec::new();
+        traverse_macho_closure(
+            vec![PendingMachoImage {
+                path: rga.clone(),
+                executable: rga,
+                inherited_rpaths: vec![],
+            }],
+            |path| Ok(graph.get(path).expect("synthetic graph image").clone()),
+            |image, _| {
+                if image.path == library_a || image.path == library_b {
+                    Ok(vec![ResolvedMachoRpath::Runtime(root.join("lib"))])
+                } else {
+                    Ok(vec![])
+                }
+            },
+            |name, image, _| match (image.path.as_path(), name) {
+                (path, "@loader_path/../lib/liba.dylib") if path == root.join("bin/rga") => {
+                    Ok(ResolvedMachoDependency::Runtime(library_a.clone()))
+                }
+                (_, "@rpath/libb.dylib") => Ok(ResolvedMachoDependency::Runtime(library_b.clone())),
+                (_, "@rpath/liba.dylib") => Ok(ResolvedMachoDependency::Runtime(library_a.clone())),
+                (_, "/usr/lib/libSystem.B.dylib") => Ok(ResolvedMachoDependency::SealedSystem(
+                    PathBuf::from("/usr/lib/libSystem.B.dylib"),
+                )),
+                _ => panic!("unexpected synthetic install name: {name}"),
+            },
+            |path, trust| {
+                visited.push((path.to_path_buf(), trust));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(visited.contains(&(library_a, RuntimeTrust::AdministratorRuntime)));
+        assert!(visited.contains(&(library_b, RuntimeTrust::AdministratorRuntime)));
+        assert!(visited.contains(&(
+            PathBuf::from("/usr/lib/libSystem.B.dylib"),
+            RuntimeTrust::MacosSealedSystem,
+        )));
+        assert!(visited.contains(&(
+            PathBuf::from("/usr/lib/dyld"),
+            RuntimeTrust::MacosSealedSystem,
+        )));
+    }
+
+    #[test]
+    fn macho_loader_controls_reject_external_dyld_and_embedded_environment() {
+        let root = PathBuf::from("/sealed/runtime");
+        let executable = root.join("bin/rga");
+        let run = |inspection: MachoInspection| {
+            traverse_macho_closure(
+                vec![PendingMachoImage {
+                    path: executable.clone(),
+                    executable: executable.clone(),
+                    inherited_rpaths: vec![],
+                }],
+                |_| Ok(inspection.clone()),
+                |_, _| Ok(vec![]),
+                |_, _, _| panic!("synthetic image has no dylib loads"),
+                |_, _| Ok(()),
+            )
+        };
+        assert!(run(MachoInspection {
+            loads: vec![],
+            rpaths: vec![],
+            dylinker: Some("/tmp/untrusted-dyld".into()),
+            has_dyld_environment: false,
+        })
+        .is_err());
+        assert!(run(MachoInspection {
+            loads: vec![],
+            rpaths: vec![],
+            dylinker: Some("/usr/lib/dyld".into()),
+            has_dyld_environment: true,
+        })
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_symlink_to_external_writable_dylib_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("runtime");
+        let external = temporary.path().join("external");
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let outside = external.join("libunsafe.dylib");
+        fs::write(&outside, b"unsealed").unwrap();
+        symlink(&outside, root.join("lib/libunsafe.dylib")).unwrap();
+        assert!(canonical_path_within(
+            &fs::canonicalize(&root).unwrap(),
+            &root.join("lib/libunsafe.dylib"),
+            "test external dylib",
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_file_identity_detects_replaced_helper_or_dylib() {
+        let temporary = tempfile::tempdir().unwrap();
+        let image = temporary.path().join("image");
+        let replacement = temporary.path().join("replacement");
+        fs::write(&image, b"original").unwrap();
+        let identity = RuntimeFileIdentity::from_metadata(&fs::metadata(&image).unwrap());
+        fs::write(&replacement, b"changed!").unwrap();
+        fs::rename(&replacement, &image).unwrap();
+        assert!(!identity.matches(&fs::metadata(&image).unwrap()));
+    }
+
+    #[test]
+    fn comparator_unavailability_or_runtime_validation_is_blocked_not_passed() {
+        assert_eq!(
+            baseline_measurement_status(true, false, false),
+            "blocked-unmeasured"
+        );
+        assert_eq!(
+            baseline_measurement_status(false, true, false),
+            "blocked-unmeasured"
+        );
+        assert_eq!(baseline_measurement_status(false, false, false), "fail");
+        assert_eq!(baseline_measurement_status(false, false, true), "pass");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn comparator_runtime_rejects_extended_acl_write_grants() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime-image");
+        fs::write(&path, b"sealed-by-mode-only").unwrap();
+        let user = env::var("USER").unwrap();
+        let output = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                &format!("user:{user} allow write"),
+                &path.display().to_string(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "chmod +a did not add a test ACL");
+        assert!(macos_acl::has_extended_acl(&path, false).unwrap());
+        assert!(require_no_extended_acl(&path, "test runtime image").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn comparator_runtime_rejects_evaluator_owned_root_before_any_measurement() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert!(ComparatorRuntime::bind(temporary.path()).is_err());
     }
 
     #[test]
