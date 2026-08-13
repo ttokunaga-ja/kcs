@@ -291,6 +291,7 @@ struct DyldSharedCacheBinding {
     architecture: String,
     uuid: String,
     linked_dylibs: Vec<DyldSharedCacheEdge>,
+    missing_weak_dylibs: Vec<DyldSharedCacheEdge>,
     inspector: FileBinding,
     platform: String,
 }
@@ -3215,10 +3216,12 @@ fn parse_dyld_cache_catalog_optional(
                     *record = DyldCatalogRecord::Ignored;
                     continue;
                 }
-                linked.push(DyldSharedCacheEdge {
+                let edge = DyldSharedCacheEdge {
                     attributes: trimmed.strip_suffix(path).unwrap_or("").trim().to_owned(),
                     path: path.to_owned(),
-                });
+                };
+                validate_shared_cache_edge_attributes(&edge)?;
+                linked.push(edge);
                 edges += 1;
                 if edges > MAX_DYLD_CACHE_EDGES {
                     return Err(QhardError::Input(
@@ -3397,6 +3400,62 @@ fn add_runtime_closure_entry(
     Ok(())
 }
 
+/// A shared-cache edge which is absent from the catalog normally has to be
+/// bound to its exact sealed filesystem image.  The sole exception is dyld's
+/// explicit weak-link contract: a missing weak target is observable through
+/// the catalog edge itself, while a later appearance changes the closure from
+/// absent to bound and therefore changes its digest.
+fn validate_shared_cache_edge_attributes(edge: &DyldSharedCacheEdge) -> Result<bool, QhardError> {
+    if edge.attributes.is_empty() {
+        return Ok(false);
+    }
+    let mut attributes = BTreeSet::new();
+    let mut weak_link = false;
+    for attribute in edge.attributes.split_whitespace() {
+        if !matches!(
+            attribute,
+            "upward" | "delay-init" | "weak-link" | "re-export"
+        ) {
+            return Err(QhardError::Input(format!(
+                "dyld shared-cache edge has unknown attribute {attribute:?}"
+            )));
+        }
+        if !attributes.insert(attribute) {
+            return Err(QhardError::Input(format!(
+                "dyld shared-cache edge repeats attribute {attribute:?}"
+            )));
+        }
+        weak_link |= attribute == "weak-link";
+    }
+    if attributes.is_empty() {
+        return Err(QhardError::Input(
+            "dyld shared-cache edge attributes are whitespace only".into(),
+        ));
+    }
+    Ok(weak_link)
+}
+
+fn classify_shared_cache_physical_edge(
+    edge: &DyldSharedCacheEdge,
+    lookup: Result<(), io::ErrorKind>,
+) -> Result<bool, QhardError> {
+    match lookup {
+        Ok(()) => {
+            validate_shared_cache_edge_attributes(edge)?;
+            Ok(true)
+        }
+        Err(io::ErrorKind::NotFound) if validate_shared_cache_edge_attributes(edge)? => Ok(false),
+        Err(io::ErrorKind::NotFound) => Err(QhardError::Input(format!(
+            "missing required dyld shared-cache physical dependency: {}",
+            edge.path
+        ))),
+        Err(kind) => Err(QhardError::Input(format!(
+            "cannot inspect dyld shared-cache physical dependency {}: {kind}",
+            edge.path
+        ))),
+    }
+}
+
 fn add_shared_cache_closure(
     cache: &DyldSharedCacheCatalog,
     requested: &Path,
@@ -3420,11 +3479,12 @@ fn add_shared_cache_closure(
                 "comparator runtime exceeds shared-cache entry limit".into(),
             ));
         }
-        let binding = DyldSharedCacheBinding {
+        let mut binding = DyldSharedCacheBinding {
             install_name: path.clone(),
             architecture: cache.architecture.clone(),
             uuid: image.uuid.clone(),
             linked_dylibs: image.linked_dylibs.clone(),
+            missing_weak_dylibs: Vec::new(),
             inspector: cache.inspector.clone(),
             platform: cache.platform.clone(),
         };
@@ -3433,13 +3493,19 @@ fn add_shared_cache_closure(
             // catalog.  Do not silently fall back to a filesystem image.
             if cache.images.contains_key(&edge.path) {
                 queue.push(edge.path.clone());
-            } else {
+            } else if classify_shared_cache_physical_edge(
+                edge,
+                fs::symlink_metadata(&edge.path)
+                    .map(|_| ())
+                    .map_err(|e| e.kind()),
+            )? {
                 let physical = validate_sealed_system_library(
                     Path::new(&edge.path),
                     "dyld shared-cache physical dependency",
                 )?;
-                // Optionality does not permit omission: if dyld may load a
-                // weak/delay edge, bind its exact sealed filesystem image.
+                // A present weak/delay edge may still be loaded by dyld, so
+                // bind its exact sealed filesystem image just like a required
+                // edge.
                 add_runtime_closure_entry(
                     files,
                     &physical,
@@ -3447,8 +3513,15 @@ fn add_shared_cache_closure(
                     runtime_mount,
                     total_bytes,
                 )?;
+            } else {
+                // Preserve the verified absence as explicit closure
+                // provenance. A later physical appearance changes this field
+                // and adds a physical binding, so rechecking fails closed.
+                binding.missing_weak_dylibs.push(edge.clone());
             }
         }
+        binding.missing_weak_dylibs.sort();
+        binding.missing_weak_dylibs.dedup();
         entries.insert(path, binding);
     }
     Ok(())
@@ -5335,6 +5408,12 @@ mod tests {
         .is_err());
         assert!(parse_dyld_cache_catalog(
             "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n", "arm64e", test_dyld_info_binding()).is_err());
+        assert!(parse_dyld_cache_catalog(
+            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n    -linked_dylibs:\n        attributes     load path\n        unexpected     /usr/lib/b.dylib\n/usr/lib/b.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n    -linked_dylibs:\n        attributes     load path\n",
+            "arm64e",
+            test_dyld_info_binding()
+        )
+        .is_err());
         for malformed in [
             "/usr/lib/a.dylib [arm64e]:\n",
             "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n",
@@ -5400,6 +5479,149 @@ mod tests {
         closure.get_mut("/usr/lib/b.dylib").unwrap().uuid =
             "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC".into();
         assert_ne!(before, hash_bytes(&serde_jcs::to_vec(&closure).unwrap()));
+    }
+
+    #[test]
+    fn shared_cache_missing_weak_edges_are_recorded_but_required_edges_fail_closed() {
+        let weak = DyldSharedCacheEdge {
+            attributes: "upward weak-link".into(),
+            path: "/usr/lib/__kio_eval_missing_weak_edge.dylib".into(),
+        };
+        let delay_init_weak = DyldSharedCacheEdge {
+            attributes: "delay-init weak-link".into(),
+            path: "/usr/lib/__kio_eval_missing_delay_init_weak_edge.dylib".into(),
+        };
+        let required = DyldSharedCacheEdge {
+            attributes: "upward".into(),
+            path: "/usr/lib/__kio_eval_missing_required_edge.dylib".into(),
+        };
+        assert!(!classify_shared_cache_physical_edge(&weak, Err(io::ErrorKind::NotFound)).unwrap());
+        assert!(!classify_shared_cache_physical_edge(
+            &delay_init_weak,
+            Err(io::ErrorKind::NotFound)
+        )
+        .unwrap());
+        assert!(
+            classify_shared_cache_physical_edge(&required, Err(io::ErrorKind::NotFound)).is_err()
+        );
+        assert!(classify_shared_cache_physical_edge(&weak, Ok(())).unwrap());
+        assert!(validate_shared_cache_edge_attributes(&DyldSharedCacheEdge {
+            attributes: "weak-link unexpected".into(),
+            path: weak.path.clone(),
+        })
+        .is_err());
+
+        let mut images = BTreeMap::new();
+        images.insert(
+            "/usr/lib/__kio_eval_parent_weak_edge.dylib".into(),
+            DyldSharedCacheImage {
+                uuid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".into(),
+                linked_dylibs: vec![weak.clone(), delay_init_weak.clone()],
+            },
+        );
+        let catalog = DyldSharedCacheCatalog {
+            inspector: test_dyld_info_binding(),
+            architecture: "arm64e".into(),
+            platform: "test".into(),
+            images,
+        };
+        let mount = RuntimeMountIdentity {
+            fsid: "test".into(),
+            mount_point: "/sealed".into(),
+            mounted_from: "test".into(),
+            filesystem_type: "test".into(),
+            flags: MACOS_MNT_RDONLY,
+            read_only: true,
+        };
+        let mut closure = BTreeMap::new();
+        let mut files = BTreeMap::new();
+        let mut bytes = 0;
+        add_shared_cache_closure(
+            &catalog,
+            Path::new("/usr/lib/__kio_eval_parent_weak_edge.dylib"),
+            &mut closure,
+            &mut files,
+            &mount,
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(closure.len(), 1);
+        assert_eq!(
+            closure["/usr/lib/__kio_eval_parent_weak_edge.dylib"].linked_dylibs,
+            vec![weak, delay_init_weak]
+        );
+        let mut expected_missing = closure["/usr/lib/__kio_eval_parent_weak_edge.dylib"]
+            .linked_dylibs
+            .clone();
+        expected_missing.sort();
+        assert_eq!(
+            closure["/usr/lib/__kio_eval_parent_weak_edge.dylib"].missing_weak_dylibs,
+            expected_missing
+        );
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn shared_cache_weak_edge_appearance_changes_runtime_closure() {
+        let inspector = test_dyld_info_binding();
+        let weak = DyldSharedCacheEdge {
+            attributes: "weak-link".into(),
+            path: "/usr/lib/__kio_eval_weak_edge_appeared.dylib".into(),
+        };
+        let cache_binding = |missing_weak_dylibs| DyldSharedCacheBinding {
+            install_name: "/usr/lib/__kio_eval_weak_edge_parent.dylib".into(),
+            architecture: "arm64e".into(),
+            uuid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".into(),
+            linked_dylibs: vec![weak.clone()],
+            missing_weak_dylibs,
+            inspector: inspector.clone(),
+            platform: "test".into(),
+        };
+        let cache_entry = |binding: DyldSharedCacheBinding| RuntimeClosureEntry {
+            path: binding.install_name.clone(),
+            trust: RuntimeTrust::MacosDyldSharedCache,
+            binding: RuntimeClosureBinding::DyldSharedCache(binding),
+        };
+        let initial_closure = vec![cache_entry(cache_binding(vec![weak.clone()]))];
+        let closure_digest = |closure: &[RuntimeClosureEntry]| {
+            hash_bytes(&serde_jcs::to_vec(closure).expect("test closure serializes"))
+        };
+        let provenance = ComparatorRuntimeProvenance {
+            root: "/sealed/runtime".into(),
+            mount: RuntimeMountIdentity {
+                fsid: "test".into(),
+                mount_point: "/sealed".into(),
+                mounted_from: "test".into(),
+                filesystem_type: "test".into(),
+                flags: MACOS_MNT_RDONLY,
+                read_only: true,
+            },
+            xattr_policy: "only-com.apple.provenance".into(),
+            inspector: inspector.clone(),
+            closure_sha256: closure_digest(&initial_closure),
+            closure: initial_closure,
+        };
+        let physical_entry = RuntimeClosureEntry {
+            path: weak.path.clone(),
+            trust: RuntimeTrust::MacosSealedSystem,
+            binding: RuntimeClosureBinding::File(FileBinding {
+                path: weak.path.clone(),
+                sha256: "physical-weak-edge".into(),
+                bytes: 1,
+            }),
+        };
+        let mut after_appearance_closure =
+            vec![cache_entry(cache_binding(Vec::new())), physical_entry];
+        after_appearance_closure.sort_by(|left, right| left.path.cmp(&right.path));
+        let after_appearance_digest = closure_digest(&after_appearance_closure);
+        assert_ne!(provenance.closure_sha256, after_appearance_digest);
+        let after_appearance = ResolvedRuntimeClosure {
+            inspector,
+            files: BTreeMap::new(),
+            closure: after_appearance_closure,
+            closure_sha256: after_appearance_digest,
+        };
+        assert!(!runtime_closure_matches(&provenance, &after_appearance));
     }
 
     #[test]

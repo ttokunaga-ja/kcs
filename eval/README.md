@@ -222,7 +222,11 @@ closure を再帰的に解決する。`@loader_path`、`@executable_path`、`@rp
 すべての runtime image が当該 root 内に残ることを要求する。terminal として許す root 外 dependency は、
 root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library、
 または Apple-signed `dyld_info` の strict catalog で UUID と全依存 edge を束縛した dyld shared-cache image
-だけである。catalog の形式不整合、途中切断、未解決 edge は fail-closed にする。
+だけである。catalog の形式不整合、途中切断、未解決 edge は fail-closed にする。ただし catalog と sealed
+filesystem の双方に存在しない edge は、dyld が明示する `weak-link` に限って不在を許可し、親 image の
+edge に加えて `missing_weak_dylibs` として closure provenance へ記録する。通常 link、`delay-init` 単独、
+未知 attribute、または NotFound 以外の検査失敗は引き続き fail-closed である。不在 weak image が後から
+catalog または filesystem に現れた場合は closure digest が変化し、計測を block する。
 実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。
 未解決の `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
 report は runtime root、固定 inspector、各 closure image の canonical path・trust class・SHA-256 と closure digest を
