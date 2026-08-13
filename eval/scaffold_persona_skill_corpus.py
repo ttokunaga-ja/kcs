@@ -21,8 +21,9 @@ if __package__ in (None, ""):
 from eval import persona_fixture_spec as spec
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 OWNER_FILE = ".kio-persona-skill-corpus-owner.json"
+WORKSPACE_FILE = "WORKSPACE.md"
 PRODUCTION_DIRS = (
     "prompts",
     "temp",
@@ -127,14 +128,17 @@ def _ensure_directory_at(parent: int, relative_path: str, label: str) -> int:
         raise
 
 
-def _validate_regular_file(metadata: os.stat_result, label: str) -> None:
+def _validate_regular_file(
+    metadata: os.stat_result, label: str, *, allow_read_only_public: bool = False
+) -> None:
     if not stat.S_ISREG(metadata.st_mode):
         raise ScaffoldError(f"control file is not regular: {label}")
     if metadata.st_nlink != 1:
         raise ScaffoldError(f"control file must have exactly one link: {label}")
     if metadata.st_uid != os.getuid():
         raise ScaffoldError(f"control file is not owned by the current user: {label}")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
+    forbidden_mode = 0o022 if allow_read_only_public else 0o077
+    if stat.S_IMODE(metadata.st_mode) & forbidden_mode:
         raise ScaffoldError(f"control file permissions are too broad: {label}")
 
 
@@ -151,13 +155,19 @@ def _write_new_text_at(directory: int, name: str, text: str, label: str) -> None
     os.fsync(directory)
 
 
-def _read_text_at(directory: int, name: str, label: str) -> str:
+def _read_text_at(
+    directory: int, name: str, label: str, *, allow_read_only_public: bool = False
+) -> str:
     try:
         descriptor = os.open(name, os.O_RDONLY | _FILE_NOFOLLOW, dir_fd=directory)
     except OSError as error:
         raise ScaffoldError(f"cannot open control file {label}: {error}") from error
     try:
-        _validate_regular_file(os.fstat(descriptor), label)
+        _validate_regular_file(
+            os.fstat(descriptor),
+            label,
+            allow_read_only_public=allow_read_only_public,
+        )
         with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
             descriptor = -1
             return stream.read()
@@ -176,16 +186,30 @@ def _write_new_json_at(directory: int, name: str, payload: object, label: str) -
 
 
 def _validate_existing_control_file(
-    directory: int, name: str, label: str, *, expect_json: bool
+    directory: int,
+    name: str,
+    label: str,
+    *,
+    expect_json: bool,
+    allow_read_only_public: bool = False,
 ) -> bool:
     try:
         metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
         return False
-    _validate_regular_file(metadata, label)
+    _validate_regular_file(
+        metadata, label, allow_read_only_public=allow_read_only_public
+    )
     if expect_json:
         try:
-            json.loads(_read_text_at(directory, name, label))
+            json.loads(
+                _read_text_at(
+                    directory,
+                    name,
+                    label,
+                    allow_read_only_public=allow_read_only_public,
+                )
+            )
         except ValueError as error:
             raise ScaffoldError(f"invalid JSON control file: {label}") from error
     return True
@@ -203,7 +227,14 @@ def _owner_payload() -> dict[str, object]:
 def _validate_owner(root_descriptor: int, root: Path) -> None:
     label = os.fspath(root / OWNER_FILE)
     try:
-        actual = json.loads(_read_text_at(root_descriptor, OWNER_FILE, label))
+        actual = json.loads(
+            _read_text_at(
+                root_descriptor,
+                OWNER_FILE,
+                label,
+                allow_read_only_public=True,
+            )
+        )
     except ValueError as error:
         raise ScaffoldError(f"invalid owner marker: {label}") from error
     if actual != _owner_payload():
@@ -302,20 +333,56 @@ def _persona_initial_files(persona: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _workspace_text(persona: dict[str, object]) -> str:
+    slug = f"{persona['id']}-{persona['role']}"
+    return (
+        f"# {slug} workspace\n\n"
+        f"This session owns only the `{slug}/` persona folder.\n\n"
+        "Read the production rules before working:\n\n"
+        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
+        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
+        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
+    )
+
+
+def _validate_workspace_file(directory: int, persona: dict[str, object], label: str) -> None:
+    if not _validate_existing_control_file(
+        directory,
+        WORKSPACE_FILE,
+        label,
+        expect_json=False,
+        allow_read_only_public=True,
+    ):
+        _write_new_text_at(directory, WORKSPACE_FILE, _workspace_text(persona), label)
+        return
+    if (
+        _read_text_at(
+            directory,
+            WORKSPACE_FILE,
+            label,
+            allow_read_only_public=True,
+        )
+        != _workspace_text(persona)
+    ):
+        raise ScaffoldError(f"workspace file does not match this scaffold version: {label}")
+
+
 def scaffold(root: Path, *, resume: bool = False) -> Path:
     root = _absolute_lexical(root)
     root_descriptor = _bind_root(root, resume=resume)
     try:
-        devices = _ensure_directory_at(root_descriptor, "devices", os.fspath(root))
-        production = _ensure_directory_at(root_descriptor, "_production", os.fspath(root))
-        try:
-            for persona in spec.PERSONAS:
-                slug = f"{persona['id']}-{persona['role']}"
+        for persona in spec.PERSONAS:
+            slug = f"{persona['id']}-{persona['role']}"
+            persona_root = _ensure_directory_at(root_descriptor, slug, os.fspath(root / slug))
+            try:
+                _validate_workspace_file(
+                    persona_root, persona, os.fspath(root / slug / WORKSPACE_FILE)
+                )
                 home = _ensure_directory_at(
-                    devices, f"{slug}/home", os.fspath(root / "devices" / slug / "home")
+                    persona_root, "home", os.fspath(root / slug / "home")
                 )
                 control = _ensure_directory_at(
-                    production, slug, os.fspath(root / "_production" / slug)
+                    persona_root, "_production", os.fspath(root / slug / "_production")
                 )
                 try:
                     for relative_path in spec.all_scope_paths(persona):
@@ -326,13 +393,13 @@ def scaffold(root: Path, *, resume: bool = False) -> Path:
                         os.close(descriptor)
 
                     for name, payload in _persona_initial_files(persona).items():
-                        label = os.fspath(root / "_production" / slug / name)
+                        label = os.fspath(root / slug / "_production" / name)
                         if not _validate_existing_control_file(
                             control, name, label, expect_json=True
                         ):
                             _write_new_json_at(control, name, payload, label)
                     for name in ("inventory.jsonl", "provenance.jsonl", "qa.jsonl"):
-                        label = os.fspath(root / "_production" / slug / name)
+                        label = os.fspath(root / slug / "_production" / name)
                         if not _validate_existing_control_file(
                             control, name, label, expect_json=False
                         ):
@@ -341,7 +408,7 @@ def scaffold(root: Path, *, resume: bool = False) -> Path:
                         (".lease.lock", "\0"),
                         ("lease-recovery.jsonl", ""),
                     ):
-                        label = os.fspath(root / "_production" / slug / name)
+                        label = os.fspath(root / slug / "_production" / name)
                         if not _validate_existing_control_file(
                             control, name, label, expect_json=False
                         ):
@@ -349,15 +416,14 @@ def scaffold(root: Path, *, resume: bool = False) -> Path:
                     _validate_existing_control_file(
                         control,
                         "lease.json",
-                        os.fspath(root / "_production" / slug / "lease.json"),
+                        os.fspath(root / slug / "_production" / "lease.json"),
                         expect_json=True,
                     )
                 finally:
                     os.close(home)
                     os.close(control)
-        finally:
-            os.close(devices)
-            os.close(production)
+            finally:
+                os.close(persona_root)
     finally:
         os.close(root_descriptor)
     return root

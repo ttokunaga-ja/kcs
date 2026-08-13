@@ -31,10 +31,10 @@ and status updates in the same turn. An interrupted batch is not final.
    an informational checkpoint and may lag it. An existing lease makes the
    claim fail without mutation, and `show` never discloses the release token.
 3. The owner checks current `inventory.jsonl` counts and writes a batch plan in
-   `_production/<persona>/prompts/`. Never infer progress from directory names.
+   `<persona>/_production/prompts/`. Never infer progress from directory names.
 4. Produce ordinary text/code/data with normal file-writing tools. Route DOCX,
    XLSX, PPTX, both PDF families, and images through their named skills.
-5. Generate and inspect in `_production/<persona>/temp` and `renders`; promote
+5. Generate and inspect in `<persona>/_production/temp` and `renders`; promote
    a reviewed final artifact into `home/` only after it passes artifact QA.
 6. Append one inventory row, one provenance row, and one QA row per promoted
    artifact. Then update `status.json` counts and the precise next action.
@@ -52,9 +52,10 @@ and status updates in the same turn. An interrupted batch is not final.
   file below `home/` contributes one inventory item.
 - A `pdf_scan` counts as one PDF artifact; its intermediate ImageGen source is
   production evidence unless the plan separately calls for a final image file.
-- Assign one subagent to one persona. Do not subdivide a persona among concurrent
-  writers: its narrative, inventory, status, and promotion stream are shared.
-  Parallelism comes from assigning other subagents to other persona folders.
+- Assign one subagent/session to one complete persona folder. Do not subdivide
+  a persona among concurrent writers: its narrative, inventory, status, and
+  promotion stream are shared. Distinct persona folders can run concurrently
+  without collision.
 - Five persona owners may run in parallel. Complete or checkpoint those owners
   before assigning the next wave.
 

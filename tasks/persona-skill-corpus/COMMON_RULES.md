@@ -3,7 +3,7 @@
 1. Treat `eval/persona_fixture_spec.py` as authoritative. Do not rename,
    omit, add, or reweight personas, primary paths, shared secondary paths,
    format families, or percentages. Materialize files only below the assigned
-   `devices/<pXX-role>/home/` root.
+   `<pXX-role>/home/` root.
 2. All content is synthetic: never use real PII, PHI, credentials, secrets,
    customer data, or copied private documents. Use invented but internally
    consistent people, organizations, account numbers, and identifiers.
@@ -25,9 +25,9 @@
    This workflow produces corpus files and artifact QA only; evaluator/index
    validation remains governed by the fixture and its existing tooling.
 8. The normal parallel unit is one worker per persona folder. Because each
-   worker writes only its own `devices/<persona>/home/` and matching
-   `_production/<persona>/`, different personas do not conflict and may run in
-   parallel. The worker must hold that persona's atomic `lease.json`; never run
+   worker/session owns one complete persona folder `<persona>/`, including its `home/`
+   and `_production/` trees. Distinct persona folders do not conflict and may
+   run concurrently. The worker must hold that persona's atomic `lease.json`; never run
    multiple writers inside one persona. Do not alter another worker's folder or
    shared planning files. A Markdown claim alone is not ownership.
 9. At each checkpoint update per-persona status, inventory, failures, decisions,

@@ -1,0 +1,27 @@
+{
+  "kind": "kio-persona-skill-corpus",
+  "personas": [
+    "p01-software-engineer",
+    "p02-site-reliability-engineer",
+    "p03-security-grc-analyst",
+    "p04-ml-research-engineer",
+    "p05-bi-data-analyst",
+    "p06-life-science-researcher",
+    "p07-humanities-researcher",
+    "p08-product-manager",
+    "p09-ux-researcher",
+    "p10-management-consultant",
+    "p11-account-executive",
+    "p12-support-success-lead",
+    "p13-corporate-privacy-counsel",
+    "p14-finance-controller",
+    "p15-recruiter-people-ops",
+    "p16-clinical-researcher",
+    "p17-construction-project-manager",
+    "p18-manufacturing-quality-engineer",
+    "p19-educator-instructional-designer",
+    "p20-investigative-journalist"
+  ],
+  "schema_version": 2,
+  "source_spec": "eval/persona_fixture_spec.py"
+}

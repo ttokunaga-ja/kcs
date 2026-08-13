@@ -45,8 +45,8 @@ class PersonaSkillCorpusLeaseTests(unittest.TestCase):
             )
             recovery_log = (
                 root
-                / "_production"
                 / "p01-software-engineer"
+                / "_production"
                 / "lease-recovery.jsonl"
             ).read_text(encoding="utf-8")
             self.assertIn("user confirmed writer stopped", recovery_log)

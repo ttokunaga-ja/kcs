@@ -75,6 +75,19 @@ class PersonaSkillCorpusDocsTests(unittest.TestCase):
         )
         self.assertNotIn("JPEG", p17)
 
+    def test_runbooks_pin_direct_persona_layout_and_ownership_boundary(self):
+        readme = (DOC_ROOT / "README.md").read_text(encoding="utf-8")
+        rules = (DOC_ROOT / "COMMON_RULES.md").read_text(encoding="utf-8")
+        batch = (DOC_ROOT / "BATCH_PROTOCOL.md").read_text(encoding="utf-8")
+        layout = (DOC_ROOT / "PRODUCTION_LAYOUT.md").read_text(encoding="utf-8")
+        handoff = (DOC_ROOT / "SESSION_HANDOFF.md").read_text(encoding="utf-8")
+        self.assertIn("repository root's `persona-corpus/`", readme)
+        self.assertIn("exactly twenty direct persona", layout)
+        self.assertIn("no central `devices/` or `_production/`", layout)
+        self.assertIn("<root>/<persona>/_production/", layout)
+        for text in (readme, rules, batch, layout, handoff):
+            self.assertIn("complete persona folder", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,3 @@
+# Large corpus artifacts and mutable production state remain local.
+/*/home/**
+/*/_production/**
