@@ -243,7 +243,9 @@ macOS の rga comparator は、ユーザー所有 package prefix を信頼根に
 `@executable_path`、`@rpath`、symlink の runtime 外 escape、未解決または非sealed dependency は
 `blocked-unmeasured` とし、比較の pass を成立させない。明示的に sealed と検証した macOS system library root
 だけを runtime 外 terminal dependency として許し、dynamic loader は sealed `/usr/lib/dyld` に固定し
-`LC_DYLD_ENVIRONMENT` は拒否する。
+`LC_DYLD_ENVIRONMENT` は拒否する。各 comparator subprocess の前後と計測 finalization で closure を再帰的に
+再解決し、初期 binding の canonical path・trust class・SHA-256・closure digest と完全一致しない場合は、
+高優先度の `@rpath` 候補追加を含めて `blocked-unmeasured` とする。
 
 ## 4.2 シナリオ凍結規律
 

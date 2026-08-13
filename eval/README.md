@@ -148,10 +148,13 @@ macOS では evaluator が固定された sealed system `otool` を使って、�
 closure を再帰的に解決する。`@loader_path`、`@executable_path`、`@rpath`、runtime 内 symlink を解決した後、
 すべての runtime image が当該 root 内に残ることを要求する。terminal として許す root 外 dependency は、
 root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library だけである。
-実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。未解決・
-曖昧な `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
+実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。
+未解決の `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
 report は runtime root、固定 inspector、各 closure image の canonical path・trust class・SHA-256 と closure digest を
 記録する。従って runtime verification failure や comparator 欠落は `blocked-unmeasured` であり、pass にはならない。
+各 rga subprocess の実行前後と計測 finalization では load command から closure を再帰的に再解決し、初期 binding の
+canonical path・trust class・SHA-256・closure digest と完全一致させる。途中で高優先度の `@rpath` 候補が追加された場合を
+含め、entry の追加・削除、解決先または内容の変化は `blocked-unmeasured` とする。
 `config/rga-config.json` は `{"custom_adapters":[]}` だけを含む root-owned sealed regular file とし、rga の
 ユーザー設定・任意 custom adapter を取り込ませない。helper lookup の `PATH` も private temporary directory ではなく
 sealed runtime の `bin/` だけに固定する。

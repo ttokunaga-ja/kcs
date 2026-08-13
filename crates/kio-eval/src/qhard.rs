@@ -245,7 +245,7 @@ impl QhardReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct FileBinding {
     path: String,
     sha256: String,
@@ -259,7 +259,7 @@ enum RuntimeTrust {
     MacosSealedSystem,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct RuntimeClosureEntry {
     path: String,
     trust: RuntimeTrust,
@@ -328,6 +328,17 @@ struct ComparatorRuntime {
     provenance: ComparatorRuntimeProvenance,
     files: BTreeMap<PathBuf, RuntimeBoundFile>,
     entry_paths: BTreeMap<String, PathBuf>,
+}
+
+/// A newly resolved dynamic-loader view of an administrator runtime.  This is
+/// deliberately rebuilt rather than inferred from the initial set of images:
+/// dyld's `@rpath` lookup is sensitive to new higher-priority candidates that
+/// were not present when the runtime was first bound.
+struct ResolvedRuntimeClosure {
+    inspector: FileBinding,
+    files: BTreeMap<PathBuf, RuntimeBoundFile>,
+    closure: Vec<RuntimeClosureEntry>,
+    closure_sha256: String,
 }
 #[derive(Debug, Serialize)]
 struct FixtureBinding {
@@ -2161,6 +2172,29 @@ enum ResolvedMachoDependency {
     SealedSystem(PathBuf),
 }
 
+/// Evaluate candidate paths in dyld's priority order.  The probe is invoked
+/// for every candidate, not only the winner, so a malformed or unsealed
+/// lower-priority existing image cannot be hidden behind an earlier match.
+/// `None` is reserved for a genuinely absent candidate; all other inspection
+/// failures are propagated rather than falling through.
+fn first_existing_macho_rpath_candidate<T, R, Probe>(
+    candidates: impl IntoIterator<Item = T>,
+    mut probe: Probe,
+) -> Result<Option<R>, QhardError>
+where
+    Probe: FnMut(&T) -> Result<Option<R>, QhardError>,
+{
+    let mut first = None;
+    for candidate in candidates {
+        if let Some(resolved) = probe(&candidate)? {
+            if first.is_none() {
+                first = Some(resolved);
+            }
+        }
+    }
+    Ok(first)
+}
+
 fn checked_macho_path(value: &str, label: &str) -> Result<(), QhardError> {
     if value.is_empty()
         || value.len() > MAX_MACHO_PATH_BYTES
@@ -2847,7 +2881,7 @@ fn resolve_macho_dependency(
         );
     }
     if let Some(suffix) = install_name.strip_prefix("@rpath/") {
-        let mut candidates = BTreeMap::new();
+        let mut candidates = Vec::new();
         for rpath in rpaths {
             let (candidate, trust) = match rpath {
                 ResolvedMachoRpath::Runtime(path) => (
@@ -2859,57 +2893,33 @@ fn resolve_macho_dependency(
                     RuntimeTrust::MacosSealedSystem,
                 ),
             };
-            match fs::symlink_metadata(&candidate) {
-                Ok(_) => {
-                    let resolved = match trust {
-                        RuntimeTrust::AdministratorRuntime => {
-                            ResolvedMachoDependency::Runtime(resolve_runtime_path(
-                                root,
-                                &candidate,
-                                "Mach-O @rpath dependency",
-                                true,
-                            )?)
-                        }
-                        RuntimeTrust::MacosSealedSystem => {
-                            ResolvedMachoDependency::SealedSystem(validate_sealed_system_library(
-                                &candidate,
-                                "Mach-O @rpath system dependency",
-                            )?)
-                        }
-                    };
-                    let (path, trust) = match resolved {
-                        ResolvedMachoDependency::Runtime(path) => {
-                            (path, RuntimeTrust::AdministratorRuntime)
-                        }
-                        ResolvedMachoDependency::SealedSystem(path) => {
-                            (path, RuntimeTrust::MacosSealedSystem)
-                        }
-                    };
-                    candidates.insert(path, trust);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(QhardError::Input(format!(
-                        "cannot inspect Mach-O @rpath dependency: {error}"
-                    )));
-                }
-            }
+            candidates.push((candidate, trust));
         }
-        return match candidates.len() {
-            0 => Err(QhardError::Input(format!(
-                "Mach-O @rpath dependency is unresolved: {install_name}"
-            ))),
-            1 => {
-                let (path, trust) = candidates.into_iter().next().expect("checked singleton");
-                Ok(match trust {
-                    RuntimeTrust::AdministratorRuntime => ResolvedMachoDependency::Runtime(path),
-                    RuntimeTrust::MacosSealedSystem => ResolvedMachoDependency::SealedSystem(path),
-                })
+        return first_existing_macho_rpath_candidate(candidates, |(candidate, trust)| {
+            match fs::symlink_metadata(candidate) {
+                Ok(_) => match trust {
+                    RuntimeTrust::AdministratorRuntime => {
+                        resolve_runtime_path(root, candidate, "Mach-O @rpath dependency", true)
+                            .map(ResolvedMachoDependency::Runtime)
+                            .map(Some)
+                    }
+                    RuntimeTrust::MacosSealedSystem => {
+                        validate_sealed_system_library(candidate, "Mach-O @rpath system dependency")
+                            .map(ResolvedMachoDependency::SealedSystem)
+                            .map(Some)
+                    }
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(QhardError::Input(format!(
+                    "cannot inspect Mach-O @rpath dependency: {error}"
+                ))),
             }
-            _ => Err(QhardError::Input(format!(
-                "Mach-O @rpath dependency is ambiguous: {install_name}"
-            ))),
-        };
+        })?
+        .ok_or_else(|| {
+            QhardError::Input(format!(
+                "Mach-O @rpath dependency is unresolved: {install_name}"
+            ))
+        });
     }
     let path = Path::new(install_name);
     if !path.is_absolute() {
@@ -3002,6 +3012,82 @@ where
     Ok(())
 }
 
+/// Resolve and bind the complete Mach-O dependency closure as it exists now.
+///
+/// This must be used both at initial binding and during measurement.  Checking
+/// only the old paths is insufficient: a new file in an earlier `LC_RPATH`
+/// directory can make dyld load a different image without changing any old
+/// closure entry.
+fn resolve_runtime_closure(
+    root: &Path,
+    entry_paths: &BTreeMap<String, PathBuf>,
+) -> Result<ResolvedRuntimeClosure, QhardError> {
+    let inspector = trusted_otool()?;
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_u64;
+    let queue = entry_paths
+        .values()
+        .map(|path| PendingMachoImage {
+            path: path.clone(),
+            executable: path.clone(),
+            inherited_rpaths: Vec::new(),
+        })
+        .collect();
+    traverse_macho_closure(
+        queue,
+        inspect_macho,
+        |image, inspection| {
+            expanded_rpaths(
+                root,
+                inspection,
+                &image.path,
+                &image.executable,
+                &image.inherited_rpaths,
+            )
+        },
+        |install_name, image, rpaths| {
+            resolve_macho_dependency(root, install_name, &image.path, &image.executable, rpaths)
+        },
+        |path, trust| add_runtime_closure_entry(&mut files, path, trust, &mut total_bytes),
+    )?;
+    // `inspect_macho` invokes otool repeatedly.  Do not accept a closure
+    // inspected by one system otool binary and attest a different one.
+    let final_inspector = trusted_otool()?;
+    if final_inspector.sha256 != inspector.sha256 {
+        return Err(QhardError::Input(
+            "otool changed while resolving comparator runtime closure".into(),
+        ));
+    }
+    let closure = files
+        .iter()
+        .map(|(path, file)| RuntimeClosureEntry {
+            path: path.display().to_string(),
+            trust: file.trust.clone(),
+            binding: file.binding.clone(),
+        })
+        .collect::<Vec<_>>();
+    let closure_bytes = serde_jcs::to_vec(&closure).map_err(|error| {
+        QhardError::Input(format!(
+            "cannot canonically serialize comparator closure: {error}"
+        ))
+    })?;
+    Ok(ResolvedRuntimeClosure {
+        inspector: final_inspector,
+        files,
+        closure,
+        closure_sha256: hash_bytes(&closure_bytes),
+    })
+}
+
+fn runtime_closure_matches(
+    provenance: &ComparatorRuntimeProvenance,
+    resolved: &ResolvedRuntimeClosure,
+) -> bool {
+    resolved.inspector == provenance.inspector
+        && resolved.closure_sha256 == provenance.closure_sha256
+        && resolved.closure == provenance.closure
+}
+
 impl ComparatorRuntime {
     fn bind(input: &Path) -> Result<Self, QhardError> {
         if !input.is_absolute() {
@@ -3025,7 +3111,6 @@ impl ComparatorRuntime {
             ));
         }
         require_sealed_absolute_path(&root, "comparator runtime root")?;
-        let inspector = trusted_otool()?;
         let bin_directory = resolve_runtime_path(
             &root,
             &root.join("bin"),
@@ -3047,52 +3132,7 @@ impl ComparatorRuntime {
                 resolve_runtime_path(&root, &requested, &format!("runtime bin/{name}"), true)?,
             );
         }
-        let mut files = BTreeMap::new();
-        let mut total_bytes = 0_u64;
-        let mut queue = Vec::new();
-        for path in entry_paths.values() {
-            queue.push(PendingMachoImage {
-                path: path.clone(),
-                executable: path.clone(),
-                inherited_rpaths: Vec::new(),
-            });
-        }
-        traverse_macho_closure(
-            queue,
-            inspect_macho,
-            |image, inspection| {
-                expanded_rpaths(
-                    &root,
-                    inspection,
-                    &image.path,
-                    &image.executable,
-                    &image.inherited_rpaths,
-                )
-            },
-            |install_name, image, rpaths| {
-                resolve_macho_dependency(
-                    &root,
-                    install_name,
-                    &image.path,
-                    &image.executable,
-                    rpaths,
-                )
-            },
-            |path, trust| add_runtime_closure_entry(&mut files, path, trust, &mut total_bytes),
-        )?;
-        let closure = files
-            .iter()
-            .map(|(path, file)| RuntimeClosureEntry {
-                path: path.display().to_string(),
-                trust: file.trust.clone(),
-                binding: file.binding.clone(),
-            })
-            .collect::<Vec<_>>();
-        let closure_bytes = serde_jcs::to_vec(&closure).map_err(|error| {
-            QhardError::Input(format!(
-                "cannot canonically serialize comparator closure: {error}"
-            ))
-        })?;
+        let resolved = resolve_runtime_closure(&root, &entry_paths)?;
         Ok(Self {
             root: root.clone(),
             bin_directory,
@@ -3100,11 +3140,11 @@ impl ComparatorRuntime {
             config,
             provenance: ComparatorRuntimeProvenance {
                 root: root.display().to_string(),
-                inspector,
-                closure_sha256: hash_bytes(&closure_bytes),
-                closure,
+                inspector: resolved.inspector,
+                closure_sha256: resolved.closure_sha256,
+                closure: resolved.closure,
             },
-            files,
+            files: resolved.files,
             entry_paths,
         })
     }
@@ -3216,9 +3256,21 @@ impl ComparatorRuntime {
                 ));
             }
         }
-        if hash_contents && trusted_otool()?.sha256 != self.provenance.inspector.sha256 {
+        // Rebuild the graph, rather than merely checking the paths recorded at
+        // binding time. This re-evaluates every loader token, symlink, sealed
+        // system dependency, LC_LOAD_DYLINKER, and LC_DYLD_ENVIRONMENT control
+        // and catches a newly introduced higher-priority `@rpath` candidate.
+        // Always hash this fresh graph: callers invoke this before and after
+        // each rga subprocess, so an altered image cannot improve a score.
+        let resolved = resolve_runtime_closure(&self.root, &self.entry_paths)?;
+        if resolved.inspector != self.provenance.inspector {
             return Err(QhardError::Input(
                 "otool changed during comparator measurement".into(),
+            ));
+        }
+        if !runtime_closure_matches(&self.provenance, &resolved) {
+            return Err(QhardError::Input(
+                "comparator runtime Mach-O closure changed while bound".into(),
             ));
         }
         Ok(())
@@ -4398,6 +4450,69 @@ mod tests {
             PathBuf::from("/usr/lib/dyld"),
             RuntimeTrust::MacosSealedSystem,
         )));
+    }
+
+    #[test]
+    fn macho_rpath_reresolution_detects_new_higher_priority_candidate() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_dir = temporary.path().join("first");
+        let second_dir = temporary.path().join("second");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first = first_dir.join("libchoice.dylib");
+        let second = second_dir.join("libchoice.dylib");
+        fs::write(&second, b"second").unwrap();
+        let select = || {
+            first_existing_macho_rpath_candidate([first.clone(), second.clone()], |candidate| {
+                match fs::symlink_metadata(candidate) {
+                    Ok(metadata) if metadata.is_file() => Ok(Some(candidate.clone())),
+                    Ok(_) => Err(QhardError::Input("test candidate is not a file".into())),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(QhardError::Input(format!(
+                        "cannot inspect test rpath candidate: {error}"
+                    ))),
+                }
+            })
+            .unwrap()
+            .expect("one rpath candidate exists")
+        };
+
+        // The initial lookup reaches only the second directory.  Adding the
+        // same name to the first directory switches dyld's priority result.
+        let initially_resolved = select();
+        assert_eq!(initially_resolved, second);
+        fs::write(&first, b"first").unwrap();
+        let freshly_resolved = select();
+        assert_eq!(freshly_resolved, first);
+
+        let binding = |path: &Path| FileBinding {
+            path: path.display().to_string(),
+            sha256: "test-digest".into(),
+            bytes: 1,
+        };
+        let initial_entry = RuntimeClosureEntry {
+            path: initially_resolved.display().to_string(),
+            trust: RuntimeTrust::AdministratorRuntime,
+            binding: binding(&initially_resolved),
+        };
+        let provenance = ComparatorRuntimeProvenance {
+            root: temporary.path().display().to_string(),
+            inspector: binding(Path::new("/usr/bin/otool")),
+            closure_sha256: "initial-closure".into(),
+            closure: vec![initial_entry],
+        };
+        let fresh_entry = RuntimeClosureEntry {
+            path: freshly_resolved.display().to_string(),
+            trust: RuntimeTrust::AdministratorRuntime,
+            binding: binding(&freshly_resolved),
+        };
+        let fresh = ResolvedRuntimeClosure {
+            inspector: binding(Path::new("/usr/bin/otool")),
+            files: BTreeMap::new(),
+            closure_sha256: "fresh-closure".into(),
+            closure: vec![fresh_entry],
+        };
+        assert!(!runtime_closure_matches(&provenance, &fresh));
     }
 
     #[test]
