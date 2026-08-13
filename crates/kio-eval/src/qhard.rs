@@ -53,13 +53,16 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug)]
 struct ControlledEnvironment {
     fixed: Vec<(OsString, OsString)>,
-    directories: Vec<(OsString, fs::File)>,
+    // These are always directories in an evaluator-owned private snapshot.
+    // Keep their capabilities even on macOS, where fdescfs cannot resolve a
+    // child path below `/dev/fd/<directory-fd>`.
+    directories: Vec<(OsString, RetainedDirectory)>,
 }
 
 impl ControlledEnvironment {
     fn apply(&self, command: &mut Command) -> Result<(), QhardError> {
         command.env_clear().envs(self.fixed.iter().cloned());
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             use std::os::{fd::AsRawFd, unix::process::CommandExt};
             let retained = self
@@ -67,6 +70,7 @@ impl ControlledEnvironment {
                 .iter()
                 .map(|(name, handle)| {
                     handle
+                        .handle
                         .try_clone()
                         .map(|handle| (name.clone(), handle))
                         .map_err(|e| {
@@ -98,6 +102,19 @@ impl ControlledEnvironment {
             }
             Ok(())
         }
+        // Darwin's fdescfs reports a directory descriptor as a directory but
+        // cannot traverse a child under it (`/dev/fd/N/kio`).  The evaluator
+        // has already copied the fixture into an owner-only private snapshot;
+        // use only those retained snapshot paths on this platform, and bind
+        // them again immediately before/after every subprocess.
+        #[cfg(target_os = "macos")]
+        {
+            self.recheck_private_directories()?;
+            for (name, directory) in &self.directories {
+                command.env(name, &directory.public_path);
+            }
+            Ok(())
+        }
         #[cfg(windows)]
         {
             let _ = command;
@@ -105,6 +122,36 @@ impl ControlledEnvironment {
                 "Q_hard controlled fixture environments require descriptor-bound directories on this platform".into(),
             ))
         }
+    }
+
+    fn recheck_private_directories(&self) -> Result<(), QhardError> {
+        for (name, directory) in &self.directories {
+            let listed = fs::symlink_metadata(&directory.public_path).map_err(|e| {
+                QhardError::Input(format!(
+                    "controlled environment directory {} changed: {e}",
+                    name.to_string_lossy()
+                ))
+            })?;
+            if listed.file_type().is_symlink() || !listed.is_dir() {
+                return Err(QhardError::Input(format!(
+                    "controlled environment directory {} is no longer a real directory",
+                    name.to_string_lossy()
+                )));
+            }
+            let opened = directory.handle.metadata().map_err(|e| {
+                QhardError::Input(format!(
+                    "cannot inspect retained controlled environment directory {}: {e}",
+                    name.to_string_lossy()
+                ))
+            })?;
+            if !same_directory(&listed, &opened) {
+                return Err(QhardError::Input(format!(
+                    "controlled environment directory {} changed while bound",
+                    name.to_string_lossy()
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1199,10 +1246,10 @@ fn qhard_env(
         ("XDG_CACHE_HOME", "xdg-cache"),
     ] {
         let path = base.child(directory, "fixture XDG directory")?;
-        directories.push((OsString::from(key), path.handle));
+        directories.push((OsString::from(key), path));
     }
     let home = base.child("home", "fixture home directory")?;
-    directories.push((OsString::from("HOME"), home.handle));
+    directories.push((OsString::from("HOME"), home));
     let mut forwarded = Vec::new();
     if online {
         for name in ["GEMINI_API_KEY", "MISTRAL_API_KEY"] {
@@ -1341,6 +1388,7 @@ pub fn run(options: QhardOptions) -> Result<QhardReport, QhardError> {
         environment.apply(&mut command)?;
         cwd.configure_command_cwd(&mut command)?;
         let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+        environment.recheck_private_directories()?;
         let titles = if output.status.success() {
             result_paths(&output.stdout, options.k)?
         } else {
@@ -2173,7 +2221,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                     ("XDG_CACHE_HOME", "xdg-cache"),
                 ]
                 .into_iter()
-                .map(|(k, d)| Ok((OsString::from(k), env_base.child(d, "fixture XDG")?.handle)))
+                .map(|(k, d)| Ok((OsString::from(k), env_base.child(d, "fixture XDG")?)))
                 .collect::<Result<Vec<_>, QhardError>>()?,
             };
             if options.online_query {
@@ -2186,6 +2234,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             environment.apply(&mut command)?;
             scope.configure_command_cwd(&mut command)?;
             let ko = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+            environment.recheck_private_directories()?;
             let kt = if ko.status.success() {
                 parse_kio_titles(&ko.stdout)?
             } else {
@@ -2865,17 +2914,36 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn controlled_environment_uses_retained_directory_fd() {
+    fn controlled_environment_exposes_nested_retained_directory() {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/proof"), b"bound").unwrap();
         let bound = RetainedDirectory::open(dir.path(), "environment").unwrap();
         let environment = ControlledEnvironment {
             fixed: vec![],
-            directories: vec![(OsString::from("HOME"), bound.handle)],
+            directories: vec![(OsString::from("HOME"), bound)],
         };
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "test -d \"$HOME\""]);
+        command.args(["-c", "test \"$(cat \"$HOME/nested/proof\")\" = bound"]);
         environment.apply(&mut command).unwrap();
         assert!(command.status().unwrap().success());
+        environment.recheck_private_directories().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn controlled_environment_rejects_replaced_private_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("environment");
+        fs::create_dir(&path).unwrap();
+        let bound = RetainedDirectory::open(&path, "environment").unwrap();
+        fs::rename(&path, dir.path().join("retained")).unwrap();
+        fs::create_dir(&path).unwrap();
+        let environment = ControlledEnvironment {
+            fixed: vec![],
+            directories: vec![(OsString::from("HOME"), bound)],
+        };
+        assert!(environment.recheck_private_directories().is_err());
     }
     #[test]
     fn report_rejects_symlinked_parent() {
