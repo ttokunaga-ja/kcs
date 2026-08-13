@@ -824,22 +824,134 @@ fn rewrite_snapshot_registry(
             "fixture snapshot has no scope registry".into(),
         ));
     }
-    let source = source_root.to_string_lossy();
-    let replacement = snapshot.to_string_lossy();
-    let connection = Connection::open(&registry)
+    let mut connection = Connection::open(&registry)
         .map_err(|e| QhardError::Input(format!("cannot open snapshot scope registry: {e}")))?;
-    let changed = connection
-        .execute(
-            "UPDATE scopes SET kio_path = replace(kio_path, ?1, ?2), root_path = replace(root_path, ?1, ?2) WHERE kio_path LIKE (?1 || '/%') AND root_path LIKE (?1 || '/%')",
-            rusqlite::params![source.as_ref(), replacement.as_ref()],
-        )
-        .map_err(|e| QhardError::Input(format!("cannot rewrite snapshot scope registry: {e}")))?;
-    if changed == 0 {
+    let rows = connection
+        .prepare("SELECT rowid, kio_path, root_path FROM scopes")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| QhardError::Input(format!("cannot read snapshot scope registry: {e}")))?;
+    if rows.is_empty() {
         return Err(QhardError::Input(
             "snapshot scope registry has no fixture-bound scope paths".into(),
         ));
     }
+    // Validate the complete registry before changing it. `repair replica`
+    // follows these paths, so a single retained off-tree row must never gain a
+    // chance to be opened from the evaluator-owned environment.
+    for (_, kio_path, root_path) in &rows {
+        registry_scope_relative(source_root, root_path, kio_path, "source")?;
+    }
+    let transaction = connection.transaction().map_err(|e| {
+        QhardError::Input(format!("cannot start snapshot scope registry rewrite: {e}"))
+    })?;
+    let mut changed = 0usize;
+    for (rowid, kio_path, root_path) in &rows {
+        let root_relative = registry_scope_relative(source_root, root_path, kio_path, "source")?;
+        changed += transaction
+            .execute(
+                "UPDATE scopes SET kio_path = ?1, root_path = ?2 WHERE rowid = ?3",
+                rusqlite::params![
+                    snapshot.join(&root_relative).join(".kio").to_string_lossy(),
+                    snapshot.join(&root_relative).to_string_lossy(),
+                    rowid,
+                ],
+            )
+            .map_err(|e| {
+                QhardError::Input(format!("cannot rewrite snapshot scope registry: {e}"))
+            })?;
+    }
+    if changed != rows.len() {
+        return Err(QhardError::Input(
+            "snapshot scope registry rewrite did not update every scope".into(),
+        ));
+    }
+    transaction.commit().map_err(|e| {
+        QhardError::Input(format!(
+            "cannot commit snapshot scope registry rewrite: {e}"
+        ))
+    })?;
+    let rewritten = connection
+        .prepare("SELECT kio_path, root_path FROM scopes")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| QhardError::Input(format!("cannot verify snapshot scope registry: {e}")))?;
+    if rewritten.len() != rows.len() {
+        return Err(QhardError::Input(
+            "snapshot scope registry changed during rewrite".into(),
+        ));
+    }
+    for (kio_path, root_path) in rewritten {
+        registry_scope_relative(snapshot, &root_path, &kio_path, "snapshot")?;
+    }
     Ok(())
+}
+
+/// Return a lexically-normal scope root relative to `bound_root`, rejecting
+/// registry paths that could point a private evaluator subprocess outside its
+/// snapshot. The registry's Kio directory must be precisely `root/.kio`.
+fn registry_scope_relative(
+    bound_root: &Path,
+    root_path: &str,
+    kio_path: &str,
+    label: &str,
+) -> Result<PathBuf, QhardError> {
+    let root_path = Path::new(root_path);
+    let relative = root_path.strip_prefix(bound_root).map_err(|_| {
+        QhardError::Input(format!(
+            "{label} scope registry root_path escapes bound root"
+        ))
+    })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(QhardError::Input(format!(
+            "{label} scope registry root_path is not a normal descendant"
+        )));
+    }
+    let expected_root = bound_root.join(relative);
+    let expected_root = expected_root.to_str().ok_or_else(|| {
+        QhardError::Input(format!(
+            "{label} bound root cannot be represented in the scope registry"
+        ))
+    })?;
+    // `Path::components` intentionally normalizes repeated separators and
+    // interior `.` segments, so compare the original registry strings too.
+    // This makes the accepted records canonical lexical descendants, rather
+    // than merely paths that happen to resolve below the bound root.
+    if root_path != expected_root {
+        return Err(QhardError::Input(format!(
+            "{label} scope registry root_path is not a canonical descendant"
+        )));
+    }
+    let expected_kio = Path::new(expected_root).join(".kio");
+    let expected_kio = expected_kio.to_str().ok_or_else(|| {
+        QhardError::Input(format!(
+            "{label} expected scope registry kio_path is not UTF-8"
+        ))
+    })?;
+    if kio_path != expected_kio {
+        return Err(QhardError::Input(format!(
+            "{label} scope registry kio_path does not match root_path/.kio"
+        )));
+    }
+    Ok(relative.to_path_buf())
 }
 
 /// The private measurement snapshot has a distinct absolute root, while
@@ -2089,6 +2201,79 @@ fn parse_kio_titles(stdout: &str) -> Result<Vec<String>, QhardError> {
         .collect())
 }
 
+/// The baseline's Kio lane uses one evaluator-owned device environment for
+/// both rebuilding and searching.  Fixture-B's p01 registry is the global
+/// registry; using a per-row persona environment would make the query observe
+/// a different (and, for the minimal fixture, unpopulated) device replica.
+fn baseline_kio_context(
+    indexed_snapshot: &RetainedDirectory,
+    online_query: bool,
+) -> Result<(RetainedDirectory, ControlledEnvironment), QhardError> {
+    let p01 = indexed_snapshot.child("p01", "private indexed p01 persona")?;
+    let scope = discover_scopes(p01)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| QhardError::Input("indexed p01 persona has no scope".into()))?;
+    let env_base = indexed_snapshot
+        .child("env", "fixture env")?
+        .child("p01", "p01 environment")?;
+    let mut environment = ControlledEnvironment {
+        fixed: vec![
+            (
+                OsString::from("PATH"),
+                env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin")),
+            ),
+            (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+            (OsString::from("TZ"), OsString::from("UTC")),
+        ],
+        directories: [
+            ("XDG_CONFIG_HOME", "xdg-config"),
+            ("XDG_DATA_HOME", "xdg-data"),
+            ("XDG_CACHE_HOME", "xdg-cache"),
+        ]
+        .into_iter()
+        .map(|(key, directory)| {
+            Ok((
+                OsString::from(key),
+                env_base.child(directory, "fixture XDG")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, QhardError>>()?,
+    };
+    if online_query {
+        for name in ["GEMINI_API_KEY", "MISTRAL_API_KEY"] {
+            if let Some(value) = env::var_os(name) {
+                environment.fixed.push((OsString::from(name), value));
+            }
+        }
+    }
+    Ok((scope, environment))
+}
+
+/// Recreate the disposable device replica once before the baseline queries.
+/// The fixture intentionally omits this cache, so direct searches would
+/// otherwise honestly report every registered scope as `index_missing`.
+fn rebuild_baseline_replica(
+    kio_path: &Path,
+    scope: &RetainedDirectory,
+    environment: &ControlledEnvironment,
+) -> Result<(), QhardError> {
+    let mut command = Command::new(kio_path);
+    command.args(["--json", "repair", "replica"]);
+    environment.apply(&mut command)?;
+    scope.configure_command_cwd(&mut command)?;
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+    environment.recheck_private_directories()?;
+    if !output.status.success() {
+        return Err(QhardError::Input(format!(
+            "private baseline device replica rebuild failed with exit {}",
+            output.status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(())
+}
+
 pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardError> {
     let attest_opts = BaselineAttestOptions {
         golden: options.golden.clone(),
@@ -2182,20 +2367,15 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
     let mut rows = Vec::new();
     let mut runtime_blocked = None;
     if !missing {
+        let (kio_scope, kio_environment) =
+            baseline_kio_context(&indexed_snapshot, options.online_query)?;
+        rebuild_baseline_replica(&kio_path, &kio_scope, &kio_environment)?;
         'queries: for q in &golden_rows {
             let expected = q
                 .expected
                 .iter()
                 .map(|e| e.file.clone())
                 .collect::<Vec<_>>();
-            let persona = indexed_snapshot.child(&q.persona, "private indexed persona")?;
-            let scope = discover_scopes(persona)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| QhardError::Input("indexed persona has no scope".into()))?;
-            let env_base = indexed_snapshot
-                .child("env", "fixture env")?
-                .child(&q.persona, "persona environment")?;
             let mut command = Command::new(&kio_path);
             command.args([
                 "--json",
@@ -2205,36 +2385,10 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
                 "--limit",
                 "10",
             ]);
-            let mut environment = ControlledEnvironment {
-                fixed: vec![
-                    (
-                        OsString::from("PATH"),
-                        env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin")),
-                    ),
-                    (OsString::from("LANG"), OsString::from("C.UTF-8")),
-                    (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
-                    (OsString::from("TZ"), OsString::from("UTC")),
-                ],
-                directories: [
-                    ("XDG_CONFIG_HOME", "xdg-config"),
-                    ("XDG_DATA_HOME", "xdg-data"),
-                    ("XDG_CACHE_HOME", "xdg-cache"),
-                ]
-                .into_iter()
-                .map(|(k, d)| Ok((OsString::from(k), env_base.child(d, "fixture XDG")?)))
-                .collect::<Result<Vec<_>, QhardError>>()?,
-            };
-            if options.online_query {
-                for name in ["GEMINI_API_KEY", "MISTRAL_API_KEY"] {
-                    if let Some(value) = env::var_os(name) {
-                        environment.fixed.push((OsString::from(name), value));
-                    }
-                }
-            }
-            environment.apply(&mut command)?;
-            scope.configure_command_cwd(&mut command)?;
+            kio_environment.apply(&mut command)?;
+            kio_scope.configure_command_cwd(&mut command)?;
             let ko = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
-            environment.recheck_private_directories()?;
+            kio_environment.recheck_private_directories()?;
             let kt = if ko.status.success() {
                 parse_kio_titles(&ko.stdout)?
             } else {
@@ -2622,6 +2776,53 @@ mod tests {
         assert!(snapshot_baseline_fixture(&source, "sha256:not-the-live-digest").is_err());
     }
 
+    #[test]
+    fn baseline_kio_context_always_uses_the_shared_p01_scope_and_environment() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir_all(fixture.path().join("p01/home/work/.kio")).unwrap();
+        fs::create_dir_all(fixture.path().join("p02/home/work/.kio")).unwrap();
+        for directory in ["xdg-config", "xdg-data", "xdg-cache"] {
+            fs::create_dir_all(fixture.path().join("env/p01").join(directory)).unwrap();
+        }
+        let root = RetainedDirectory::open(fixture.path(), "baseline fixture").unwrap();
+        let expected_env = root.public_path.join("env/p01");
+
+        let (scope, environment) = baseline_kio_context(&root, false).unwrap();
+
+        assert_eq!(
+            scope.public_path,
+            fs::canonicalize(fixture.path().join("p01/home/work")).unwrap()
+        );
+        assert!(environment
+            .directories
+            .iter()
+            .all(|(_, directory)| directory.public_path.starts_with(&expected_env)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_replica_rebuild_reports_a_clear_nonzero_failure() {
+        let false_binary = Path::new("/usr/bin/false");
+        if !false_binary.is_file() {
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir_all(fixture.path().join("p01/home/work/.kio")).unwrap();
+        for directory in ["xdg-config", "xdg-data", "xdg-cache"] {
+            fs::create_dir_all(fixture.path().join("env/p01").join(directory)).unwrap();
+        }
+        let root = RetainedDirectory::open(fixture.path(), "baseline fixture").unwrap();
+        let (scope, environment) = baseline_kio_context(&root, false).unwrap();
+
+        let error = rebuild_baseline_replica(false_binary, &scope, &environment).unwrap_err();
+
+        assert!(matches!(
+            error,
+            QhardError::Input(message)
+                if message == "private baseline device replica rebuild failed with exit 1"
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_snapshot_copies_are_owner_only() {
@@ -2738,6 +2939,48 @@ mod tests {
             .unwrap();
         assert!(path.starts_with(&snapshot.path().to_string_lossy().to_string()));
         assert!(!path.starts_with(&source.path().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn snapshot_registry_rejects_off_tree_scope_before_rewrite() {
+        let source = tempfile::tempdir().unwrap();
+        let snapshot = tempfile::tempdir().unwrap();
+        let registry = snapshot
+            .path()
+            .join("env/qhard/xdg-data/kio/scope-registry.sqlite");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        let connection = Connection::open(&registry).unwrap();
+        connection
+            .execute_batch("CREATE TABLE scopes (kio_path TEXT, root_path TEXT);")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scopes VALUES (?1, ?2)",
+                rusqlite::params![
+                    source.path().join("qhard/a/.kio").to_string_lossy(),
+                    source.path().join("qhard/a").to_string_lossy(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scopes VALUES (?1, ?2)",
+                rusqlite::params!["/private/off-tree/.kio", "/private/off-tree"],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(rewrite_snapshot_registry(snapshot.path(), source.path(), "qhard").is_err());
+
+        let connection = Connection::open(registry).unwrap();
+        let path: String = connection
+            .query_row(
+                "SELECT kio_path FROM scopes ORDER BY rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(path, source.path().join("qhard/a/.kio").to_string_lossy());
     }
 
     #[test]
