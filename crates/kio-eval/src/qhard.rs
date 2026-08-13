@@ -662,7 +662,7 @@ fn fingerprint_directory_excluding(
             &mut FixtureDigestBudget::default(),
         )?;
         let copy = RetainedDirectory::open(&temp.path().join("copy"), "digest copy")?;
-        let _ = fs::remove_file(temp.path().join(excluded));
+        let _ = fs::remove_file(temp.path().join("copy").join(excluded));
         return fingerprint_directory(
             &copy.handle,
             Path::new(""),
@@ -2562,6 +2562,28 @@ mod tests {
         let before = fixture_live_digest(&bound).unwrap();
         fs::write(dir.path().join("evidence.txt"), b"after").unwrap();
         assert_ne!(before, fixture_live_digest(&bound).unwrap());
+    }
+    #[test]
+    fn fixture_content_digest_excludes_only_root_attestation() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("qhard-attestation.json"),
+            b"first attestation",
+        )
+        .unwrap();
+        fs::write(dir.path().join("evidence.txt"), b"original evidence").unwrap();
+        let bound = RetainedDirectory::open(dir.path(), "fixture").unwrap();
+
+        let before = fixture_content_digest(&bound).unwrap();
+        fs::write(
+            dir.path().join("qhard-attestation.json"),
+            b"updated attestation",
+        )
+        .unwrap();
+        assert_eq!(before, fixture_content_digest(&bound).unwrap());
+
+        fs::write(dir.path().join("evidence.txt"), b"changed evidence").unwrap();
+        assert_ne!(before, fixture_content_digest(&bound).unwrap());
     }
     #[test]
     fn live_fixture_digest_rejects_aggregate_byte_overflow_before_reading() {
