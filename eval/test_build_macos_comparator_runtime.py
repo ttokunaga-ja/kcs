@@ -37,6 +37,26 @@ class ComparatorRuntimeBuilderContractTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(source).hexdigest(), match.group(1))
         self.assertIn("' build-runtime \"$admin_dir\" &&", readme)
 
+    def test_readme_normalizes_fixed_copy_acl_before_root_execution(self):
+        readme = README.read_text(encoding="utf-8")
+        install = readme.index("sudo /usr/bin/install -o root -g wheel -m 0500")
+        clear_acl = readme.index(
+            'sudo /bin/chmod -N "$admin_dir" "$admin_dir/build-script"'
+        )
+        execute = readme.index(
+            "sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+        self.assertLess(install, clear_acl)
+        self.assertLess(clear_acl, execute)
+
+    def test_builder_allows_only_the_os_provenance_xattr(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("xattr -c", source)
+        self.assertIn("require_safe_xattrs", source)
+        self.assertIn("names == com.apple.provenance", source)
+        self.assertIn('"xattr_policy":"only-com.apple.provenance"', source)
+        self.assertIn('names not in ([b"com.apple.provenance"],)', source)
+
 
 if __name__ == "__main__":
     unittest.main()

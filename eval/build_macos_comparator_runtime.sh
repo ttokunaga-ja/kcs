@@ -8,6 +8,11 @@ readonly IMAGE=/Library/KioComparatorRuntime/v1.dmg MANIFEST=/Library/KioCompara
 readonly BUILD_ROOT=/private/tmp/kio-comparator-runtime-v1-build VOLUME_NAME=KioComparatorRuntime-v1
 readonly ADMIN_SCRIPT_PREFIX=/private/tmp/kio-comparator-runtime-v1-admin.
 die() { print -u2 -- "error: $*"; exit 1; }
+require_safe_xattrs() {
+  local path=$1 names
+  names=$(/usr/bin/xattr "$path") || die "cannot enumerate extended attributes: $path"
+  [[ -z $names || $names == com.apple.provenance ]] || die "unexpected extended attributes: $path: ${names//$'\n'/,}"
+}
 mode=${1:-build}
 [[ $mode == build || $mode == verify ]] || die "usage: $0 [build|verify]"
 if [[ $mode == verify ]]; then
@@ -68,6 +73,27 @@ class Statfs(ctypes.Structure):
 
 
 libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+XATTR_NOFOLLOW = 0x0001
+libc.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+libc.listxattr.restype = ctypes.c_ssize_t
+
+
+def safe_xattrs(path):
+    encoded_path = os.fsencode(path)
+    size = libc.listxattr(encoded_path, None, 0, XATTR_NOFOLLOW)
+    if size < 0:
+        fail("cannot enumerate xattrs: " + path + ": " + os.strerror(ctypes.get_errno()))
+    if size > 4096:
+        fail("xattr name list exceeds cap: " + path)
+    if size == 0:
+        return
+    buffer = ctypes.create_string_buffer(size)
+    actual = libc.listxattr(encoded_path, buffer, size, XATTR_NOFOLLOW)
+    if actual != size:
+        fail("xattr names changed during inspection: " + path)
+    fields = bytes(buffer.raw[:actual]).split(b"\0")
+    if not fields or fields[-1] != b"" or fields[:-1] != [b"com.apple.provenance"]:
+        fail("unexpected extended attributes: " + path)
 
 
 def mount_info(path=None, fd=None):
@@ -96,6 +122,7 @@ if not public[4] & 1:
     fail("runtime mount is writable; MNT_RDONLY is not set")
 if public[1] != runtime:
     fail("runtime is not the exact mount point")
+safe_xattrs(runtime)
 checked = set()
 for relative in required:
     current = runtime
@@ -114,6 +141,7 @@ for relative in required:
             fail("required runtime path is not sealed: " + os.path.relpath(current, runtime))
         if mount_info(path=current) != public:
             fail("required runtime path is on a different mount: " + os.path.relpath(current, runtime))
+        safe_xattrs(current)
         checked.add(current)
 config = os.path.join(runtime, "config/rga-config.json")
 with open(config, "rb") as handle:
@@ -187,7 +215,7 @@ for p in "$ADMIN_SCRIPT_DIR" "$ADMIN_SCRIPT"; do
   script_stat=$(/usr/bin/stat -f '%u:%g:%p' -- "$p")
   [[ $script_stat == 0:0:* ]] || die "administrator script path must be root:wheel: $p"
   [[ $(( 8#${script_stat##*:} & 8#022 )) -eq 0 ]] || die "administrator script path is group/other writable: $p"
-  [[ -z $(/usr/bin/xattr -l -- "$p") ]] || die "administrator script path has xattrs: $p"
+  require_safe_xattrs "$p"
   [[ $(/bin/ls -lde -- "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "administrator script path has an ACL: $p"
 done
 admin_dir_mode=$(/usr/bin/stat -f '%p' -- "$ADMIN_SCRIPT_DIR")
@@ -215,19 +243,19 @@ trap rollback EXIT
 /bin/mkdir -m 0755 -- "$RUNTIME_ROOT"; created_mountpoint=1; /usr/sbin/chown root:wheel -- "$RUNTIME_ROOT"
 /bin/mkdir -m 0700 -- "$BUILD_ROOT"; created_build=1; /usr/sbin/chown root:wheel -- "$BUILD_ROOT"
 for p in "$MANAGED_ROOT" "$RUNTIME_ROOT" "$BUILD_ROOT"; do
-  /usr/bin/xattr -c -- "$p"
   /bin/chmod -N -- "$p"
+  require_safe_xattrs "$p"
 done
 [[ $(/usr/bin/stat -f '%u:%g:%p' -- "$MANAGED_ROOT") == 0:0:* ]] || die "managed root ownership is unsafe"
 managed_mode=$(/usr/bin/stat -f '%p' -- "$MANAGED_ROOT")
 [[ $(( 8#$managed_mode & 8#022 )) -eq 0 ]] || die "managed root is group/other writable"
-[[ -z $(/usr/bin/xattr -l -- "$MANAGED_ROOT") ]] || die "managed root has xattrs"
+require_safe_xattrs "$MANAGED_ROOT"
 [[ $(/bin/ls -lde -- "$MANAGED_ROOT" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "managed root has an ACL"
 
 # The embedded resolver reads only the hard-coded Homebrew inputs.  It rejects
 # unresolved paths, non-system escapes, and basename collisions before copying.
 /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/python3 -I -E -s - "$BUILD_ROOT" <<'PY'
-import hashlib,json,os,re,shutil,subprocess,sys
+import ctypes,hashlib,json,os,re,shutil,subprocess,sys
 B=os.path.abspath(sys.argv[1]); P=B+"/payload"; BIN=P+"/bin"; LIB=P+"/lib"; CFG=P+"/config"
 for d in (BIN,LIB,CFG): os.makedirs(d,mode=0o755)
 S={"rga":"/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga","rga-preproc":"/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga-preproc","pandoc":"/opt/homebrew/Cellar/pandoc/3.10.1/bin/pandoc","pdftotext":"/opt/homebrew/Cellar/poppler/26.02.0_1/bin/pdftotext","rg":"/opt/homebrew/Cellar/ripgrep/15.1.0/bin/rg"}
@@ -243,6 +271,23 @@ def digest(p):
  with open(p,"rb") as f:
   for b in iter(lambda:f.read(1048576),b""): h.update(b)
  return h.hexdigest()
+XATTR_NOFOLLOW=0x0001
+libc=ctypes.CDLL("/usr/lib/libSystem.B.dylib",use_errno=True)
+libc.listxattr.argtypes=[ctypes.c_char_p,ctypes.c_void_p,ctypes.c_size_t,ctypes.c_int]
+libc.listxattr.restype=ctypes.c_ssize_t
+def safe_xattrs(path):
+ raw=os.fsencode(path); size=libc.listxattr(raw,None,0,XATTR_NOFOLLOW)
+ if size<0: raise RuntimeError("cannot enumerate xattrs: %s: %s"%(path,os.strerror(ctypes.get_errno())))
+ if size>4096: raise RuntimeError("xattr name list exceeds cap: "+path)
+ if size==0: return []
+ buf=ctypes.create_string_buffer(size)
+ got=libc.listxattr(raw,buf,size,XATTR_NOFOLLOW)
+ if got!=size: raise RuntimeError("xattr names changed during inspection: "+path)
+ encoded=bytes(buf.raw[:got]); parts=encoded.split(b"\0")
+ if not parts or parts[-1]!=b"": raise RuntimeError("malformed xattr name list: "+path)
+ names=parts[:-1]
+ if names not in ([b"com.apple.provenance"],): raise RuntimeError("unexpected xattrs: %s: %r"%(path,names))
+ return [name.decode("ascii") for name in names]
 # Never inspect a Homebrew Mach-O image.  First copy the *reviewed pin set*
 # through no-follow descriptors and verify it while streaming.  Everything
 # below, including otool, only receives these root-owned staged regular files.
@@ -393,17 +438,24 @@ while q:
    q.append((x,e))
 if seen != set(D.values()): raise RuntimeError("sealed payload closure differs from reviewed pins")
 open(CFG+"/rga-config.json","wb").write(b'{"custom_adapters":[]}')
-subprocess.check_call(["/usr/bin/xattr","-cr",P]); subprocess.check_call(["/bin/chmod","-RN",P])
+subprocess.check_call(["/bin/chmod","-RN",P])
+payload_xattrs=[]
+for root,dirs,files in os.walk(P):
+ dirs.sort(); files.sort()
+ for name in ["."]+files:
+  path=root if name=="." else os.path.join(root,name)
+  names=safe_xattrs(path)
+  if names: payload_xattrs.append({"path":os.path.relpath(path,P),"names":names})
 for root,dirs,files in os.walk(P):
  os.chmod(root,0o555)
  for n in dirs: os.chmod(os.path.join(root,n),0o555)
  for n in files: os.chmod(os.path.join(root,n),0o555 if root==BIN else 0o444)
-json.dump({"schema_version":1,"runtime_root":"/Library/KioComparatorRuntime/v1","sources_before":[{"path":ORIGINAL[p],"sha256":STAGED_PINS[p],"bytes":PIN_SIZES[ORIGINAL[p]]} for p in sorted(C)],"payload_files":[{"path":os.path.relpath(os.path.join(r,n),P),"sha256":digest(os.path.join(r,n))} for r,_,fs in os.walk(P) for n in sorted(fs)],"closure_images":sorted(os.path.relpath(x,P) for x in seen)},open(B+"/manifest-preimage.json","w"),sort_keys=True,separators=(",",":"))
+json.dump({"schema_version":1,"runtime_root":"/Library/KioComparatorRuntime/v1","xattr_policy":"only-com.apple.provenance","payload_allowed_xattrs":payload_xattrs,"sources_before":[{"path":ORIGINAL[p],"sha256":STAGED_PINS[p],"bytes":PIN_SIZES[ORIGINAL[p]]} for p in sorted(C)],"payload_files":[{"path":os.path.relpath(os.path.join(r,n),P),"sha256":digest(os.path.join(r,n))} for r,_,fs in os.walk(P) for n in sorted(fs)],"closure_images":sorted(os.path.relpath(x,P) for x in seen)},open(B+"/manifest-preimage.json","w"),sort_keys=True,separators=(",",":"))
 PY
 created_image=1
 /usr/bin/hdiutil create -srcfolder "$BUILD_ROOT/payload" -format UDRO -fs "Case-sensitive APFS" -volname "$VOLUME_NAME" -srcowners on -noanyowners "$IMAGE"
 /usr/sbin/chown root:wheel -- "$IMAGE"; /bin/chmod 0444 -- "$IMAGE"
-/usr/bin/xattr -c -- "$IMAGE"; /bin/chmod -N -- "$IMAGE"
+/bin/chmod -N -- "$IMAGE"; require_safe_xattrs "$IMAGE"
 /usr/bin/hdiutil attach -readonly -owners on -nobrowse -noautoopen -mountpoint "$RUNTIME_ROOT" "$IMAGE" >/dev/null; mounted=1
 
 created_manifest=1
@@ -436,6 +488,22 @@ def pinned_source_digest(p,expected,expected_size):
 class Fsid(ctypes.Structure): _fields_=[("val",ctypes.c_int32*2)]
 class Statfs(ctypes.Structure): _fields_=[("f_bsize",ctypes.c_uint32),("f_iosize",ctypes.c_int32),("f_blocks",ctypes.c_uint64),("f_bfree",ctypes.c_uint64),("f_bavail",ctypes.c_uint64),("f_files",ctypes.c_uint64),("f_ffree",ctypes.c_uint64),("f_fsid",Fsid),("f_owner",ctypes.c_uint32),("f_type",ctypes.c_uint32),("f_flags",ctypes.c_uint32),("f_fssubtype",ctypes.c_uint32),("f_fstypename",ctypes.c_char*16),("f_mntonname",ctypes.c_char*1024),("f_mntfromname",ctypes.c_char*1024)]
 libc=ctypes.CDLL("/usr/lib/libSystem.B.dylib",use_errno=True)
+XATTR_NOFOLLOW=0x0001
+libc.listxattr.argtypes=[ctypes.c_char_p,ctypes.c_void_p,ctypes.c_size_t,ctypes.c_int]
+libc.listxattr.restype=ctypes.c_ssize_t
+def safe_xattrs(path):
+ raw=os.fsencode(path); size=libc.listxattr(raw,None,0,XATTR_NOFOLLOW)
+ if size<0: bad("cannot enumerate xattrs: %s: %s"%(path,os.strerror(ctypes.get_errno())))
+ if size>4096: bad("xattr name list exceeds cap: "+path)
+ if size==0: return []
+ buf=ctypes.create_string_buffer(size)
+ got=libc.listxattr(raw,buf,size,XATTR_NOFOLLOW)
+ if got!=size: bad("xattr names changed during inspection: "+path)
+ encoded=bytes(buf.raw[:got]); parts=encoded.split(b"\0")
+ if not parts or parts[-1]!=b"": bad("malformed xattr name list: "+path)
+ names=parts[:-1]
+ if names not in ([b"com.apple.provenance"],): bad("unexpected xattrs: %s: %r"%(path,names))
+ return [name.decode("ascii") for name in names]
 def fsinfo(path=None,fd=None):
  s=Statfs(); rc=libc.fstatfs(fd,ctypes.byref(s)) if fd is not None else libc.statfs(path.encode(),ctypes.byref(s))
  if rc: bad("statfs unavailable: "+os.strerror(ctypes.get_errno()))
@@ -450,15 +518,19 @@ if public != retained: bad("public/retained mount identity differs")
 if not (public[4] & 1): bad("MNT_RDONLY is not set")
 if public[1] != R: bad("mountpoint identity differs from runtime root")
 if "\n " in subprocess.check_output(["/bin/ls","-lde",R],text=True): bad("ACL on runtime root")
-if subprocess.check_output(["/usr/bin/xattr","-l",R],text=True): bad("xattr on runtime root")
+runtime_xattrs=[]
+root_xattrs=safe_xattrs(R)
+if root_xattrs: runtime_xattrs.append({"path":".","names":root_xattrs})
 for root,ds,fs in os.walk(R,followlinks=False):
+ ds.sort(); fs.sort()
  if os.path.islink(root): bad("directory symlink")
  for n in ds+fs:
   p=os.path.join(root,n); q=os.lstat(p)
   if os.path.islink(p): bad("symlink: "+p)
   if q.st_uid!=0 or q.st_gid!=0 or q.st_mode&0o022: bad("unsafe ownership/mode: "+p)
   if "\n " in subprocess.check_output(["/bin/ls","-lde",p],text=True): bad("ACL: "+p)
-  if subprocess.check_output(["/usr/bin/xattr","-l",p],text=True): bad("xattr: "+p)
+  names=safe_xattrs(p)
+  if names: runtime_xattrs.append({"path":os.path.relpath(p,R),"names":names})
 if open(R+"/config/rga-config.json","rb").read()!=b'{"custom_adapters":[]}': bad("wrong config bytes")
 d=json.load(open(pre));
 for x in d["payload_files"]:
@@ -496,10 +568,10 @@ for rel in d["closure_images"]:
    if not target.startswith(R+"/lib/") or not os.path.isfile(target): bad("rpath escape/unresolved: "+raw)
   elif system_load(raw): pass
   else: bad("external or unsealed dependency %s in %s"%(raw,p))
-d.update(image_sha256=dg(I),runtime_read_only=True)
+d.update(image_sha256=dg(I),runtime_read_only=True,runtime_allowed_xattrs=runtime_xattrs)
 with open(M,"w") as f: json.dump(d,f,sort_keys=True,separators=(",",":")); f.write("\n")
 os.chown(M,0,0); os.chmod(M,0o444)
-subprocess.check_call(["/usr/bin/xattr","-c",M]); subprocess.check_call(["/bin/chmod","-N",M])
+subprocess.check_call(["/bin/chmod","-N",M])
 PY
 # The image and manifest live on the writable parent volume, so verify their
 # own replacement boundary after every root write. The mounted payload is
@@ -509,7 +581,7 @@ for p in "$MANAGED_ROOT" "$IMAGE" "$MANIFEST"; do
   artifact_stat=$(/usr/bin/stat -f '%u:%g:%p' -- "$p")
   [[ $artifact_stat == 0:0:* ]] || die "sealed runtime artifact is not root:wheel: $p"
   [[ $(( 8#${artifact_stat##*:} & 8#022 )) -eq 0 ]] || die "sealed runtime artifact is group/other writable: $p"
-  [[ -z $(/usr/bin/xattr -l -- "$p") ]] || die "sealed runtime artifact has xattrs: $p"
+  require_safe_xattrs "$p"
   [[ $(/bin/ls -lde -- "$p" | /usr/bin/wc -l | /usr/bin/tr -d ' ') -eq 1 ]] || die "sealed runtime artifact has an ACL: $p"
 done
 # Never execute Homebrew-derived runtime images while privileged.  An ordinary

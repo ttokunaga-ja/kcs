@@ -137,22 +137,31 @@ hash を記録し、管理者が同じ値を独立に照合してから、root-o
 
 ```bash
 /usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: eb10d92806029eecfa4cdf53fcb24f98b19a37c7b802de808d64ed3e53e6d5af
+# Expected for this revision: 658be05db9a845e331bee00437ca8bf23a374ae381252fb9d8d131ad5736d51f
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
   /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh "$admin_dir/build-script"
+sudo /bin/chmod -N "$admin_dir" "$admin_dir/build-script"
 sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
     cleanup() { /bin/rm -f -- "$script"; /bin/rmdir -- "$admin_dir"; }
     trap cleanup EXIT
-    readonly expected=eb10d92806029eecfa4cdf53fcb24f98b19a37c7b802de808d64ed3e53e6d5af
+    readonly expected=658be05db9a845e331bee00437ca8bf23a374ae381252fb9d8d131ad5736d51f
     readonly actual=$(/usr/bin/shasum -a 256 "$script")
     [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
     /bin/zsh -f "$script" build
     exit $?' build-runtime "$admin_dir" &&
 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify
 ```
+
+macOS は通常ユーザーの checkout から `install` した固定コピーや新規作成物へ、SIP下で除去できない
+`com.apple.provenance` を付与することがある。SIPや他のsecurity controlは変更しない。builderと正式 evaluatorは
+xattr列挙失敗をfail-closedとし、属性が無い場合または名前が正確に`com.apple.provenance`だけの場合に限り受理する。
+値は実行・path解決に使わず、その他のxattr（`com.apple.quarantine`を含む）は拒否する。管理者固定コピー、
+staging、image/manifest、mounted runtimeの全treeで同じpolicyを確認し、manifest/reportにはpolicyを記録する。
+ACLは上の`chmod -N`でroot-private固定コピーだけを正規化し、checkoutやHomebrew sourceには触れない。
+build script自身はownership、mode、ACL、xattr policy、およびSHA-256を再検証し、不一致なら実行前に停止する。
 
 対象は `/Library/KioComparatorRuntime/v1`、image は
 `/Library/KioComparatorRuntime/v1.dmg`、一時 build directory は
@@ -162,7 +171,7 @@ sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
 runtime 内の `@rpath` と `@loader_path` に再束縛され、解決不能、外部 escape、basename collision、
 runtime 外 rpath は fail-closed
 である。UDRO case-sensitive APFS image を read-only mount してから、canonical path、root ownership、
-mode、ACL/xattr、symlink 不在、payload/source digest、固定 config bytes を静的検証し、
+mode、ACL、限定xattr policy、symlink 不在、payload/source digest、固定 config bytes を静的検証し、
 `/Library/KioComparatorRuntime/v1.manifest.json` に記録する。
 
 失敗時は、その invocation が作成した固定 target だけを rollback する。成功後に version を廃止する

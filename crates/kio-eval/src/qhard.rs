@@ -52,6 +52,7 @@ const MAX_MACHO_LOAD_COMMANDS: usize = 256;
 const MAX_MACHO_PATH_BYTES: usize = 4 * 1024;
 const MAX_MACHO_INSPECT_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_DYLD_INFO_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RUNTIME_XATTR_LIST_BYTES: usize = 64 * 1024;
 const MAX_DYLD_CACHE_IMAGES: usize = 16_384;
 const MAX_DYLD_CACHE_EDGES: usize = 262_144;
 // Darwin's `MNT_RDONLY`.  Keep this as a policy constant rather than relying
@@ -359,6 +360,7 @@ struct RuntimeMountIdentity {
 struct ComparatorRuntimeProvenance {
     root: String,
     mount: RuntimeMountIdentity,
+    xattr_policy: String,
     inspector: FileBinding,
     closure_sha256: String,
     closure: Vec<RuntimeClosureEntry>,
@@ -2518,6 +2520,167 @@ mod macos_acl {
     }
 }
 
+/// macOS 26 may attach `com.apple.provenance` to otherwise immutable files.
+/// It is descriptive metadata rather than an authorization control, so it is
+/// the only extended attribute accepted for the administrator runtime.  The
+/// names, not their values, are the policy surface: values are intentionally
+/// never read or parsed.
+#[cfg(target_os = "macos")]
+mod macos_xattr {
+    use super::*;
+
+    const XATTR_NOFOLLOW: c_int = 0x0001;
+
+    unsafe extern "C" {
+        fn listxattr(
+            path: *const c_char,
+            namebuf: *mut c_char,
+            size: usize,
+            options: c_int,
+        ) -> libc::ssize_t;
+    }
+
+    fn list(path: &Path, nofollow: bool) -> Result<BTreeSet<String>, QhardError> {
+        let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            QhardError::Input("comparator runtime path contains an interior NUL".into())
+        })?;
+        let options = if nofollow { XATTR_NOFOLLOW } else { 0 };
+        // SAFETY: `encoded` is NUL-terminated, and a null buffer with size
+        // zero is the documented sizing form of `listxattr`.
+        let size = unsafe { listxattr(encoded.as_ptr(), std::ptr::null_mut(), 0, options) };
+        if size < 0 {
+            return Err(QhardError::Input(format!(
+                "cannot enumerate comparator runtime xattrs: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        let size = usize::try_from(size)
+            .map_err(|_| QhardError::Input("comparator runtime xattr size overflows".into()))?;
+        if size > MAX_RUNTIME_XATTR_LIST_BYTES {
+            return Err(QhardError::Input(
+                "comparator runtime xattr list exceeds the bounded limit".into(),
+            ));
+        }
+        if size == 0 {
+            return Ok(BTreeSet::new());
+        }
+        let mut names = vec![0_u8; size];
+        // SAFETY: `names` has exactly the size returned by `listxattr`; the
+        // no-follow option makes symlink inspection refer to the link itself.
+        let listed = unsafe {
+            listxattr(
+                encoded.as_ptr(),
+                names.as_mut_ptr().cast::<c_char>(),
+                names.len(),
+                options,
+            )
+        };
+        if listed < 0 {
+            return Err(QhardError::Input(format!(
+                "cannot enumerate comparator runtime xattrs: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        let listed = usize::try_from(listed)
+            .map_err(|_| QhardError::Input("comparator runtime xattr size overflows".into()))?;
+        if listed != names.len() {
+            return Err(QhardError::Input(
+                "comparator runtime xattr list changed while enumerating".into(),
+            ));
+        }
+        if names.last() != Some(&0) {
+            return Err(QhardError::Input(
+                "comparator runtime xattr list is not NUL-terminated".into(),
+            ));
+        }
+        let mut result = BTreeSet::new();
+        for raw in names[..names.len() - 1].split(|byte| *byte == 0) {
+            if raw.is_empty() {
+                return Err(QhardError::Input(
+                    "comparator runtime xattr list contains an empty name".into(),
+                ));
+            }
+            let name = std::str::from_utf8(raw).map_err(|_| {
+                QhardError::Input("comparator runtime xattr name is not UTF-8".into())
+            })?;
+            if !result.insert(name.to_owned()) {
+                return Err(QhardError::Input(
+                    "comparator runtime xattr list contains a duplicate name".into(),
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    pub(super) fn require_allowed(path: &Path, nofollow: bool) -> Result<(), QhardError> {
+        let names = list(path, nofollow)?;
+        if runtime_xattr_names_allowed(&names) {
+            return Ok(());
+        }
+        Err(QhardError::Input(format!(
+            "comparator runtime has forbidden extended attributes: {}",
+            names.into_iter().collect::<Vec<_>>().join(", ")
+        )))
+    }
+}
+
+fn runtime_xattr_names_allowed(names: &BTreeSet<String>) -> bool {
+    names.is_empty() || names == &BTreeSet::from(["com.apple.provenance".to_owned()])
+}
+
+#[cfg(target_os = "macos")]
+fn require_allowed_runtime_xattrs(path: &Path, label: &str) -> Result<(), QhardError> {
+    macos_xattr::require_allowed(path, false)
+        .map_err(|error| QhardError::Input(format!("{label} xattr validation failed: {error}")))
+}
+
+#[cfg(target_os = "macos")]
+fn require_allowed_runtime_xattrs_link(path: &Path, label: &str) -> Result<(), QhardError> {
+    macos_xattr::require_allowed(path, true).map_err(|error| {
+        QhardError::Input(format!("{label} symlink xattr validation failed: {error}"))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn require_allowed_runtime_xattrs(_path: &Path, label: &str) -> Result<(), QhardError> {
+    Err(QhardError::Input(format!(
+        "{label} requires a sealed macOS comparator runtime"
+    )))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn require_allowed_runtime_xattrs_link(_path: &Path, label: &str) -> Result<(), QhardError> {
+    Err(QhardError::Input(format!(
+        "{label} requires a sealed macOS comparator runtime"
+    )))
+}
+
+/// Inspect the runtime root and every component used to reach it.  This is
+/// separate from `require_sealed_absolute_path` because sealed macOS system
+/// libraries are trusted under their own platform policy; the explicit xattr
+/// allowlist belongs only to the administrator-provided runtime.
+fn require_allowed_runtime_path_xattrs(path: &Path, label: &str) -> Result<(), QhardError> {
+    if !path.is_absolute() {
+        return Err(QhardError::Input(format!("{label} must be absolute")));
+    }
+    let mut current = PathBuf::from("/");
+    require_allowed_runtime_xattrs(&current, label)?;
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            current.push(name);
+            let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                QhardError::Input(format!("cannot inspect {label} path component: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() {
+                require_allowed_runtime_xattrs_link(&current, label)?;
+            } else {
+                require_allowed_runtime_xattrs(&current, label)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn require_no_extended_acl(path: &Path, label: &str) -> Result<(), QhardError> {
     if macos_acl::has_extended_acl(path, false)? {
@@ -2657,6 +2820,7 @@ fn resolve_runtime_path(
             .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
         if metadata.file_type().is_symlink() {
             require_no_extended_acl_link(&raw, label)?;
+            require_allowed_runtime_xattrs_link(&raw, label)?;
             // Symlinks are permitted only as administrator-owned aliases that
             // resolve back into this exact runtime root. The resolved target
             // is then checked below as a sealed canonical path.
@@ -2679,9 +2843,15 @@ fn resolve_runtime_path(
             )));
         } else {
             require_no_extended_acl(&raw, label)?;
+            require_allowed_runtime_xattrs(&raw, label)?;
         }
     }
     let canonical = canonical_path_within(root, requested, label)?;
+    // The requested spelling may traverse an allowed runtime-internal
+    // symlink. Revalidate the canonical target as well, so xattrs on the
+    // target's own path components and final closure file cannot hide behind
+    // the alias.
+    require_allowed_runtime_path_xattrs(&canonical, label)?;
     require_sealed_absolute_path(&canonical, label)?;
     let metadata = fs::symlink_metadata(&canonical)
         .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
@@ -3846,6 +4016,7 @@ impl ComparatorRuntime {
             ));
         }
         require_sealed_absolute_path(&root, "comparator runtime root")?;
+        require_allowed_runtime_path_xattrs(&root, "comparator runtime root")?;
         let root_handle = RetainedDirectory::open(&root, "comparator runtime root")?;
         let mount = inspect_runtime_mount(&root)?;
         let retained_mount = inspect_runtime_mount_fd(&root_handle.handle)?;
@@ -3896,6 +4067,7 @@ impl ComparatorRuntime {
             provenance: ComparatorRuntimeProvenance {
                 root: root.display().to_string(),
                 mount,
+                xattr_policy: "only-com.apple.provenance".into(),
                 inspector: resolved.inspector,
                 closure_sha256: resolved.closure_sha256,
                 closure: resolved.closure,
@@ -3925,6 +4097,7 @@ impl ComparatorRuntime {
         }
         runtime_public_root_matches_handle(&self.root, &self.root_handle)?;
         require_sealed_absolute_path(&self.root, "comparator runtime root")?;
+        require_allowed_runtime_path_xattrs(&self.root, "comparator runtime root")?;
         let bin_directory = resolve_runtime_path(
             &self.root,
             &self.root.join("bin"),
@@ -5436,6 +5609,7 @@ mod tests {
                 flags: MACOS_MNT_RDONLY,
                 read_only: true,
             },
+            xattr_policy: "only-com.apple.provenance".into(),
             inspector: binding(Path::new("/usr/bin/otool")),
             closure_sha256: "initial-closure".into(),
             closure: vec![initial_entry],
@@ -5489,6 +5663,43 @@ mod tests {
             &bound,
             &nested_read_only
         ));
+    }
+
+    #[test]
+    fn comparator_runtime_xattr_policy_allows_only_empty_or_provenance() {
+        assert!(runtime_xattr_names_allowed(&BTreeSet::new()));
+        assert!(runtime_xattr_names_allowed(&BTreeSet::from([
+            "com.apple.provenance".to_owned(),
+        ])));
+        assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
+            "com.example.untrusted".to_owned(),
+        ])));
+        assert!(!runtime_xattr_names_allowed(&BTreeSet::from([
+            "com.apple.provenance".to_owned(),
+            "com.example.untrusted".to_owned(),
+        ])));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn comparator_runtime_rejects_unexpected_xattr_without_reading_value() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime-image");
+        fs::write(&path, b"sealed-by-mode-only").unwrap();
+        let output = Command::new("/usr/bin/xattr")
+            .args([
+                "-w",
+                "com.kio.untrusted",
+                "opaque",
+                &path.display().to_string(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "xattr did not add a test attribute"
+        );
+        assert!(require_allowed_runtime_xattrs(&path, "test runtime image").is_err());
     }
 
     #[cfg(target_os = "macos")]
