@@ -3563,37 +3563,7 @@ fn resolve_runtime_rpath(
     owner: &Path,
     executable: &Path,
 ) -> Result<ResolvedMachoRpath, QhardError> {
-    let candidate = if let Some(suffix) = raw.strip_prefix("@loader_path/") {
-        safe_macho_join(
-            owner.parent().ok_or_else(|| {
-                QhardError::Input("Mach-O loader image has no parent directory".into())
-            })?,
-            suffix,
-            root,
-            "Mach-O @loader_path rpath",
-        )?
-    } else if let Some(suffix) = raw.strip_prefix("@executable_path/") {
-        safe_macho_join(
-            executable.parent().ok_or_else(|| {
-                QhardError::Input("Mach-O executable has no parent directory".into())
-            })?,
-            suffix,
-            root,
-            "Mach-O @executable_path rpath",
-        )?
-    } else if raw.starts_with("@rpath/") {
-        return Err(QhardError::Input(
-            "LC_RPATH must not itself use @rpath".into(),
-        ));
-    } else {
-        let path = Path::new(raw);
-        if !path.is_absolute() {
-            return Err(QhardError::Input(
-                "LC_RPATH must be absolute, @loader_path, or @executable_path".into(),
-            ));
-        }
-        path.to_path_buf()
-    };
+    let candidate = runtime_rpath_candidate(root, raw, owner, executable)?;
     if candidate.starts_with(root) {
         let resolved = resolve_runtime_path(root, &candidate, "Mach-O rpath", false)?;
         require_runtime_mount(runtime_mount, &resolved, "Mach-O runtime rpath")?;
@@ -3615,6 +3585,70 @@ fn resolve_runtime_rpath(
         ));
     }
     Ok(ResolvedMachoRpath::SealedSystem(canonical))
+}
+
+/// Expand one LC_RPATH value before binding it to either the dedicated runtime
+/// mount or a sealed-system root.  The exact dyld tokens are valid rpaths: the
+/// omitted suffix denotes the owning image's or executable's parent directory.
+fn runtime_rpath_candidate(
+    root: &Path,
+    raw: &str,
+    owner: &Path,
+    executable: &Path,
+) -> Result<PathBuf, QhardError> {
+    checked_macho_path(raw, "Mach-O rpath")?;
+    if raw == "@loader_path" {
+        return safe_macho_join(
+            owner.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O loader image has no parent directory".into())
+            })?,
+            ".",
+            root,
+            "Mach-O @loader_path rpath",
+        );
+    }
+    if let Some(suffix) = raw.strip_prefix("@loader_path/") {
+        return safe_macho_join(
+            owner.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O loader image has no parent directory".into())
+            })?,
+            suffix,
+            root,
+            "Mach-O @loader_path rpath",
+        );
+    }
+    if raw == "@executable_path" {
+        return safe_macho_join(
+            executable.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O executable has no parent directory".into())
+            })?,
+            ".",
+            root,
+            "Mach-O @executable_path rpath",
+        );
+    }
+    if let Some(suffix) = raw.strip_prefix("@executable_path/") {
+        return safe_macho_join(
+            executable.parent().ok_or_else(|| {
+                QhardError::Input("Mach-O executable has no parent directory".into())
+            })?,
+            suffix,
+            root,
+            "Mach-O @executable_path rpath",
+        );
+    }
+    if raw.starts_with("@rpath/") {
+        return Err(QhardError::Input(
+            "LC_RPATH must not itself use @rpath".into(),
+        ));
+    }
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(QhardError::Input(
+            "LC_RPATH must be absolute, @loader_path, or @executable_path".into(),
+        ));
+    }
+    Ok(path.to_path_buf())
 }
 
 fn expanded_rpaths(
@@ -5722,6 +5756,54 @@ mod tests {
             "test",
         )
         .is_err());
+    }
+
+    #[test]
+    fn macho_rpath_exact_tokens_resolve_to_their_parent_directories() {
+        let root = Path::new("/sealed/runtime");
+        let owner = Path::new("/sealed/runtime/lib/nested/libowner.dylib");
+        let executable = Path::new("/sealed/runtime/bin/rga");
+
+        assert_eq!(
+            runtime_rpath_candidate(root, "@loader_path", owner, executable).unwrap(),
+            PathBuf::from("/sealed/runtime/lib/nested")
+        );
+        assert_eq!(
+            runtime_rpath_candidate(root, "@executable_path", owner, executable).unwrap(),
+            PathBuf::from("/sealed/runtime/bin")
+        );
+        assert_eq!(
+            runtime_rpath_candidate(root, "@loader_path/../lib", owner, executable).unwrap(),
+            PathBuf::from("/sealed/runtime/lib/lib")
+        );
+        assert_eq!(
+            runtime_rpath_candidate(root, "@executable_path/../lib", owner, executable).unwrap(),
+            PathBuf::from("/sealed/runtime/lib")
+        );
+    }
+
+    #[test]
+    fn macho_rpath_exact_tokens_preserve_runtime_bounds_and_relative_rejection() {
+        let root = Path::new("/sealed/runtime");
+        let owner = Path::new("/sealed/runtime/lib/libowner.dylib");
+        let executable = Path::new("/sealed/runtime/bin/rga");
+
+        assert!(
+            runtime_rpath_candidate(root, "@loader_path/../../outside", owner, executable).is_err()
+        );
+        assert!(
+            runtime_rpath_candidate(root, "@executable_path/../../outside", owner, executable)
+                .is_err()
+        );
+        assert!(runtime_rpath_candidate(
+            root,
+            "@loader_path",
+            Path::new("/outside/libowner.dylib"),
+            executable
+        )
+        .is_err());
+        assert!(runtime_rpath_candidate(root, "lib", owner, executable).is_err());
+        assert!(runtime_rpath_candidate(root, "@rpath/lib", owner, executable).is_err());
     }
 
     #[test]
