@@ -127,6 +127,54 @@ target/release/kio-eval benchmark baseline \
 Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
 新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
 
+### macOS 比較器 runtime の管理者構築
+
+正式 baseline 用の runtime は、既存の Homebrew tree を変更せず、専用の read-only image として
+構築する。checkout 内の script を直接 root 実行してはならない。通常ユーザーがまず commit/worktree の
+hash を記録し、管理者が同じ値を独立に照合してから、root-owned 固定コピーを install する。スクリプト
+自身は `sudo` を呼ばず、パスワードを読まない。下の SHA-256 はこの revision の script 用であり、更新時は
+必ず再記録・再照合する。
+
+```bash
+/usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
+# Expected for this revision: 7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
+sudo /bin/chmod 0700 "$admin_dir"
+sudo /usr/bin/install -o root -g wheel -m 0500 \
+  /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh "$admin_dir/build-script"
+sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
+    cleanup() { /bin/rm -f -- "$script"; /bin/rmdir -- "$admin_dir"; }
+    trap cleanup EXIT
+    readonly expected=7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+    readonly actual=$(/usr/bin/shasum -a 256 "$script")
+    [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
+    /bin/zsh -f "$script" build
+    exit $?' build-runtime "$admin_dir"
+```
+
+対象は `/Library/KioComparatorRuntime/v1`、image は
+`/Library/KioComparatorRuntime/v1.dmg`、一時 build directory は
+`/private/tmp/kio-comparator-runtime-v1-build` に固定される。いずれかが既に存在すれば上書きせず停止する。
+`/opt/homebrew` は読み取り専用の入力としてだけ利用し、`rga`、`rga-preproc`、`pandoc`、`pdftotext`、
+`rg` と再帰的な非 system Mach-O closure を staging へ複製する。load command は
+runtime 内の `@rpath` と `@loader_path` に再束縛され、解決不能、外部 escape、basename collision、
+runtime 外 rpath は fail-closed
+である。UDRO case-sensitive APFS image を read-only mount してから、canonical path、root ownership、
+mode、ACL/xattr、symlink 不在、payload/source digest、固定 config bytes を静的検証し、
+`/Library/KioComparatorRuntime/v1.manifest.json` に記録する。
+
+失敗時は、その invocation が作成した固定 target だけを rollback する。成功後に version を廃止する
+場合の手順は script が表示する `hdiutil detach`、image/manifest の削除、空の mountpoint/managed root の
+`rmdir` に限定する。既存の `v1` を上書きして更新することはない。
+
+構築後の tool smoke は root で実行してはならない。管理者 shell を終了してから、通常ユーザーで
+`/absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify` を実行する。これは限定的な
+smoke であり、5 executable と PDF/DOCX adapter の helper lookup を sealed runtime の `bin/` だけで
+実行する。rga 0.10.10 の PDF adapter は `--rga-no-cache` では失敗するため、verify と正式 evaluator は
+ambient cache ではなく evaluator 所有の一時 0700 cache を明示する。smoke は baseline evaluator の
+authoritative preflight を置き換えない。
+
 比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
 入力に使うため、可変な public corpus path を再オープンしない。`kio` は検査済み regular executable
 の private snapshot に束縛する。`rga` lane は、ユーザー所有の Homebrew tree を比較器 runtime として
@@ -147,7 +195,9 @@ config/rga-config.json
 macOS では evaluator が固定された sealed system `otool` を使って、この5 executable の Mach-O load command
 closure を再帰的に解決する。`@loader_path`、`@executable_path`、`@rpath`、runtime 内 symlink を解決した後、
 すべての runtime image が当該 root 内に残ることを要求する。terminal として許す root 外 dependency は、
-root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library だけである。
+root 所有・非書込みで再確認した `/usr/lib` または `/System/Library` 下の macOS sealed-system library、
+または Apple-signed `dyld_info` の strict catalog で UUID と全依存 edge を束縛した dyld shared-cache image
+だけである。catalog の形式不整合、途中切断、未解決 edge は fail-closed にする。
 実行ファイルの dynamic loader は sealed `/usr/lib/dyld` のみ、`LC_DYLD_ENVIRONMENT` は禁止する。
 未解決の `@rpath`、runtime 外への escape、非sealed component、closure の変更は fail-closed にする。
 report は runtime root、固定 inspector、各 closure image の canonical path・trust class・SHA-256 と closure digest を
