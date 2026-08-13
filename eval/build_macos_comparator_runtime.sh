@@ -12,6 +12,114 @@ mode=${1:-build}
 [[ $mode == build || $mode == verify ]] || die "usage: $0 [build|verify]"
 if [[ $mode == verify ]]; then
   [[ ${EUID} -ne 0 ]] || die "verify must be run by an ordinary user, never root"
+  [[ $(/usr/bin/uname -s) == Darwin ]] || die "macOS only"
+  [[ -d $RUNTIME_ROOT && ! -L $RUNTIME_ROOT ]] || die "runtime is not built and mounted: $RUNTIME_ROOT"
+  /usr/bin/env -i HOME=/var/empty PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    /usr/bin/python3 -I -E -s - "$RUNTIME_ROOT" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+runtime = sys.argv[1]
+required = [
+    "bin/rga",
+    "bin/rga-preproc",
+    "bin/pandoc",
+    "bin/pdftotext",
+    "bin/rg",
+    "config/rga-config.json",
+]
+
+
+def fail(message):
+    raise SystemExit("verify preflight failed: " + message)
+
+
+if os.path.realpath(runtime) != runtime:
+    fail("runtime path is not canonical")
+root = os.lstat(runtime)
+if not stat.S_ISDIR(root.st_mode) or root.st_uid != 0 or root.st_gid != 0 or root.st_mode & 0o022:
+    fail("runtime root ownership, type, or mode is unsafe")
+
+
+class Fsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class Statfs(ctypes.Structure):
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", Fsid),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+    ]
+
+
+libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+
+
+def mount_info(path=None, fd=None):
+    value = Statfs()
+    result = libc.fstatfs(fd, ctypes.byref(value)) if fd is not None else libc.statfs(path.encode(), ctypes.byref(value))
+    if result:
+        fail("statfs is unavailable: " + os.strerror(ctypes.get_errno()))
+    return (
+        tuple(value.f_fsid.val),
+        value.f_mntonname.split(b"\0", 1)[0].decode(),
+        value.f_mntfromname.split(b"\0", 1)[0].decode(),
+        value.f_type,
+        value.f_flags,
+    )
+
+
+public = mount_info(path=runtime)
+descriptor = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    retained = mount_info(fd=descriptor)
+finally:
+    os.close(descriptor)
+if public != retained:
+    fail("public and retained mount identities differ")
+if not public[4] & 1:
+    fail("runtime mount is writable; MNT_RDONLY is not set")
+if public[1] != runtime:
+    fail("runtime is not the exact mount point")
+checked = set()
+for relative in required:
+    current = runtime
+    components = relative.split("/")
+    for index, component in enumerate(components):
+        current = os.path.join(current, component)
+        if current in checked:
+            continue
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            fail("required runtime entry is missing: " + relative)
+        final = index == len(components) - 1
+        expected_type = stat.S_ISREG(metadata.st_mode) if final else stat.S_ISDIR(metadata.st_mode)
+        if not expected_type or metadata.st_uid != 0 or metadata.st_gid != 0 or metadata.st_mode & 0o022:
+            fail("required runtime path is not sealed: " + os.path.relpath(current, runtime))
+        if mount_info(path=current) != public:
+            fail("required runtime path is on a different mount: " + os.path.relpath(current, runtime))
+        checked.add(current)
+config = os.path.join(runtime, "config/rga-config.json")
+with open(config, "rb") as handle:
+    if handle.read() != b'{"custom_adapters":[]}':
+        fail("rga config bytes differ from the sealed contract")
+PY
   readonly VERIFY_ROOT=/private/tmp/kio-comparator-runtime-v1-verify
   [[ ! -e $VERIFY_ROOT && ! -L $VERIFY_ROOT ]] || die "refusing to reuse verifier directory: $VERIFY_ROOT"
   /bin/mkdir -m 0700 -- "$VERIFY_ROOT"
@@ -71,10 +179,10 @@ PY
 fi
 [[ ${EUID} -eq 0 ]] || die "administrator execution required; run this script explicitly with sudo (the script never invokes sudo)"
 [[ $(/usr/bin/uname -s) == Darwin ]] || die "macOS only"
-readonly ADMIN_SCRIPT=$(/usr/bin/realpath -- "$0")
+readonly ADMIN_SCRIPT=${0:A}
 readonly ADMIN_SCRIPT_DIR=${ADMIN_SCRIPT:h}
 [[ ${${ADMIN_SCRIPT}:t} == build-script && $ADMIN_SCRIPT_DIR == ${ADMIN_SCRIPT_PREFIX}* ]] || die "root build must execute a root-private administrator-reviewed script copy"
-[[ "$(/usr/bin/realpath -- "$ADMIN_SCRIPT_DIR")" == "$ADMIN_SCRIPT_DIR" && ! -L $ADMIN_SCRIPT && ! -L $ADMIN_SCRIPT_DIR ]] || die "administrator script path must be canonical and symlink-free"
+[[ "$0" == "$ADMIN_SCRIPT" && ${ADMIN_SCRIPT_DIR:A} == "$ADMIN_SCRIPT_DIR" && ! -L $ADMIN_SCRIPT && ! -L $ADMIN_SCRIPT_DIR ]] || die "administrator script path must be canonical and symlink-free"
 for p in "$ADMIN_SCRIPT_DIR" "$ADMIN_SCRIPT"; do
   script_stat=$(/usr/bin/stat -f '%u:%g:%p' -- "$p")
   [[ $script_stat == 0:0:* ]] || die "administrator script path must be root:wheel: $p"
@@ -88,7 +196,7 @@ for p in "$MANAGED_ROOT" "$RUNTIME_ROOT" "$IMAGE" "$MANIFEST" "$BUILD_ROOT"; do
  if [[ -e $p || -L $p ]]; then
   print -u2 -- "existing target (no writes): $p"
   /usr/bin/stat -f 'realpath=%N uid=%u gid=%g mode=%Sp' -- "$p" 2>&1 || true
-  /usr/bin/realpath -- "$p" 2>&1 || true
+  print -u2 -r -- "canonical=${p:A}"
   exit 1
  fi
 done

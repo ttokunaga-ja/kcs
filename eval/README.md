@@ -137,7 +137,7 @@ hash を記録し、管理者が同じ値を独立に照合してから、root-o
 
 ```bash
 /usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: 7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+# Expected for this revision: eb10d92806029eecfa4cdf53fcb24f98b19a37c7b802de808d64ed3e53e6d5af
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
@@ -146,11 +146,12 @@ sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
     cleanup() { /bin/rm -f -- "$script"; /bin/rmdir -- "$admin_dir"; }
     trap cleanup EXIT
-    readonly expected=7d1d45b035ab76dd904a9c14278e79dd6c60f8ad4a81a31b67ee1c8fb77f8033
+    readonly expected=eb10d92806029eecfa4cdf53fcb24f98b19a37c7b802de808d64ed3e53e6d5af
     readonly actual=$(/usr/bin/shasum -a 256 "$script")
     [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
     /bin/zsh -f "$script" build
-    exit $?' build-runtime "$admin_dir"
+    exit $?' build-runtime "$admin_dir" &&
+/absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify
 ```
 
 対象は `/Library/KioComparatorRuntime/v1`、image は
@@ -168,8 +169,9 @@ mode、ACL/xattr、symlink 不在、payload/source digest、固定 config bytes 
 場合の手順は script が表示する `hdiutil detach`、image/manifest の削除、空の mountpoint/managed root の
 `rmdir` に限定する。既存の `v1` を上書きして更新することはない。
 
-構築後の tool smoke は root で実行してはならない。管理者 shell を終了してから、通常ユーザーで
-`/absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify` を実行する。これは限定的な
+構築後の tool smoke は root で実行してはならない。上の `&&` により、管理者 build が成功した場合だけ
+通常ユーザーの `verify` へ進む。`verify` 自身も runtime の必須 file、固定 config、canonical mount point、
+retained descriptor と一致する mount identity、および `MNT_RDONLY` を tool 起動前に検証する。これは限定的な
 smoke であり、5 executable と PDF/DOCX adapter の helper lookup を sealed runtime の `bin/` だけで
 実行する。rga 0.10.10 の PDF adapter は `--rga-no-cache` では失敗するため、verify と正式 evaluator は
 ambient cache ではなく evaluator 所有の一時 0700 cache を明示する。smoke は baseline evaluator の
