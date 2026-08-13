@@ -3495,9 +3495,10 @@ fn add_shared_cache_closure(
                 queue.push(edge.path.clone());
             } else if classify_shared_cache_physical_edge(
                 edge,
-                fs::symlink_metadata(&edge.path)
-                    .map(|_| ())
-                    .map_err(|e| e.kind()),
+                // Follow a sealed-system symlink here: a dangling weak-link
+                // target is absent to dyld even though the symlink inode is
+                // still present. All other resolution failures remain fatal.
+                fs::metadata(&edge.path).map(|_| ()).map_err(|e| e.kind()),
             )? {
                 let physical = validate_sealed_system_library(
                     Path::new(&edge.path),
@@ -5559,6 +5560,33 @@ mod tests {
             expected_missing
         );
         assert!(files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_cache_dangling_weak_symlink_is_classified_as_absent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dangling = temporary.path().join("missing-weak.dylib");
+        symlink("absent-target.dylib", &dangling).unwrap();
+        // `symlink_metadata` observes the link inode, but dyld needs the
+        // target and therefore sees this as missing. The production probe
+        // must follow links with `metadata` before applying weak-link policy.
+        assert!(fs::symlink_metadata(&dangling).is_ok());
+        let lookup = || {
+            fs::metadata(&dangling)
+                .map(|_| ())
+                .map_err(|error| error.kind())
+        };
+        let weak = DyldSharedCacheEdge {
+            attributes: "weak-link".into(),
+            path: dangling.display().to_string(),
+        };
+        let required = DyldSharedCacheEdge {
+            attributes: "upward".into(),
+            path: dangling.display().to_string(),
+        };
+        assert!(!classify_shared_cache_physical_edge(&weak, lookup()).unwrap());
+        assert!(classify_shared_cache_physical_edge(&required, lookup()).is_err());
     }
 
     #[test]
