@@ -468,6 +468,53 @@ pub(crate) fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadat
     false
 }
 
+/// Durably flush a retained directory without relying on its capability handle
+/// being directly syncable.  On Linux, `open_dir_nofollow` may retain an
+/// `O_PATH` descriptor: it is valid authority for relative operations but
+/// `fsync(2)` rejects it with `EBADF`.  Reopen exactly that directory as `.`
+/// without following links, verify the held identity, and sync the reopened
+/// descriptor instead.
+pub(crate) fn sync_retained_directory(
+    directory: &fs::File,
+    expected: &fs::Metadata,
+    path: &Path,
+) -> BoundaryResult<()> {
+    #[cfg(unix)]
+    {
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let syncable = cap_fs::open(directory, Path::new("."), &options)
+            .map_err(|error| BoundaryError::io(path, error))?;
+        let observed = syncable
+            .metadata()
+            .map_err(|error| BoundaryError::io(path, error))?;
+        if !observed.is_dir() || !same_directory_identity(expected, &observed) {
+            return Err(BoundaryError::new(
+                path,
+                "retained directory changed before sync",
+            ));
+        }
+        syncable
+            .sync_all()
+            .map_err(|error| BoundaryError::io(path, error))?;
+    }
+    #[cfg(windows)]
+    {
+        let observed = directory
+            .metadata()
+            .map_err(|error| BoundaryError::io(path, error))?;
+        if !observed.is_dir() || !same_directory_identity(expected, &observed) {
+            return Err(BoundaryError::new(
+                path,
+                "retained directory changed before sync",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::BoundCorpus;

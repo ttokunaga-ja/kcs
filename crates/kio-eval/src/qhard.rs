@@ -33,7 +33,10 @@ use serde_json::Value;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command};
+use crate::{
+    boundary::sync_retained_directory,
+    runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command},
+};
 
 pub const FROZEN_GOLDEN_SHA256: &str =
     "sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163";
@@ -516,6 +519,7 @@ impl PrivateTreeSnapshot {
 struct RetainedDirectory {
     public_path: PathBuf,
     handle: fs::File,
+    identity: fs::Metadata,
 }
 
 impl RetainedDirectory {
@@ -550,6 +554,7 @@ impl RetainedDirectory {
         Ok(Self {
             public_path: canonical,
             handle,
+            identity: opened,
         })
     }
 
@@ -557,9 +562,18 @@ impl RetainedDirectory {
         let handle = cap_fs::open_dir_nofollow(&self.handle, Path::new(name)).map_err(|_| {
             QhardError::Input(format!("{label} must be a real non-reparse directory"))
         })?;
+        let identity = handle
+            .metadata()
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
+        if !identity.is_dir() {
+            return Err(QhardError::Input(format!(
+                "{label} must be a real directory"
+            )));
+        }
         Ok(Self {
             public_path: self.public_path.join(name),
             handle,
+            identity,
         })
     }
 
@@ -1818,11 +1832,23 @@ pub fn write_report(
         ));
     }
     let bytes = serde_json::to_vec_pretty(report)?;
-    publish_report(&parent.handle, Path::new(name), &bytes)?;
+    publish_report(
+        &parent.handle,
+        &parent.identity,
+        &parent.public_path,
+        Path::new(name),
+        &bytes,
+    )?;
     Ok(())
 }
 
-fn publish_report(parent: &fs::File, name: &Path, bytes: &[u8]) -> Result<(), QhardError> {
+fn publish_report(
+    parent: &fs::File,
+    parent_identity: &fs::Metadata,
+    parent_path: &Path,
+    name: &Path,
+    bytes: &[u8],
+) -> Result<(), QhardError> {
     match cap_fs::stat(parent, name, cap_fs::FollowSymlinks::No) {
         Ok(metadata) if !metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
             return Err(QhardError::Input(
@@ -1871,9 +1897,7 @@ fn publish_report(parent: &fs::File, name: &Path, bytes: &[u8]) -> Result<(), Qh
             "cannot atomically install Q_hard report: {e}"
         )));
     }
-    #[cfg(unix)]
-    parent
-        .sync_all()
+    sync_retained_directory(parent, parent_identity, parent_path)
         .map_err(|e| QhardError::Input(format!("cannot sync Q_hard report directory: {e}")))?;
     Ok(())
 }
@@ -5253,6 +5277,8 @@ pub fn write_baseline_report(
     }
     publish_report(
         &parent.handle,
+        &parent.identity,
+        &parent.public_path,
         Path::new(
             absolute
                 .file_name()
@@ -5295,6 +5321,8 @@ pub fn write_baseline_attestation(
     }
     publish_report(
         &parent.handle,
+        &parent.identity,
+        &parent.public_path,
         Path::new(
             absolute
                 .file_name()

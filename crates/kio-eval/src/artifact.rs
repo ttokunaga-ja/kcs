@@ -10,7 +10,7 @@ use std::{
 use cap_primitives::{ambient_authority, fs as cap_fs};
 use thiserror::Error;
 
-use crate::boundary::same_directory_identity;
+use crate::boundary::{same_directory_identity, sync_retained_directory};
 
 #[derive(Debug, Error)]
 #[error("{0}")]
@@ -114,10 +114,9 @@ impl CreateOnlyArtifact {
                 self.label
             )));
         }
-        #[cfg(unix)]
-        self.parent.sync_all().map_err(|error| {
-            ArtifactError(format!("cannot sync {} directory: {error}", self.label))
-        })?;
+        sync_retained_directory(&self.parent, &self.parent_identity, &self.parent_path).map_err(
+            |error| ArtifactError(format!("cannot sync {} directory: {error}", self.label)),
+        )?;
         self.recheck_parent()?;
         Ok(())
     }

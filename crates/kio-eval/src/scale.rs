@@ -25,7 +25,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::runner::{BoundedProcessOptions, run_bounded_command};
+use crate::{
+    boundary::sync_retained_directory,
+    runner::{BoundedProcessOptions, run_bounded_command},
+};
 
 const SCHEMA_VERSION: u64 = 1;
 const FIXTURE_ID: &str = "kio-scale-120k-v1";
@@ -2452,6 +2455,9 @@ pub fn write_report(path: &Path, corpus: &Path, report: &ScaleReport) -> Result<
     let retained_parent = cap_fs::Metadata::from_file(&parent_handle).map_err(|e| {
         ScaleError::Input(format!("cannot inspect retained scale report parent: {e}"))
     })?;
+    let retained_parent_file = parent_handle.metadata().map_err(|e| {
+        ScaleError::Input(format!("cannot inspect retained scale report parent: {e}"))
+    })?;
     let named_parent = cap_fs::stat(&parent_handle, Path::new("."), cap_fs::FollowSymlinks::No)
         .map_err(|e| ScaleError::Input(format!("cannot recheck scale report parent: {e}")))?;
     if !retained_parent.file_type().is_dir() || !same_file(&retained_parent, &named_parent) {
@@ -2514,9 +2520,7 @@ pub fn write_report(path: &Path, corpus: &Path, report: &ScaleReport) -> Result<
             "cannot atomically install scale report: {error}"
         )));
     }
-    #[cfg(unix)]
-    parent_handle
-        .sync_all()
+    sync_retained_directory(&parent_handle, &retained_parent_file, &canonical_parent)
         .map_err(|e| ScaleError::Input(format!("cannot sync scale report directory: {e}")))?;
     Ok(())
 }
