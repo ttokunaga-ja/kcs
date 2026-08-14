@@ -40,7 +40,7 @@
 //! N=200). One question at n=24 does not separate two models, and this
 //! codebase has already shipped one retrieval change that four green tests
 //! endorsed and measurement rejected. So [`RerankModel`] is a parameter, and
-//! the choice belongs to an `eval/run_eval.py` differential.
+//! the choice belongs to a `kio-eval` differential.
 
 use serde_json::{json, Value};
 

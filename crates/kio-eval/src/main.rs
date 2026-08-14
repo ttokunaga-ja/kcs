@@ -8,8 +8,7 @@ fn main() {
     let args = app::Args::parse();
     let code = match app::run(args) {
         Ok(code) => code,
-        // Keep the historical Python generator's user-facing overwrite
-        // contract while the generator implementation moved to Rust.
+        // Keep the generator's stable user-facing overwrite contract.
         Err(app::AppError::Generator(GeneratorError::NonEmpty(path))) => {
             eprintln!(
                 "[error] 出力先が空でない: {} (--force で上書き)",

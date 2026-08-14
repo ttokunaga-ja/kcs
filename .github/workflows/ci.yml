@@ -87,17 +87,17 @@ jobs:
           target/release/kio-eval benchmark scale
           --corpus /tmp/kio-scale-tiny --bin target/release/kio
           --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
-      - run: python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
+      - run: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
       - run: python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
-      - run: python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: target/release/kio-eval --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
       # The short-query corpus has a measured 22/24 baseline. Unlike the saturated
       # 50-query set, this gate has room to detect both improvements and regressions.
       - run: >-
-          python3 eval/run_eval.py --golden eval/golden-queries-short.jsonl
+          target/release/kio-eval --golden eval/golden-queries-short.jsonl
           --scenario M3-1 --min-recall 0.9166666666666666
           --corpus /tmp/kio-eval-corpus --bin target/release/kio
-      - run: python3 eval/run_eval.py --scenario M3-2 --corpus /tmp/kio-eval-corpus --bin target/release/kio
-      - run: python3 eval/run_eval.py --scenario M3-3 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: target/release/kio-eval --scenario M3-2 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: target/release/kio-eval --scenario M3-3 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
   msrv:
     runs-on: ubuntu-latest

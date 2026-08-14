@@ -24,7 +24,7 @@ had been reranked.
 
 ## What this measures, and what it does not
 
-Recall@10 over the same 3-element projection `run_eval.py` scores
+Recall@10 over the same 3-element projection `kio-eval` scores
 (`raw_hash`, `section_id`, `path_at_commit`). It is a lower bound on what an
 integrated reranker could do: the dump sees at most the CLI's 100-result cap
 while 05 §1.3's `candidate_depth` is 200.

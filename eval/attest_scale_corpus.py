@@ -435,7 +435,7 @@ def attest_scope(root, scope_manifest):
         if not tree_rows:
             raise ScaleAttestationError(
                 "HEAD has no projected tree_entries; prepare must stop at "
-                "`kio index` and must not append a separate `kio snapshot`"
+                "`kio index` and must not append a separate `kio snapshot create`"
             )
         expected_tree = {
             entry["path"]: _prefixed_hash(entry["raw_sha256"])

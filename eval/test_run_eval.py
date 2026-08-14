@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Python oracle と Rust evaluator shim の軽量単体テスト.
+"""Python oracle の軽量単体テスト.
 
 実行:
     python3 -m unittest eval/test_run_eval.py
@@ -17,7 +17,6 @@ import copy
 import json
 import math
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 import replay_history  # noqa: E402
 import python_eval_oracle as run_eval  # noqa: E402
-import run_eval as run_eval_shim  # noqa: E402
 
 
 def _strict_object(value, required, optional=()):
@@ -663,140 +661,6 @@ class TestUtf8KioSubprocesses(unittest.TestCase):
         self.assertTrue(kwargs["text"])
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "strict")
-
-
-class TestRustEvaluatorWrapper(unittest.TestCase):
-    """The legacy Python entry point must only forward to Rust."""
-
-    def _stub(self, directory, exit_code=17):
-        path = os.path.join(directory, "evaluator-stub")
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(
-                "#!/usr/bin/env python3\n"
-                "import sys\n"
-                "print('stdout:' + '|'.join(sys.argv[1:]))\n"
-                "print('stderr:' + '|'.join(sys.argv[1:]), file=sys.stderr)\n"
-                f"raise SystemExit({exit_code})\n")
-        os.chmod(path, 0o755)
-        return path
-
-    def _run_wrapper(self, cwd, env, *args):
-        return subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), "run_eval.py"), *args],
-            cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
-
-    def test_override_forwards_argv_streams_exit_and_works_from_other_cwd(self):
-        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
-            stub = self._stub(directory)
-            env = os.environ.copy()
-            env["KIO_EVAL_BIN"] = stub
-            completed = self._run_wrapper(directory, env, "--scenario", "M3-1", "--dry-run")
-        self.assertEqual(completed.returncode, 17)
-        self.assertEqual(completed.stdout, "stdout:--scenario|M3-1|--dry-run\n")
-        self.assertEqual(completed.stderr, "stderr:--scenario|M3-1|--dry-run\n")
-
-    def test_missing_override_fails_without_python_fallback(self):
-        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
-            env = os.environ.copy()
-            env["KIO_EVAL_BIN"] = os.path.join(directory, "missing")
-            completed = self._run_wrapper(directory, env, "--dry-run")
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("Rust evaluator kio-eval", completed.stderr)
-
-    def test_repository_binary_resolves_from_foreign_cwd(self):
-        # Keep the unit test independent of an existing Cargo build while
-        # proving resolution is repository-rooted rather than cwd-rooted.
-        with tempfile.TemporaryDirectory(prefix="kio-eval-wrapper-") as directory:
-            executable = "kio-eval.exe" if os.name == "nt" else "kio-eval"
-            binary = os.path.join(directory, "target", "debug", executable)
-            os.makedirs(os.path.dirname(binary))
-            with open(binary, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write("#!/bin/sh\n")
-            os.chmod(binary, 0o755)
-            with mock.patch.dict(os.environ, {}, clear=True), \
-                 mock.patch.object(run_eval_shim, "REPO_ROOT", directory):
-                self.assertEqual(run_eval_shim.evaluator_binary(), binary)
-
-
-class TestRustGeneratorWrapper(unittest.TestCase):
-    """The legacy corpus command must be a transparent Rust subcommand shim."""
-
-    def _stub(self, directory, exit_code=17):
-        path = os.path.join(directory, "evaluator-stub")
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(
-                "#!/usr/bin/env python3\n"
-                "import sys\n"
-                "print('stdout:' + '|'.join(sys.argv[1:]))\n"
-                "print('stderr:' + '|'.join(sys.argv[1:]), file=sys.stderr)\n"
-                f"raise SystemExit({exit_code})\n")
-        os.chmod(path, 0o755)
-        return path
-
-    def _run_wrapper(self, cwd, env, *args):
-        return subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), "generate_corpus.py"), *args],
-            cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8")
-
-    def test_override_forwards_subcommand_argv_streams_and_exit(self):
-        with tempfile.TemporaryDirectory(prefix="kio-generator-wrapper-") as directory:
-            stub = self._stub(directory)
-            env = os.environ.copy()
-            env["KIO_EVAL_BIN"] = stub
-            completed = self._run_wrapper(directory, env, "--out", "target", "--force")
-        self.assertEqual(completed.returncode, 17)
-        self.assertEqual(completed.stdout, "stdout:generate-corpus|--out|target|--force\n")
-        self.assertEqual(completed.stderr, "stderr:generate-corpus|--out|target|--force\n")
-
-    def test_missing_override_fails_without_python_generator_fallback(self):
-        with tempfile.TemporaryDirectory(prefix="kio-generator-wrapper-") as directory:
-            env = os.environ.copy()
-            env["KIO_EVAL_BIN"] = os.path.join(directory, "missing")
-            completed = self._run_wrapper(directory, env, "--out", "target")
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("Rust evaluator kio-eval", completed.stderr)
-
-
-class TestRustGeneratorBinaryContract(unittest.TestCase):
-    """Exercise the Rust CLI contract when the repository binary is available."""
-
-    def _binary(self):
-        try:
-            return run_eval_shim.evaluator_binary()
-        except SystemExit:
-            self.skipTest("kio-eval binary is not built in this Python-only test environment")
-
-    def test_success_and_nonempty_error_match_the_legacy_generator(self):
-        binary = self._binary()
-        with tempfile.TemporaryDirectory(prefix="kio-generator-binary-") as directory:
-            corpus = os.path.join(directory, "corpus")
-            success = subprocess.run(
-                [binary, "generate-corpus", "--out", corpus],
-                capture_output=True, text=True, encoding="utf-8")
-            self.assertEqual(success.returncode, 0, success.stderr)
-            self.assertEqual(success.stderr, "")
-            self.assertEqual(success.stdout, "\n".join([
-                f"[ok] コーパス生成: {corpus}",
-                "     files=305 anchors=31 scopes=7",
-                "       - research    : 45 files",
-                "       - notes       : 45 files",
-                "       - downloads   : 45 files",
-                "       - projects-a  : 44 files",
-                "       - projects-b  : 43 files",
-                "       - specs       : 42 files",
-                "       - journal     : 41 files",
-                f"     manifest: {os.path.join(corpus, 'corpus-manifest.json')}",
-                "",
-            ]))
-
-            nonempty = subprocess.run(
-                [binary, "generate-corpus", "--out", corpus],
-                capture_output=True, text=True, encoding="utf-8")
-            self.assertEqual(nonempty.returncode, 1)
-            self.assertEqual(nonempty.stdout, "")
-            self.assertEqual(
-                nonempty.stderr,
-                f"[error] 出力先が空でない: {corpus} (--force で上書き)\n")
 
 
 if __name__ == "__main__":

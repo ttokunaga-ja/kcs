@@ -3,9 +3,9 @@
 
 09 §5.5 #5 (2026-07-23 再凍結) の別ファイル方式: 増補 8 問は実データ fixture
 (raster PDF / PPTX 図表 / 画像) を正解担体とするため合成コーパスの
-run_eval.py には載らない。本ランナーが fixture 環境 (register_fixture 系で
+`kio-eval` の synthetic suite には載らない。本ランナーが fixture 環境 (register_fixture 系で
 登録済みの qhard 環境) に対して Recall@10 を計測し、M3-1 の Done 判定は
-run_eval.py の M3-1 (18 問) と本結果の合算 26 問 >= 0.8 (= 21 問) で行う。
+`kio-eval` の M3-1 (18 問) と本結果の合算 26 問 >= 0.8 (= 21 問) で行う。
 
 前提: 増補ファイルの正解は OCR 強化パス (Mistral Batch) 完了後にのみ索引に
 載る (hard1 = raster、hard3 = 図表画像)。OCR 未実行の環境では recall 0 が
@@ -98,7 +98,7 @@ def main(argv=None):
         "hits": hits,
         "total": len(rows),
         "recall_fraction": round(hits / len(rows), 4) if rows else 0.0,
-        "note": ("M3-1 Done 判定は run_eval.py の M3-1 18 問との合算 26 問 >= 21 "
+        "note": ("M3-1 Done 判定は kio-eval の M3-1 18 問との合算 26 問 >= 21 "
                  "(09 §5.5 #5, 2026-07-23 再凍結)"),
     }
     Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1))

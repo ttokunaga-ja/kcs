@@ -2,7 +2,7 @@
 """Build the indexed fixture environments `run_baseline.py` / `run_qhard.py` search.
 
 Those two runners are the only instrument that can detect a search-quality
-regression: the synthetic `run_eval.py` scores 1.0/1.0/1.0 against a 0.8 target,
+regression: the synthetic `kio-eval` suite scores 1.0/1.0/1.0 against a 0.8 target,
 i.e. it sits at its ceiling and cannot measure degradation. The 24-query
 fixture-B set last measured 0.9167 with hard3 at 6/8, so it has the headroom the
 synthetic set does not. Both runners resolve `<fixture-root>/env/<name>/xdg-*`

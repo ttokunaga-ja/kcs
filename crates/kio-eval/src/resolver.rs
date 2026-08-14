@@ -370,7 +370,7 @@ mod tests {
 
     fn corpus() -> CorpusManifest {
         CorpusManifest {
-            generator: "eval/generate_corpus.py".into(),
+            generator: "kio-eval generate-corpus".into(),
             seed: 20_260_703,
             scopes: vec![],
             file_count: 0,

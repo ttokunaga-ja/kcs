@@ -15,17 +15,15 @@
 | --- | --- |
 | `corpus-fixture.json` | **生成物の凍結正本**。305 文書の bytes と manifest を保持し、Rust `kio-eval generate-corpus` が検証して materialize する |
 | `corpus_spec.py` | Python replay/oracle 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
-| `generate_corpus.py` | 旧 CLI 互換 shim。`kio-eval generate-corpus` を exec するだけで、Python/Cargo fallback は持たない |
-| `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
+| `replay_history.py` | 各 scope で `init → index → snapshot create → 編集 → snapshot create → リネーム → snapshot create → 削除 → snapshot create` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `run_eval.py` | 互換 CLI shim。リポジトリ内の Rust `kio-eval` をそのまま起動する。評価・report・exit code の正本は Rust であり、Python へ暗黙に fallback しない。`KIO_EVAL_BIN` で明示的に evaluator binary を差し替えられる |
 | `python_eval_oracle.py` | Python の独立 differential/security oracle。共有 golden vectors、pointer CAS attestation、crossscope/reranker の限定的な補助だけを持つ。通常の full evaluator・履歴ゲート・report 生成は持たない |
 | `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
 | `run_crossscope.py` | 横断増補の専用ランナー。`python_eval_oracle.py` の限定的な補助を明示利用する。full Rust evaluator のセット全体ゲートは部分集合に当てられないため別立て。診断値 `worst_expected_rank` を併記する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `test_run_eval.py` | Python oracle の独立テストと Rust evaluator/generator shim の透過転送テスト。`python3 -m unittest eval.test_run_eval` |
+| `test_run_eval.py` | Python oracle の独立テスト。`python3 -m unittest eval.test_run_eval` |
 | `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
 | `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
@@ -46,9 +44,8 @@
 # 0. バイナリ (未ビルドなら)
 cargo build --release --locked --all-features
 
-# 1. 合成コーパス生成 (Rust 正本。Python entry point は互換 shim)
-python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
-# 直接実行する場合: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
+# 1. 合成コーパス生成
+target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
 
 # 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
 python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
@@ -58,14 +55,14 @@ python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/releas
 python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3a. dry-run: Rust の正本 evaluator が golden-queries / manifest を検証する
-python3 eval/run_eval.py --dry-run --corpus /tmp/kio-eval-corpus
+target/release/kio-eval --dry-run --corpus /tmp/kio-eval-corpus
 
 # 3b. 本評価: Rust の正本 evaluator が Recall@10 をシナリオ別に集計。
 #     kio search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
-python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+target/release/kio-eval --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3c. シナリオ絞り込み (複数指定可)。最終HEADのCIは3シナリオを個別に実行する。
-python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+target/release/kio-eval --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 ```
 
 ### exit コード (docs/09 §4.3, 2026-07-03 J2 裁定)
@@ -310,8 +307,8 @@ Done 条件 = **synthetic で各シナリオ Recall@10 >= 0.8** + **dogfood で 
 ## 決定論の検証
 
 ```bash
-python3 eval/generate_corpus.py --out /tmp/c1
-python3 eval/generate_corpus.py --out /tmp/c2
+target/release/kio-eval generate-corpus --out /tmp/c1
+target/release/kio-eval generate-corpus --out /tmp/c2
 diff -r /tmp/c1 /tmp/c2   # 差分なし (byte 同一) であること
 ```
 
@@ -382,7 +379,7 @@ cargo run -p kio-eval -- benchmark scale \
 ```
 
 `prepare_scale_corpus.py` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
-HEAD tree projection を公開するので、その直後に別の `kio snapshot` を追加してはならない。
+HEAD tree projection を公開するので、その直後に別の `kio snapshot create` を追加してはならない。
 device state は corpus 内の `.kio-eval-device` に隔離され、開発者の実 registry や API key を使わない。
 
 出力の `scale-corpus-manifest.json` は全 source bytes、expected chunk 数、

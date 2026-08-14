@@ -2,8 +2,8 @@
 """Python-only differential and security oracle for the Rust evaluator.
 
 This module deliberately has no normal evaluator CLI, full-history gate, report
-writer, or restore path.  ``run_eval.py`` forwards those production concerns to
-Rust.  The small helpers here retain independent checks for shared vectors,
+writer, or restore path. Rust's ``kio-eval`` owns those production concerns.
+The small helpers here retain independent checks for shared vectors,
 pointer attestation, and the crossscope/reranker auxiliary tools.
 
 The independent Recall projection is retained for differential tests:
@@ -127,7 +127,7 @@ def load_json(path, label):
     if not os.path.exists(path):
         raise SystemExit(
             f"[error] {label} が見つからない: {path}\n"
-            f"        先に generate_corpus.py / replay_history.py を実行すること。")
+            f"        先に kio-eval generate-corpus / replay_history.py を実行すること。")
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
 

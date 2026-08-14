@@ -5,7 +5,7 @@ fn binary() -> &'static str {
 }
 
 #[test]
-fn generate_corpus_subcommand_preserves_the_legacy_cli_contract() {
+fn generate_corpus_subcommand_preserves_the_canonical_cli_contract() {
     let temporary = tempfile::tempdir().unwrap();
     let corpus = temporary.path().join("corpus");
     let output = Command::new(binary())
@@ -31,7 +31,11 @@ fn generate_corpus_subcommand_preserves_the_legacy_cli_contract() {
         corpus.join("corpus-manifest.json").display(),
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
-    assert!(corpus.join("corpus-manifest.json").is_file());
+    let manifest_path = corpus.join("corpus-manifest.json");
+    assert!(manifest_path.is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["generator"], "kio-eval generate-corpus");
 
     let nonempty = Command::new(binary())
         .args(["generate-corpus", "--out"])

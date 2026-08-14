@@ -1,8 +1,8 @@
 //! Strict, bounded readers for the deterministic evaluation fixtures.
 //!
-//! The Python generators remain the source of fixture bytes during the
-//! transition, but their public contract is deliberately duplicated here so
-//! an evaluator never treats a stale manifest as authority.
+//! The Rust generator is the source of fixture materialization, and its public
+//! contract is deliberately duplicated here so an evaluator never treats a
+//! stale manifest as authority.
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -319,7 +319,7 @@ pub fn load_golden_queries(path: &Path) -> Result<Vec<GoldenQuery>, ManifestErro
 }
 
 pub fn validate_corpus_manifest(manifest: &CorpusManifest) -> Result<(), ManifestError> {
-    if manifest.generator != "eval/generate_corpus.py" {
+    if manifest.generator != "kio-eval generate-corpus" {
         return Err(invalid("corpus manifest", "generator identity mismatch"));
     }
     if manifest.seed != SEED {

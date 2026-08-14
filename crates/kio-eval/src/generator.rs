@@ -19,7 +19,7 @@ use crate::manifest::{
 const FIXTURE: &str = include_str!("../../../eval/corpus-fixture.json");
 const MANIFEST_NAME: &str = "corpus-manifest.json";
 const FIXTURE_MANIFEST_SHA256: &str =
-    "f53656c023fd13f49fd86bd648f53857d786b8b50ee3c2b13a11e7cbead7f128";
+    "10a2d87520dea212b4f3c7cdbb530b85158dbb9978f185fc343df2eefb02ec72";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
@@ -67,10 +67,10 @@ struct FixtureContent {
 
 /// Materialize the frozen corpus under `out` without following attacker-owned
 /// output components. Existing unlisted files are deliberately retained when
-/// `force` is set, matching the historical Python generator.
+/// `force` is set, preserving the stable generator contract.
 pub fn generate_corpus(out: &Path, force: bool) -> Result<GenerationSummary, GeneratorError> {
     let fixture = fixture()?;
-    let manifest_bytes = python_manifest_bytes(&fixture.manifest)?;
+    let manifest_bytes = frozen_manifest_bytes(&fixture.manifest)?;
     let output = absolute(out)?;
     let (parent_handle, leaf) = safe_parent_and_leaf(&output)?;
     let (root, root_created) = open_or_create_root(&parent_handle, &leaf, &output)?;
@@ -159,7 +159,7 @@ fn fixture() -> Result<Fixture, GeneratorError> {
             "frozen corpus counts mismatch".into(),
         ));
     }
-    let bytes = python_manifest_bytes(&fixture.manifest)?;
+    let bytes = frozen_manifest_bytes(&fixture.manifest)?;
     if hash_hex(&bytes) != fixture.manifest_sha256 {
         return Err(GeneratorError::Fixture(format!(
             "manifest bytes digest mismatch: {}",
@@ -206,9 +206,9 @@ fn fixture() -> Result<Fixture, GeneratorError> {
     Ok(fixture)
 }
 
-// `serde_json::Map` is ordered without the preserve_order feature; converting
-// through Value therefore matches Python's `sort_keys=True` object order.
-fn python_manifest_bytes(manifest: &CorpusManifest) -> Result<Vec<u8>, GeneratorError> {
+// `serde_json::Map` is ordered without the preserve_order feature. Converting
+// through Value therefore gives the frozen manifest a deterministic key order.
+fn frozen_manifest_bytes(manifest: &CorpusManifest) -> Result<Vec<u8>, GeneratorError> {
     let value = serde_json::to_value(manifest)
         .map_err(|error| GeneratorError::Fixture(error.to_string()))?;
     let mut text = serde_json::to_string_pretty(&value)
@@ -478,7 +478,7 @@ mod tests {
     fn fixture_is_complete_and_has_frozen_manifest_bytes() {
         let fixture = fixture().unwrap();
         assert_eq!(
-            hash_hex(&python_manifest_bytes(&fixture.manifest).unwrap()),
+            hash_hex(&frozen_manifest_bytes(&fixture.manifest).unwrap()),
             FIXTURE_MANIFEST_SHA256
         );
     }
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_legacy_parent_components() {
+    fn accepts_lexically_normalized_parent_components() {
         let temp = tempfile::tempdir().unwrap();
         generate_corpus(&temp.path().join("working/../nested/corpus"), false).unwrap();
         assert!(temp

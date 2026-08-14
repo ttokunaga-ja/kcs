@@ -6814,7 +6814,7 @@
         ]
       }
     ],
-    "generator": "eval/generate_corpus.py",
+    "generator": "kio-eval generate-corpus",
     "scopes": [
       "research",
       "notes",
@@ -6826,6 +6826,6 @@
     ],
     "seed": 20260703
   },
-  "manifest_sha256": "f53656c023fd13f49fd86bd648f53857d786b8b50ee3c2b13a11e7cbead7f128",
+  "manifest_sha256": "10a2d87520dea212b4f3c7cdbb530b85158dbb9978f185fc343df2eefb02ec72",
   "schema_version": 1
 }

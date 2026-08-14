@@ -74,7 +74,7 @@ def main(argv=None):
     ap.add_argument(
         "--golden", default=os.path.join(HERE, "golden-queries-crossscope.jsonl"))
     ap.add_argument("--corpus", required=True,
-                    help="合成コーパスディレクトリ (generate_corpus.py の出力)")
+                    help="合成コーパスディレクトリ (kio-eval generate-corpus の出力)")
     ap.add_argument("--bin", default="target/release/kio")
     ap.add_argument("--out", default=os.path.join(HERE, "crossscope-results.json"))
     ap.add_argument("--dry-run", action="store_true",

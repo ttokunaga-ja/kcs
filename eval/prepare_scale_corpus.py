@@ -3,7 +3,7 @@
 
 This command intentionally ends each fresh scope with an explicitly offline
 ``kio index`` invocation.
-Do not append a separate ``kio snapshot``: index already publishes the snapshot
+Do not append a separate ``kio snapshot create``: index already publishes the snapshot
 and projects its HEAD tree into SQLite, while a later manual snapshot would
 advance HEAD before the lazy search projection occurs.
 """

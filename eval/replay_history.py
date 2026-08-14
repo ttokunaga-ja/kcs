@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """履歴シナリオの決定論的再現 (Kio 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
-生成済みコーパス (generate_corpus.py の出力) に対し、各 scope で
-    kio init -> kio index --approve -> kio snapshot
-    -> 編集 -> snapshot -> リネーム -> snapshot -> 削除 -> snapshot
+Rust `kio-eval generate-corpus` が生成したコーパスに対し、各 scope で
+    kio init -> kio index --approve -> kio snapshot create
+    -> 編集 -> snapshot create -> リネーム -> snapshot create -> 削除 -> snapshot create
 の履歴を **決定論的** に再現する (M3-2 リネーム / M3-3 削除の評価に必要)。
 
 - 操作列は corpus_spec.HISTORY で固定 (どのファイルを編集/リネーム/削除するか)。
@@ -11,7 +11,7 @@
   に記録する。commit hash / timestamp は非決定なので記録しない (件数・メッセージのみ)。
 - 最後に各 scope で `kio log` を叩き、履歴 commit が積まれたことを検証する。
 
-前提: 対象は generate_corpus.py 直後のフレッシュなコーパス (.kio 未作成)。
+前提: 対象は `kio-eval generate-corpus` 直後のフレッシュなコーパス (.kio 未作成)。
 
 使い方:
     python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus \\
@@ -223,7 +223,7 @@ def build_manifest(per_scope, old_hashes):
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="Kio 履歴シナリオ再現 (決定論的)")
-    ap.add_argument("--corpus", required=True, help="generate_corpus.py の出力ディレクトリ")
+    ap.add_argument("--corpus", required=True, help="kio-eval generate-corpus の出力ディレクトリ")
     ap.add_argument("--bin", default="target/release/kio", help="kio バイナリのパス")
     ap.add_argument("--manifest", default=None,
                     help="履歴 manifest の出力先 (既定 <corpus>/history-manifest.json)")

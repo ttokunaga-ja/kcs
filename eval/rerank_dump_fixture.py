@@ -9,7 +9,7 @@ cannot change Recall@10 when the whole result set already fits in the top ten.
 
 This one runs against fixture-B with embeddings present, where all 24 queries
 fill the 100-result cap. It is a separate file rather than a flag because the
-two corpora score differently, the same reason `run_eval.py`, `run_qhard.py`
+two corpora score differently, the same reason `kio-eval`, `run_qhard.py`
 and `run_baseline.py` are separate: fixture-B matches on the result's `title`
 (the ORIGINAL filename — the normalized corpus appends `.md`, and `title`
 carries the name before that), against `Path(expected.path).name`. Following
