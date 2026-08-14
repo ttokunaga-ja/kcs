@@ -2,7 +2,10 @@ use std::fs;
 
 use kio_core::cas::{hash_bytes, ChunkObject, ObjectKind, ObjectStore};
 use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry};
-use kio_core::gc::{GcPlan, GcPlanLimits, GcPlanner};
+use kio_core::gc::{
+    validated_final_shallow_receipts, GcInProgressMarker, GcIndexState, GcPlan, GcPlanLimits,
+    GcPlanner, GcSweepSession, ShallowReceipt,
+};
 use kio_core::scope::Repository;
 use serde_json::json;
 use tempfile::TempDir;
@@ -110,6 +113,448 @@ fn excluded(plan: &GcPlan, reason: &str) -> u64 {
         .iter()
         .find(|x| x.reason == reason)
         .map_or(0, |x| x.count)
+}
+
+#[test]
+fn recovery_rejects_preexisting_receipt_timestamp_or_inode_replacement() {
+    fn fixture() -> (Fixture, String, String, GcInProgressMarker, GcSweepSession) {
+        let f = Fixture::new();
+        let shallow_tree = f.tree("old");
+        let shallow = f.commit(
+            &shallow_tree,
+            vec![],
+            "2025-01-01T00:00:00Z",
+            CommitType::Auto,
+        );
+        let head_tree = f.tree("head");
+        let head = f.commit(
+            &head_tree,
+            vec![shallow.clone()],
+            "2026-01-01T00:00:00Z",
+            CommitType::Manual,
+        );
+        f.head(&head);
+        f.branch("main", &head);
+        let receipt_dir = f.kio().join("gc/shallowed");
+        fs::create_dir_all(&receipt_dir).unwrap();
+        let leaf = &shallow[7..];
+        fs::write(
+            receipt_dir.join(leaf),
+            ShallowReceipt::new(
+                shallow.clone(),
+                shallow_tree.clone(),
+                "2026-01-01T00:00:00Z".into(),
+            )
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ObjectStore::new(f.kio());
+        fs::remove_file(store.object_path(ObjectKind::Tree, &shallow_tree).unwrap()).unwrap();
+        let plan = f.plan();
+        let marker = GcInProgressMarker::from_plan(
+            &plan,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            "2026-01-01T00:00:00Z".into(),
+            GcIndexState::Absent,
+        )
+        .unwrap();
+        let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+        session.publish_marker(&marker).unwrap();
+        (f, shallow, shallow_tree, marker, session)
+    }
+    let (f, commit, tree, marker, session) = fixture();
+    let leaf = &commit[7..];
+    fs::write(
+        f.kio().join("gc/shallowed").join(leaf),
+        ShallowReceipt::new(commit.clone(), tree.clone(), "2026-01-01T00:00:01Z".into())
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(session
+        .validate_frozen_marker_current_truth(&marker)
+        .is_err());
+
+    let (f, commit, _tree, marker, session) = fixture();
+    let path = f.kio().join("gc/shallowed").join(&commit[7..]);
+    let original = fs::read(&path).unwrap();
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, &original).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert!(session
+        .validate_frozen_marker_current_truth(&marker)
+        .is_err());
+}
+
+#[test]
+fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
+    fn fixture() -> (
+        Fixture,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        GcInProgressMarker,
+        GcSweepSession,
+    ) {
+        let f = Fixture::new();
+        let expired_tree = f.tree("expired");
+        let expired = f.commit(
+            &expired_tree,
+            vec![],
+            "2025-01-01T00:00:00Z",
+            CommitType::Auto,
+        );
+        let recent_tree = f.tree("recent");
+        let recent = f.commit(
+            &recent_tree,
+            vec![expired.clone()],
+            "2026-01-01T00:00:00Z",
+            CommitType::Auto,
+        );
+        let head_tree = f.tree("head");
+        let head = f.commit(
+            &head_tree,
+            vec![recent.clone()],
+            "2026-01-02T00:00:00Z",
+            CommitType::Manual,
+        );
+        f.head(&head);
+        f.branch("main", &head);
+        let plan = f.plan();
+        assert_eq!(hashes(&plan), vec![expired.clone()]);
+        let marker = GcInProgressMarker::from_plan(
+            &plan,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            "2026-01-01T00:00:00Z".into(),
+            GcIndexState::Absent,
+        )
+        .unwrap();
+        let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+        (
+            f,
+            expired,
+            expired_tree,
+            recent,
+            recent_tree,
+            head,
+            head_tree,
+            marker,
+            session,
+        )
+    }
+
+    fn forged_with_receipt(
+        f: &Fixture,
+        session: &GcSweepSession,
+        mut marker: GcInProgressMarker,
+        commit: String,
+        tree: String,
+    ) -> GcInProgressMarker {
+        marker.phase = kio_core::gc::GcSweepPhase::Receipting;
+        marker.candidates = vec![kio_core::gc::GcMarkerCandidate {
+            commit_hash: commit.clone(),
+            tree_hash: tree.clone(),
+            size_bytes: fs::metadata(
+                f.kio()
+                    .join("objects/trees")
+                    .join(&tree[7..9])
+                    .join(&tree[9..11])
+                    .join(&tree[7..]),
+            )
+            .unwrap()
+            .len(),
+        }];
+        marker.trees = vec![tree.clone()];
+        marker.estimated_bytes = marker.candidates[0].size_bytes;
+        marker.validate().unwrap();
+        fs::create_dir_all(f.kio().join("gc/shallowed")).unwrap();
+        fs::write(
+            f.kio().join("gc/shallowed").join(&commit[7..]),
+            ShallowReceipt::new(commit, tree, "2026-01-01T00:00:00Z".into())
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        session.publish_marker(&marker).unwrap();
+        marker
+    }
+
+    // A protected Manual commit is syntactically valid in a receipt/marker,
+    // but can never be selected by retention.
+    let (f, _expired, _expired_tree, _recent, _recent_tree, head, head_tree, marker, session) =
+        fixture();
+    let forged = forged_with_receipt(&f, &session, marker, head, head_tree);
+    assert!(session
+        .validate_frozen_marker_current_truth(&forged)
+        .is_err());
+
+    // A non-tip Auto commit that is still in its recent bucket is similarly
+    // not an authorized victim even with a matching durable receipt.
+    let (f, _expired, _expired_tree, recent, recent_tree, _head, _head_tree, marker, session) =
+        fixture();
+    assert_ne!(hashes(&f.plan()), vec![recent.clone()]);
+    let forged = forged_with_receipt(&f, &session, marker, recent, recent_tree);
+    assert!(session
+        .validate_frozen_marker_current_truth(&forged)
+        .is_err());
+
+    // Adding an otherwise protected pair to the genuine selection is no more
+    // authorized than replacing it; exact equality prevents both shapes.
+    let (f, _expired, _expired_tree, _recent, _recent_tree, head, head_tree, mut marker, session) =
+        fixture();
+    marker.phase = kio_core::gc::GcSweepPhase::Receipting;
+    marker.candidates.push(kio_core::gc::GcMarkerCandidate {
+        commit_hash: head.clone(),
+        tree_hash: head_tree.clone(),
+        size_bytes: fs::metadata(
+            f.kio()
+                .join("objects/trees")
+                .join(&head_tree[7..9])
+                .join(&head_tree[9..11])
+                .join(&head_tree[7..]),
+        )
+        .unwrap()
+        .len(),
+    });
+    marker.estimated_bytes = marker
+        .candidates
+        .iter()
+        .map(|candidate| candidate.size_bytes)
+        .sum();
+    marker
+        .candidates
+        .sort_by(|left, right| left.commit_hash.cmp(&right.commit_hash));
+    marker.trees = marker
+        .candidates
+        .iter()
+        .map(|candidate| candidate.tree_hash.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    marker.validate().unwrap();
+    fs::create_dir_all(f.kio().join("gc/shallowed")).unwrap();
+    fs::write(
+        f.kio().join("gc/shallowed").join(&head[7..]),
+        ShallowReceipt::new(head, head_tree, "2026-01-01T00:00:00Z".into())
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    session.publish_marker(&marker).unwrap();
+    assert!(session
+        .validate_frozen_marker_current_truth(&marker)
+        .is_err());
+
+    // Omitting a currently eligible item is also forbidden: a forged marker
+    // may not turn a full plan into a convenient subset.
+    let (
+        _f,
+        _expired,
+        _expired_tree,
+        _recent,
+        _recent_tree,
+        _head,
+        _head_tree,
+        mut marker,
+        session,
+    ) = fixture();
+    marker.candidates.clear();
+    marker.trees.clear();
+    marker.estimated_bytes = 0;
+    marker.validate().unwrap();
+    session.publish_marker(&marker).unwrap();
+    assert!(session
+        .validate_frozen_marker_current_truth(&marker)
+        .is_err());
+}
+
+#[test]
+fn recovery_authorization_stays_bound_to_marker_start_across_retention_boundary() {
+    let f = Fixture::new();
+    let expired_tree = f.tree("expired-at-start");
+    let expired = f.commit(
+        &expired_tree,
+        vec![],
+        "2025-01-01T00:00:00Z",
+        CommitType::Auto,
+    );
+    let recent_tree = f.tree("recent-at-start");
+    let recent = f.commit(
+        &recent_tree,
+        vec![expired.clone()],
+        "2026-01-01T00:00:00Z",
+        CommitType::Auto,
+    );
+    let head = f.commit(
+        &f.tree("head"),
+        vec![recent.clone()],
+        "2026-01-02T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    f.branch("main", &head);
+
+    let start_plan = f.plan();
+    assert_eq!(hashes(&start_plan), vec![expired]);
+    let later = GcPlanner::bind(f.canonical_root())
+        .unwrap()
+        .plan_at(NOW + 181 * 24 * 60 * 60)
+        .unwrap();
+    assert!(hashes(&later).contains(&recent));
+
+    let mut marker = GcInProgressMarker::from_plan(
+        &start_plan,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        "2026-01-01T00:00:00Z".into(),
+        GcIndexState::Absent,
+    )
+    .unwrap();
+    let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+    session.publish_marker(&marker).unwrap();
+    marker.phase = kio_core::gc::GcSweepPhase::Receipting;
+    session.advance_marker(&marker).unwrap();
+    for candidate in &start_plan.candidates {
+        session
+            .create_receipt(candidate, marker.started_at.clone())
+            .unwrap();
+    }
+    marker = session.bind_operation_receipts(&marker).unwrap();
+    marker.phase = kio_core::gc::GcSweepPhase::Sweeping;
+    session.advance_marker(&marker).unwrap();
+
+    // The later wall clock changes a fresh plan, but an irreversible recovery
+    // remains authorized by the exact retention decision frozen at started_at.
+    session
+        .validate_frozen_marker_current_truth(&marker)
+        .unwrap();
+}
+
+#[test]
+fn same_byte_ref_replacement_changes_plan_truth_binding() {
+    let f = Fixture::new();
+    let tree = f.tree("old");
+    let old = f.commit(&tree, vec![], "2025-01-01T00:00:00Z", CommitType::Auto);
+    let head_tree = f.tree("head");
+    let head = f.commit(
+        &head_tree,
+        vec![old],
+        "2026-01-01T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    f.branch("main", &head);
+    let first = f.plan();
+    let path = f.kio().join("refs/heads/main");
+    let bytes = fs::read(&path).unwrap();
+    let replacement = path.with_extension("same-bytes");
+    fs::write(&replacement, bytes).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let second = f.plan();
+    assert_ne!(first.truth_digest, second.truth_digest);
+    assert_ne!(first.stable_truth_digest, second.stable_truth_digest);
+}
+
+#[test]
+fn marker_owned_receipt_must_use_marker_timestamp() {
+    let f = Fixture::new();
+    let tree = f.tree("expired");
+    let expired = f.commit(&tree, vec![], "2025-01-01T00:00:00Z", CommitType::Auto);
+    let head_tree = f.tree("head");
+    let head = f.commit(
+        &head_tree,
+        vec![expired],
+        "2026-01-01T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    f.branch("main", &head);
+    let plan = f.plan();
+    let mut marker = GcInProgressMarker::from_plan(
+        &plan,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        "2026-01-01T00:00:00Z".into(),
+        GcIndexState::Absent,
+    )
+    .unwrap();
+    let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+    session.publish_marker(&marker).unwrap();
+    marker.phase = kio_core::gc::GcSweepPhase::Receipting;
+    session.advance_marker(&marker).unwrap();
+    let candidate = plan.candidates.first().unwrap();
+    session
+        .create_receipt(candidate, marker.started_at.clone())
+        .unwrap();
+    let path = f
+        .kio()
+        .join("gc/shallowed")
+        .join(&candidate.commit_hash[7..]);
+    fs::write(
+        &path,
+        ShallowReceipt::new(
+            candidate.commit_hash.clone(),
+            candidate.tree_hash.clone(),
+            "2026-01-01T00:00:01Z".into(),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(session.validate_recovery_state(&marker).is_err());
+}
+
+#[test]
+fn sweeping_receipt_binding_rejects_same_bytes_inode_replacement() {
+    let f = Fixture::new();
+    let tree = f.tree("expired");
+    let expired = f.commit(&tree, vec![], "2025-01-01T00:00:00Z", CommitType::Auto);
+    let head_tree = f.tree("head");
+    let head = f.commit(
+        &head_tree,
+        vec![expired],
+        "2026-01-01T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    f.branch("main", &head);
+    let plan = f.plan();
+    let mut marker = GcInProgressMarker::from_plan(
+        &plan,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        "2026-01-01T00:00:00Z".into(),
+        GcIndexState::Absent,
+    )
+    .unwrap();
+    let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+    session.publish_marker(&marker).unwrap();
+    marker.phase = kio_core::gc::GcSweepPhase::Receipting;
+    session.advance_marker(&marker).unwrap();
+    for candidate in &plan.candidates {
+        session
+            .create_receipt(candidate, marker.started_at.clone())
+            .unwrap();
+    }
+    marker = session.bind_operation_receipts(&marker).unwrap();
+    marker.phase = kio_core::gc::GcSweepPhase::Sweeping;
+    session.advance_marker(&marker).unwrap();
+    let candidate = plan.candidates.first().unwrap();
+    let path = f
+        .kio()
+        .join("gc/shallowed")
+        .join(&candidate.commit_hash[7..]);
+    let bytes = fs::read(&path).unwrap();
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, bytes).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert!(session.validate_recovery_state(&marker).is_err());
 }
 
 #[test]
@@ -386,7 +831,18 @@ fn an_existing_shallow_receipt_is_idempotent_and_skips_missing_tree() {
     let leaf = &shallow[7..];
     let receipt_dir = f.kio().join("gc/shallowed");
     fs::create_dir_all(&receipt_dir).unwrap();
-    fs::write(receipt_dir.join(leaf), serde_json::to_vec(&json!({"commit_hash": shallow, "tree_hash": tree, "gc_policy":"shallow", "shallowed_at":"2026-01-01T00:00:00Z"})).unwrap()).unwrap();
+    fs::write(
+        receipt_dir.join(leaf),
+        kio_core::gc::ShallowReceipt::new(
+            shallow.clone(),
+            tree.clone(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap(),
+    )
+    .unwrap();
     let path = f
         .kio()
         .join("objects/trees")
@@ -398,6 +854,103 @@ fn an_existing_shallow_receipt_is_idempotent_and_skips_missing_tree() {
     assert!(p.candidates.is_empty());
     assert_eq!(p.stats.trees_verified, 1); // only the live HEAD tree
     assert_eq!(excluded(&p, "already_shallow"), 1);
+}
+
+#[test]
+fn final_shallow_validation_requires_every_shared_tree_receipt() {
+    let f = Fixture::new();
+    let shared_tree = f.tree("shared-gone");
+    let first = f.commit(
+        &shared_tree,
+        vec![],
+        "2025-01-01T00:00:00Z",
+        CommitType::Auto,
+    );
+    let second = f.commit(
+        &shared_tree,
+        vec![first.clone()],
+        "2025-01-01T00:00:01Z",
+        CommitType::Auto,
+    );
+    let head = f.commit(
+        &f.tree("shared-head"),
+        vec![second],
+        "2025-01-02T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    let receipts = f.kio().join("gc/shallowed");
+    fs::create_dir_all(&receipts).unwrap();
+    fs::write(
+        receipts.join(&first[7..]),
+        ShallowReceipt::new(
+            first.clone(),
+            shared_tree.clone(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap(),
+    )
+    .unwrap();
+    let path = f
+        .kio()
+        .join("objects/trees")
+        .join(&shared_tree[7..9])
+        .join(&shared_tree[9..11])
+        .join(&shared_tree[7..]);
+    fs::remove_file(path).unwrap();
+
+    let error = validated_final_shallow_receipts(&f.kio()).unwrap_err();
+    assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+}
+
+#[cfg(unix)]
+#[test]
+fn final_shallow_inventory_rejects_a_symlinked_kio_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let source = Fixture::new();
+    let replacement = Fixture::new();
+    let source_kio = source.kio();
+    let parked = source.temp.path().join(".kio.parked");
+    fs::rename(&source_kio, &parked).unwrap();
+    symlink(replacement.kio(), &source_kio).unwrap();
+
+    let error = validated_final_shallow_receipts(&source_kio).unwrap_err();
+    assert!(matches!(
+        error.error_code(),
+        "KIO-E-STORE-CORRUPT-001" | "KIO-E-STORE-IO-001"
+    ));
+}
+
+#[test]
+fn marker_estimated_bytes_must_exactly_bind_candidate_tree_sizes() {
+    let f = Fixture::new();
+    let tree = f.tree("expired-size-bound");
+    let expired = f.commit(&tree, vec![], "2025-01-01T00:00:00Z", CommitType::Auto);
+    let head = f.commit(
+        &f.tree("size-bound-head"),
+        vec![expired],
+        "2026-01-01T00:00:00Z",
+        CommitType::Manual,
+    );
+    f.head(&head);
+    f.branch("main", &head);
+    let plan = f.plan();
+    let mut marker = GcInProgressMarker::from_plan(
+        &plan,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        "2026-01-01T00:00:00Z".into(),
+        GcIndexState::Absent,
+    )
+    .unwrap();
+    assert!(marker.estimated_bytes > 0);
+    marker.estimated_bytes = 0;
+    assert!(marker.validate().is_err());
+    marker.estimated_bytes = plan.estimated_bytes;
+    marker.candidates[0].size_bytes = 0;
+    assert!(marker.validate().is_err());
 }
 
 #[test]

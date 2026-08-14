@@ -1113,7 +1113,7 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) の**実装は Phase 4+** ([09-mvp-scope.md §3.1](09-mvp-scope.md))。MVP (Step 1-4) では GC を実行せず (**定期** auto snapshot・retention 減衰がまだ無く回収対象がほぼ発生しないため — 取り込み完了時の auto snapshot は MVP に存在する: §8.1)、`gc_policy` × `commit_type` の対応 schema のみ Step 1 の設計時から契約として遵守する (§2.6)。
+> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep である。`--prune-unreachable`、tiered hook、自動 scheduling、CoW 並行 GC はまだ実装しない。MVP (Step 1-4) では GC を実行せず、`gc_policy` × `commit_type` の対応 schema のみを契約として遵守していた (§2.6)。
 
 ```text
 gc_policy(commit_type):
@@ -1134,6 +1134,9 @@ gc_policy(commit_type):
 (`.kio/gc/shallowed/<commit64>`) を**tree 破棄より先に耐久化する** (Phase 4 実装要件) — fsck は
 receipt が説明する tree 欠落を正常 (shallow) として扱い、receipt なき欠落を corruption とする
 ([10-operations.md §7.5.1](10-operations.md)。これが無いと正規 GC と tree の偶発喪失を区別できない)。
+milestone 2 の receipt は上記4 fieldだけの canonical JSON+LFであり、create-new後にfileと
+`shallowed/` directoryをfsyncする。同名receiptはbyte/semantic完全一致だけを冪等成功とし、
+unknown field、filename/hash/tree/time不一致、symlink/reparse、非regular、hardlinkはcorruptionである。
 
 `shallow` 後の commit を対象に view した場合 (`kio view <path> --at <commit>` — 文法の正本は [06-cli-spec.md §1](06-cli-spec.md)。commit の metadata 表示は `kio log` / `kio inspect` 系が担う):
 
@@ -1183,10 +1186,21 @@ keep_repaired_per_branch = 5
 ## 2.5 並行性 / power-loss 安全性
 
 ```
-- GC 中の新規 commit 受付は block しない (CoW 風 readonly snapshot 上で走る)。§6 の lock 表が
-  `kio gc` を書き込み系に含めるのは on-demand 実装 (全体 lock 型 — 実装は Phase 4+ の初期形、§2.2) の
-  規約 — 本節の並行 GC はその後続であり、導入時に §6 の表を改訂する
-- object 物理削除は exclusive lock の短い critical section に限定
+- milestone 2 の on-demand sweep は preview/確認後から完了まで `.kio/.lock` をexclusive保持する。
+  `.kio/gc/in_progress` が残る crash recovery 中も、通常writerは
+  `KIO-E-GC-SWEEP-ACTIVE-001`で拒否し、GC resumeだけが専用lock入口を使う。新規commitをblockしない
+  CoW型GCは後続milestoneであり、本実装には含めない
+- markerはreceiptより先にatomic publishし、file/directory fsyncする。phaseは
+  `prepared → receipting → sweeping → finalizing`。更新はstrict versioned markerを
+  capability-relativeに交換し、operation/plan/truth/candidate/tree/index stateを固定する
+- shared treeは対象commit全件のreceipt耐久化後に1回だけ除去する。除去直前にも全ref tip、全commitの
+  tree共有、receipt、marker、bound scope identityを再検証し、相違は自動再計画せずfail-closedにする
+- tree/marker の隔離・退役名は `.kio/gc/internal/` 配下の operation-reserved namespace とする。
+  retained descriptor、nofollow、no-replace exchange、identity/hash/single-link の再検証で、隔離前および
+  検出可能な隔離後の差替えは fail-closed にする。POSIX の最終 pathname unlink には inode 条件を付与
+  できないため、検証直後の reserved name へ第三者が直接書き込む残余窓は §3.5 の restore 隔離と同じく
+  保護契約外とする。この例外は public CAS path、scope/fanout directory、receipt/marker public name、
+  hardlink、または unlink 後の retained handle に対する検証を緩めない
 - **generation 採番の順序**: sweep は**最初の tree 物理削除に先立ち** `index_generation` を新規採番・
   耐久化し、**sweep 完了時にも再採番**する — sweep 前に発行された cursor は開始時採番で、sweep 中に
   発行された cursor は完了時採番で、いずれも generation 不一致として拒否される (§1.5)。途中 crash
@@ -1194,7 +1208,21 @@ keep_repaired_per_branch = 5
 - **sweep 実行中 (in_progress マーカー存在 — crash 残骸を含む) は新規 cursor を発行しない** (page 1 は
   cursor なし応答 + 注記 — sweep 中に発行した cursor が同一 generation のまま変化する stream へ
   consumed を適用する窓を作らない。replay は generation 検査で自然に拒否される)
+- 各回転は公開 `index/sqlite.db` をin-place更新しない。retained `.kio` capabilityからsourceの
+  generation/physical identityとsource file state（size/mtime/ctime）を固定し、`.kio/gc/internal/index/` の
+  private copyを更新・file fsyncしてから、source state、source/target/private-directory identityをmarkerへ
+  耐久化する。その後、descriptor-relative atomic exchange直前にもsource stateを再照合した上でexchangeを
+  行い、公開`index/`、private directoryの順にfsyncする。recoveryは公開leafがmarkerのsourceかtargetである
+  場合だけ再開し、同generationの別inode、private directory/leaf差替え、unsupported platformはreceipt publish前
+  またはtree除去前にfail-closedとする
+- private copy の pre-sweep generation 更新と同一 SQLite transaction で、strict singleton
+  `gc_rotation_attestation`（version、sweep ID、role、plan digest、source/target generation）を記録する。
+  tree除去直前に公開DBのgeneration/physical identityとこのattestationをmarkerへ再照合し、単にmarkerの
+  `index_pre_sweep`を現在値へ偽装した状態を回転済みとは扱わない。coreのtree除去APIはこのtrusted index検証後に
+  発行されるprocess-local permitを必須とし、marker JSONだけを物理削除authorityにしない
 - power-loss 中断時は次回起動時に sweep 再開 (.kio/gc/in_progress マーカーで検出)
+- markerだけでreceipt/tree進捗が無い場合に限り、locked fresh planとの不一致を確認してmarkerを退役し、
+  新規previewを要求してよい。一度作成したreceiptはrollbackしない
 ```
 
 ## 2.6 GC の削除対象 (規範)
@@ -1227,7 +1255,7 @@ GC が削除してはならないもの:
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
-なお GC の実行系 (tiered retention / on_idle / prune) の実装は Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。tiered retention 導入までの auto commit の蓄積はディスク消費として容認する。
+なお on-demand tree-only shallow sweepはPhase 4 milestone 2で実装するが、tiered retention hook / on_idle / pruneは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
 
 # 3. Purge (法務・秘匿・誤取り込み)
 
@@ -1681,7 +1709,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 規約:
 
 - 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容する。検索は `.kio/index/sqlite.db` の WAL snapshot を読まず、公開済み `aggregator.sqlite` の projection だけを読む。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
-- `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
+- `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。Unixでは acquire/reclaim/release 全体を crash-release される directory `flock` でも直列化し、release はcheck-then-unlinkでなくdead canonical sentinelとのatomic exchangeを使う。このため非保持時にもdead sentinel leafが残り得るが、次writerが同じgate下で回収し、単なる`.lock`存在だけをlive判定に使わない。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kio repair rebuild-db` 実行中の `kio search` は旧 `.kio/index/sqlite.db` を読まない。scope の replica header が `Rebuilding` または完全 projection を欠く間は `KIO-E-INDEX-REBUILDING-001` で fail-closed とし、writer が新しい projection を publish してから検索へ再参加させる。再構築本体は引き続き atomic rename (`sqlite.db.tmp → sqlite.db`) で切り替える

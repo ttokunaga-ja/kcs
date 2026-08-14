@@ -773,6 +773,7 @@ version = "0.1.0"
 dependencies = [
  "cap-primitives",
  "kio-core",
+ "libc",
  "rusqlite",
  "serde",
  "serde_jcs",

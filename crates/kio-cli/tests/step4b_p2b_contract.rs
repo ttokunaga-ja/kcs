@@ -12,6 +12,7 @@ use assert_cmd::Command;
 use base64::Engine;
 use kio_core::cas::{hash_bytes, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore};
 use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
+use kio_core::gc::ShallowReceipt;
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
 use kio_index::registry::{RegistryDb, RegistryEntry};
@@ -88,6 +89,37 @@ fn fixture() -> (TempDir, Value, String) {
         .unwrap()
         .to_owned();
     (dir, pointer, uri)
+}
+
+fn make_pointer_commit_final_shallow(dir: &TempDir, pointer: &Value) {
+    let commit_hash = pointer["commit"].as_str().unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
+    let commit = repo.read_commit(commit_hash).unwrap();
+
+    // A completed shallow state is valid only for a non-tip Auto/Repaired
+    // commit with an exact canonical receipt. Advance HEAD before removing the
+    // pointer commit's tree so this fixture models a real completed GC sweep.
+    fs::write(
+        dir.path().join("advance.md"),
+        "# Advance\n\nadvance the shallow fixture head\n",
+    )
+    .unwrap();
+    success(dir, &["index", "--offline", "--approve"]);
+
+    let receipt_path = kio_dir(dir)
+        .join("gc/shallowed")
+        .join(commit_hash.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit_hash.to_owned(),
+        commit.tree.clone(),
+        "2026-08-14T00:00:00Z".into(),
+    )
+    .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
+
+    let store = ObjectStore::new(kio_dir(dir));
+    fs::remove_file(store.object_path(ObjectKind::Tree, &commit.tree).unwrap()).unwrap();
 }
 
 fn kio_dir(dir: &TempDir) -> std::path::PathBuf {
@@ -1026,12 +1058,7 @@ fn pb28_rebuild_db_initializes_last_lifecycle_epoch_to_current_value() {
 #[test]
 fn pb39_regression_shallow_commit_resolves_alive_non_strict() {
     let (dir, pointer, _) = fixture();
-    let repo = Repository::open(dir.path()).unwrap();
-    let commit = repo
-        .read_commit(pointer["commit"].as_str().unwrap())
-        .unwrap();
-    let store = ObjectStore::new(kio_dir(&dir));
-    fs::remove_file(store.object_path(ObjectKind::Tree, &commit.tree).unwrap()).unwrap();
+    make_pointer_commit_final_shallow(&dir, &pointer);
     let pointer_json = serde_json::to_string(&pointer).unwrap();
     let output = success(&dir, &["evidence", "verify", &pointer_json]);
     assert_eq!(output["status"], "alive");
@@ -1044,12 +1071,7 @@ fn pb39_regression_shallow_commit_resolves_alive_non_strict() {
 #[test]
 fn pb40_pb41_strict_shallow_commit_downgrades_to_unverifiable_exit_three() {
     let (dir, pointer, _) = fixture();
-    let repo = Repository::open(dir.path()).unwrap();
-    let commit = repo
-        .read_commit(pointer["commit"].as_str().unwrap())
-        .unwrap();
-    let store = ObjectStore::new(kio_dir(&dir));
-    fs::remove_file(store.object_path(ObjectKind::Tree, &commit.tree).unwrap()).unwrap();
+    make_pointer_commit_final_shallow(&dir, &pointer);
     let pointer_json = serde_json::to_string(&pointer).unwrap();
 
     let (code, output) = run(&dir, &["evidence", "verify", &pointer_json, "--strict"]);

@@ -1,7 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use assert_cmd::Command;
 use kio_core::cas::{fanout_path, ObjectKind, ObjectStore};
+use kio_core::gc::ShallowReceipt;
+use kio_core::scope::Repository;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -365,12 +368,45 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
     let shallow_out = TempDir::new().unwrap();
     init(&shallow);
     fs::write(shallow.path().join("doc.md"), b"content").unwrap();
-    let commit = snapshot(&shallow, "source");
+    // A final shallow receipt permits a missing tree only for an Auto/Repaired
+    // commit that is no longer a ref tip.  Build that exact completed-GC state
+    // rather than treating a deleted tree on a manual HEAD snapshot as shallow.
+    let repo = Repository::open(shallow.path()).unwrap();
+    let commit = repo
+        .auto_snapshot_with_normalize(
+            Some("source"),
+            Some("2026-08-14T00:00:00Z"),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .commit_hash
+        .unwrap();
     let tree_hash = inspect(&shallow, &commit)["tree"]
         .as_str()
         .unwrap()
         .to_owned();
+    fs::write(shallow.path().join("doc.md"), b"advanced").unwrap();
+    repo.auto_snapshot_with_normalize(
+        Some("advance shallow fixture head"),
+        Some("2026-08-14T00:00:01Z"),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
     let store = ObjectStore::new(shallow.path().join(".kio"));
+    let receipt_path = shallow
+        .path()
+        .join(".kio/gc/shallowed")
+        .join(commit.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit.clone(),
+        tree_hash.clone(),
+        "2026-08-14T00:00:02Z".into(),
+    )
+    .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
     fs::remove_file(store.object_path(ObjectKind::Tree, &tree_hash).unwrap()).unwrap();
     let error = json_failure(
         &shallow,

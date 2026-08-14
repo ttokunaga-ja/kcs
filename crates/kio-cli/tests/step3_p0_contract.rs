@@ -11,6 +11,7 @@ use kio_core::scope::Repository;
 use kio_core::{
     cas::{ContentObjectKind, ObjectKind, ObjectStore},
     dag::CommitObject,
+    gc::ShallowReceipt,
     portable::portable_tag_leaf,
 };
 use kio_index::aggregator::{AggIndexStatus, Aggregator};
@@ -3843,19 +3844,29 @@ fn pc19_pc21_index_generation_rotation_rejects_a_cursor_after_new_content_is_ind
 }
 
 #[test]
-fn ct3_cursor_005_shallow_snapshot_cursor_is_rejected() {
+fn ct3_cursor_005_unreceipted_missing_tree_is_store_corruption() {
     let dir = indexed_scope();
     let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
     let cursor = first["paging"]["next_cursor"].as_str().unwrap().to_owned();
-    // Discard the snapshot's tree objects, emulating a shallow (tiered-retention)
-    // commit. The cursor can no longer be replayed.
-    fs::remove_dir_all(dir.path().join(".kio/objects/trees")).unwrap();
+    // GC never sweeps a ref tip and never removes a tree without a receipt.
+    // A manually missing current tree is corruption, not a valid shallow cursor.
+    let kio_dir = dir.path().join(".kio");
+    let head = head_commit(&kio_dir);
+    let commit: Value =
+        serde_json::from_slice(&fs::read(object_path(&kio_dir, "commits", &head)).unwrap())
+            .unwrap();
+    fs::remove_file(object_path(
+        &kio_dir,
+        "trees",
+        commit["tree"].as_str().unwrap(),
+    ))
+    .unwrap();
     let err = json_failure(
         &dir,
         &["search", "認証仕様", "--cursor", &cursor, "--limit", "100"],
-        1,
+        4,
     );
-    assert_eq!(err["error_code"], "KIO-E-COMMIT-SHALLOW-001");
+    assert_eq!(err["error_code"], "KIO-E-STORE-CORRUPT-001");
 }
 
 #[test]
@@ -4901,11 +4912,24 @@ fn ct3_evidence_005_shallow_commit_resolves_directly() {
     let commit = pointer["commit"].as_str().unwrap();
     let kio_dir = dir.path().join(".kio");
 
-    // Make the commit shallow: discard its tree object (05 §2.2 GC has no Step 3
-    // generator, so hand-place the shallow state).
+    // Complete a valid markerless shallow state: the indexed Auto commit must
+    // be non-tip and have a strict canonical receipt before its tree is gone.
     let commit_bytes = fs::read(object_path(&kio_dir, "commits", commit)).unwrap();
     let commit_obj: Value = serde_json::from_slice(&commit_bytes).unwrap();
     let tree = commit_obj["tree"].as_str().unwrap();
+    fs::write(dir.path().join("advance.md"), "# Advance\n\nfixture head\n").unwrap();
+    json_success(&dir, &["index", "--yes"]);
+    let receipt_path = kio_dir
+        .join("gc/shallowed")
+        .join(commit.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit.to_owned(),
+        tree.to_owned(),
+        "2026-08-14T00:00:00Z".into(),
+    )
+    .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
     fs::remove_file(object_path(&kio_dir, "trees", tree)).unwrap();
 
     let ptr = pointer.to_string();
@@ -9209,6 +9233,23 @@ fn r17_1_forged_commit_pointer_rejected_while_true_shallow_resolves() {
         serde_json::from_slice(&fs::read(object_path(&kio_dir2, "commits", commit2)).unwrap())
             .unwrap();
     let tree2 = commit_obj["tree"].as_str().unwrap();
+    fs::write(
+        dir2.path().join("advance.md"),
+        "# Advance\n\nfixture head\n",
+    )
+    .unwrap();
+    json_success(&dir2, &["index", "--yes"]);
+    let receipt_path = kio_dir2
+        .join("gc/shallowed")
+        .join(commit2.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit2.to_owned(),
+        tree2.to_owned(),
+        "2026-08-14T00:00:00Z".into(),
+    )
+    .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
     fs::remove_file(object_path(&kio_dir2, "trees", tree2)).unwrap();
     let viewed = json_success(&dir2, &["view", &pointer2.to_string()]);
     assert_eq!(
@@ -9366,13 +9407,11 @@ fn r16_2_one_scope_store_corruption_is_partial_not_all_failed() {
     assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kio"));
 }
 
-// R16-3: a fresh search against a scope whose HEAD advanced via a bare `snapshot`
-// (tree_entries NOT projected) and whose new tree object was then discarded must
-// EXCLUDE that scope with reason "snapshot_shallow" — not silently place it in
-// searched_scopes with an empty result set (exit 0), the P10-type silent
-// false-negative GPT-5.5 found in the fresh path's dropped `Ok(false)`.
+// R16-3: a fresh search against a scope whose current tree disappeared without
+// a GC receipt must exclude that scope as store corruption, never silently place
+// it in searched_scopes with an empty result set.
 #[test]
-fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
+fn r16_3_fresh_search_unreceipted_tree_loss_excludes_not_silent_empty() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -9422,17 +9461,15 @@ fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0]["reason"], "snapshot_shallow");
+    assert_eq!(excluded[0]["reason"], "store_corrupt");
     // R23-20 (03 §4 L296): scope_path is the canonical `.kio` directory.
     assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kio"));
 }
 
-// R16-4(a): `repair rebuild-db` — the only implemented recovery command — must not
-// die on the very shallow-HEAD corruption it exists to recover from. A discarded HEAD
-// tree object yields a clear COMMIT-SHALLOW (via the shared rebuilder), not a raw
-// KIO-E-STORE-NOT-FOUND-001 (R15-4 fixed reindex but its fix skipped repair).
+// R16-4(a): a missing HEAD tree without a canonical receipt is corruption.
+// `repair rebuild-db` must not relabel or auto-repair that impossible GC state.
 #[test]
-fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
+fn r16_4_repair_on_unreceipted_missing_head_reports_corruption() {
     let dir = indexed_scope();
     let kio_dir = dir.path().join(".kio");
     let head = head_commit(&kio_dir);
@@ -9446,10 +9483,10 @@ fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
     ))
     .unwrap();
 
-    let err = json_failure(&dir, &["repair", "rebuild-db"], 1);
+    let err = json_failure(&dir, &["repair", "rebuild-db"], 4);
     assert_eq!(
-        err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
-        "repair must report the shallow HEAD, not a raw STORE-NOT-FOUND: {err}"
+        err["error_code"], "KIO-E-STORE-CORRUPT-001",
+        "repair must fail closed on a receiptless missing HEAD tree: {err}"
     );
 }
 
@@ -9487,34 +9524,41 @@ fn r16_5_diff_with_shallow_side_names_the_side() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
     kio(&dir, &["init"]).assert().success();
-    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, &["index", "--yes"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
-    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2 = json_success(&dir, &["index", "--yes"]);
     let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
 
     // (control) a healthy diff of the two commits works.
     let ok = json_success(&dir, &["diff", &c1_hash, &c2_hash]);
     assert!(!ok["changes"].as_array().unwrap().is_empty());
 
-    // Make C2 shallow: discard its tree object (its commit survives).
+    // Make the non-tip Auto C1 legitimately shallow: receipt first, then tree.
     let kio_dir = dir.path().join(".kio");
-    let c2_obj: Value =
-        serde_json::from_slice(&fs::read(object_path(&kio_dir, "commits", &c2_hash)).unwrap())
+    let c1_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&kio_dir, "commits", &c1_hash)).unwrap())
             .unwrap();
-    fs::remove_file(object_path(
-        &kio_dir,
-        "trees",
-        c2_obj["tree"].as_str().unwrap(),
-    ))
+    let c1_tree = c1_obj["tree"].as_str().unwrap();
+    let receipt_path = kio_dir
+        .join("gc/shallowed")
+        .join(c1_hash.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        c1_hash.clone(),
+        c1_tree.to_owned(),
+        "2026-08-14T00:00:00Z".into(),
+    )
     .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
+    fs::remove_file(object_path(&kio_dir, "trees", c1_tree)).unwrap();
 
-    // Naming C2 as operand b → COMMIT-SHALLOW, context side="b".
-    let err_b = json_failure(&dir, &["diff", &c1_hash, &c2_hash], 1);
+    // Naming C1 as operand b → COMMIT-SHALLOW, context side="b".
+    let err_b = json_failure(&dir, &["diff", &c2_hash, &c1_hash], 1);
     assert_eq!(err_b["error_code"], "KIO-E-COMMIT-SHALLOW-001", "{err_b}");
     assert_eq!(err_b["context"]["side"], "b", "{err_b}");
-    // Naming C2 as operand a → COMMIT-SHALLOW, context side="a".
-    let err_a = json_failure(&dir, &["diff", &c2_hash, &c1_hash], 1);
+    // Naming C1 as operand a → COMMIT-SHALLOW, context side="a".
+    let err_a = json_failure(&dir, &["diff", &c1_hash, &c2_hash], 1);
     assert_eq!(err_a["error_code"], "KIO-E-COMMIT-SHALLOW-001", "{err_a}");
     assert_eq!(err_a["context"]["side"], "a", "{err_a}");
 }
@@ -9689,11 +9733,10 @@ fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
     );
 }
 
-// R17-4: the snapshot_shallow class (R16-3: a bare-snapshot HEAD whose tree object was
-// discarded, no cached rows) gets its OWN recovery guidance — deliberately NOT the
-// index_missing "run repair" push, because repair cannot restore a discarded object.
+// R17-4: a receiptless missing HEAD tree is store corruption and receives the
+// store-corrupt recovery guidance. Valid GC shallow commits are never ref tips.
 #[test]
-fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
+fn r17_4_unreceipted_missing_head_returns_store_corrupt_guidance() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("a.md"),
@@ -9731,19 +9774,12 @@ fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
     assert!(
         recovery
             .iter()
-            .any(|line| line.as_str().unwrap().contains("snapshot_shallow")),
-        "snapshot_shallow-specific recovery guidance is present: {err}"
+            .any(|line| line.as_str().unwrap().contains("store_corrupt")),
+        "store_corrupt recovery guidance is present: {err}"
     );
     assert!(
-        err["message"]
-            .as_str()
-            .unwrap()
-            .contains("re-run `kio index`")
-            || err["message"]
-                .as_str()
-                .unwrap()
-                .contains("restore the discarded"),
-        "guidance names object restore / re-index (not a derived-index rebuild alone): {err}"
+        err["message"].as_str().unwrap().contains("repair all"),
+        "guidance names the fail-closed store recovery command: {err}"
     );
 }
 

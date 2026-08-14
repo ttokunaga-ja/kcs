@@ -4,6 +4,7 @@ use std::fs;
 use assert_cmd::Command;
 use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
 use kio_core::dag::{CommitObject, CommitStats, CommitType};
+use kio_core::gc::ShallowReceipt;
 use kio_core::scope::Repository;
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -1650,6 +1651,23 @@ fn discard_commit_tree(dir: &TempDir, commit_hash: &str) -> std::path::PathBuf {
     path
 }
 
+fn write_shallow_receipt(dir: &TempDir, commit_hash: &str) {
+    let repo = Repository::open(dir.path()).unwrap();
+    let tree_hash = repo.read_commit(commit_hash).unwrap().tree;
+    let path = repo
+        .kio_dir()
+        .join("gc/shallowed")
+        .join(commit_hash.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit_hash.to_owned(),
+        tree_hash,
+        "2026-08-14T00:00:00Z".into(),
+    )
+    .unwrap();
+    fs::write(path, receipt.canonical_bytes().unwrap()).unwrap();
+}
+
 #[test]
 fn ct4_timetravel_007_replica_revalidates_history_after_cas_becomes_shallow() {
     let dir = tempfile::tempdir().unwrap();
@@ -1692,6 +1710,7 @@ fn ct4_timetravel_007_replica_revalidates_history_after_cas_becomes_shallow() {
         .unwrap();
     assert!(cached > 0, "fixture must retain historical cache rows");
     drop(conn);
+    write_shallow_receipt(&dir, &c1);
     let c1_tree_path = discard_commit_tree(&dir, &c1);
 
     // A durable replica projection is never authority for a selected `--at`
@@ -1798,6 +1817,15 @@ fn ct4_timetravel_007_replica_revalidates_history_after_cas_becomes_shallow() {
         ],
     );
     let cursor = page1["paging"]["next_cursor"].as_str().unwrap();
+    // The cursor remains bound to this snapshot after HEAD advances, making it
+    // eligible for a completed markerless shallow receipt.
+    fs::write(
+        cursor_dir.path().join("advanced.md"),
+        "# Advanced\n\nnew cursor fixture head\n",
+    )
+    .unwrap();
+    index_at(&cursor_dir, "2026-07-10T00:00:01Z");
+    write_shallow_receipt(&cursor_dir, &head);
     let head_tree_path = discard_commit_tree(&cursor_dir, &head);
     let page2 = json_failure(
         &cursor_dir,

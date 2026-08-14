@@ -40,7 +40,7 @@
 - 高度な分類器の自動移動 (auto_organize は提案表示のみ)
 - 多デバイス同期 (synchronization は v2+)
 - Adapter の OS サンドボックス強制・第三者 Adapter の配布/署名 (07-adapter-spec.md §7.1)
-- GC の実行系 (shallow sweep / prune-unreachable / tiered retention hook / CoW 並行 GC / power-loss sweep)。Phase 4 の最初の独立 milestone である `kio gc --dry-run` read-only planner は [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する
+- GC の実行系のうち、receipt先行・crash recovery付きの on-demand tree-only shallow sweep は Phase 4 milestone 2 として [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する。`--prune-unreachable`、tiered retention hook、CoW 並行 GC、scheduled/on-idle 実行は未公開である
 - purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース。05-runtime.md §3.5)
 - export / import (.kioz bundle)
 - kio evidence verify --batch / kio evidence retarget の実装
@@ -138,9 +138,10 @@ Step 別の目安 (テスト除く):
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
 | retention shallow 候補の read-only planner (`kio gc --dry-run`) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.2-2.4](05-runtime.md) | Phase 4 milestone 1 |
-| on-demand shallow sweep / `--prune-unreachable` GC 実行系 | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (破壊 mode は未公開) |
+| receipt先行・crash recovery付きの on-demand tree-only shallow sweep (`kio gc [--yes]`) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4 milestone 2 |
+| `--prune-unreachable` GC 実行系 | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (未公開) |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
-| CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
+| CoW 並行 GC / max-runtime分割実行 | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |
 | export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |

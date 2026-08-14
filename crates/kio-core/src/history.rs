@@ -372,6 +372,10 @@ impl FirstParentHistory {
 #[derive(Debug, Clone)]
 pub struct HistoryReader {
     store: ObjectStore,
+    // Keep the capability root separately from `ObjectStore`: tolerant history
+    // walks must authenticate a missing tree against the strict shallow-receipt
+    // namespace, rather than treating every missing CAS tree as intentional.
+    kio_dir: PathBuf,
     limits: HistoryLimits,
 }
 
@@ -383,8 +387,18 @@ impl HistoryReader {
 
     #[must_use]
     pub fn with_limits(kio_dir: impl Into<PathBuf>, limits: HistoryLimits) -> Self {
+        let supplied = kio_dir.into();
+        // HistoryReader has historically accepted ordinary ambient paths
+        // (including macOS tempfile paths spelled through `/var` while the
+        // canonical mount name is `/private/var`).  Canonicalize once before
+        // handing the path to the capability-bound receipt reader; all later
+        // reads stay on this fixed store identity.  Keep the original path only
+        // when canonicalization fails so strict ObjectStore reads preserve the
+        // established typed error at use time.
+        let kio_dir = supplied.canonicalize().unwrap_or(supplied);
         Self {
-            store: ObjectStore::new(kio_dir),
+            store: ObjectStore::new(&kio_dir),
+            kio_dir,
             limits,
         }
     }
@@ -454,7 +468,28 @@ impl HistoryReader {
     /// a missing commit is corruption, and this call fails exactly like
     /// `all_parents` in that case too.
     pub fn all_parents_tolerant(&self, start_commit: &str) -> Result<(HistoryGraph, Vec<String>)> {
-        let walk = self.walk_tolerant(start_commit, ParentMode::All)?;
+        self.all_parents_for_roots_tolerant(&BTreeSet::from([start_commit.to_owned()]))
+    }
+
+    /// The receipt-gated tolerant counterpart of [`Self::all_parents_for_roots`].
+    /// Every supplied root remains strict; only a non-root ancestor with a
+    /// markerless, exact shallow receipt may be skipped while its parents keep
+    /// being traversed. This is intended for derived-state rebuilds, not for
+    /// explicit snapshot selection.
+    pub fn all_parents_for_roots_tolerant(
+        &self,
+        roots: &BTreeSet<String>,
+    ) -> Result<(HistoryGraph, Vec<String>)> {
+        let start_commit = roots
+            .first()
+            .cloned()
+            .ok_or_else(|| KioError::schema("history root set is empty"))?;
+        let allowed_shallow = self.markerless_shallow_receipts()?;
+        let walk = self.walk_many_tolerant(
+            roots.iter().map(String::as_str),
+            ParentMode::All,
+            &allowed_shallow,
+        )?;
         // `validate_acyclic` counts only parent hashes that are themselves keys
         // of `nodes` (a no-op generalization for a complete, non-tolerant graph,
         // where every referenced parent is always present) — a shallow-skipped
@@ -463,7 +498,7 @@ impl HistoryReader {
         validate_acyclic(&walk.nodes)?;
         Ok((
             HistoryGraph {
-                start_commit: start_commit.to_owned(),
+                start_commit,
                 nodes: walk.nodes,
                 visit_order: walk.order,
                 stats: walk.stats,
@@ -478,7 +513,8 @@ impl HistoryReader {
         &self,
         start_commit: &str,
     ) -> Result<(FirstParentHistory, Vec<String>)> {
-        let walk = self.walk_tolerant(start_commit, ParentMode::First)?;
+        let allowed_shallow = self.markerless_shallow_receipts()?;
+        let walk = self.walk_tolerant(start_commit, ParentMode::First, &allowed_shallow)?;
         Ok((
             FirstParentHistory {
                 start_commit: start_commit.to_owned(),
@@ -539,14 +575,33 @@ impl HistoryReader {
     /// tolerated. Skipped hashes are still counted against `HistoryStats` for
     /// their commit bytes (their tree contributes zero entries/bytes, same as a
     /// legitimately empty tree would).
-    fn walk_tolerant(&self, start_commit: &str, mode: ParentMode) -> Result<TolerantWalkState> {
+    fn walk_tolerant(
+        &self,
+        start_commit: &str,
+        mode: ParentMode,
+        _allowed_shallow: &BTreeMap<String, String>,
+    ) -> Result<TolerantWalkState> {
+        self.walk_many_tolerant([start_commit], mode, _allowed_shallow)
+    }
+
+    fn walk_many_tolerant<'a>(
+        &self,
+        starts: impl IntoIterator<Item = &'a str>,
+        mode: ParentMode,
+        _allowed_shallow: &BTreeMap<String, String>,
+    ) -> Result<TolerantWalkState> {
         let mut state = TolerantWalkState::default();
-        let mut pending = vec![start_commit.to_owned()];
-        let mut scheduled = BTreeSet::from([start_commit.to_owned()]);
+        let strict_starts = starts
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let mut pending = strict_starts.iter().rev().cloned().collect::<Vec<_>>();
+        let mut scheduled = strict_starts.clone();
 
         while let Some(commit_hash) = pending.pop() {
-            let is_start = commit_hash == start_commit;
-            let outcome = self.read_node_tolerant(&commit_hash, state.stats, is_start)?;
+            let is_start = strict_starts.contains(&commit_hash);
+            let outcome =
+                self.read_node_tolerant(&commit_hash, state.stats, is_start, _allowed_shallow)?;
             let (parents, next_stats) = match outcome {
                 TolerantNodeOutcome::Full(node, next_stats) => {
                     let parents = match mode {
@@ -667,6 +722,13 @@ impl HistoryReader {
         match self.store.read_object(kind, object_hash) {
             Ok(object) => Ok(object),
             Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {
+                if kind == ObjectKind::Tree {
+                    crate::gc::validate_final_shallow_tree(
+                        &self.kio_dir,
+                        commit_hash,
+                        object_hash,
+                    )?;
+                }
                 Err(history_shallow_error(commit_hash, kind, object_hash))
             }
             Err(error) => Err(error),
@@ -683,6 +745,7 @@ impl HistoryReader {
         commit_hash: &str,
         stats: HistoryStats,
         is_start: bool,
+        _allowed_shallow: &BTreeMap<String, String>,
     ) -> Result<TolerantNodeOutcome> {
         let next_commit_count = checked_total(stats.commits, 1);
         if next_commit_count > self.limits.max_commits {
@@ -710,6 +773,14 @@ impl HistoryReader {
         let tree_object = match self.store.read_object(ObjectKind::Tree, &commit.tree) {
             Ok(object) => object,
             Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {
+                if _allowed_shallow.get(commit_hash) != Some(&commit.tree) {
+                    return Err(KioError::new(
+                        "KIO-E-STORE-CORRUPT-001",
+                        "missing commit tree has no canonical shallow receipt",
+                        json!({"commit_hash": commit_hash, "tree_hash": commit.tree}),
+                        ExitCode::PermanentFailure,
+                    ));
+                }
                 if is_start {
                     return Err(history_shallow_error(
                         commit_hash,
@@ -763,6 +834,14 @@ impl HistoryReader {
                 verified_bytes: next_verified_bytes,
             },
         ))
+    }
+
+    /// Build the only allow-list a tolerant walk may use.  Active sweeps have
+    /// not reached a stable markerless shallow state, so no absent tree is
+    /// tolerated until recovery completes. `read_shallow_receipts` is itself a
+    /// strict no-follow, canonical receipt inventory.
+    fn markerless_shallow_receipts(&self) -> Result<BTreeMap<String, String>> {
+        crate::gc::validated_final_shallow_receipts(&self.kio_dir)
     }
 }
 
@@ -961,6 +1040,7 @@ mod tests {
     use super::{HistoryLimits, HistoryReader, TreeBinding};
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
     use crate::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
+    use crate::gc::ShallowReceipt;
 
     struct Fixture {
         _temp: tempfile::TempDir,
@@ -973,6 +1053,10 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let kio_dir = temp.path().join(".kio");
             fs::create_dir(&kio_dir).unwrap();
+            fs::create_dir_all(kio_dir.join("refs/heads")).unwrap();
+            fs::create_dir_all(kio_dir.join("refs/tags-v1")).unwrap();
+            fs::create_dir_all(kio_dir.join("objects/trees")).unwrap();
+            fs::write(kio_dir.join("HEAD"), b"").unwrap();
             let store = ObjectStore::new(&kio_dir);
             Self {
                 _temp: temp,
@@ -1001,13 +1085,21 @@ mod tests {
                     files_modified: 0,
                     files_deleted: 0,
                 },
-                CommitType::Manual,
+                CommitType::Auto,
             )
             .unwrap();
             self.store
                 .write_json(ObjectKind::Commit, &serde_json::to_value(commit).unwrap())
                 .unwrap()
                 .0
+        }
+
+        fn shallow_receipt(&self, commit: String, tree: String) {
+            let leaf = commit.strip_prefix("sha256:").unwrap().to_owned();
+            let dir = self.kio_dir.join("gc/shallowed");
+            fs::create_dir_all(&dir).unwrap();
+            let receipt = ShallowReceipt::new(commit, tree, "2026-07-13T00:00:00Z".into()).unwrap();
+            fs::write(dir.join(leaf), receipt.canonical_bytes().unwrap()).unwrap();
         }
     }
 
@@ -1294,23 +1386,23 @@ mod tests {
         assert_eq!(error.context()["commit_hash"], json!(missing_parent));
         assert_eq!(error.context()["missing_object_kind"], json!("commit"));
 
+        // Keep this missing-tree case separate from the dangling-parent case
+        // above: final shallow inventory validates every commit link globally.
+        let fixture = Fixture::new();
         let missing_tree = hash_bytes(b"missing-tree");
         let shallow = fixture.commit("shallow", &missing_tree, Vec::new());
         let error = HistoryReader::new(&fixture.kio_dir)
             .first_parent(&shallow)
             .unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-COMMIT-SHALLOW-001");
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
         assert_eq!(error.context()["commit_hash"], json!(shallow));
-        assert_eq!(error.context()["missing_object_kind"], json!("tree"));
-        assert_eq!(error.context()["missing_object_hash"], json!(missing_tree));
 
         let raw_only_tree = fixture.store.write_raw(b"raw-only-tree").unwrap();
         let shallow = fixture.commit("raw-is-not-tree", &raw_only_tree, Vec::new());
         let error = HistoryReader::new(&fixture.kio_dir)
             .snapshot(&shallow)
             .unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-COMMIT-SHALLOW-001");
-        assert_eq!(error.context()["missing_object_kind"], json!("tree"));
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
     #[test]
@@ -1324,8 +1416,7 @@ mod tests {
         let tree_path = fixture.store.object_path(ObjectKind::Tree, &tree).unwrap();
         fs::remove_file(tree_path).unwrap();
         let error = reader.all_parents(&head).unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-COMMIT-SHALLOW-001");
-        assert_eq!(error.context()["missing_object_kind"], json!("tree"));
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
     #[test]
@@ -1360,6 +1451,7 @@ mod tests {
         let root = fixture.commit("root", &root_tree, Vec::new());
         let missing_tree = hash_bytes(b"pc45-missing-tree");
         let shallow_mid = fixture.commit("shallow-mid", &missing_tree, vec![root.clone()]);
+        fixture.shallow_receipt(shallow_mid.clone(), missing_tree);
         let head_tree = fixture.tree(vec![entry("head.md", b"head", Some(profile()))]);
         let head = fixture.commit("head", &head_tree, vec![shallow_mid.clone()]);
 
@@ -1392,6 +1484,42 @@ mod tests {
         );
     }
 
+    /// Tolerance is not a generic missing-tree escape hatch: a missing
+    /// ancestor tree without the exact durable shallow receipt is corruption.
+    #[test]
+    fn tolerant_walk_rejects_unreceipted_missing_ancestor_tree() {
+        let fixture = Fixture::new();
+        let root_tree = fixture.tree(Vec::new());
+        let root = fixture.commit("root", &root_tree, Vec::new());
+        let missing_tree = hash_bytes(b"unreceipted-missing-tree");
+        let missing = fixture.commit("missing", &missing_tree, vec![root]);
+        let head_tree = fixture.tree(Vec::new());
+        let head = fixture.commit("head", &head_tree, vec![missing.clone()]);
+
+        let error = HistoryReader::new(&fixture.kio_dir)
+            .all_parents_tolerant(&head)
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+        assert_eq!(error.context()["commit_hash"], json!(missing));
+    }
+
+    #[test]
+    fn multi_root_tolerant_walk_keeps_every_root_strict() {
+        let fixture = Fixture::new();
+        let healthy_tree = fixture.tree(Vec::new());
+        let healthy = fixture.commit("healthy", &healthy_tree, Vec::new());
+        let missing_tree = hash_bytes(b"receipt-backed-root-must-still-fail");
+        let shallow_root = fixture.commit("shallow-root", &missing_tree, Vec::new());
+        fixture.shallow_receipt(shallow_root.clone(), missing_tree);
+        let roots = BTreeSet::from([healthy, shallow_root.clone()]);
+
+        let error = HistoryReader::new(&fixture.kio_dir)
+            .all_parents_for_roots_tolerant(&roots)
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-COMMIT-SHALLOW-001");
+        assert_eq!(error.context()["commit_hash"], json!(shallow_root));
+    }
+
     /// PC47: the *start* commit of a tolerant walk still hard-fails when its own
     /// tree is shallow — only a deeper ancestor is tolerated (PC45's skip is not
     /// a blanket exemption; a `--cursor` replay or `--at <shallow-commit>` needs
@@ -1401,6 +1529,7 @@ mod tests {
         let fixture = Fixture::new();
         let missing_tree = hash_bytes(b"pc47-missing-tree");
         let shallow_head = fixture.commit("shallow-head", &missing_tree, Vec::new());
+        fixture.shallow_receipt(shallow_head.clone(), missing_tree);
         let error = HistoryReader::new(&fixture.kio_dir)
             .all_parents_tolerant(&shallow_head)
             .unwrap_err();
@@ -1418,6 +1547,7 @@ mod tests {
         let root = fixture.commit("root", &root_tree, Vec::new());
         let missing_tree = hash_bytes(b"pc45-fp-missing-tree");
         let shallow_mid = fixture.commit("shallow-mid", &missing_tree, vec![root.clone()]);
+        fixture.shallow_receipt(shallow_mid.clone(), missing_tree);
         let head_tree = fixture.tree(Vec::new());
         let head = fixture.commit("head", &head_tree, vec![shallow_mid.clone()]);
 
@@ -1441,9 +1571,7 @@ mod tests {
         let error = HistoryReader::new(&fixture.kio_dir)
             .all_parents_tolerant(&head)
             .unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-COMMIT-SHALLOW-001");
-        assert_eq!(error.context()["missing_object_kind"], json!("commit"));
-        assert_eq!(error.context()["commit_hash"], json!(missing_parent));
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
     }
 
     /// Two independent branches each carrying a shallow ancestor still merge
@@ -1458,8 +1586,10 @@ mod tests {
         let missing_tree_left = hash_bytes(b"pc45-merge-left-missing");
         let missing_tree_right = hash_bytes(b"pc45-merge-right-missing");
         let shallow_left = fixture.commit("shallow-left", &missing_tree_left, vec![root.clone()]);
+        fixture.shallow_receipt(shallow_left.clone(), missing_tree_left);
         let shallow_right =
             fixture.commit("shallow-right", &missing_tree_right, vec![root.clone()]);
+        fixture.shallow_receipt(shallow_right.clone(), missing_tree_right);
         let merge = fixture.commit(
             "merge",
             &empty,

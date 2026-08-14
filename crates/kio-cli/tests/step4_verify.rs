@@ -3,6 +3,7 @@ use std::fs;
 use assert_cmd::Command;
 use kio_core::cas::{canonical_json_bytes, ContentObjectKind, ObjectKind, ObjectStore};
 use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType};
+use kio_core::gc::ShallowReceipt;
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_index::aggregator::{AggIndexStatus, AggSelector, Aggregator};
 use serde_json::Value;
@@ -330,9 +331,28 @@ fn ct4_verify_uri_and_bounded_stdin_are_read_only() {
 fn ct4_verify_genuine_shallow_commit_uses_durable_chunk_cas() {
     let (dir, pointer, _) = fixture();
     let repo = kio_core::scope::Repository::open(dir.path()).unwrap();
-    let commit = repo
-        .read_commit(pointer["commit"].as_str().unwrap())
-        .unwrap();
+    let commit_hash = pointer["commit"].as_str().unwrap();
+    let commit = repo.read_commit(commit_hash).unwrap();
+    // The original indexed auto snapshot must no longer be a ref tip before
+    // its durable receipt can represent a completed markerless shallow state.
+    fs::write(
+        dir.path().join("advance.md"),
+        "# Advance\n\nadvance the fixture head\n",
+    )
+    .unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+    let receipt_path = dir
+        .path()
+        .join(".kio/gc/shallowed")
+        .join(commit_hash.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt = ShallowReceipt::new(
+        commit_hash.to_owned(),
+        commit.tree.clone(),
+        "2026-08-14T00:00:00Z".into(),
+    )
+    .unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
     let store = ObjectStore::new(dir.path().join(".kio"));
     fs::remove_file(store.object_path(ObjectKind::Tree, &commit.tree).unwrap()).unwrap();
     let pointer = serde_json::to_string(&pointer).unwrap();

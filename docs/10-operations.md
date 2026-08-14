@@ -577,7 +577,7 @@ corruption にしない。**説明範囲の限定**: tombstone / erase receipt �
 object の欠落は corruption とする (古い退役 event が新規破損を隠さない)。**tree 欠落**は
 `.kio/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
-自動復元しない。この receipt (= `.kio/gc/shallowed/` の shallow receipt) は public pointer API と re-ingest barrier には使わない (erase receipt の用途列挙は別 — [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。purge journal が active
+自動復元しない。この receipt (= `.kio/gc/shallowed/` の shallow receipt) は public pointer API と re-ingest barrier には使わない (erase receipt の用途列挙は別 — [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。validな`.kio/gc/in_progress`がある間、fsckはmarkerのfrozen commit/treeとreceipt/treeの遷移をstrict検証し、通常corruptionへ誤分類せず`gc_sweep_incomplete` (exit 3)を返す。malformed marker、frozen binding不一致、marker無しreceipt/tree共存はcorruptionであり、自動修復しない。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
 receipt も corruption とする。verified raw と marker の共存の正常判定・修復は **canonical final event ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を基準にする** (marker 単独の末尾では判定しない — 別 marker のより新しい purge を見逃す): 共存が**正常**なのは canonical final event が `retired` の場合
 (resurrection — [05-runtime.md §3.5](05-runtime.md))。canonical final event が `erased` のまま verified raw が
@@ -627,7 +627,7 @@ terminal 化済み (done / failed permanent / abandoned / settled partial — [0
 ([03-data-model.md §2](03-data-model.md) — 帰属不明の crash 残骸、および
 [07-adapter-spec.md §8.3](07-adapter-spec.md) cleanup 失敗の残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
 purge closure と同一規則)。
-GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
+on-demand tree-only shallow sweepはPhase 4 milestone 2で実装済みだが、このorphan cleanupをGCへ統合する機能と`--prune-unreachable`は未実装である。ここでは引き続き**法務 purge の完結手段だけ**を扱う (purge 完了表示の注記から誘導)。
 **拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
 pending / running の task・**descriptor を持ち path と整合し、非 terminal (pending / running /
 partial / failed retryable) の task に対応する** staging (partial は**再投入可能な failed unit が

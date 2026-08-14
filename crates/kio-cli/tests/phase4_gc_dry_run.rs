@@ -125,7 +125,41 @@ fn gc_dry_run_is_deterministic_and_does_not_change_the_store() {
 }
 
 #[test]
-fn gc_without_dry_run_is_invalid_usage() {
+fn gc_json_execution_requires_yes_even_when_the_plan_is_empty() {
+    let scope = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    kio(home.path())
+        .arg("init")
+        .current_dir(scope.path())
+        .assert()
+        .success();
+    let kio_dir = scope.path().join(".kio");
+    let before = store_image(&kio_dir);
+
+    let output = kio(home.path())
+        .args(["gc", "--json"])
+        .current_dir(scope.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-USAGE-001");
+    assert!(error["message"].as_str().unwrap().contains("--yes"));
+    assert_eq!(store_image(&kio_dir), before);
+
+    let authorized = kio(home.path())
+        .args(["gc", "--yes", "--json"])
+        .current_dir(scope.path())
+        .output()
+        .unwrap();
+    assert!(authorized.status.success());
+    let report: Value = serde_json::from_slice(&authorized.stdout).unwrap();
+    assert_eq!(report["status"], "dry_run");
+    assert_eq!(report["candidate_count"], 0);
+}
+
+#[test]
+fn gc_dry_run_and_yes_is_invalid_usage() {
     let scope = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     kio(home.path())
@@ -135,7 +169,7 @@ fn gc_without_dry_run_is_invalid_usage() {
         .success();
 
     let output = kio(home.path())
-        .args(["gc", "--json"])
+        .args(["gc", "--dry-run", "--yes", "--json"])
         .current_dir(scope.path())
         .output()
         .unwrap();

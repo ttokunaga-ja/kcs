@@ -612,7 +612,18 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .current_dir(temp.path())
         .assert()
         .success();
-    assert!(!temp.path().join(".kio/.lock").exists());
+    // Secure release leaves a canonical dead sentinel rather than performing
+    // a check-then-unlink that could remove a replacement lock. A following
+    // writer must reclaim it through the serialized exchange protocol.
+    let released: Value =
+        serde_json::from_slice(&fs::read(temp.path().join(".kio/.lock")).unwrap()).unwrap();
+    assert_eq!(released["pid"], u32::MAX);
+    kio()
+        .args(["snapshot", "-m", "released sentinel recovered", "--json"])
+        .env("KIO_FIXED_NOW", "2026-04-29T12:00:03Z")
+        .current_dir(temp.path())
+        .assert()
+        .success();
 }
 
 #[test]

@@ -310,10 +310,12 @@ fn retained_history_instances_from_graph<'a>(
 
 /// The union of exact normalized instances reachable from every current ref.
 ///
-/// The roots are read as one strict complete union. An absent commit or tree
-/// in a tag-only branch still aborts rebuild rather than silently disappearing
-/// when HEAD happens to be healthy. Computing introductions in that union is
-/// necessary to remove descendant re-introductions across roots deterministically.
+/// All roots are strict, but a receipt-backed, markerless shallow *ancestor*
+/// is a deliberate boundary: its absent tree contributes no bindings while its
+/// readable commit parents remain in the union. An unreceipted missing tree (or
+/// a missing root tree) remains corruption and aborts rebuild. Computing
+/// introductions in that union is necessary to remove descendant
+/// re-introductions across roots deterministically.
 pub(super) fn retained_history_instances_for_roots(
     kio_dir: &Path,
     roots: &BTreeSet<String>,
@@ -321,7 +323,7 @@ pub(super) fn retained_history_instances_for_roots(
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    let graph = HistoryReader::new(kio_dir).all_parents_for_roots(roots)?;
+    let (graph, _) = HistoryReader::new(kio_dir).all_parents_for_roots_tolerant(roots)?;
     retained_history_instances_from_graph(kio_dir, &graph, roots.iter().map(String::as_str))
 }
 

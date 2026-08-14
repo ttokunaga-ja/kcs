@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cap_primitives::fs as cap_fs;
 use kio_core::cas::{hash_bytes, is_hash, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES};
 use kio_core::dag::{CommitType, TreeEntry};
+use kio_core::gc::ensure_no_active_sweep;
 use kio_core::history::HistoryReader;
 use kio_core::portable::portable_collision_key;
 use kio_core::purge::{canonical_final_event, EventKind, PurgeState};
@@ -78,6 +79,11 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
     // tests-p3b.md §A): this ordering was already correct, unlike
     // open/view/evidence-verify (QB6).
     let source = resolve_source(&args.source)?;
+    // A shallow sweep publishes its durable receipt before removing the tree.
+    // Restore must not stage bytes, prompt, or publish while that state machine
+    // is active.  The helper also rejects a malformed marker rather than
+    // treating it as absence.
+    ensure_no_active_sweep(&source.target.kio_dir)?;
     // QB5/QB6/裁定1: shared (1)+(3) preflight pair, opened as soon as the
     // source scope is known. LC57: restore's checkpoint 2 (below, in
     // `publish_all`) fires per file, immediately before that file's atomic
@@ -107,6 +113,9 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
     let _purge_publication_lock = StoreLock::acquire_path(
         super::purge::purge_publication_lock_path(&source.target.kio_dir),
     )?;
+    // Recheck after the only lock restore takes and before any private
+    // destination staging.  GC deliberately does not share this lock.
+    ensure_no_active_sweep(&source.target.kio_dir)?;
     // The directory may have appeared between the first preflight and creation.
     // Re-run the complete leaf check before staging any content.
     let preflight_files = preflight_in_dir(&source, &destination_dir, args.force)?;
@@ -149,6 +158,11 @@ fn resolve_evidence_source(operand: &str) -> Result<RestoreSource> {
     let tree = match repo.read_tree(&commit.tree) {
         Ok(tree) => tree,
         Err(error) if super::is_store_not_found(&error) => {
+            kio_core::gc::validate_final_shallow_tree(
+                &target.kio_dir,
+                &pointer.commit,
+                &commit.tree,
+            )?;
             return Err(KioError::commit_shallow(
                 "restore requires the complete evidence commit tree; the tree object is missing or shallow",
                 pointer.commit.clone(),
@@ -1638,10 +1652,10 @@ fn publish_all(
         // canonical-marker recheck (LC8-14/item 3, PA50) immediately before
         // this file's atomic, irreversible publish (LC57).
         let raw_present = raw_present_now(&source.target, &file.preflight.source.raw_hash)?;
-        if let Err(error) =
+        if let Err(error) = ensure_no_active_sweep(&source.target.kio_dir).and_then(|()| {
             check_purge_state(&source.target, &file.preflight.source.raw_hash, raw_present)
                 .and_then(|()| checkpoint.recheck())
-        {
+        }) {
             cleanup_one(destination, &file.temp);
             for pending in remaining {
                 cleanup_one(destination, &pending.temp);
@@ -1669,12 +1683,15 @@ fn publish_all(
                 // rather than leaving purged/hidden bytes sitting published.
                 let post_publish_raw_present =
                     raw_present_now(&source.target, &file.preflight.source.raw_hash)?;
-                if let Err(recheck_error) = check_purge_state(
-                    &source.target,
-                    &file.preflight.source.raw_hash,
-                    post_publish_raw_present,
-                )
-                .and_then(|()| checkpoint.recheck())
+                if let Err(recheck_error) = ensure_no_active_sweep(&source.target.kio_dir)
+                    .and_then(|()| {
+                        check_purge_state(
+                            &source.target,
+                            &file.preflight.source.raw_hash,
+                            post_publish_raw_present,
+                        )
+                    })
+                    .and_then(|()| checkpoint.recheck())
                 {
                     let error = rollback_published_file(
                         destination,

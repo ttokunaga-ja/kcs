@@ -3466,62 +3466,46 @@ fn r14_3_healthy_head_read_only_scope_unchanged() {
     fs::set_permissions(&kio_dir, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-// R15-4: a HEAD commit whose TREE object is gone (shallow: GC'd / manually deleted /
-// corrupt CAS) must NOT brick the scope. `status` is a pure read → it degrades
-// (head_shallow, no per-file classification) and exits 0. Writes that need the prior
-// tree — `index` / `snapshot` / `reindex` — fail with a clear KIO-E-COMMIT-SHALLOW-001
-// (recovery guidance) instead of a raw KIO-E-STORE-NOT-FOUND-001 whose hash is opaque.
+// R15-4: an unreceipted HEAD tree disappearance is store corruption, not a valid
+// shallow state. GC never sweeps a ref tip and publishes a durable receipt before
+// removing any eligible non-tip tree, so reads and writes must fail closed here.
 #[test]
-fn r15_4_shallow_head_degrades_reads_and_rejects_writes() {
+fn r15_4_unreceipted_missing_head_tree_is_corruption() {
     let dir = scope();
     fs::write(dir.path().join("doc.md"), "# Doc\n\nbody one\n").unwrap();
     json_success(&dir, ["index", "--yes"]);
 
-    // Delete the HEAD commit's tree object(s), leaving the commit reachable — exactly
-    // the shallow state (05 §2.2: tree discarded, commit retained).
+    // Delete only the HEAD tree leaf, leaving the CAS directories structurally valid.
+    // There is deliberately no shallow receipt.
     let trees_dir = dir.path().join(".kio/objects/trees");
-    fs::remove_dir_all(&trees_dir).unwrap();
+    let tree_leaf = collect_files(&trees_dir)
+        .into_iter()
+        .next()
+        .expect("HEAD tree leaf");
+    fs::remove_file(trees_dir.join(tree_leaf)).unwrap();
 
-    // (a) `status` degrades: exit 0, head_shallow = true, files listed WITHOUT a
-    // tree-derived classification (the prior tree needed to classify is gone).
-    let status = json_success(&dir, ["status"]);
-    assert_eq!(
-        status["head_shallow"], true,
-        "status must flag the shallow HEAD: {status}"
-    );
-    let files = status["files"].as_array().unwrap();
-    assert!(
-        !files.is_empty(),
-        "status still lists the working files: {status}"
-    );
-    assert!(
-        files.iter().all(|file| file.get("status").is_none()),
-        "a shallow HEAD omits the per-file classification: {status}"
-    );
+    let status = json_failure(&dir, ["status"], 4);
+    assert_eq!(status["error_code"], "KIO-E-STORE-CORRUPT-001");
 
     // Edit the file so `index` has a change to snapshot (its no-change short-circuit
     // uses the sqlite cache, not the tree object; snapshot/reindex read the tree
     // unconditionally). The write must then extend the shallow HEAD → rejected.
     fs::write(dir.path().join("doc.md"), "# Doc\n\nbody two\n").unwrap();
 
-    // (b) `index` / `snapshot` reject the shallow commit with the clear error code,
-    // not a raw KIO-E-STORE-NOT-FOUND-001.
-    let index_err = json_failure(&dir, ["index", "--yes"], 1);
+    let index_error = json_failure(&dir, ["index", "--yes"], 4);
     assert_eq!(
-        index_err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
-        "{index_err}"
+        index_error["error_code"], "KIO-E-STORE-CORRUPT-001",
+        "{index_error}"
     );
-    let snap_err = json_failure(&dir, ["snapshot", "-m", "x"], 1);
+    let snapshot_error = json_failure(&dir, ["snapshot", "-m", "x"], 4);
     assert_eq!(
-        snap_err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
-        "{snap_err}"
+        snapshot_error["error_code"], "KIO-E-STORE-CORRUPT-001",
+        "{snapshot_error}"
     );
-
-    // (c) `reindex --force --yes` likewise fails with the shallow error.
-    let reindex_err = json_failure(&dir, ["reindex", "--regenerate", "--yes"], 1);
+    let reindex_error = json_failure(&dir, ["reindex", "--regenerate", "--yes"], 4);
     assert_eq!(
-        reindex_err["error_code"], "KIO-E-COMMIT-SHALLOW-001",
-        "{reindex_err}"
+        reindex_error["error_code"], "KIO-E-STORE-CORRUPT-001",
+        "{reindex_error}"
     );
 
     // (control) `log` stays healthy — it traverses commits, not trees.

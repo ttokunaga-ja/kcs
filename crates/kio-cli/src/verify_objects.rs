@@ -8,7 +8,8 @@ use kio_core::cas::{
     canonical_json_bytes, hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError,
     ChunkObject, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
-use kio_core::dag::{CommitObject, TreeObject};
+use kio_core::dag::{CommitObject, NormalizeRef, TreeObject};
+use kio_core::gc::{read_active_marker, read_shallow_receipts, GcSweepSession};
 use kio_core::portable::portable_tag_digest64;
 use kio_core::purge::{
     canonical_final_event, CanonicalFinalEvent, EventKind, LifecycleEvent, PurgeState,
@@ -203,7 +204,14 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
             let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
             (false, entry_gen, entry.normalize.clone())
         }
-        Err(error) if is_store_not_found(&error) => (true, None, None),
+        Err(error) if is_store_not_found(&error) => {
+            kio_core::gc::validate_final_shallow_tree(
+                &target.kio_dir,
+                &pointer.commit,
+                &commit.tree,
+            )?;
+            (true, None, None)
+        }
         Err(error) => return Err(error),
     };
 
@@ -532,6 +540,141 @@ fn verify_objects_with_limits(
             return Ok(finish_report(state, 0, None));
         }
     }
+    // GC's receipt-first sweep is a crash-recoverable state machine, not an
+    // ordinary missing-object condition.  Read the two shared canonical
+    // records before any repair-capable fsck work.  A malformed receipt or
+    // marker is never treated as absence.  A valid active marker returns one
+    // bounded retryable finding and leaves every tree/receipt untouched; the
+    // sweeper's recovery path owns completing or rolling back the transition.
+    let shallow_receipts = match read_shallow_receipts(repo.kio_dir()) {
+        Ok(receipts) => receipts,
+        Err(error) => {
+            state.finding("gc_shallow_receipt_corrupt", "", &error.to_string(), &[]);
+            return Ok(finish_report(state, 0, None));
+        }
+    };
+    let active_gc_marker = match read_active_marker(repo.kio_dir()) {
+        Ok(marker) => marker,
+        Err(error) => {
+            state.finding("gc_sweep_marker_corrupt", "", &error.to_string(), &[]);
+            return Ok(finish_report(state, 0, None));
+        }
+    };
+    // Validate final receipt bindings even for commits that are currently not
+    // graph-reachable.  Apart from detecting a forged receipt early, this
+    // records when historical tree entries are intentionally unavailable: a
+    // chunk can no longer be re-attested against its normalized unit after the
+    // sole tree that named it was shallow-discarded.
+    let mut final_shallow_commits = BTreeSet::new();
+    if active_gc_marker.is_none() {
+        match kio_core::gc::validated_final_shallow_receipts(repo.kio_dir()) {
+            Ok(receipts) => {
+                final_shallow_commits.extend(receipts.into_keys());
+            }
+            Err(error) => {
+                state.finding("gc_shallow_receipt_corrupt", "", &error.to_string(), &[]);
+                return Ok(finish_report(state, 0, None));
+            }
+        }
+    }
+    if let Some(marker) = active_gc_marker {
+        // Canonical marker syntax is not sufficient to call a transition
+        // recoverable: validate its phase against descriptor-bound receipt and
+        // tree state.  This is the same state machine used by `kio gc --yes`,
+        // so impossible combinations are corruption rather than a misleading
+        // retryable finding.
+        let session = match GcSweepSession::bind(repo.root().to_path_buf()) {
+            Ok(session) => session,
+            Err(error) => {
+                state.finding("gc_sweep_marker_corrupt", "", &error.to_string(), &[]);
+                return Ok(finish_report(state, 0, None));
+            }
+        };
+        if let Err(error) = session.validate_recovery_state(&marker) {
+            state.finding("gc_sweep_marker_corrupt", "", &error.to_string(), &[]);
+            return Ok(finish_report(state, 0, None));
+        }
+        if let Err(error) = crate::gc::validate_marker_index_binding_for_observer(&session, &marker)
+        {
+            state.finding("gc_sweep_marker_corrupt", "", &error.to_string(), &[]);
+            return Ok(finish_report(state, 0, None));
+        }
+        // The marker is strictly canonical, but its frozen commit/tree pairs
+        // must still bind to the current immutable commit objects.  Receipts
+        // for a frozen pair may be absent (before receipt), coexist with the
+        // tree (after receipt, before unlink), or explain its absence (after
+        // unlink). Non-frozen receipts remain final shallow state and may not
+        // coexist with their trees.
+        for candidate in &marker.candidates {
+            match repo.read_commit(&candidate.commit_hash) {
+                Ok(commit) if commit.tree == candidate.tree_hash => {}
+                Ok(_) => {
+                    state.finding(
+                        "gc_sweep_marker_corrupt",
+                        &candidate.commit_hash,
+                        "GC marker tree does not match its commit",
+                        &[],
+                    );
+                    return Ok(finish_report(state, 0, None));
+                }
+                Err(error) => {
+                    state.finding(
+                        "gc_sweep_marker_corrupt",
+                        &candidate.commit_hash,
+                        &error.to_string(),
+                        &[],
+                    );
+                    return Ok(finish_report(state, 0, None));
+                }
+            }
+        }
+        for (commit_hash, receipt) in &shallow_receipts {
+            let commit = match repo.read_commit(commit_hash) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    state.finding(
+                        "gc_shallow_receipt_corrupt",
+                        commit_hash,
+                        &error.to_string(),
+                        &[],
+                    );
+                    return Ok(finish_report(state, 0, None));
+                }
+            };
+            if commit.tree != receipt.tree_hash {
+                state.finding(
+                    "gc_shallow_receipt_corrupt",
+                    commit_hash,
+                    "shallow receipt tree does not match the commit tree",
+                    &[],
+                );
+                return Ok(finish_report(state, 0, None));
+            }
+            if !marker.is_frozen_pair(commit_hash, &receipt.tree_hash)
+                && repo.read_tree(&receipt.tree_hash).is_ok()
+            {
+                state.finding(
+                    "gc_shallow_receipt_corrupt",
+                    commit_hash,
+                    "markerless shallow receipt coexists with its tree",
+                    &[],
+                );
+                return Ok(finish_report(state, 0, None));
+            }
+        }
+        // The frozen target set is the authoritative bound for transitional
+        // receipt/tree combinations; do not speculate or repair.
+        state.finding(
+            "gc_sweep_incomplete",
+            "",
+            &format!(
+                "active GC shallow sweep {}; retry after crash recovery",
+                marker.sweep_id
+            ),
+            &[],
+        );
+        return Ok(finish_report(state, 0, None));
+    }
     let mut repairs_allowed = true;
 
     let raw_hashes = inventory(repo.kio_dir(), "raw", &mut state)?;
@@ -768,6 +911,21 @@ fn verify_objects_with_limits(
             }
         }
     }
+
+    // A final shallow receipt proves that a historical tree was deliberately
+    // discarded, while manifests and normalized-unit CAS objects remain.  The
+    // chunk ledger is mutable operational metadata, so its introduction fields
+    // must not decide which chunk closures may be omitted.  Instead, when at
+    // least one strict final shallow receipt exists, add every independently
+    // hash-verified retained manifest closure to the exact-unit index.  A
+    // chunk still has to match raw/profile/generation/unit-key/content-hash;
+    // an unrelated ledger row alone cannot make it reachable.
+    if !final_shallow_commits.is_empty() {
+        index_retained_manifest_units(&store, repo.kio_dir(), &mut reachable_units, &mut state)?;
+        if state.exceeded_bounds {
+            return Ok(finish_limit_report(state));
+        }
+    }
     let dead_raws = raw_affected
         .keys()
         .filter(|raw_hash| {
@@ -788,14 +946,26 @@ fn verify_objects_with_limits(
             continue;
         };
         let Some(tree) = trees.get(&commit.tree) else {
+            if final_shallow_commits.contains(commit_hash) {
+                continue;
+            }
             state.finding(
                 "missing_tree",
                 &commit.tree,
-                "commit references a missing tree",
+                "commit references a missing tree without a valid final shallow receipt",
                 std::slice::from_ref(commit_hash),
             );
             continue;
         };
+        if shallow_receipts.contains_key(commit_hash) {
+            state.finding(
+                "gc_shallow_receipt_corrupt",
+                &commit.tree,
+                "markerless shallow receipt coexists with its tree",
+                std::slice::from_ref(commit_hash),
+            );
+            continue;
+        }
         for entry in &tree.entries {
             if dead_raws.contains(&entry.raw_hash) {
                 continue;
@@ -1342,6 +1512,127 @@ impl std::fmt::Display for PinnedNormalizedError {
 }
 
 const MAX_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Extend the exact-unit index with immutable closures retained after a final
+/// shallow sweep.  This intentionally does not consult `chunks.jsonl`: its
+/// introduction fields are not authenticated bindings between a chunk and a
+/// discarded tree.  Each accepted unit instead comes from a content-addressed
+/// manifest and content-addressed body whose full schema/identity closure has
+/// been validated by the same loader used for live tree references.
+fn index_retained_manifest_units(
+    store: &ObjectStore,
+    kio_dir: &Path,
+    units_by_content_hash: &mut BTreeMap<String, Vec<ValidatedNormalizedInstanceUnit>>,
+    state: &mut State,
+) -> Result<()> {
+    let manifest_hashes = inventory(kio_dir, ContentObjectKind::Manifest.directory(), state)?;
+    if state.exceeded_bounds || state.unsafe_namespace {
+        return Ok(());
+    }
+    for manifest_hash in manifest_hashes {
+        state.count_object();
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        let bytes = match store.read_content_object_bytes(
+            ContentObjectKind::Manifest,
+            &manifest_hash,
+            MAX_MANIFEST_OBJECT_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                state.finding(
+                    "normalized_closure_corrupt",
+                    &manifest_hash,
+                    &error.to_string(),
+                    &[],
+                );
+                continue;
+            }
+        };
+        state.add_bytes(bytes.len() as u64);
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        let manifest: NormalizedInstanceManifest = match serde_json::from_slice(&bytes) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                state.finding(
+                    "normalized_closure_corrupt",
+                    &manifest_hash,
+                    &format!("manifest schema: {error}"),
+                    &[],
+                );
+                continue;
+            }
+        };
+        let canonical = match serde_json::to_value(&manifest)
+            .map_err(|error| KioError::schema(error.to_string()))
+            .and_then(|value| canonical_json_bytes(&value))
+        {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                state.finding(
+                    "normalized_closure_corrupt",
+                    &manifest_hash,
+                    &error.to_string(),
+                    &[],
+                );
+                continue;
+            }
+        };
+        if canonical != bytes {
+            state.finding(
+                "normalized_closure_corrupt",
+                &manifest_hash,
+                "manifest is not canonical JSON or has unknown fields",
+                &[],
+            );
+            continue;
+        }
+        let reference = NormalizeRef {
+            tool_profile_hash: manifest.tool_profile_hash.clone(),
+            gen: manifest.gen,
+            manifest_hash,
+        };
+        let instance = match load_pinned_normalized_instance(
+            store,
+            kio_dir,
+            &manifest.raw_hash,
+            &reference,
+            state,
+        ) {
+            Ok(instance) => instance,
+            Err(error) => {
+                state.finding(
+                    "normalized_closure_corrupt",
+                    &reference.manifest_hash,
+                    &error.to_string(),
+                    &[],
+                );
+                continue;
+            }
+        };
+        for unit in instance.units {
+            let content_hash = hash_bytes(unit.markdown.as_bytes());
+            let candidates = units_by_content_hash.entry(content_hash).or_default();
+            if !candidates.iter().any(|candidate| {
+                candidate.raw_hash == instance.manifest.raw_hash
+                    && candidate.tool_profile_hash == instance.manifest.tool_profile_hash
+                    && candidate.gen == instance.manifest.gen
+                    && candidate.unit.unit_key == unit.unit_key
+            }) {
+                candidates.push(ValidatedNormalizedInstanceUnit {
+                    raw_hash: instance.manifest.raw_hash.clone(),
+                    tool_profile_hash: instance.manifest.tool_profile_hash.clone(),
+                    gen: instance.manifest.gen,
+                    unit,
+                });
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Verify the immutable closure named by one tree `NormalizeRef`. This never
 /// opens `objects/normalized_units/`: that path-named representation is a

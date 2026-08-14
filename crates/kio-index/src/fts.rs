@@ -10,6 +10,7 @@ use std::sync::{Once, OnceLock};
 use cap_primitives::fs as cap_fs;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::search_projection::resolve_markdown_escapes;
@@ -319,6 +320,123 @@ struct SourceFileIdentity {
     #[cfg(windows)]
     file_index: Option<u64>,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceFileState {
+    identity: SourceFileIdentity,
+    len: u64,
+    modified_seconds: i64,
+    modified_nanos: i64,
+    changed_seconds: i64,
+    changed_nanos: i64,
+}
+
+fn source_file_state_digest(state: SourceFileState) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"kio-gc-index-source-state-v1\0");
+    #[cfg(unix)]
+    {
+        digest.update(state.identity.dev.to_be_bytes());
+        digest.update(state.identity.ino.to_be_bytes());
+    }
+    #[cfg(windows)]
+    {
+        digest.update(
+            state
+                .identity
+                .volume_serial_number
+                .unwrap_or_default()
+                .to_be_bytes(),
+        );
+        digest.update(state.identity.file_index.unwrap_or_default().to_be_bytes());
+    }
+    digest.update(state.len.to_be_bytes());
+    digest.update(state.modified_seconds.to_be_bytes());
+    digest.update(state.modified_nanos.to_be_bytes());
+    digest.update(state.changed_seconds.to_be_bytes());
+    digest.update(state.changed_nanos.to_be_bytes());
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("write to String");
+    }
+    encoded
+}
+
+#[cfg(unix)]
+fn source_file_state(file: &std::fs::File) -> Result<SourceFileState> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|error| IndexError::Schema(format!("inspect GC source index state: {error}")))?;
+    Ok(SourceFileState {
+        identity: SourceFileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        len: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanos: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(windows)]
+fn source_file_state(file: &std::fs::File) -> Result<SourceFileState> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|error| IndexError::Schema(format!("inspect GC source index state: {error}")))?;
+    let modified = metadata.last_write_time();
+    Ok(SourceFileState {
+        identity: SourceFileIdentity {
+            volume_serial_number: metadata.volume_serial_number(),
+            file_index: metadata.file_index(),
+        },
+        len: metadata.file_size(),
+        modified_seconds: i64::try_from(modified / 10_000_000).unwrap_or(i64::MAX),
+        modified_nanos: i64::try_from((modified % 10_000_000) * 100).unwrap_or(i64::MAX),
+        changed_seconds: -1,
+        changed_nanos: -1,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn source_file_state(file: &std::fs::File) -> Result<SourceFileState> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| IndexError::Schema(format!("inspect GC source index state: {error}")))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok());
+    Ok(SourceFileState {
+        identity: SourceFileIdentity {},
+        len: metadata.len(),
+        modified_seconds: modified
+            .as_ref()
+            .and_then(|value| i64::try_from(value.as_secs()).ok())
+            .unwrap_or(-1),
+        modified_nanos: modified
+            .as_ref()
+            .map_or(-1, |value| i64::from(value.subsec_nanos())),
+        changed_seconds: -1,
+        changed_nanos: -1,
+    })
+}
+
+fn gc_leaf_state(parent: &std::fs::File, leaf: &str) -> Result<SourceFileState> {
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let file = cap_fs::open(parent, Path::new(leaf), &options)
+        .map_err(|error| IndexError::Schema(format!("open GC index state {leaf}: {error}")))?;
+    validate_bound_source_file(&file, Path::new(leaf))?;
+    source_file_state(&file)
+}
 #[cfg(unix)]
 fn cap_source_leaf_identity(
     parent: &std::fs::File,
@@ -389,6 +507,193 @@ fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
         dev: m.dev(),
         ino: m.ino(),
     })
+}
+
+/// Return a stable, marker-safe representation of the primary SQLite file's
+/// platform identity.  This intentionally has no pathname component: it is
+/// the identity of the retained descriptor, and is compared with a fresh
+/// descriptor-relative observation before every destructive GC step.
+#[cfg(unix)]
+fn canonical_gc_index_identity(file: &std::fs::File) -> Result<String> {
+    let identity = source_file_identity(file)?;
+    Ok(format!("unix:{:016x}:{:016x}", identity.dev, identity.ino))
+}
+
+#[cfg(windows)]
+fn canonical_gc_index_identity(file: &std::fs::File) -> Result<String> {
+    let identity = source_file_identity(file)?;
+    let volume = identity.volume_serial_number.ok_or_else(|| {
+        IndexError::Schema("GC source index has no Windows volume identity".to_owned())
+    })?;
+    let index = identity.file_index.ok_or_else(|| {
+        IndexError::Schema("GC source index has no Windows file identity".to_owned())
+    })?;
+    Ok(format!("windows:{volume:08x}:{index:016x}"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn canonical_gc_index_identity(_: &std::fs::File) -> Result<String> {
+    Err(IndexError::Schema(
+        "GC source SQLite identity is unsupported on this platform".to_owned(),
+    ))
+}
+
+fn gc_leaf_identity(parent: &std::fs::File, leaf: &str) -> Result<String> {
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let file = cap_fs::open(parent, Path::new(leaf), &options)
+        .map_err(|error| IndexError::Schema(format!("open GC index leaf {leaf}: {error}")))?;
+    validate_bound_source_file(&file, Path::new(leaf))?;
+    canonical_gc_index_identity(&file)
+}
+
+fn validate_gc_temp_leaf(leaf: &str) -> Result<()> {
+    if !leaf.starts_with(".gc-index-")
+        || leaf.len() > 128
+        || !leaf
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(IndexError::Schema(
+            "invalid private GC index name".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Open the operation-reserved namespace for private GC index copies.  This
+/// deliberately lives below `gc/internal`, never beside the public index: a
+/// crashed preparation must not leave an executable-looking database in the
+/// public index directory.
+fn open_gc_internal_index_dir(kio_dir: &std::fs::File) -> Result<std::fs::File> {
+    fn open_or_create(parent: &std::fs::File, leaf: &str) -> Result<std::fs::File> {
+        match cap_fs::open_dir_nofollow(parent, Path::new(leaf)) {
+            Ok(dir) => Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let options = cap_fs::DirOptions::new();
+                cap_fs::create_dir(parent, Path::new(leaf), &options).map_err(|error| {
+                    IndexError::Schema(format!("create private GC index directory {leaf}: {error}"))
+                })?;
+                parent.sync_all().map_err(|error| {
+                    IndexError::Schema(format!("fsync private GC index parent {leaf}: {error}"))
+                })?;
+                cap_fs::open_dir_nofollow(parent, Path::new(leaf)).map_err(|error| {
+                    IndexError::Schema(format!("open private GC index directory {leaf}: {error}"))
+                })
+            }
+            Err(error) => Err(IndexError::Schema(format!(
+                "open private GC index directory {leaf}: {error}"
+            ))),
+        }
+    }
+    let gc = open_or_create(kio_dir, "gc")?;
+    let internal = open_or_create(&gc, "internal")?;
+    open_or_create(&internal, "index")
+}
+
+fn open_existing_gc_internal_index_dir(kio_dir: &std::fs::File) -> Result<std::fs::File> {
+    let gc = cap_fs::open_dir_nofollow(kio_dir, Path::new("gc")).map_err(|error| {
+        IndexError::Schema(format!("open private GC index gc directory: {error}"))
+    })?;
+    let internal = cap_fs::open_dir_nofollow(&gc, Path::new("internal")).map_err(|error| {
+        IndexError::Schema(format!("open private GC index internal directory: {error}"))
+    })?;
+    cap_fs::open_dir_nofollow(&internal, Path::new("index"))
+        .map_err(|error| IndexError::Schema(format!("open private GC index directory: {error}")))
+}
+
+fn gc_private_dir_identity(dir: &std::fs::File) -> Result<String> {
+    canonical_gc_index_identity(dir)
+}
+
+fn require_gc_private_dir_identity(dir: &std::fs::File, expected: &str) -> Result<()> {
+    if gc_private_dir_identity(dir)? != expected {
+        return Err(IndexError::Schema(
+            "GC private index directory changed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn exchange_gc_index_leaves(
+    left_dir: &std::fs::File,
+    left: &str,
+    right_dir: &std::fs::File,
+    right: &str,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn renameatx_np(
+            fromfd: libc::c_int,
+            from: *const libc::c_char,
+            tofd: libc::c_int,
+            to: *const libc::c_char,
+            flags: libc::c_uint,
+        ) -> libc::c_int;
+    }
+    let left =
+        CString::new(left).map_err(|_| IndexError::Schema("invalid GC index name".into()))?;
+    let right =
+        CString::new(right).map_err(|_| IndexError::Schema("invalid GC index name".into()))?;
+    if unsafe {
+        renameatx_np(
+            left_dir.as_raw_fd(),
+            left.as_ptr(),
+            right_dir.as_raw_fd(),
+            right.as_ptr(),
+            2,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(IndexError::Schema(format!(
+            "atomic GC index exchange: {}",
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+#[cfg(target_os = "linux")]
+fn exchange_gc_index_leaves(
+    left_dir: &std::fs::File,
+    left: &str,
+    right_dir: &std::fs::File,
+    right: &str,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    let left =
+        CString::new(left).map_err(|_| IndexError::Schema("invalid GC index name".into()))?;
+    let right =
+        CString::new(right).map_err(|_| IndexError::Schema("invalid GC index name".into()))?;
+    if unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            left_dir.as_raw_fd(),
+            left.as_ptr(),
+            right_dir.as_raw_fd(),
+            right.as_ptr(),
+            2_u32,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(IndexError::Schema(format!(
+            "atomic GC index exchange: {}",
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn exchange_gc_index_leaves(_: &std::fs::File, _: &str, _: &std::fs::File, _: &str) -> Result<()> {
+    Err(IndexError::Schema(
+        "atomic GC index exchange is unsupported on this platform".to_owned(),
+    ))
 }
 #[cfg(not(any(unix, windows)))]
 fn source_file_identity(_: &std::fs::File) -> Result<SourceFileIdentity> {
@@ -595,6 +900,759 @@ pub fn open_existing_source_index_connection(
         conn,
         _source: source,
     })
+}
+
+/// Read the metadata for the fixed `index/sqlite.db` leaf below a retained
+/// `.kio` directory capability.  Unlike the public-path helper this never
+/// re-resolves the scope or `.kio` pathname after GC has bound it.
+///
+/// `Ok(None)` means the leaf was absent at the descriptor-relative lookup;
+/// callers that had already recorded a present index must treat that as a
+/// fail-closed state transition rather than as an empty index.
+pub fn read_bound_gc_index_metadata(
+    kio_dir: &std::fs::File,
+    config: &FtsSchemaConfig,
+) -> Result<Option<BoundGcIndexMetadata>> {
+    let Some((source, conn)) = open_bound_gc_index(kio_dir, config, false)? else {
+        return Ok(None);
+    };
+    // Keep both the primary file and its directory capabilities alive for the
+    // complete SQLite operation. In particular, `/dev/fd/N` is only safe while
+    // `source.file` remains open.
+    let metadata = read_index_metadata(&conn)?;
+    validate_bound_source_name_identity(&source)?;
+    let identity = canonical_gc_index_identity(&source.file)?;
+    drop(conn);
+    drop(source);
+    Ok(metadata.map(|metadata| BoundGcIndexMetadata {
+        metadata,
+        file_identity: identity,
+    }))
+}
+
+/// Metadata and the platform file identity observed from the exact primary
+/// SQLite descriptor used by a descriptor-bound GC operation.  GC persists
+/// this identity in its recovery marker so a same-generation replacement is
+/// never accepted as the source index after tree retirement has started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundGcIndexMetadata {
+    pub metadata: IndexMetadata,
+    pub file_identity: String,
+}
+
+/// A durable, singleton statement written into a private GC index clone in
+/// the *same SQLite transaction* that advances its generation.  The public
+/// filename/inode binding lives in the GC marker; this record binds the
+/// otherwise forgeable logical generation to that marker's frozen operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcIndexRotationAttestation {
+    pub sweep_id: String,
+    pub role: String,
+    pub plan_digest: String,
+    pub source_generation: String,
+    pub target_generation: String,
+}
+
+/// A descriptor-relative, fully materialized replacement database.  The
+/// caller must publish its `temp_leaf` and returned state in the GC marker
+/// before calling [`exchange_prepared_bound_gc_index`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedBoundGcIndexRotation {
+    pub temp_leaf: String,
+    pub private_dir_identity: String,
+    pub source: BoundGcIndexMetadata,
+    pub source_state_digest: String,
+    pub target: BoundGcIndexMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedGcIndexCleanup {
+    Removed,
+    AlreadyAbsent,
+}
+
+pub fn prepare_bound_gc_index_rotation(
+    kio_dir: &std::fs::File,
+    temp_leaf: &str,
+    generation: &str,
+    expected: (&str, &str),
+    attestation: &GcIndexRotationAttestation,
+    config: &FtsSchemaConfig,
+) -> Result<PreparedBoundGcIndexRotation> {
+    validate_gc_temp_leaf(temp_leaf)?;
+    let source = read_bound_gc_index_metadata(kio_dir, config)?.ok_or_else(|| {
+        IndexError::Schema("GC source index disappeared before durable rotation".to_owned())
+    })?;
+    if source.metadata.index_generation != expected.0 || source.file_identity != expected.1 {
+        return Err(IndexError::Schema(format!(
+            "GC source index changed before durable rotation (expected generation {}, identity {}; found generation {}, identity {})",
+            expected.0, expected.1, source.metadata.index_generation, source.file_identity
+        )));
+    }
+    let index = cap_fs::open_dir_nofollow(kio_dir, Path::new("index")).map_err(|error| {
+        IndexError::Schema(format!(
+            "open GC index directory for durable rotation: {error}"
+        ))
+    })?;
+    let private = open_gc_internal_index_dir(kio_dir)?;
+    let private_dir_identity = gc_private_dir_identity(&private)?;
+    let mut source_options = cap_fs::OpenOptions::new();
+    source_options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut input = cap_fs::open(&index, Path::new("sqlite.db"), &source_options)
+        .map_err(|error| IndexError::Schema(format!("open GC source index copy: {error}")))?;
+    validate_bound_source_file(&input, Path::new("sqlite.db"))?;
+    if canonical_gc_index_identity(&input)? != source.file_identity {
+        return Err(IndexError::Schema(
+            "GC source index changed before private copy".to_owned(),
+        ));
+    }
+    let source_state = source_file_state(&input)?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create_new(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut output = cap_fs::open(&private, Path::new(temp_leaf), &options)
+        .map_err(|error| IndexError::Schema(format!("create GC private index copy: {error}")))?;
+    std::io::copy(&mut input, &mut output)
+        .map_err(|error| IndexError::Schema(format!("copy GC private index: {error}")))?;
+    wait_at_bound_gc_index_copy_barrier();
+    output
+        .sync_all()
+        .map_err(|error| IndexError::Schema(format!("fsync GC private index copy: {error}")))?;
+    drop(output);
+    private.sync_all().map_err(|error| {
+        IndexError::Schema(format!("fsync private GC index directory: {error}"))
+    })?;
+    // The exact descriptor copied above and the public name must still agree
+    // before SQLite is allowed to mutate the private clone.  This makes the
+    // source generation/identity binding cover the whole copy interval.
+    if source_file_state(&input)? != source_state
+        || gc_leaf_state(&index, "sqlite.db")? != source_state
+    {
+        return Err(IndexError::Schema(
+            "GC source index changed during private copy".to_owned(),
+        ));
+    }
+    let target = rotate_bound_gc_index_leaf(
+        &private,
+        temp_leaf,
+        generation,
+        None,
+        Some(attestation),
+        config,
+    )?
+    .ok_or_else(|| IndexError::Schema("GC private index copy disappeared".to_owned()))?;
+    private.sync_all().map_err(|error| {
+        IndexError::Schema(format!("fsync completed private GC index: {error}"))
+    })?;
+    Ok(PreparedBoundGcIndexRotation {
+        temp_leaf: temp_leaf.to_owned(),
+        private_dir_identity,
+        source,
+        source_state_digest: source_file_state_digest(source_state),
+        target,
+    })
+}
+
+#[cfg(debug_assertions)]
+fn wait_at_bound_gc_index_copy_barrier() {
+    let Some(ready_path) = std::env::var_os("KIO_TEST_GC_INDEX_COPY_READY") else {
+        return;
+    };
+    let ready_path = PathBuf::from(ready_path);
+    if std::fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !release_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn wait_at_bound_gc_index_copy_barrier() {}
+
+/// Remove an operation-owned private index leaf after its source copy is no
+/// longer needed.  The identity check makes this safe for recovery cleanup:
+/// a substituted leaf is never unlinked merely because it has a GC-looking
+/// name.  The directory fsync makes successful cleanup durable.
+pub fn remove_prepared_bound_gc_index(
+    kio_dir: &std::fs::File,
+    temp_leaf: &str,
+    expected_private_dir_identity: &str,
+    expected_identity: &str,
+) -> Result<PreparedGcIndexCleanup> {
+    validate_gc_temp_leaf(temp_leaf)?;
+    let private = open_existing_gc_internal_index_dir(kio_dir)?;
+    require_gc_private_dir_identity(&private, expected_private_dir_identity)?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let file = match cap_fs::open(&private, Path::new(temp_leaf), &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreparedGcIndexCleanup::AlreadyAbsent)
+        }
+        Err(error) => {
+            return Err(IndexError::Schema(format!(
+                "open GC private index copy for cleanup: {error}"
+            )))
+        }
+    };
+    validate_bound_source_file(&file, Path::new(temp_leaf))?;
+    let identity = canonical_gc_index_identity(&file)?;
+    if gc_leaf_identity(&private, temp_leaf)? != identity {
+        return Err(IndexError::Schema(
+            "GC private index cleanup input changed".to_owned(),
+        ));
+    }
+    if identity != expected_identity {
+        return Err(IndexError::Schema(
+            "GC private index cleanup input changed".to_owned(),
+        ));
+    }
+    match cap_fs::remove_file(&private, Path::new(temp_leaf)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreparedGcIndexCleanup::AlreadyAbsent)
+        }
+        Err(error) => {
+            return Err(IndexError::Schema(format!(
+                "remove GC private index copy: {error}"
+            )))
+        }
+    }
+    private
+        .sync_all()
+        .map_err(|error| IndexError::Schema(format!("fsync private GC index cleanup: {error}")))?;
+    Ok(PreparedGcIndexCleanup::Removed)
+}
+
+/// Retire stale private rotation leaves before a new attempt.  Only bounded,
+/// strict private names are considered; every candidate is re-opened
+/// descriptor-relatively no-follow and required to remain a single-link
+/// regular file before unlink.  The caller supplies the one marker-owned leaf
+/// which must survive recovery.
+pub fn cleanup_stale_bound_gc_index_rotations(
+    kio_dir: &std::fs::File,
+    keep_leaf: Option<&str>,
+) -> Result<()> {
+    const MAX_PRIVATE_GC_INDEX_LEAVES: usize = 32;
+    const MAX_PRIVATE_GC_INDEX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    let private = open_gc_internal_index_dir(kio_dir)?;
+    let mut stale = Vec::new();
+    let mut bytes = 0_u64;
+    let entries = cap_fs::read_dir(&private, Path::new("."))
+        .map_err(|error| IndexError::Schema(format!("enumerate GC index cleanup: {error}")))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| IndexError::Schema(format!("enumerate GC index cleanup: {error}")))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(".gc-index-") {
+            continue;
+        }
+        validate_gc_temp_leaf(name)?;
+        if Some(name) != keep_leaf {
+            let mut options = cap_fs::OpenOptions::new();
+            options
+                .read(true)
+                ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+            let file = cap_fs::open(&private, Path::new(name), &options).map_err(|error| {
+                IndexError::Schema(format!("open stale GC index copy for bounds: {error}"))
+            })?;
+            validate_bound_source_file(&file, Path::new(name))?;
+            bytes = bytes
+                .checked_add(
+                    file.metadata()
+                        .map_err(|error| {
+                            IndexError::Schema(format!(
+                                "inspect stale GC index copy for bounds: {error}"
+                            ))
+                        })?
+                        .len(),
+                )
+                .ok_or_else(|| {
+                    IndexError::Schema("stale private GC index bytes overflow".to_owned())
+                })?;
+            if bytes > MAX_PRIVATE_GC_INDEX_BYTES {
+                return Err(IndexError::Schema(
+                    "too many stale private GC index bytes".to_owned(),
+                ));
+            }
+            stale.push(name.to_owned());
+            if stale.len() > MAX_PRIVATE_GC_INDEX_LEAVES {
+                return Err(IndexError::Schema(
+                    "too many stale private GC index copies".to_owned(),
+                ));
+            }
+        }
+    }
+    for leaf in stale {
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let file = cap_fs::open(&private, Path::new(&leaf), &options)
+            .map_err(|error| IndexError::Schema(format!("open stale GC index copy: {error}")))?;
+        validate_bound_source_file(&file, Path::new(&leaf))?;
+        let identity = canonical_gc_index_identity(&file)?;
+        if gc_leaf_identity(&private, &leaf)? != identity {
+            return Err(IndexError::Schema(
+                "stale GC index copy changed during cleanup".to_owned(),
+            ));
+        }
+        cap_fs::remove_file(&private, Path::new(&leaf))
+            .map_err(|error| IndexError::Schema(format!("remove stale GC index copy: {error}")))?;
+    }
+    private.sync_all().map_err(|error| {
+        IndexError::Schema(format!("fsync private GC index stale cleanup: {error}"))
+    })
+}
+
+pub fn exchange_prepared_bound_gc_index(
+    kio_dir: &std::fs::File,
+    temp_leaf: &str,
+    expected_private_dir_identity: &str,
+    expected_source_identity: &str,
+    expected_source_state_digest: &str,
+    expected_target_identity: &str,
+) -> Result<()> {
+    validate_gc_temp_leaf(temp_leaf)?;
+    let index = cap_fs::open_dir_nofollow(kio_dir, Path::new("index")).map_err(|error| {
+        IndexError::Schema(format!("open GC index directory for exchange: {error}"))
+    })?;
+    let private = open_existing_gc_internal_index_dir(kio_dir)?;
+    require_gc_private_dir_identity(&private, expected_private_dir_identity)?;
+    let source = gc_leaf_identity(&index, "sqlite.db")?;
+    let source_state = gc_leaf_state(&index, "sqlite.db")?;
+    let temp = gc_leaf_identity(&private, temp_leaf)?;
+    if source != expected_source_identity
+        || source_file_state_digest(source_state) != expected_source_state_digest
+        || temp != expected_target_identity
+    {
+        return Err(IndexError::Schema(
+            "GC durable index exchange inputs changed".to_owned(),
+        ));
+    }
+    exchange_gc_index_leaves(&index, "sqlite.db", &private, temp_leaf)?;
+    // Exchange spans two directories.  Persist the destination namespace
+    // first: after a power loss recovery may see both names, but never rely on
+    // a source-directory fsync having made the target name durable first.
+    index
+        .sync_all()
+        .map_err(|error| IndexError::Schema(format!("fsync GC index exchange: {error}")))?;
+    private
+        .sync_all()
+        .map_err(|error| IndexError::Schema(format!("fsync private GC index exchange: {error}")))?;
+    if gc_leaf_identity(&index, "sqlite.db")? != expected_target_identity
+        || gc_leaf_identity(&private, temp_leaf)? != expected_source_identity
+    {
+        return Err(IndexError::Schema(
+            "GC durable index exchange changed unexpectedly".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Rotate the fixed `index/sqlite.db` generation below a retained `.kio`
+/// capability and return the metadata read from the *same pinned connection*
+/// after the write commits.  No ambient pathname is accepted by this API.
+pub fn rotate_bound_gc_index_generation(
+    kio_dir: &std::fs::File,
+    generation: &str,
+    expected_current: Option<(&str, &str)>,
+    config: &FtsSchemaConfig,
+) -> Result<Option<BoundGcIndexMetadata>> {
+    let index = cap_fs::open_dir_nofollow(kio_dir, Path::new("index")).map_err(|error| {
+        IndexError::Schema(format!(
+            "open GC index directory below retained capability: {error}"
+        ))
+    })?;
+    rotate_bound_gc_index_leaf(
+        &index,
+        "sqlite.db",
+        generation,
+        expected_current,
+        None,
+        config,
+    )
+}
+
+fn rotate_bound_gc_index_leaf(
+    index: &std::fs::File,
+    leaf: &str,
+    generation: &str,
+    expected_current: Option<(&str, &str)>,
+    attestation: Option<&GcIndexRotationAttestation>,
+    config: &FtsSchemaConfig,
+) -> Result<Option<BoundGcIndexMetadata>> {
+    let Some((source, mut conn)) = open_bound_gc_index_leaf(index, leaf, config, true)? else {
+        return Ok(None);
+    };
+    let before = read_index_metadata(&conn)?.ok_or_else(|| {
+        schema_rebuild_error("GC source index is missing index metadata".to_owned())
+    })?;
+    let before_identity = canonical_gc_index_identity(&source.file)?;
+    if let Some((expected_generation, expected_identity)) = expected_current {
+        if before.index_generation != expected_generation {
+            return Err(IndexError::Schema(format!(
+                "GC source index generation changed before rotation (expected {expected_generation}, found {})",
+                before.index_generation
+            )));
+        }
+        if before_identity != expected_identity {
+            return Err(IndexError::Schema(
+                "GC source index identity changed before rotation".to_owned(),
+            ));
+        }
+    }
+    if let Some(attestation) = attestation {
+        if attestation.target_generation != generation
+            || attestation.source_generation != before.index_generation
+        {
+            return Err(IndexError::Schema(
+                "GC rotation attestation does not bind source and target generation".to_owned(),
+            ));
+        }
+        write_gc_rotation_attestation(&mut conn, attestation, before.last_lifecycle_epoch)?;
+    } else {
+        rotate_index_generation(&conn, generation, before.last_lifecycle_epoch)?;
+    }
+    let after = read_index_metadata(&conn)?.ok_or_else(|| {
+        IndexError::Schema("GC source index metadata disappeared during rotation".to_owned())
+    })?;
+    // The descriptor's own identity remains authoritative, but re-check its
+    // shape after SQLite completes so a hardlink/replacement is never silently
+    // accepted for a later operation.
+    validate_bound_source_name_identity(&source)?;
+    let after_identity = canonical_gc_index_identity(&source.file)?;
+    if after_identity != before_identity {
+        return Err(IndexError::Schema(
+            "GC source index identity changed during rotation".to_owned(),
+        ));
+    }
+    // SQLite must release its connection before the exact primary descriptor
+    // is forced durable.  A directory fsync alone does not persist the
+    // private database's changed pages on every filesystem.
+    drop(conn);
+    source.file.sync_all().map_err(|error| {
+        IndexError::Schema(format!("fsync rotated GC index primary file: {error}"))
+    })?;
+    Ok(Some(BoundGcIndexMetadata {
+        metadata: after,
+        file_identity: after_identity,
+    }))
+}
+
+/// Read and strictly validate the operation attestation from the exact
+/// descriptor-bound public SQLite leaf. `None` is meaningful: a pre-GC index
+/// has no operation authorization and must not be accepted for tree removal.
+pub fn read_bound_gc_index_rotation_attestation(
+    kio_dir: &std::fs::File,
+    config: &FtsSchemaConfig,
+) -> Result<
+    Option<(
+        BoundGcIndexMetadata,
+        GcIndexRotationAttestation,
+        std::fs::File,
+    )>,
+> {
+    let Some((source, conn)) = open_bound_gc_index(kio_dir, config, false)? else {
+        return Ok(None);
+    };
+    let metadata = read_index_metadata(&conn)?
+        .ok_or_else(|| IndexError::Schema("GC attestation index has no metadata row".to_owned()))?;
+    let attestation = read_gc_rotation_attestation(&conn)?;
+    validate_bound_source_name_identity(&source)?;
+    let identity = canonical_gc_index_identity(&source.file)?;
+    let attested_file = source
+        .file
+        .try_clone()
+        .map_err(|error| IndexError::Schema(format!("retain attested GC index: {error}")))?;
+    Ok(attestation.map(|attestation| {
+        (
+            BoundGcIndexMetadata {
+                metadata,
+                file_identity: identity,
+            },
+            attestation,
+            attested_file,
+        )
+    }))
+}
+
+fn write_gc_rotation_attestation(
+    conn: &mut Connection,
+    attestation: &GcIndexRotationAttestation,
+    lifecycle_epoch: u64,
+) -> Result<()> {
+    if !valid_gc_rotation_attestation(attestation) {
+        return Err(IndexError::Schema(
+            "invalid GC rotation attestation fields".to_owned(),
+        ));
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS gc_rotation_attestation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version INTEGER NOT NULL CHECK (version = 1),
+            sweep_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('pre_sweep', 'final')),
+            plan_digest TEXT NOT NULL,
+            source_generation TEXT NOT NULL,
+            target_generation TEXT NOT NULL
+        )",
+    )?;
+    // The attestation is singleton and replaces any attestation from an older
+    // rotation only in this clone. The generation advance and replacement are
+    // committed together, so observers never see just one of the two.
+    tx.execute(
+        "INSERT INTO index_metadata (id, index_generation, last_lifecycle_epoch)
+         VALUES (1, ?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET
+             index_generation = excluded.index_generation,
+             last_lifecycle_epoch = excluded.last_lifecycle_epoch",
+        params![
+            attestation.target_generation,
+            i64::try_from(lifecycle_epoch).unwrap_or(i64::MAX)
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO gc_rotation_attestation
+             (id, version, sweep_id, role, plan_digest, source_generation, target_generation)
+         VALUES (1, 1, ?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (id) DO UPDATE SET
+             version = excluded.version,
+             sweep_id = excluded.sweep_id,
+             role = excluded.role,
+             plan_digest = excluded.plan_digest,
+             source_generation = excluded.source_generation,
+             target_generation = excluded.target_generation",
+        params![
+            attestation.sweep_id,
+            attestation.role,
+            attestation.plan_digest,
+            attestation.source_generation,
+            attestation.target_generation,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn read_gc_rotation_attestation(conn: &Connection) -> Result<Option<GcIndexRotationAttestation>> {
+    if !table_exists(conn, "gc_rotation_attestation")? {
+        return Ok(None);
+    }
+    validate_optional_gc_rotation_attestation(conn)?;
+    let rows = conn
+        .prepare(
+            "SELECT sweep_id, role, plan_digest, source_generation, target_generation
+             FROM gc_rotation_attestation ORDER BY id",
+        )?
+        .query_map([], |row| {
+            Ok(GcIndexRotationAttestation {
+                sweep_id: row.get(0)?,
+                role: row.get(1)?,
+                plan_digest: row.get(2)?,
+                source_generation: row.get(3)?,
+                target_generation: row.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    match rows.as_slice() {
+        [] => Err(IndexError::Schema(
+            "GC rotation attestation table is empty".to_owned(),
+        )),
+        [one] if valid_gc_rotation_attestation(one) => Ok(Some(one.clone())),
+        [..] if rows.len() == 1 => Err(IndexError::Schema(
+            "GC rotation attestation has invalid fields".to_owned(),
+        )),
+        _ => Err(IndexError::Schema(
+            "GC rotation attestation table is not singleton".to_owned(),
+        )),
+    }
+}
+
+fn valid_gc_rotation_attestation(attestation: &GcIndexRotationAttestation) -> bool {
+    matches!(attestation.role.as_str(), "pre_sweep" | "final")
+        && valid_gc_ulid(&attestation.sweep_id)
+        && valid_gc_ulid(&attestation.source_generation)
+        && valid_gc_ulid(&attestation.target_generation)
+        && attestation.source_generation != attestation.target_generation
+        && is_sha256_digest(&attestation.plan_digest)
+}
+
+fn valid_gc_ulid(value: &str) -> bool {
+    value.len() == 26
+        && value.bytes().all(|byte| {
+            matches!(byte, b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+        })
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value.as_bytes()[7..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn validate_optional_gc_rotation_attestation(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "gc_rotation_attestation")? {
+        return Ok(());
+    }
+    validate_table(
+        conn,
+        "gc_rotation_attestation",
+        &[
+            ("id", "INTEGER", false, 1),
+            ("version", "INTEGER", true, 0),
+            ("sweep_id", "TEXT", true, 0),
+            ("role", "TEXT", true, 0),
+            ("plan_digest", "TEXT", true, 0),
+            ("source_generation", "TEXT", true, 0),
+            ("target_generation", "TEXT", true, 0),
+        ],
+    )?;
+    validate_exact_schema_sql(
+        conn,
+        "table",
+        "gc_rotation_attestation",
+        CURRENT_GC_ROTATION_ATTESTATION_SQL,
+    )
+}
+
+/// Descriptor-relative, fixed-leaf variant of `bind_source_index` for GC.
+/// The caller owns the already-bound `.kio` descriptor; this function only
+/// opens `index` and `sqlite.db` beneath it with no symlink traversal.
+fn open_bound_gc_index(
+    kio_dir: &std::fs::File,
+    config: &FtsSchemaConfig,
+    writable: bool,
+) -> Result<Option<(BoundSourceIndex, Connection)>> {
+    // The Unix descriptor VFS below makes SQLite open the exact retained
+    // primary-file descriptor.  On Windows rusqlite currently accepts only a
+    // pathname here; retaining a no-share-delete file handle is not enough to
+    // prove that SQLite adopted that same handle.  Refuse GC rotation rather
+    // than silently re-opening `index/sqlite.db` through the ambient cwd.
+    #[cfg(windows)]
+    {
+        let _ = (kio_dir, config, writable);
+        return Err(IndexError::Schema(
+            "capability-bound GC SQLite rotation is unsupported on Windows".to_owned(),
+        ));
+    }
+    crate::vec::ensure_registered();
+    let root = kio_dir
+        .try_clone()
+        .map_err(|e| IndexError::Schema(format!("retain GC .kio capability: {e}")))?;
+    let parent = match cap_fs::open_dir_nofollow(&root, Path::new("index")) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(IndexError::Schema(format!(
+                "open GC index directory below retained capability: {error}"
+            )))
+        }
+    };
+    open_bound_gc_index_leaf(&parent, "sqlite.db", config, writable)
+}
+
+fn open_bound_gc_index_leaf(
+    parent: &std::fs::File,
+    leaf: &str,
+    config: &FtsSchemaConfig,
+    writable: bool,
+) -> Result<Option<(BoundSourceIndex, Connection)>> {
+    let root = parent
+        .try_clone()
+        .map_err(|e| IndexError::Schema(format!("retain GC index capability: {e}")))?;
+    let parent = parent
+        .try_clone()
+        .map_err(|e| IndexError::Schema(format!("retain GC index parent: {e}")))?;
+    let public_path = PathBuf::from(leaf);
+    let before = cap_source_leaf_identity(&parent, Path::new(leaf))?;
+    let Some(before) = before else {
+        return Ok(None);
+    };
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(writable)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = cap_fs::open(&parent, Path::new(leaf), &options)
+        .map_err(|error| IndexError::Schema(format!("open bound GC source index: {error}")))?;
+    validate_bound_source_file(&file, &public_path)?;
+    if source_file_identity(&file)? != before {
+        return Err(IndexError::Schema(
+            "GC source index changed while opening retained capability".to_owned(),
+        ));
+    }
+    let source = BoundSourceIndex {
+        _root: root,
+        _parent: parent,
+        file,
+        public_path,
+    };
+    let flags = if writable {
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    };
+    let conn = open_bound_source_connection(&source.sqlite_path(), flags)?;
+    validate_bound_source_name_identity(&source)?;
+    if writable {
+        conn.pragma_update(None, "journal_mode", "MEMORY")?;
+    }
+    if !validate_current_schema(&conn, config)? {
+        return Err(schema_rebuild_error(
+            "GC source index has no current index schema".to_owned(),
+        ));
+    }
+    validate_bound_source_name_identity(&source)?;
+    Ok(Some((source, conn)))
+}
+
+/// Prove that the descriptor SQLite used is still what the retained
+/// descriptor-relative `index/sqlite.db` name denotes.  A check of the open
+/// descriptor alone is insufficient: an attacker can rename it away and put a
+/// different regular database at the same name while the operation is in
+/// flight.  Do this after every bound open/rotation before returning success.
+fn validate_bound_source_name_identity(source: &BoundSourceIndex) -> Result<()> {
+    validate_bound_source_file(&source.file, &source.public_path)?;
+    let leaf = source.public_path.file_name().ok_or_else(|| {
+        IndexError::Schema(format!(
+            "bound source index has no file name: {}",
+            source.public_path.display()
+        ))
+    })?;
+    let named = cap_source_leaf_identity(&source._parent, Path::new(leaf))?.ok_or_else(|| {
+        IndexError::Schema(format!(
+            "bound source index disappeared while operating: {}",
+            source.public_path.display()
+        ))
+    })?;
+    if named != source_file_identity(&source.file)? {
+        return Err(IndexError::Schema(format!(
+            "bound source index name changed while operating: {}",
+            source.public_path.display()
+        )));
+    }
+    Ok(())
 }
 
 impl SqliteFtsIndex {
@@ -1396,7 +2454,12 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
             "missing required current index object",
         ));
     }
-    validate_no_unknown_user_objects(conn, REQUIRED_OBJECTS)?;
+    // GC's private-copy generation rotation may add one strict attestation
+    // table. It is deliberately optional so Phase 3 indexes remain readable;
+    // when present it is validated below and is never treated as arbitrary
+    // user schema.
+    const OPTIONAL_GC_OBJECTS: &[&str] = &["gc_rotation_attestation"];
+    validate_no_unknown_user_objects_with_optional(conn, REQUIRED_OBJECTS, OPTIONAL_GC_OBJECTS)?;
 
     validate_table(
         conn,
@@ -1507,6 +2570,7 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
         ],
     )?;
     validate_exact_schema_sql(conn, "table", "index_metadata", CURRENT_INDEX_METADATA_SQL)?;
+    validate_optional_gc_rotation_attestation(conn)?;
     validate_index(
         conn,
         "idx_chunks_ident",
@@ -1754,7 +2818,11 @@ fn has_non_internal_user_objects(conn: &Connection) -> Result<bool> {
         .is_some())
 }
 
-fn validate_no_unknown_user_objects(conn: &Connection, required: &[&str]) -> Result<()> {
+fn validate_no_unknown_user_objects_with_optional(
+    conn: &Connection,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT type, name FROM sqlite_master
          WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -1765,7 +2833,7 @@ fn validate_no_unknown_user_objects(conn: &Connection, required: &[&str]) -> Res
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for (object_type, name) in objects {
-        if required.contains(&name.as_str()) {
+        if required.contains(&name.as_str()) || optional.contains(&name.as_str()) {
             continue;
         }
         let recognized_shadow = object_type == "table" && is_current_virtual_shadow(&name);
@@ -1810,6 +2878,7 @@ const CURRENT_CHUNK_PUBLICATIONS_SQL: &str = "CREATE TABLE chunk_publications (p
 const CURRENT_EMBEDDINGS_SQL: &str = "CREATE TABLE embeddings (id TEXT NOT NULL PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL, modality TEXT NOT NULL, vector BLOB NOT NULL, dimensions INTEGER NOT NULL, distance TEXT NOT NULL, profile_hash TEXT NOT NULL, context_key TEXT)";
 const CURRENT_TREE_ENTRIES_SQL: &str = "CREATE TABLE tree_entries (commit_hash TEXT NOT NULL, path TEXT NOT NULL, raw_hash TEXT NOT NULL, tool_profile_hash TEXT, gen INTEGER, manifest_hash TEXT, PRIMARY KEY (commit_hash, path))";
 const CURRENT_INDEX_METADATA_SQL: &str = "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), index_generation TEXT NOT NULL, last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0)";
+const CURRENT_GC_ROTATION_ATTESTATION_SQL: &str = "CREATE TABLE gc_rotation_attestation (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL CHECK (version = 1), sweep_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('pre_sweep', 'final')), plan_digest TEXT NOT NULL, source_generation TEXT NOT NULL, target_generation TEXT NOT NULL)";
 const CURRENT_IDX_CHUNKS_IDENT_SQL: &str =
     "CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash)";
 const CURRENT_IDX_CHUNK_PUBLICATIONS_SQL: &str =
@@ -2456,6 +3525,121 @@ mod tests {
         .expect_err("helper must never create a missing source index");
         assert!(error.to_string().contains("inspect source index"));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn bound_gc_rotation_stays_on_retained_kio_capability_and_reports_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let kio = directory.path().join(".kio");
+        let index = kio.join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        let path = index.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let generation = "01J00000000000000000000000";
+        let conn = Connection::open(&path).unwrap();
+        ensure_index_metadata(&conn, generation, 7).unwrap();
+        drop(conn);
+
+        let kio_handle = cap_fs::open_ambient_dir(&kio, cap_primitives::ambient_authority())
+            .expect("open retained .kio test capability");
+        let rotated = rotate_bound_gc_index_generation(
+            &kio_handle,
+            "01J00000000000000000000001",
+            None,
+            &config,
+        )
+        .unwrap()
+        .expect("present index must remain present");
+        assert_eq!(
+            rotated.metadata.index_generation,
+            "01J00000000000000000000001"
+        );
+        assert_eq!(rotated.metadata.last_lifecycle_epoch, 7);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_bound_gc_index_metadata(&kio_handle, &config)
+            .unwrap()
+            .is_none());
+        assert!(rotate_bound_gc_index_generation(
+            &kio_handle,
+            "01J00000000000000000000002",
+            None,
+            &config,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn bound_gc_rotation_rejects_an_unexpected_initial_generation_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let kio = directory.path().join(".kio");
+        let index = kio.join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        let path = index.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        ensure_index_metadata(&conn, "01J00000000000000000000000", 7).unwrap();
+        drop(conn);
+        let kio_handle = cap_fs::open_ambient_dir(&kio, cap_primitives::ambient_authority())
+            .expect("open retained .kio test capability");
+
+        let error = rotate_bound_gc_index_generation(
+            &kio_handle,
+            "01J00000000000000000000001",
+            Some((
+                "01J00000000000000000000099",
+                "unix:0000000000000000:0000000000000000",
+            )),
+            &config,
+        )
+        .expect_err("mismatched initial generation must fail closed");
+        assert!(error
+            .to_string()
+            .contains("generation changed before rotation"));
+        let metadata = read_bound_gc_index_metadata(&kio_handle, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            metadata.metadata.index_generation,
+            "01J00000000000000000000000"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_gc_rotation_rejects_index_symlink_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let victim_db = victim.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&victim_db, config.clone()).unwrap());
+        let before = std::fs::read(&victim_db).unwrap();
+        let kio = directory.path().join(".kio");
+        std::fs::create_dir(&kio).unwrap();
+        symlink(victim.path(), kio.join("index")).unwrap();
+        let kio_handle = cap_fs::open_ambient_dir(&kio, cap_primitives::ambient_authority())
+            .expect("open retained .kio test capability");
+
+        let error = rotate_bound_gc_index_generation(
+            &kio_handle,
+            "01J00000000000000000000003",
+            None,
+            &config,
+        )
+        .expect_err("bound GC rotation must reject index symlink");
+        assert!(error.to_string().contains("open GC index directory"));
+        assert_eq!(std::fs::read(&victim_db).unwrap(), before);
     }
 
     #[cfg(unix)]

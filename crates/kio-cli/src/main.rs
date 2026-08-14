@@ -288,8 +288,12 @@ struct RestoreArgs {
 #[derive(Debug, Args)]
 struct GcArgs {
     /// Compute and report the plan without writing receipts or deleting objects.
-    #[arg(long, required = true)]
+    #[arg(long, conflicts_with = "yes")]
     dry_run: bool,
+
+    /// Confirm the retention shallow sweep without an interactive prompt.
+    #[arg(long, conflicts_with = "dry_run")]
+    yes: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -873,7 +877,8 @@ fn run(cli: Cli) -> Result<Value> {
     // D7 (07 §7): publish `[adapter.policy.<execution_mode>].timeout_seconds`
     // from `config.toml`, the third registry at this same call site.
     register_execution_timeouts_from_user_config();
-    match cli.command {
+    let Cli { json, command } = cli;
+    match command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
             let kio_dir = path.join(".kio");
@@ -885,16 +890,24 @@ fn run(cli: Cli) -> Result<Value> {
             // it (R13-4) so the user's natural recovery action reports the repair.
             // Unrecoverable corruption (bad scope.json/config) is surfaced by
             // `open`'s `validate` as a non-zero exit that points at `kio repair`.
-            let repaired = if existed {
-                kio_core::scope::empty_head_recovery_hash(&kio_dir)
+            // Re-initializing an existing scope can self-heal HEAD and seed
+            // the purge epoch. Open it without repair (which also rejects a
+            // symlink/reparse `.kio`), then take the ordinary GC-aware lock
+            // before either write. A brand-new scope cannot have a prior GC
+            // marker and retains init's normal creation flow.
+            let (repo, repaired, _existing_store_lock) = if existed {
+                let repo = Repository::open_without_head_repair(&path)?;
+                let lock = repo.lock_store()?;
+                let repaired = kio_core::scope::empty_head_recovery_hash(repo.kio_dir())
                     .ok()
                     .flatten()
                     .map(|_| vec!["HEAD".to_owned()])
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                repo.self_heal_head_for_repair()?;
+                (repo, repaired, Some(lock))
             } else {
-                Vec::new()
+                (Repository::init(&path)?, Vec::new(), None)
             };
-            let repo = Repository::init(&path)?;
             // LC39/LC40: seed `.kio/purge/epoch` from scope creation onward, so
             // no read command ever fail-closes on a file that simply was never
             // created (see `ensure_purge_epoch_initialized`'s doc comment).
@@ -961,11 +974,26 @@ fn run(cli: Cli) -> Result<Value> {
                     .map(serde_json::to_value)
                     .transpose()
                     .map_err(|err| KioError::schema(err.to_string()))?,
+                // GC has its own durable recovery marker.  As with purge,
+                // status exposes it rather than attempting recovery or
+                // collapsing an interrupted destructive operation into a
+                // normal healthy state.
+                "active_gc_sweep": kio_core::gc::read_active_marker(repo.kio_dir())?
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|err| KioError::schema(err.to_string()))?,
             }))
         }
         Command::Snapshot(args) => {
             let _action = args.action;
-            let repo = Repository::open_current()?;
+            // Opening an ordinary repository can self-heal HEAD. Bind and
+            // validate without repair first, acquire the GC-aware store lock,
+            // and only then perform that write. This keeps even the open path
+            // behind the active-sweep barrier without following a replaced
+            // public `.kio` pathname.
+            let repo = Repository::open_current_without_head_repair()?;
+            let _lock = repo.lock_store()?;
+            repo.self_heal_head_for_repair()?;
             validate_repo_tool_lock(&repo)?;
             // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment): a
             // scope created before this session's read-barrier wiring, or one
@@ -991,7 +1019,6 @@ fn run(cli: Cli) -> Result<Value> {
             // Keep the source HEAD, its ready replica header, and the optional
             // same-content projection reuse in one writer critical section.
             // `snapshot_filtered_with_policy` takes this lock reentrantly.
-            let _lock = repo.lock_store()?;
             let ready_replica_before_snapshot = capture_ready_replica_snapshot(&repo);
             let outcome = repo.snapshot_filtered_with_policy(
                 args.message.as_deref(),
@@ -1153,10 +1180,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Adapter(args) => run_adapter(args),
         Command::Ledger(args) => run_ledger(args),
         Command::Repair(args) => run_repair(args),
-        Command::Gc(args) => {
-            debug_assert!(args.dry_run, "clap requires --dry-run");
-            gc::run_gc_dry_run()
-        }
+        Command::Gc(args) => gc::run(args.dry_run, args.yes, json),
         Command::Search(args) => run_search(args),
         Command::Open(args) => run_open(args),
         Command::View(args) => run_view(args),
@@ -1812,6 +1836,25 @@ fn run_repair(args: RepairArgs) -> Result<Value> {
             LaneOverride::new(rebuild.realtime, rebuild.batch),
             Some(&repo.kio_dir().join("config.toml")),
         )?;
+    }
+    // `repair verify-objects` is the recovery observer for an interrupted
+    // receipt-first GC sweep. It must report the bounded incomplete state,
+    // not take the ordinary writer lock (whose shared active-GC barrier is
+    // correctly used by all mutation-capable repair modes). `verify_objects`
+    // itself returns before any repair when this marker is present.
+    if matches!(
+        mode,
+        RepairMode::VerifyObjects | RepairMode::VerifyObjectsPruneOrphans
+    ) && kio_core::gc::read_active_marker(repo.kio_dir())?.is_some()
+    {
+        let report = verify_objects::verify_objects(&repo)?;
+        let mut output =
+            serde_json::to_value(report).map_err(|error| KioError::schema(error.to_string()))?;
+        if let Some(object) = output.as_object_mut() {
+            object.insert("error_code".to_owned(), json!("KIO-E-GC-SWEEP-ACTIVE-001"));
+            object.insert("__exit_code".to_owned(), json!(3));
+        }
+        return Ok(output);
     }
     // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
     let _lock = repo.lock_store()?;
@@ -5747,7 +5790,21 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         .collect::<Vec<_>>();
     signed_exclusions.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
     signed_exclusions.dedup_by(|a, b| a.scope_id == b.scope_id);
-    let next_cursor = if slice_end < expanded.len() {
+    // A GC marker freezes a tree-only sweep and forces search pagination to
+    // linearize at page 1: never mint a token that could be replayed across
+    // the pre/post sweep index-generation rotations.  The marker is read by
+    // core through its descriptor-bound nofollow validator, not as an
+    // ambient pathname probe.
+    let gc_recovery_pending = gc_marker_active_for_scopes(&searched)?;
+    if gc_recovery_pending && decoded_cursor.is_some() {
+        return Err(KioError::new(
+            "KIO-E-SEARCH-CURSOR-001",
+            "search cursor cannot be replayed while GC shallow-sweep recovery is pending; re-run without a cursor",
+            json!({ "reason": "gc_sweep_recovery_pending" }),
+            ExitCode::InvalidUsage,
+        ));
+    }
+    let next_cursor = if slice_end < expanded.len() && !gc_recovery_pending {
         let mut consumed = vec![0u64; exec_scopes.len()];
         for hit in &expanded[..slice_end] {
             consumed[hit.candidate.scope_index] += 1;
@@ -5955,6 +6012,12 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         "index_status": index_status,
         "results": results,
     });
+    if gc_recovery_pending {
+        response["gc_recovery_pending"] = json!({
+            "reason": "gc_sweep_active",
+            "next_cursor_suppressed": true,
+        });
+    }
     append_search_logs(&repo, &response, started);
     if partial_failure {
         // Some scopes were excluded, or a searched scope skipped shallow
@@ -5976,6 +6039,24 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // cursor or partially built JSON body after the fact.
     maybe_wait_at_test_search_response_barrier();
     recheck_search_response_barriers(&late_barriers, &exec_scopes)?;
+    // A marker may have appeared while the result body was assembled.  Check
+    // again at the actual response boundary and redact a freshly minted token
+    // rather than leaking a cursor across the sweep transition.
+    if gc_marker_active_for_scopes(&searched)? {
+        if decoded_cursor.is_some() {
+            return Err(KioError::new(
+                "KIO-E-SEARCH-CURSOR-001",
+                "search cursor cannot be replayed while GC shallow-sweep recovery is pending; re-run without a cursor",
+                json!({ "reason": "gc_sweep_recovery_pending" }),
+                ExitCode::InvalidUsage,
+            ));
+        }
+        response["paging"]["next_cursor"] = Value::Null;
+        response["gc_recovery_pending"] = json!({
+            "reason": "gc_sweep_active",
+            "next_cursor_suppressed": true,
+        });
+    }
     Ok(response)
 }
 
@@ -8284,7 +8365,9 @@ pub(crate) fn authenticate_chunk_row(
 /// Missing commits are only tolerated as the expected pre-commit crash residue;
 /// all other commit-store failures remain observable corruption.
 pub(crate) fn durable_history_roots(repo: &Repository) -> Result<BTreeSet<String>> {
-    let mut roots = repo.current_ref_targets()?;
+    let ref_roots = repo.current_ref_targets()?;
+    let mut roots = ref_roots.clone();
+    let final_shallow_commits = final_shallow_commit_set(repo)?;
     let creations = read_stored_chunks(repo.kio_dir())?;
     let events = read_chunk_publication_events(repo.kio_dir())?;
     // Events are append-only and may name the same association repeatedly. Keep
@@ -8314,6 +8397,15 @@ pub(crate) fn durable_history_roots(repo: &Repository) -> Result<BTreeSet<String
         .into_iter()
         .flatten()
         {
+            // A current ref remains an authoritative history root even after
+            // a completed shallow sweep.  Its immutable commit is still
+            // available, but the intentionally discarded tree cannot prove a
+            // chunk-ledger publication association.  Only an exact, strict,
+            // markerless shallow receipt may bypass that redundant ledger
+            // authentication; disconnected ledger roots remain authenticated.
+            if final_shallow_commits.contains(introduction_commit) {
+                continue;
+            }
             let event = ChunkPublicationEvent {
                 event: "publication".to_owned(),
                 chunk_id: creation.row.chunk_id.clone(),
@@ -8336,6 +8428,9 @@ pub(crate) fn durable_history_roots(repo: &Repository) -> Result<BTreeSet<String
             .get(&(event.chunk_id.clone(), event.chunking_config_hash.clone()))
             .copied()
             .ok_or_else(|| KioError::schema("publication event has no creation association"))?;
+        if final_shallow_commits.contains(&event.introduction_commit) {
+            continue;
+        }
         if authenticate_publication_event_cached(
             repo,
             repo.kio_dir(),
@@ -8347,6 +8442,26 @@ pub(crate) fn durable_history_roots(repo: &Repository) -> Result<BTreeSet<String
         }
     }
     Ok(roots)
+}
+
+/// Whether a commit is in the only normal tree-absent state: a markerless,
+/// strict shallow receipt exactly bound to its commit/tree.
+/// This is deliberately narrower than "has a receipt": mismatches, an active
+/// sweep, a receipt/tree coexistence, and every unreceipted missing tree remain
+/// visible to the caller rather than weakening durable-ledger authentication.
+/// Load and validate every markerless final shallow receipt once.  Callers can
+/// then make repeated history/ledger decisions without re-reading mutable
+/// receipt paths per row.  Any active marker disables the final state entirely:
+/// recovery owns that transitional namespace.
+fn final_shallow_commit_set(repo: &Repository) -> Result<BTreeSet<String>> {
+    if kio_core::gc::read_active_marker(repo.kio_dir())?.is_some() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(
+        kio_core::gc::validated_final_shallow_receipts(repo.kio_dir())?
+            .into_keys()
+            .collect(),
+    )
 }
 
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
@@ -8386,8 +8501,8 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // the old database. This also makes a tag-only/disconnected branch a first
     // class root rather than an accidental cache survivor.
     let mut tree_rows = BTreeMap::<(String, String), TreeEntryRow>::new();
-    let graph = HistoryReader::new(repo.kio_dir())
-        .all_parents_for_roots(&rebuild_roots)
+    let (graph, _) = HistoryReader::new(repo.kio_dir())
+        .all_parents_for_roots_tolerant(&rebuild_roots)
         .map_err(|error| annotate_index_stage(error, "walk retained history"))?;
     for node in graph.nodes_in_visit_order() {
         for entry in &node.tree.entries {
@@ -8900,7 +9015,10 @@ fn read_head_tree_for_rebuild(repo: &Repository, head: &str) -> Result<TreeObjec
     };
     match repo.read_tree(&commit.tree) {
         Ok(tree) => Ok(tree),
-        Err(error) if is_store_not_found(&error) => Err(commit_shallow_for_rebuild(head)),
+        Err(error) if is_store_not_found(&error) => {
+            kio_core::gc::validate_final_shallow_tree(repo.kio_dir(), head, &commit.tree)?;
+            Err(commit_shallow_for_rebuild(head))
+        }
         Err(error) => Err(error),
     }
 }
@@ -12515,7 +12633,14 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         }
         // Tree object gone (genuine shallow: commit present, tree GC'd) — resolve the
         // chunk directly, with gen unbound.
-        Err(error) if is_store_not_found(&error) => (true, None, None),
+        Err(error) if is_store_not_found(&error) => {
+            kio_core::gc::validate_final_shallow_tree(
+                &target.kio_dir,
+                &pointer.commit,
+                &commit.tree,
+            )?;
+            (true, None, None)
+        }
         Err(error) => return Err(error),
     };
 
@@ -13412,6 +13537,19 @@ fn recheck_search_response_barriers(
         }
     }
     Ok(())
+}
+
+/// Return whether any scope participating in this response has a validated
+/// Phase-4 GC recovery marker.  This intentionally performs no recovery and
+/// makes no assumptions from the replica: the marker is source-store truth.
+/// A malformed/replaced marker is a core fail-closed error, not "inactive".
+fn gc_marker_active_for_scopes(searched_scopes: &[SearchedScopeInfo]) -> Result<bool> {
+    for scope in searched_scopes {
+        if kio_core::gc::read_active_marker(&scope.scope_path)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Integration-test synchronization point for the narrow interval after the
@@ -28192,14 +28330,25 @@ mod tests {
     }
 
     #[test]
-    fn gc_exposes_only_the_mandatory_read_only_mode() {
-        assert!(Cli::try_parse_from(["kio", "gc"]).is_err());
+    fn gc_exposes_explicit_read_only_and_confirmed_sweep_modes() {
+        let sweep = Cli::try_parse_from(["kio", "gc"]).unwrap();
+        assert!(matches!(
+            sweep.command,
+            Command::Gc(GcArgs {
+                dry_run: false,
+                yes: false
+            })
+        ));
         assert!(Cli::try_parse_from(["kio", "gc", "--prune-unreachable"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "gc", "--dry-run", "--yes"]).is_err());
         let parsed = Cli::try_parse_from(["kio", "gc", "--dry-run", "--json"]).unwrap();
         assert!(parsed.json);
         assert!(matches!(
             parsed.command,
-            Command::Gc(GcArgs { dry_run: true })
+            Command::Gc(GcArgs {
+                dry_run: true,
+                yes: false
+            })
         ));
     }
 

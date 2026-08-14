@@ -340,16 +340,18 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 
 > MVP の purge は raw 本文・派生 artifact の全履歴削除 + tombstone (既定) / `--erase-tombstone` (not_found) まで。tree/commit を書き換える完全な履歴書き換え (filename 秘匿ケース) は MVP 非対応で v2+ / Phase 4+ ([05-runtime.md §3.5](05-runtime.md), [09-mvp-scope.md §3.1](09-mvp-scope.md))。
 
-## 6.1 Read-only GC planner (Phase 4 milestone 1)
+## 6.1 Retention GC: plan and crash-safe shallow sweep (Phase 4 milestones 1–2)
 
-この段階で公開する GC 操作は、retention による shallow 候補を読み取り専用で計算する次の形式だけとする。
+この段階で公開する GC 操作は、retention による shallow 候補を読み取り専用で計算する形式と、明示確認付きの tree-only shallow sweep である。
 
 ```bash
 kio gc --dry-run
 kio gc --dry-run --json
+kio gc [--yes]
+kio gc --yes --json
 ```
 
-- `--dry-run` は必須。省略は invalid usage (exit 2) とし、削除を行う既定動作や未実装の破壊 mode は公開しない。
+- `--dry-run` は read-only preview を明示する。省略時の `kio gc` は確認付き shallow sweep であり、`--prune-unreachable` 等の未実装破壊 mode は公開しない。
 - planner は `[gc.auto_retention]` / `[gc.derived_retention]` を読み、現在時刻・全 ref tip・全 commit object・既存 shallow receipt を同一の bounded read-only plan へ束縛する。計画後に同じ truth 一式を独立した bounded pass で再検証し、一致しなければ成功を返さない。`HEAD` / branch / tag の tip は常に候補外。
 - `auto` は UTC の半開区間で `all -> hourly -> daily -> weekly` と減衰させ、bucket 内では fractional seconds を含む `created_at` が最新の commit (同一 `created_at` なら commit hash の byte 順で先のもの) を保持する。hour は UTC hour、day は UTC civil day、week は月曜開始、`keep_weekly_months` の 1 month は retention 計算上 30 days とする。未来時刻は安全側で保持する。
 - `repaired` は branch ごとの到達履歴で最新 `keep_repaired_per_branch` 件を保持する。どの branch にも属さない `repaired` は安全側で保持する。`manual` / `imported` / `merged` / `purged` は常に候補外。
@@ -357,9 +359,14 @@ kio gc --dry-run --json
 - candidate は commit 単位で列挙するが、対象 object kind は `tree` だけである。同じ tree hash を候補外の非 shallow commit が 1 件でも参照する場合、その tree を共有する候補はすべて保護する。`estimated_bytes` は候補となる一意 tree の物理 byte 数で、commit / raw / chunk / toollock / manifest はこの plan に含めない。
 - `.kio/gc/shallowed/<commit64>` は厳格に検証し、receipt 済み commit を再候補化しない。receipt がない commit の tree 欠落、malformed receipt、探索上限超過、symlink / reparse point / 非 regular file / unsafe hardlink、走査中の identity 変更は候補 0 件へ縮退せず structured error とする。上限超過は `KIO-E-GC-PLAN-LIMIT-001` (exit 4)。
 - 成功結果は `status=\"dry_run\"`、適用時刻と policy、candidate commit/tree 数、一意 tree の推定 byte 数、commit-hash byte 順の候補、理由別の除外数、走査 limit/stat を返す。同じ store・policy・注入時刻に対する JSON / human output は決定的である。
-- 実行中は receipt・objects・refs・HEAD・index・chunks ledger を作成・更新・削除せず、index generation も進めない。この milestone は GC 実行系、`--prune-unreachable`、scheduled snapshot、`after_index`、`on_idle` を含まない。
+- `--dry-run` は完全に read-only である。一方 `kio gc` は fresh plan 全体（policy、sorted candidates、exclusions、plan/truth digestを含む）を対話時にそのまま表示して `y` / `yes` の確認を要求する。active marker の resume では要約でなく完全なfrozen marker/stateを表示する。非 TTY または `--json` では候補数が0でも `--yes` が必須である。`--dry-run --yes` は usage error。外部 JSON や過去の preview は mutation authority にならない。
+- 確認後は `.kio/.lock` の下で capability-relative に再bind/replanし、candidate集合・policy・plan/truth digest が preview と一致したときだけ実行する。不一致は `KIO-E-GC-PLAN-CHANGED-001` (retryable exit 3) で、marker / receipt / tree を変更しない。
+- 実行は `.kio/gc/in_progress` を atomic publish + fsync してから `prepared → receipting → sweeping → finalizing` を進める。marker はcandidate/tree各100,000件、canonical body 8 MiB、推定対象4 GiBを上限とし、publish前に超過を拒否する。receipt は `.kio/gc/shallowed/<commit64>` に canonical JSON+LF で create-new/fsyncし、全 shared-tree receipt が耐久化されるまで tree を一つも削除しない。commit/raw/chunk/manifest/toollock/index/chunks ledger は削除対象外である。
+- tree leafはretained descriptorからnofollow・single-link・hash/schema/identityを再検証し、no-replaceでCAS fanout外の`.kio/gc/internal/trees/`へ隔離する。隔離 leafを同じbound directoryでunlinkし、link count 0 を確認してから同じretained file handleをtruncate+fsyncする。canonical tree leafと隔離 leafは消失する。ambient pathname unlinkやempty fanout掃除は行わない。`.kio/gc/internal/`はoperation-reserved namespaceであり、検出可能な差替えはfail-closedにする。POSIXにidentity条件付きunlinkが存在しないため、検証直後のreserved nameへの直接第三者書込みだけは[05-runtime.md §2.5](05-runtime.md)・同§3.5と同じ保護契約外の残余窓であり、public CAS path・scope/fanout・receipt/marker public name・hardlinkの保護を緩めない。
+- marker がある間、`kio gc --dry-run` は recovery pending を read-only で報告する。`kio gc --yes` は凍結 marker を validator で再検証して再開する。receipt または tree deletion 後に truth が矛盾すれば fail-closed し、marker は残す。最初の physical tree deletion 前と**finalizing の各実行・再開時**に index generation を descriptor-bound に回転する（sqlite がない scope は `index_absent` として記録する）。回転は公開DBのin-place更新ではなく、`.kio/gc/internal/index/`のprivate copyを更新・file/directory fsyncし、source file stateとsource/target/private-directory identityをmarkerへ耐久化してexchange直前に再照合してから、公開`index/sqlite.db`とatomic exchangeし、両directoryをfsyncする。pre-sweep private copyではgeneration更新と同一SQLite transactionにstrict singleton attestation（sweep ID、role、plan digest、source/target generation）を記録し、treeごとに公開DBのgeneration/identityとattestationを再検証したprocess-local permitだけをcore除去APIへ渡す。完了 rotation の耐久化後だけ marker を削除する。descriptor-bound SQLite rotationを安全に実装できないplatform（現行Windowsを含む）では、marker/receiptのpublishより前にsweepをfail-closedする。
+- active marker は通常 writer を retryable に拒否し、search は新規 cursor を発行しない。ページ 1 は結果を返せても `next_cursor=null` と recovery-pending 注記を含める。次段階は tiered retention の `after_index` hook であり、`--prune-unreachable`、scheduled snapshot、`on_idle` はまだ含まない。
 
-次の独立 milestone は **receipt を tree 削除より先に耐久化する shallow tree sweep と crash recovery** である。そこで初めて短い exclusive critical section と物理削除を導入し、dry-run plan を再検証してから適用する ([05-runtime.md §2.2-§2.6](05-runtime.md))。
+次の候補 milestone は **tiered retention の `after_index` hook** である。今回の executor は dry-run plan を再検証してから適用し、`--prune-unreachable` や自動実行には進まない ([05-runtime.md §2.2-§2.6](05-runtime.md))。
 
 ---
 

@@ -40,6 +40,8 @@ use std::fs;
 use assert_cmd::Command;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use kio_core::cas::{ObjectKind, ObjectStore};
+use kio_core::gc::ShallowReceipt;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -1044,7 +1046,28 @@ fn pc47_at_a_shallow_commit_itself_still_hard_fails() {
         .as_str()
         .unwrap()
         .to_owned();
-    fs::remove_dir_all(dir.path().join(".kio/objects/trees")).unwrap();
+    let tree = success(&dir, &["inspect", &head])["tree"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A completed shallow state is receipt-backed and its target is no longer
+    // a ref tip.  Advance HEAD before discarding the original auto snapshot.
+    fs::write(
+        dir.path().join("advanced.md"),
+        "# Advance\n\nhead advance\n",
+    )
+    .unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+    let receipt_path = dir
+        .path()
+        .join(".kio/gc/shallowed")
+        .join(head.strip_prefix("sha256:").unwrap());
+    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+    let receipt =
+        ShallowReceipt::new(head.clone(), tree.clone(), "2026-08-14T00:00:00Z".into()).unwrap();
+    fs::write(receipt_path, receipt.canonical_bytes().unwrap()).unwrap();
+    let store = ObjectStore::new(dir.path().join(".kio"));
+    fs::remove_file(store.object_path(ObjectKind::Tree, &tree).unwrap()).unwrap();
     let (code, err) = run(
         &dir,
         &[
