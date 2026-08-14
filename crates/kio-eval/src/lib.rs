@@ -114,7 +114,6 @@ mod golden_vectors {
         value: Value,
         canonical_utf8: String,
         sha256: String,
-        python_compatible: bool,
     }
 
     #[derive(Debug, Deserialize)]
@@ -198,7 +197,6 @@ mod golden_vectors {
             let actual = canonical_json_bytes(&case.value).unwrap();
             assert_eq!(actual, case.canonical_utf8.as_bytes(), "{}", case.name);
             assert_eq!(hash_bytes(&actual), case.sha256, "{}", case.name);
-            let _ = case.python_compatible;
         }
         for case in vectors.slugs {
             assert_eq!(

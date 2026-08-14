@@ -643,45 +643,6 @@ pub fn classify_outcome(outcome: &SearchOutcome) -> ClassifiedOutcome {
     }
 }
 
-/// Tri-state JSON field used by the legacy evaluator artifact contract.
-/// Generic process failures emit a code or explicit `null`; validation and
-/// attestation failures omit `error_code` entirely.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ErrorCodeField {
-    #[default]
-    Missing,
-    Null,
-    Code(String),
-}
-
-impl ErrorCodeField {
-    fn from_present(value: Option<String>) -> Self {
-        value.map_or(Self::Null, Self::Code)
-    }
-
-    fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-fn serialize_error_code<S>(value: &ErrorCodeField, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match value {
-        ErrorCodeField::Missing => serializer.serialize_none(),
-        ErrorCodeField::Null => serializer.serialize_none(),
-        ErrorCodeField::Code(code) => serializer.serialize_str(code),
-    }
-}
-
-fn deserialize_error_code<'de, D>(deserializer: D) -> Result<ErrorCodeField, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer).map(ErrorCodeField::from_present)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryResult {
     pub scenario: String,
@@ -689,13 +650,8 @@ pub struct QueryResult {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recall_at_10: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "ErrorCodeField::is_missing",
-        serialize_with = "serialize_error_code",
-        deserialize_with = "deserialize_error_code"
-    )]
-    pub error_code: ErrorCodeField,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub duration_ms: f64,
@@ -999,7 +955,7 @@ where
                     query: query.query.clone(),
                     status: "unimplemented".to_owned(),
                     recall_at_10: None,
-                    error_code: ErrorCodeField::Code(error_code),
+                    error_code: Some(error_code),
                     detail: Some("search 未実装 (NOT-IMPLEMENTED)".to_owned()),
                     duration_ms,
                     pointer_attested: None,
@@ -1023,7 +979,7 @@ where
                     query: query.query.clone(),
                     status: "failed".to_owned(),
                     recall_at_10: Some(0.0),
-                    error_code: ErrorCodeField::from_present(error_code),
+                    error_code,
                     detail: query.resolution_error.clone(),
                     duration_ms,
                     pointer_attested: None,
@@ -1042,7 +998,7 @@ where
                     query: query.query.clone(),
                     status: "failed".to_owned(),
                     recall_at_10: Some(0.0),
-                    error_code: ErrorCodeField::from_present(error_code),
+                    error_code,
                     detail: Some(detail),
                     duration_ms,
                     pointer_attested: None,
@@ -1066,7 +1022,7 @@ where
                             query: query.query.clone(),
                             status: "failed".to_owned(),
                             recall_at_10: Some(0.0),
-                            error_code: ErrorCodeField::Missing,
+                            error_code: None,
                             detail: Some(validation_error),
                             duration_ms,
                             pointer_attested: None,
@@ -1100,7 +1056,7 @@ where
                     query: query.query.clone(),
                     status: "scored".to_owned(),
                     recall_at_10: Some(recall),
-                    error_code: ErrorCodeField::Missing,
+                    error_code: None,
                     detail,
                     duration_ms,
                     pointer_attested,
@@ -1431,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_artifact_preserves_legacy_null_and_detail_contract() {
+    fn failure_artifact_omits_missing_error_code_and_preserves_detail() {
         let query = ResolvedQuery {
             scenario: "M3-1".to_owned(),
             query: "fixture query".to_owned(),
@@ -1449,7 +1405,7 @@ mod tests {
         .unwrap();
         let value = serde_json::to_value(&results).unwrap();
         let result = &value["queries"][0];
-        assert_eq!(result["error_code"], Value::Null);
+        assert!(result.get("error_code").is_none());
         assert_eq!(result["detail"], "exit=1: plain failure");
 
         let mut unresolved = query.clone();

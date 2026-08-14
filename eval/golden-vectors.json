@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "canonical_json": [
-    {"name": "ascii-integer-only", "value": {"z": 2, "a": 1}, "canonical_utf8": "{\"a\":1,\"z\":2}", "sha256": "sha256:99168216144c7fed5d4c54916cf98d9c66096280c04a499822a99b6658bd177a", "python_compatible": true},
-    {"name": "float-jcs-exponent", "value": {"n": 1e-7}, "canonical_utf8": "{\"n\":1e-7}", "sha256": "sha256:747d6d23b64d1b2d579adb832b44de31c91c875bbef7a8e397f5d183a746b54b", "python_compatible": false},
-    {"name": "safe-large-integer", "value": {"n": 9007199254740991}, "canonical_utf8": "{\"n\":9007199254740991}", "sha256": "sha256:e1da48c6a6089f06ecb4e0a2259e658e3786b2420f52baccdf929ec6460d7b41", "python_compatible": true},
-    {"name": "unicode-key-and-value", "value": {"あ": "値", "é": "café"}, "canonical_utf8": "{\"é\":\"café\",\"あ\":\"値\"}", "sha256": "sha256:b86c0f59e9c8f31276b365dcf5692aa244564840a6d09b750623d439e3a53d1c", "python_compatible": true},
-    {"name": "explicit-null", "value": {"present": null}, "canonical_utf8": "{\"present\":null}", "sha256": "sha256:924c481da1aca4bbd856f20e4aaef20f67c34fccd0b5e27cb2647b8c45ee21ac", "python_compatible": true},
-    {"name": "omitted-field", "value": {}, "canonical_utf8": "{}", "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "python_compatible": true}
+    {"name": "ascii-integer-only", "value": {"z": 2, "a": 1}, "canonical_utf8": "{\"a\":1,\"z\":2}", "sha256": "sha256:99168216144c7fed5d4c54916cf98d9c66096280c04a499822a99b6658bd177a"},
+    {"name": "float-jcs-exponent", "value": {"n": 1e-7}, "canonical_utf8": "{\"n\":1e-7}", "sha256": "sha256:747d6d23b64d1b2d579adb832b44de31c91c875bbef7a8e397f5d183a746b54b"},
+    {"name": "safe-large-integer", "value": {"n": 9007199254740991}, "canonical_utf8": "{\"n\":9007199254740991}", "sha256": "sha256:e1da48c6a6089f06ecb4e0a2259e658e3786b2420f52baccdf929ec6460d7b41"},
+    {"name": "unicode-key-and-value", "value": {"あ": "値", "é": "café"}, "canonical_utf8": "{\"é\":\"café\",\"あ\":\"値\"}", "sha256": "sha256:b86c0f59e9c8f31276b365dcf5692aa244564840a6d09b750623d439e3a53d1c"},
+    {"name": "explicit-null", "value": {"present": null}, "canonical_utf8": "{\"present\":null}", "sha256": "sha256:924c481da1aca4bbd856f20e4aaef20f67c34fccd0b5e27cb2647b8c45ee21ac"},
+    {"name": "omitted-field", "value": {}, "canonical_utf8": "{}", "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}
   ],
   "slugs": [
     {"name": "unicode-nfc-and-japanese", "input": "Café 回収率と精度", "expected": "caf-回収率と精度"},
