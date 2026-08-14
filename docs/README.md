@@ -97,7 +97,7 @@ Phase 5: Agent            agent API / navigation / neighbors / node / edge
 Step 計画 (Phase 1-3 を実装):
 
 ```
-Step 1 (1-2ヶ月): kio-core + kio-cli (init / status / snapshot (=commit) / log / diff / inspect / tag)
+Step 1 (1-2ヶ月): kio-core + kio-cli (init / status / snapshot create / log / diff / inspect / tag)
 Step 2 (2-3ヶ月): kio-pipeline + kio-adapter (frontier AI default)
 Step 3 (2-3ヶ月): kio-index + kio-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel + purge 最小形 (tombstone) + evidence verify

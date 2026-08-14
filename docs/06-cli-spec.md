@@ -8,7 +8,9 @@ Kio の CLI 契約。GUI は MVP 範囲外 (Phase 4+) だが、将来の用語�
 
 # 1. Core Commands
 
-`snapshot` を正規コマンド名とし、`commit` は Git に慣れた開発者向け alias。内部的には同じ履歴 object を作る。
+`snapshot` だけを正規コマンド名とし、action は `create` または `auto` を必須とする。
+旧 `commit` alias とaction省略形は受理しない。内部の履歴 object名としてのcommitはCLI surfaceとは
+区別する。
 
 ```bash
 kio init [<path>]                       # <path> (省略時 = カレント) の .kio を作成
@@ -81,7 +83,7 @@ kio repair replica | kio repair -r                                # device repli
                                         # KIO-E-CONFIRM-REJECTED-001 で拒否し、**何も削除しない**。
 kio gc --dry-run                       # Phase 4 milestone 1: retention による shallow 候補のread-only plan (§6.1)
 kio snapshot create [-m "<message>"]    # manual snapshot。-m省略時は自動 message
-kio snapshot auto                        # scheduled auto snapshot entrypoint (commit 1時点ではnot-implemented)
+kio snapshot auto                        # Phase 4 milestone 4: current indexed scopeのscheduled auto snapshot
 kio log [--at <commit>] [--since <dur>]
 kio diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kio search "<query>" [options]          # 詳細 §3
@@ -118,6 +120,38 @@ kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 `snapshot` は action を必須とする。`kio snapshot`、`kio snapshot -m ...`、`kio commit ...` は旧surfaceであり usage error (exit 2) で拒否する。`create` だけが manual message を受け取り、`auto` はmessage引数を受け取らない。
 
 定期設定は省略時disabledである。存在する `[snapshot.auto]` は厳格に `enabled` (boolean)、`interval_seconds` (integer, 1..31536000)、`on_change_threshold` (integer, 1..1000000) の3 fieldすべてを持たなければならない。`[snapshot]` / `[snapshot.auto]` のunknown field、欠落、型違い、範囲外は schema validation error (exit 2) とし、aliasや暗黙defaultはない。
+
+`snapshot auto` はmanual messageを受け取らず、現在のscopeにvalidなsource indexが無い場合は
+`status=skipped, reason=not_indexed`、config欠落/disabledなら`reason=disabled`でread-onlyに
+終了する。eligible分類とstate/normalization/locking契約は[05-runtime.md §8.2](05-runtime.md)を
+正本とする。成功JSONの固定fieldは次である。
+
+```json
+{
+  "operation": "snapshot_auto",
+  "status": "skipped|noop|created",
+  "reason": "disabled|not_indexed|not_eligible|tree_and_tool_lock_unchanged|snapshot_created",
+  "eligibility_reason": null,
+  "eligible": false,
+  "change_count": null,
+  "next_eligible_at": null,
+  "commit_hash": null,
+  "tree_hash": null,
+  "stats": null,
+  "recovered_gc": false
+}
+```
+
+eligible resultでは`eligibility_reason`は
+`first_run|interval_elapsed|change_threshold|interval_and_change_threshold`、`change_count`はinteger、
+`next_eligible_at`はcanonical UTC seconds、
+created/no-opはcommit/tree/statsを該当値へ置換する。usage/configはexit 2、clock/lock/state/authority
+競合はretryable exit 3、unsafe filesystem/store corruptionはexit 4である。scheduled mutationを
+実装済みのplatformはmacOS / Linuxであり、その他ではlock・HEAD・state publication前に
+`KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001` / exit 4でfail-closedする。
+eligible attemptのdurable state CASはimmutable object準備後かつHEAD/ref/manifestより前に行う。
+state競合ではrefを進めず、state成功後に別のauthority再検証が失敗した場合は保守的cooldownとして
+stateを残し、ref不達objectを履歴authorityとして扱わない。
 
 **`kio diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed` (旧新 tool_lock_hash と変更 role) / `resurrection_published` (no-op 例外 (a) の publication commit — [05-runtime.md §8.1](05-runtime.md)) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。current tree の required field が欠落する場合は `unknown` へ縮退せず corruption / incompatible format として fail-closed にする。
 
@@ -374,7 +408,7 @@ kio gc --yes --json
 - automatic resultはindex/snapshot payloadの`gc` objectに載せる。post-publication timeout/errorは`publication_status="completed"`を保持し、timeoutは`KIO-E-GC-RUNTIME-LIMIT-001` / exit 3、permanent integrity failureはexit 4、それ以外のpost-publication failureはpartial exit 3とする。pre-publication recovery timeoutは`publication_status="not_started"` / exit 3である。human outputにも`gc: <status> (<reason>)`を追記する。
 - internal child scopeはchild subprocess自身がそのscopeへ1回だけhookを適用し、保持済みchild capabilityと再bind identityが一致しない場合はfail-closedする。親scope hookがchildへ代理適用されることはなく、childのGC結果は親の`child_scopes[].gc`へ保持する。
 
-未公開の次段階は `--prune-unreachable`、scheduled snapshot / `on_idle`、CoW並行GC、既存scopeのdefaultを`after_index`へ変更する判断である ([05-runtime.md §2.2-§2.6](05-runtime.md))。
+未公開の次段階は `--prune-unreachable`、Rust-only `on_idle`、CoW並行GC、既存scopeのdefaultを`after_index`へ変更する判断である。scheduled snapshotはPhase 4 milestone 4で公開済みである ([05-runtime.md §2.2-§2.6](05-runtime.md))。
 
 ---
 

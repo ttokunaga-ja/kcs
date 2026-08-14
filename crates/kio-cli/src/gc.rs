@@ -68,9 +68,26 @@ pub(super) fn preflight_automatic(
     repository: &Repository,
     trigger: &str,
 ) -> Result<AutomaticGcPreflight> {
-    let started = Instant::now();
     let session = GcSweepSession::bind_repository(repository)?;
     let binding = session.automation_binding()?;
+    preflight_automatic_bound(&session, &binding, trigger)
+}
+
+/// Scheduler variant of automatic-GC preflight.  The caller has already
+/// retained the selected scope and `.kio` capabilities; never re-bind the
+/// public repository path between the scheduler observation and a possibly
+/// destructive recovery.
+pub(super) fn preflight_automatic_bound(
+    session: &GcSweepSession,
+    expected_binding: &GcAutomationBinding,
+    trigger: &str,
+) -> Result<AutomaticGcPreflight> {
+    let started = Instant::now();
+    session.assert_public_identity()?;
+    let binding = session.automation_binding()?;
+    if &binding != expected_binding {
+        return Err(config_changed_after_publication());
+    }
     let config = binding.config;
     match config.mode {
         GcAutomationMode::ManualOnly => Ok(AutomaticGcPreflight::Proceed {
@@ -87,8 +104,16 @@ pub(super) fn preflight_automatic(
                 });
             }
             let mut budget = ExecutionBudget::new(Some(deadline));
-            let report =
-                resume_session_with_budget(session, fixed_now()?, &mut budget, Some(&binding))?;
+            let report = resume_session_with_budget(
+                session,
+                fixed_now()?,
+                &mut budget,
+                Some(expected_binding),
+            )?;
+            session.assert_public_identity()?;
+            if &session.automation_binding()? != expected_binding {
+                return Err(config_changed_after_publication());
+            }
             let report =
                 decorate_automatic_report(report, trigger, config.max_runtime_seconds, true);
             if is_runtime_deferred(&report) {
@@ -195,7 +220,7 @@ fn run_after_success(
             let deadline = automatic_deadline(started, config.max_runtime_seconds)?;
             let mut budget = ExecutionBudget::new(Some(deadline));
             let report = if session.read_marker()?.is_some() {
-                resume_session_with_budget(session, now, &mut budget, Some(expected_binding))?
+                resume_session_with_budget(&session, now, &mut budget, Some(expected_binding))?
             } else {
                 let preview = session.plan_at(now)?;
                 if preview.candidates.is_empty() {
@@ -402,17 +427,17 @@ fn resume_with_budget(
     budget: &mut ExecutionBudget,
 ) -> Result<Value> {
     let session = GcSweepSession::bind(root)?;
-    resume_session_with_budget(session, now, budget, None)
+    resume_session_with_budget(&session, now, budget, None)
 }
 
 fn resume_session_with_budget(
-    session: GcSweepSession,
+    session: &GcSweepSession,
     now: i64,
     budget: &mut ExecutionBudget,
     expected_binding: Option<&GcAutomationBinding>,
 ) -> Result<Value> {
     let _lock = session.acquire_store_lock()?;
-    require_automation_binding(&session, expected_binding)?;
+    require_automation_binding(session, expected_binding)?;
     session.ensure_index_rotation_supported()?;
     let marker = session.read_marker()?.ok_or_else(plan_changed)?;
     let marker_can_be_discarded = session.marker_can_be_discarded_after_fresh_replan(&marker)?;
@@ -435,7 +460,7 @@ fn resume_session_with_budget(
     // invocation clock here would let an otherwise valid crash cross a
     // retention bucket boundary and become permanently unresumable.
     session.validate_frozen_marker_current_truth(&marker)?;
-    execute_locked(&session, marker, now, budget)
+    execute_locked(session, marker, now, budget)
 }
 
 fn require_automation_binding(

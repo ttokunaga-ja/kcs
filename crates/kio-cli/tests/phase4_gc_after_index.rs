@@ -524,6 +524,7 @@ fn on_idle_fails_closed_before_index_or_snapshot_mutation() {
     for args in [
         &["index", "--offline", "--approve", "--json"][..],
         &["snapshot", "create", "-m", "blocked", "--json"][..],
+        &["snapshot", "auto", "--json"][..],
     ] {
         let output = kio(&dir, args).output().unwrap();
         assert_eq!(output.status.code(), Some(1));

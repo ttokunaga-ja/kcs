@@ -283,24 +283,32 @@ fn ct_cli_removed_snapshot_surfaces_are_usage_errors() {
         &["snapshot"][..],
         &["snapshot", "-m", "message"][..],
         &["commit", "-m", "message"][..],
+        &["snapshot", "auto", "-m", "message"][..],
     ] {
         kio().args(args).current_dir(scope.path()).assert().code(2);
     }
 }
 
 #[test]
-fn ct_snapshot_auto_is_structured_not_implemented_until_scheduler_exists() {
+fn ct_snapshot_auto_is_disabled_without_scope_configuration() {
     let scope = tempfile::tempdir().unwrap();
+    kio()
+        .arg("init")
+        .current_dir(scope.path())
+        .assert()
+        .success();
     let output = kio()
         .args(["snapshot", "auto", "--json"])
         .current_dir(scope.path())
         .assert()
-        .code(1)
+        .success()
         .get_output()
-        .stderr
+        .stdout
         .clone();
-    let error: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(error["error_code"], "KIO-E-CONFIG-NOT-IMPLEMENTED-001");
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["operation"], "snapshot_auto");
+    assert_eq!(report["status"], "skipped");
+    assert_eq!(report["reason"], "disabled");
 }
 
 #[test]

@@ -55,6 +55,10 @@ use kio_core::cas::{
     ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kio_core::dag::{CommitObject, CommitType, NormalizeRef, TreeObject};
+use kio_core::gc::{
+    snapshot_auto_clock_error, GcAutomationBinding, GcAutomationMode, GcSweepSession,
+    SnapshotAutoBinding, SnapshotAutoStateBinding,
+};
 use kio_core::history::HistoryReader;
 use kio_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
 use kio_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMode};
@@ -70,8 +74,9 @@ use kio_index::chunking::{
 };
 use kio_index::embedding_store::{self, f32_from_le_bytes, f32_to_le_bytes};
 use kio_index::fts::{
-    open_existing_source_index_connection, ExistingSourceIndexOpenMode, FtsSchemaConfig,
-    FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS,
+    open_existing_source_index_connection, read_bound_gc_index_metadata, BoundGcIndexMetadata,
+    ExistingSourceIndexOpenMode, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex,
+    CHUNK_VEC_DIMENSIONS,
 };
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_index::{
@@ -1010,7 +1015,7 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Snapshot(SnapshotArgs {
             action: SnapshotAction::Auto,
-        }) => Err(KioError::not_implemented("snapshot auto")),
+        }) => run_snapshot_auto(),
         Command::Snapshot(SnapshotArgs {
             action: SnapshotAction::Create(args),
         }) => {
@@ -1237,6 +1242,389 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Restore(args) => restore::run(args),
         Command::Purge(args) => purge::run(args),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScheduledAutoObservation {
+    gc: GcAutomationBinding,
+    config: SnapshotAutoBinding,
+    state: SnapshotAutoStateBinding,
+    direct_entries: BTreeSet<String>,
+    preview: ScanPreview,
+    index: BoundGcIndexMetadata,
+    change_count: u64,
+    eligible: bool,
+    eligibility_reason: Option<&'static str>,
+    next_eligible_at: Option<String>,
+}
+
+fn run_snapshot_auto() -> Result<Value> {
+    let repo = Repository::open_current_without_head_repair()?;
+    let session = GcSweepSession::bind_repository(&repo)?;
+    let first_gc = session.automation_binding()?;
+    let first_config = session.snapshot_auto_binding()?;
+    let second_gc = session.automation_binding()?;
+    let second_config = session.snapshot_auto_binding()?;
+    if first_gc != second_gc || first_config != second_config {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot configuration changed during observation",
+        ));
+    }
+    if first_gc.config.mode == GcAutomationMode::OnIdle {
+        return Err(KioError::not_implemented("gc.mode=on_idle"));
+    }
+    if !first_config.config.is_some_and(|config| config.enabled) {
+        return Ok(snapshot_auto_skip(
+            "disabled",
+            Value::Null,
+            Value::Null,
+            false,
+        ));
+    }
+    let first_indexed = scheduled_auto_indexed(&session)?;
+    let second_indexed = scheduled_auto_indexed(&session)?;
+    if first_indexed != second_indexed
+        || session.automation_binding()? != first_gc
+        || session.snapshot_auto_binding()? != first_config
+    {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot index authority changed during observation",
+        ));
+    }
+    if !first_indexed {
+        return Ok(snapshot_auto_skip(
+            "not_indexed",
+            Value::Null,
+            Value::Null,
+            false,
+        ));
+    }
+    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_PRE_GC_PREFLIGHT_READY");
+    let (recovered_gc, gc_binding) =
+        match gc::preflight_automatic_bound(&session, &first_gc, "snapshot_auto")? {
+            gc::AutomaticGcPreflight::Proceed { recovered, binding } => (recovered, binding),
+            gc::AutomaticGcPreflight::Deferred(report) => {
+                return Ok(gc::deferred_before_publication("snapshot_auto", report))
+            }
+        };
+    if gc_binding != first_gc
+        || session.automation_binding()? != first_gc
+        || session.snapshot_auto_binding()? != first_config
+        || scheduled_auto_indexed(&session)? != first_indexed
+    {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot authority changed during automatic GC preflight",
+        ));
+    }
+    let now = now_utc_seconds();
+    let initial = observe_scheduled_auto(&repo, &session, &now)?;
+    if initial.gc != gc_binding {
+        return Err(snapshot_auto_authority_changed(
+            "GC automation changed after scheduled preflight",
+        ));
+    }
+    let confirmed = observe_scheduled_auto(&repo, &session, &now)?;
+    if confirmed != initial {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot authority changed during observation",
+        ));
+    }
+    if !initial.eligible {
+        return Ok(snapshot_auto_skip(
+            "not_eligible",
+            json!(initial.change_count),
+            json!(initial.next_eligible_at),
+            recovered_gc,
+        ));
+    }
+    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_PRELOCK_READY");
+    let lock = session.acquire_snapshot_auto_store_lock()?;
+    let bound_repo = Repository::open_bound_existing(
+        repo.canonical_root().to_path_buf(),
+        session.retained_scope_handle()?,
+        session.retained_kio_handle()?,
+    )?;
+    let locked = observe_scheduled_auto(&bound_repo, &session, &now)?;
+    if locked != initial || locked.gc != gc_binding {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot authority changed during locked eligibility handoff",
+        ));
+    }
+    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_LOCKED_READY");
+    let final_observation = observe_scheduled_auto(&bound_repo, &session, &now)?;
+    if final_observation != locked || final_observation.gc != gc_binding {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot authority changed immediately before publication",
+        ));
+    }
+    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_BEFORE_PUBLICATION_READY");
+    let publication_observation = observe_scheduled_auto(&bound_repo, &session, &now)?;
+    if publication_observation != final_observation || publication_observation.gc != gc_binding {
+        return Err(snapshot_auto_authority_changed(
+            "scheduled snapshot authority changed at publication boundary",
+        ));
+    }
+    let excluded = scheduled_auto_excluded(&publication_observation.preview);
+    let allowed = explicitly_allowed_tier_a_paths(&publication_observation.preview);
+    let expected_raw_by_path = scheduled_auto_expected_raw(&publication_observation.preview)?;
+    session.prepare_snapshot_auto_state_publication(&publication_observation.state)?;
+    session.assert_public_identity()?;
+    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY");
+    session.assert_public_identity()?;
+    // This closure runs only after immutable snapshot preparation and before
+    // any scheduled ref/manifest publication. A failed conditional state CAS
+    // therefore leaves the candidate commit unreachable.
+    let mut publish_checkpoint =
+        || session.publish_snapshot_auto_state(&publication_observation.state, &now);
+    let outcome = bound_repo.scheduled_auto_snapshot(
+        &now,
+        &excluded,
+        &allowed,
+        &expected_raw_by_path,
+        &publication_observation.direct_entries,
+        &publication_observation.config,
+        &mut publish_checkpoint,
+    )?;
+    if let Some(commit_hash) = outcome.commit_hash.as_deref() {
+        mark_replica_rebuilding_or_log(bound_repo.kio_dir(), commit_hash);
+        append_event_log(
+            "KIO-I-COMMIT-CREATED-001",
+            "commit created",
+            json!({
+                "commit_hash": commit_hash,
+                "tree_hash": outcome.tree_hash,
+                "trigger": "snapshot_auto",
+            }),
+        )?;
+    }
+    drop(lock);
+    Ok(
+        json!({"operation":"snapshot_auto","status":if outcome.noop {"noop"} else {"created"},"reason":if outcome.noop {"tree_and_tool_lock_unchanged"} else {"snapshot_created"},"eligibility_reason":publication_observation.eligibility_reason,"eligible":true,"change_count":publication_observation.change_count,"next_eligible_at":publication_observation.next_eligible_at,"commit_hash":outcome.commit_hash,"tree_hash":outcome.tree_hash,"stats":{"files_added":outcome.stats.files_added,"files_modified":outcome.stats.files_modified,"files_deleted":outcome.stats.files_deleted},"recovered_gc":recovered_gc}),
+    )
+}
+
+fn snapshot_auto_skip(
+    reason: &str,
+    change_count: Value,
+    next_eligible_at: Value,
+    recovered_gc: bool,
+) -> Value {
+    json!({"operation":"snapshot_auto","status":"skipped","reason":reason,"eligibility_reason":Value::Null,"eligible":false,"change_count":change_count,"next_eligible_at":next_eligible_at,"commit_hash":Value::Null,"tree_hash":Value::Null,"stats":Value::Null,"recovered_gc":recovered_gc})
+}
+
+fn snapshot_auto_authority_changed(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
+        message,
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+fn wait_at_snapshot_auto_test_barrier(variable: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(ready_path) = std::env::var_os(variable) else {
+        return;
+    };
+    let ready_path = PathBuf::from(ready_path);
+    if fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !release_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn observe_scheduled_auto(
+    repo: &Repository,
+    session: &GcSweepSession,
+    now: &str,
+) -> Result<ScheduledAutoObservation> {
+    session.assert_public_identity()?;
+    let gc = session.automation_binding()?;
+    let config = session.snapshot_auto_binding()?;
+    let config_value = config
+        .config
+        .ok_or_else(|| KioError::schema("scheduled auto is disabled"))?;
+    if !config_value.enabled {
+        return Err(KioError::schema("scheduled auto authority became disabled"));
+    }
+    let index = scheduled_auto_index_metadata(session)?
+        .ok_or_else(|| KioError::schema("scheduled auto index disappeared during observation"))?;
+    let direct_entries = session.validate_snapshot_auto_direct_entries()?;
+    let state = session.snapshot_auto_state()?;
+    let now_seconds = parse_utc_seconds(now)
+        .filter(|seconds| kio_core::scope::format_utc_seconds(*seconds) == now)
+        .ok_or_else(|| snapshot_auto_clock_error("current time is not canonical UTC seconds"))?;
+    let (interval_elapsed, prior_next) = match &state.state {
+        Some(state) => {
+            let last =
+                parse_utc_seconds(&state.last_successful_eligible_attempt_at).ok_or_else(|| {
+                    snapshot_auto_clock_error("scheduler state time is not canonical UTC seconds")
+                })?;
+            if now_seconds < last {
+                return Err(snapshot_auto_clock_error(
+                    "scheduled snapshot clock moved backwards",
+                ));
+            }
+            let next = scheduled_auto_add_interval(last, config_value.interval_seconds)?;
+            (
+                now_seconds >= next,
+                Some(kio_core::scope::format_utc_seconds(next)),
+            )
+        }
+        None => (true, None),
+    };
+    let root = session.retained_scope_handle()?;
+    let kio = session.retained_kio_handle()?;
+    let preview = build_bound_scan_preview(
+        &root,
+        &kio,
+        ScanPreviewRequest {
+            scope_path: repo.canonical_root().display().to_string(),
+            include_raw_hashes: true,
+            require_network_approval: false,
+        },
+        &[],
+    )
+    .map_err(pipeline_to_kio)?;
+    let change_count = scheduled_preview_change_count(repo, session, &preview)?;
+    let threshold = change_count >= config_value.on_change_threshold;
+    let (eligible, eligibility_reason) = match (state.state.is_none(), interval_elapsed, threshold)
+    {
+        (true, _, _) => (true, Some("first_run")),
+        (_, true, true) => (true, Some("interval_and_change_threshold")),
+        (_, true, false) => (true, Some("interval_elapsed")),
+        (_, false, true) => (true, Some("change_threshold")),
+        _ => (false, None),
+    };
+    session.assert_public_identity()?;
+    Ok(ScheduledAutoObservation {
+        gc,
+        config,
+        state,
+        direct_entries,
+        preview,
+        index,
+        change_count,
+        eligible,
+        eligibility_reason,
+        next_eligible_at: if eligible {
+            Some(kio_core::scope::format_utc_seconds(
+                scheduled_auto_add_interval(now_seconds, config_value.interval_seconds)?,
+            ))
+        } else {
+            prior_next
+        },
+    })
+}
+
+fn scheduled_auto_add_interval(at: i64, interval: u64) -> Result<i64> {
+    at.checked_add(i64::try_from(interval).map_err(|_| {
+        snapshot_auto_clock_error("scheduled interval is outside signed timestamp range")
+    })?)
+    .ok_or_else(|| snapshot_auto_clock_error("scheduled interval overflow"))
+}
+
+fn scheduled_auto_excluded(preview: &ScanPreview) -> BTreeSet<String> {
+    let mut excluded = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.ignored)
+        .map(|candidate| candidate.input_path.clone())
+        .collect::<BTreeSet<_>>();
+    // The ignore policy file is scheduler control, not scope content. The
+    // bound preview intentionally omits it, so exclude it explicitly from the
+    // lower-level snapshot candidate enumeration too.
+    excluded.insert(".kioignore".to_owned());
+    excluded
+}
+
+fn scheduled_auto_expected_raw(preview: &ScanPreview) -> Result<BTreeMap<String, String>> {
+    preview
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.ignored)
+        .map(|candidate| {
+            Ok((
+                candidate.input_path.clone(),
+                candidate
+                    .raw_hash
+                    .clone()
+                    .ok_or_else(|| KioError::schema("bound scheduled scan omitted a raw hash"))?,
+            ))
+        })
+        .collect()
+}
+
+fn scheduled_auto_indexed(session: &GcSweepSession) -> Result<bool> {
+    Ok(scheduled_auto_index_metadata(session)?.is_some())
+}
+
+fn scheduled_auto_index_metadata(session: &GcSweepSession) -> Result<Option<BoundGcIndexMetadata>> {
+    session.assert_public_identity()?;
+    let kio = session.retained_kio_handle()?;
+    let metadata = read_bound_gc_index_metadata(
+        &kio,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
+    session.assert_public_identity()?;
+    Ok(metadata)
+}
+
+fn scheduled_preview_change_count(
+    repo: &Repository,
+    session: &GcSweepSession,
+    preview: &ScanPreview,
+) -> Result<u64> {
+    session.assert_public_identity()?;
+    let head = repo.head_commit_hash()?;
+    let head_tree = head
+        .as_deref()
+        .map(|hash| {
+            repo.read_commit(hash)
+                .and_then(|commit| repo.read_tree(&commit.tree))
+        })
+        .transpose()?;
+    let old = head_tree
+        .as_ref()
+        .map(|tree| {
+            tree.entries
+                .iter()
+                .map(|e| (&e.path, &e.raw_hash))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let new = preview
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.ignored)
+        .map(|candidate| {
+            Ok((
+                &candidate.input_path,
+                candidate
+                    .raw_hash
+                    .as_ref()
+                    .ok_or_else(|| KioError::schema("bound scheduled scan omitted a raw hash"))?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let changes = old
+        .keys()
+        .chain(new.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|path| old.get(*path) != new.get(*path))
+        .count() as u64;
+    session.assert_public_identity()?;
+    Ok(changes)
 }
 
 fn run_index(args: IndexArgs) -> Result<Value> {
@@ -26481,7 +26869,26 @@ fn print_output(value: Value, json_mode: bool) {
     // the `object/chunk/<hash>` URI resolution path (`resolve_object_uri`),
     // which returns the CAS chunk object's own `text` verbatim — that case
     // still prints the body.
-    if let Some(text) = value.get("text").and_then(Value::as_str) {
+    if value.get("operation").and_then(Value::as_str) == Some("snapshot_auto") {
+        // Scheduler output is a compact audit receipt in human mode as well as
+        // JSON mode; do not collapse an important skipped reason to `skipped`.
+        for key in [
+            "status",
+            "reason",
+            "eligibility_reason",
+            "change_count",
+            "next_eligible_at",
+            "commit_hash",
+            "tree_hash",
+        ] {
+            let rendered = match value.get(key) {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None => "null".to_owned(),
+            };
+            println!("{}: {}", key, terminal_safe_text(&rendered, false));
+        }
+    } else if let Some(text) = value.get("text").and_then(Value::as_str) {
         println!("{}", terminal_safe_text(text, true));
     } else if let Some(view_path) = value.get("view_path").and_then(Value::as_str) {
         // 05 §1.7.2: the path IS `view`'s output, so print it. Falling through

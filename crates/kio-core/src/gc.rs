@@ -13,14 +13,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cas::{
-    canonical_json_bytes, hash_bytes, is_hash, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES,
+    canonical_json_bytes, hash_bytes, is_hash, MAX_COMMIT_OBJECT_BYTES, MAX_RAW_OBJECT_BYTES,
+    MAX_TREE_OBJECT_BYTES,
 };
 use crate::dag::{CommitObject, CommitType, TreeObject, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES};
 use crate::error::{KioError, Result};
 use crate::schema::{validate_json_schema, SchemaKind};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::scope::acquire_bound_reentrant_store_lock;
 use crate::scope::{
     acquire_bound_store_lock, enforce_config_semantics, format_utc_seconds, parse_utc_seconds,
-    BoundStoreLock, Repository, KIO_FORMAT_VERSION,
+    BoundReentrantStoreLock, BoundStoreLock, Repository, KIO_FORMAT_VERSION,
 };
 use crate::ExitCode;
 
@@ -30,6 +33,13 @@ const MAX_MARKER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SWEEP_CANDIDATES: usize = 100_000;
 const MAX_SWEEP_ESTIMATED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const GC_RETIRE_SENTINEL: &[u8] = b"kio gc retirement sentinel\n";
+const SNAPSHOT_AUTO_STATE_LEAF: &str = "snapshot-auto.json";
+const SNAPSHOT_AUTO_STATE_VERSION: u32 = 1;
+const SNAPSHOT_AUTO_STATE_TEMP_PREFIX: &str = ".snapshot-auto-state-";
+/// Scheduler state publishing may leave a private create-new file behind if
+/// the process dies after fsync and before the final rename/exchange.  Keep
+/// recovery bounded even when a scheduler repeatedly dies at that seam.
+const MAX_SNAPSHOT_AUTO_STATE_TEMPORARIES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -470,14 +480,18 @@ fn read_active_marker_bound(kio: &std::fs::File) -> Result<Option<GcInProgressMa
 
 pub fn ensure_no_active_sweep(kio_dir: &Path) -> Result<()> {
     if let Some(marker) = read_active_marker(kio_dir)? {
-        return Err(KioError::new(
-            "KIO-E-GC-SWEEP-ACTIVE-001",
-            "a GC shallow sweep is active; resume it with kio gc --yes",
-            json!({"sweep_id":marker.sweep_id}),
-            ExitCode::PartialFailure,
-        ));
+        return Err(active_sweep_error(&marker));
     }
     Ok(())
+}
+
+fn active_sweep_error(marker: &GcInProgressMarker) -> KioError {
+    KioError::new(
+        "KIO-E-GC-SWEEP-ACTIVE-001",
+        "a GC shallow sweep is active; resume it with kio gc --yes",
+        json!({"sweep_id":marker.sweep_id}),
+        ExitCode::PartialFailure,
+    )
 }
 
 /// Inventory every markerless final shallow boundary in one bounded pass.
@@ -724,6 +738,51 @@ pub struct GcAutomationBinding {
     kio_identity: Identity,
 }
 
+/// Strict scheduler settings from the optional `[snapshot.auto]` table.
+/// Absence of the table is represented by `None`; there are deliberately no
+/// field defaults or legacy aliases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SnapshotAutoConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub on_change_threshold: u64,
+}
+
+/// Capability-bound snapshot of the configuration authority used by one
+/// scheduler invocation.  The private observation fields make equality bind
+/// the exact regular-file identity/state/digest as well as the parsed policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotAutoBinding {
+    pub config: Option<SnapshotAutoConfig>,
+    config_observation: FileObservation,
+    // The root ignore file is part of the effective snapshot policy.  Bind its
+    // exact optional observation too: a same-UID edit must not turn a preview
+    // that excluded a path into a later publication that archives it.
+    root_ignore_observation: Option<FileObservation>,
+    scope_identity: Identity,
+    kio_identity: Identity,
+}
+
+/// Durable scheduler checkpoint. It records prepared eligible attempts,
+/// including deterministic no-ops, before a scheduled ref can advance. A
+/// later ref-publication failure may therefore defer the next attempt; that is
+/// the intended fail-closed alternative to advancing a ref without its state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotAutoState {
+    pub version: u32,
+    pub last_successful_eligible_attempt_at: String,
+}
+
+/// Exact optional state-file observation.  Callers compare this value before
+/// and after taking the writer lock; same-byte inode/timestamp replacement is
+/// therefore observable rather than treated as an unchanged checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotAutoStateBinding {
+    pub state: Option<SnapshotAutoState>,
+    observation: Option<FileObservation>,
+}
+
 impl Default for GcAutomationConfig {
     fn default() -> Self {
         Self {
@@ -797,6 +856,38 @@ impl GcSweepSession {
         self.recheck_binding()?;
         acquire_bound_store_lock(&self.kio)
     }
+    /// Acquire the scheduler writer barrier relative to the retained `.kio`
+    /// descriptor, then make nested [`Repository`] store-lock acquisitions
+    /// reentrant on this thread. There is deliberately no ambient fallback:
+    /// platforms that cannot prove the descriptor-relative lock boundary fail
+    /// closed through the underlying bound-lock primitive.
+    pub fn acquire_snapshot_auto_store_lock(&self) -> Result<BoundReentrantStoreLock> {
+        self.recheck_binding()?;
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return Err(snapshot_auto_platform_unsupported());
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let lock = acquire_bound_reentrant_store_lock(
+                &self.kio,
+                vec![self.root.join(".kio/.lock"), PathBuf::from("./.lock")],
+            )?;
+            if let Err(error) = self.recheck_binding() {
+                drop(lock);
+                return Err(error);
+            }
+            // `BoundStoreLock` is also used by GC itself and therefore cannot
+            // reject its own marker.  The scheduler is an ordinary writer: inspect
+            // the marker through the same retained `.kio` capability after owning
+            // the lock and before making nested `StoreLock` calls reentrant.
+            if let Some(marker) = read_active_marker_bound(&self.kio)? {
+                drop(lock);
+                return Err(active_sweep_error(&marker));
+            }
+            Ok(lock)
+        }
+    }
     /// Read the validated GC automation settings through this session's
     /// retained `.kio` descriptor.  Rechecking before and after the read
     /// prevents a public scope replacement from silently changing the
@@ -826,6 +917,218 @@ impl GcSweepSession {
             scope_identity: id_file(&self.scope)?,
             kio_identity: id_file(&self.kio)?,
         })
+    }
+
+    /// Read the complete validated configuration through the retained `.kio`
+    /// capability and bind the exact file observation used for scheduled
+    /// snapshot authorization.
+    pub fn snapshot_auto_binding(&self) -> Result<SnapshotAutoBinding> {
+        self.recheck_binding()?;
+        let (bytes, config_observation) =
+            read_regular_observed(&self.kio, "config.toml", MAX_METADATA)?;
+        let config = read_snapshot_auto_config_bytes(&bytes)?;
+        let root_ignore_observation =
+            match read_regular_observed(&self.scope, ".kioignore", MAX_METADATA) {
+                Ok((_, observation)) => Some(observation),
+                Err(error) if is_io_not_found(&error) => None,
+                Err(error) => return Err(error),
+            };
+        self.recheck_binding()?;
+        Ok(SnapshotAutoBinding {
+            config,
+            config_observation,
+            root_ignore_observation,
+            scope_identity: id_file(&self.scope)?,
+            kio_identity: id_file(&self.kio)?,
+        })
+    }
+
+    /// Read the optional strict scheduler checkpoint relative to the retained
+    /// store handle.  A missing file is the only representation of a first
+    /// scheduled attempt.
+    pub fn snapshot_auto_state(&self) -> Result<SnapshotAutoStateBinding> {
+        self.recheck_binding()?;
+        let (state, observation) =
+            match read_regular_observed(&self.kio, SNAPSHOT_AUTO_STATE_LEAF, MAX_METADATA) {
+                Ok((bytes, observation)) => {
+                    (Some(parse_snapshot_auto_state(&bytes)?), Some(observation))
+                }
+                Err(error) if is_io_not_found(&error) => (None, None),
+                Err(error) => return Err(error),
+            };
+        self.recheck_binding()?;
+        Ok(SnapshotAutoStateBinding { state, observation })
+    }
+
+    /// Atomically and durably publish the scheduler checkpoint at the prepared
+    /// eligible-attempt boundary. `expected` must be the exact state observation
+    /// re-read under the writer lock. A replacement between eligibility and
+    /// publication fails closed before a scheduled ref can advance.
+    pub fn publish_snapshot_auto_state(
+        &self,
+        expected: &SnapshotAutoStateBinding,
+        now: &str,
+    ) -> Result<SnapshotAutoStateBinding> {
+        self.prepare_snapshot_auto_state_publication(expected)?;
+        let seconds = parse_utc_seconds(now)
+            .filter(|seconds| format_utc_seconds(*seconds) == now)
+            .ok_or_else(|| {
+                snapshot_auto_clock_error("current time is not canonical UTC seconds")
+            })?;
+        if let Some(previous) = expected.state.as_ref() {
+            let previous_seconds = parse_utc_seconds(&previous.last_successful_eligible_attempt_at)
+                .ok_or_else(|| corrupt("snapshot auto state time is invalid"))?;
+            if seconds < previous_seconds {
+                return Err(snapshot_auto_clock_error(
+                    "scheduled snapshot clock moved backwards",
+                ));
+            }
+        }
+        let state = SnapshotAutoState {
+            version: SNAPSHOT_AUTO_STATE_VERSION,
+            last_successful_eligible_attempt_at: format_utc_seconds(seconds),
+        };
+        let bytes = canonical_snapshot_auto_state_bytes(&state)?;
+        let temporary = unique_internal_name(".snapshot-auto-state");
+        create_new_bound(&self.kio, &temporary, &bytes, MAX_METADATA)?;
+        let (_, temporary_observation) =
+            read_regular_observed(&self.kio, &temporary, MAX_METADATA)?;
+        if let Err(error) = self.recheck_binding() {
+            retire_snapshot_state_temporary(&self.kio, &temporary, &bytes, &temporary_observation)?;
+            return Err(error);
+        }
+        let observed_state = match self.snapshot_auto_state() {
+            Ok(state) => state,
+            Err(error) => {
+                retire_snapshot_state_temporary(
+                    &self.kio,
+                    &temporary,
+                    &bytes,
+                    &temporary_observation,
+                )?;
+                return Err(error);
+            }
+        };
+        if &observed_state != expected {
+            retire_snapshot_state_temporary(&self.kio, &temporary, &bytes, &temporary_observation)?;
+            return Err(snapshot_auto_state_changed());
+        }
+        wait_at_gc_test_barrier("KIO_TEST_SNAPSHOT_AUTO_BEFORE_STATE_WRITE_READY");
+        match expected.observation.as_ref() {
+            None => {
+                if let Err(error) =
+                    rename_snapshot_state_noreplace(&self.kio, &temporary, SNAPSHOT_AUTO_STATE_LEAF)
+                {
+                    let state_changed = self
+                        .snapshot_auto_state()
+                        .map(|state| &state != expected)
+                        .unwrap_or(true);
+                    retire_snapshot_state_temporary(
+                        &self.kio,
+                        &temporary,
+                        &bytes,
+                        &temporary_observation,
+                    )?;
+                    if state_changed {
+                        return Err(snapshot_auto_state_changed());
+                    }
+                    return Err(error);
+                }
+            }
+            Some(observation) => replace_snapshot_state_expected(
+                &self.kio,
+                SNAPSHOT_AUTO_STATE_LEAF,
+                &temporary,
+                &bytes,
+                observation,
+            )?,
+        }
+        self.kio
+            .sync_all()
+            .map_err(|error| ioerr(error, SNAPSHOT_AUTO_STATE_LEAF))?;
+        let published = self.snapshot_auto_state()?;
+        if published.state.as_ref() != Some(&state) {
+            return Err(corrupt("snapshot auto state changed during publication"));
+        }
+        Ok(published)
+    }
+
+    /// Establish the scheduler-state publication precondition while the
+    /// caller owns the scheduler writer barrier.  In particular, malformed or
+    /// substituted private checkpoint crash residue is rejected *before* a
+    /// scheduled snapshot can publish any CAS object or ref.  A process that
+    /// died after fsyncing a valid private checkpoint is recovered by removing
+    /// that exact, descriptor-relative record.
+    ///
+    /// This deliberately does not publish the new checkpoint; callers use it
+    /// before immutable snapshot preparation and then call
+    /// [`Self::publish_snapshot_auto_state`] at the pre-ref prepared-attempt
+    /// boundary.
+    pub fn prepare_snapshot_auto_state_publication(
+        &self,
+        expected: &SnapshotAutoStateBinding,
+    ) -> Result<()> {
+        self.recheck_binding()?;
+        if &self.snapshot_auto_state()? != expected {
+            return Err(snapshot_auto_state_changed());
+        }
+        cleanup_snapshot_auto_state_temporaries(&self.kio)?;
+        // Cleanup has no reason to modify the public state leaf.  Re-observe
+        // it anyway so a competing namespace writer cannot race the cleanup
+        // precondition and leave a commit published before its checkpoint
+        // conflict is discovered.
+        if &self.snapshot_auto_state()? != expected {
+            return Err(snapshot_auto_state_changed());
+        }
+        self.recheck_binding()
+    }
+
+    /// Retained scope-root capability for the scheduler's direct-file scan.
+    pub fn retained_scope_handle(&self) -> Result<std::fs::File> {
+        self.recheck_binding()?;
+        self.scope
+            .try_clone()
+            .map_err(|error| ioerr(error, "scope"))
+    }
+
+    /// Reject unsafe direct entries before a scheduled scan. Direct child
+    /// directories remain outside this scope's working tree; symlinks,
+    /// reparse points, hardlinks and other special leaves are never silently
+    /// interpreted as document inputs.
+    pub fn validate_snapshot_auto_direct_entries(&self) -> Result<BTreeSet<String>> {
+        self.recheck_binding()?;
+        let mut names = BTreeSet::new();
+        for entry in cap_fs::read_base_dir(&self.scope).map_err(|error| ioerr(error, "scope"))? {
+            let entry = entry.map_err(|error| ioerr(error, "scope"))?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| snapshot_auto_unsafe_entry("non-UTF-8 direct entry"))?;
+            if name == ".kio" {
+                continue;
+            }
+            let metadata = cap_fs::stat(&self.scope, Path::new(&name), cap_fs::FollowSymlinks::No)
+                .map_err(|error| ioerr(error, &name))?;
+            if metadata.is_dir() {
+                #[cfg(windows)]
+                {
+                    use cap_fs::_WindowsByHandle;
+                    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                        return Err(snapshot_auto_unsafe_entry(
+                            "direct directory is a reparse point",
+                        ));
+                    }
+                }
+                continue;
+            }
+            valid_file(&metadata, MAX_RAW_OBJECT_BYTES).map_err(|_| {
+                snapshot_auto_unsafe_entry("direct entry is not a safe single-link regular file")
+            })?;
+            names.insert(name);
+        }
+        self.recheck_binding()?;
+        Ok(names)
     }
     pub fn ensure_index_rotation_supported(&self) -> Result<()> {
         self.recheck_binding()?;
@@ -1844,6 +2147,58 @@ impl GcSweepSession {
     }
 }
 
+impl SnapshotAutoBinding {
+    /// Re-read the complete effective ignore authority through the retained
+    /// scope and `.kio` capabilities.  This is intentionally an exact
+    /// observation comparison rather than a semantic comparison: replacements
+    /// and same-byte edits are authorization changes for scheduled writers.
+    pub(crate) fn recheck(&self, scope: &std::fs::File, kio: &std::fs::File) -> Result<()> {
+        if id_file(scope)? != self.scope_identity
+            || id_file(kio)? != self.kio_identity
+            || id_child(scope, ".kio")? != self.kio_identity
+        {
+            return Err(snapshot_auto_authority_changed());
+        }
+        let (config_bytes, config_observation) =
+            read_regular_observed(kio, "config.toml", MAX_METADATA)?;
+        // Parsing is deliberately repeated, so an invalid replacement is also
+        // rejected at the publication boundary rather than silently retaining
+        // the previously parsed policy.
+        if read_snapshot_auto_config_bytes(&config_bytes)? != self.config
+            || config_observation != self.config_observation
+        {
+            return Err(snapshot_auto_authority_changed());
+        }
+        let root_ignore_observation = match read_regular_observed(scope, ".kioignore", MAX_METADATA)
+        {
+            Ok((_, observation)) => Some(observation),
+            Err(error) if is_io_not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        if root_ignore_observation != self.root_ignore_observation {
+            return Err(snapshot_auto_authority_changed());
+        }
+        Ok(())
+    }
+}
+
+impl SnapshotAutoStateBinding {
+    /// Confirm that the checkpoint just published still names the exact
+    /// durable state leaf before a scheduled ref can advance.
+    pub(crate) fn recheck(&self, kio: &std::fs::File) -> Result<()> {
+        let actual = match read_regular_observed(kio, SNAPSHOT_AUTO_STATE_LEAF, MAX_METADATA) {
+            Ok((bytes, observation)) => Some((parse_snapshot_auto_state(&bytes)?, observation)),
+            Err(error) if is_io_not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        let expected = self.state.as_ref().cloned().zip(self.observation.clone());
+        if actual != expected {
+            return Err(snapshot_auto_state_changed());
+        }
+        Ok(())
+    }
+}
+
 /// Index rotation state is itself recovery authority.  Permit only publication
 /// of one fully described rotation, retention of that exact record, or its
 /// completion into the matching recorded target.  The absent-index fast path
@@ -2018,6 +2373,300 @@ fn create_new_bound(dir: &std::fs::File, leaf: &str, bytes: &[u8], max: u64) -> 
         return Err(corrupt("receipt changed after create"));
     }
     dir.sync_all().map_err(|e| ioerr(e, leaf))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rename_snapshot_state_noreplace(dir: &std::fs::File, from: &str, to: &str) -> Result<()> {
+    rename_noreplace_bound(dir, from, to)
+}
+
+// `std::fs::rename` is no-clobber on Windows. `cap_fs::rename` retains the
+// already-open directory as the path-resolution authority and therefore gives
+// first publication the same destination-must-be-absent contract.
+#[cfg(windows)]
+fn rename_snapshot_state_noreplace(dir: &std::fs::File, from: &str, to: &str) -> Result<()> {
+    cap_fs::rename(dir, Path::new(from), dir, Path::new(to)).map_err(|error| ioerr(error, to))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn rename_snapshot_state_noreplace(_: &std::fs::File, _: &str, _: &str) -> Result<()> {
+    Err(corrupt(
+        "platform lacks a verified no-replace snapshot state primitive",
+    ))
+}
+
+/// Replace an exact observed scheduler checkpoint without an absent public
+/// state window. Darwin/Linux retain the predecessor through atomic exchange,
+/// validate that it is the expected inode/bytes, and only then retire it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn replace_snapshot_state_expected(
+    dir: &std::fs::File,
+    leaf: &str,
+    temporary: &str,
+    replacement: &[u8],
+    expected: &FileObservation,
+) -> Result<()> {
+    exchange_bound(dir, leaf, temporary)?;
+    dir.sync_all().map_err(|error| ioerr(error, leaf))?;
+    let (old_bytes, old) = read_regular_observed(dir, temporary, MAX_METADATA)?;
+    let old_ok = old.identity == expected.identity
+        && old.state.len == expected.state.len
+        && old.digest == expected.digest
+        && parse_snapshot_auto_state(&old_bytes).is_ok();
+    let public = read_regular_observed(dir, leaf, MAX_METADATA);
+    let new_ok = public
+        .as_ref()
+        .is_ok_and(|(bytes, _)| bytes == replacement && parse_snapshot_auto_state(bytes).is_ok());
+    if !old_ok || !new_ok {
+        // The exchange captured a writer which won after our last observation.
+        // Restore that captured checkpoint to the public name before failing.
+        // A non-cooperating third writer can still alter either reserved state
+        // name in this syscall-width window; the post-exchange observations
+        // detect that case, and no pathname is unlinked in either outcome.
+        let captured_before = old.clone();
+        let replacement_before = public.map(|(_, observation)| observation)?;
+        exchange_bound(dir, leaf, temporary)?;
+        dir.sync_all().map_err(|error| ioerr(error, leaf))?;
+        let restored = read_regular_observed(dir, leaf, MAX_METADATA);
+        let retired_replacement = read_regular_observed(dir, temporary, MAX_METADATA);
+        let restored_ok = restored.as_ref().is_ok_and(|(_, observation)| {
+            observation.identity == captured_before.identity
+                && observation.state.len == captured_before.state.len
+                && observation.digest == captured_before.digest
+        });
+        let replacement_retired_ok =
+            retired_replacement
+                .as_ref()
+                .is_ok_and(|(bytes, observation)| {
+                    bytes == replacement
+                        && observation.identity == replacement_before.identity
+                        && observation.state.len == replacement_before.state.len
+                        && observation.digest == replacement_before.digest
+                });
+        if !restored_ok || !replacement_retired_ok {
+            return Err(corrupt(
+                "snapshot auto state changed during failed replacement rollback",
+            ));
+        }
+        retire_snapshot_state_temporary(dir, temporary, replacement, &replacement_before)?;
+        return Err(snapshot_auto_state_changed());
+    }
+    let old_handle = open_verified_file_handle(
+        dir,
+        temporary,
+        &old,
+        MAX_METADATA,
+        "snapshot auto predecessor state",
+    )?;
+    let (captured, captured_observation) = exchange_capture_verified(
+        dir,
+        temporary,
+        &old,
+        MAX_METADATA,
+        "snapshot auto predecessor state",
+    )?;
+    remove_verified_leaf(
+        dir,
+        &captured,
+        &captured_observation,
+        MAX_METADATA,
+        "snapshot auto captured predecessor state",
+    )?;
+    remove_sentinel_leaf(dir, temporary)?;
+    dir.sync_all().map_err(|error| ioerr(error, temporary))?;
+    let unlinked =
+        cap_fs::Metadata::from_file(&old_handle).map_err(|error| ioerr(error, temporary))?;
+    if id_meta(&unlinked)? != old.identity || link_count(&unlinked)? != 0 {
+        return Err(corrupt(
+            "snapshot auto predecessor state gained another name",
+        ));
+    }
+    Ok(())
+}
+
+/// Retire only the scheduler temporary created by this invocation.  The
+/// exchange first captures the current name and compares its identity/bytes;
+/// a substituted entry is preserved and fails closed rather than being
+/// removed as cleanup.  This keeps repeated CAS conflicts from accumulating
+/// unbounded private state files.
+fn retire_snapshot_state_temporary(
+    dir: &std::fs::File,
+    temporary: &str,
+    expected_bytes: &[u8],
+    expected: &FileObservation,
+) -> Result<()> {
+    let (bytes, current) = read_regular_observed(dir, temporary, MAX_METADATA)?;
+    if bytes != expected_bytes
+        || current.identity != expected.identity
+        || current.state.len != expected.state.len
+        || current.digest != expected.digest
+    {
+        return Err(corrupt("snapshot auto temporary changed before retirement"));
+    }
+    let (captured, captured_observation) = exchange_capture_verified(
+        dir,
+        temporary,
+        &current,
+        MAX_METADATA,
+        "snapshot auto temporary",
+    )?;
+    remove_verified_leaf(
+        dir,
+        &captured,
+        &captured_observation,
+        MAX_METADATA,
+        "snapshot auto captured temporary",
+    )?;
+    remove_sentinel_leaf(dir, temporary)?;
+    dir.sync_all().map_err(|error| ioerr(error, temporary))
+}
+
+/// Retire only scheduler state temporaries which could have been produced by
+/// [`unique_internal_name`].  This runs under the scheduler writer lock,
+/// before allocating the next temporary.  Names outside this narrow private
+/// grammar are deliberately ignored; a name in the namespace which does not
+/// conform is evidence of interference and stops publication without
+/// deleting anything.
+fn cleanup_snapshot_auto_state_temporaries(dir: &std::fs::File) -> Result<()> {
+    let mut temporaries = Vec::new();
+    for entry in cap_fs::read_base_dir(dir).map_err(|error| ioerr(error, "directory"))? {
+        let entry = entry.map_err(|error| ioerr(error, "directory"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            // A non-UTF-8 name cannot be generated by this ASCII-only
+            // namespace. It is unrelated and must not be removed.
+            continue;
+        };
+        if !name.starts_with(SNAPSHOT_AUTO_STATE_TEMP_PREFIX) {
+            continue;
+        }
+        if !is_snapshot_auto_state_temporary_name(name) {
+            return Err(corrupt("malformed snapshot auto temporary name"));
+        }
+        temporaries.push(name.to_owned());
+        if temporaries.len() > MAX_SNAPSHOT_AUTO_STATE_TEMPORARIES {
+            return Err(limit("snapshot auto temporary count"));
+        }
+    }
+    temporaries.sort();
+
+    for temporary in temporaries {
+        let (bytes, observation) = read_regular_observed(dir, &temporary, MAX_METADATA)?;
+        parse_snapshot_auto_state(&bytes)?;
+        retire_snapshot_state_temporary(dir, &temporary, &bytes, &observation)?;
+    }
+    // The individual retirement operation syncs the directory, including the
+    // no-op case this makes the cleanup completion boundary explicit.
+    dir.sync_all()
+        .map_err(|error| ioerr(error, "snapshot auto temporary cleanup"))
+}
+
+fn is_snapshot_auto_state_temporary_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(SNAPSHOT_AUTO_STATE_TEMP_PREFIX) else {
+        return false;
+    };
+    let Some((pid, nanos)) = suffix.split_once('-') else {
+        return false;
+    };
+    if nanos.contains('-') || !is_canonical_decimal(pid) || !is_canonical_decimal(nanos) {
+        return false;
+    }
+    pid.parse::<u32>().is_ok_and(|value| value != 0) && nanos.parse::<u128>().is_ok()
+}
+
+fn is_canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+/// Windows has no rename-exchange primitive. The retained `.kio` directory
+/// handle and the process-wide writer lock are the authority boundary; rename
+/// the already-created temporary handle relative to that directory with
+/// replace + write-through semantics, then the caller verifies the exact
+/// public bytes and directory identity before reporting success.
+#[cfg(windows)]
+fn replace_snapshot_state_expected(
+    dir: &std::fs::File,
+    leaf: &str,
+    temporary: &str,
+    _: &[u8],
+    expected: &FileObservation,
+) -> Result<()> {
+    use cap_fs::OpenOptionsExt;
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 1;
+    const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 2;
+
+    if !read_regular_observed(dir, leaf, MAX_METADATA)
+        .is_ok_and(|(_, observed)| observed == *expected)
+    {
+        return Err(snapshot_auto_state_changed());
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options.access_mode(DELETE | SYNCHRONIZE);
+    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    options._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let temporary_handle = cap_fs::open(dir, Path::new(temporary), &options)
+        .map_err(|error| ioerr(error, temporary))?;
+    let name = std::ffi::OsStr::new(leaf).encode_wide().collect::<Vec<_>>();
+    let name_bytes = name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| corrupt("snapshot auto state name is too long"))?;
+    let header = offset_of!(FILE_RENAME_INFO, FileName);
+    let total = header
+        .checked_add(name_bytes as usize)
+        .ok_or_else(|| corrupt("snapshot auto state rename buffer overflow"))?;
+    let mut buffer = vec![0_u8; total];
+    // SAFETY: `buffer` is large enough for FILE_RENAME_INFO through the exact
+    // UTF-16 leaf payload, and every pointer remains live for the syscall.
+    let result = unsafe {
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        (*info).Anonymous.Flags =
+            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        (*info).RootDirectory = dir.as_raw_handle();
+        (*info).FileNameLength = name_bytes;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+        SetFileInformationByHandle(
+            temporary_handle.as_raw_handle(),
+            FileRenameInfoEx,
+            buffer.as_ptr().cast(),
+            u32::try_from(total).unwrap_or(u32::MAX),
+        )
+    };
+    if result == 0 {
+        Err(ioerr(
+            std::io::Error::last_os_error(),
+            SNAPSHOT_AUTO_STATE_LEAF,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn replace_snapshot_state_expected(
+    _: &std::fs::File,
+    _: &str,
+    _: &str,
+    _: &[u8],
+    _: &FileObservation,
+) -> Result<()> {
+    Err(corrupt(
+        "platform lacks a verified snapshot state replacement primitive",
+    ))
 }
 
 /// Atomically exchange a public leaf with an operation-private sentinel, then
@@ -3378,6 +4027,126 @@ fn read_automation_config_bytes(bytes: &[u8]) -> Result<GcAutomationConfig> {
     })
 }
 
+fn read_snapshot_auto_config_bytes(bytes: &[u8]) -> Result<Option<SnapshotAutoConfig>> {
+    let Some(value) = parse_config_bytes(bytes)? else {
+        return Ok(None);
+    };
+    let Some(auto) = value
+        .get("snapshot")
+        .and_then(toml::Value::as_table)
+        .and_then(|snapshot| snapshot.get("auto"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(None);
+    };
+    let enabled = auto
+        .get("enabled")
+        .and_then(toml::Value::as_bool)
+        .ok_or_else(|| KioError::schema("snapshot.auto enabled must be a boolean"))?;
+    let interval_seconds = u64::try_from(
+        auto.get("interval_seconds")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| KioError::schema("snapshot.auto interval_seconds must be an integer"))?,
+    )
+    .map_err(|_| KioError::schema("snapshot.auto interval_seconds is out of range"))?;
+    let on_change_threshold = u64::try_from(
+        auto.get("on_change_threshold")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| {
+                KioError::schema("snapshot.auto on_change_threshold must be an integer")
+            })?,
+    )
+    .map_err(|_| KioError::schema("snapshot.auto on_change_threshold is out of range"))?;
+    // The schema is the canonical range authority. Keep a local assertion so
+    // this parser remains fail-closed if that schema is edited independently.
+    if !(1..=31_536_000).contains(&interval_seconds)
+        || !(1..=1_000_000).contains(&on_change_threshold)
+    {
+        return Err(KioError::schema(
+            "snapshot.auto value is outside its canonical range",
+        ));
+    }
+    Ok(Some(SnapshotAutoConfig {
+        enabled,
+        interval_seconds,
+        on_change_threshold,
+    }))
+}
+
+fn canonical_snapshot_auto_state_bytes(state: &SnapshotAutoState) -> Result<Vec<u8>> {
+    let mut bytes = canonical_json_bytes(
+        &serde_json::to_value(state).map_err(|error| KioError::schema(error.to_string()))?,
+    )?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_METADATA {
+        return Err(limit("snapshot auto state bytes"));
+    }
+    Ok(bytes)
+}
+
+fn parse_snapshot_auto_state(bytes: &[u8]) -> Result<SnapshotAutoState> {
+    let state: SnapshotAutoState = serde_json::from_slice(bytes)
+        .map_err(|error| corrupt(&format!("invalid snapshot auto state: {error}")))?;
+    if state.version != SNAPSHOT_AUTO_STATE_VERSION {
+        return Err(corrupt("unsupported snapshot auto state version"));
+    }
+    let seconds = parse_utc_seconds(&state.last_successful_eligible_attempt_at)
+        .filter(|seconds| format_utc_seconds(*seconds) == state.last_successful_eligible_attempt_at)
+        .ok_or_else(|| corrupt("snapshot auto state time is not canonical UTC seconds"))?;
+    if format_utc_seconds(seconds) != state.last_successful_eligible_attempt_at
+        || canonical_snapshot_auto_state_bytes(&state)? != bytes
+    {
+        return Err(corrupt("snapshot auto state is not canonical JCS+LF"));
+    }
+    Ok(state)
+}
+
+fn snapshot_auto_state_changed() -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-STATE-CHANGED-001",
+        "scheduled snapshot state changed during the locked eligibility handoff",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+fn snapshot_auto_authority_changed() -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
+        "scheduled snapshot authority changed during publication",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+pub fn snapshot_auto_clock_error(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-CLOCK-001",
+        message,
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+fn snapshot_auto_unsafe_entry(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-UNSAFE-ENTRY-001",
+        message,
+        json!({}),
+        ExitCode::PermanentFailure,
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn snapshot_auto_platform_unsupported() -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+        "scheduled snapshot mutation requires a verified descriptor-relative writer lock",
+        json!({}),
+        ExitCode::PermanentFailure,
+    )
+}
+
 fn open_bound_absolute(path: &Path) -> Result<std::fs::File> {
     let mut filesystem_root = PathBuf::new();
     let mut descendants = Vec::new();
@@ -4246,6 +5015,157 @@ mod tests {
         );
         assert!(ShallowReceipt::parse_canonical(&bytes[..bytes.len() - 1], &commit[7..]).is_err());
         assert!(ShallowReceipt::parse_canonical(&bytes, &"c".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn snapshot_auto_config_has_no_implicit_fields_or_aliases() {
+        assert_eq!(read_snapshot_auto_config_bytes(b"").unwrap(), None);
+        assert_eq!(
+            read_snapshot_auto_config_bytes(
+                b"[snapshot.auto]\nenabled=true\ninterval_seconds=60\non_change_threshold=2\n",
+            )
+            .unwrap(),
+            Some(SnapshotAutoConfig {
+                enabled: true,
+                interval_seconds: 60,
+                on_change_threshold: 2,
+            })
+        );
+        for invalid in [
+            b"[snapshot.auto]\nenabled=true\ninterval_seconds=60\n".as_slice(),
+            b"[snapshot.auto]\nenabled=true\ninterval_seconds=0\non_change_threshold=1\n",
+            b"[snapshot.auto]\nenabled=true\ninterval_seconds=1\non_change_threshold=1\nlegacy=true\n",
+        ] {
+            assert!(read_snapshot_auto_config_bytes(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn snapshot_auto_state_is_canonical_durable_and_monotonic() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
+        let absent = session.snapshot_auto_state().unwrap();
+        assert!(absent.state.is_none());
+
+        let first = session
+            .publish_snapshot_auto_state(&absent, "2026-08-14T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            first
+                .state
+                .as_ref()
+                .unwrap()
+                .last_successful_eligible_attempt_at,
+            "2026-08-14T00:00:00Z"
+        );
+        assert_eq!(
+            std::fs::read(repo.kio_dir().join(SNAPSHOT_AUTO_STATE_LEAF)).unwrap(),
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n"
+        );
+        let backwards = session
+            .publish_snapshot_auto_state(&first, "2026-08-13T23:59:59Z")
+            .unwrap_err();
+        assert_eq!(backwards.error_code(), "KIO-E-SNAPSHOT-CLOCK-001");
+
+        let second = session
+            .publish_snapshot_auto_state(&first, "2026-08-14T00:01:00Z")
+            .unwrap();
+        assert_eq!(
+            second
+                .state
+                .as_ref()
+                .unwrap()
+                .last_successful_eligible_attempt_at,
+            "2026-08-14T00:01:00Z"
+        );
+    }
+
+    #[test]
+    fn snapshot_auto_state_retires_only_verified_crash_temporaries() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let temporary = repo.kio_dir().join(".snapshot-auto-state-123-456");
+        std::fs::write(
+            &temporary,
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n",
+        )
+        .unwrap();
+
+        let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
+        let absent = session.snapshot_auto_state().unwrap();
+        session
+            .publish_snapshot_auto_state(&absent, "2026-08-14T00:01:00Z")
+            .unwrap();
+
+        assert!(!temporary.exists());
+        assert!(std::fs::read_dir(repo.kio_dir()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(SNAPSHOT_AUTO_STATE_TEMP_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn snapshot_auto_state_rejects_malformed_crash_temporary_name() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let malformed = repo.kio_dir().join(".snapshot-auto-state-not-a-pid-456");
+        std::fs::write(
+            &malformed,
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n",
+        )
+        .unwrap();
+
+        let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
+        let absent = session.snapshot_auto_state().unwrap();
+        let error = session
+            .publish_snapshot_auto_state(&absent, "2026-08-14T00:01:00Z")
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+        assert!(malformed.exists());
+        assert!(!repo.kio_dir().join(SNAPSHOT_AUTO_STATE_LEAF).exists());
+    }
+
+    #[test]
+    fn snapshot_auto_state_rejects_noncanonical_and_future_records() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
+        for invalid in [
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":2}\n"
+                .as_slice(),
+            b"{\"version\":1,\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\"}\n",
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}",
+        ] {
+            std::fs::write(repo.kio_dir().join(SNAPSHOT_AUTO_STATE_LEAF), invalid).unwrap();
+            assert!(session.snapshot_auto_state().is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_auto_writer_lock_rejects_replaced_public_scope_before_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
+
+        let replacement_root = tempfile::tempdir().unwrap();
+        let replacement = Repository::init(replacement_root.path()).unwrap();
+        let retained = root.path().join(".kio-retained");
+        std::fs::rename(repo.kio_dir(), &retained).unwrap();
+        std::fs::rename(replacement.kio_dir(), root.path().join(".kio")).unwrap();
+
+        let error = match session.acquire_snapshot_auto_store_lock() {
+            Ok(_) => panic!("replaced public scope acquired a scheduler writer lock"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
+        assert!(!root.path().join(".kio/.lock").exists());
+        assert!(!retained.join(".lock").exists());
     }
 
     #[test]

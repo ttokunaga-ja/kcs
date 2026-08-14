@@ -7,7 +7,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::Command;
-#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +24,7 @@ use crate::dag::{
     NormalizeRef, TreeEntry, TreeObject,
 };
 use crate::error::{IoResultExt, KioError, Result};
+use crate::gc::{SnapshotAutoBinding, SnapshotAutoStateBinding};
 use crate::portable::{
     portable_collision_key, portable_leaf_error, portable_tag_digest64, portable_tag_leaf,
     PORTABLE_TAGS_DIRECTORY,
@@ -123,9 +123,7 @@ pub struct Repository {
     /// path is relative to the opened directory rather than the replaceable
     /// public `.kio` entry.  Source-file operations use `bound_root` through
     /// capability APIs; callers must not reconstruct a public parent path.
-    #[cfg(unix)]
     bound_root: Option<Arc<File>>,
-    #[cfg(unix)]
     bound_kio: Option<Arc<File>>,
 }
 
@@ -316,9 +314,7 @@ impl Repository {
             root,
             kio_dir: kio_dir.clone(),
             store: ObjectStore::new(kio_dir),
-            #[cfg(unix)]
             bound_root: None,
-            #[cfg(unix)]
             bound_kio: None,
         };
         repo.validate()?;
@@ -401,7 +397,7 @@ impl Repository {
             root: PathBuf::from("."),
             canonical_root,
             kio_dir: PathBuf::from("."),
-            store: ObjectStore::new(PathBuf::from(".")),
+            store: ObjectStore::from_bound_kio(&kio)?,
             bound_root: Some(Arc::new(scope)),
             bound_kio: Some(Arc::new(kio)),
         };
@@ -417,6 +413,70 @@ impl Repository {
         let mut repo = Self::init(Path::new("."))?;
         repo.canonical_root = canonical_root;
         Ok(repo)
+    }
+
+    /// Enter an already-initialized repository through retained scope and
+    /// `.kio` capabilities. This is the scheduler counterpart to the bound
+    /// child-index constructor: after the caller owns the descriptor-relative
+    /// store lock, every store path is resolved from the retained `.kio`
+    /// directory and every working-file read is resolved from `scope`.
+    ///
+    /// This changes the process working directory and is therefore intended
+    /// only for a dedicated CLI process immediately before its terminal
+    /// publication phase.
+    #[cfg(unix)]
+    pub fn open_bound_existing(canonical_root: PathBuf, scope: File, kio: File) -> Result<Self> {
+        use cap_primitives::fs as cap_fs;
+        use cap_primitives::fs::MetadataExt;
+        use std::os::fd::AsRawFd;
+
+        let named = cap_fs::stat(&scope, Path::new(".kio"), cap_fs::FollowSymlinks::No)
+            .map_err(|error| KioError::io(error.to_string(), ".kio"))?;
+        let retained = cap_fs::Metadata::from_file(&kio)
+            .map_err(|error| KioError::io(error.to_string(), ".kio"))?;
+        if !named.is_dir()
+            || !retained.is_dir()
+            || named.dev() != retained.dev()
+            || named.ino() != retained.ino()
+        {
+            return Err(unsafe_store_error(
+                Path::new(".kio"),
+                "retained .kio capability no longer matches the selected scope",
+            ));
+        }
+        // SAFETY: `kio` is a retained, no-follow directory descriptor verified
+        // above and remains owned by the repository for its full lifetime.
+        if unsafe { libc::fchdir(kio.as_raw_fd()) } != 0 {
+            return Err(KioError::io(
+                std::io::Error::last_os_error().to_string(),
+                ".kio",
+            ));
+        }
+        let repo = Self {
+            root: PathBuf::from("."),
+            canonical_root,
+            kio_dir: PathBuf::from("."),
+            store: ObjectStore::from_bound_kio(&kio)?,
+            bound_root: Some(Arc::new(scope)),
+            bound_kio: Some(Arc::new(kio)),
+        };
+        // Test-only seam: at this point ObjectStore has retained no-follow
+        // handles for objects/{raw,trees,commits}, while no scheduled source
+        // staging or CAS write has started.  A replacement of the public
+        // descendants here must not redirect this repository.
+        wait_at_bound_snapshot_auto_layout_barrier();
+        repo.validate()?;
+        Ok(repo)
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_bound_existing(_: PathBuf, _: File, _: File) -> Result<Self> {
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot mutation requires retained repository capabilities",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
     }
 
     /// Perform the established HEAD self-heal after a repair command has
@@ -439,9 +499,7 @@ impl Repository {
             root,
             kio_dir: kio_dir.clone(),
             store: ObjectStore::new(kio_dir),
-            #[cfg(unix)]
             bound_root: None,
-            #[cfg(unix)]
             bound_kio: None,
         };
         repo.validate_config()?;
@@ -678,6 +736,9 @@ impl Repository {
                 normalize_by_path,
                 limits,
                 &BTreeSet::new(),
+                None,
+                None,
+                None,
             );
         }
         let mut entries = Vec::new();
@@ -729,18 +790,146 @@ impl Repository {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn archive_staged_working_tree(
         &self,
         candidates: Vec<WorkingFileCandidate>,
         normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
         limits: ArchiveLimits,
         purge_self_targets: &BTreeSet<String>,
+        expected_raw_by_path: Option<&BTreeMap<String, String>>,
+        expected_direct_entries: Option<&BTreeSet<String>>,
+        expected_snapshot_policy: Option<&SnapshotAutoBinding>,
     ) -> Result<WorkingTree> {
+        let scheduled_bound = expected_raw_by_path.is_some() && {
+            #[cfg(unix)]
+            {
+                self.bound_kio.is_some()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
+        #[cfg(unix)]
+        if scheduled_bound {
+            // Recover only canonical private stages through the retained raw
+            // descriptor before allocating new ones.  This is bounded and
+            // validates every recognized residue; no public descendant path
+            // is followed.
+            self.store.cleanup_bound_raw_stages()?;
+            let mut staged = Vec::with_capacity(candidates.len());
+            let mut consumed_scope_bytes = 0_u64;
+            for candidate in candidates {
+                let remaining = limits
+                    .max_scope_bytes
+                    .checked_sub(consumed_scope_bytes)
+                    .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+                let allowed = limits.max_file_bytes.min(remaining);
+                let mut source = open_working_file_candidate(&candidate)?;
+                let before = source.metadata().kio_io(&candidate.path)?;
+                if before.len() > allowed {
+                    return Err(scope_input_oversized(
+                        &candidate.file_name,
+                        limits,
+                        before.len(),
+                    ));
+                }
+                let stage = self.store.stage_raw_from_reader(&mut source, allowed)?;
+                let after = source.metadata().kio_io(&candidate.path)?;
+                use std::os::unix::fs::MetadataExt as _;
+                if after.len() != stage.size_bytes()
+                    || before.len() != after.len()
+                    || before.dev() != after.dev()
+                    || before.ino() != after.ino()
+                {
+                    return Err(scope_file_changed(&candidate.file_name));
+                }
+                consumed_scope_bytes = consumed_scope_bytes
+                    .checked_add(stage.size_bytes())
+                    .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+                staged.push((candidate, source, before, stage));
+            }
+            let actual = staged
+                .iter()
+                .map(|(file, _, _, stage)| (file.file_name.clone(), stage.raw_hash().to_owned()))
+                .collect::<BTreeMap<_, _>>();
+            if Some(&actual) != expected_raw_by_path {
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot inputs changed before publication",
+                ));
+            }
+            if self.bound_snapshot_auto_direct_entries()?
+                != *expected_direct_entries.expect("scheduled expected entries")
+            {
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot direct entries changed before CAS publication",
+                ));
+            }
+            // Identity and length are insufficient for an in-place same-size
+            // edit. Re-hash each still-open, no-follow source descriptor after
+            // the final namespace check and before the first CAS publication.
+            for (candidate, source, before, stage) in &mut staged {
+                source.seek(SeekFrom::Start(0)).kio_io(&candidate.path)?;
+                let (rehash, size) = hash_scope_file(
+                    source,
+                    &candidate.path,
+                    &candidate.file_name,
+                    limits.max_file_bytes,
+                    limits,
+                )?;
+                let after = source.metadata().kio_io(&candidate.path)?;
+                use std::os::unix::fs::MetadataExt as _;
+                if rehash != stage.raw_hash()
+                    || size != stage.size_bytes()
+                    || after.len() != before.len()
+                    || after.dev() != before.dev()
+                    || after.ino() != before.ino()
+                {
+                    return Err(snapshot_authority_changed(
+                        "scheduled snapshot source bytes changed before CAS publication",
+                    ));
+                }
+            }
+            self.store.validate_bound_layout()?;
+            if let Some(policy) = expected_snapshot_policy {
+                let scope = self.bound_root.as_deref().expect("scheduled bound root");
+                let kio = self.bound_kio.as_deref().expect("scheduled bound kio");
+                policy.recheck(scope, kio)?;
+            }
+            self.reject_scheduled_bound_purge_state()?;
+            self.reject_scheduled_marker_targets(actual.values())?;
+            let mut entries = Vec::with_capacity(staged.len());
+            for (candidate, _, _, stage) in staged {
+                let (published_hash, published_size) = self.store.publish_bound_raw_stage(stage)?;
+                if published_size > limits.max_file_bytes {
+                    return Err(scope_input_oversized(
+                        &candidate.file_name,
+                        limits,
+                        published_size,
+                    ));
+                }
+                let mut tree_entry =
+                    TreeEntry::raw_file(candidate.file_name.clone(), published_hash)?;
+                attach_pending_normalize(&mut tree_entry, &candidate.file_name, normalize_by_path);
+                tree_entry.validate()?;
+                entries.push(tree_entry);
+            }
+            return Ok(WorkingTree {
+                tree: build_tree(entries)?,
+            });
+        }
         // The caller holds `.kio/.lock`, so no live Kio writer can own an
         // `.ingest-*` leaf. Remove crash-orphaned raw bytes before creating any
         // new staging file; otherwise a tombstoned re-ingest killed before its
         // authorization check could remain in KIO-managed storage indefinitely.
-        cleanup_orphan_raw_ingest_temps(&self.kio_dir)?;
+        // Scheduled publication has retained object descriptors but must not
+        // follow the ordinary path-based crash-temp scavenger: a same-UID
+        // descendant replacement must be a fail-closed no-op, never a cleanup
+        // of the replacement target. Its bound ObjectStore owns raw CAS writes.
+        if !scheduled_bound {
+            cleanup_orphan_raw_ingest_temps(&self.kio_dir)?;
+        }
         let mut staged = Vec::with_capacity(candidates.len());
         let mut consumed_scope_bytes = 0_u64;
         for candidate in candidates {
@@ -756,6 +945,48 @@ impl Repository {
                     scope_input_oversized(&staged_file.candidate.file_name, limits, u64::MAX)
                 })?;
             staged.push(staged_file);
+        }
+
+        // A scheduled decision is authorized by a descriptor-bound raw-hash
+        // preview.  Compare that exact path/hash set after every source has
+        // been copied into private staging files but before the first CAS
+        // publication.  An editor changing, adding, deleting, or renaming a
+        // file in the final observation-to-publication window therefore
+        // causes a retryable failure instead of a commit with a stale report.
+        if let Some(expected) = expected_raw_by_path {
+            let actual = staged
+                .iter()
+                .map(|file| (file.candidate.file_name.clone(), file.raw_hash.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if &actual != expected {
+                drop(staged);
+                if !scheduled_bound {
+                    let raw_dir = self.kio_dir.join("objects/raw");
+                    File::open(&raw_dir)
+                        .and_then(|dir| dir.sync_all())
+                        .kio_io(&raw_dir)?;
+                }
+                return Err(KioError::new(
+                    "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
+                    "scheduled snapshot inputs changed before publication",
+                    json!({}),
+                    ExitCode::PartialFailure,
+                ));
+            }
+        }
+        if let Some(expected) = expected_direct_entries {
+            if self.bound_snapshot_auto_direct_entries()? != *expected {
+                drop(staged);
+                if !scheduled_bound {
+                    let raw_dir = self.kio_dir.join("objects/raw");
+                    File::open(&raw_dir)
+                        .and_then(|dir| dir.sync_all())
+                        .kio_io(&raw_dir)?;
+                }
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot direct entries changed before CAS publication",
+                ));
+            }
         }
 
         // Discover every candidate barrier before the first raw CAS publication.
@@ -788,12 +1019,14 @@ impl Repository {
         // protection. Re-ingestion of a residual original is deferred to
         // the next ordinary `kio index` (05 §3.5 L743), once no journal
         // remains to block it.
-        let purge = PurgeState::new(&self.kio_dir);
-        for file in &staged {
-            if purge_self_targets.contains(&file.raw_hash) {
-                continue;
+        if !scheduled_bound {
+            let purge = PurgeState::new(&self.kio_dir);
+            for file in &staged {
+                if purge_self_targets.contains(&file.raw_hash) {
+                    continue;
+                }
+                ensure_raw_publication_allowed(&purge, &file.raw_hash)?;
             }
-            ensure_raw_publication_allowed(&purge, &file.raw_hash)?;
         }
 
         let mut entries = Vec::with_capacity(staged.len());
@@ -1054,6 +1287,11 @@ impl Repository {
             false,
             &[],
             true,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1096,6 +1334,408 @@ impl Repository {
             false,
             &[],
             true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[cfg(unix)]
+    fn bound_snapshot_auto_direct_entries(&self) -> Result<BTreeSet<String>> {
+        use cap_primitives::fs as cap_fs;
+        use cap_primitives::fs::MetadataExt;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = self.bound_root.as_deref().ok_or_else(|| {
+            KioError::invalid_usage(
+                "scheduled snapshot publication requires a retained scope capability",
+            )
+        })?;
+        let mut names = BTreeSet::new();
+        for entry in cap_fs::read_base_dir(root).map_err(|error| {
+            KioError::io(error.to_string(), self.canonical_root.display().to_string())
+        })? {
+            let entry = entry.map_err(|error| {
+                KioError::io(error.to_string(), self.canonical_root.display().to_string())
+            })?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| snapshot_unsafe_direct_entry("direct entry name is not UTF-8"))?;
+            if name == ".kio" {
+                continue;
+            }
+            let path = Path::new(&name);
+            let before = cap_fs::stat(root, path, cap_fs::FollowSymlinks::No)
+                .map_err(|error| KioError::io(error.to_string(), name.clone()))?;
+            if before.is_dir() {
+                continue;
+            }
+            if !before.is_file() || before.nlink() != 1 || before.len() > MAX_RAW_OBJECT_BYTES {
+                return Err(snapshot_unsafe_direct_entry(
+                    "direct entry is not a safe single-link regular file",
+                ));
+            }
+            let file =
+                open_bound_scope_file_nofollow(root, &name, &self.canonical_root.join(&name))?;
+            let opened = file.metadata().kio_io(Path::new(&name))?;
+            let after = cap_fs::stat(root, path, cap_fs::FollowSymlinks::No)
+                .map_err(|error| KioError::io(error.to_string(), name.clone()))?;
+            if !opened.is_file()
+                || opened.nlink() != 1
+                || opened.len() > MAX_RAW_OBJECT_BYTES
+                || after.nlink() != 1
+                || after.dev() != before.dev()
+                || after.ino() != before.ino()
+                || opened.dev() != before.dev()
+                || opened.ino() != before.ino()
+            {
+                return Err(snapshot_unsafe_direct_entry(
+                    "direct entry changed or gained another link during publication",
+                ));
+            }
+            names.insert(name);
+        }
+        Ok(names)
+    }
+
+    /// Validate the scheduler's immutable writer inputs through the retained
+    /// `.kio` directory.  This deliberately has stricter semantics than the
+    /// ordinary open path: an empty HEAD with a populated branch ref is
+    /// corruption here, not an opportunity for automatic repair.
+    #[cfg(unix)]
+    fn validate_scheduled_auto_prerequisites(&self) -> Result<ScheduledSnapshotAuthority> {
+        if self.bound_kio.is_none() {
+            return Err(KioError::invalid_usage(
+                "scheduled snapshot publication requires a retained .kio capability",
+            ));
+        }
+        if self.bound_root.is_none() {
+            return Err(KioError::invalid_usage(
+                "scheduled snapshot publication requires a retained scope capability",
+            ));
+        }
+        let authority = self.capture_scheduled_snapshot_authority()?;
+        let head = authority.head.trim();
+        let branch = authority.branch.trim();
+        match (head.is_empty(), branch.is_empty()) {
+            (true, true) => {}
+            (true, false) => {
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot rejects an empty HEAD with a populated refs/heads/main",
+                ))
+            }
+            (false, true) => {
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot rejects a populated HEAD with an empty refs/heads/main",
+                ))
+            }
+            (false, false) if head != branch => {
+                return Err(snapshot_authority_changed(
+                    "scheduled snapshot rejects a HEAD/ref mismatch",
+                ))
+            }
+            (false, false) => {}
+        }
+        if !head.is_empty() {
+            if !is_hash(head) {
+                return Err(KioError::schema("HEAD must contain a commit_hash"));
+            }
+            // Both objects are CAS-bound in this repository.  Do not permit a
+            // scheduled writer to extend a shallow/corrupt history.
+            let commit = self.read_commit(head)?;
+            self.read_tree(&commit.tree)?;
+        }
+        self.reject_scheduled_bound_purge_state()?;
+        Ok(authority)
+    }
+
+    /// Capture every mutable metadata leaf that selects the scheduled
+    /// snapshot's parent and tool identity.  Values alone are not enough: a
+    /// same-byte inode replacement is an authority change too.
+    #[cfg(unix)]
+    fn capture_scheduled_snapshot_authority(&self) -> Result<ScheduledSnapshotAuthority> {
+        let kio = self.bound_kio.as_deref().ok_or_else(|| {
+            KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
+        })?;
+        let (head, head_observation) =
+            read_bound_regular_text_observed_at(kio, "HEAD", MAX_BOUND_CONFIG_BYTES)?;
+        wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_AUTHORITY_CAPTURE_READY");
+        let (branch, branch_observation) =
+            read_bound_regular_text_observed_at(kio, "refs/heads/main", MAX_BOUND_CONFIG_BYTES)?;
+        let (tool_lock, tool_lock_observation) =
+            read_bound_regular_text_observed_at(kio, "tool-lock.json", MAX_BOUND_CONFIG_BYTES)?;
+        let tool_lock_value: Value = serde_json::from_str(&tool_lock)
+            .map_err(|error| KioError::schema(error.to_string()))?;
+        canonical_tool_lock_value(&tool_lock_value)?;
+        Ok(ScheduledSnapshotAuthority {
+            head,
+            branch,
+            tool_lock,
+            head_observation,
+            branch_observation,
+            tool_lock_observation,
+        })
+    }
+
+    #[cfg(unix)]
+    fn recheck_scheduled_snapshot_authority(
+        &self,
+        expected: &ScheduledSnapshotAuthority,
+    ) -> Result<()> {
+        let actual = self.capture_scheduled_snapshot_authority().map_err(|_| {
+            snapshot_authority_changed("scheduled snapshot metadata authority changed")
+        })?;
+        if actual != *expected {
+            return Err(snapshot_authority_changed(
+                "scheduled snapshot HEAD, branch ref, or tool lock changed",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn recheck_scheduled_published_authority(
+        &self,
+        expected: &ScheduledSnapshotAuthority,
+        published: &ScheduledSnapshotAuthority,
+        commit_hash: &str,
+    ) -> Result<()> {
+        let actual = self.capture_scheduled_snapshot_authority().map_err(|_| {
+            snapshot_authority_changed("scheduled snapshot metadata authority changed")
+        })?;
+        if actual.head.trim() != commit_hash
+            || actual.branch.trim() != commit_hash
+            || actual.head_observation != published.head_observation
+            || actual.branch_observation != published.branch_observation
+            || actual.tool_lock != expected.tool_lock
+            || actual.tool_lock_observation != expected.tool_lock_observation
+        {
+            return Err(snapshot_authority_changed(
+                "scheduled snapshot refs or tool lock changed after publication",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn capture_scheduled_snapshot_authority(&self) -> Result<ScheduledSnapshotAuthority> {
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot publication requires retained filesystem capabilities",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
+    }
+
+    #[cfg(not(unix))]
+    fn recheck_scheduled_snapshot_authority(&self, _: &ScheduledSnapshotAuthority) -> Result<()> {
+        unreachable!("scheduled snapshots are unsupported without descriptor capabilities")
+    }
+
+    #[cfg(not(unix))]
+    fn recheck_scheduled_published_authority(
+        &self,
+        _: &ScheduledSnapshotAuthority,
+        _: &ScheduledSnapshotAuthority,
+        _: &str,
+    ) -> Result<()> {
+        unreachable!("scheduled snapshots are unsupported without descriptor capabilities")
+    }
+
+    #[cfg(not(unix))]
+    fn validate_scheduled_auto_prerequisites(&self) -> Result<ScheduledSnapshotAuthority> {
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot publication requires retained filesystem capabilities",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
+    }
+
+    #[cfg(unix)]
+    fn scheduled_bound_head_hash(&self) -> Result<Option<String>> {
+        let kio = self.bound_kio.as_deref().ok_or_else(|| {
+            KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
+        })?;
+        let head = read_bound_regular_text_at(kio, "HEAD", MAX_BOUND_CONFIG_BYTES)?;
+        let value = head.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if !is_hash(value) {
+            return Err(KioError::schema("HEAD must contain a commit_hash"));
+        }
+        Ok(Some(value.to_owned()))
+    }
+
+    #[cfg(not(unix))]
+    fn scheduled_bound_head_hash(&self) -> Result<Option<String>> {
+        self.head_commit_hash()
+    }
+
+    #[cfg(unix)]
+    fn reject_scheduled_bound_purge_state(&self) -> Result<()> {
+        use cap_primitives::fs as cap_fs;
+
+        let kio = self.bound_kio.as_deref().expect("validated above");
+        // A scheduled writer never drives purge recovery or marker retirement.
+        // The parent directory may legitimately remain after completed recovery
+        // because it contains the monotonic epoch; only the active journal is
+        // the writer barrier.
+        match cap_fs::open_dir_nofollow(kio, Path::new("purge")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(KioError::io(error.to_string(), "purge")),
+            Ok(purge) => match cap_fs::stat(
+                &purge,
+                Path::new("in-progress.json"),
+                cap_fs::FollowSymlinks::No,
+            ) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(metadata) if metadata.is_file() => {
+                    return Err(KioError::new(
+                        "KIO-E-PURGE-INCOMPLETE-001",
+                        "scheduled snapshot is blocked by an active purge journal",
+                        json!({ "component": "snapshot_auto" }),
+                        ExitCode::PartialFailure,
+                    ))
+                }
+                Ok(_) => {
+                    return Err(unsafe_store_error(
+                        Path::new("purge/in-progress.json"),
+                        "purge journal is not a regular file",
+                    ))
+                }
+                Err(error) => {
+                    return Err(KioError::io(error.to_string(), "purge/in-progress.json"))
+                }
+            },
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn reject_scheduled_marker_targets<'a>(
+        &self,
+        raw_hashes: impl IntoIterator<Item = &'a String>,
+    ) -> Result<()> {
+        let kio = self.bound_kio.as_deref().ok_or_else(|| {
+            KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
+        })?;
+        for raw_hash in raw_hashes {
+            for namespace in ["tombstones", "purge/erase-receipts"] {
+                if bound_marker_exists(kio, namespace, raw_hash)? {
+                    return Err(KioError::new(
+                        "KIO-E-PURGE-INCOMPLETE-001",
+                        "scheduled snapshot refuses a raw identity with an existing purge marker",
+                        json!({ "component": "snapshot_auto" }),
+                        ExitCode::PartialFailure,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn reject_scheduled_marker_targets<'a>(
+        &self,
+        _: impl IntoIterator<Item = &'a String>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn publish_scheduled_bound_refs(&self, commit_hash: &str) -> Result<()> {
+        let kio = self.bound_kio.as_deref().ok_or_else(|| {
+            KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
+        })?;
+        replace_bound_regular_file_at(kio, "refs/heads/main", commit_hash.as_bytes())?;
+        replace_bound_regular_file_at(kio, "HEAD", commit_hash.as_bytes())
+    }
+
+    #[cfg(not(unix))]
+    fn publish_scheduled_bound_refs(&self, _: &str) -> Result<()> {
+        unreachable!("scheduled snapshots are unsupported without descriptor capabilities")
+    }
+
+    #[cfg(not(unix))]
+    fn bound_snapshot_auto_direct_entries(&self) -> Result<BTreeSet<String>> {
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot publication requires retained filesystem capabilities",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
+    }
+
+    /// Scheduler-only auto snapshot. Historical normalization is carried only
+    /// through a raw-hash-bound reference, never from a mutable cache.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scheduled_auto_snapshot(
+        &self,
+        fixed_now: &str,
+        excluded_paths: &BTreeSet<String>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
+        expected_raw_by_path: &BTreeMap<String, String>,
+        expected_direct_entries: &BTreeSet<String>,
+        expected_snapshot_policy: &SnapshotAutoBinding,
+        before_ref_publication: &mut dyn FnMut() -> Result<SnapshotAutoStateBinding>,
+    ) -> Result<SnapshotOutcome> {
+        // Freeze HEAD and its normalization references in the same writer
+        // critical section as the eventual snapshot. Otherwise a concurrent
+        // promotion on unchanged raw bytes could be replaced by the older
+        // reference captured just before the nested snapshot lock.
+        let _lock = StoreLock::acquire(&self.kio_dir)?;
+        // This entrypoint is only valid for the retained-descriptor repository
+        // constructed by the scheduler handoff.  In particular, do not apply
+        // the ordinary empty-HEAD recovery here: a scheduled writer must never
+        // turn a replaceable mutable ref into a new authority for publication.
+        let scheduled_authority = self.validate_scheduled_auto_prerequisites()?;
+        self.store.validate_bound_layout()?;
+        expected_snapshot_policy.recheck(
+            self.bound_root.as_deref().expect("scheduled bound root"),
+            self.bound_kio.as_deref().expect("scheduled bound kio"),
+        )?;
+        self.reject_scheduled_marker_targets(expected_raw_by_path.values())?;
+        if self.bound_snapshot_auto_direct_entries()? != *expected_direct_entries {
+            return Err(snapshot_authority_changed(
+                "scheduled snapshot direct entries changed before publication",
+            ));
+        }
+        let mut normalize_by_path = BTreeMap::new();
+        if !scheduled_authority.head.trim().is_empty() {
+            let head = scheduled_authority.head.trim();
+            let tree = self.read_tree(&self.read_commit(head)?.tree)?;
+            for entry in tree.entries {
+                if let Some(normalize) = entry.normalize {
+                    normalize_by_path.insert(
+                        entry.path.clone(),
+                        PendingNormalizeRef {
+                            expected_raw_hash: entry.raw_hash,
+                            normalize,
+                        },
+                    );
+                }
+            }
+        }
+        self.snapshot_with_type(
+            Some("scheduled auto snapshot"),
+            Some(fixed_now),
+            CommitType::Auto,
+            excluded_paths,
+            &normalize_by_path,
+            explicitly_allowed_tier_a_paths,
+            false,
+            &[],
+            true,
+            Some(expected_raw_by_path),
+            Some(expected_direct_entries),
+            Some(expected_snapshot_policy),
+            Some(&scheduled_authority),
+            Some(before_ref_publication),
         )
     }
 
@@ -1299,6 +1939,11 @@ impl Repository {
             true,
             purged_raws,
             publish_ref,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1354,7 +1999,17 @@ impl Repository {
         force_commit: bool,
         purged_raws: &[String],
         publish_ref: bool,
+        expected_raw_by_path: Option<&BTreeMap<String, String>>,
+        expected_direct_entries: Option<&BTreeSet<String>>,
+        expected_snapshot_policy: Option<&SnapshotAutoBinding>,
+        expected_scheduled_authority: Option<&ScheduledSnapshotAuthority>,
+        before_ref_publication: Option<&mut dyn FnMut() -> Result<SnapshotAutoStateBinding>>,
     ) -> Result<SnapshotOutcome> {
+        // A retained repository is also used by the existing child-index
+        // subprocess.  Bound descriptors plus `commit_type=auto` therefore do
+        // not identify a scheduled publication by themselves.  The scheduler
+        // is the only caller that supplies its validated authority binding.
+        let scheduled_bound = expected_scheduled_authority.is_some();
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kio_dir)?;
         maybe_hold_lock_for_tests();
@@ -1367,11 +2022,22 @@ impl Repository {
         // important: that routine writes raw/tree CAS objects as it captures
         // the working tree, and a rejected shallow base must not leave those
         // newly published objects behind.
-        let head_hash = self.head_commit_hash()?;
-        let head_tree_hash = match head_hash.as_deref() {
+        let head_hash = if let Some(authority) = expected_scheduled_authority {
+            let head = authority.head.trim();
+            if head.is_empty() {
+                None
+            } else {
+                Some(head.to_owned())
+            }
+        } else if scheduled_bound {
+            self.scheduled_bound_head_hash()?
+        } else {
+            self.head_commit_hash()?
+        };
+        let head_commit = match head_hash.as_deref() {
             None => None,
             Some(hash) => match self.read_commit(hash) {
-                Ok(commit) => Some(commit.tree),
+                Ok(commit) => Some(commit),
                 Err(error) if is_store_not_found(&error) => {
                     return Err(KioError::commit_shallow(
                         "HEAD commit object is missing (shallow: discarded / corrupt); \
@@ -1382,6 +2048,7 @@ impl Repository {
                 Err(error) => return Err(error),
             },
         };
+        let head_tree_hash = head_commit.as_ref().map(|commit| commit.tree.clone());
         // Snapshot the prior HEAD tree before writing the candidate working
         // tree.  `validate_final_shallow_tree` distinguishes a canonical
         // final shallow boundary from a receiptless, mismatched, manual, or
@@ -1434,6 +2101,9 @@ impl Repository {
                 normalize_by_path,
                 ArchiveLimits::default(),
                 &purge_self_targets,
+                expected_raw_by_path,
+                expected_direct_entries,
+                expected_snapshot_policy,
             )?
         }
         .tree;
@@ -1453,7 +2123,7 @@ impl Repository {
         // stays defensive (keeps a mid-purge re-run of this method, e.g.
         // re-purge, from ever retiring the marker it is itself about to
         // create).
-        let resurrection_candidates = if commit_type == CommitType::Purged {
+        let resurrection_candidates = if scheduled_bound || commit_type == CommitType::Purged {
             BTreeSet::new()
         } else {
             let purge = PurgeState::new(&self.kio_dir);
@@ -1483,10 +2153,63 @@ impl Repository {
         // `resurrection_commit` to retire the marker against, and the
         // tombstone/receipt would stay active indefinitely despite the raw
         // object being alive again.
+        let current_tool_lock_hash = self.tool_lock_hash()?;
         if !force_commit
             && resurrection_candidates.is_empty()
             && head_tree_hash.as_deref() == Some(tree_hash.as_str())
+            && head_commit
+                .as_ref()
+                .is_some_and(|commit| commit.tool_lock_hash == current_tool_lock_hash)
         {
+            // Eligible no-ops have completed all immutable preparation at
+            // this point. Publish their scheduler checkpoint before returning
+            // so a failed state CAS can never follow an already-advanced ref.
+            if scheduled_bound {
+                wait_at_bound_snapshot_auto_pre_checkpoint_barrier();
+                self.store.validate_bound_layout()?;
+                if let Some(authority) = expected_scheduled_authority {
+                    self.recheck_scheduled_snapshot_authority(authority)?;
+                }
+                if let Some(policy) = expected_snapshot_policy {
+                    policy.recheck(
+                        self.bound_root.as_deref().expect("scheduled bound root"),
+                        self.bound_kio.as_deref().expect("scheduled bound kio"),
+                    )?;
+                }
+                self.reject_scheduled_bound_purge_state()?;
+                self.reject_scheduled_marker_targets(
+                    working.entries.iter().map(|entry| &entry.raw_hash),
+                )?;
+            }
+            if let Some(publish) = before_ref_publication {
+                let checkpoint = publish()?;
+                if scheduled_bound {
+                    self.store.validate_bound_layout()?;
+                    if let Some(policy) = expected_snapshot_policy {
+                        policy.recheck(
+                            self.bound_root.as_deref().expect("scheduled bound root"),
+                            self.bound_kio.as_deref().expect("scheduled bound kio"),
+                        )?;
+                    }
+                    checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
+                    wait_at_bound_snapshot_auto_after_state_write_barrier();
+                    self.store.validate_bound_layout()?;
+                    if let Some(authority) = expected_scheduled_authority {
+                        self.recheck_scheduled_snapshot_authority(authority)?;
+                    }
+                    if let Some(policy) = expected_snapshot_policy {
+                        policy.recheck(
+                            self.bound_root.as_deref().expect("scheduled bound root"),
+                            self.bound_kio.as_deref().expect("scheduled bound kio"),
+                        )?;
+                    }
+                    checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
+                    self.reject_scheduled_bound_purge_state()?;
+                    self.reject_scheduled_marker_targets(
+                        working.entries.iter().map(|entry| &entry.raw_hash),
+                    )?;
+                }
+            }
             return Ok(SnapshotOutcome {
                 noop: true,
                 message: "snapshot noop: tree unchanged".to_owned(),
@@ -1514,7 +2237,7 @@ impl Repository {
                 parents,
                 created_at,
                 message,
-                self.tool_lock_hash()?,
+                current_tool_lock_hash,
                 stats.clone(),
                 purged_raws.to_vec(),
             )?
@@ -1524,7 +2247,7 @@ impl Repository {
                 parents,
                 created_at,
                 message,
-                self.tool_lock_hash()?,
+                current_tool_lock_hash,
                 stats.clone(),
                 commit_type,
             )?
@@ -1549,6 +2272,32 @@ impl Repository {
             });
         }
 
+        // A scheduled checkpoint is a prepared eligible-attempt record.  The
+        // commit object is already immutable and durable, but no ref/manifest
+        // has moved yet.  If its conditional state publication fails, return
+        // without making the object reachable.
+        if scheduled_bound {
+            wait_at_bound_snapshot_auto_pre_checkpoint_barrier();
+            self.store.validate_bound_layout()?;
+            if let Some(authority) = expected_scheduled_authority {
+                self.recheck_scheduled_snapshot_authority(authority)?;
+            }
+            if let Some(policy) = expected_snapshot_policy {
+                policy.recheck(
+                    self.bound_root.as_deref().expect("scheduled bound root"),
+                    self.bound_kio.as_deref().expect("scheduled bound kio"),
+                )?;
+            }
+            self.reject_scheduled_bound_purge_state()?;
+            self.reject_scheduled_marker_targets(
+                working.entries.iter().map(|entry| &entry.raw_hash),
+            )?;
+        }
+        let checkpoint = match before_ref_publication {
+            Some(publish) => Some(publish()?),
+            None => None,
+        };
+
         // Known limitation (WS1c S6, 2026-07-03): refs/heads/main and HEAD are
         // advanced by two separate atomic renames. Each rename is individually
         // crash-safe (temp file + rename, never a torn value), but a power loss
@@ -1556,12 +2305,70 @@ impl Repository {
         // points at the parent. The commit object is already durable in the CAS,
         // so recovery is a matter of re-pointing HEAD; no data is lost. A single
         // atomic multi-ref transaction is deferred (single-user Step 1 scope).
-        atomic_overwrite(
-            &self.kio_dir.join("refs/heads/main"),
-            commit_hash.as_bytes(),
-        )?;
-        atomic_overwrite(&self.kio_dir.join("HEAD"), commit_hash.as_bytes())?;
+        let published_authority = if scheduled_bound {
+            self.store.validate_bound_layout()?;
+            if let Some(authority) = expected_scheduled_authority {
+                self.recheck_scheduled_snapshot_authority(authority)?;
+            }
+            if let Some(policy) = expected_snapshot_policy {
+                policy.recheck(
+                    self.bound_root.as_deref().expect("scheduled bound root"),
+                    self.bound_kio.as_deref().expect("scheduled bound kio"),
+                )?;
+            }
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
+            }
+            wait_at_bound_snapshot_auto_after_state_write_barrier();
+            self.store.validate_bound_layout()?;
+            if let Some(authority) = expected_scheduled_authority {
+                self.recheck_scheduled_snapshot_authority(authority)?;
+            }
+            if let Some(policy) = expected_snapshot_policy {
+                policy.recheck(
+                    self.bound_root.as_deref().expect("scheduled bound root"),
+                    self.bound_kio.as_deref().expect("scheduled bound kio"),
+                )?;
+            }
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
+            }
+            self.reject_scheduled_bound_purge_state()?;
+            self.reject_scheduled_marker_targets(
+                working.entries.iter().map(|entry| &entry.raw_hash),
+            )?;
+            self.publish_scheduled_bound_refs(&commit_hash)?;
+            Some(self.capture_scheduled_snapshot_authority()?)
+        } else {
+            atomic_overwrite(
+                &self.kio_dir.join("refs/heads/main"),
+                commit_hash.as_bytes(),
+            )?;
+            atomic_overwrite(&self.kio_dir.join("HEAD"), commit_hash.as_bytes())?;
+            None
+        };
         self.write_manifest(&working, prior_tree.as_ref())?;
+        if scheduled_bound {
+            self.store.validate_bound_layout()?;
+            if let Some(authority) = expected_scheduled_authority {
+                self.recheck_scheduled_published_authority(
+                    authority,
+                    published_authority
+                        .as_ref()
+                        .expect("scheduled published authority binding"),
+                    &commit_hash,
+                )?;
+            }
+            if let Some(policy) = expected_snapshot_policy {
+                policy.recheck(
+                    self.bound_root.as_deref().expect("scheduled bound root"),
+                    self.bound_kio.as_deref().expect("scheduled bound kio"),
+                )?;
+            }
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
+            }
+        }
 
         // U19/LC23-LC25: retire is appended only *after* this snapshot's
         // finalize (commit + ref publish + manifest, all now durable above) —
@@ -2054,8 +2861,18 @@ impl Repository {
     /// `kio_format_version` is a `.kio/scope.json`-only concept. A config file
     /// carrying that retired key is rejected by the strict config schema.
     fn validate_config(&self) -> Result<()> {
-        let path = self.kio_dir.join("config.toml");
-        let value = fs::read_to_string(&path).kio_io(&path)?;
+        #[cfg(unix)]
+        let value = if let Some(kio) = self.bound_kio.as_deref() {
+            read_bound_regular_text_at(kio, "config.toml", MAX_BOUND_CONFIG_BYTES)?
+        } else {
+            let path = self.kio_dir.join("config.toml");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        #[cfg(not(unix))]
+        let value = {
+            let path = self.kio_dir.join("config.toml");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
         let toml: toml::Value =
             toml::from_str(&value).map_err(|err| KioError::schema(err.to_string()))?;
         let json_value =
@@ -2082,9 +2899,20 @@ impl Repository {
     /// ordering ran schema validation first, so an unknown key masked the
     /// real (version) problem behind a generic schema failure.
     fn validated_scope_id(&self) -> Result<String> {
-        let path = self.kio_dir.join("scope.json");
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
-            .map_err(|err| KioError::schema(err.to_string()))?;
+        #[cfg(unix)]
+        let text = if let Some(kio) = self.bound_kio.as_deref() {
+            read_bound_regular_text_at(kio, "scope.json", MAX_BOUND_CONFIG_BYTES)?
+        } else {
+            let path = self.kio_dir.join("scope.json");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        #[cfg(not(unix))]
+        let text = {
+            let path = self.kio_dir.join("scope.json");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        let value: Value =
+            serde_json::from_str(&text).map_err(|err| KioError::schema(err.to_string()))?;
         validate_scope_json_value(&value)?;
         let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
             return Err(KioError::schema("scope.json missing scope_id"));
@@ -2099,9 +2927,20 @@ impl Repository {
     }
 
     fn validate_manifest(&self) -> Result<()> {
-        let path = self.kio_dir.join("manifest.json");
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
-            .map_err(|err| KioError::schema(err.to_string()))?;
+        #[cfg(unix)]
+        let text = if let Some(kio) = self.bound_kio.as_deref() {
+            read_bound_regular_text_at(kio, "manifest.json", MAX_BOUND_CONFIG_BYTES)?
+        } else {
+            let path = self.kio_dir.join("manifest.json");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        #[cfg(not(unix))]
+        let text = {
+            let path = self.kio_dir.join("manifest.json");
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        let value: Value =
+            serde_json::from_str(&text).map_err(|err| KioError::schema(err.to_string()))?;
         validate_json_schema(SchemaKind::Manifest, &value)?;
         if !value.is_object() {
             return Err(KioError::schema("manifest.json must be an object"));
@@ -2207,6 +3046,10 @@ impl Repository {
         });
         let bytes =
             serde_json::to_vec_pretty(&value).map_err(|err| KioError::schema(err.to_string()))?;
+        #[cfg(unix)]
+        if let Some(kio) = self.bound_kio.as_deref() {
+            return replace_bound_regular_file_at(kio, "manifest.json", &bytes);
+        }
         atomic_overwrite(&self.kio_dir.join("manifest.json"), &bytes)
     }
 
@@ -2217,13 +3060,27 @@ impl Repository {
     /// Returns an empty map when the manifest is absent. The manifest is schema
     /// validated before `snapshot` runs, so entries are well formed here.
     fn read_manifest_deleted_hashes(&self) -> Result<BTreeMap<String, String>> {
-        let path = self.kio_dir.join("manifest.json");
         let mut map = BTreeMap::new();
-        if !path.is_file() {
-            return Ok(map);
-        }
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
-            .map_err(|err| KioError::schema(err.to_string()))?;
+        #[cfg(unix)]
+        let text = if let Some(kio) = self.bound_kio.as_deref() {
+            read_bound_regular_text_at(kio, "manifest.json", MAX_BOUND_CONFIG_BYTES)?
+        } else {
+            let path = self.kio_dir.join("manifest.json");
+            if !path.is_file() {
+                return Ok(map);
+            }
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        #[cfg(not(unix))]
+        let text = {
+            let path = self.kio_dir.join("manifest.json");
+            if !path.is_file() {
+                return Ok(map);
+            }
+            fs::read_to_string(&path).kio_io(&path)?
+        };
+        let value: Value =
+            serde_json::from_str(&text).map_err(|err| KioError::schema(err.to_string()))?;
         if let Some(files) = value.get("files").and_then(Value::as_array) {
             for file in files {
                 if file.get("status").and_then(Value::as_str) != Some("deleted") {
@@ -2241,6 +3098,13 @@ impl Repository {
     }
 
     fn tool_lock_hash(&self) -> Result<String> {
+        #[cfg(unix)]
+        if let Some(kio) = self.bound_kio.as_deref() {
+            let text = read_bound_regular_text_at(kio, "tool-lock.json", MAX_BOUND_CONFIG_BYTES)?;
+            let value: Value =
+                serde_json::from_str(&text).map_err(|err| KioError::schema(err.to_string()))?;
+            return hash_json(&canonical_tool_lock_value(&value)?);
+        }
         let path = self.kio_dir.join("tool-lock.json");
         if path.is_file() {
             let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
@@ -2383,58 +3247,211 @@ fn persist_bound_generated_parent_policy(kio: &File, policy: toml::Value) -> Res
 
 #[cfg(unix)]
 fn read_bound_regular_text(kio: &File, relative: &str) -> Result<String> {
+    read_bound_regular_text_at(kio, relative, MAX_BOUND_CONFIG_BYTES)
+}
+
+/// Read a regular `.kio` metadata leaf through a retained directory
+/// descriptor.  Every component is opened no-follow, so replacing a
+/// descendant directory after the scheduler has acquired its capability
+/// cannot redirect the read.
+#[cfg(unix)]
+fn read_bound_regular_text_at(kio: &File, relative: &str, max_bytes: u64) -> Result<String> {
     use cap_primitives::fs as cap_fs;
 
     let path = Path::new(relative);
-    if path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(KioError::invalid_usage(
-            "bound metadata path must be one regular file name",
+            "bound metadata path must contain only normal components",
         ));
     }
-    let listed = cap_fs::stat(kio, path, cap_fs::FollowSymlinks::No)
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| KioError::invalid_usage("bound metadata path must name a regular file"))?;
+    let mut directory = kio
+        .try_clone()
         .map_err(|error| KioError::io(error.to_string(), relative))?;
-    if !listed.is_file() || listed.len() > MAX_BOUND_CONFIG_BYTES {
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        directory = cap_fs::open_dir_nofollow(&directory, Path::new(component))
+            .map_err(|error| KioError::io(error.to_string(), relative))?;
+    }
+    let listed = cap_fs::stat(&directory, Path::new(leaf), cap_fs::FollowSymlinks::No)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    if !listed.is_file() || listed.len() > max_bytes {
         return Err(KioError::schema(
-            "bound config.toml must be a bounded regular file",
+            "bound metadata must be a bounded regular file",
         ));
     }
     let mut options = cap_fs::OpenOptions::new();
     options.read(true);
     options._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
-    let mut file = cap_fs::open(kio, path, &options)
+    let mut file = cap_fs::open(&directory, Path::new(leaf), &options)
         .map_err(|error| KioError::io(error.to_string(), relative))?;
     let opened = cap_fs::Metadata::from_file(&file)
         .map_err(|error| KioError::io(error.to_string(), relative))?;
-    if !opened.is_file() || opened.len() != listed.len() || opened.len() > MAX_BOUND_CONFIG_BYTES {
-        return Err(KioError::schema("bound config.toml changed while opening"));
+    if !opened.is_file() || opened.len() != listed.len() || opened.len() > max_bytes {
+        return Err(KioError::schema("bound metadata changed while opening"));
     }
     let mut text = String::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
     file.read_to_string(&mut text)
         .map_err(|error| KioError::io(error.to_string(), relative))?;
     if text.len() as u64 != opened.len() {
-        return Err(KioError::schema("bound config.toml changed while reading"));
+        return Err(KioError::schema("bound metadata changed while reading"));
     }
     Ok(text)
 }
 
+/// Exact identity and content observation for a descriptor-relative metadata
+/// read. This is deliberately separate from the GC observation types: the
+/// scheduler's ref/tool handoff needs only regular-file authority binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundMetadataObservation {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    nlink: u64,
+    digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScheduledSnapshotAuthority {
+    head: String,
+    branch: String,
+    tool_lock: String,
+    head_observation: BoundMetadataObservation,
+    branch_observation: BoundMetadataObservation,
+    tool_lock_observation: BoundMetadataObservation,
+}
+
+/// Read a bounded regular metadata leaf without following any public path and
+/// retain enough evidence to reject same-byte replacement at a later writer
+/// boundary.
+#[cfg(unix)]
+fn read_bound_regular_text_observed_at(
+    kio: &File,
+    relative: &str,
+    max_bytes: u64,
+) -> Result<(String, BoundMetadataObservation)> {
+    use cap_primitives::fs::{self as cap_fs, MetadataExt};
+
+    let path = Path::new(relative);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(KioError::invalid_usage(
+            "bound metadata path must contain only normal components",
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| KioError::invalid_usage("bound metadata path must name a regular file"))?;
+    let mut directory = kio
+        .try_clone()
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        directory = cap_fs::open_dir_nofollow(&directory, Path::new(component))
+            .map_err(|error| KioError::io(error.to_string(), relative))?;
+    }
+    let before = cap_fs::stat(&directory, Path::new(leaf), cap_fs::FollowSymlinks::No)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    if !before.is_file() || before.nlink() != 1 || before.len() > max_bytes {
+        return Err(KioError::schema(
+            "bound metadata must be a bounded single-link regular file",
+        ));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options.read(true);
+    options._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut file = cap_fs::open(&directory, Path::new(leaf), &options)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    let opened = cap_fs::Metadata::from_file(&file)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    if !opened.is_file()
+        || opened.nlink() != 1
+        || opened.len() > max_bytes
+        || opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.len() != before.len()
+    {
+        return Err(KioError::schema("bound metadata changed while opening"));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
+    (&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    let after = cap_fs::stat(&directory, Path::new(leaf), cap_fs::FollowSymlinks::No)
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    if bytes.len() as u64 != opened.len()
+        || after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+        || after.nlink() != opened.nlink()
+        || after.len() != opened.len()
+    {
+        return Err(KioError::schema("bound metadata changed while reading"));
+    }
+    let text =
+        String::from_utf8(bytes.clone()).map_err(|error| KioError::schema(error.to_string()))?;
+    Ok((
+        text,
+        BoundMetadataObservation {
+            dev: opened.dev(),
+            ino: opened.ino(),
+            len: opened.len(),
+            nlink: opened.nlink(),
+            digest: format!("{:x}", Sha256::digest(&bytes)),
+        },
+    ))
+}
+
 #[cfg(unix)]
 fn replace_bound_regular_file(kio: &File, relative: &str, contents: &[u8]) -> Result<()> {
+    replace_bound_regular_file_at(kio, relative, contents)
+}
+
+#[cfg(unix)]
+fn replace_bound_regular_file_at(kio: &File, relative: &str, contents: &[u8]) -> Result<()> {
     use cap_primitives::fs as cap_fs;
 
     let path = Path::new(relative);
-    if path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(KioError::invalid_usage(
-            "bound metadata path must be one regular file name",
+            "bound metadata path must contain only normal components",
         ));
     }
     if contents.len() as u64 > MAX_BOUND_CONFIG_BYTES {
         return Err(KioError::schema(
             "bound config.toml exceeds the bootstrap byte limit",
         ));
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| KioError::invalid_usage("bound metadata path must name a regular file"))?;
+    let mut directory = kio
+        .try_clone()
+        .map_err(|error| KioError::io(error.to_string(), relative))?;
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        directory = cap_fs::open_dir_nofollow(&directory, Path::new(component))
+            .map_err(|error| KioError::io(error.to_string(), relative))?;
     }
 
     for attempt in 0..8_u8 {
@@ -2446,7 +3463,7 @@ fn replace_bound_regular_file(kio: &File, relative: &str, contents: &[u8]) -> Re
         let temporary_path = Path::new(&temporary);
         let mut options = cap_fs::OpenOptions::new();
         options.write(true).create_new(true);
-        let mut file = match cap_fs::open(kio, temporary_path, &options) {
+        let mut file = match cap_fs::open(&directory, temporary_path, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(KioError::io(error.to_string(), relative)),
@@ -2460,16 +3477,19 @@ fn replace_bound_regular_file(kio: &File, relative: &str, contents: &[u8]) -> Re
         })();
         drop(file);
         if let Err(error) = write_result {
-            let _ = cap_fs::remove_file(kio, temporary_path);
+            let _ = cap_fs::remove_file(&directory, temporary_path);
             return Err(error);
         }
-        if let Err(error) = cap_fs::rename(kio, temporary_path, kio, path) {
-            let _ = cap_fs::remove_file(kio, temporary_path);
+        if let Err(error) = cap_fs::rename(&directory, temporary_path, &directory, Path::new(leaf))
+        {
+            let _ = cap_fs::remove_file(&directory, temporary_path);
             return Err(KioError::io(error.to_string(), relative));
         }
-        // The directory descriptor is the durability and capability boundary;
-        // sync it after the in-directory rename when the platform permits it.
-        kio.sync_all()
+        // The directory that directly contains the renamed leaf is the
+        // durability boundary.  Syncing only the retained `.kio` ancestor is
+        // insufficient for nested metadata such as `refs/heads/main`.
+        directory
+            .sync_all()
             .map_err(|error| KioError::io(error.to_string(), relative))?;
         return Ok(());
     }
@@ -3900,6 +4920,80 @@ fn ensure_raw_publication_allowed(purge: &PurgeState, raw_hash: &str) -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
+fn bound_marker_exists(kio: &File, namespace: &str, raw_hash: &str) -> Result<bool> {
+    use cap_primitives::fs as cap_fs;
+
+    let digest = raw_hash
+        .strip_prefix("sha256:")
+        .ok_or_else(|| KioError::schema("scheduled marker lookup requires a sha256 raw hash"))?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(KioError::schema(
+            "scheduled marker lookup requires a sha256 raw hash",
+        ));
+    }
+    let mut directory = kio
+        .try_clone()
+        .map_err(|error| KioError::io(error.to_string(), namespace))?;
+    for component in Path::new(namespace).components().chain([
+        Component::Normal(std::ffi::OsStr::new(&digest[..2])),
+        Component::Normal(std::ffi::OsStr::new(&digest[2..4])),
+    ]) {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        directory = match cap_fs::open_dir_nofollow(&directory, Path::new(component)) {
+            Ok(next) => next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(KioError::io(error.to_string(), namespace)),
+        };
+    }
+    match cap_fs::stat(&directory, Path::new(digest), cap_fs::FollowSymlinks::No) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(unsafe_store_error(
+            Path::new(namespace),
+            "purge marker leaf is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(KioError::io(error.to_string(), namespace)),
+    }
+}
+
+/// Debug-only synchronization seam for descriptor-replacement integration
+/// tests. Production builds never inspect the environment or wait.
+fn wait_at_bound_snapshot_auto_layout_barrier() {
+    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_BOUND_LAYOUT_READY");
+}
+
+/// Debug-only synchronization seams for scheduled-writer race tests.  The
+/// ready/release protocol is intentionally identical across seams so tests can
+/// mutate one authority input at a precisely named boundary.
+fn wait_at_bound_snapshot_auto_pre_checkpoint_barrier() {
+    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_PRE_CHECKPOINT_READY");
+}
+
+fn wait_at_bound_snapshot_auto_after_state_write_barrier() {
+    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_AFTER_STATE_WRITE_READY");
+}
+
+fn wait_at_bound_snapshot_auto_barrier(variable: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(ready_path) = std::env::var_os(variable) else {
+        return;
+    };
+    let ready_path = PathBuf::from(ready_path);
+    if fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !release_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn attach_pending_normalize(
     tree_entry: &mut TreeEntry,
     file_name: &str,
@@ -3967,6 +5061,24 @@ fn scope_file_changed_path(path: &Path) -> KioError {
         "scope path no longer identifies the checked regular file",
         json!({ "path": path }),
         ExitCode::Failure,
+    )
+}
+
+fn snapshot_authority_changed(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
+        message,
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+fn snapshot_unsafe_direct_entry(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-UNSAFE-ENTRY-001",
+        message,
+        json!({}),
+        ExitCode::PermanentFailure,
     )
 }
 
@@ -4130,6 +5242,13 @@ pub struct StoreLock {
 impl StoreLock {
     pub fn acquire(kio_dir: &Path) -> Result<Self> {
         let lock = Self::acquire_path(kio_dir.join(".lock"))?;
+        // The outer acquisition already performed this check while it owned
+        // the real lock.  Besides avoiding redundant work, skipping the
+        // ambient-path read for a nested acquisition lets a descriptor-bound
+        // automatic writer safely reuse this ordinary API.
+        if lock.reentrant {
+            return Ok(lock);
+        }
         // Acquire first, then inspect through the strict GC parser. This closes
         // the marker-publication race for every ordinary writer sharing this
         // central lock entrypoint; GC uses its retained-descriptor counterpart.
@@ -4151,9 +5270,6 @@ impl StoreLock {
     /// path) and stale-reclaim semantics as [`acquire`]; the parent directory is
     /// created if missing.
     pub fn acquire_path(path: PathBuf) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).kio_io(parent)?;
-        }
         let pid = std::process::id();
 
         // Reentrant fast path: this thread already holds the lock for `path`.
@@ -4175,6 +5291,10 @@ impl StoreLock {
                 #[cfg(unix)]
                 _gate: None,
             });
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).kio_io(parent)?;
         }
 
         #[cfg(unix)]
@@ -4587,6 +5707,82 @@ pub struct BoundStoreLock {
 #[cfg(not(unix))]
 pub struct BoundStoreLock {
     _private: (),
+}
+
+/// Bridges a descriptor-bound writer lock to [`StoreLock`]'s existing
+/// thread-local reentrancy protocol.  Automatic snapshot operations first
+/// acquire the public `.lock` leaf relative to a retained `.kio` descriptor;
+/// repository helpers may then call `StoreLock::acquire` without reopening or
+/// replacing that lock through a public path.
+///
+/// The caller must supply exactly the public `.kio/.lock` path that ordinary
+/// repository operations use as their `LOCK_DEPTH` key.  The path is never
+/// opened by this type.
+pub struct BoundReentrantStoreLock {
+    paths: Vec<PathBuf>,
+    inner: Option<BoundStoreLock>,
+}
+
+/// Acquire the retained-descriptor lock protocol and register it as the outer
+/// owner in the current thread's ordinary lock-depth table.  On platforms
+/// without a descriptor-relative primitive, `acquire_bound_store_lock` fails
+/// closed rather than falling back to an ambient lock path.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn acquire_bound_reentrant_store_lock(
+    kio: &File,
+    ordinary_lock_paths: Vec<PathBuf>,
+) -> Result<BoundReentrantStoreLock> {
+    let mut paths = ordinary_lock_paths;
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Err(KioError::invalid_usage(
+            "bound reentrant store lock requires at least one lock key",
+        ));
+    }
+    let already_held = LOCK_DEPTH.with(|depth| {
+        let depth = depth.borrow();
+        paths.iter().any(|path| depth.contains_key(path))
+    });
+    if already_held {
+        return Err(KioError::locked(paths[0].display().to_string()));
+    }
+
+    let inner = acquire_bound_store_lock(kio)?;
+    LOCK_DEPTH.with(|depth| {
+        let mut depth = depth.borrow_mut();
+        for path in &paths {
+            depth.insert(path.clone(), 1);
+        }
+    });
+    Ok(BoundReentrantStoreLock {
+        paths,
+        inner: Some(inner),
+    })
+}
+
+impl Drop for BoundReentrantStoreLock {
+    fn drop(&mut self) {
+        // Remove only this outer registration.  Well-scoped Rust callers drop
+        // all nested StoreLock guards first; decrementing defensively avoids
+        // corrupting the depth accounting if a caller intentionally leaks one.
+        LOCK_DEPTH.with(|depth| {
+            let mut depth = depth.borrow_mut();
+            for path in &self.paths {
+                let Some(count) = depth.get_mut(path) else {
+                    continue;
+                };
+                *count -= 1;
+                if *count == 0 {
+                    depth.remove(path);
+                }
+            }
+        });
+        // Drop after unpublishing the synthetic reentrancy owner.  The bound
+        // guard releases only the descriptor-relative entry it originally
+        // acquired; it never resolves `self.path`.
+        drop(self.inner.take());
+    }
 }
 
 #[cfg(unix)]
@@ -5677,6 +6873,26 @@ mod tests {
         assert!(StoreLock::acquire(repo.kio_dir()).is_ok());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn bound_reentrant_lock_allows_nested_repository_store_lock() {
+        use cap_primitives::{ambient_authority, fs as cap_fs};
+
+        let scope = tempfile::tempdir().unwrap();
+        let repo = Repository::init(scope.path()).unwrap();
+        let retained = cap_fs::open_ambient_dir(repo.kio_dir(), ambient_authority()).unwrap();
+        let path = repo.kio_dir().join(".lock");
+
+        let outer = super::acquire_bound_reentrant_store_lock(&retained, vec![path]).unwrap();
+        let nested = repo.lock_store().unwrap();
+        drop(nested);
+        drop(outer);
+
+        // The descriptor-bound owner released its own entry, and no synthetic
+        // depth remains to make a later ordinary writer spuriously reentrant.
+        assert!(StoreLock::acquire(repo.kio_dir()).is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn bound_gc_lock_never_creates_a_lock_in_a_public_path_replacement() {
@@ -6737,6 +7953,54 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_snapshot_rejects_raw_map_drift_before_cas_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let path = dir.path().join("doc.txt");
+        fs::write(&path, b"observed bytes").unwrap();
+        repo.snapshot(Some("initial"), Some("2026-08-14T00:00:00Z"))
+            .unwrap();
+        let head_before = repo.head_commit_hash().unwrap();
+        let expected = BTreeMap::from([("doc.txt".to_owned(), hash_bytes(b"observed bytes"))]);
+
+        let changed = b"changed after the scheduled preview";
+        fs::write(&path, changed).unwrap();
+        let changed_raw = ObjectStore::new(repo.kio_dir())
+            .object_path(ObjectKind::Raw, &hash_bytes(changed))
+            .unwrap();
+        assert!(!changed_raw.exists());
+
+        let error = repo
+            .snapshot_with_type(
+                Some("scheduled test"),
+                Some("2026-08-14T00:01:00Z"),
+                CommitType::Auto,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                false,
+                &[],
+                true,
+                Some(&expected),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001");
+        assert_eq!(repo.head_commit_hash().unwrap(), head_before);
+        assert!(!changed_raw.exists());
+        assert!(fs::read_dir(repo.kio_dir().join("objects/raw"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ingest-")));
+    }
+
+    #[test]
     fn cand_043_poisoned_raw_slot_prevents_snapshot_publication() {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -6868,9 +8132,7 @@ mod tests {
             canonical_root: root.clone(),
             kio_dir: kio_dir.clone(),
             store: ObjectStore::new(kio_dir.clone()),
-            #[cfg(unix)]
             bound_root: None,
-            #[cfg(unix)]
             bound_kio: None,
         };
         assert_eq!(

@@ -1,8 +1,10 @@
 //! Content-addressed storage primitives.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -472,6 +474,50 @@ pub struct AccountedReadError {
 #[derive(Debug, Clone)]
 pub struct ObjectStore {
     kio_dir: PathBuf,
+    /// Scheduled writers retain these handles before taking their writer
+    /// boundary.  The ambient `.kio/objects` pathname is deliberately never
+    /// consulted by the bound read/write subset below.
+    #[cfg(unix)]
+    bound: Option<BoundObjectDirs>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct BoundObjectDirs {
+    kio: Arc<File>,
+    objects: Arc<File>,
+    raw: Arc<File>,
+    trees: Arc<File>,
+    commits: Arc<File>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct BoundRawStage {
+    parent: Arc<File>,
+    name: String,
+    file: File,
+    raw_hash: String,
+    size_bytes: u64,
+}
+#[cfg(unix)]
+impl BoundRawStage {
+    #[must_use]
+    pub fn raw_hash(&self) -> &str {
+        &self.raw_hash
+    }
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+#[cfg(unix)]
+impl Drop for BoundRawStage {
+    fn drop(&mut self) {
+        if !self.name.is_empty() {
+            let _ = bound_remove(&self.parent, &self.name);
+        }
+    }
 }
 
 impl ObjectStore {
@@ -479,13 +525,97 @@ impl ObjectStore {
     pub fn new(kio_dir: impl Into<PathBuf>) -> Self {
         Self {
             kio_dir: kio_dir.into(),
+            #[cfg(unix)]
+            bound: None,
         }
+    }
+
+    /// Construct a CAS capability rooted in an already retained `.kio`
+    /// directory.  This is intentionally narrow: it binds precisely the
+    /// namespaces used by the scheduled snapshot writer, and refuses a
+    /// missing/replaced/symlinked object namespace rather than recovering via
+    /// the public pathname.
+    #[cfg(unix)]
+    pub fn from_bound_kio(kio: &File) -> Result<Self> {
+        let objects = bound_open_dir(kio, "objects")?;
+        let raw = bound_open_dir(&objects, ObjectKind::Raw.directory())?;
+        let trees = bound_open_dir(&objects, ObjectKind::Tree.directory())?;
+        let commits = bound_open_dir(&objects, ObjectKind::Commit.directory())?;
+        Ok(Self {
+            kio_dir: PathBuf::from("."),
+            bound: Some(BoundObjectDirs {
+                kio: Arc::new(
+                    kio.try_clone()
+                        .map_err(|e| KioError::io(e.to_string(), ".kio"))?,
+                ),
+                objects: Arc::new(objects),
+                raw: Arc::new(raw),
+                trees: Arc::new(trees),
+                commits: Arc::new(commits),
+            }),
+        })
     }
 
     pub fn write_raw(&self, bytes: &[u8]) -> Result<String> {
         let hash = hash_bytes(bytes);
         self.write_object_bytes(ObjectKind::Raw, &hash, bytes)?;
         Ok(hash)
+    }
+
+    #[cfg(unix)]
+    pub fn stage_raw_from_reader<R: Read>(
+        &self,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<BoundRawStage> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| {
+                KioError::invalid_usage("bound raw staging requires a retained ObjectStore")
+            })?
+            .stage_raw_from_reader(reader, max_bytes)
+    }
+
+    #[cfg(unix)]
+    pub fn cleanup_bound_raw_stages(&self) -> Result<()> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| {
+                KioError::invalid_usage("bound raw cleanup requires a retained ObjectStore")
+            })?
+            .cleanup_raw_ingest_orphans()
+    }
+
+    #[cfg(unix)]
+    pub fn validate_bound_layout(&self) -> Result<()> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| {
+                KioError::invalid_usage("bound layout validation requires a retained ObjectStore")
+            })?
+            .validate_layout()
+    }
+
+    #[cfg(not(unix))]
+    pub fn validate_bound_layout(&self) -> Result<()> {
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot publication requires retained filesystem capabilities",
+            serde_json::json!({}),
+            crate::error::ExitCode::PermanentFailure,
+        ))
+    }
+
+    #[cfg(unix)]
+    pub fn publish_bound_raw_stage(&self, stage: BoundRawStage) -> Result<(String, u64)> {
+        self.bound
+            .as_ref()
+            .ok_or_else(|| {
+                KioError::invalid_usage(
+                    "bound raw stage publication requires a retained ObjectStore",
+                )
+            })?
+            .publish_raw_stage(stage)
     }
 
     /// Repair one corrupt, single-representation raw CAS slot with verified
@@ -968,6 +1098,10 @@ impl ObjectStore {
     }
 
     pub fn write_object_bytes(&self, kind: ObjectKind, hash: &str, bytes: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(bound) = &self.bound {
+            return bound.write_object_bytes(kind, hash, bytes);
+        }
         if bytes.len() as u64 > kind.max_bytes() {
             return Err(object_size_error(
                 kind,
@@ -1015,6 +1149,10 @@ impl ObjectStore {
         reader: &mut R,
         max_bytes: u64,
     ) -> Result<(String, u64)> {
+        #[cfg(unix)]
+        if let Some(bound) = &self.bound {
+            return bound.write_raw_reader(reader, max_bytes);
+        }
         let max_bytes = max_bytes.min(MAX_RAW_OBJECT_BYTES);
         let raw_base = self
             .kio_dir
@@ -1070,6 +1208,10 @@ impl ObjectStore {
     }
 
     pub fn read_by_hash(&self, hash: &str) -> Result<StoredObject> {
+        #[cfg(unix)]
+        if let Some(bound) = &self.bound {
+            return bound.read_by_hash(hash);
+        }
         let (kind, path) = self.locate_object(hash)?;
         let (_, bytes) = read_verified_object(&path, kind, hash, true)?;
         Ok(StoredObject {
@@ -1240,6 +1382,10 @@ impl ObjectStore {
         kind: ObjectKind,
         hash: &str,
     ) -> Result<(StoredObject, u64)> {
+        #[cfg(unix)]
+        if let Some(bound) = &self.bound {
+            return bound.read_object_with_size(kind, hash);
+        }
         if !is_hash(hash) {
             return Err(KioError::invalid_usage("invalid hash"));
         }
@@ -1451,6 +1597,627 @@ impl ObjectStore {
         }
         Ok(true)
     }
+}
+
+#[cfg(unix)]
+impl BoundObjectDirs {
+    fn validate_layout(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let changed = || {
+            KioError::new(
+                "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
+                "public object layout changed after scheduled snapshot binding",
+                serde_json::json!({}),
+                crate::ExitCode::PartialFailure,
+            )
+        };
+        let objects = bound_open_dir(&self.kio, "objects").map_err(|_| changed())?;
+        let raw = bound_open_dir(&objects, ObjectKind::Raw.directory()).map_err(|_| changed())?;
+        let trees =
+            bound_open_dir(&objects, ObjectKind::Tree.directory()).map_err(|_| changed())?;
+        let commits =
+            bound_open_dir(&objects, ObjectKind::Commit.directory()).map_err(|_| changed())?;
+        for (current, retained) in [
+            (&objects, &self.objects),
+            (&raw, &self.raw),
+            (&trees, &self.trees),
+            (&commits, &self.commits),
+        ] {
+            let current = current
+                .metadata()
+                .kio_io(Path::new("bound object layout"))?;
+            let retained = retained
+                .metadata()
+                .kio_io(Path::new("retained object layout"))?;
+            if current.dev() != retained.dev() || current.ino() != retained.ino() {
+                return Err(changed());
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_raw_from_reader<R: Read>(
+        &self,
+        reader: &mut R,
+        max_bytes: u64,
+    ) -> Result<BoundRawStage> {
+        let max_bytes = max_bytes.min(MAX_RAW_OBJECT_BYTES);
+        let (name, mut file) = bound_create_ingest_temp(&self.raw)?;
+        let result = (|| {
+            let mut hasher = Sha256::new();
+            let mut total = 0_u64;
+            let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+            loop {
+                let cap = max_bytes
+                    .saturating_sub(total)
+                    .saturating_add(1)
+                    .min(buffer.len() as u64) as usize;
+                let count = reader.read(&mut buffer[..cap]).kio_io(Path::new(&name))?;
+                if count == 0 {
+                    break;
+                }
+                total = total
+                    .checked_add(count as u64)
+                    .ok_or_else(|| object_size_error(ObjectKind::Raw, max_bytes, u64::MAX))?;
+                if total > max_bytes {
+                    return Err(object_size_error(ObjectKind::Raw, max_bytes, total));
+                }
+                hasher.update(&buffer[..count]);
+                file.write_all(&buffer[..count]).kio_io(Path::new(&name))?;
+            }
+            file.sync_all().kio_io(Path::new(&name))?;
+            file.seek(std::io::SeekFrom::Start(0))
+                .kio_io(Path::new(&name))?;
+            Ok((format!("sha256:{}", lower_hex(&hasher.finalize())), total))
+        })();
+        match result {
+            Ok((raw_hash, size_bytes)) => Ok(BoundRawStage {
+                parent: Arc::clone(&self.raw),
+                name,
+                file,
+                raw_hash,
+                size_bytes,
+            }),
+            Err(error) => {
+                drop(file);
+                let _ = bound_remove(&self.raw, &name);
+                Err(error)
+            }
+        }
+    }
+
+    fn publish_raw_stage(&self, mut stage: BoundRawStage) -> Result<(String, u64)> {
+        if !Arc::ptr_eq(&stage.parent, &self.raw) {
+            return Err(KioError::invalid_usage(
+                "bound raw stage belongs to another ObjectStore",
+            ));
+        }
+        let opened = stage.file.metadata().kio_io(Path::new(&stage.name))?;
+        if !opened.is_file() || opened.len() != stage.size_bytes {
+            return Err(corrupt_object_error(
+                Path::new(&stage.name),
+                "bound raw stage changed before publication",
+                &stage.raw_hash,
+                None,
+            ));
+        }
+        let hash = stage.raw_hash.clone();
+        let size = stage.size_bytes;
+        let (parent, leaf) = self.fanout(ObjectKind::Raw, &hash, true)?;
+        match bound_read_verified(&parent, &leaf, ObjectKind::Raw, &hash, true) {
+            Ok((existing_size, existing)) => {
+                let (_, staged) = bound_read_regular(&self.raw, &stage.name, MAX_RAW_OBJECT_BYTES)?;
+                if existing_size != size || existing != staged {
+                    return Err(corrupt_object_error(
+                        Path::new(&leaf),
+                        "CAS object bytes do not match existing object",
+                        &hash,
+                        Some(&hash_bytes(&existing)),
+                    ));
+                }
+                bound_remove(&self.raw, &stage.name)?;
+            }
+            Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {
+                bound_publish_between(
+                    &self.raw,
+                    &stage.name,
+                    &parent,
+                    &leaf,
+                    ObjectKind::Raw,
+                    &hash,
+                    size,
+                    None,
+                )?
+            }
+            Err(error) => return Err(error),
+        }
+        stage.name.clear();
+        Ok((hash, size))
+    }
+
+    fn cleanup_raw_ingest_orphans(&self) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        const MAX_ENTRIES: usize = 100_000;
+        let mut total = 0_u64;
+        let entries = cap_primitives::fs::read_base_dir(&self.raw)
+            .map_err(|e| KioError::io(e.to_string(), "bound raw stage directory"))?;
+        for (n, entry) in entries.enumerate() {
+            if n >= MAX_ENTRIES {
+                return Err(bound_stage_corrupt(
+                    "bound raw stage directory exceeds entry limit",
+                ));
+            }
+            let entry =
+                entry.map_err(|e| KioError::io(e.to_string(), "bound raw stage directory"))?;
+            let file_name = entry.file_name();
+            let bytes = file_name.as_bytes();
+            if !bytes.starts_with(b".ingest-") {
+                continue;
+            }
+            let name = std::str::from_utf8(bytes)
+                .map_err(|_| bound_stage_corrupt("bound raw stage name is not UTF-8"))?;
+            if !bound_ingest_name(name) {
+                return Err(bound_stage_corrupt("bound raw stage name is malformed"));
+            }
+            let (size, _) = bound_read_regular(&self.raw, name, MAX_RAW_OBJECT_BYTES)?;
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| bound_stage_corrupt("bound raw stage byte count overflow"))?;
+            if total > MAX_RAW_OBJECT_BYTES {
+                return Err(bound_stage_corrupt(
+                    "bound raw stage cleanup exceeds byte limit",
+                ));
+            }
+            bound_remove(&self.raw, name)?;
+        }
+        self.raw
+            .sync_all()
+            .kio_io(Path::new("bound raw stage directory"))
+    }
+
+    fn dir(&self, kind: ObjectKind) -> &File {
+        match kind {
+            ObjectKind::Raw => &self.raw,
+            ObjectKind::Tree => &self.trees,
+            ObjectKind::Commit => &self.commits,
+        }
+    }
+
+    fn fanout(&self, kind: ObjectKind, hash: &str, create: bool) -> Result<(File, String)> {
+        let digest = hash_path_component(hash)?;
+        let first = &digest[..2];
+        let second = &digest[2..4];
+        let base = self.dir(kind);
+        let first_dir = bound_open_or_create_dir(base, first, create)?;
+        let second_dir = bound_open_or_create_dir(&first_dir, second, create)?;
+        Ok((second_dir, digest.to_owned()))
+    }
+
+    fn read_object_with_size(&self, kind: ObjectKind, hash: &str) -> Result<(StoredObject, u64)> {
+        if !is_hash(hash) {
+            return Err(KioError::invalid_usage("invalid hash"));
+        }
+        let (parent, leaf) = self.fanout(kind, hash, false)?;
+        let (size_bytes, bytes) = bound_read_verified(&parent, &leaf, kind, hash, true)?;
+        Ok((
+            StoredObject {
+                kind,
+                hash: hash.to_owned(),
+                bytes,
+            },
+            size_bytes,
+        ))
+    }
+
+    fn read_by_hash(&self, hash: &str) -> Result<StoredObject> {
+        if !is_hash(hash) {
+            return Err(KioError::invalid_usage("invalid hash"));
+        }
+        for kind in [ObjectKind::Tree, ObjectKind::Commit, ObjectKind::Raw] {
+            match self.read_object_with_size(kind, hash) {
+                Ok((object, _)) => return Ok(object),
+                Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(KioError::not_found(hash))
+    }
+
+    fn write_object_bytes(&self, kind: ObjectKind, hash: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() as u64 > kind.max_bytes() {
+            return Err(object_size_error(
+                kind,
+                kind.max_bytes(),
+                bytes.len() as u64,
+            ));
+        }
+        if hash_bytes(bytes) != hash {
+            return Err(KioError::invalid_usage(
+                "CAS object hash does not match the supplied bytes",
+            ));
+        }
+        let (parent, leaf) = self.fanout(kind, hash, true)?;
+        match bound_read_verified(&parent, &leaf, kind, hash, true) {
+            Ok((_, existing)) => {
+                if existing == bytes {
+                    return Ok(());
+                }
+                return Err(corrupt_object_error(
+                    Path::new(&leaf),
+                    "CAS object bytes do not match existing object",
+                    hash,
+                    Some(&hash_bytes(&existing)),
+                ));
+            }
+            Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {}
+            Err(error) => return Err(error),
+        }
+        let (temp_name, mut temp) = bound_create_temp(&parent)?;
+        let result = (|| {
+            temp.write_all(bytes).kio_io(Path::new(&temp_name))?;
+            temp.sync_all().kio_io(Path::new(&temp_name))?;
+            drop(temp);
+            bound_publish(
+                &parent,
+                &temp_name,
+                &leaf,
+                kind,
+                hash,
+                bytes.len() as u64,
+                Some(bytes),
+            )
+        })();
+        if result.is_err() {
+            let _ = bound_remove(&parent, &temp_name);
+        }
+        result
+    }
+
+    fn write_raw_reader<R: Read>(&self, reader: &mut R, max_bytes: u64) -> Result<(String, u64)> {
+        let max_bytes = max_bytes.min(MAX_RAW_OBJECT_BYTES);
+        let (temp_name, mut temp) = bound_create_temp(&self.raw)?;
+        let result = (|| {
+            let mut hasher = Sha256::new();
+            let mut total = 0_u64;
+            let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+            loop {
+                let cap = max_bytes
+                    .saturating_sub(total)
+                    .saturating_add(1)
+                    .min(buffer.len() as u64) as usize;
+                let count = reader
+                    .read(&mut buffer[..cap])
+                    .kio_io(Path::new(&temp_name))?;
+                if count == 0 {
+                    break;
+                }
+                total = total
+                    .checked_add(count as u64)
+                    .ok_or_else(|| object_size_error(ObjectKind::Raw, max_bytes, u64::MAX))?;
+                if total > max_bytes {
+                    return Err(object_size_error(ObjectKind::Raw, max_bytes, total));
+                }
+                hasher.update(&buffer[..count]);
+                temp.write_all(&buffer[..count])
+                    .kio_io(Path::new(&temp_name))?;
+            }
+            temp.sync_all().kio_io(Path::new(&temp_name))?;
+            drop(temp);
+            let hash = format!("sha256:{}", lower_hex(&hasher.finalize()));
+            let (parent, leaf) = self.fanout(ObjectKind::Raw, &hash, true)?;
+            // A temp in raw's base cannot be linked across a fanout directory
+            // by a path-based fallback; linkat keeps both endpoints capability-bound.
+            match bound_read_verified(&parent, &leaf, ObjectKind::Raw, &hash, true) {
+                Ok((_, existing)) => {
+                    let (_, staged) =
+                        bound_read_regular(&self.raw, &temp_name, ObjectKind::Raw.max_bytes())?;
+                    if existing != staged {
+                        return Err(corrupt_object_error(
+                            Path::new(&leaf),
+                            "CAS object bytes do not match existing object",
+                            &hash,
+                            Some(&hash_bytes(&existing)),
+                        ));
+                    }
+                    bound_remove(&self.raw, &temp_name)?;
+                }
+                Err(error) if error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {
+                    bound_publish_between(
+                        &self.raw,
+                        &temp_name,
+                        &parent,
+                        &leaf,
+                        ObjectKind::Raw,
+                        &hash,
+                        total,
+                        None,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+            Ok((hash, total))
+        })();
+        if result.is_err() {
+            let _ = bound_remove(&self.raw, &temp_name);
+        }
+        result
+    }
+}
+
+#[cfg(unix)]
+fn bound_open_dir(parent: &File, leaf: &str) -> Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let leaf = CString::new(leaf)
+        .map_err(|_| KioError::invalid_usage("invalid bound CAS directory name"))?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let io = std::io::Error::last_os_error();
+        if io.kind() == std::io::ErrorKind::NotFound {
+            return Err(KioError::not_found(leaf.to_string_lossy().to_string()));
+        }
+        return Err(KioError::io(
+            io.to_string(),
+            leaf.to_string_lossy().to_string(),
+        ));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn bound_ingest_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".ingest-") else {
+        return false;
+    };
+    let mut fields = rest.split('-');
+    (0..3).all(|_| {
+        fields.next().is_some_and(|field| {
+            !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }) && fields.next().is_none()
+}
+
+#[cfg(unix)]
+fn bound_stage_corrupt(message: &str) -> KioError {
+    KioError::new(
+        "KIO-E-STORE-CORRUPT-001",
+        message,
+        serde_json::json!({}),
+        crate::ExitCode::PermanentFailure,
+    )
+}
+
+#[cfg(unix)]
+fn bound_open_or_create_dir(parent: &File, leaf: &str, create: bool) -> Result<File> {
+    match bound_open_dir(parent, leaf) {
+        Ok(dir) => Ok(dir),
+        Err(error) if create && error.error_code() == "KIO-E-STORE-NOT-FOUND-001" => {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            let name = CString::new(leaf)
+                .map_err(|_| KioError::invalid_usage("invalid bound CAS directory name"))?;
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let io = std::io::Error::last_os_error();
+                if io.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(KioError::io(io.to_string(), leaf));
+                }
+            }
+            bound_open_dir(parent, leaf)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn bound_read_regular(parent: &File, leaf: &str, max: u64) -> Result<(u64, Vec<u8>)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let name = CString::new(leaf).map_err(|_| KioError::invalid_usage("invalid bound CAS leaf"))?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let io = std::io::Error::last_os_error();
+        if io.kind() == std::io::ErrorKind::NotFound {
+            return Err(KioError::not_found(leaf));
+        }
+        return Err(KioError::io(io.to_string(), leaf));
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let meta = file.metadata().kio_io(Path::new(leaf))?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(non_regular_object_error(Path::new(leaf)));
+    }
+    if meta.len() > max {
+        return Err(KioError::new(
+            "KIO-E-STORE-OBJECT-OVERSIZED-001",
+            "CAS object exceeds its byte limit",
+            serde_json::json!({"max_bytes": max, "actual_bytes": meta.len()}),
+            crate::ExitCode::PermanentFailure,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.read_to_end(&mut bytes).kio_io(Path::new(leaf))?;
+    if bytes.len() as u64 != meta.len() {
+        return Err(corrupt_object_error(
+            Path::new(leaf),
+            "CAS object changed while reading",
+            "stable",
+            None,
+        ));
+    }
+    Ok((meta.len(), bytes))
+}
+
+#[cfg(unix)]
+fn bound_read_verified(
+    parent: &File,
+    leaf: &str,
+    kind: ObjectKind,
+    hash: &str,
+    materialize: bool,
+) -> Result<(u64, Vec<u8>)> {
+    let (size, bytes) = bound_read_regular(parent, leaf, kind.max_bytes())?;
+    let actual = hash_bytes(&bytes);
+    if actual != hash {
+        return Err(corrupt_object_error(
+            Path::new(leaf),
+            "CAS object hash does not match filename",
+            hash,
+            Some(&actual),
+        ));
+    }
+    Ok((size, if materialize { bytes } else { Vec::new() }))
+}
+
+#[cfg(unix)]
+fn bound_create_temp(parent: &File) -> Result<(String, File)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    for attempt in 0..128_u32 {
+        let name = format!(
+            ".kio-cas-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+            attempt
+        );
+        let c = CString::new(name.as_str())
+            .map_err(|_| KioError::invalid_usage("invalid bound CAS temp name"))?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            return Ok((name, unsafe { File::from_raw_fd(fd) }));
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(KioError::io(
+                std::io::Error::last_os_error().to_string(),
+                "bound CAS temp",
+            ));
+        }
+    }
+    Err(KioError::io(
+        "unable to allocate private bound CAS temp",
+        "bound CAS temp",
+    ))
+}
+
+#[cfg(unix)]
+fn bound_create_ingest_temp(parent: &File) -> Result<(String, File)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    for attempt in 0..128_u32 {
+        let name = format!(
+            ".ingest-{}-{}-{attempt}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
+        let c = CString::new(name.as_str())
+            .map_err(|_| KioError::invalid_usage("invalid bound raw stage name"))?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            return Ok((name, unsafe { File::from_raw_fd(fd) }));
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(KioError::io(
+                std::io::Error::last_os_error().to_string(),
+                "bound raw stage",
+            ));
+        }
+    }
+    Err(KioError::io(
+        "could not allocate a private bound raw stage",
+        "bound raw stage",
+    ))
+}
+
+#[cfg(unix)]
+fn bound_remove(parent: &File, leaf: &str) -> Result<()> {
+    cap_primitives::fs::remove_file(parent, Path::new(leaf))
+        .map_err(|error| KioError::io(error.to_string(), leaf))
+}
+
+#[cfg(unix)]
+fn bound_publish(
+    parent: &File,
+    temp: &str,
+    leaf: &str,
+    kind: ObjectKind,
+    hash: &str,
+    size: u64,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    bound_publish_between(parent, temp, parent, leaf, kind, hash, size, expected)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn bound_publish_between(
+    from: &File,
+    temp: &str,
+    to: &File,
+    leaf: &str,
+    kind: ObjectKind,
+    hash: &str,
+    size: u64,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    match cap_primitives::fs::hard_link(from, Path::new(temp), to, Path::new(leaf)) {
+        Ok(()) => {
+            bound_remove(from, temp)?;
+            to.sync_all().kio_io(Path::new(leaf))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let (_, existing) = bound_read_verified(to, leaf, kind, hash, true)?;
+            if existing.len() as u64 != size || expected.is_some_and(|bytes| bytes != existing) {
+                return Err(corrupt_object_error(
+                    Path::new(leaf),
+                    "CAS object bytes do not match existing object",
+                    hash,
+                    Some(&hash_bytes(&existing)),
+                ));
+            }
+            bound_remove(from, temp)?;
+        }
+        Err(error) => return Err(KioError::io(error.to_string(), leaf)),
+    }
+    let (actual_size, actual) = bound_read_verified(to, leaf, kind, hash, true)?;
+    if actual_size != size || expected.is_some_and(|bytes| bytes != actual) {
+        return Err(corrupt_object_error(
+            Path::new(leaf),
+            "published CAS object changed",
+            hash,
+            Some(&hash_bytes(&actual)),
+        ));
+    }
+    Ok(())
 }
 
 fn read_verified_object(
@@ -3586,5 +4353,46 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(fs::read(&outside).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_store_keeps_raw_publication_inside_retained_namespace_after_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let kio = dir.path().join(".kio");
+        let objects = kio.join("objects");
+        for kind in ["raw", "trees", "commits"] {
+            fs::create_dir_all(objects.join(kind)).unwrap();
+        }
+        let kio_handle = File::open(&kio).unwrap();
+        let store = ObjectStore::from_bound_kio(&kio_handle).unwrap();
+        let retained_raw = objects.join("raw-retained");
+        fs::rename(objects.join("raw"), &retained_raw).unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        symlink(victim.path(), objects.join("raw")).unwrap();
+
+        for (kind, bytes) in [
+            (ObjectKind::Tree, b"bound tree publication".as_slice()),
+            (ObjectKind::Commit, b"bound commit publication".as_slice()),
+        ] {
+            let hash = hash_bytes(bytes);
+            store.write_object_bytes(kind, &hash, bytes).unwrap();
+            assert_eq!(store.read_object(kind, &hash).unwrap().bytes, bytes);
+        }
+        let bytes = b"bound raw publication";
+        let hash = store.write_raw(bytes).unwrap();
+        let digest = hash_path_component(&hash).unwrap();
+        let retained_leaf = retained_raw
+            .join(&digest[..2])
+            .join(&digest[2..4])
+            .join(digest);
+        assert_eq!(fs::read(retained_leaf).unwrap(), bytes);
+        assert!(fs::read_dir(victim.path()).unwrap().next().is_none());
+        assert_eq!(
+            store.read_object(ObjectKind::Raw, &hash).unwrap().bytes,
+            bytes
+        );
     }
 }
