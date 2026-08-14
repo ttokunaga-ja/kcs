@@ -415,9 +415,9 @@ Status: decided
 組み立てる」形が 1 問も無かった。増補 16 問 (M3-1 ×8 / M3-2 ×4 / M3-3 ×4、全問 expected が 2 scope に跨る) を
 `eval/golden-queries-crossscope.jsonl`
 (digest sha256:1fe0ebf2b51f35323d91bb1a235a282b5fa68a59de7a9c0bac2bc0f4ebade868、専用ランナー
-`eval/run_crossscope.py`) として凍結する。**正解担体は合成コーパスの既存 anchor そのもの**であり
+`kio-eval crossscope`) として凍結する。**正解担体は合成コーパスの既存 anchor そのもの**であり
 `corpus_spec.py`・コーパス・履歴・決定論には一切手を入れていない (既存 2 ファイルの digest は不変を実測確認)。
-専用ランナーである理由は `HISTORY_QUERY_COUNT`(=16 厳密一致) と `assess_history_coverage`(rename 7/edit 3/delete 9 の
+Rust専用ランナーである理由は `HISTORY_QUERY_COUNT`(=16 厳密一致) と `assess_history_coverage`(rename 7/edit 3/delete 9 の
 全 anchor 掘り起こし) が**セット全体の契約**であり、部分集合に当てると必ず落ちるためである。
 **重要な計測所見: Recall@10 はこの欠陥クラスをほぼ検出できない** — replica を無効化しても 16 問すべて 1.000 のままだった
 (合成コーパスは小さく各 expected が固有数値を持つので per-scope 順位でも 10 位以内に入る)。横断融合の欠陥が動かすのは

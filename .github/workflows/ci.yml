@@ -51,8 +51,6 @@ jobs:
           eval.test_persona_renderers
           eval.test_persona_manifest
           eval.test_generate_persona_corpus
-          eval.test_run_eval
-          eval.test_run_crossscope
           eval.test_scale_corpus
           eval.test_scale_attest_bounds
           eval.test_scale_prepare
@@ -89,6 +87,26 @@ jobs:
           --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
       - run: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
       - run: python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: >-
+          target/release/kio-eval crossscope --dry-run
+          --corpus /tmp/kio-eval-corpus --bin target/release/kio
+          --out /tmp/kio-crossscope-unused.json
+      - run: >-
+          target/release/kio-eval crossscope
+          --corpus /tmp/kio-eval-corpus --bin target/release/kio
+          --out /tmp/kio-crossscope-results.json
+      - run: >-
+          target/release/kio-eval rerank-dump
+          --golden eval/golden-queries-short.jsonl
+          --corpus /tmp/kio-eval-corpus --bin target/release/kio
+          --limit 10 --out /tmp/kio-rerank-input.json
+      - run: gzip -dc eval/rerank/rerank-input-fixture.json.gz > /tmp/kio-rerank-fixture-input.json
+      - run: gzip -dc eval/rerank/rerank-output-bge-reranker-v2-m3.json.gz > /tmp/kio-rerank-fixture-output.json
+      - run: >-
+          target/release/kio-eval rerank-apply
+          --input /tmp/kio-rerank-fixture-input.json
+          --output /tmp/kio-rerank-fixture-output.json
+          --report /tmp/kio-rerank-fixture-report.json
       - run: target/release/kio-eval --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
       # The short-query corpus has a measured 22/24 baseline. Unlike the saturated
       # 50-query set, this gate has room to detect both improvements and regressions.

@@ -796,7 +796,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `08 §8` (「新 schema は古い解決ロジックでもエラーなく扱える (forward compatible) … 未知フィールドは無視」)。
 
 **CT3-EVIDENCE-009** — P0 (r2 新設) — eval 結合点: raw_hash / section_id は results[].evidence_pointer から読む
-- Given: `kio search --json` の結果と、eval ハーネス (`eval/run_eval.py`) の Recall@10 判定。
+- Given: `kio search --json` の結果と、Rust eval ハーネス (`kio-eval`) の Recall@10 判定。
 - When: eval ハーネスが上位 10 件の distinct `(raw_hash, section)` を数える。
 - Then: `results[]` の各要素は top-level に `chunk_hash / evidence_pointer / evidence_uri / score /
   scope_path` を持ち (`05 §1.7` の例と同形)、`raw_hash` / `section_id` / `heading_path` は
@@ -804,7 +804,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   `(raw_hash, section_id ?? heading_path 末尾)` を読み出せる (top-level の raw_hash に依存しない)。
 - 根拠: `05 §1.7` (results[] schema — raw_hash は evidence_pointer 内にのみ定義 / 「evidence_pointer は
   08 §2 の schema をそのまま埋め込む」) / `08 §2` / `09 §4.3` (Recall@10 = distinct (raw_hash, section))。
-- 補足: `eval/run_eval.py` は evidence_pointer 経由の読み出しに修正済み (2026-07-03、eval 側修正は発注側)。
+- 補足: Rust `kio-eval` は evidence_pointer 経由の読み出しを正本とする。
   本テストは search 側 schema と eval 側読み出しの**結合点**を固定し、schema 変更による Recall 計測の
   silent 破壊を防ぐ。
 
@@ -1050,7 +1050,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 | CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | Step 1 (ws1a) で担保。Step 3 は commit の tree entry 射影 (tree_entries) を読むが tree/commit 生成は Step 1 |
 | `kio search` と書き込み系の lock 相互作用 (`kio index` と `kio search` 同時実行 / rebuild 中の search) | `05 §6` (search は lock 取得しない / rebuild 中は旧 db or `KIO-E-INDEX-REBUILDING-001`) は横断契約。search が読み取り系で lock を取らない点は ws1a CT-LOCK-003 の延長で担保。`KIO-E-INDEX-REBUILDING-001` は rebuild-db (Step 2 枠) 実行中の search 挙動につき P2 参考に留め本書では固定しない |
 
-**Step 3 の Done gate (r2 で整理)**: eval ハーネス (`eval/run_eval.py`) のフル実行は M3-2 (`--all-history`) /
+**Step 3 の Done gate (r2 で整理)**: Rust eval ハーネス (`kio-eval`) のフル実行は M3-2 (`--all-history`) /
 M3-3 (`--include-deleted`) のクエリを含むが、これらのフラグは Step 4 実装 (`09 §3.1`)。したがって
 **Step 3 の完了判定 = 「M3-1 の 18 クエリ (`eval/golden-queries.jsonl` の scenario=M3-1) で
 Recall@10 >= 0.8」+「本書 P0 全緑」** とし、M3-2 / M3-3 の Recall 判定は Step 4 完了時に行う

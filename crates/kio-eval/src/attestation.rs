@@ -27,6 +27,9 @@ pub const MAX_POINTER_ATTESTATION_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum number of returned pointers checked for one query.
 pub const MAX_POINTER_ATTESTATIONS_PER_QUERY: usize = 10;
 const MAX_SCOPE_RECORD_BYTES: u64 = 64 * 1024;
+/// Current rerank dumps have a stricter source-render budget than generic
+/// historical attestation, so reject a large chunk before JSON parsing.
+const MAX_CURRENT_CHUNK_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("{message}")]
@@ -72,7 +75,6 @@ struct ObjectKey {
 enum CachedObject {
     Commit(CommitObject),
     Tree(TreeObject),
-    Chunk(ChunkObject),
     Failure(PointerAttestationError),
 }
 
@@ -106,7 +108,7 @@ impl PointerAttestor {
                 .try_clone_kio_handle()
                 .map_err(|_| PointerAttestationError::new("scope capability unavailable"))?;
             let scope_id = read_scope_id(&kio)?;
-            if scope_kio_dirs.insert(scope_id, kio).is_some() {
+            if scope_kio_dirs.insert(scope_id.clone(), kio).is_some() {
                 return Err(PointerAttestationError::new(
                     "duplicate scope_id in evaluator corpus",
                 ));
@@ -126,6 +128,26 @@ impl PointerAttestor {
 
     /// Attest one JSON evidence-pointer value.
     pub fn attest(&mut self, value: &Value) -> AttestationResult<()> {
+        self.attest_chunk(value, true).map(drop)
+    }
+
+    /// Attest a current-tree result and return its immutable chunk text.
+    ///
+    /// Current snapshot trees may predate normalization promotion and therefore
+    /// lack a tree-level normalize reference. The pointer still has to bind a
+    /// real commit/tree path and matching raw/profile Chunk CAS. Historical
+    /// scoring continues to use [`Self::attest`], which requires the stronger
+    /// generation link.
+    pub fn attest_current_chunk_text(&mut self, value: &Value) -> AttestationResult<String> {
+        let chunk = self.attest_chunk(value, false)?;
+        Ok(chunk.text)
+    }
+
+    fn attest_chunk(
+        &mut self,
+        value: &Value,
+        require_normalize: bool,
+    ) -> AttestationResult<ChunkObject> {
         let pointer: EvidencePointer = serde_json::from_value(value.clone())
             .map_err(|_| PointerAttestationError::new("result has invalid evidence_pointer"))?;
         let validated = pointer
@@ -139,6 +161,13 @@ impl PointerAttestor {
             .ok_or_else(|| PointerAttestationError::new("pointer has invalid path_at_commit"))?;
 
         let commit = self.read_commit(&pointer.scope_id, &pointer.commit)?;
+        if !require_normalize
+            && self.current_head(&pointer.scope_id)?.as_deref() != Some(&pointer.commit)
+        {
+            return Err(PointerAttestationError::new(
+                "pointer commit is not the retained scope's current HEAD",
+            ));
+        }
         if pointer
             .tree
             .as_deref()
@@ -159,17 +188,26 @@ impl PointerAttestor {
                 "tree path raw_hash does not match pointer",
             ));
         }
-        let normalize = entry
-            .normalize
-            .as_ref()
-            .ok_or_else(|| PointerAttestationError::new("tree path has no normalized identity"))?;
-        if normalize.tool_profile_hash != pointer.tool_profile_hash {
+        let normalize = entry.normalize.as_ref();
+        if require_normalize && normalize.is_none() {
+            return Err(PointerAttestationError::new(
+                "tree path has no normalized identity",
+            ));
+        }
+        if normalize
+            .is_some_and(|normalize| normalize.tool_profile_hash != pointer.tool_profile_hash)
+        {
             return Err(PointerAttestationError::new(
                 "tree path profile does not match pointer",
             ));
         }
 
-        let chunk = self.read_chunk(&pointer.scope_id, &pointer.chunk_hash)?;
+        let chunk_limit = if require_normalize {
+            MAX_CHUNK_OBJECT_BYTES
+        } else {
+            MAX_CURRENT_CHUNK_OBJECT_BYTES
+        };
+        let chunk = self.read_chunk(&pointer.scope_id, &pointer.chunk_hash, chunk_limit)?;
         if chunk.raw_hash != pointer.raw_hash {
             return Err(PointerAttestationError::new(
                 "chunk raw_hash does not match pointer",
@@ -180,12 +218,22 @@ impl PointerAttestor {
                 "chunk profile does not match pointer",
             ));
         }
-        if chunk.r#gen != normalize.r#gen {
+        if normalize.is_some_and(|normalize| chunk.r#gen != normalize.r#gen) {
             return Err(PointerAttestationError::new(
                 "chunk generation does not match tree path",
             ));
         }
-        Ok(())
+        // Chunk reads may be large enough for a writer to advance HEAD while
+        // they are in progress. Recheck the retained authority records before
+        // handing current-tree text to the dump consumer.
+        if !require_normalize
+            && self.current_head(&pointer.scope_id)?.as_deref() != Some(&pointer.commit)
+        {
+            return Err(PointerAttestationError::new(
+                "pointer commit is not the retained scope's current HEAD",
+            ));
+        }
+        Ok(chunk)
     }
 
     /// Attest direct pointer values, bounded to the supplied top `k`.
@@ -228,6 +276,20 @@ impl PointerAttestor {
         }
     }
 
+    /// Re-read retained authority records immediately before returning current
+    /// text, so a pointer cannot be validated against a stale pre-search HEAD.
+    fn current_head(&self, scope_id: &str) -> AttestationResult<Option<String>> {
+        let kio_dir = self
+            .scope_kio_dirs
+            .get(scope_id)
+            .ok_or_else(|| {
+                PointerAttestationError::new("pointer scope_id is not in the synthetic corpus")
+            })?
+            .try_clone()
+            .map_err(|_| PointerAttestationError::new("scope capability unavailable"))?;
+        read_current_head(&kio_dir)
+    }
+
     fn read_tree(&mut self, scope_id: &str, hash: &str) -> AttestationResult<TreeObject> {
         match self.read_object(scope_id, AttestedObjectKind::Tree, hash)? {
             CachedObject::Tree(tree) => Ok(tree),
@@ -235,11 +297,28 @@ impl PointerAttestor {
         }
     }
 
-    fn read_chunk(&mut self, scope_id: &str, hash: &str) -> AttestationResult<ChunkObject> {
-        match self.read_object(scope_id, AttestedObjectKind::Chunk, hash)? {
-            CachedObject::Chunk(chunk) => Ok(chunk),
-            _ => Err(PointerAttestationError::new("chunk cache type mismatch")),
+    fn read_chunk(
+        &mut self,
+        scope_id: &str,
+        hash: &str,
+        max_bytes: u64,
+    ) -> AttestationResult<ChunkObject> {
+        // Chunk text can be very large. Do not cache or clone it: the caller
+        // either validates it once or moves it directly into the dump.
+        let kio_dir = self
+            .scope_kio_dirs
+            .get(scope_id)
+            .ok_or_else(|| {
+                PointerAttestationError::new("pointer scope_id is not in the synthetic corpus")
+            })?
+            .try_clone()
+            .map_err(|_| PointerAttestationError::new("scope capability unavailable"))?;
+        if self.verified_bytes > MAX_POINTER_ATTESTATION_BYTES - max_bytes {
+            return Err(PointerAttestationError::new(
+                "pointer attestation byte bound exhausted",
+            ));
         }
+        self.read_chunk_object(&kio_dir, hash, max_bytes)
     }
 
     fn read_object(
@@ -258,6 +337,9 @@ impl PointerAttestor {
                 CachedObject::Failure(error) => Err(error.clone()),
                 object => Ok(object.clone()),
             };
+        }
+        if kind == AttestedObjectKind::Chunk {
+            return self.read_uncached(scope_id, kind, hash);
         }
         let result = self.read_uncached(scope_id, kind, hash);
         let cached = match &result {
@@ -322,10 +404,9 @@ impl PointerAttestor {
                     AttestedObjectKind::Chunk => unreachable!(),
                 }
             }
-            AttestedObjectKind::Chunk => {
-                let chunk = self.read_chunk_object(&kio_dir, hash)?;
-                Ok(CachedObject::Chunk(chunk))
-            }
+            AttestedObjectKind::Chunk => Err(PointerAttestationError::new(
+                "chunk reads bypass the metadata cache",
+            )),
         }
     }
 
@@ -359,8 +440,9 @@ impl PointerAttestor {
         &mut self,
         kio_dir: &fs::File,
         hash: &str,
+        max_bytes: u64,
     ) -> AttestationResult<ChunkObject> {
-        let result = read_cap_cas_file(kio_dir, "chunks", hash, MAX_CHUNK_OBJECT_BYTES);
+        let result = read_cap_cas_file(kio_dir, "chunks", hash, max_bytes);
         let (bytes, consumed) = match result {
             Ok(value) => value,
             Err(error) => {
@@ -427,6 +509,34 @@ fn read_scope_id(kio_dir: &fs::File) -> AttestationResult<String> {
         .filter(|value| is_ulid(value))
         .ok_or_else(|| PointerAttestationError::new("scope record has invalid scope_id"))?;
     Ok(scope_id.to_owned())
+}
+
+/// Bind current-tree extraction to both authority records. A populated HEAD
+/// and branch ref must agree; accepting only a historical CAS path would let a
+/// search result smuggle an old snapshot into a current-tree dump.
+fn read_current_head(kio_dir: &fs::File) -> AttestationResult<Option<String>> {
+    let head = read_cap_regular_file(kio_dir, "HEAD", MAX_SCOPE_RECORD_BYTES)
+        .map_err(|_| PointerAttestationError::new("current HEAD unavailable"))?;
+    let refs = cap_fs::open_dir_nofollow(kio_dir, Path::new("refs"))
+        .and_then(|refs| cap_fs::open_dir_nofollow(&refs, Path::new("heads")))
+        .map_err(|_| PointerAttestationError::new("current branch ref unavailable"))?;
+    let branch = read_cap_regular_file(&refs, "main", MAX_SCOPE_RECORD_BYTES)
+        .map_err(|_| PointerAttestationError::new("current branch ref unavailable"))?;
+    let head = std::str::from_utf8(&head)
+        .map_err(|_| PointerAttestationError::new("current HEAD is not UTF-8"))?
+        .trim();
+    let branch = std::str::from_utf8(&branch)
+        .map_err(|_| PointerAttestationError::new("current branch ref is not UTF-8"))?
+        .trim();
+    if head.is_empty() && branch.is_empty() {
+        return Ok(None);
+    }
+    if !is_hash(head) || head != branch {
+        return Err(PointerAttestationError::new(
+            "current HEAD and branch ref are invalid or disagree",
+        ));
+    }
+    Ok(Some(head.to_owned()))
 }
 
 #[derive(Debug)]
@@ -546,7 +656,7 @@ mod tests {
     use std::fs;
 
     use kio_core::{
-        cas::{ObjectKind, ObjectStore, hash_bytes},
+        cas::{ChunkObject, ObjectKind, ObjectStore, hash_bytes},
         dag::{CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, build_tree},
         scope::Repository,
     };
@@ -555,7 +665,7 @@ mod tests {
 
     use crate::boundary::BoundCorpus;
 
-    use super::PointerAttestor;
+    use super::{PointerAttestor, read_cap_regular_file};
 
     const RAW_HASH: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
@@ -570,6 +680,7 @@ mod tests {
         root: TempDir,
         scope: String,
         pointer: Value,
+        chunk: ChunkObject,
     }
 
     fn fixture() -> Fixture {
@@ -642,11 +753,12 @@ mod tests {
                 "chunk_hash": chunk_hash,
                 "path_at_commit": "old-name.md",
             }),
+            chunk,
         }
     }
 
     #[test]
-    fn attests_valid_pointer_and_caches_all_cas_reads() {
+    fn attests_valid_pointer_and_does_not_cache_chunk_text() {
         let fixture = fixture();
         let mut attestor =
             PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
@@ -654,7 +766,93 @@ mod tests {
         attestor.attest(&fixture.pointer).unwrap();
         let verified = attestor.verified_bytes();
         attestor.attest(&fixture.pointer).unwrap();
-        assert_eq!(attestor.verified_bytes(), verified);
+        // Commit/tree metadata are cached; chunks deliberately are not so a
+        // large text payload is never retained and cloned by the attestor.
+        assert!(attestor.verified_bytes() > verified);
+    }
+
+    #[test]
+    fn current_chunk_text_accepts_only_the_explicit_missing_normalize_case() {
+        let fixture = fixture();
+        let store = ObjectStore::new(fixture.root.path().join(&fixture.scope).join(".kio"));
+        let tree = build_tree(vec![TreeEntry {
+            path: "old-name.md".to_owned(),
+            entry_type: "file".to_owned(),
+            raw_hash: RAW_HASH.to_owned(),
+            normalize: None,
+        }])
+        .unwrap();
+        let (tree_hash, _) = store
+            .write_json(ObjectKind::Tree, &serde_json::to_value(&tree).unwrap())
+            .unwrap();
+        let commit = CommitObject::new(
+            tree_hash.clone(),
+            vec![],
+            "2026-07-13T00:00:00Z".to_owned(),
+            "current candidate".to_owned(),
+            TOOL_LOCK_HASH.to_owned(),
+            CommitStats {
+                files_added: 1,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            CommitType::Manual,
+        )
+        .unwrap();
+        let (commit_hash, _) = store
+            .write_json(ObjectKind::Commit, &serde_json::to_value(&commit).unwrap())
+            .unwrap();
+        let mut pointer = fixture.pointer.clone();
+        pointer["commit"] = json!(commit_hash);
+        pointer["tree"] = json!(tree_hash);
+        let kio = fixture.root.path().join(&fixture.scope).join(".kio");
+        fs::write(kio.join("HEAD"), pointer["commit"].as_str().unwrap()).unwrap();
+        fs::write(
+            kio.join("refs/heads/main"),
+            pointer["commit"].as_str().unwrap(),
+        )
+        .unwrap();
+
+        let mut strict =
+            PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
+                .unwrap();
+        assert!(strict.attest(&pointer).is_err());
+        let mut current =
+            PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
+                .unwrap();
+        assert_eq!(
+            current.attest_current_chunk_text(&pointer).unwrap(),
+            fixture.chunk.text
+        );
+
+        pointer["tool_profile_hash"] = json!(TOOL_LOCK_HASH);
+        assert!(current.attest_current_chunk_text(&pointer).is_err());
+    }
+
+    #[test]
+    fn current_chunk_text_rejects_historical_pointer_even_when_its_cas_path_is_valid() {
+        let fixture = fixture();
+        let kio = fixture.root.path().join(&fixture.scope).join(".kio");
+        // The fixture pointer is a valid historical object, but no current
+        // authority points at it (a freshly initialized repository is unborn).
+        fs::write(
+            kio.join("HEAD"),
+            b"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        fs::write(
+            kio.join("refs/heads/main"),
+            b"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut attestor =
+            PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
+                .unwrap();
+        assert!(
+            attestor
+                .attest_current_chunk_text(&fixture.pointer)
+                .is_err()
+        );
     }
 
     #[test]
@@ -681,6 +879,35 @@ mod tests {
         wrong_profile["tool_profile_hash"] =
             json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         assert!(attestor.attest(&wrong_profile).is_err());
+    }
+
+    #[test]
+    fn rejects_chunk_generation_that_differs_from_the_tree_entry() {
+        let fixture = fixture();
+        let mut wrong_generation = fixture.chunk.clone();
+        wrong_generation.r#gen = 4;
+        let chunk_hash = ObjectStore::new(fixture.root.path().join(&fixture.scope).join(".kio"))
+            .write_chunk(&wrong_generation)
+            .unwrap();
+        let mut pointer = fixture.pointer.clone();
+        pointer["chunk_hash"] = json!(chunk_hash);
+
+        let mut attestor =
+            PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
+                .unwrap();
+        assert!(attestor.attest(&pointer).is_err());
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_and_non_regular_objects() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = fs::File::open(directory.path()).unwrap();
+
+        fs::write(directory.path().join("oversized"), b"{}").unwrap();
+        assert!(read_cap_regular_file(&handle, "oversized", 1).is_err());
+
+        fs::create_dir(directory.path().join("not-a-file")).unwrap();
+        assert!(read_cap_regular_file(&handle, "not-a-file", 1024).is_err());
     }
 
     #[test]

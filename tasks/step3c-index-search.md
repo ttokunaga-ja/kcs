@@ -11,7 +11,7 @@ Kio Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 - 契約テスト仕様: `tasks/step3a-contract-tests.md` r3 — ベクタ実計算済み・クロスレビュー再計算一致。**期待値の変更禁止**
 - spec 追記済み (2026-07-03): chunk 境界の正準規則 (04 §4.1)、MMR relevance 正規化 (05 §1.4)、query_hash 正準構成 (05 §1.8)、per-search latency 記録 (05 §7)
 - embedding は **単一 multimodal profile 採用** (07 §5.3 で確定、tasks/step3-embedding-verify.md 確定版): `gemini-embedding-2` (GA) / 768 次元 (MRL 切り詰め、profile 固定) / cosine / modality=multimodal / mode=online (バッチ非対応 — client 側並列 + 429 backoff)。**MVP で embed するのは text chunk のみ。非 multimodal profile は採用不可 (03 §7)**
-- 検索評価ハーネス: `eval/` (コーパス生成・履歴再現・golden queries 50・run_eval.py)
+- 検索評価ハーネス: Rust `kio-eval` + `eval/` の凍結fixture (コーパス生成・履歴再現・golden queries 50)
 
 ## 実装範囲 (正本: docs/09-mvp-scope.md §3.1 の Step 3 行)
 
@@ -31,7 +31,7 @@ Kio Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 1. step3a の P0 60 を Rust テストに落とす (ベクタ fixture 一致 assert 含む)。**pipeline 系契約は CLI (kio search / kio index) を通る結合テスト** — Step 2 の教訓 (純関数テストのみは完了と見なさない)
 2. 依存追加可 (最小): rusqlite (bundled)、sqlite-vec、既存 ureq。**テストの外部通信ゼロ** (embedding はモック / KIO_TEST_* env フック方式を踏襲)
 3. 実装 green 化 → `eval/` の M3-1 サブセットで実測 (eval/README.md の手順どおり):
-   `python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus` → `python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio` → `python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio --scenario M3-1` で **Recall@10 >= 0.8** を確認 (M3-2/3 は Step 4 完了時)
+   `target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus` → `python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio` → `target/release/kio-eval --corpus /tmp/kio-eval-corpus --bin target/release/kio --scenario M3-1` で **Recall@10 >= 0.8** を確認 (M3-2/3 は Step 4 完了時)
 
 ## spec 未定義部の暫定判断 (step3a §C の実装者判断 5 件。この通り実装し decisions に記録)
 

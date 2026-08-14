@@ -602,7 +602,7 @@ path-sorted tree/commit and one SQLite swap; unaffected entries retain prior pro
 
 ## I. Evaluation and MVP decision
 
-**CT4-EVAL-001 — P0 — harness unit tests.** `python3 -m unittest eval.test_run_eval` is green; golden,
+**CT4-EVAL-001 — P0 — harness unit tests.** `cargo test -p kio-eval --all-targets` is green; golden,
 corpus spec, and history fixture hashes are unchanged. (`09 §4.3`)
 
 **CT4-EVAL-002 — P0 — replay proves history.** Fresh generated corpus replay records rename=7,

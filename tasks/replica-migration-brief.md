@@ -153,8 +153,8 @@ per-scope 側の短語経路を読むこと (`grep -n "short_token_instr_sql\|ex
 ## 4.1 使う道具
 
 ```bash
-python3 eval/run_eval.py --help
-python3 eval/run_crossscope.py --help
+target/release/kio-eval --help
+target/release/kio-eval crossscope --help
 ```
 
 - 評価コーパスは **7 スコープ** (`eval/corpus_spec.py` の `SCOPES`)。横断経路を通る
@@ -168,7 +168,7 @@ python3 eval/run_crossscope.py --help
 1. **着手前にベースラインを取り、記録すること。**変更後だけ測っても意味がない
 2. **項目 3 の前後で短語セットを測ること。**replica 側の短語レーンが per-scope と
    同じ答えを返すかは、ここでしか判らない
-3. **横断 eval (`run_crossscope.py`) の `worst_expected_rank`。**
+3. **横断 eval (`kio-eval crossscope`) の `worst_expected_rank`。**
    [09-mvp-scope.md](../docs/09-mvp-scope.md) に「replica を無効化して比較する」旧手法の
    数字が残っているが、**その手法は再現不能になった** (無効化する対象が無い)。
    **移行後に 16 問すべてで測り直し、その数字を 09 に書くこと** — 特に履歴 8 問は

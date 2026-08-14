@@ -11,9 +11,8 @@
 //! Covered here: QB1-QB9 (§A, full), QB11/QB12/QB14/QB15/QB18/QB19/QB20/
 //! QB23 (§B slice), QB29/QB31/QB32/QB37 (§C slice), QB50-QB58 (§D, full —
 //! `kio log --at/--since` real implementation), QB61 (§E slice). QB24's
-//! Recall@10 projection lives in the Rust `kio-eval` runner, with the
-//! independent Python oracle covered by `eval/test_run_eval.py`; it is not a
-//! CLI contract here.
+//! Recall@10 projection and frozen malformed-wire cases live in the Rust
+//! `kio-eval` runner/tests; they are not CLI contracts here.
 //!
 //! Deliberately deferred (substantial new subsystems outside a safe,
 //! single-pass scope, or dependent on P2-C infra this book explicitly does

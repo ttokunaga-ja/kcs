@@ -35,7 +35,7 @@ green ~267、clippy/fmt clean)。北極星シナリオ M3-1 は実 Gemini hybrid
    Mistral OCR の images[] 領域 (チャート/グラフ内テキスト、境界 = C3) の説明+書き起こしを取得し
    unit metadata に載せて chunk 化時に検索対象へ。`.kio/config.toml` で無効化可
 7. **eval M3-2 / M3-3 の結線と Done 判定**: golden-queries.jsonl に M3-2 (16 件、`--all-history`) /
-   M3-3 (16 件、`--include-deleted`) が凍結済み。time-travel 実装後に `run_eval.py --scenario M3-2/M3-3`
+   M3-3 (16 件、`--include-deleted`) が凍結済み。time-travel 実装後に `kio-eval --scenario M3-2/M3-3`
    で Recall@10 >= 0.8 を実測 (text-only 0.8889 / hybrid 1.0 が M3-1 の実績)
 8. **online Markdownize 成果物の HEAD/search への昇格** (R8 F6、2026-07-05 裁定で Step 4 保留):
    現状 online markdownize task は Done まで走り `objects/normalized_units` に成果物を生成 (課金) するが、
@@ -50,7 +50,7 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
 ## 2. 既に用意されている前提物 (再作成不要)
 
 - **eval ハーネス**: `eval/` にコーパス生成・履歴再現 (rename 7/edit 3/delete 9)・golden 50 件
-  (M3-1:18 / M3-2:16 / M3-3:16、凍結済み・変更禁止)・run_eval.py (--scenario 対応)
+  (M3-1:18 / M3-2:16 / M3-3:16、凍結済み・変更禁止)・Rust `kio-eval` (`--scenario` 対応)
 - **bbox_annotation 検証 fixture**: `experiments/ocr-verification/` に境界調査 fixture 18 ページ +
   曖昧画像 15 枚。実 API 検証は実施済みで裁定も完了 (bbox_annotation 採用)
 - **decisions**: `tasks/ws1c-decisions.md` に #1〜#59 の実装判断。Step 4 の新判断は #60 以降に追記
@@ -97,7 +97,7 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
    docs 根拠を要求)。M3-2/M3-3 の eval 結線契約も含める
 3. 上がってきた step4a を 4 エンジンでクロスレビュー → 裁定 → r2
 4. scaffold (必要なら) → step4c 発注書 → 実装委譲 → 多エンジン監査 → 修正ラウンド → merge
-5. **完了ゲート**: `cargo test --workspace` 全 green + `run_eval.py --scenario M3-2` と `M3-3` で
+5. **完了ゲート**: `cargo test --workspace` 全 green + `kio-eval --scenario M3-2` と `M3-3` で
    Recall@10 >= 0.8 実測 + restore/purge/verify の実機シナリオ。これで**北極星 3 シナリオ Done**
 6. Step 4 完了後、`tasks/exploratory-audit-runbook.md` で探索型監査を最低 1-2 ラウンド
 

@@ -55,9 +55,13 @@ The full check that CI runs:
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --all-targets --locked
 ```
 
-The evaluation harness is Python and runs without a Rust build:
+The canonical evaluator, cross-scope supplement, and offline rerank scorer are
+Rust (`kio-eval`) and are covered by the workspace tests. Python remains only
+for fixture generation/replay, persona, scale preparation, and experimental
+ML lanes that do not yet have a Rust replacement:
 
 ```bash
+cargo test -p kio-eval --all-targets --locked
 python3 -m unittest discover -s eval -t .
 ```
 

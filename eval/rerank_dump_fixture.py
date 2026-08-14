@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pass 1 over fixture-B — the corpus where a reranker can actually be measured.
 
-`rerank_dump.py` targets the synthetic history corpus, which cannot pose the
+`kio-eval rerank-dump` targets the synthetic history corpus, which cannot pose the
 question: offline runs carry no vector lane, so `fuse_rrf` sees only what FTS
 matched and 24 of 25 queries come back with ten or fewer candidates. Reranking
 cannot change Recall@10 when the whole result set already fits in the top ten.
@@ -16,9 +16,10 @@ carries the name before that), against `Path(expected.path).name`. Following
 `run_qhard.py` here rather than inventing a projection is deliberate; pass 1
 already shipped one bug from reimplementing a scorer's key.
 
-`rerank_apply.py` needs no change: it intersects whatever projection both sides
-agree on, so a one-element `[title]` key works the same as the synthetic set's
-three-element one.
+`kio-eval rerank-apply` accepts this fixture-B contract alongside the synthetic
+dump contract: it scores any nonempty, homogeneous key array exactly, so this
+one-element `[title]` projection remains distinct from the synthetic
+three-element key.
 
 Expects the fixture layout `embed_full.py` builds:
 

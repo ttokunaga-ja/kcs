@@ -1368,6 +1368,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn bounded_process_rejects_non_utf8_stdout() {
+        let mut command = shell("printf '\\377'");
+        let error =
+            run_bounded_command(&mut command, BoundedProcessOptions::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::NonUtf8 { stream: "stdout" }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bounded_process_collects_both_terminal_stream_events_repeatedly() {
         for _ in 0..64 {
             let mut command = shell("printf stdout; printf stderr >&2");

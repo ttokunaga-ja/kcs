@@ -158,7 +158,7 @@ driftを減らせる。
 
 | 対象 | 現在 | 移行方針 |
 |---|---|---|
-| slugify | Python `run_eval.py`とRust chunkingに重複 | Rustをcanonical、Pythonはgolden差分のみ |
+| slugify | 当時のPython evaluatorとRust chunkingに重複 | Rustをcanonicalとし、frozen wire vectorsへ移行済み |
 | canonical JSON / chunk identity | PythonがRust CAS/JCSを再実装 | Rust APIを使用し、Unicode/number/optional omission vectorで独立確認 |
 | Recall@k | Pythonだけ | internal Rust evaluatorへ実装 |
 | nearest-rank percentile | Python内でも2重実装 | Rustで一つに統合 |

@@ -481,7 +481,7 @@ pinned object の unit を `failed` に書き換え (PB45 と同じ fixture 手�
 裁定 §1 (R25-1) と §3 に「eval の多くが単一 scope で `searched.len() <= 1` の早期 return に落ちるため
 横断経路を通らない」と書いたが、**ハーネスを読んで確かめたところ間違っていた**。
 
-`eval/run_eval.py:477` は `[bin, "--json", "search", query, "--all-scopes"]` を実行し、
+Rust `kio-eval` は `[bin, "--json", "search", query, "--all-scopes"]` を実行し、
 `corpus_spec.SCOPES` は 7 scope (`research / notes / downloads / projects-a / projects-b /
 specs / journal`) である。したがって**全 50 クエリが `searched.len() == 7` で横断経路を通り、
 replica が適用される**。実行して確認した — `aggregator.applied = true`。
@@ -546,13 +546,13 @@ preserves_shared_content_embeddings` が落ちた (`deleted_chunk_vectors` が 2
 
 ### 専用ランナーが必要だった理由
 
-`run_eval.py` は**セット全体**の性質を 2 つ検査する。どちらも 50 問セットの契約であって増補の契約ではない:
+Rust `kio-eval` は**セット全体**の性質を 2 つ検査する。どちらも 50 問セットの契約であって増補の契約ではない:
 
 - `HISTORY_QUERY_COUNT`(=16 **厳密一致**) — 増補を足すと 20 になって落ちる
 - `assess_history_coverage` — その run が rename 7 / edit 3 / delete 9 の全 anchor を掘り起こしたこと。
   増補だけを流すと落ちる
 
-したがって `run_crossscope.py` は**部分集合に意味のあるゲートだけ**を適用する
+したがって `kio-eval crossscope` は**部分集合に意味のあるゲートだけ**を適用する
 (Recall@10 目標・レイテンシ目標・Evidence Pointer 必須フィールド)。加えて
 「expected が単一 scope に閉じたクエリが混ざったら error」という、このセットがこのセットである条件を自前で守る。
 
@@ -580,6 +580,6 @@ preserves_shared_content_embeddings` が落ちた (`deleted_chunk_vectors` が 2
 ### 成果物
 
 - `eval/golden-queries-crossscope.jsonl` (16 問、digest `sha256:1fe0ebf2…`)
-- `eval/run_crossscope.py` (専用ランナー)
+- `kio-eval crossscope` (Rust専用ランナー)
 - `eval/crossscope-results.json` / `eval/crossscope-results-no-replica-2026-07-26.json` (対照)
 - `eval/README.md` と `docs/09 §4.3` に凍結記録

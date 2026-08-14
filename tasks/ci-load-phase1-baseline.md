@@ -125,9 +125,9 @@ importは検出されなかった。50 test moduleが`subprocess`をimportし、
 
 1. `percentile_nearest_rank`、`slugify`、chunk identity hashのような決定論的primitive。
    現在はPython内でも重複し、一部はRust製品実装も再実装している。
-2. deterministic corpus/manifest生成 (`generate_corpus.py`)。
+2. deterministic corpus/manifest生成 (現行は Rust `kio-eval generate-corpus`)。
 3. CLI history replay (`replay_history.py`)。
-4. Recall/latency集計、exit分類、manifest検証を行う`run_eval.py`の決定論的部分。
+4. Recall/latency集計、exit分類、manifest検証 (現行は Rust `kio-eval`)。
 
 ただし、Python validatorがRust製品実装から独立したoracleであること自体に価値がある契約も
 ある。Rustへ製品ロジックを一本化したあと、Python側は同じ実装を丸ごと再実装するのではなく、

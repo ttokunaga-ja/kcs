@@ -47,7 +47,7 @@
   実質的に何もしていない** — 全部が top 10 に入るから
 - 実行時間の現状: `step3_p0_contract` 244 本で **78 秒**、`step4b_p2c_contract` 38 本で **31 秒**
 - CI の recall ゲートは**存在する**: `.github/workflows/ci.yml` の
-  `synthetic-history-eval` が `run_eval.py` を M3-1 / M3-2 / M3-3 で走らせている
+  `synthetic-history-eval` が Rust `kio-eval` を M3-1 / M3-2 / M3-3 で走らせている
 
 **語レーンがそのゲートをすり抜けたのは、既定 off の cargo feature だったから。**
 CI は feature 無しでビルドするので、順位を見られる唯一のゲートが
@@ -154,16 +154,16 @@ crates/kio-cli/tests/step5_local_ocr.rs:364     [count] s3e_the_related_image_fl
 1. **`eval/golden-queries-short.jsonl` を追加する。**現在ゲートされている 50 問は
    **1.000 で飽和**していて、悪化しか検出できない。短問集合は **22/24 (0.9167)** で、
    **伸びしろが残っている唯一の集合**である
-   - 呼び方: `python3 eval/run_eval.py --golden eval/golden-queries-short.jsonl --scenario M3-1 --corpus ... --bin ...`
-   - **M3-1 のみで走らせること。**`run_eval.py:1151` の `HISTORY_QUERY_COUNT = 16` は
+   - 呼び方: `target/release/kio-eval --golden eval/golden-queries-short.jsonl --scenario M3-1 --corpus ... --bin ...`
+   - **M3-1 のみで走らせること。**Rust runner の `HISTORY_QUERY_COUNT = 16` は
      M3-2 / M3-3 に対する**セット全体の契約**で、問題数の違う golden file を
-     当てると落ちる (`run_crossscope.py` が別ランナーになっているのはこの理由)
+     当てると落ちる (`kio-eval crossscope` が別ランナーになっているのはこの理由)
    - **現行 HEAD での基準値は 22/24。**これを下回ったら失敗にすること
 
 2. **順位に影響する cargo feature は、eval job で on 側も走らせる。
    さもなくば optional にしない。**語レーンが通った道はここだった
 
-3. `run_crossscope.py` (16 問) の追加も検討する。`worst_expected_rank` という
+3. `kio-eval crossscope` (16 問) の追加も検討する。`worst_expected_rank` という
    診断値を持っていて、Recall@10 が構造的に見えない融合の欠陥を見られる
 
 ---

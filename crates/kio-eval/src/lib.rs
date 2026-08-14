@@ -1,10 +1,13 @@
 //! Deterministic primitives owned by Kio's internal evaluation binary.
 
+pub mod artifact;
 pub mod attestation;
 pub mod boundary;
+pub mod crossscope;
 pub mod generator;
 pub mod manifest;
 pub mod qhard;
+pub mod rerank;
 pub mod resolver;
 pub mod runner;
 pub mod scale;
@@ -159,8 +162,32 @@ mod golden_vectors {
     }
 
     fn vectors() -> Vectors {
+        parse_frozen_vectors(&frozen_vector_bytes()).unwrap()
+    }
+
+    fn frozen_vector_bytes() -> Vec<u8> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/golden-vectors.json");
-        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        fs::read(path).unwrap()
+    }
+
+    fn parse_frozen_vectors(bytes: &[u8]) -> Result<Vectors, String> {
+        let vectors: Vectors = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        if vectors.schema_version != 1 {
+            return Err("unsupported golden vector schema_version".to_owned());
+        }
+        Ok(vectors)
+    }
+
+    fn replace_once(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+        let offset = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("frozen vector fixture contains replacement target");
+        let mut replaced = Vec::with_capacity(bytes.len() - needle.len() + replacement.len());
+        replaced.extend_from_slice(&bytes[..offset]);
+        replaced.extend_from_slice(replacement);
+        replaced.extend_from_slice(&bytes[offset + needle.len()..]);
+        replaced
     }
 
     #[test]
@@ -222,6 +249,54 @@ mod golden_vectors {
     fn percentile_rejects_out_of_range_values() {
         for percentile in [0.0, -0.1, 1.1, f64::NAN] {
             assert!(percentile_nearest_rank(&[1_u64], percentile).is_err());
+        }
+    }
+
+    #[test]
+    fn golden_vector_wire_schema_rejects_unknown_fields_and_wrong_version() {
+        let unknown_nested = br#"{
+            "schema_version": 1,
+            "canonical_json": [], "slugs": [], "chunk_identity": [], "recall": [],
+            "percentiles": [{"name": "bad", "values": [], "percentile": 0.95,
+                "expected": null, "unexpected": true}]
+        }"#;
+        assert!(parse_frozen_vectors(unknown_nested).is_err());
+
+        let wrong_version = replace_once(
+            &frozen_vector_bytes(),
+            br#""schema_version": 1"#,
+            br#""schema_version": 2"#,
+        );
+        assert!(parse_frozen_vectors(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn golden_vector_wire_schema_rejects_nonfinite_and_invalid_chunk_contracts() {
+        let nonfinite = replace_once(&frozen_vector_bytes(), b"1e-7", b"NaN");
+        assert!(parse_frozen_vectors(&nonfinite).is_err());
+
+        for (field, replacement) in [
+            (
+                br#""spec_version": 1, "raw_hash"# as &[u8],
+                br#""spec_version": 2, "raw_hash"# as &[u8],
+            ),
+            (
+                br#""raw_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"#,
+                br#""raw_hash": "sha256:not-a-hash"#,
+            ),
+            (br#""unit_key": "section:one"# as &[u8], br#""unit_key": ""# as &[u8]),
+            (
+                br#""byte_start": 0, "byte_end": 5"# as &[u8],
+                br#""byte_start": 6, "byte_end": 5"# as &[u8],
+            ),
+            (
+                br#""text_hash": "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#,
+                br#""text_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"#,
+            ),
+        ] {
+            let wire = replace_once(&frozen_vector_bytes(), field, replacement);
+            let parsed: Vectors = serde_json::from_slice(&wire).unwrap();
+            assert!(parsed.chunk_identity[0].chunk.validate().is_err());
         }
     }
 }

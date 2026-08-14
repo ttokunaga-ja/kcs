@@ -1183,7 +1183,7 @@ U142 の Recall@10 射影変更 (`(raw_hash, section)` → `(raw_hash, section, 
 field) の存在確認までに限定し、`eval/` 配下の実際の計算式が新射影を採用しているかどうかの検証は
 本書の対象範囲内か外かを含めて未確定のまま残す。
 
-**Z4-決着 (2026-07-22 Phase 4 回帰補修)**: 懸念は的中した — `eval/run_eval.py` の Recall@10 射影は
+**Z4-決着 (2026-07-22 Phase 4 回帰補修)**: 懸念は的中した — 現行Rust `kio-eval`へ移植済みの Recall@10 射影は
 QB24 の 3 要素へ更新済みだったが、同ファイル内 `assess_history_coverage` の rename 網羅ガード
 (`{old_file, new_file} ⊆ correctly_recalled の paths`) に非伝播だった。golden は旧名しか記さないため
 新 path の alias 行は expected_set 経由で correctly recalled になり得ず、ガードは**構造的に充足不能**
@@ -1214,7 +1214,7 @@ PC25/PC26 (p2c.md) の正本引用はいずれも単一 scope の replay を前�
 1. **Z1 (preflight 実装単位)**: **共有関数へ統合する** — 契約は観測順序のみだが、3 経路の独立実装は非伝播バグの温床 (本プロジェクトで実証済みのパターン) のため実装戦略として統合を指示。
 2. **Z2 (config.toml の kio_format_version)**: **config.toml 側の書込・検証を廃止し scope.json へ一本化** — spec の保存場所規範 (03 §2) どおり。再 init 方針で互換負債なし。
 3. **Z3 (複合 lock 順序)**: **(a) 待機順序制約** — cost-ledger Tx 保持中に scope store lock 系を取得することを禁止 (逆順禁止の字義)。順方向 (store lock 保持中の Tx 開始) は可。契約は逆順取得の不在確認。
-4. **Z4 (eval/ の Recall 射影)**: **対象範囲内** — eval/run_eval.py は本ワークストリームの資産 (Phase 1a で既修正実績)。U142 の射影 ((raw_hash, section, path_at_commit)) を確認・追随し test_run_eval.py で固定。
+4. **Z4 (eval/ の Recall 射影)**: **対象範囲内** — U142 の射影 ((raw_hash, section, path_at_commit)) はRust `kio-eval`とfrozen wire testsで固定する。
 5. **Z5 (log --at/--since)**: **QB50〜QB56 の類推期待値を採用して実装** — search/view/restore の確立済み意味論からの類推は本プロジェクトの正当な導出。spec 側への明文追記は Phase 4 の実装フィードバック記録へ (凍結例外ではなく提案として)。
 6. **Z6 (multi-scope の部分 query_cache 欠落)**: **(a) を確定** — 当該 scope のみ excluded_scopes へ計上し他 scope の replay は継続 (05 §1.8 の部分失敗規則と整合)。
 

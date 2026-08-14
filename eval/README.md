@@ -14,21 +14,19 @@
 | ファイル | 役割 |
 | --- | --- |
 | `corpus-fixture.json` | **生成物の凍結正本**。305 文書の bytes と manifest を保持し、Rust `kio-eval generate-corpus` が検証して materialize する |
-| `corpus_spec.py` | Python replay/oracle 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
+| `corpus_spec.py` | Python history replay 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
 | `replay_history.py` | 各 scope で `init → index → snapshot create → 編集 → snapshot create → リネーム → snapshot create → 削除 → snapshot create` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `python_eval_oracle.py` | Python の独立 differential/security oracle。共有 golden vectors、pointer CAS attestation、crossscope/reranker の限定的な補助だけを持つ。通常の full evaluator・履歴ゲート・report 生成は持たない |
 | `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
-| `run_crossscope.py` | 横断増補の専用ランナー。`python_eval_oracle.py` の限定的な補助を明示利用する。full Rust evaluator のセット全体ゲートは部分集合に当てられないため別立て。診断値 `worst_expected_rank` を併記する |
+| `kio-eval crossscope` | 横断増補のRust専用ランナー。full evaluatorのセット全体ゲートを部分集合へ誤適用せず、Recall/latency/Evidenceと診断値`worst_expected_rank`を検証する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `test_run_eval.py` | Python oracle の独立テスト。`python3 -m unittest eval.test_run_eval` |
+| `kio-eval rerank-dump` | current-tree queryの候補順・3要素key・検証済みChunk CAS textをcreate-only JSONへ固定するRust経路。offline GPU差分のpass 1 |
 | `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
 | `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
 | `run_baseline.py` | 歴史的/reference runner。新規の baseline 判定は Rust `kio-eval benchmark baseline` が正本 |
-| `test_run_crossscope.py` | 横断評価の生成物 schema（replica 専用、`worst_expected_rank` 集計、UTF-8/LF）を検証する単体テスト。`python3 -m unittest eval.test_run_crossscope` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
 | `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
@@ -50,9 +48,9 @@ target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
 # 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
 python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
-# 3c. 横断増補 (別ファイル・専用ランナー、09 §4.3)。既存 50 問とは独立に走る
-python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run
-python3 eval/run_crossscope.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+# 3c. 横断増補 (別ファイル・Rust専用ランナー、09 §4.3)。既存 50 問とは独立に走る
+target/release/kio-eval crossscope --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run --out /tmp/crossscope-unused.json
+target/release/kio-eval crossscope --corpus /tmp/kio-eval-corpus --bin target/release/kio --out /tmp/crossscope-results.json
 
 # 3a. dry-run: Rust の正本 evaluator が golden-queries / manifest を検証する
 target/release/kio-eval --dry-run --corpus /tmp/kio-eval-corpus
@@ -63,7 +61,20 @@ target/release/kio-eval --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3c. シナリオ絞り込み (複数指定可)。最終HEADのCIは3シナリオを個別に実行する。
 target/release/kio-eval --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+
+# 4. offline rerankerへ渡すcurrent-tree候補を、検証済みChunk CASから固定する。
+#    --outは既存fileを上書きしない。
+target/release/kio-eval rerank-dump --corpus /tmp/kio-eval-corpus \
+  --bin target/release/kio --out /tmp/rerank-input.json
+
+# 5. GPU が返した JSON を固定dumpへ適用する。--report もcreate-only。
+target/release/kio-eval rerank-apply --input /tmp/rerank-input.json \
+  --output /tmp/rerank-output.json --report /tmp/rerank-report.json
 ```
+
+`crossscope` と `rerank-dump` の出力は measured corpus 外の既存directoryに置き、
+既存fileを上書きしない。再測定は新しい出力名を使い、比較後に採用するartifactだけを
+明示的に更新する。
 
 ### exit コード (docs/09 §4.3, 2026-07-03 J2 裁定)
 

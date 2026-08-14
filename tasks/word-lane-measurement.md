@@ -38,8 +38,8 @@
 5. **走らせる前に凍結する**
 
 コーパスには一切手を入れていない (crossscope 増補と同じ方針)。
-`run_eval.py --golden` が既にあるのでランナー改修も不要。M3-2/M3-3 の
-`HISTORY_QUERY_COUNT` 契約は M3-1 のみの実行には当たらない (run_eval.py:1151)。
+Rust `kio-eval --golden` が既にあるのでランナー改修も不要。M3-2/M3-3 の
+`HISTORY_QUERY_COUNT` 契約は M3-1 のみの実行には当たらない。
 
 # 3. 事前予測 (走らせる前に記載)
 

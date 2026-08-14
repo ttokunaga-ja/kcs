@@ -3,7 +3,7 @@
 ## 0. MVP Done 判定 (09-mvp-scope.md §4.3)
 
 **Done 条件「synthetic で各シナリオ Recall@10 >= 0.8」を達成** (commit `58cea60` 時点、
-fresh corpus / `eval/run_eval.py` 全 3 シナリオ):
+fresh corpus / Rust `kio-eval` 全 3 シナリオ):
 
 | シナリオ (北極星) | Recall@10 | 目標 | p95 | 目標 |
 |---|---|---|---|---|

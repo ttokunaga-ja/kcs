@@ -23,16 +23,16 @@
 そこで**測定を 2 つに割り、git で繋ぐ**:
 
 ```
-eval/rerank_dump.py   (Mac)     search      -> rerank-input.json
+kio-eval rerank-dump  (Mac)     search      -> rerank-input.json
 tasks/... のブリーフ  (GPU 機)   rerank      -> rerank-output.json
-eval/rerank_apply.py  (Mac)     並べ替え適用 -> Recall@10 before/after
+kio-eval rerank-apply (Mac)     並べ替え適用 -> Recall@10 before/after
 ```
 
-Mac 側は候補を **text lane が返した順のまま**記録し、evidence pointer の
-byte span から**索引が持っているのと同じ文字**を復元する (03 §8.1)。
+Mac 側は候補を **text lane が返した順のまま**記録し、evidence pointerが束縛する
+検証済みChunk CASから**索引が持っているのと同じ文字**を取得する (03 §8.1)。
 baseline の Recall@10 も Mac 側で計算するので、**後半を信用する必要が無い**。
 
-`eval/rerank_dump.py` は書けていて、動く。
+`kio-eval rerank-dump` がこのpassをRustで実行する。
 
 ---
 
@@ -62,7 +62,7 @@ reranker が並べ替える対象が存在しない。reranker は
 
 `eval/register_fixture.py` の docstring:
 
-> 合成 `run_eval.py` は 1.0/1.0/1.0 で目標 0.8 に対し天井に張り付いており、
+> 合成 Rust `kio-eval` は 1.0/1.0/1.0 で目標 0.8 に対し天井に張り付いており、
 > 劣化を測れない。24 問の fixture-B は直近 0.9167 (hard3 は 6/8) で、
 > 合成セットに無い伸びしろがある。
 
@@ -234,9 +234,10 @@ GPU 側の報告で判明: `candidates[].text` に**空白のみが 36 件**あ�
 2. **候補密度を先に確認する。**fixture-B で 1 問あたり何件返るかを数え、
    10 件を超えることを確かめてから先へ進む。ここが 10 件以下なら、
    reranker はこの器でも測れない
-3. `rerank_dump.py` の対象を fixture 環境へ向ける
+3. fixture-B固有経路は `rerank_dump_fixture.py`、synthetic経路はRust
+   `kio-eval rerank-dump` を使う
 4. GPU 機のブリーフを書く (入力 JSON の形は dump が出したものそのまま)
-5. `rerank_apply.py` を書く
+5. `kio-eval rerank-apply` で並べ替えを適用して採点する
 
 **2 を飛ばさないこと。**§2 は「測る前に器を確かめなかった」ことで
 1 往復ぶん無駄にした記録である。

@@ -6,6 +6,8 @@
 
 use std::{
     collections::HashSet,
+    env,
+    ffi::OsString,
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -292,6 +294,43 @@ impl BoundDevice {
     pub fn runtime(&self) -> &Path {
         &self.runtime
     }
+
+    /// Hermetic fixture-only environment for evaluator subprocesses.
+    ///
+    /// Credentials, agent sockets, and ambient Kio seams are excluded. `PATH`
+    /// is the sole ambient value because platform helpers may need it; locale
+    /// and time zone remain deterministic.
+    #[must_use]
+    pub fn hermetic_environment(&self) -> Vec<(OsString, OsString)> {
+        let path = env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+        vec![
+            (OsString::from("PATH"), path),
+            (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+            (OsString::from("TZ"), OsString::from("UTC")),
+            (OsString::from("HOME"), self.home.as_os_str().to_owned()),
+            (
+                OsString::from("XDG_CONFIG_HOME"),
+                self.config.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("XDG_CACHE_HOME"),
+                self.cache.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("XDG_DATA_HOME"),
+                self.data.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("XDG_STATE_HOME"),
+                self.state.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from("XDG_RUNTIME_DIR"),
+                self.runtime.as_os_str().to_owned(),
+            ),
+        ]
+    }
     pub fn try_clone_home_handle(&self) -> BoundaryResult<fs::File> {
         self.home_handle
             .try_clone()
@@ -413,7 +452,7 @@ fn open_runner_cwd(scope: &fs::File, path: &Path) -> BoundaryResult<fs::File> {
     cap_fs::open(scope, Path::new("."), &options).map_err(|error| BoundaryError::io(path, error))
 }
 
-fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+pub(crate) fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

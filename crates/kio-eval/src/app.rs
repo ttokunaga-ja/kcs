@@ -23,11 +23,13 @@ use kio_core::{
 };
 use kio_eval::{
     attestation::{MAX_POINTER_ATTESTATIONS_PER_QUERY, PointerAttestor},
-    boundary::{BoundCorpus, BoundDevice, BoundScope},
+    boundary::{BoundCorpus, BoundScope},
+    crossscope::CrossscopeOptions,
     manifest::{
         SCOPES, Scenario, load_corpus_manifest, load_golden_queries, load_history_manifest,
     },
     qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
+    rerank::{RerankApplyOptions, RerankApplySummary, RerankDumpOptions, RerankDumpSummary},
     resolver::{CorpusModel, Resolver, validate_query},
     runner::{
         BoundedProcessOptions, HistoryEntryRef, HistoryManifestRef, RenameEntryRef, ResolvedQuery,
@@ -71,6 +73,48 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Evaluate the frozen cross-scope query supplement without full-suite gates.
+    Crossscope {
+        #[arg(long, default_value = "eval/golden-queries-crossscope.jsonl")]
+        golden: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        /// New output file. Existing measurements are never overwritten.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Freeze attested current-tree candidate pools for offline reranking.
+    RerankDump {
+        /// Golden query file; repeat to combine suites. Defaults to the full
+        /// and short frozen query sets.
+        #[arg(long)]
+        golden: Vec<PathBuf>,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long, default_value_t = 100, value_parser = parse_rerank_limit)]
+        limit: usize,
+        /// New output file. Existing files are never overwritten.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Apply a GPU reranker ordering to a frozen rerank dump and score it.
+    RerankApply {
+        /// Output from a current canonical synthetic or fixture-B dump producer.
+        #[arg(long)]
+        input: PathBuf,
+        /// GPU reranker JSON containing the model identity and rankings.
+        #[arg(long)]
+        output: PathBuf,
+        /// Optional new report file. Existing files are never overwritten.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Materialize the frozen synthetic evaluation corpus.
     GenerateCorpus {
         #[arg(long)]
@@ -175,6 +219,12 @@ pub enum AppError {
     Runner(#[from] kio_eval::runner::RunnerError),
     #[error(transparent)]
     Generator(#[from] kio_eval::generator::GeneratorError),
+    #[error(transparent)]
+    Crossscope(#[from] kio_eval::crossscope::CrossscopeError),
+    #[error(transparent)]
+    Rerank(#[from] kio_eval::rerank::RerankDumpError),
+    #[error(transparent)]
+    RerankApply(#[from] kio_eval::rerank::RerankApplyError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -207,41 +257,50 @@ fn parse_recall(value: &str) -> Result<f64, String> {
     }
 }
 
-/// The hermetic fixture-only environment used by every evaluator subprocess.
-///
-/// Do not inherit a general ambient environment: credentials, agent sockets,
-/// and adapter configuration are all evaluator inputs unless explicitly
-/// excluded.  `PATH` is required for platform command helpers; the remaining
-/// entries are fixed so output decoding and timestamps are deterministic.
-fn device_env(device: &BoundDevice) -> Result<Vec<(OsString, OsString)>, AppError> {
-    let path = env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
-    Ok(vec![
-        (OsString::from("PATH"), path),
-        (OsString::from("LANG"), OsString::from("C.UTF-8")),
-        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
-        (OsString::from("TZ"), OsString::from("UTC")),
-        (OsString::from("HOME"), device.home().as_os_str().to_owned()),
-        (
-            OsString::from("XDG_CONFIG_HOME"),
-            device.config().as_os_str().to_owned(),
-        ),
-        (
-            OsString::from("XDG_CACHE_HOME"),
-            device.cache().as_os_str().to_owned(),
-        ),
-        (
-            OsString::from("XDG_DATA_HOME"),
-            device.data().as_os_str().to_owned(),
-        ),
-        (
-            OsString::from("XDG_STATE_HOME"),
-            device.state().as_os_str().to_owned(),
-        ),
-        (
-            OsString::from("XDG_RUNTIME_DIR"),
-            device.runtime().as_os_str().to_owned(),
-        ),
-    ])
+fn parse_rerank_limit(value: &str) -> Result<usize, String> {
+    let value: usize = value.parse().map_err(|_| "must be an integer".to_owned())?;
+    if (1..=100).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be in 1..=100".to_owned())
+    }
+}
+
+fn print_rerank_summary(summary: &RerankDumpSummary) {
+    println!(
+        "dumped   : {} queries, {} candidates",
+        summary.dumped_queries, summary.candidates
+    );
+    println!("skipped  : {}", summary.skipped_queries);
+    println!(
+        "baseline : Recall@10 = {:.4}",
+        summary.baseline_recall_at_10
+    );
+    println!("out      : {}", summary.output.display());
+}
+
+fn print_rerank_apply_summary(summary: &RerankApplySummary) {
+    println!("model     : {}", summary.model.escape_default());
+    println!(
+        "queries   : {} ({} ranked)",
+        summary.queries, summary.ranked_queries
+    );
+    println!(
+        "Recall@10 : {:.4} -> {:.4}  ({:+.4})",
+        summary.before_recall_at_10,
+        summary.after_recall_at_10,
+        summary.after_recall_at_10 - summary.before_recall_at_10
+    );
+    println!(
+        "improved  : {}   worsened: {}",
+        summary.improved, summary.worsened
+    );
+    for problem in &summary.problems {
+        println!("[warn] {}", problem.escape_default());
+    }
+    if let Some(report) = &summary.report {
+        println!("report    : {}", report.display());
+    }
 }
 
 fn bundled_eval_path(name: &str) -> PathBuf {
@@ -582,6 +641,65 @@ fn walk_regular_files(root: &Path) -> Vec<PathBuf> {
 pub fn run(args: Args) -> Result<ExitCode, AppError> {
     if let Some(command) = args.command.as_ref() {
         return match command {
+            Commands::Crossscope {
+                golden,
+                corpus,
+                bin,
+                out,
+                dry_run,
+            } => {
+                let code = kio_eval::crossscope::run(CrossscopeOptions {
+                    golden: golden.clone(),
+                    corpus: corpus.clone(),
+                    bin: bin.clone(),
+                    out: out.clone(),
+                    dry_run: *dry_run,
+                })?;
+                Ok(code)
+            }
+            Commands::RerankDump {
+                golden,
+                corpus,
+                bin,
+                limit,
+                out,
+            } => {
+                let golden = if golden.is_empty() {
+                    vec![
+                        bundled_eval_path("golden-queries.jsonl"),
+                        bundled_eval_path("golden-queries-short.jsonl"),
+                    ]
+                } else {
+                    golden.clone()
+                };
+                let summary = kio_eval::rerank::run(RerankDumpOptions {
+                    golden,
+                    corpus: corpus.clone(),
+                    bin: bin.clone(),
+                    limit: *limit,
+                    out: out.clone(),
+                })?;
+                print_rerank_summary(&summary);
+                Ok(ExitCode::Success)
+            }
+            Commands::RerankApply {
+                input,
+                output,
+                report,
+            } => {
+                let summary = kio_eval::rerank::apply(RerankApplyOptions {
+                    input: input.clone(),
+                    output: output.clone(),
+                    report: report.clone(),
+                })?;
+                let succeeded = summary.ranked_queries > 0 && summary.problems.is_empty();
+                print_rerank_apply_summary(&summary);
+                Ok(if succeeded {
+                    ExitCode::Success
+                } else {
+                    ExitCode::Failure
+                })
+            }
             Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
             Commands::Benchmark { command } => match command {
                 BenchmarkCommands::BaselineAttest {
@@ -913,7 +1031,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
             bin.display()
         )));
     }
-    let environment = device_env(bound_corpus.device())?;
+    let environment = bound_corpus.device().hermetic_environment();
     let log_problems = verify_logs(&bin, &bound_corpus, &history, &environment);
     if !log_problems.is_empty() {
         return Err(AppError::Input(log_problems.join("; ")));
@@ -1028,10 +1146,13 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
 mod tests {
     use std::{ffi::OsString, fs, path::Path};
 
+    use kio_core::ExitCode;
     use kio_eval::boundary::BoundCorpus;
+    use serde_json::json;
 
     use super::{
-        bundled_eval_path, device_env, output_is_within_input_root, parse_recall, parse_scenario,
+        Args, Commands, bundled_eval_path, output_is_within_input_root, parse_recall,
+        parse_rerank_limit, parse_scenario, run,
     };
 
     #[test]
@@ -1041,6 +1162,56 @@ mod tests {
         assert_eq!(parse_recall("0").unwrap(), 0.0);
         assert!(parse_recall("NaN").is_err());
         assert!(parse_recall("1.01").is_err());
+        assert_eq!(parse_rerank_limit("100").unwrap(), 100);
+        assert!(parse_rerank_limit("0").is_err());
+        assert!(parse_rerank_limit("101").is_err());
+    }
+
+    #[test]
+    fn rerank_apply_empty_ranking_has_failure_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("dump.json");
+        let output = root.path().join("output.json");
+        fs::write(
+            &input,
+            serde_json::to_vec(&json!({
+                "note": "pass 1 of the reranker differential; generated by kio-eval rerank-dump",
+                "limit": 1,
+                "queries": [{
+                    "id": "golden#0", "scenario": "M3-1", "query": "needle",
+                    "expected": [["sha256:a", null, "a.md"]],
+                    "baseline_recall_at_10": 1.0,
+                    "candidates": [{"key": ["sha256:a", null, "a.md"], "text": "candidate"}]
+                }],
+                "skipped": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &output,
+            br#"{"model":"test-model","queries":[{"id":"golden#0","ranking":[]}]}"#,
+        )
+        .unwrap();
+        let code = run(Args {
+            command: Some(Commands::RerankApply {
+                input,
+                output,
+                report: None,
+            }),
+            golden: None,
+            corpus: None,
+            corpus_manifest: None,
+            history_manifest: None,
+            bin: Path::new("kio").to_path_buf(),
+            out: None,
+            report: None,
+            scenario: vec![],
+            min_recall: 0.8,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(code, ExitCode::Failure);
     }
 
     #[test]
@@ -1064,7 +1235,7 @@ mod tests {
         fs::create_dir(corpus.path().join("research")).unwrap();
         fs::create_dir(corpus.path().join("research/.kio")).unwrap();
         let bound = BoundCorpus::bind(corpus.path(), &["research".to_owned()]).unwrap();
-        let values = device_env(bound.device()).unwrap();
+        let values = bound.device().hermetic_environment();
         assert!(values.iter().any(|(key, _)| key == "PATH"));
         assert!(
             values
