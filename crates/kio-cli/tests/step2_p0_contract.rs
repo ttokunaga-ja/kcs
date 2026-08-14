@@ -2546,7 +2546,7 @@ fn events_log(dir: &TempDir) -> String {
 fn r13_4_empty_head_with_healthy_refs_is_repaired_not_orphaned() {
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, ["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
 
     // Corrupt HEAD to empty; refs/heads/main still names C1.
@@ -2570,7 +2570,7 @@ fn r13_4_empty_head_with_healthy_refs_is_repaired_not_orphaned() {
 
     // (a) the next snapshot must extend C1, not orphan it under a root commit.
     fs::write(dir.path().join("doc.txt"), "v2").unwrap();
-    let c2 = json_success(&dir, ["snapshot", "-m", "after"]);
+    let c2 = json_success(&dir, ["snapshot", "create", "-m", "after"]);
     assert_eq!(c2["status"], "created");
     assert_eq!(
         c2["commit"]["parents"].as_array().unwrap(),
@@ -2589,7 +2589,7 @@ fn r13_4_empty_head_with_healthy_refs_is_repaired_not_orphaned() {
 fn r13_4_missing_head_with_healthy_refs_is_repaired() {
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, ["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
 
     // (b) delete HEAD entirely; refs/heads/main still healthy.
@@ -2616,7 +2616,7 @@ fn r13_4_fresh_init_both_empty_still_root_commits() {
     // repair event is emitted.
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    let first = json_success(&dir, ["snapshot", "-m", "first"]);
+    let first = json_success(&dir, ["snapshot", "create", "-m", "first"]);
     assert_eq!(first["status"], "created");
     assert!(
         first["commit"]["parents"].as_array().unwrap().is_empty(),
@@ -2636,7 +2636,7 @@ fn r13_4_fresh_init_both_empty_still_root_commits() {
 fn r13_5_reinit_repairs_missing_head_and_status_recovers() {
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    json_success(&dir, ["snapshot", "-m", "first"]);
+    json_success(&dir, ["snapshot", "create", "-m", "first"]);
 
     fs::remove_file(dir.path().join(".kio/HEAD")).unwrap();
     let reinit = json_success(&dir, ["init", "."]);
@@ -2655,7 +2655,7 @@ fn r13_5_reinit_repairs_missing_head_and_status_recovers() {
 fn r13_5_reinit_reports_already_initialized_when_healthy() {
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    json_success(&dir, ["snapshot", "-m", "first"]);
+    json_success(&dir, ["snapshot", "create", "-m", "first"]);
     let reinit = json_success(&dir, ["init", "."]);
     assert_eq!(reinit["status"], "already initialized");
     assert_eq!(reinit["repaired"], json!([]));
@@ -3361,7 +3361,7 @@ fn r14_3_corrupt_head_read_only_scope_reads_run_and_defer_heal() {
     use std::os::unix::fs::PermissionsExt;
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, ["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
 
     // Corrupt HEAD to empty (refs still names C1), then make `.kio` read-only so the
@@ -3437,7 +3437,7 @@ fn r14_3_healthy_head_read_only_scope_unchanged() {
     use std::os::unix::fs::PermissionsExt;
     let dir = scope();
     fs::write(dir.path().join("doc.txt"), "v1").unwrap();
-    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, ["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
 
     let kio_dir = dir.path().join(".kio");
@@ -3497,7 +3497,7 @@ fn r15_4_unreceipted_missing_head_tree_is_corruption() {
         index_error["error_code"], "KIO-E-STORE-CORRUPT-001",
         "{index_error}"
     );
-    let snapshot_error = json_failure(&dir, ["snapshot", "-m", "x"], 4);
+    let snapshot_error = json_failure(&dir, ["snapshot", "create", "-m", "x"], 4);
     assert_eq!(
         snapshot_error["error_code"], "KIO-E-STORE-CORRUPT-001",
         "{snapshot_error}"

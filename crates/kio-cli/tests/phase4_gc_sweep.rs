@@ -1026,7 +1026,11 @@ fn active_marker_blocks_init_snapshot_and_tag_before_their_writes() {
         .unwrap();
     assert_eq!(interrupted.status.code(), Some(7));
     let marker_before = fs::read(dir.path().join(".kio/gc/in_progress")).unwrap();
-    for args in [&["init"][..], &["snapshot"][..], &["tag", "blocked"][..]] {
+    for args in [
+        &["init"][..],
+        &["snapshot", "create"][..],
+        &["tag", "blocked"][..],
+    ] {
         let output = kio(&dir, args).arg("--json").output().unwrap();
         assert_eq!(
             output.status.code(),

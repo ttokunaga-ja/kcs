@@ -635,12 +635,11 @@ Ready to snapshot:
 
 ## 16. Kio commit / snapshot
 
-Kio では `commit` と `snapshot` を内部的に別 object として分けない。どちらも `tree + parent + metadata` を持つ同一の履歴 object とし、`message`、`actor`、`reason`、`protected` などのメタデータによって、手動保存・自動保存・import・repair・重要保存点を区別する。
+Kio は `tree + parent + metadata` を持つ単一の履歴 object を使い、`message`、`actor`、`reason`、`protected` などのメタデータによって、手動保存・自動保存・import・repair・重要保存点を区別する。
 
-ユーザー向けの公式語彙は `snapshot` とし、CLI では開発者向け alias として `commit` を許可する。実装上の object type は単一であり、`commit` と `snapshot` の二重管理を作らない。
+ユーザー向け・CLIの正規語彙は `snapshot` だけである。実装上の object type は単一であり、二重管理を作らない。
 
 ```bash
-kio commit -m "before refactor"
 kio snapshot create -m "before refactor"
 ```
 
@@ -659,10 +658,10 @@ commit object
 
 ## 17. CLI と GUI の語彙
 
-CLI は Git に慣れたユーザーと自動化を重視し、Git 風のコマンドを維持する。
+CLI は自動化を重視し、snapshot の正規surfaceを維持する。
 
 ```bash
-kio commit -m "before cleanup"
+kio snapshot create -m "before cleanup"
 kio checkout <commit>
 kio status
 kio log

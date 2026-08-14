@@ -58,7 +58,7 @@ fn init(dir: &TempDir) {
 }
 
 fn snapshot(dir: &TempDir, message: &str) -> String {
-    json_success(dir, &["snapshot", "-m", message])["commit_hash"]
+    json_success(dir, &["snapshot", "create", "-m", message])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned()

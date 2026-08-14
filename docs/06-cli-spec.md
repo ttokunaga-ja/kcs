@@ -80,9 +80,8 @@ kio repair replica | kio repair -r                                # device repli
                                         # 対象 0 件はプロンプトなしの冪等成功。非対話 (isatty=false) で --yes 無しは
                                         # KIO-E-CONFIRM-REJECTED-001 で拒否し、**何も削除しない**。
 kio gc --dry-run                       # Phase 4 milestone 1: retention による shallow 候補のread-only plan (§6.1)
-kio commit -m "<message>"               # = kio snapshot create -m
-kio snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")
-kio snapshot create -m "<message>"      # 正規形
+kio snapshot create [-m "<message>"]    # manual snapshot。-m省略時は自動 message
+kio snapshot auto                        # scheduled auto snapshot entrypoint (commit 1時点ではnot-implemented)
 kio log [--at <commit>] [--since <dur>]
 kio diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kio search "<query>" [options]          # 詳細 §3
@@ -115,6 +114,10 @@ kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 ```
 
 本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1.2 / §3.1](09-mvp-scope.md) (Phase 4+ のコマンドは行内に注記)。
+
+`snapshot` は action を必須とする。`kio snapshot`、`kio snapshot -m ...`、`kio commit ...` は旧surfaceであり usage error (exit 2) で拒否する。`create` だけが manual message を受け取り、`auto` はmessage引数を受け取らない。
+
+定期設定は省略時disabledである。存在する `[snapshot.auto]` は厳格に `enabled` (boolean)、`interval_seconds` (integer, 1..31536000)、`on_change_threshold` (integer, 1..1000000) の3 fieldすべてを持たなければならない。`[snapshot]` / `[snapshot.auto]` のunknown field、欠落、型違い、範囲外は schema validation error (exit 2) とし、aliasや暗黙defaultはない。
 
 **`kio diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed` (旧新 tool_lock_hash と変更 role) / `resurrection_published` (no-op 例外 (a) の publication commit — [05-runtime.md §8.1](05-runtime.md)) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。current tree の required field が欠落する場合は `unknown` へ縮退せず corruption / incompatible format として fail-closed にする。
 
@@ -365,7 +368,7 @@ kio gc --yes --json
 - tree leafはretained descriptorからnofollow・single-link・hash/schema/identityを再検証し、no-replaceでCAS fanout外の`.kio/gc/internal/trees/`へ隔離する。隔離 leafを同じbound directoryでunlinkし、link count 0 を確認してから同じretained file handleをtruncate+fsyncする。canonical tree leafと隔離 leafは消失する。ambient pathname unlinkやempty fanout掃除は行わない。`.kio/gc/internal/`はoperation-reserved namespaceであり、検出可能な差替えはfail-closedにする。POSIXにidentity条件付きunlinkが存在しないため、検証直後のreserved nameへの直接第三者書込みだけは[05-runtime.md §2.5](05-runtime.md)・同§3.5と同じ保護契約外の残余窓であり、public CAS path・scope/fanout・receipt/marker public name・hardlinkの保護を緩めない。
 - marker がある間、`kio gc --dry-run` は recovery pending を read-only で報告する。`kio gc --yes` は凍結 marker を validator で再検証して再開する。receipt または tree deletion 後に truth が矛盾すれば fail-closed し、marker は残す。最初の physical tree deletion 前と**finalizing の各実行・再開時**に index generation を descriptor-bound に回転する（sqlite がない scope は `index_absent` として記録する）。回転は公開DBのin-place更新ではなく、`.kio/gc/internal/index/`のprivate copyを更新・file/directory fsyncし、source file stateとsource/target/private-directory identityをmarkerへ耐久化してexchange直前に再照合してから、公開`index/sqlite.db`とatomic exchangeし、両directoryをfsyncする。pre-sweep private copyではgeneration更新と同一SQLite transactionにstrict singleton attestation（sweep ID、role、plan digest、source/target generation）を記録し、treeごとに公開DBのgeneration/identityとattestationを再検証したprocess-local permitだけをcore除去APIへ渡す。完了 rotation の耐久化後だけ marker を削除する。descriptor-bound SQLite rotationを安全に実装できないplatform（現行Windowsを含む）では、marker/receiptのpublishより前にsweepをfail-closedする。
 - active marker は通常 writer を retryable に拒否し、search は新規 cursor を発行しない。ページ 1 は結果を返せても `next_cursor=null` と recovery-pending 注記を含める。明示 `after_index` modeのindex/snapshot入口だけは、通常writer lockより前にbounded recoveryを行う。
-- milestone 3 は `[gc] mode="after_index"` を**明示したscopeだけ**で、成功かつnon-partialな `kio index` / manual `kio snapshot` のdurable publication後に同じexecutorを呼ぶ。既存writer lockは先に解放し、GCは専用bound lockの下でfresh replan/revalidationする。preview、revoke、usage error、失敗・partial indexからは発火しない。`manual_only`は現行defaultのままであり自動mutationを行わない。`on_idle`は未実装としてfail-closedする。
+- milestone 3 は `[gc] mode="after_index"` を**明示したscopeだけ**で、成功かつnon-partialな `kio index` / manual `kio snapshot create` のdurable publication後に同じexecutorを呼ぶ。既存writer lockは先に解放し、GCは専用bound lockの下でfresh replan/revalidationする。preview、revoke、usage error、失敗・partial indexからは発火しない。`manual_only`は現行defaultのままであり自動mutationを行わない。`on_idle`は未実装としてfail-closedする。
 - automatic authority はwriter開始前のcanonicalな`[gc]` subtree digestとretained scope / `.kio` identityへ固定し、publication後およびGC lock下のlocked re-plan前後で一致を要求する。mode/runtime/retentionまたはscope bindingが途中で変わればGC mutationを開始せず `KIO-E-GC-CONFIG-CHANGED-001` / exit 3 とする。既にdurableなpublicationは`publication_status="completed"`のままであり、index自身が更新する非GCのadapter/network設定はこのdigestの対象外である。
 - `max_runtime_seconds` はmonotonic soft deadlineである。安全なdurable checkpointで `status="deferred"`、`reason="max_runtime_seconds"`、`recovery_pending=true` を返しmarkerを残す。次回のautomatic writer入口は通常lockより前にresumeし、未完ならindex/snapshotを開始しない。shared treeは全candidate receiptが耐久化するまでtree phaseへ移らないためbatch境界でsharing closureを分割しない。
 - automatic resultはindex/snapshot payloadの`gc` objectに載せる。post-publication timeout/errorは`publication_status="completed"`を保持し、timeoutは`KIO-E-GC-RUNTIME-LIMIT-001` / exit 3、permanent integrity failureはexit 4、それ以外のpost-publication failureはpartial exit 3とする。pre-publication recovery timeoutは`publication_status="not_started"` / exit 3である。human outputにも`gc: <status> (<reason>)`を追記する。

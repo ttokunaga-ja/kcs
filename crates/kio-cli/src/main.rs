@@ -193,8 +193,7 @@ enum Command {
     Init(InitArgs),
     /// Show file state, pending tasks, and budget.
     Status,
-    /// Create a snapshot. The `commit` alias maps here (docs/06-cli-spec.md §1).
-    #[command(alias = "commit")]
+    /// Create a manual snapshot or run the scheduler entrypoint.
     Snapshot(SnapshotArgs),
     /// Show snapshot history.
     Log(LogArgs),
@@ -241,10 +240,21 @@ struct InitArgs {
 
 #[derive(Debug, Args)]
 struct SnapshotArgs {
-    /// 正規形 `kio snapshot create` の受け口 (省略可)。
-    #[arg(value_parser = ["create"])]
-    action: Option<String>,
+    #[command(subcommand)]
+    action: SnapshotAction,
+}
 
+#[derive(Debug, Subcommand)]
+enum SnapshotAction {
+    /// Create a manual snapshot.
+    Create(SnapshotCreateArgs),
+    /// Run one scheduler-triggered automatic snapshot attempt.
+    Auto,
+}
+
+#[derive(Debug, Args)]
+struct SnapshotCreateArgs {
+    /// Optional manual snapshot message.
     #[arg(short, long)]
     message: Option<String>,
 }
@@ -998,8 +1008,12 @@ fn run(cli: Cli) -> Result<Value> {
                     .map_err(|err| KioError::schema(err.to_string()))?,
             }))
         }
-        Command::Snapshot(args) => {
-            let _action = args.action;
+        Command::Snapshot(SnapshotArgs {
+            action: SnapshotAction::Auto,
+        }) => Err(KioError::not_implemented("snapshot auto")),
+        Command::Snapshot(SnapshotArgs {
+            action: SnapshotAction::Create(args),
+        }) => {
             // Opening an ordinary repository can self-heal HEAD. Bind and
             // validate without repair first, acquire the GC-aware store lock,
             // and only then perform that write. This keeps even the open path
@@ -26611,7 +26625,7 @@ mod tests {
         terminal_safe_text, truncate_torn_chunk_tail, unit_authorities_from_inputs,
         write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command, GcArgs,
         LaneOverride, MarkdownizeSendLane, NormalizedUnitInput, PreferredRequestKind, RepairMode,
-        RepairOperation, RepositoryScopeId, SearchMode, StoredChunk,
+        RepairOperation, RepositoryScopeId, SearchMode, SnapshotAction, SnapshotArgs, StoredChunk,
     };
 
     fn ledger_test_chunk() -> StoredChunk {
@@ -29183,23 +29197,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_commit_alias_as_snapshot() {
-        let cli = Cli::try_parse_from(["kio", "commit", "-m", "initial"]).unwrap();
-
-        let Command::Snapshot(args) = cli.command else {
-            panic!("expected snapshot command");
-        };
-        assert_eq!(args.message.as_deref(), Some("initial"));
-    }
-
-    #[test]
     fn parses_snapshot_create_canonical_form() {
         let cli = Cli::try_parse_from(["kio", "snapshot", "create", "-m", "x"]).unwrap();
 
-        let Command::Snapshot(args) = cli.command else {
+        let Command::Snapshot(SnapshotArgs {
+            action: SnapshotAction::Create(args),
+        }) = cli.command
+        else {
             panic!("expected snapshot command");
         };
-        assert_eq!(args.action.as_deref(), Some("create"));
+        assert_eq!(args.message.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn parses_snapshot_auto_canonical_form() {
+        let cli = Cli::try_parse_from(["kio", "snapshot", "auto"]).unwrap();
+
+        let Command::Snapshot(SnapshotArgs {
+            action: SnapshotAction::Auto,
+        }) = cli.command
+        else {
+            panic!("expected snapshot command");
+        };
+    }
+
+    #[test]
+    fn rejects_removed_snapshot_surfaces() {
+        assert!(Cli::try_parse_from(["kio", "snapshot"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "snapshot", "-m", "x"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "commit", "-m", "x"]).is_err());
+        assert!(Cli::try_parse_from(["kio", "snapshot", "auto", "-m", "x"]).is_err());
     }
 
     #[test]

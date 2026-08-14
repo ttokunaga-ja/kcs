@@ -180,31 +180,25 @@ fn ct_cli_003_state_001_002_status_reports_new_modified_unchanged() {
 }
 
 #[test]
-fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
+fn ct_cli_snapshot_create_log_inspect_tag_diff() {
     let left = tempfile::tempdir().unwrap();
-    let right = tempfile::tempdir().unwrap();
-    for dir in [left.path(), right.path()] {
-        kio().arg("init").current_dir(dir).assert().success();
-        fs::write(dir.join("a.pdf"), b"one").unwrap();
-    }
+    kio()
+        .arg("init")
+        .current_dir(left.path())
+        .assert()
+        .success();
+    fs::write(left.path().join("a.pdf"), b"one").unwrap();
 
     let snap = snapshot_json(
         left.path(),
         &["snapshot", "create", "-m", "same"],
         "2026-04-29T12:00:00Z",
     );
-    let alias = snapshot_json(
-        right.path(),
-        &["commit", "-m", "same"],
-        "2026-04-29T12:00:00Z",
-    );
-    assert_eq!(snap["commit_hash"], alias["commit_hash"]);
-
     fs::write(left.path().join("a.pdf"), b"two").unwrap();
     fs::write(left.path().join("b.pdf"), b"new").unwrap();
     let second = snapshot_json(
         left.path(),
-        &["snapshot", "-m", "second"],
+        &["snapshot", "create", "-m", "second"],
         "2026-04-29T12:00:01Z",
     );
 
@@ -278,6 +272,80 @@ fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
 }
 
 #[test]
+fn ct_cli_removed_snapshot_surfaces_are_usage_errors() {
+    let scope = tempfile::tempdir().unwrap();
+    kio()
+        .arg("init")
+        .current_dir(scope.path())
+        .assert()
+        .success();
+    for args in [
+        &["snapshot"][..],
+        &["snapshot", "-m", "message"][..],
+        &["commit", "-m", "message"][..],
+    ] {
+        kio().args(args).current_dir(scope.path()).assert().code(2);
+    }
+}
+
+#[test]
+fn ct_snapshot_auto_is_structured_not_implemented_until_scheduler_exists() {
+    let scope = tempfile::tempdir().unwrap();
+    let output = kio()
+        .args(["snapshot", "auto", "--json"])
+        .current_dir(scope.path())
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+#[test]
+fn ct_snapshot_auto_config_schema_is_strict() {
+    let scope = tempfile::tempdir().unwrap();
+    kio()
+        .arg("init")
+        .current_dir(scope.path())
+        .assert()
+        .success();
+    let config = scope.path().join(".kio/config.toml");
+
+    let valid = "[snapshot.auto]\nenabled = true\ninterval_seconds = 1\non_change_threshold = 1\n";
+    fs::write(&config, valid).unwrap();
+    kio()
+        .args(["status", "--json"])
+        .current_dir(scope.path())
+        .assert()
+        .success();
+
+    for invalid in [
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 1\n",
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 1\non_change_threshold = 1\nunknown = 1\n",
+        "[snapshot.auto]\nenabled = \"true\"\ninterval_seconds = 1\non_change_threshold = 1\n",
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 0\non_change_threshold = 1\n",
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 31536001\non_change_threshold = 1\n",
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 1\non_change_threshold = 0\n",
+        "[snapshot.auto]\nenabled = true\ninterval_seconds = 1\non_change_threshold = 1000001\n",
+        "[snapshot]\nenabled = true\n",
+    ] {
+        fs::write(&config, invalid).unwrap();
+        let output = kio()
+            .args(["status", "--json"])
+            .current_dir(scope.path())
+            .assert()
+            .code(2)
+            .get_output()
+            .stderr
+            .clone();
+        let error: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001", "{invalid}");
+    }
+}
+
+#[test]
 fn ct_lock_001_concurrent_snapshots_fail_fast() {
     let temp = tempfile::tempdir().unwrap();
     let device_home = tempfile::tempdir().unwrap();
@@ -290,7 +358,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
 
     let bin = assert_cmd::cargo::cargo_bin("kio");
     let first = process_command_with_device_home(&bin, device_home.path())
-        .args(["snapshot", "-m", "first", "--json"])
+        .args(["snapshot", "create", "-m", "first", "--json"])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:00Z")
         .env("KIO_TEST_HOLD_LOCK_MS", "800")
         .current_dir(temp.path())
@@ -302,7 +370,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
     let first = wait_for_path(first, temp.path().join(".kio/.lock").as_path());
 
     let second = process_command_with_device_home(&bin, device_home.path())
-        .args(["snapshot", "-m", "second", "--json"])
+        .args(["snapshot", "create", "-m", "second", "--json"])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:01Z")
         .current_dir(temp.path())
         .output()
@@ -444,13 +512,13 @@ fn ct_lock_003_read_commands_do_not_acquire_lock() {
     fs::write(temp.path().join("a.pdf"), b"one").unwrap();
     let first = snapshot_json(
         temp.path(),
-        &["snapshot", "-m", "first"],
+        &["snapshot", "create", "-m", "first"],
         "2026-04-29T12:00:00Z",
     );
     fs::write(temp.path().join("a.pdf"), b"two").unwrap();
     let second = snapshot_json(
         temp.path(),
-        &["snapshot", "-m", "second"],
+        &["snapshot", "create", "-m", "second"],
         "2026-04-29T12:00:01Z",
     );
 
@@ -591,7 +659,7 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     fs::write(temp.path().join(".kio/.lock"), "{}").unwrap();
     fs::write(temp.path().join("a.pdf"), b"a").unwrap();
     let out = kio()
-        .args(["snapshot", "-m", "locked", "--json"])
+        .args(["snapshot", "create", "-m", "locked", "--json"])
         .current_dir(temp.path())
         .assert()
         .code(3)
@@ -607,7 +675,7 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     )
     .unwrap();
     kio()
-        .args(["snapshot", "-m", "stale recovered", "--json"])
+        .args(["snapshot", "create", "-m", "stale recovered", "--json"])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:02Z")
         .current_dir(temp.path())
         .assert()
@@ -619,7 +687,13 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         serde_json::from_slice(&fs::read(temp.path().join(".kio/.lock")).unwrap()).unwrap();
     assert_eq!(released["pid"], u32::MAX);
     kio()
-        .args(["snapshot", "-m", "released sentinel recovered", "--json"])
+        .args([
+            "snapshot",
+            "create",
+            "-m",
+            "released sentinel recovered",
+            "--json",
+        ])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:03Z")
         .current_dir(temp.path())
         .assert()
@@ -638,7 +712,7 @@ fn ct_obs_001_002_events_and_errors_jsonl() {
     fs::write(temp.path().join("a.pdf"), b"a").unwrap();
 
     kio()
-        .args(["snapshot", "-m", "event"])
+        .args(["snapshot", "create", "-m", "event"])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:00Z")
         .env("XDG_DATA_HOME", data.path())
         .current_dir(temp.path())
@@ -693,7 +767,7 @@ fn s5_symlink_is_skipped_with_warning() {
     // Snapshot succeeds and the symlink is absent from the stored tree.
     let snap = snapshot_json(
         temp.path(),
-        &["snapshot", "-m", "s"],
+        &["snapshot", "create", "-m", "s"],
         "2026-04-29T12:00:00Z",
     );
     let tree_hash = snap["tree_hash"].as_str().unwrap();

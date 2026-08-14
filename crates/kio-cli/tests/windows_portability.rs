@@ -123,7 +123,11 @@ fn tag_names_use_portable_leaves_and_case_insensitive_collisions() {
     let device = tempfile::tempdir().unwrap();
     json_success(scope.path(), device.path(), &["init"]);
     fs::write(scope.path().join("doc.md"), "first").unwrap();
-    let first = json_success(scope.path(), device.path(), &["snapshot", "-m", "first"]);
+    let first = json_success(
+        scope.path(),
+        device.path(),
+        &["snapshot", "create", "-m", "first"],
+    );
 
     for invalid in [
         "CON",
@@ -172,7 +176,11 @@ fn tag_names_use_portable_leaves_and_case_insensitive_collisions() {
     // still its own tag: the leaf is `sha256` over the folded logical name, so
     // naming the digest cannot alias the tag that digest belongs to.
     fs::write(scope.path().join("doc.md"), "second").unwrap();
-    let second = json_success(scope.path(), device.path(), &["snapshot", "-m", "second"]);
+    let second = json_success(
+        scope.path(),
+        device.path(),
+        &["snapshot", "create", "-m", "second"],
+    );
     json_success(scope.path(), device.path(), &["tag", leaf]);
     let leaf_copy = json_success(scope.path(), device.path(), &["tag", "leaf-copy", leaf]);
     assert_eq!(leaf_copy["commit_hash"], second["commit_hash"]);

@@ -1156,7 +1156,7 @@ unknown field、filename/hash/tree/time不一致、symlink/reparse、非regular�
 GC は独立した常駐プロセスを持たない (§5 プロセスモデル)。実行契機は次の 3 つ:
 
 1. `manual_only` (**現行デフォルト**): `kio gc` の明示実行のみ
-2. `after_index` (Phase 4 milestone 3、明示 opt-in): `kio index` / manual `kio snapshot` の**成功かつ non-partial**な durable publication 後、既存 writer lock を解放してから同一プロセス内で `max_runtime_seconds` を soft upper bound として実行する。preview、usage error、失敗、partial index、`index --revoke-network` は発火点ではない
+2. `after_index` (Phase 4 milestone 3、明示 opt-in): `kio index` / manual `kio snapshot create` の**成功かつ non-partial**な durable publication 後、既存 writer lock を解放してから同一プロセス内で `max_runtime_seconds` を soft upper bound として実行する。preview、usage error、失敗、partial index、`index --revoke-network` は発火点ではない
 3. `on_idle` (未実装): 将来は OS スケジューラ委譲の定期 auto snapshot 実行時 (§8) に便乗する。現行実装はこの mode で通常 index/snapshot を黙って自動化せず `KIO-E-CONFIG-NOT-IMPLEMENTED-001` で fail-closed する
 
 `after_index` は wall clock でなく process-local monotonic clockを使う。deadline は hook 開始（config / plan / recovery 検証を含む）から計測するが、tree / SQLite copy の途中を打ち切らず、次の**耐久済み checkpoint**で停止するため、個々の bounded operation に要した時間だけ soft bound を超え得る。checkpoint は marker publish、phase marker 交換、新規 receipt publish、pre-sweep index rotation の各耐久段階、tree 1件の退役完了である。final index rotation と marker 完了は反復 starvation を避けるため一つの不可分な完了単位として扱う。各 invocation は期限超過時でも最低1つの耐久 stepを完了してから停止し、同一の既存 receipt の再確認は予算を消費しない。
@@ -1685,7 +1685,7 @@ kio view <path> --at <commit>
 
 Kio は **常駐 daemon を持たない**。すべての処理は CLI コマンドのプロセス内で完結する。
 
-- interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から CLI を起動する委譲方式とする (§8.2)
+- interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から `kio snapshot auto` を起動する委譲方式とする (§8.2)
 - idle 検出 (GC on_idle, Phase 4+) も同様に委譲実行時に判定し、Kio 自身は常駐しない (§2.3)
 - 同一 `.kio` に対する多重起動は `.kio/.lock` で防止する (§6)
 - **ローカルモデルサーバ (`execution_mode = "offline_api"`) の重み常駐は、サーバ側の責務であって Kio の責務ではない** (2026-07-26)。Kio はプロセスを起動も管理も常駐もせず、[07-adapter-spec.md §3](07-adapter-spec.md) が定める loopback url を呼ぶだけである — この点で online_api Adapter の呼出と何ら変わらない。モデルの遅延ロード・idle TTL による重み解放は当該サーバの設定であり、Kio の「常駐なし」原則と矛盾しない。サーバが起動していない場合の扱いは §1 の既存縮退に従う (embedding なら text fallback)。**`cmd` によるプロセス起動は将来仕様のままである** ([07-adapter-spec.md §7](07-adapter-spec.md)) — offline_api の導入はこれを前倒ししない
@@ -1700,7 +1700,7 @@ Kio は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 `.kio/.lock` を取得するコマンド (書き込み系):
 
 ```text
-kio index / kio snapshot (= kio commit) / kio tag (refs/tags-v1 更新) / kio gc / kio purge /
+kio index / kio snapshot create / kio snapshot auto / kio tag (refs/tags-v1 更新) / kio gc / kio purge /
 kio repair rebuild-db / kio repair verify-objects / kio move --accept /
 kio batch resume / kio batch retry / kio batch abandon / kio reindex /
 kio adapter revoke
@@ -1748,7 +1748,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持たない、§5):
 
-1. 明示的 `kio snapshot` / `kio commit` (commit_type=manual)
+1. 明示的 `kio snapshot create` (commit_type=manual)
 2. `kio index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
 3. `kio batch resume` / `kio batch retry` / `kio reindex --regenerate` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` / **tree の `chunk_set_hash` (公開 chunk 集合の digest — chunk のみが後着した finalize でも変わる)** を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kio index` まで検索対象にならないか、manifest 反映済み snapshot が先行したケースで introduction を刻む commit を作れない (§1.6)
 

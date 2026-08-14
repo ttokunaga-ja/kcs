@@ -1344,7 +1344,12 @@ fn pc57_mixed_retryable_and_permanent_all_failed_exits_3() {
     let (snapshot_code, snapshot) = run_in(
         &data_home,
         b,
-        &["snapshot", "--message", "make B replica rebuilding"],
+        &[
+            "snapshot",
+            "create",
+            "--message",
+            "make B replica rebuilding",
+        ],
     );
     assert_eq!(
         snapshot_code, 0,

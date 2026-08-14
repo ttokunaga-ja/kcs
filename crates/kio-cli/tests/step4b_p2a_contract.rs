@@ -582,7 +582,7 @@ fn pa16_pa17_destination_rejects_scope_root_dot_kio_and_ordinary_subdir_with_con
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("doc.md"), b"pa16 content").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "source"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "source"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -653,7 +653,7 @@ fn pa21_stale_backup_residue_is_rejected_before_mutation_regardless_of_force() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("notes.md"), b"pa21 content").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "source"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "source"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -704,7 +704,7 @@ fn pa22_pa23_force_overwrite_evacuates_old_file_before_no_replace_publish() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("notes.md"), b"pa22 restored content").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "source"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "source"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -758,7 +758,7 @@ fn pa23_non_force_publish_race_is_a_transient_conflict_leaving_destination_untou
     init(&dir);
     fs::write(dir.path().join("a.md"), b"alpha").unwrap();
     fs::write(dir.path().join("b.md"), b"beta").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "two files"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "two files"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -787,7 +787,7 @@ fn pa27_pa28_pa29_conflict_kind_is_closed_and_retry_disposition_follows_it() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("notes.md"), b"pa27 content").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "source"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "source"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1605,7 +1605,7 @@ fn pa50_all_three_restore_call_sites_share_the_same_corrupt_verdict_for_a_retire
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("doc.md"), b"pa50 content").unwrap();
-    let commit = json_success(&dir, &["snapshot", "-m", "source"])["commit_hash"]
+    let commit = json_success(&dir, &["snapshot", "create", "-m", "source"])["commit_hash"]
         .as_str()
         .unwrap()
         .to_owned();

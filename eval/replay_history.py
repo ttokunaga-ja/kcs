@@ -129,7 +129,7 @@ def replay(corpus_dir, bin_path):
 
         run_kio(bin_path, scope_dir, ["init", "."], corpus_dir=corpus_dir)
         run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
-        run_kio(bin_path, scope_dir, ["snapshot", "-m", "baseline"], corpus_dir=corpus_dir)
+        run_kio(bin_path, scope_dir, ["snapshot", "create", "-m", "baseline"], corpus_dir=corpus_dir)
 
         steps = ["baseline"]
 
@@ -142,7 +142,7 @@ def replay(corpus_dir, bin_path):
                 apply_edit(scope_dir, e)
             run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(e["file"] for e in edits)
-            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "create", "-m", f"edit: {files}"],
                     corpus_dir=corpus_dir)
             steps.append("edit")
 
@@ -155,7 +155,7 @@ def replay(corpus_dir, bin_path):
                 apply_rename(scope_dir, r)
             run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             pairs = ", ".join(f"{r['old_file']}->{r['new_file']}" for r in renames)
-            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "create", "-m", f"rename: {pairs}"],
                     corpus_dir=corpus_dir)
             steps.append("rename")
 
@@ -168,7 +168,7 @@ def replay(corpus_dir, bin_path):
                 apply_delete(scope_dir, d)
             run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(d["file"] for d in deletes)
-            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"delete: {files}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "create", "-m", f"delete: {files}"],
                     corpus_dir=corpus_dir)
             steps.append("delete")
 

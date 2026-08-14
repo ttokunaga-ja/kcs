@@ -141,6 +141,22 @@
       },
       "additionalProperties": false
     },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "auto": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval_seconds": { "type": "integer", "minimum": 1, "maximum": 31536000 },
+            "on_change_threshold": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+          },
+          "required": ["enabled", "interval_seconds", "on_change_threshold"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "logs": {
       "type": "object",
       "properties": {

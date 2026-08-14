@@ -142,7 +142,7 @@ fn scope_replacement_after_publication_cannot_redirect_automatic_gc() {
         .env("KIO_TEST_GC_POST_PUBLICATION_READY", &ready)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .args(["snapshot", "-m", "bind original scope", "--json"])
+        .args(["snapshot", "create", "-m", "bind original scope", "--json"])
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -311,7 +311,13 @@ fn after_index_with_candidates_fails_before_marker_on_unsupported_rotation_platf
 
     let output = kio(
         &dir,
-        &["snapshot", "-m", "unsupported automatic gc", "--json"],
+        &[
+            "snapshot",
+            "create",
+            "-m",
+            "unsupported automatic gc",
+            "--json",
+        ],
     )
     .output()
     .unwrap();
@@ -401,7 +407,7 @@ fn automatic_receipt_crash_recovers_in_preflight_before_next_publication() {
 
     // A new writer first resumes the frozen marker, then publishes its own
     // result.  No manual `kio gc` invocation is required for recovery.
-    let recovered = json_success(&dir, &["snapshot", "-m", "resume automatic"], NOW);
+    let recovered = json_success(&dir, &["snapshot", "create", "-m", "resume automatic"], NOW);
     assert_eq!(recovered["gc"]["recovered_before_publication"], true);
     assert!(!dir.path().join(".kio/gc/in_progress").exists());
     assert!(receipt_path(&dir, &commit).is_file());
@@ -418,7 +424,7 @@ fn completed_automatic_sweep_rotates_sqlite_before_and_after_tree_retirement() {
     // Manual snapshot publication itself does not rebuild SQLite.  Therefore
     // this generation change is attributable to the hook's pre/final sweep
     // rotations, not to index publication.
-    let result = json_success(&dir, &["snapshot", "-m", "rotate around gc"], NOW);
+    let result = json_success(&dir, &["snapshot", "create", "-m", "rotate around gc"], NOW);
     assert_eq!(result["gc"]["status"], "completed");
     assert!(!tree_path(&dir, &tree).exists());
     assert!(receipt_path(&dir, &commit).is_file());
@@ -448,7 +454,7 @@ fn manual_only_snapshots_preserve_gc_state_tree_and_sqlite_generation() {
         ("manual-only first", "created"),
         ("manual-only noop", "noop"),
     ] {
-        let output = json_success(&dir, &["snapshot", "-m", message], NOW);
+        let output = json_success(&dir, &["snapshot", "create", "-m", message], NOW);
         assert_eq!(output["status"], expected_status);
         assert_eq!(output["gc"]["status"], "disabled");
         assert_eq!(output["gc"]["reason"], "manual_only");
@@ -469,13 +475,13 @@ fn snapshot_success_and_noop_report_after_index_without_gc_state_for_empty_plan(
     let generation_before = index_generation(&dir);
     configure(&dir, "after_index");
 
-    let first = json_success(&dir, &["snapshot", "-m", "first"], NOW);
+    let first = json_success(&dir, &["snapshot", "create", "-m", "first"], NOW);
     assert_eq!(first["gc"]["status"], "skipped");
-    let second = json_success(&dir, &["snapshot", "-m", "noop"], NOW);
+    let second = json_success(&dir, &["snapshot", "create", "-m", "noop"], NOW);
     assert_eq!(second["gc"]["status"], "skipped");
     assert_eq!(index_generation(&dir), generation_before);
 
-    let human = kio(&dir, &["snapshot", "-m", "human observable"])
+    let human = kio(&dir, &["snapshot", "create", "-m", "human observable"])
         .output()
         .unwrap();
     assert!(human.status.success());
@@ -517,7 +523,7 @@ fn on_idle_fails_closed_before_index_or_snapshot_mutation() {
 
     for args in [
         &["index", "--offline", "--approve", "--json"][..],
-        &["snapshot", "-m", "blocked", "--json"][..],
+        &["snapshot", "create", "-m", "blocked", "--json"][..],
     ] {
         let output = kio(&dir, args).output().unwrap();
         assert_eq!(output.status.code(), Some(1));
@@ -655,7 +661,11 @@ fn after_index_retains_a_tree_still_shared_by_a_protected_ref_tip() {
     .unwrap();
     configure(&dir, "after_index");
 
-    let result = json_success(&dir, &["snapshot", "-m", "trigger retention"], NOW);
+    let result = json_success(
+        &dir,
+        &["snapshot", "create", "-m", "trigger retention"],
+        NOW,
+    );
     assert_eq!(result["gc"]["status"], "skipped");
     assert_eq!(result["gc"]["reason"], "no_candidates");
     assert!(
@@ -782,7 +792,11 @@ fn automatic_sweep_receipts_all_eligible_repaired_sharers_before_one_tree_remova
         1
     );
 
-    let result = json_success(&dir, &["snapshot", "-m", "resume repaired sweep"], NOW);
+    let result = json_success(
+        &dir,
+        &["snapshot", "create", "-m", "resume repaired sweep"],
+        NOW,
+    );
     assert_eq!(
         result["gc"]["recovered_before_publication"], true,
         "{result}"

@@ -3975,7 +3975,7 @@ fn ct3_replica_002_snapshot_marks_the_prior_projection_rebuilding() {
         "# Updated auth specification\n\nnew snapshot-only content\n",
     )
     .unwrap();
-    let snapshot = json_success(&dir, &["snapshot", "--message", "snapshot only"]);
+    let snapshot = json_success(&dir, &["snapshot", "create", "--message", "snapshot only"]);
     assert_eq!(snapshot["status"], "created", "{snapshot}");
     let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
     assert_ne!(head_after, head_before, "the test must advance HEAD");
@@ -4240,7 +4240,10 @@ fn ct3_replica_005_same_content_snapshot_republishes_ready_projection() {
         "indexed predecessor must have tree rows"
     );
 
-    let snapshot = json_success(&dir, &["snapshot", "--message", "checkpoint only"]);
+    let snapshot = json_success(
+        &dir,
+        &["snapshot", "create", "--message", "checkpoint only"],
+    );
     assert_eq!(snapshot["status"], "created", "{snapshot}");
     let head_after = fs::read_to_string(dir.path().join(".kio/HEAD")).unwrap();
     assert_ne!(
@@ -5197,7 +5200,12 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
         .unwrap()
         .to_owned();
     // snapshot で HEAD を射影なしに前進させる (replay の各 step と同じ形)
-    json_success_embed_at(&dir, "rate_limit", base_now, &["snapshot", "-m", "advance"]);
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        base_now,
+        &["snapshot", "create", "-m", "advance"],
+    );
 
     let retry = json_success_embed_at(&dir, "mock", &retry_at, &["batch", "retry"]);
     assert!(
@@ -5592,7 +5600,7 @@ fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
     let sanity = json_success(&dir, &["view", &chunk_hash]);
     assert!(view_slice(&sanity).contains("3600"));
     // Advance HEAD via a bare snapshot (proves it is not a no-op).
-    let snap = json_success(&dir, &["snapshot", "-m", "advance"]);
+    let snap = json_success(&dir, &["snapshot", "create", "-m", "advance"]);
     assert_eq!(
         snap["status"], "created",
         "snapshot must advance HEAD: {snap}"
@@ -6116,7 +6124,7 @@ fn n2_manual_snapshot_excludes_tier_a() {
     fs::write(dir.path().join(".env"), "TOKEN=supersecret").unwrap();
     kio(&dir, &["init"]).assert().success();
 
-    let snap = json_success(&dir, &["snapshot", "-m", "manual"]);
+    let snap = json_success(&dir, &["snapshot", "create", "-m", "manual"]);
     assert_eq!(
         snap["status"], "created",
         "snapshot must commit a.txt: {snap}"
@@ -6174,7 +6182,7 @@ fn f4_tag_rejects_reserved_head_and_hash_names() {
     fs::write(dir.path().join("a.md"), "# T\n\n## S\nbody text here.\n").unwrap();
     kio(&dir, &["init"]).assert().success();
     // A commit must exist so a legitimate tag (resolving HEAD) can be created.
-    json_success(&dir, &["snapshot", "-m", "first"]);
+    json_success(&dir, &["snapshot", "create", "-m", "first"]);
 
     // Reserved name `HEAD`: rejected before any ref is written.
     let err = json_failure(&dir, &["tag", "HEAD"], 2);
@@ -6968,7 +6976,10 @@ fn p10_replica_rebuilding_returns_not_silent_empty() {
         "# Alpha revised\n\n## S\nalphaunique alphaunique replacement content here\n",
     )
     .unwrap();
-    let snapshot = json_success(&dir, &["snapshot", "--message", "advance source HEAD"]);
+    let snapshot = json_success(
+        &dir,
+        &["snapshot", "create", "--message", "advance source HEAD"],
+    );
     assert_eq!(snapshot["status"], "created", "{snapshot}");
     let err = json_failure(&dir, &["search", "alphaunique", "--mode", "text"], 3);
     assert_eq!(err["error_code"], "KIO-E-INDEX-REBUILDING-001");
@@ -9168,7 +9179,7 @@ fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
     )
     .unwrap();
     for (args, label) in [
-        (vec!["snapshot", "-m", "x"], "snapshot"),
+        (vec!["snapshot", "create", "-m", "x"], "snapshot"),
         (vec!["index", "--yes"], "index"),
         (vec!["reindex", "--regenerate", "--yes"], "reindex"),
         (vec!["repair", "rebuild-db"], "repair"),
@@ -9312,10 +9323,10 @@ fn r16_1_log_truncates_at_missing_ancestor_commit() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
     kio(&dir, &["init"]).assert().success();
-    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, &["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
-    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2 = json_success(&dir, &["snapshot", "create", "-m", "second"]);
     let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
 
     // (control) a healthy log returns both commits, HEAD-first, not truncated.
@@ -9429,7 +9440,7 @@ fn r16_3_fresh_search_unreceipted_tree_loss_excludes_not_silent_empty() {
     // NOT projected (only index/reindex project) — then discard its tree object. B's
     // HEAD is now shallow with NO cached rows for the new commit (ShallowNoRows).
     fs::write(b.join("b.md"), "# B\n\n## Sec\nbetashared token v2\n").unwrap();
-    let snap = json_success_path(&b, &data_home, &["snapshot", "-m", "advance"]);
+    let snap = json_success_path(&b, &data_home, &["snapshot", "create", "-m", "advance"]);
     let b2 = snap["commit_hash"].as_str().unwrap().to_owned();
     let b_kio = b.join(".kio");
     let b2_obj: Value =
@@ -9575,12 +9586,12 @@ fn r17_5_shallow_commit_via_hash_tag_and_implicit_head_folds_to_commit_shallow()
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
     kio(&dir, &["init"]).assert().success();
-    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1 = json_success(&dir, &["snapshot", "create", "-m", "first"]);
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
     // A tag pointing at C1, created while C1 is healthy (control + tag-name coverage).
     json_success(&dir, &["tag", "tagc1", &c1_hash]);
     fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
-    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2 = json_success(&dir, &["snapshot", "create", "-m", "second"]);
     let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
 
     // (control) a healthy diff of the two hash literals works.
@@ -9753,7 +9764,7 @@ fn r17_4_unreceipted_missing_head_returns_store_corrupt_guidance() {
         "# A\n\n## Sec\nalphashallow token v2\n",
     )
     .unwrap();
-    let snap = json_success(&dir, &["snapshot", "-m", "advance"]);
+    let snap = json_success(&dir, &["snapshot", "create", "-m", "advance"]);
     let c2 = snap["commit_hash"].as_str().unwrap().to_owned();
     let kio_dir = dir.path().join(".kio");
     let c2_obj: Value =
