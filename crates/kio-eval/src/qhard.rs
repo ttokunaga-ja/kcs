@@ -4610,7 +4610,7 @@ fn run_bound_rga(
     Ok(output)
 }
 fn query_fragments(query: &str) -> Vec<String> {
-    // Exact counterpart of eval/run_baseline.py's four regexes.  Do not use
+    // Exact implementation of the four frozen baseline fragment classes. Do not use
     // Unicode `is_alphanumeric`: it would admit Japanese words as an extra,
     // more selective baseline query and make Kio's margin look better.
     let input: Vec<char> = query.nfkc().collect();
@@ -5332,8 +5332,8 @@ mod tests {
             query_fragments("修復作業 45 分の API_limit A ３.５ カタカナー"),
             vec!["3.5", "45", "api_limit", "カタカナー", "修復作業"]
         );
-        // Generated once by eval/run_baseline.py's independent regex reference;
-        // this fixed table ensures future Rust changes preserve every overlap.
+        // This fixed table ensures future Rust changes preserve every overlap
+        // in the independently frozen fragment vectors.
         let expected = [
             "一度|上限",
             "何分|修復作業|時間枠",

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Build the indexed fixture environments `run_baseline.py` / `run_qhard.py` search.
+"""Build indexed external fixtures for Rust baseline/Q_hard measurement.
 
-Those two runners are the only instrument that can detect a search-quality
-regression: the synthetic `kio-eval` suite scores 1.0/1.0/1.0 against a 0.8 target,
-i.e. it sits at its ceiling and cannot measure degradation. The 24-query
-fixture-B set last measured 0.9167 with hard3 at 6/8, so it has the headroom the
-synthetic set does not. Both runners resolve `<fixture-root>/env/<name>/xdg-*`
-and neither builds it — this is the missing half, and it was never committed
-(`git log --diff-filter=D` finds no deletion; it simply never existed in the
-repo).
+Rust `kio-eval benchmark baseline` and `benchmark qhard` are the measurement
+contracts. The synthetic suite sits at its ceiling, while the 24-query fixture-B
+set has measurable headroom. Neither Rust command builds the paid external
+fixture or its isolated `<fixture-root>/env/<name>/xdg-*` state; this script owns
+that distinct registration workflow.
 
 ## What a fixture is
 
@@ -18,8 +15,8 @@ repo).
       env/qhard/xdg-{config,data,cache}
       registration-report.json
 
-The source corpus is **never touched**. `run_baseline.py` compares Kio against
-mdfind and rga on a PRISTINE copy — baselines must not see Kio-derived
+The source corpus is **never touched**. Rust baseline measurement compares Kio
+against mdfind and rga on a PRISTINE copy — baselines must not see Kio-derived
 artifacts — so the tree that gets `.kio` directories has to be a copy, and the
 one the baselines read stays clean.
 

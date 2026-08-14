@@ -25,14 +25,14 @@
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
 | `kio-eval rerank-dump` | current-tree queryの候補順・3要素key・検証済みChunk CAS textをcreate-only JSONへ固定するRust経路。offline GPU差分のpass 1 |
 | `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
-| `run_qhard.py` | 歴史的な専用 runner。現在の Done 判定用の新規計測には使わない |
+| `kio-eval benchmark qhard` | attest済み外部fixtureとsynthetic M3-1を同一実行で再測定する唯一のQ_hard判定経路 |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
-| `run_baseline.py` | 歴史的/reference runner。新規の baseline 判定は Rust `kio-eval benchmark baseline` が正本 |
+| `kio-eval benchmark baseline` | attest済みfixture-BをSpotlight/rgaと比較する唯一のbaseline判定経路 |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
 | `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
 | `attest_scale_corpus.py` | HEAD・現行 chunk config・FTS coverage を照合し、検索可能 chunk の正確な総数を証明 |
-| `run_scale_eval.py` | Rust lane 移行前の legacy/reference 実装。fixture 生成・attestation 契約の参照用であり、新規の性能判定の正本ではない |
+| `run_scale_eval.py` | Python scale generator/prepare/attestと密結合したfixture契約test用。CI consumerがあるため4モジュール同時移行まで保持し、新規の性能判定はRust `benchmark scale`だけが行う |
 | `test_scale_*.py`, `test_run_scale_eval.py` | 性能 fixture の形、所有権、排他、bounded read、registry 復旧、計測契約の単体テスト |
 
 ## 使い方
@@ -142,8 +142,8 @@ target/release/kio-eval benchmark baseline \
   --comparator-runtime /Library/KioComparatorRuntime/v1 --out /tmp/kio-baseline.json
 ```
 
-Rust が計測の正本である。legacy の `run_baseline.py` は参照用に残すが、歴史的 JSON は証拠ではなく
-新たな合格計測を成立させない。`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
+Rust 以外のbaseline runnerは保持しない。歴史的 JSON は証拠ではなく、新たな合格計測を成立させない。
+`mdfind` または `rga` が無ければ `blocked-unmeasured` であり、pass にはならない。
 baseline report の `configuration` は `online_query` と、Kio subprocess に実際に転送した
 credential の**環境変数名だけ**を `forwarded_credential_names` として記録する。値は report に
 書き出さない。`--online-query` を指定しない限りこの配列は空である。比較器欠落などで Kio lane

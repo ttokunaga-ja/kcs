@@ -1603,8 +1603,8 @@ RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
 
 **切り詰めの代償は測定に現れなかった** (差 +0.0417 = 1 問、n=24 なのでノイズ)。
 
-> **この 0.5417 を、下の品質計器の表にある `run_baseline.py` の 0.9167 と比べないこと。**
-> 同じ 24 問 fixture を使うが**計器が違う**。`run_baseline.py` は実際の `kio` バイナリを
+> **この 0.5417 を、下の品質計器の表にある Rust baseline の 0.9167 と比べないこと。**
+> 同じ 24 問 fixture を使うが**計器が違う**。`kio-eval benchmark baseline` は実際の `kio` バイナリを
 > `kio --json search <query> --all-scopes` で回すので、chunk 分割・hybrid・集約まで
 > 通った Kio の実力である。`v3_mrl.py` は Kio を一切通さず、**1 ファイル = 1 passage**
 > (分割なし・先頭 4000 文字) の素の cosine しか見ない。
@@ -1799,7 +1799,7 @@ UTF-8 byte order 最小**の chunk を指す。逆引きの探索範囲は検索
 | 計器 | 実測 | 使えるか |
 |---|---|---|
 | Rust `kio-eval` (合成・CI 常時) | M3-1/2/3 = 1.0 / 1.0 / 1.0 (目標 0.8) | ❌ 天井。劣化を検出できない |
-| `eval/run_baseline.py` (fixture-b 24 問) | kio 0.9167、hard3 は 6/8 | ✅ 余地がある |
+| `kio-eval benchmark baseline` (fixture-b 24 問) | kio 0.9167、hard3 は 6/8 | ✅ 余地がある |
 
 その fixture は失われていなかった。当時は改名前の `kio-` 名で残っていた
 (**2026-07-28 に `kio-` へ改名済み**)。所在は 2026-07-28 に実測し直した:

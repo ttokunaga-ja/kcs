@@ -236,9 +236,8 @@ Spotlight/rga との baseline 比較は、Q_hard 8 問や synthetic M3-1 18 問�
 `sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45`）で行う。
 正本は Rust の `kio-eval benchmark baseline` である。実行前に
 `kio-eval benchmark baseline-attest` が indexed fixture と `.kio` を除いた pristine
-tree の同値性、p01..p20、golden を束縛する attestation を生成する。Python
-`eval/run_baseline.py` は歴史的な reference であり、新規判定の正本ではない。保存済み JSON は
-計測証拠ではなく、実測の pass を主張しない。
+tree の同値性、p01..p20、golden を束縛する attestation を生成する。baseline runnerは
+Rust実装だけを保持する。保存済み JSON は計測証拠ではなく、実測の pass を主張しない。
 
 macOS の rga comparator は、ユーザー所有 package prefix を信頼根にしてはならない。baseline 実行は
 管理者提供の root-owned / group-other 非書込み runtime root を明示し、rga、rga-preproc、pandoc、pdftotext、rg
@@ -410,7 +409,7 @@ Status: decided
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
-| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 Q_hard 増補は 2026-07-23 完了・再凍結** (§4.2 の一回限り例外の完遂 — 本追記は §6.2 凍結対象外の完遂手続き): 「Step 3 着手前」の期日は失効していたため同日のユーザー裁定で失効後実行。増補 8 問 (hard1 ×4 + hard3 ×4、全問を結果測定前に投入 = 事前コミット) は実データ fixture (raster PDF / PPTX 図表 / 画像) を正解担体とするため合成コーパスに載らず、**別ファイル方式**で再凍結する: 既存 `eval/golden-queries.jsonl` は 50 件のまま不変 (digest sha256:b7183fa3586383883ec522256696268eab8e607c1a032020e09223158a5bf08d)、増補分は `eval/golden-queries-qhard.jsonl` 8 件 (digest sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163、専用ランナー `eval/run_qhard.py`)。M3-1 の Done 判定は以後**合算 26 問で Recall@10 >= 0.8 (= 21 問以上)**)。**横断増補は 2026-07-26 完了・再凍結** (§4.2 の別ファイル方式を再適用): 既存 50 問は
+| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 Q_hard 増補は 2026-07-23 完了・再凍結** (§4.2 の一回限り例外の完遂 — 本追記は §6.2 凍結対象外の完遂手続き): 「Step 3 着手前」の期日は失効していたため同日のユーザー裁定で失効後実行。増補 8 問 (hard1 ×4 + hard3 ×4、全問を結果測定前に投入 = 事前コミット) は実データ fixture (raster PDF / PPTX 図表・画像) を正解担体とするため合成コーパスに載らず、**別ファイル方式**で再凍結する: 既存 `eval/golden-queries.jsonl` は 50 件のまま不変 (digest sha256:b7183fa3586383883ec522256696268eab8e607c1a032020e09223158a5bf08d)、増補分は `eval/golden-queries-qhard.jsonl` 8 件 (digest sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163、Rust runner `kio-eval benchmark qhard`)。M3-1 の Done 判定は以後**合算 26 問で Recall@10 >= 0.8 (= 21 問以上)**)。**横断増補は 2026-07-26 完了・再凍結** (§4.2 の別ファイル方式を再適用): 既存 50 問は
 **全問 expected が単一 scope に閉じており**、`--all-scopes` で 7 scope を横断はするものの「複数 scope から答えを
 組み立てる」形が 1 問も無かった。増補 16 問 (M3-1 ×8 / M3-2 ×4 / M3-3 ×4、全問 expected が 2 scope に跨る) を
 `eval/golden-queries-crossscope.jsonl`

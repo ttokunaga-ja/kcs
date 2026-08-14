@@ -11,8 +11,8 @@
 > 恒久コーパスの埋め込み禁止も解ける。詳細は下記「判断」。
 
 > **0.5417 / 0.5833 を Kio の検索品質と読まないこと。** `tasks/local-adapter-plan.md`
-> の品質計器の表は同じ 24 問 fixture で `run_baseline.py` の **0.9167** を挙げているが、
-> **計器が違う**。`run_baseline.py` は実際の `kio` バイナリを
+> の品質計器の表は同じ 24 問 fixture で Rust baseline の **0.9167** を挙げているが、
+> **計器が違う**。`kio-eval benchmark baseline` は実際の `kio` バイナリを
 > `kio --json search <query> --all-scopes` で回すので chunk 分割・hybrid・集約まで
 > 通っている。`v3_mrl.py` は Kio を通さず **1 ファイル = 1 passage** (分割なし・
 > 先頭 4000 文字) の素の cosine だけを見る。

@@ -33,12 +33,12 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   markdownize 1.3.0)。登録が炙り出した 2 バグ (`acf4f23`) と合わせ、実データが監査 19 ラウンドの
   盲点 3 つを 1 日で回収。
 - embedding (sync): 2,321 task 全成功、$0.0096。検索時 query embedding で hard 自然文が
-  vector レーン解答 (run_qhard --online-query)。
+  vector レーン解答 (現行は Rust `kio-eval benchmark qhard --online-query`)。
 - **1-A3 残余追加**: (6) batch reject 後の task 再駆動動線 — reset-violations は台帳のみで、
   invalid_input 化した task の復活が未配線 (fixture では手動 flip で代替した)。(7) built-in
   mistral の tools.toml pricing 宣言ガイダンス (`pages = 0.002`) — 無宣言だと確定記帳が常に
   estimated 縮退で過大計上。
-- **baseline 比較を実測 (2026-07-23、`eval/run_baseline.py` + 凍結 24 問 `golden-queries-fixture-b.jsonl`)**:
+- **baseline 比較を実測 (2026-07-23、現行再測定経路は Rust `kio-eval benchmark baseline` + 凍結 24 問 `golden-queries-fixture-b.jsonl`)**:
   Recall@10 = **Kio 8/24 (0.333) / mdfind 0/24 / rga 0/24** (rga は pandoc 導入 + 断片採点の
   上振れ運用でも 0 — Q_hard の設計どおり字句エンジンは全滅)。**差 >= 0.3 は両者に対し成立、
   Kio >= 0.8 の腕が未達 = ゲート OPEN**。クラス別 Kio: hard1 3/8・hard2 5/8・hard3 0/8。

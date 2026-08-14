@@ -9,12 +9,11 @@ cannot change Recall@10 when the whole result set already fits in the top ten.
 
 This one runs against fixture-B with embeddings present, where all 24 queries
 fill the 100-result cap. It is a separate file rather than a flag because the
-two corpora score differently, the same reason `kio-eval`, `run_qhard.py`
-and `run_baseline.py` are separate: fixture-B matches on the result's `title`
+two corpora score differently: fixture-B matches on the result's `title`
 (the ORIGINAL filename — the normalized corpus appends `.md`, and `title`
-carries the name before that), against `Path(expected.path).name`. Following
-`run_qhard.py` here rather than inventing a projection is deliberate; pass 1
-already shipped one bug from reimplementing a scorer's key.
+carries the name before that), against `Path(expected.path).name`. This frozen
+fixture-B projection is kept distinct from the synthetic three-element key;
+pass 1 already shipped one bug from conflating the two scorers.
 
 `kio-eval rerank-apply` accepts this fixture-B contract alongside the synthetic
 dump contract: it scores any nonempty, homogeneous key array exactly, so this
@@ -170,7 +169,7 @@ def main(argv=None):
             if text is None:
                 missing += 1
                 continue
-            # `title` is the projection run_qhard.py scores on.
+            # `title` is the frozen fixture-B scoring projection.
             candidates.append(
                 {"key": [normalized_title(result.get("title"))], "text": text})
         if missing:
