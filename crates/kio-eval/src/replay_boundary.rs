@@ -11,6 +11,7 @@ use std::{
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use cap_primitives::{ambient_authority, fs as cap_fs};
@@ -22,6 +23,7 @@ const HISTORY_MANIFEST: &str = "history-manifest.json";
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DIRECT_ENTRY_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+static ROLLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub type ReplayBoundaryResult<T> = Result<T, ReplayBoundaryError>;
 
@@ -287,7 +289,17 @@ pub struct StagedHistoryManifest<'a> {
     published: bool,
     #[cfg(test)]
     fail_after_rename: bool,
+    #[cfg(test)]
+    post_root_sync: Option<PostRootSyncAction>,
 }
+
+#[cfg(test)]
+#[derive(Debug)]
+enum PostRootSyncAction {
+    Replace(Vec<u8>),
+    Remove,
+}
+
 impl StagedHistoryManifest<'_> {
     pub fn publish(mut self) -> ReplayBoundaryResult<()> {
         rename_no_replace_between(
@@ -309,51 +321,154 @@ impl StagedHistoryManifest<'_> {
             .root
             .sync_all()
             .map_err(|e| ReplayBoundaryError::io(&self.boundary.public_root, e))
-            .and_then(|()| self.boundary.recheck_identities())
         {
             return self.rollback_after_publish(error);
         }
+        #[cfg(test)]
+        if let Some(action) = self.post_root_sync.take() {
+            self.inject_post_root_sync_action(action)?;
+        }
+        self.verify_publication()?;
+        // A public-path replacement after publication makes the result
+        // indeterminate.  Do not attempt a cleanup through the retained old
+        // root: it cannot establish anything about the replacement namespace.
+        self.boundary
+            .recheck_identities()
+            .map_err(|error| ReplayBoundaryError::Indeterminate {
+                path: self.boundary.public_root.join(HISTORY_MANIFEST),
+                message: format!("post-publication boundary identity changed: {error}"),
+            })?;
+        // Close the interval opened by the identity recheck. A success result
+        // is therefore backed by the exact staged inode and bytes at the final
+        // observation barrier.
+        self.verify_publication()?;
         Ok(())
     }
 
-    fn rollback_after_publish(&mut self, cause: ReplayBoundaryError) -> ReplayBoundaryResult<()> {
+    fn verify_publication(&self) -> ReplayBoundaryResult<()> {
         let observed = regular_observed_at(
             &self.boundary.root,
             HISTORY_MANIFEST,
             MAX_SOURCE_BYTES,
             &self.boundary.public_root,
-        );
-        let Ok(observed) = observed else {
-            return Err(ReplayBoundaryError::Indeterminate {
-                path: self.boundary.public_root.join(HISTORY_MANIFEST),
-                message: "post-rename manifest cannot be observed for rollback".into(),
-            });
+        )
+        .map_err(|error| ReplayBoundaryError::Indeterminate {
+            path: self.boundary.public_root.join(HISTORY_MANIFEST),
+            message: format!("published manifest cannot be verified: {error}"),
+        })?;
+        let binding = FileBinding {
+            sha256: sha256(&observed.bytes),
+            bytes: observed.bytes.len() as u64,
         };
-        if observed.identity != self.identity
-            || (FileBinding {
-                sha256: sha256(&observed.bytes),
-                bytes: observed.bytes.len() as u64,
-            }) != self.binding
+        if observed.identity != self.identity || binding != self.binding {
+            return Err(ReplayBoundaryError::Indeterminate {
+                path: self.boundary.public_root.join(HISTORY_MANIFEST),
+                message: "published manifest differs from staged authority".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn rollback_after_publish(&mut self, cause: ReplayBoundaryError) -> ReplayBoundaryResult<()> {
+        // Never observe then unlink a public name: another same-UID process
+        // could replace it in between. Instead atomically move whatever is at
+        // the public leaf into retained private staging, then prove it was our
+        // staged object. A mismatched capture is retained as evidence.
+        let capture = format!(
+            ".{HISTORY_MANIFEST}.{}.{}.rollback",
+            std::process::id(),
+            ROLLBACK_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        if rename_no_replace_between(
+            &self.boundary.root,
+            HISTORY_MANIFEST,
+            &self.staging,
+            &capture,
+        )
+        .is_err()
         {
             return Err(ReplayBoundaryError::Indeterminate {
                 path: self.boundary.public_root.join(HISTORY_MANIFEST),
-                message: "post-rename manifest identity differs from staged authority".into(),
+                message: "could not atomically capture post-rename manifest for rollback".into(),
             });
         }
-        if cap_fs::remove_file(&self.boundary.root, Path::new(HISTORY_MANIFEST)).is_err()
-            || self.boundary.root.sync_all().is_err()
-        {
+        if self.boundary.root.sync_all().is_err() || self.staging.sync_all().is_err() {
             return Err(ReplayBoundaryError::Indeterminate {
                 path: self.boundary.public_root.join(HISTORY_MANIFEST),
-                message: "could not durably remove exact post-rename manifest".into(),
+                message: "could not durably capture post-rename manifest for rollback".into(),
             });
         }
+        let observed = regular_observed_at(
+            &self.staging,
+            &capture,
+            MAX_SOURCE_BYTES,
+            &self.boundary.public_root.join(DEVICE_DIR).join("state"),
+        )
+        .map_err(|_| ReplayBoundaryError::Indeterminate {
+            path: self.boundary.public_root.join(HISTORY_MANIFEST),
+            message: "captured post-rename manifest cannot be verified".into(),
+        })?;
+        let binding = FileBinding {
+            sha256: sha256(&observed.bytes),
+            bytes: observed.bytes.len() as u64,
+        };
+        if observed.identity != self.identity || binding != self.binding {
+            return Err(ReplayBoundaryError::Indeterminate {
+                path: self.boundary.public_root.join(HISTORY_MANIFEST),
+                message: "captured post-rename manifest differs from staged authority".into(),
+            });
+        }
+        ensure_absent(
+            &self.boundary.root,
+            HISTORY_MANIFEST,
+            &self.boundary.public_root,
+        )
+        .map_err(|_| ReplayBoundaryError::Indeterminate {
+            path: self.boundary.public_root.join(HISTORY_MANIFEST),
+            message: "manifest reappeared while completing rollback".into(),
+        })?;
         Err(cause)
     }
     #[cfg(test)]
     fn inject_post_rename_failure(mut self) -> Self {
         self.fail_after_rename = true;
         self
+    }
+    #[cfg(test)]
+    fn inject_post_root_sync_replacement(mut self, bytes: Vec<u8>) -> Self {
+        self.post_root_sync = Some(PostRootSyncAction::Replace(bytes));
+        self
+    }
+    #[cfg(test)]
+    fn inject_post_root_sync_removal(mut self) -> Self {
+        self.post_root_sync = Some(PostRootSyncAction::Remove);
+        self
+    }
+    #[cfg(test)]
+    fn inject_post_root_sync_action(&self, action: PostRootSyncAction) -> ReplayBoundaryResult<()> {
+        cap_fs::remove_file(&self.boundary.root, Path::new(HISTORY_MANIFEST)).map_err(|e| {
+            ReplayBoundaryError::io(self.boundary.public_root.join(HISTORY_MANIFEST), e)
+        })?;
+        if let PostRootSyncAction::Replace(bytes) = action {
+            let mut options = cap_fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            let mut replacement =
+                cap_fs::open(&self.boundary.root, Path::new(HISTORY_MANIFEST), &options).map_err(
+                    |e| {
+                        ReplayBoundaryError::io(self.boundary.public_root.join(HISTORY_MANIFEST), e)
+                    },
+                )?;
+            replacement
+                .write_all(&bytes)
+                .and_then(|_| replacement.sync_all())
+                .map_err(|e| {
+                    ReplayBoundaryError::io(self.boundary.public_root.join(HISTORY_MANIFEST), e)
+                })?;
+        }
+        self.boundary
+            .root
+            .sync_all()
+            .map_err(|e| ReplayBoundaryError::io(&self.boundary.public_root, e))
     }
 }
 impl Drop for StagedHistoryManifest<'_> {
@@ -638,6 +753,8 @@ impl ReplayDevice {
                 published: false,
                 #[cfg(test)]
                 fail_after_rename: false,
+                #[cfg(test)]
+                post_root_sync: None,
             })
         }
     }
@@ -1718,6 +1835,44 @@ mod tests {
             b"{}\n"
         );
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn publication_rejects_post_sync_replacement_without_deleting_it() {
+        let (temp, scopes) = fixture();
+        let boundary = ReplayBoundary::bind(temp.path(), &scopes).unwrap();
+        let device = boundary.prepare_device().unwrap();
+        let replacement = b"forged evidence\n".to_vec();
+        let result = device
+            .stage_history_manifest(&boundary, b"expected evidence\n")
+            .unwrap()
+            .inject_post_root_sync_replacement(replacement.clone())
+            .publish();
+        assert!(matches!(
+            result,
+            Err(ReplayBoundaryError::Indeterminate { .. })
+        ));
+        assert_eq!(
+            fs::read(temp.path().join(HISTORY_MANIFEST)).unwrap(),
+            replacement
+        );
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn publication_rejects_post_sync_removal_without_success() {
+        let (temp, scopes) = fixture();
+        let boundary = ReplayBoundary::bind(temp.path(), &scopes).unwrap();
+        let device = boundary.prepare_device().unwrap();
+        let result = device
+            .stage_history_manifest(&boundary, b"expected evidence\n")
+            .unwrap()
+            .inject_post_root_sync_removal()
+            .publish();
+        assert!(matches!(
+            result,
+            Err(ReplayBoundaryError::Indeterminate { .. })
+        ));
+        assert!(!temp.path().join(HISTORY_MANIFEST).exists());
+    }
     #[cfg(target_os = "linux")]
     #[test]
     fn descriptor_backed_device_environment_survives_public_home_swap() {
@@ -1894,7 +2049,7 @@ mod tests {
         let (temp, scopes) = fixture();
         let binary_dir = tempfile::tempdir().unwrap();
         let binary = binary_dir.path().join("kio-eval-under-test");
-        fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        fs::write(&binary, b"#!/bin/sh\n[ \"$1\" = \"--list\" ]\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let boundary = ReplayBoundary::bind(temp.path(), &scopes).unwrap();
