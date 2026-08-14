@@ -993,7 +993,7 @@ mod tests {
         let (corpus, manifest) = checked_manifest();
         for mutator in [
             |value: &mut serde_json::Value| {
-                value["generator"] = serde_json::json!("eval/replay_history.py")
+                value["generator"] = serde_json::json!("legacy-python-replay/v0")
             },
             |value: &mut serde_json::Value| value["schema_version"] = serde_json::json!(0),
             |value: &mut serde_json::Value| value["plan_sha256"] = serde_json::json!("sha256:00"),

@@ -157,7 +157,7 @@ target/release/kio-eval --help
 target/release/kio-eval crossscope --help
 ```
 
-- 評価コーパスは **7 スコープ** (`eval/corpus_spec.py` の `SCOPES`)。横断経路を通る
+- 評価コーパスは **7 スコープ** (`eval/corpus-fixture.json` のmanifestで固定)。横断経路を通る
 - `eval/golden-queries-short.jsonl` は **24 問の短語セット** (各 12 文字以下)。
   **項目 3 (短語レーン) の直接の検査になる**
 - CI が短語セットを `--min-recall 0.9166666666666666` で門番している

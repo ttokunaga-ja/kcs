@@ -86,7 +86,11 @@ jobs:
           --corpus /tmp/kio-scale-tiny --bin target/release/kio
           --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
       - run: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
-      - run: python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      # replay-history rejects hardlinked executables at its trust boundary.
+      - run: install -m 0755 target/release/kio /tmp/kio-replay-kio
+      - run: >-
+          target/release/kio-eval replay-history
+          --corpus /tmp/kio-eval-corpus --bin /tmp/kio-replay-kio
       - run: >-
           target/release/kio-eval crossscope --dry-run
           --corpus /tmp/kio-eval-corpus --bin target/release/kio

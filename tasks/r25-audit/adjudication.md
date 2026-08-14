@@ -482,7 +482,7 @@ pinned object の unit を `failed` に書き換え (PB45 と同じ fixture 手�
 横断経路を通らない」と書いたが、**ハーネスを読んで確かめたところ間違っていた**。
 
 Rust `kio-eval` は `[bin, "--json", "search", query, "--all-scopes"]` を実行し、
-`corpus_spec.SCOPES` は 7 scope (`research / notes / downloads / projects-a / projects-b /
+凍結 `corpus-fixture.json` の manifest は 7 scope (`research / notes / downloads / projects-a / projects-b /
 specs / journal`) である。したがって**全 50 クエリが `searched.len() == 7` で横断経路を通り、
 replica が適用される**。実行して確認した — `aggregator.applied = true`。
 
@@ -514,7 +514,7 @@ BM25 のコーパス統一と絞り込み修正が効く経路そのものであ
 
 **複数 scope に跨る答えを要求するクエリが golden set に 1 件も無い。** これは
 「Q_hard の増補」としてユーザー側 Done 条件に残っていた項目であり、私が勝手に作ると
-golden の正本性 (`corpus_spec.py` 単一定義・決定論) を壊す。増補はユーザー裁定が要る。
+golden と凍結 fixture/plan の単一定義・決定論を壊す。増補はユーザー裁定が要る。
 
 ### 順位 7 の修正が開けた穴 (同じ回で検出・修正)
 
@@ -540,7 +540,7 @@ preserves_shared_content_embeddings` が落ちた (`deleted_chunk_vectors` が 2
 `golden-queries.jsonl` は digest ごと不変・増補は自分のファイルと自分の digest・専用ランナー。
 **同じ形をそのまま再適用した** — 新しい規約は作っていない。
 
-**コーパスには一切手を入れていない。** 16 問すべて正解担体は `corpus_spec.ANCHORS` の既存 anchor であり、
+**コーパスには一切手を入れていない。** 16 問すべて正解担体は凍結 corpus fixture の既存 anchor であり、
 「同じ数値が 2 scope に現れる」既存の事実 (`ef_search 128` / `暫定スコア 0.71` / `p95 1900ms` 等) を
 そのままクエリにした。決定論・履歴 fixture・既存 2 ファイルの digest はすべて不変を実測確認済み。
 

@@ -8,7 +8,6 @@ import unittest
 from unittest import mock
 
 from eval.eval_env import subprocess_env
-from eval import replay_history
 
 
 class TestEvalEnvironment(unittest.TestCase):
@@ -53,25 +52,6 @@ class TestEvalEnvironment(unittest.TestCase):
             environment = subprocess_env(corpus, home_dir=persona_home)
             self.assertEqual(environment["HOME"], str(persona_home.absolute()))
             self.assertTrue(persona_home.is_dir())
-
-    def test_history_replay_requests_strict_utf8(self):
-        completed = mock.Mock(
-            returncode=0, stdout='{"message":"日本語"}', stderr=""
-        )
-        with tempfile.TemporaryDirectory(prefix="kio-eval-utf8-") as directory:
-            with mock.patch.object(
-                replay_history.subprocess, "run", return_value=completed
-            ) as invoke:
-                response = replay_history.run_kio(
-                    "kio", directory, ["log"], corpus_dir=directory
-                )
-
-        self.assertEqual(response, {"message": "日本語"})
-        kwargs = invoke.call_args.kwargs
-        self.assertTrue(kwargs["text"])
-        self.assertEqual(kwargs["encoding"], "utf-8")
-        self.assertEqual(kwargs["errors"], "strict")
-
 
 if __name__ == "__main__":
     unittest.main()

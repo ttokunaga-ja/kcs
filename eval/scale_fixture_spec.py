@@ -1,8 +1,8 @@
 """Deterministic specification for the independent 120k-chunk scale fixture.
 
-This module deliberately does not import ``corpus_spec``.  The existing
-200-500-file Recall corpus is frozen; this fixture exists only to exercise the
-20-scope / 100k-plus performance contract without changing Recall inputs.
+This fixture is independent of the frozen seven-scope Recall corpus and its
+Rust history plan.  It exists only to exercise the 20-scope / 100k-plus
+performance contract without changing Recall inputs.
 """
 
 import hashlib

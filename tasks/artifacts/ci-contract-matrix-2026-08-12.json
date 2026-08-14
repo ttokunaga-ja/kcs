@@ -349,17 +349,17 @@
     },
     {
       "component": "deterministic corpus and manifest generation",
-      "python": ["eval/generate_corpus.py:26"],
-      "rust": [],
-      "decision": "Port to the Rust evaluation binary after a byte-identical corpus and manifest fixture is frozen.",
-      "risk": "Current corpus_spec data and renderers are Python-owned and need a stable serialized input contract."
+      "python": [],
+      "rust": ["crates/kio-eval/src/generator.rs", "crates/kio-eval/src/manifest.rs"],
+      "decision": "The Rust evaluation binary owns the frozen corpus fixture, history plan, and strict manifest schemas.",
+      "risk": "Keep fixture and plan digests frozen and reject every non-current schema."
     },
     {
       "component": "history replay orchestration",
-      "python": ["eval/replay_history.py:45"],
-      "rust": ["crates/kio-core/src/history.rs:421"],
-      "decision": "Move only after a reusable Rust test runner exists; Python process glue is not the 200-minute bottleneck.",
-      "risk": "Avoid bypassing the public CLI behavior that the current replay intentionally exercises."
+      "python": [],
+      "rust": ["crates/kio-eval/src/replay.rs", "crates/kio-eval/src/replay_boundary.rs"],
+      "decision": "Rust replay-history is the sole replay orchestrator and exercises the public kio CLI through a bounded runner.",
+      "risk": "Retain capability binding, offline execution, strict command evidence, and create-only manifest publication."
     },
     {
       "component": "Evidence Pointer and CAS attestation",
