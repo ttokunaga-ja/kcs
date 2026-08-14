@@ -11,18 +11,17 @@
 //! covered by the CLI mock seam. `profile()` never performs network I/O.
 
 use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy, EMBEDDING_RESPONSE_MAX_BYTES,
-    MODEL_CATALOG_MAX_BYTES,
+    EMBEDDING_RESPONSE_MAX_BYTES, HttpPolicy, HttpResponse, MODEL_CATALOG_MAX_BYTES,
+    authenticated_agent, read_json_bounded, require_success,
 };
 use crate::identity::{is_mutable_model_alias, tool_profile_hash};
 use crate::traits::{EmbeddingAdapter, PreferredRequestKind};
 use crate::types::{
-    validate_cosine_vector, AdapterKind, AdapterProfile, AdapterUsage, BillableUnit,
-    BillableUnitKind, EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingVector,
-    ExecutionMode,
+    AdapterKind, AdapterProfile, AdapterUsage, BillableUnit, BillableUnitKind, EmbeddingItem,
+    EmbeddingRequest, EmbeddingResponse, EmbeddingVector, ExecutionMode, validate_cosine_vector,
 };
 use crate::{AdapterError, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Adopted embedding profile constants. Non-adapter crates access this profile
 /// through `crate::catalog`, not by naming this adapter directly.
@@ -125,10 +124,11 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
             .get(&format!("{}/v1beta/models", self.base_url()))
-            .set("x-goog-api-key", &api_key)
-            .set("Accept-Encoding", "identity")
+            .header("x-goog-api-key", &api_key)
+            .header("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_json_bounded(
             response,
             MODEL_CATALOG_MAX_BYTES,
@@ -206,20 +206,21 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
                 "{}/v1beta/models/{model_pin}:batchEmbedContents",
                 self.base_url()
             ))
-            .set("x-goog-api-key", &api_key)
-            .set("Content-Type", "application/json")
-            .set("Accept-Encoding", "identity");
+            .header("x-goog-api-key", &api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept-Encoding", "identity");
         // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): attach the
         // provider idempotency header only when the profile resolved one —
         // dormant in production (the real Gemini embedding profile always
         // declares `ProviderIdempotency::NotProvided`), reachable via a test
         // profile.
         if let Some((name, value)) = idempotency_header {
-            http_request = http_request.set(name, value);
+            http_request = http_request.header(name, value);
         }
         let response = http_request
             .send_json(json!({ "requests": requests }))
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let response = read_json_bounded(
             response,
             EMBEDDING_RESPONSE_MAX_BYTES,
@@ -495,33 +496,37 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
 }
 
 fn http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(401 | 403, response) => AdapterError::Auth(format!(
-            "Gemini embedding HTTP auth: {}",
-            response.status_text()
-        )),
+    AdapterError::Network(error.to_string())
+}
+
+fn http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        401 | 403 => {
+            AdapterError::Auth(format!("Gemini embedding HTTP auth: {}", response.status()))
+        }
         // QA16: capture a real `Retry-After` header when the provider sent
         // one — never a fabricated value (`parse_retry_after_ms` returns
         // `None` for an absent/unparseable header, same as before this
         // field existed).
-        ureq::Error::Status(429, response) => {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
-                message: format!("Gemini embedding HTTP 429: {}", response.status_text()),
+                message: format!("Gemini embedding HTTP 429: {}", response.status()),
                 retry_after_ms,
             }
         }
-        ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
+        402 => AdapterError::QuotaExceeded(format!(
             "Gemini embedding HTTP quota: {}",
-            response.status_text()
+            response.status()
         )),
-        ureq::Error::Status(code, response) => AdapterError::Network(format!(
+        code => AdapterError::Network(format!(
             "Gemini embedding HTTP {code}: {}",
-            response.status_text()
+            response.status()
         )),
-        ureq::Error::Transport(transport) => AdapterError::Network(transport.to_string()),
     }
 }
 

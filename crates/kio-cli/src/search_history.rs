@@ -13,7 +13,7 @@ use kio_core::scope::Repository;
 use kio_core::{KioError, Result};
 use rusqlite::Connection;
 
-use crate::search_time::{validate_cursor_cutoff, TimeSelector};
+use crate::search_time::{TimeSelector, validate_cursor_cutoff};
 
 /// The exact normalized identity used to join a historical tree binding to the
 /// append-only chunk table.
@@ -21,7 +21,7 @@ use crate::search_time::{validate_cursor_cutoff, TimeSelector};
 pub struct SearchContentKey {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     /// A generation can be retried with a different pinned manifest.  It is
     /// consequently part of the searchable normalized identity.
     pub manifest_hash: String,
@@ -32,7 +32,7 @@ pub struct SearchContentKey {
 pub struct SearchHistoryBinding {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
@@ -49,7 +49,7 @@ impl SearchHistoryBinding {
         SearchContentKey {
             raw_hash: self.raw_hash.clone(),
             tool_profile_hash: self.tool_profile_hash.clone(),
-            gen: self.gen,
+            r#gen: self.r#gen,
             manifest_hash: self.manifest_hash.clone(),
         }
     }
@@ -118,7 +118,7 @@ pub(super) fn current_history_plan_from_cache(
             Ok(SearchHistoryBinding {
                 raw_hash: row.get(0)?,
                 tool_profile_hash: row.get(1)?,
-                gen: row.get::<_, i64>(2)? as u64,
+                r#gen: row.get::<_, i64>(2)? as u64,
                 manifest_hash: row.get(3)?,
                 path_at_commit: row.get(4)?,
                 pointer_commit: snapshot_commit.to_owned(),
@@ -165,7 +165,7 @@ pub(super) fn install_eligible_identities(
             rusqlite::params![
                 key.raw_hash,
                 key.tool_profile_hash,
-                key.gen as i64,
+                key.r#gen as i64,
                 key.manifest_hash
             ],
         )
@@ -201,13 +201,13 @@ pub fn plan_search_history(
                 let key = SearchContentKey {
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: normalize.tool_profile_hash.clone(),
-                    gen: normalize.gen,
+                    r#gen: normalize.r#gen,
                     manifest_hash: normalize.manifest_hash.clone(),
                 };
                 let candidate = SearchHistoryBinding {
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: normalize.tool_profile_hash.clone(),
-                    gen: normalize.gen,
+                    r#gen: normalize.r#gen,
                     manifest_hash: normalize.manifest_hash.clone(),
                     path_at_commit: entry.path.clone(),
                     pointer_commit: snapshot_commit.to_owned(),
@@ -342,7 +342,7 @@ fn plan_all_history(graph: &HistoryGraph) -> Result<Vec<SearchHistoryBinding>> {
             Ok(SearchHistoryBinding {
                 raw_hash: binding.raw_hash.clone(),
                 tool_profile_hash: normalize.tool_profile_hash.clone(),
-                gen: normalize.gen,
+                r#gen: normalize.r#gen,
                 manifest_hash: normalize.manifest_hash.clone(),
                 path_at_commit: binding.path.clone(),
                 pointer_commit: introduction.commit_hash,
@@ -368,13 +368,13 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
         let key = SearchContentKey {
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
-            gen: normalize.gen,
+            r#gen: normalize.r#gen,
             manifest_hash: normalize.manifest_hash.clone(),
         };
         let candidate = SearchHistoryBinding {
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
-            gen: normalize.gen,
+            r#gen: normalize.r#gen,
             manifest_hash: normalize.manifest_hash.clone(),
             path_at_commit: entry.path.clone(),
             pointer_commit: history.start_commit().to_owned(),
@@ -405,7 +405,7 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
         let key = SearchContentKey {
             raw_hash: deleted.binding.raw_hash.clone(),
             tool_profile_hash: normalize.tool_profile_hash.clone(),
-            gen: normalize.gen,
+            r#gen: normalize.r#gen,
             manifest_hash: normalize.manifest_hash.clone(),
         };
         if live_keys.contains(&key) {
@@ -414,7 +414,7 @@ fn plan_include_deleted(history: &FirstParentHistory) -> Result<Vec<SearchHistor
         planned.push(SearchHistoryBinding {
             raw_hash: deleted.binding.raw_hash,
             tool_profile_hash: normalize.tool_profile_hash,
-            gen: normalize.gen,
+            r#gen: normalize.r#gen,
             manifest_hash: normalize.manifest_hash,
             path_at_commit: deleted.binding.path,
             pointer_commit: deleted.commit_hash,
@@ -465,7 +465,7 @@ fn sort_bindings(bindings: &mut [SearchHistoryBinding]) {
                     .as_bytes()
                     .cmp(right.tool_profile_hash.as_bytes())
             })
-            .then_with(|| left.gen.cmp(&right.gen))
+            .then_with(|| left.r#gen.cmp(&right.r#gen))
             .then_with(|| {
                 left.manifest_hash
                     .as_bytes()
@@ -486,9 +486,9 @@ fn sort_bindings(bindings: &mut [SearchHistoryBinding]) {
 
 #[cfg(test)]
 mod tests {
-    use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
+    use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
     use kio_core::dag::{
-        build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry,
+        CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, build_tree,
     };
     use tempfile::TempDir;
 
@@ -556,7 +556,7 @@ mod tests {
     fn profile() -> NormalizeRef {
         NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
-            gen: 3,
+            r#gen: 3,
             manifest_hash: hash_bytes(b"manifest"),
         }
     }
@@ -681,15 +681,17 @@ mod tests {
             .unwrap();
         assert_eq!(live.pointer_commit, head);
         assert!(live.is_live);
-        assert!(plan
-            .bindings
-            .iter()
-            .filter(|binding| !binding.is_live)
-            .all(|binding| binding.pointer_commit == middle));
-        assert!(plan
-            .bindings
-            .iter()
-            .all(|binding| binding.path_at_commit != "renamed.md"));
+        assert!(
+            plan.bindings
+                .iter()
+                .filter(|binding| !binding.is_live)
+                .all(|binding| binding.pointer_commit == middle)
+        );
+        assert!(
+            plan.bindings
+                .iter()
+                .all(|binding| binding.path_at_commit != "renamed.md")
+        );
     }
 
     #[test]

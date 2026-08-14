@@ -241,7 +241,7 @@ pub(crate) fn maybe_delay_scope_for_test(_scope_id: &str, _deadline: ScopeDeadli
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_settings, run_ordered, MultiScopeSettings, ScopeExecution, MAX_PARALLELISM,
+        MAX_PARALLELISM, MultiScopeSettings, ScopeExecution, effective_settings, run_ordered,
     };
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};

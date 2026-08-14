@@ -17,7 +17,7 @@ pub struct NormalizeRef {
     pub tool_profile_hash: String,
     /// Generation is part of the normalized-instance identity. It is required
     /// whenever `normalize` is present; raw-only entries omit `normalize`.
-    pub gen: u64,
+    pub r#gen: u64,
     /// PB04 (step4b-contract-tests-p2b.md §B; 03-data-model.md §8, tree
     /// schema v2): content hash of this (raw_hash, tool_profile_hash,
     /// gen)'s normalized-instance manifest.json canonical JCS bytes
@@ -465,8 +465,8 @@ pub const fn protected(commit_type: CommitType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_tree, is_valid_created_at, CommitObject, CommitStats, CommitType, TreeEntry,
-        TreeObject,
+        CommitObject, CommitStats, CommitType, TreeEntry, TreeObject, build_tree,
+        is_valid_created_at,
     };
     use crate::error::Result;
     use serde_json::json;
@@ -559,10 +559,12 @@ mod tests {
 
         assert!(tree.validate().is_ok());
         assert!(build_tree(Vec::new()).unwrap().validate().is_ok());
-        assert!(build_tree(vec![valid_entry("raw.txt", RAW_HASH)])
-            .unwrap()
-            .validate()
-            .is_ok());
+        assert!(
+            build_tree(vec![valid_entry("raw.txt", RAW_HASH)])
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
 
         for path in [".env", "a..b", "report final.txt", "C-report.txt"] {
             assert!(TreeEntry::raw_file(path, RAW_HASH).is_ok(), "{path:?}");
@@ -718,9 +720,11 @@ mod tests {
             );
         }
 
-        assert!(commit_with_created_at("2026-04-29T12:00:00.123456Z")
-            .unwrap()
-            .validate()
-            .is_ok());
+        assert!(
+            commit_with_created_at("2026-04-29T12:00:00.123456Z")
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
     }
 }

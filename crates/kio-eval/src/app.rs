@@ -18,21 +18,21 @@ use std::{
 use cap_primitives::fs as cap_fs;
 use clap::{Parser, Subcommand};
 use kio_core::{
-    cas::{hash_bytes, read_bounded_regular_file, MAX_RAW_OBJECT_BYTES},
     ExitCode,
+    cas::{MAX_RAW_OBJECT_BYTES, hash_bytes, read_bounded_regular_file},
 };
 use kio_eval::{
-    attestation::{PointerAttestor, MAX_POINTER_ATTESTATIONS_PER_QUERY},
+    attestation::{MAX_POINTER_ATTESTATIONS_PER_QUERY, PointerAttestor},
     boundary::{BoundCorpus, BoundDevice, BoundScope},
     manifest::{
-        load_corpus_manifest, load_golden_queries, load_history_manifest, Scenario, SCOPES,
+        SCOPES, Scenario, load_corpus_manifest, load_golden_queries, load_history_manifest,
     },
     qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
-    resolver::{validate_query, CorpusModel, Resolver},
+    resolver::{CorpusModel, Resolver, validate_query},
     runner::{
-        assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
-        run_bounded_command, write_report, write_results, BoundedProcessOptions, HistoryEntryRef,
-        HistoryManifestRef, RenameEntryRef, ResolvedQuery, ScoredRecord,
+        BoundedProcessOptions, HistoryEntryRef, HistoryManifestRef, RenameEntryRef, ResolvedQuery,
+        ScoredRecord, assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
+        run_bounded_command, write_report, write_results,
     },
     scale::{self, ScaleOptions},
 };
@@ -278,10 +278,10 @@ fn scenario_name(value: Scenario) -> &'static str {
 
 fn expected_flags(query: &kio_eval::manifest::GoldenQuery) -> Vec<String> {
     let mut flags = query.flags.clone();
-    if let Some(required) = query.scenario.required_flag() {
-        if !flags.iter().any(|flag| flag == required) {
-            flags.push(required.to_owned());
-        }
+    if let Some(required) = query.scenario.required_flag()
+        && !flags.iter().any(|flag| flag == required)
+    {
+        flags.push(required.to_owned());
     }
     flags
 }
@@ -796,12 +796,12 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                         AppError::Input(format!("cannot serialize Q_hard report: {error}"))
                     })?;
                     if let Some(path) = out {
-                        if let Some(synthetic_root) = &synthetic_input_root {
-                            if output_is_within_input_root(path, synthetic_root)? {
-                                return Err(AppError::Input(
-                                    "Q_hard report must be outside synthetic corpus input".into(),
-                                ));
-                            }
+                        if let Some(synthetic_root) = &synthetic_input_root
+                            && output_is_within_input_root(path, synthetic_root)?
+                        {
+                            return Err(AppError::Input(
+                                "Q_hard report must be outside synthetic corpus input".into(),
+                            ));
                         }
                         qhard::write_report(path, fixture_root, &report)
                             .map_err(|error| AppError::Input(error.to_string()))?;
@@ -1066,9 +1066,11 @@ mod tests {
         let bound = BoundCorpus::bind(corpus.path(), &["research".to_owned()]).unwrap();
         let values = device_env(bound.device()).unwrap();
         assert!(values.iter().any(|(key, _)| key == "PATH"));
-        assert!(values
-            .iter()
-            .any(|(key, value)| key == "TZ" && value == "UTC"));
+        assert!(
+            values
+                .iter()
+                .any(|(key, value)| key == "TZ" && value == "UTC")
+        );
         assert!(values.iter().any(|(key, value)| {
             key == "HOME" && value == &OsString::from(bound.device().home())
         }));

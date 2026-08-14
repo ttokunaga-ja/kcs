@@ -17,7 +17,7 @@ use thiserror::Error;
 
 pub use cursor::{CursorExcludedScope, CursorToken, ScopeCursor, ScopeMode};
 pub use evidence::EvidencePointer;
-pub use object_uri::{extract_related_images, ObjectUri, RelatedImage};
+pub use object_uri::{ObjectUri, RelatedImage, extract_related_images};
 pub use query::{ChunkingConfigBinding, TimeTravelSelector};
 
 pub type Result<T> = std::result::Result<T, SearchError>;

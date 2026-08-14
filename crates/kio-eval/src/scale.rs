@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::runner::{run_bounded_command, BoundedProcessOptions};
+use crate::runner::{BoundedProcessOptions, run_bounded_command};
 
 const SCHEMA_VERSION: u64 = 1;
 const FIXTURE_ID: &str = "kio-scale-120k-v1";
@@ -464,17 +464,17 @@ fn open_sqlite_at(
         let source = format!("{name}{suffix}");
         match cap_fs::stat(parent, Path::new(&source), cap_fs::FollowSymlinks::No) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !suffix.is_empty() => {
-                continue
+                continue;
             }
             Err(error) => {
                 return Err(ScaleError::Input(format!(
                     "cannot inspect {label}: {error}"
-                )))
+                )));
             }
             Ok(metadata) if !metadata.file_type().is_file() => {
                 return Err(ScaleError::Input(format!(
                     "{label} sidecar must be a regular file"
-                )))
+                )));
             }
             Ok(_) => {
                 let target = temp.path().join(&source);
@@ -755,7 +755,8 @@ fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
                         Ok(())
                     },
                 )?;
-                let file_digest = format!("sha256:{:x}", hasher.finalize());
+                let file_digest =
+                    format!("sha256:{}", kio_core::cas::lower_hex(&hasher.finalize()));
                 digest.record(&format!("F:{}:{file_digest}", relative.display()));
             } else {
                 return Err(ScaleError::Input(
@@ -775,7 +776,10 @@ fn snapshot_tree_digest(source: &fs::File) -> Result<String, ScaleError> {
         &mut digest,
         &mut SnapshotBudget::default(),
     )?;
-    Ok(format!("sha256:{:x}", digest.digest.finalize()))
+    Ok(format!(
+        "sha256:{}",
+        kio_core::cas::lower_hex(&digest.digest.finalize())
+    ))
 }
 
 fn snapshot_measurement_inputs(
@@ -1532,12 +1536,12 @@ fn attest_live_corpus(
                     Err(error) => {
                         return Err(ScaleError::Input(format!(
                             "cannot inspect scope runtime directory: {error}"
-                        )))
+                        )));
                     }
                     Ok(metadata) if !metadata.file_type().is_dir() => {
                         return Err(ScaleError::Input(
                             "scope runtime path must be a real directory".into(),
-                        ))
+                        ));
                     }
                     Ok(_) => current = open_dir_at(&current, component, "scope runtime directory")?,
                 }
@@ -1555,16 +1559,15 @@ fn attest_live_corpus(
                 ));
             }
         }
-        if let Ok(purge) = open_dir_at(&kio_handle, "purge", "scope purge directory") {
-            if cap_fs::stat(
+        if let Ok(purge) = open_dir_at(&kio_handle, "purge", "scope purge directory")
+            && cap_fs::stat(
                 &purge,
                 Path::new("in-progress.json"),
                 cap_fs::FollowSymlinks::No,
             )
             .is_ok()
-            {
-                return Err(ScaleError::Input("scope has an in-progress purge".into()));
-            }
+        {
+            return Err(ScaleError::Input("scope has an in-progress purge".into()));
         }
         let config_raw =
             read_regular_at(&kio_handle, "config.toml", 1024 * 1024, "live scope config")?;
@@ -2044,7 +2047,7 @@ fn appended_search_metric(
         Some(_) => {
             return Err(ScaleError::Input(
                 "metrics log was replaced during a search".into(),
-            ))
+            ));
         }
         None => 0,
     };
@@ -2457,12 +2460,11 @@ pub fn write_report(path: &Path, corpus: &Path, report: &ScaleReport) -> Result<
         ));
     }
     if let Ok(metadata) = cap_fs::stat(&parent_handle, Path::new(name), cap_fs::FollowSymlinks::No)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
     {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ScaleError::Input(
-                "scale report destination is not a regular file".into(),
-            ));
-        }
+        return Err(ScaleError::Input(
+            "scale report destination is not a regular file".into(),
+        ));
     }
     let bytes = serde_json::to_vec_pretty(report)?;
     if bytes.len() > MAX_REPORT_BYTES {
@@ -2488,7 +2490,7 @@ pub fn write_report(path: &Path, corpus: &Path, report: &ScaleReport) -> Result<
             Err(error) => {
                 return Err(ScaleError::Input(format!(
                     "cannot create scale report: {error}"
-                )))
+                )));
             }
         }
     }
@@ -2644,10 +2646,12 @@ mod tests {
         assert!(!test_report(true, Some(true)).acceptance_failed());
         let tiny = test_report(false, None);
         assert!(!tiny.acceptance_failed());
-        assert!(serde_json::to_value(tiny)
-            .unwrap()
-            .get("passed_p95_thresholds")
-            .is_none());
+        assert!(
+            serde_json::to_value(tiny)
+                .unwrap()
+                .get("passed_p95_thresholds")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2729,7 +2733,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            format!("sha256:{:x}", digest.finalize()),
+            format!("sha256:{}", kio_core::cas::lower_hex(&digest.finalize())),
             hash_bytes(&payload)
         );
         assert!(
@@ -2828,12 +2832,14 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(corpus.path(), outside.path().join("escape")).unwrap();
-            assert!(write_report(
-                &outside.path().join("escape/report.json"),
-                corpus.path(),
-                &report
-            )
-            .is_err());
+            assert!(
+                write_report(
+                    &outside.path().join("escape/report.json"),
+                    corpus.path(),
+                    &report
+                )
+                .is_err()
+            );
         }
     }
 

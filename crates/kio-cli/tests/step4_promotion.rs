@@ -6,9 +6,9 @@ use kio_core::scope::Repository;
 use kio_pipeline::markdownize::load_validated_normalized_instance;
 use kio_pipeline::prepare::UnitType;
 use kio_pipeline::task::{
-    validate_task_output_ref, TaskOutputRef, TaskStatus, TaskStore, TaskType,
+    TaskOutputRef, TaskStatus, TaskStore, TaskType, validate_task_output_ref,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -338,15 +338,19 @@ fn ct4_bbox_006_ocr_from_scratch_promotes_scanned_pdf_and_image() {
         let TaskOutputRef::NormalizedInstance {
             raw_hash,
             tool_profile_hash,
-            gen,
+            r#gen,
             ..
         } = validate_task_output_ref(repo.kio_dir(), task).unwrap()
         else {
             panic!("Done OCR task must retain a typed normalized output_ref");
         };
-        let instance =
-            load_validated_normalized_instance(repo.kio_dir(), &raw_hash, &tool_profile_hash, gen)
-                .unwrap();
+        let instance = load_validated_normalized_instance(
+            repo.kio_dir(),
+            &raw_hash,
+            &tool_profile_hash,
+            r#gen,
+        )
+        .unwrap();
         assert_eq!(instance.manifest.units.len(), 1);
         assert_eq!(instance.units.len(), 1);
         let expected_key = if task.input_path.ends_with(".pdf") {

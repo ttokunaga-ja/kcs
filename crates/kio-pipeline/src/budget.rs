@@ -193,7 +193,7 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ParsedBudgetConfig::default())
+            return Ok(ParsedBudgetConfig::default());
         }
         Err(err) => {
             return Err(PipelineError::Io {
@@ -233,13 +233,13 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
     // config.schema.json `minimum: 0` constraint, 10 §12 / 06 §11). A negative cap
     // is nonsensical and would silently invert the budget arithmetic; reject it
     // (exit 2 KIO-E-CONFIG-SCHEMA-001 via `pipeline_to_kio`).
-    if let Some(cap) = monthly_usd_cap {
-        if cap < 0.0 {
-            return Err(PipelineError::Schema(format!(
-                "budget.monthly_usd_cap must be non-negative at {}: {cap}",
-                path.display()
-            )));
-        }
+    if let Some(cap) = monthly_usd_cap
+        && cap < 0.0
+    {
+        return Err(PipelineError::Schema(format!(
+            "budget.monthly_usd_cap must be non-negative at {}: {cap}",
+            path.display()
+        )));
     }
     for (adapter, cap) in &per_adapter {
         if *cap < 0.0 {

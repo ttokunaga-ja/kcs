@@ -11,7 +11,7 @@ use kio_core::gc::{
     ShallowReceipt,
 };
 use kio_core::scope::Repository;
-use kio_index::fts::{read_bound_gc_index_metadata, FtsSchemaConfig, FtsTokenizer};
+use kio_index::fts::{FtsSchemaConfig, FtsTokenizer, read_bound_gc_index_metadata};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -200,11 +200,13 @@ fn final_shallow_receipt_explains_missing_tree_but_markerless_coexistence_is_cor
         .stdout
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
-    assert!(value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| { f["kind"] == "gc_shallow_receipt_corrupt" }));
+    assert!(
+        value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| { f["kind"] == "gc_shallow_receipt_corrupt" })
+    );
 }
 
 #[test]
@@ -230,11 +232,13 @@ fn active_marker_blocks_fsck_repair_and_restore_before_destination_side_effects(
     );
     let fsck = fsck_output.stdout;
     let value: Value = serde_json::from_slice(&fsck).unwrap();
-    assert!(value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["kind"] == "gc_sweep_incomplete"));
+    assert!(
+        value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "gc_sweep_incomplete")
+    );
     assert_eq!(
         marker_before,
         fs::read(dir.path().join(".kio/gc/in_progress")).unwrap()
@@ -281,11 +285,13 @@ fn every_frozen_receipt_tree_transition_is_recovery_pending() {
             .stdout
             .clone();
         let value: Value = serde_json::from_slice(&output).unwrap();
-        assert!(value["remaining_findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f["kind"] == "gc_sweep_incomplete"));
+        assert!(
+            value["remaining_findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["kind"] == "gc_sweep_incomplete")
+        );
         assert_eq!(
             marker_before,
             fs::read(dir.path().join(".kio/gc/in_progress")).unwrap()
@@ -353,16 +359,20 @@ fn absent_pre_sweep_marker_cannot_authorize_retirement_against_live_index() {
         .stdout
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
-    assert!(value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "gc_sweep_marker_corrupt"));
-    assert!(!value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "gc_sweep_incomplete"));
+    assert!(
+        value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "gc_sweep_marker_corrupt")
+    );
+    assert!(
+        !value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "gc_sweep_incomplete")
+    );
     assert!(!tree_path.exists());
     assert!(dir.path().join(".kio/index/sqlite.db").is_file());
 }
@@ -382,11 +392,13 @@ fn mismatched_frozen_marker_is_corruption_not_recovery_pending() {
         .stdout
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
-    assert!(value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["kind"] == "gc_sweep_marker_corrupt"));
+    assert!(
+        value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "gc_sweep_marker_corrupt")
+    );
 }
 
 #[test]
@@ -409,16 +421,20 @@ fn phase_impossible_marker_is_corruption_not_recovery_pending() {
         .stdout
         .clone();
     let value: Value = serde_json::from_slice(&output).unwrap();
-    assert!(value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "gc_sweep_marker_corrupt"));
-    assert!(!value["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "gc_sweep_incomplete"));
+    assert!(
+        value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "gc_sweep_marker_corrupt")
+    );
+    assert!(
+        !value["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "gc_sweep_incomplete")
+    );
 }
 
 #[test]
@@ -445,10 +461,12 @@ fn final_shallow_ancestor_with_chunks_keeps_verify_and_rebuild_available() {
 
     let repo = Repository::open(dir.path()).unwrap();
     let old_tree = repo.read_commit(&old_commit).unwrap().tree;
-    assert!(!ObjectStore::new(repo.kio_dir())
-        .object_path(ObjectKind::Tree, &old_tree)
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(repo.kio_dir())
+            .object_path(ObjectKind::Tree, &old_tree)
+            .unwrap()
+            .exists()
+    );
 
     assert_eq!(
         json_success_at(&dir, &["repair", "verify-objects"], NOW)["status"],
@@ -499,9 +517,11 @@ fn unrelated_ledger_introduction_cannot_hide_an_unreachable_chunk() {
         .stdout
         .clone();
     let report: Value = serde_json::from_slice(&output).unwrap();
-    assert!(report["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "chunk_unit_content_unreachable"));
+    assert!(
+        report["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "chunk_unit_content_unreachable")
+    );
 }

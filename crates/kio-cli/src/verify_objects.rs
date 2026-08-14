@@ -5,21 +5,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use kio_core::cas::{
-    canonical_json_bytes, hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError,
-    ChunkObject, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    AccountedReadError, ChunkObject, ContentObjectKind, EmbeddingObject, MAX_RAW_OBJECT_BYTES,
+    ObjectKind, ObjectStore, canonical_json_bytes, hash_bytes, is_hash, read_bounded_regular_file,
 };
 use kio_core::dag::{CommitObject, NormalizeRef, TreeObject};
-use kio_core::gc::{read_active_marker, read_shallow_receipts, GcSweepSession};
+use kio_core::gc::{GcSweepSession, read_active_marker, read_shallow_receipts};
 use kio_core::portable::portable_tag_digest64;
 use kio_core::purge::{
-    canonical_final_event, CanonicalFinalEvent, EventKind, LifecycleEvent, PurgeState,
-    TombstoneMode, MAX_PURGE_RECORD_BYTES,
+    CanonicalFinalEvent, EventKind, LifecycleEvent, MAX_PURGE_RECORD_BYTES, PurgeState,
+    TombstoneMode, canonical_final_event,
 };
-use kio_core::scope::{names_jsonl_path, now_utc_seconds, Repository};
+use kio_core::scope::{Repository, names_jsonl_path, now_utc_seconds};
 use kio_core::{KioError, Result};
 use kio_pipeline::markdownize::{
-    load_validated_normalized_units_from_manifest, validate_normalized_instance,
     NormalizedInstanceIdentity, NormalizedInstanceManifest, ValidatedNormalizedInstance,
+    load_validated_normalized_units_from_manifest, validate_normalized_instance,
 };
 use serde::Serialize;
 
@@ -38,7 +38,7 @@ const MAX_AFFECTED_COMMITS: usize = 4_096;
 struct ValidatedNormalizedInstanceUnit {
     raw_hash: String,
     tool_profile_hash: String,
-    gen: u64,
+    r#gen: u64,
     unit: kio_pipeline::markdownize::NormalizedUnitObject,
 }
 
@@ -60,7 +60,7 @@ fn exact_pinned_content_unit_for_chunk<'a>(
         .find(|pinned_unit| {
             pinned_unit.raw_hash == chunk.raw_hash
                 && pinned_unit.tool_profile_hash == chunk.tool_profile_hash
-                && pinned_unit.gen == chunk.gen
+                && pinned_unit.r#gen == chunk.r#gen
                 && pinned_unit.unit.unit_key == chunk.unit_key
         })
         .ok_or(ChunkPinnedUnitError::IdentityMismatch)
@@ -201,7 +201,7 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
             else {
                 return Err(invalid_pointer_identity_error(pointer));
             };
-            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
+            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.r#gen);
             (false, entry_gen, entry.normalize.clone())
         }
         Err(error) if is_store_not_found(&error) => {
@@ -250,7 +250,7 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     };
     if chunk.raw_hash != pointer.raw_hash
         || chunk.tool_profile_hash != pointer.tool_profile_hash
-        || entry_gen.is_some_and(|gen| chunk.gen != gen)
+        || entry_gen.is_some_and(|r#gen| chunk.r#gen != r#gen)
     {
         return Err(invalid_pointer_identity_error(pointer));
     }
@@ -261,30 +261,28 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     // judgment. `PB45`'s unit-status check is folded into this shared path
     // rather than a bespoke best-effort read here.
     let mut manifest_missing = false;
-    if !commit_shallow {
-        if let Some(normalize) = &entry_normalize {
-            match verify_point_in_time_attribution(
-                &target,
-                &repo,
-                &pointer.raw_hash,
-                normalize,
-                &pointer.chunk_hash,
-                &chunk,
-                &pointer.commit,
-            )? {
-                PointInTimeAttribution::Alive => {}
-                PointInTimeAttribution::ManifestMissing => manifest_missing = true,
-                PointInTimeAttribution::NotFound => {
-                    return checkpoint.finish(verify_exit_override(
-                        not_found_verify_output(&target, &pointer.raw_hash),
-                        if strict { 4 } else { 0 },
-                    ));
-                }
-                PointInTimeAttribution::StoreCorrupt => {
-                    return Err(store_corrupt_pointer_entry_missing_error(pointer));
-                }
-                PointInTimeAttribution::IndexRebuilding => return Err(index_rebuilding_error()),
+    if !commit_shallow && let Some(normalize) = &entry_normalize {
+        match verify_point_in_time_attribution(
+            &target,
+            &repo,
+            &pointer.raw_hash,
+            normalize,
+            &pointer.chunk_hash,
+            &chunk,
+            &pointer.commit,
+        )? {
+            PointInTimeAttribution::Alive => {}
+            PointInTimeAttribution::ManifestMissing => manifest_missing = true,
+            PointInTimeAttribution::NotFound => {
+                return checkpoint.finish(verify_exit_override(
+                    not_found_verify_output(&target, &pointer.raw_hash),
+                    if strict { 4 } else { 0 },
+                ));
             }
+            PointInTimeAttribution::StoreCorrupt => {
+                return Err(store_corrupt_pointer_entry_missing_error(pointer));
+            }
+            PointInTimeAttribution::IndexRebuilding => return Err(index_rebuilding_error()),
         }
     }
 
@@ -381,10 +379,10 @@ fn dispatch_marker_barrier_error(
 /// failure already use) so a structured status response can still request a
 /// non-zero exit.
 fn verify_exit_override(mut value: Value, exit: u64) -> Value {
-    if exit != 0 {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("__exit_code".to_owned(), json!(exit));
-        }
+    if exit != 0
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("__exit_code".to_owned(), json!(exit));
     }
     value
 }
@@ -1047,7 +1045,7 @@ fn verify_objects_with_limits(
                             ValidatedNormalizedInstanceUnit {
                                 raw_hash: instance.manifest.raw_hash.clone(),
                                 tool_profile_hash: instance.manifest.tool_profile_hash.clone(),
-                                gen: instance.manifest.gen,
+                                r#gen: instance.manifest.r#gen,
                                 unit: unit.clone(),
                             },
                         );
@@ -1592,7 +1590,7 @@ fn index_retained_manifest_units(
         }
         let reference = NormalizeRef {
             tool_profile_hash: manifest.tool_profile_hash.clone(),
-            gen: manifest.gen,
+            r#gen: manifest.r#gen,
             manifest_hash,
         };
         let instance = match load_pinned_normalized_instance(
@@ -1619,13 +1617,13 @@ fn index_retained_manifest_units(
             if !candidates.iter().any(|candidate| {
                 candidate.raw_hash == instance.manifest.raw_hash
                     && candidate.tool_profile_hash == instance.manifest.tool_profile_hash
-                    && candidate.gen == instance.manifest.gen
+                    && candidate.r#gen == instance.manifest.r#gen
                     && candidate.unit.unit_key == unit.unit_key
             }) {
                 candidates.push(ValidatedNormalizedInstanceUnit {
                     raw_hash: instance.manifest.raw_hash.clone(),
                     tool_profile_hash: instance.manifest.tool_profile_hash.clone(),
-                    gen: instance.manifest.gen,
+                    r#gen: instance.manifest.r#gen,
                     unit,
                 });
             }
@@ -1689,11 +1687,11 @@ fn load_pinned_normalized_instance(
     let identity = NormalizedInstanceIdentity {
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: normalize.tool_profile_hash.clone(),
-        gen: normalize.gen,
+        r#gen: normalize.r#gen,
     };
     if manifest.raw_hash != identity.raw_hash
         || manifest.tool_profile_hash != identity.tool_profile_hash
-        || manifest.gen != identity.gen
+        || manifest.r#gen != identity.r#gen
     {
         return Err(PinnedNormalizedError::Corrupt(
             "manifest identity does not match its tree normalization reference".to_owned(),
@@ -2824,7 +2822,7 @@ pub fn prune_orphans_plan(repo: &Repository) -> Result<PruneOrphansPlan> {
                 repo.kio_dir(),
                 &entry.raw_hash,
                 &normalize.tool_profile_hash,
-                normalize.gen,
+                normalize.r#gen,
             ) else {
                 // A missing/corrupt normalized instance is fsck's concern
                 // (`kio repair verify-objects` without `--prune-orphans`);
@@ -3209,13 +3207,13 @@ fn validate_retired_event(
                 .to_owned(),
         );
     }
-    if let Some(tree) = trees.get(&commit.tree) {
-        if !tree.entries.iter().any(|entry| entry.raw_hash == raw_hash) {
-            return Err(
-                "retired event resurrection_commit tree does not contain a leaf for this raw_hash"
-                    .to_owned(),
-            );
-        }
+    if let Some(tree) = trees.get(&commit.tree)
+        && !tree.entries.iter().any(|entry| entry.raw_hash == raw_hash)
+    {
+        return Err(
+            "retired event resurrection_commit tree does not contain a leaf for this raw_hash"
+                .to_owned(),
+        );
     }
     // `trees.get(&commit.tree) == None`: the resurrection commit's tree is
     // not physically present (shallow-discarded, or GC'd) — LC20's explicit
@@ -3385,12 +3383,12 @@ fn recover_raw(path: &Path, expected_hash: &str, remaining_bytes: u64) -> Result
         Ok(_) => match read_bounded_regular_file(path, MAX_RAW_OBJECT_BYTES.min(remaining_bytes)) {
             Ok(bytes) => bytes,
             Err(error) if error.error_code() == "KIO-E-STORE-OBJECT-OVERSIZED-001" => {
-                return Ok(RawRecovery::LimitExceeded)
+                return Ok(RawRecovery::LimitExceeded);
             }
             Err(error) => return Err(error),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RawRecovery::Missing(0))
+            return Ok(RawRecovery::Missing(0));
         }
         Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
     };
@@ -3474,7 +3472,7 @@ mod tests {
             raw_hash: raw_hash.clone(),
             prepared_hash: prepared_hash.clone(),
             tool_profile_hash: profile_hash.clone(),
-            gen: 4,
+            r#gen: 4,
             mode: MarkdownizeMode::Full,
             markdown: "immutable markdown".to_owned(),
             metadata: BTreeMap::new(),
@@ -3489,7 +3487,7 @@ mod tests {
         let manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: profile_hash.clone(),
-            gen: 4,
+            r#gen: 4,
             parent_gen: None,
             run_id: "test-run".to_owned(),
             units: vec![NormalizedUnitManifestEntry {
@@ -3513,7 +3511,7 @@ mod tests {
             raw_hash,
             NormalizeRef {
                 tool_profile_hash: profile_hash,
-                gen: 4,
+                r#gen: 4,
                 manifest_hash,
             },
             manifest,
@@ -3584,7 +3582,7 @@ mod tests {
             raw_hash: raw_hash.clone(),
             prepared_hash: hash('3'),
             tool_profile_hash: profile_hash.clone(),
-            gen: 4,
+            r#gen: 4,
             mode: MarkdownizeMode::Full,
             markdown: "first body".to_owned(),
             metadata: BTreeMap::new(),
@@ -3605,7 +3603,7 @@ mod tests {
             vec![ValidatedNormalizedInstanceUnit {
                 raw_hash: raw_hash.clone(),
                 tool_profile_hash: profile_hash.clone(),
-                gen: 4,
+                r#gen: 4,
                 unit: first,
             }],
         );
@@ -3614,7 +3612,7 @@ mod tests {
             vec![ValidatedNormalizedInstanceUnit {
                 raw_hash: raw_hash.clone(),
                 tool_profile_hash: profile_hash.clone(),
-                gen: 4,
+                r#gen: 4,
                 unit: second,
             }],
         );
@@ -3622,7 +3620,7 @@ mod tests {
             spec_version: 1,
             raw_hash: raw_hash.clone(),
             tool_profile_hash: profile_hash.clone(),
-            gen: 4,
+            r#gen: 4,
             unit_key: "file:1".to_owned(),
             unit_content_hash: second_hash,
             heading_path: Vec::new(),
@@ -3726,14 +3724,16 @@ mod tests {
             },
         )]);
         let reachable = BTreeSet::from([purge_commit_hash.clone(), bad_candidate_hash.clone()]);
-        assert!(find_republication_commit(
-            &target_raw,
-            &purge_commit_hash,
-            &commits,
-            &trees,
-            &reachable,
-        )
-        .is_none());
+        assert!(
+            find_republication_commit(
+                &target_raw,
+                &purge_commit_hash,
+                &commits,
+                &trees,
+                &reachable,
+            )
+            .is_none()
+        );
 
         // A candidate whose tree DOES carry the leaf is accepted, and its
         // OWN `created_at` -- not the caller's invocation time -- is
@@ -3803,8 +3803,8 @@ mod tests {
     }
 
     #[test]
-    fn lc17_in_commit_binding_requires_reachable_purged_exact_non_future_commit_and_purged_raws_membership(
-    ) {
+    fn lc17_in_commit_binding_requires_reachable_purged_exact_non_future_commit_and_purged_raws_membership()
+     {
         let commit_hash = hash('c');
         let target_raw = hash('9');
         let created_at = "2026-07-13T00:00:00.25Z";
@@ -3815,69 +3815,81 @@ mod tests {
         let reachable = BTreeSet::from([commit_hash.clone()]);
         let event = purged_event(&commit_hash, created_at);
 
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &event,
-            &commits,
-            &reachable,
-            "2026-07-13T00:00:01Z"
-        )
-        .is_ok());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &event,
+                &commits,
+                &reachable,
+                "2026-07-13T00:00:01Z"
+            )
+            .is_ok()
+        );
         // Not ref-reachable.
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &event,
-            &commits,
-            &BTreeSet::new(),
-            "2026-07-13T00:00:01Z"
-        )
-        .is_err());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &event,
+                &commits,
+                &BTreeSet::new(),
+                "2026-07-13T00:00:01Z"
+            )
+            .is_err()
+        );
         // `at` does not equal commit.created_at.
         let mismatched_at = purged_event(&commit_hash, "2026-07-13T00:00:00Z");
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &mismatched_at,
-            &commits,
-            &reachable,
-            "2026-07-13T00:00:01Z"
-        )
-        .is_err());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &mismatched_at,
+                &commits,
+                &reachable,
+                "2026-07-13T00:00:01Z"
+            )
+            .is_err()
+        );
         // commit_type is not purged.
         commits.insert(commit_hash.clone(), commit(CommitType::Manual, created_at));
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &event,
-            &commits,
-            &reachable,
-            "2026-07-13T00:00:01Z"
-        )
-        .is_err());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &event,
+                &commits,
+                &reachable,
+                "2026-07-13T00:00:01Z"
+            )
+            .is_err()
+        );
         // purged_raws does not include this raw_hash (borrowed marker defense).
         commits.insert(
             commit_hash.clone(),
             purged_commit(created_at, vec![hash('8')]),
         );
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &event,
-            &commits,
-            &reachable,
-            "2026-07-13T00:00:01Z"
-        )
-        .is_err());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &event,
+                &commits,
+                &reachable,
+                "2026-07-13T00:00:01Z"
+            )
+            .is_err()
+        );
         // `at` in the future relative to the fixed invocation time.
         commits.insert(
             commit_hash.clone(),
             purged_commit(created_at, vec![target_raw.clone()]),
         );
-        assert!(validate_purge_or_erase_in_commit(
-            &target_raw,
-            &event,
-            &commits,
-            &reachable,
-            "2026-07-13T00:00:00.2Z"
-        )
-        .is_err());
+        assert!(
+            validate_purge_or_erase_in_commit(
+                &target_raw,
+                &event,
+                &commits,
+                &reachable,
+                "2026-07-13T00:00:00.2Z"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -4021,10 +4033,12 @@ mod tests {
         std::fs::write(&tag, hash('f')).unwrap();
 
         let report = verify_objects(&repo).unwrap();
-        assert!(report
-            .remaining_findings
-            .iter()
-            .any(|finding| finding.object_hash == hash('f')));
+        assert!(
+            report
+                .remaining_findings
+                .iter()
+                .any(|finding| finding.object_hash == hash('f'))
+        );
     }
 
     #[test]
@@ -4043,10 +4057,12 @@ mod tests {
         std::fs::write(dir.path().join("doc.md"), vec![b'y'; original.len()]).unwrap();
 
         let baseline = verify_objects(&repo).unwrap();
-        assert!(baseline
-            .remaining_findings
-            .iter()
-            .any(|finding| finding.kind == "raw_corrupt"));
+        assert!(
+            baseline
+                .remaining_findings
+                .iter()
+                .any(|finding| finding.kind == "raw_corrupt")
+        );
         let exact = verify_objects_with_limits(
             &repo,
             VerifyLimits {
@@ -4055,10 +4071,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!exact
-            .remaining_findings
-            .iter()
-            .any(|finding| finding.kind == "inventory_limit"));
+        assert!(
+            !exact
+                .remaining_findings
+                .iter()
+                .any(|finding| finding.kind == "inventory_limit")
+        );
         let one_under = verify_objects_with_limits(
             &repo,
             VerifyLimits {
@@ -4067,10 +4085,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(one_under
-            .remaining_findings
-            .iter()
-            .any(|finding| finding.kind == "inventory_limit"));
+        assert!(
+            one_under
+                .remaining_findings
+                .iter()
+                .any(|finding| finding.kind == "inventory_limit")
+        );
     }
 
     #[test]

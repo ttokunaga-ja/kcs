@@ -1,10 +1,10 @@
 //! Adapter trait groups.
 
+use crate::Result;
 use crate::types::{
     AdapterProfile, EmbeddingRequest, EmbeddingResponse, MarkdownizeRequest, MarkdownizeResponse,
     PrepareRequest, PrepareResponse, RerankRequest, RerankResponse,
 };
-use crate::Result;
 
 pub trait PrepareAdapter {
     fn profile(&self) -> AdapterProfile;

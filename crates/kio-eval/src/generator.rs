@@ -13,7 +13,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::manifest::{
-    validate_corpus_manifest, CorpusManifest, CORPUS_ANCHOR_COUNT, CORPUS_FILE_COUNT, SCOPES,
+    CORPUS_ANCHOR_COUNT, CORPUS_FILE_COUNT, CorpusManifest, SCOPES, validate_corpus_manifest,
 };
 
 const FIXTURE: &str = include_str!("../../../eval/corpus-fixture.json");
@@ -298,7 +298,7 @@ fn safe_parent_and_leaf(output: &Path) -> Result<(fs::File, String), GeneratorEr
                     return Err(boundary(
                         output,
                         "parent component must be a real directory",
-                    ))
+                    ));
                 }
                 Err(source) => return Err(io_error(output, source)),
             },
@@ -531,11 +531,12 @@ mod tests {
     fn accepts_lexically_normalized_parent_components() {
         let temp = tempfile::tempdir().unwrap();
         generate_corpus(&temp.path().join("working/../nested/corpus"), false).unwrap();
-        assert!(temp
-            .path()
-            .join("nested/corpus")
-            .join(MANIFEST_NAME)
-            .is_file());
+        assert!(
+            temp.path()
+                .join("nested/corpus")
+                .join(MANIFEST_NAME)
+                .is_file()
+        );
     }
 
     #[cfg(unix)]

@@ -130,7 +130,7 @@ conflict
 
 Kioは、Gitの強力な履歴管理思想を取り込みつつ、**Gitの用語や操作体系を上位レイヤーから隠す**設計にします。
 
-ただし重要な但し書き: **MVP のターゲットは開発者・研究者・技術者** ([01-positioning.md §2](01-positioning.md)) なので、CLI 上では Git 風の用語 (`commit`, `restore`, `snapshot`) を許容します。一般ユーザー向け GUI で用語を翻訳するのは MVP より後のフェーズの仕事です。本書の用語置換テーブルは「将来 GUI を作るときの設計指針」であって、MVP CLI の責務ではありません。
+ただし重要な但し書き: **MVP のターゲットは開発者・研究者・技術者** ([01-positioning.md §2](01-positioning.md)) なので、CLI 上では `restore` と `snapshot` を許容します。履歴 object の名称は `commit` のままだが、CLI の作成入口は `kio snapshot create` だけであり、旧 `kio commit` alias は受理しません。一般ユーザー向け GUI で用語を翻訳するのは MVP より後のフェーズの仕事です。本書の用語置換テーブルは「将来 GUI を作るときの設計指針」であって、MVP CLI の責務ではありません。
 
 ---
 

@@ -15,33 +15,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgGroup, Args};
 use kio_core::cas::{
-    canonical_json_bytes, hash_bytes, is_hash, ChunkObject, ContentObjectKind, ObjectKind,
-    ObjectStore,
+    ChunkObject, ContentObjectKind, ObjectKind, ObjectStore, canonical_json_bytes, hash_bytes,
+    is_hash,
 };
 use kio_core::dag::CommitType;
 use kio_core::dag::TreeEntry;
 use kio_core::history::HistoryReader;
 use kio_core::purge::{
-    canonical_final_event, closure_content_hash, BeginOutcome, ClosureItem, EventKind,
-    LifecycleEvent, PurgeClosure, PurgeJournal, PurgePhase, PurgeReason, PurgeState, TombstoneMode,
+    BeginOutcome, ClosureItem, EventKind, LifecycleEvent, PurgeClosure, PurgeJournal, PurgePhase,
+    PurgeReason, PurgeState, TombstoneMode, canonical_final_event, closure_content_hash,
 };
 use kio_core::scope::{
-    append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds, Repository, StoreLock,
+    Repository, StoreLock, append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
 use kio_pipeline::ledger::ops::{
-    get_batch_request, recovery_finish_cleanup, recovery_settle_unknown, resolve_abandon_selector,
-    AbandonResolution, AbandonSelector,
+    AbandonResolution, AbandonSelector, get_batch_request, recovery_finish_cleanup,
+    recovery_settle_unknown, resolve_abandon_selector,
 };
 use kio_pipeline::ledger::{LedgerDb, TaskKey};
 use kio_pipeline::markdownize::{
-    load_validated_normalized_units_from_manifest, NormalizedInstanceManifest,
-    NormalizedUnitObject, UnitStatus,
+    NormalizedInstanceManifest, NormalizedUnitObject, UnitStatus,
+    load_validated_normalized_units_from_manifest,
 };
-use kio_pipeline::task::{TaskStore, TaskType, MAX_TASK_STORE_BYTES};
+use kio_pipeline::task::{MAX_TASK_STORE_BYTES, TaskStore, TaskType};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PURGE_REASONS: [&str; 5] = ["legal", "privacy", "misingest", "copyright", "other"];
 const VALIDATION_HASH: &str =
@@ -328,7 +328,7 @@ fn authenticate_target_chunk_rows(
             spec_version: 1,
             raw_hash: stored.row.raw_hash.clone(),
             tool_profile_hash: stored.row.tool_profile_hash.clone(),
-            gen: stored.row.gen,
+            r#gen: stored.row.r#gen,
             unit_key: stored.row.unit_key.clone(),
             unit_content_hash: stored.row.unit_content_hash.clone(),
             heading_path: stored.row.heading_path.clone().unwrap_or_default(),
@@ -937,10 +937,10 @@ fn orphaned_image_hashes_for_raw(
         for row in rows {
             let text = row.map_err(|error| KioError::schema(error.to_string()))?;
             for image in kio_search::object_uri::extract_related_images(&text) {
-                if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) {
-                    if object.is_image() {
-                        hashes.insert(object.hash().to_owned());
-                    }
+                if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri)
+                    && object.is_image()
+                {
+                    hashes.insert(object.hash().to_owned());
                 }
             }
         }
@@ -1235,7 +1235,7 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
         let identity = (
             manifest.raw_hash.clone(),
             manifest.tool_profile_hash.clone(),
-            manifest.gen,
+            manifest.r#gen,
         );
         let target = targets.contains(manifest.raw_hash.as_str());
         // The mutable instance manifest merely locates the immutable manifest
@@ -1296,7 +1296,7 @@ fn scan_derived_inventory(kio_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
 struct VerifiedManifestClosure {
     raw_hash: String,
     tool_profile_hash: String,
-    gen: u64,
+    r#gen: u64,
     unit_hashes: BTreeSet<String>,
     prepared: BTreeSet<String>,
     images: BTreeSet<String>,
@@ -1368,7 +1368,7 @@ fn extend_inventory_from_reachable_refs(
                 VerifiedManifestClosure {
                     raw_hash: manifest.raw_hash,
                     tool_profile_hash: manifest.tool_profile_hash,
-                    gen: manifest.gen,
+                    r#gen: manifest.r#gen,
                     unit_hashes,
                     prepared,
                     images,
@@ -1386,7 +1386,7 @@ fn extend_inventory_from_reachable_refs(
         // still checked before inventory hash de-duplication.
         if closure.raw_hash != binding.binding.raw_hash
             || closure.tool_profile_hash != normalize.tool_profile_hash
-            || closure.gen != normalize.gen
+            || closure.r#gen != normalize.r#gen
         {
             return Err(store_corrupt(
                 &source_path,
@@ -1513,7 +1513,7 @@ fn validate_instance_leaf(path: &Path, manifest: &NormalizedInstanceManifest) ->
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| store_corrupt(path, "normalized instance leaf is not valid UTF-8"))?;
-    let valid_name = name == format!("{raw}.{tool}.g{}", manifest.gen);
+    let valid_name = name == format!("{raw}.{tool}.g{}", manifest.r#gen);
     let fanout = path
         .parent()
         .and_then(Path::file_name)
@@ -1556,21 +1556,21 @@ fn collect_image_hashes_from_value(value: &Value, output: &mut BTreeSet<String>)
     match value {
         Value::Object(object) => {
             for (key, child) in object {
-                if key == "image_hash" {
-                    if let Some(hash) = child.as_str().filter(|hash| is_hash(hash)) {
-                        output.insert(hash.to_owned());
-                    }
+                if key == "image_hash"
+                    && let Some(hash) = child.as_str().filter(|hash| is_hash(hash))
+                {
+                    output.insert(hash.to_owned());
                 }
-                if key == "images" {
-                    if let Some(items) = child.as_array() {
-                        for item in items {
-                            if let Some(hash) = item
-                                .get("hash")
-                                .and_then(Value::as_str)
-                                .filter(|hash| is_hash(hash))
-                            {
-                                output.insert(hash.to_owned());
-                            }
+                if key == "images"
+                    && let Some(items) = child.as_array()
+                {
+                    for item in items {
+                        if let Some(hash) = item
+                            .get("hash")
+                            .and_then(Value::as_str)
+                            .filter(|hash| is_hash(hash))
+                        {
+                            output.insert(hash.to_owned());
                         }
                     }
                 }
@@ -2415,16 +2415,16 @@ fn working_tree_warning_text(alias_count: u64) -> String {
 }
 
 fn attach_working_tree_warning(mut value: Value, alias_count: u64) -> Value {
-    if alias_count > 0 {
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "working_tree_warning".to_owned(),
-                json!({
-                    "live_alias_count": alias_count,
-                    "message": working_tree_warning_text(alias_count),
-                }),
-            );
-        }
+    if alias_count > 0
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "working_tree_warning".to_owned(),
+            json!({
+                "live_alias_count": alias_count,
+                "message": working_tree_warning_text(alias_count),
+            }),
+        );
     }
     value
 }
@@ -2609,21 +2609,20 @@ fn preflight(repo: &Repository, args: &PurgeArgs) -> Result<PurgePreview> {
     let plan = resolve_plan(repo, args)?;
     let state = PurgeState::new(repo.kio_dir());
     let journal = state.read_journal()?;
-    if let Some(active) = &journal {
-        if active.target_raw_hashes != plan.target_raw_hashes
+    if let Some(active) = &journal
+        && (active.target_raw_hashes != plan.target_raw_hashes
             || active.reason != plan.reason
-            || active.tombstone_mode != plan.tombstone_mode
-        {
-            return Err(KioError::new(
-                "KIO-E-PURGE-INCOMPLETE-001",
-                "a different purge transaction is already in progress",
-                json!({
-                    "phase": active.phase,
-                    "target_raw_count": active.target_raw_hashes.len(),
-                }),
-                ExitCode::PartialFailure,
-            ));
-        }
+            || active.tombstone_mode != plan.tombstone_mode)
+    {
+        return Err(KioError::new(
+            "KIO-E-PURGE-INCOMPLETE-001",
+            "a different purge transaction is already in progress",
+            json!({
+                "phase": active.phase,
+                "target_raw_count": active.target_raw_hashes.len(),
+            }),
+            ExitCode::PartialFailure,
+        ));
     }
 
     let completed = if journal.is_none() {
@@ -2736,20 +2735,20 @@ fn inspect_terminal_state(
     let mut tombstones = Vec::new();
     let mut receipts = Vec::new();
     for raw_hash in &plan.target_raw_hashes {
-        if let Some(tombstone) = state.read_tombstone(raw_hash)? {
-            if tombstone.is_active() {
-                if plan.tombstone_mode == TombstoneMode::Erase {
-                    return Err(KioError::invalid_usage(
-                        "converting an existing active tombstone to erase mode is not supported",
-                    ));
-                }
-                tombstones.push(tombstone);
+        if let Some(tombstone) = state.read_tombstone(raw_hash)?
+            && tombstone.is_active()
+        {
+            if plan.tombstone_mode == TombstoneMode::Erase {
+                return Err(KioError::invalid_usage(
+                    "converting an existing active tombstone to erase mode is not supported",
+                ));
             }
+            tombstones.push(tombstone);
         }
-        if let Some(receipt) = state.read_erase_receipt(raw_hash)? {
-            if receipt.is_active() {
-                receipts.push(receipt);
-            }
+        if let Some(receipt) = state.read_erase_receipt(raw_hash)?
+            && receipt.is_active()
+        {
+            receipts.push(receipt);
         }
     }
 
@@ -2904,11 +2903,13 @@ mod windows_tests {
         atomic_private_replace(&path, b"[\"replacement\"]").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"[\"replacement\"]");
-        assert!(std::fs::read_dir(&purge_dir).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".purge-write-")));
+        assert!(std::fs::read_dir(&purge_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".purge-write-")
+        }));
     }
 
     #[test]

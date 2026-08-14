@@ -639,7 +639,7 @@ fn validate_golden_shape(query: &GoldenQuery) -> Result<(), String> {
     match query.scenario.required_flag() {
         None if !query.flags.is_empty() => return Err("M3-1 must have no flags".to_owned()),
         Some(flag) if !query.flags.iter().any(|actual| actual == flag) => {
-            return Err(format!("required flag missing: {flag}"))
+            return Err(format!("required flag missing: {flag}"));
         }
         _ => {}
     }
@@ -727,7 +727,7 @@ fn frozen_history() -> &'static HistoryManifest {
 mod tests {
     use std::fs;
 
-    use super::{load_golden_queries, MAX_GOLDEN_QUERIES};
+    use super::{MAX_GOLDEN_QUERIES, load_golden_queries};
 
     #[test]
     fn golden_query_count_is_bounded_before_execution() {

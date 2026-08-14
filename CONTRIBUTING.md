@@ -61,9 +61,9 @@ The evaluation harness is Python and runs without a Rust build:
 python3 -m unittest discover -s eval -t .
 ```
 
-The development and CI toolchain is pinned to Rust `1.97.0` (see
-`rust-toolchain.toml`); the workspace still declares an MSRV of
-`rust-version = "1.86"`, which CI verifies separately.
+Development, CI, and the workspace contract all use Rust `1.97.1` with
+Edition 2024 (see `rust-toolchain.toml` and the workspace `Cargo.toml`). Kio is
+pre-stable and does not maintain a second MSRV compatibility contract.
 
 ## Pull requests
 

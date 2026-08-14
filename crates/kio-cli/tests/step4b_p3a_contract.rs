@@ -34,11 +34,11 @@ use kio_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARK
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::tool_lock::{canonical_tool_lock_value, tool_lock_hash};
 use kio_core::scope::{
-    network_approvals_initialized, publish_network_approval, revoke_network_approval,
-    tier_a_template_text, write_network_approval_pending, Repository,
+    Repository, network_approvals_initialized, publish_network_approval, revoke_network_approval,
+    tier_a_template_text, write_network_approval_pending,
 };
 use kio_pipeline::scan::TIER_B_NEEDLES;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
@@ -373,12 +373,14 @@ fn qa3_embedding_rate_limit_pending_and_gated() {
     );
     assert_eq!(resumed["tasks_executed"], expected_count, "{resumed}");
     let status = run_embedding_seam(&dir, "mock", None, &["status"]);
-    assert!(status["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|task| task["type"] == "embedding")
-        .all(|task| task["status"] == "done"));
+    assert!(
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["type"] == "embedding")
+            .all(|task| task["status"] == "done")
+    );
 }
 
 // ===========================================================================
@@ -1329,9 +1331,11 @@ fn setup_pending_mock_embedding_scope() -> TempDir {
 
     let baseline = mock_embed_json(&dir, &["status"]);
     assert!(
-        baseline["tasks"].as_array().unwrap().iter().any(|task| {
-            task["input_path"] == "a.md" && task["status"] == "pending"
-        }),
+        baseline["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| { task["input_path"] == "a.md" && task["status"] == "pending" }),
         "the embedding task must still be Pending (the stale profile hash must have closed the gate): {baseline}"
     );
     dir

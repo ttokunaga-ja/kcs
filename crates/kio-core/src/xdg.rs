@@ -80,10 +80,10 @@ fn home_dir_from(value: Option<OsString>) -> Option<PathBuf> {
 #[cfg(windows)]
 fn windows_profile_dir() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    use std::ptr::{null_mut, NonNull};
+    use std::ptr::{NonNull, null_mut};
 
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{FOLDERID_Profile, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Profile, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     #[cfg(debug_assertions)]
     if let Some(profile) = home_dir_from(std::env::var_os("KIO_TEST_WINDOWS_PROFILE")) {

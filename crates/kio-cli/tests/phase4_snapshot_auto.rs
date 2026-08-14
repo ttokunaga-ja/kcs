@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
+use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::dag::CommitType;
 use kio_core::scope::Repository;
 use serde_json::Value;
@@ -223,11 +223,13 @@ fn stale_gc_candidate(mode: &str) -> (TempDir, String, String) {
     let repo = Repository::open(dir.path()).unwrap();
     let tree = repo.read_commit(&commit).unwrap().tree;
     let plan = json(&dir, &["gc", "--dry-run"], T0);
-    assert!(plan["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["commit_hash"] == commit));
+    assert!(
+        plan["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["commit_hash"] == commit)
+    );
     (dir, commit, tree)
 }
 
@@ -391,9 +393,11 @@ fn ignored_and_tier_a_inputs_do_not_change_snapshot() {
     assert_eq!(report["status"], "skipped");
     assert_eq!(report["change_count"], 0);
     let paths = tree_paths(&dir);
-    assert!(!paths
-        .iter()
-        .any(|path| { path == "ignored.md" || path == "ignored-local.md" || path == ".env" }));
+    assert!(
+        !paths
+            .iter()
+            .any(|path| { path == "ignored.md" || path == "ignored-local.md" || path == ".env" })
+    );
 }
 
 #[cfg(unix)]
@@ -699,10 +703,12 @@ fn malformed_checkpoint_temp_fails_before_snapshot_publication() {
     assert_eq!(head(&dir), before_head);
     assert!(malformed.is_file());
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -741,13 +747,13 @@ fn concurrent_checkpoint_replacement_is_preserved_and_fails_closed() {
         fs::read(dir.path().join(".kio/snapshot-auto.json")).unwrap(),
         concurrent
     );
-    assert!(fs::read_dir(dir.path().join(".kio"))
-        .unwrap()
-        .all(|entry| !entry
+    assert!(fs::read_dir(dir.path().join(".kio")).unwrap().all(|entry| {
+        !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .starts_with(".snapshot-auto-state-")));
+            .starts_with(".snapshot-auto-state-")
+    }));
     assert_eq!(head(&dir), before_head);
 }
 
@@ -787,13 +793,13 @@ fn concurrent_first_checkpoint_publication_is_no_clobber() {
     );
     assert_eq!(fs::read(&state).unwrap(), concurrent);
     assert_eq!(head(&dir), before_head);
-    assert!(fs::read_dir(dir.path().join(".kio"))
-        .unwrap()
-        .all(|entry| !entry
+    assert!(fs::read_dir(dir.path().join(".kio")).unwrap().all(|entry| {
+        !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .starts_with(".snapshot-auto-state-")));
+            .starts_with(".snapshot-auto-state-")
+    }));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -810,25 +816,25 @@ fn crash_after_checkpoint_temp_fsync_is_recovered_without_residue() {
     let status = child.wait().unwrap();
     assert!(!status.success());
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(fs::read_dir(dir.path().join(".kio"))
-        .unwrap()
-        .any(|entry| entry
+    assert!(fs::read_dir(dir.path().join(".kio")).unwrap().any(|entry| {
+        entry
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .starts_with(".snapshot-auto-state-")));
+            .starts_with(".snapshot-auto-state-")
+    }));
 
     let recovered = auto(&dir, T0);
     assert_eq!(recovered["status"], "noop");
     assert_eq!(recovered["eligibility_reason"], "first_run");
     assert!(dir.path().join(".kio/snapshot-auto.json").is_file());
-    assert!(fs::read_dir(dir.path().join(".kio"))
-        .unwrap()
-        .all(|entry| !entry
+    assert!(fs::read_dir(dir.path().join(".kio")).unwrap().all(|entry| {
+        !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .starts_with(".snapshot-auto-state-")));
+            .starts_with(".snapshot-auto-state-")
+    }));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -877,14 +883,13 @@ fn live_writer_lock_rejects_scheduled_snapshot_without_state_publication() {
     let lock_path = dir.path().join(".kio/.lock");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(bytes) = fs::read(&lock_path) {
-            if serde_json::from_slice::<Value>(&bytes)
+        if let Ok(bytes) = fs::read(&lock_path)
+            && serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|value| value["pid"].as_u64())
                 == Some(first.id() as u64)
-            {
-                break;
-            }
+        {
+            break;
         }
         assert!(
             Instant::now() < deadline,
@@ -962,10 +967,12 @@ fn ignore_policy_change_at_writer_boundary_is_rejected_before_cas() {
     );
     assert_eq!(head(&dir), before_head);
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Raw, &hash_bytes(secret))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Raw, &hash_bytes(secret))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -991,10 +998,12 @@ fn working_file_change_after_final_observation_is_not_published() {
     );
     assert_eq!(head(&dir), before_head);
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Raw, &hash_bytes(replacement))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Raw, &hash_bytes(replacement))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -1021,10 +1030,12 @@ fn unsafe_symlink_added_at_writer_boundary_is_rejected_before_cas() {
     );
     assert_eq!(head(&dir), before_head);
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Raw, &hash_bytes(b"eligible safe input\n"))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Raw, &hash_bytes(b"eligible safe input\n"))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -1119,10 +1130,12 @@ fn scope_replacement_at_writer_boundary_cannot_mutate_either_store() {
         before_head
     );
     assert!(!retained.join("snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(&retained)
-        .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(&retained)
+            .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -1230,10 +1243,12 @@ fn scope_replacement_before_gc_preflight_cannot_resume_the_victim_marker() {
     );
     assert_eq!(kio_bytes(&dir.path().join(".kio")), victim_before);
     assert!(dir.path().join(".kio/gc/in_progress").is_file());
-    assert!(ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Tree, &victim_tree)
-        .unwrap()
-        .is_file());
+    assert!(
+        ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Tree, &victim_tree)
+            .unwrap()
+            .is_file()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1321,10 +1336,12 @@ fn purge_journal_created_at_writer_boundary_blocks_before_cas() {
     );
     assert_eq!(head(&dir), before_head);
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
-        .unwrap()
-        .exists());
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Raw, &hash_bytes(new_bytes))
+            .unwrap()
+            .exists()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1348,10 +1365,12 @@ fn disabled_scheduler_does_not_resume_an_after_index_marker() {
     assert_eq!(report["reason"], "disabled");
     assert_eq!(report["recovered_gc"], false);
     assert_eq!(kio_bytes(&dir.path().join(".kio")), before);
-    assert!(ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Tree, &tree)
-        .unwrap()
-        .is_file());
+    assert!(
+        ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Tree, &tree)
+            .unwrap()
+            .is_file()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1397,13 +1416,16 @@ fn active_after_index_marker_is_recovered_before_scheduled_publication() {
     assert_eq!(report["status"], "noop");
     assert_eq!(report["recovered_gc"], true);
     assert!(!dir.path().join(".kio/gc/in_progress").exists());
-    assert!(dir
-        .path()
-        .join(".kio/gc/shallowed")
-        .join(commit.strip_prefix("sha256:").unwrap())
-        .is_file());
-    assert!(!ObjectStore::new(dir.path().join(".kio"))
-        .object_path(ObjectKind::Tree, &tree)
-        .unwrap()
-        .exists());
+    assert!(
+        dir.path()
+            .join(".kio/gc/shallowed")
+            .join(commit.strip_prefix("sha256:").unwrap())
+            .is_file()
+    );
+    assert!(
+        !ObjectStore::new(dir.path().join(".kio"))
+            .object_path(ObjectKind::Tree, &tree)
+            .unwrap()
+            .exists()
+    );
 }

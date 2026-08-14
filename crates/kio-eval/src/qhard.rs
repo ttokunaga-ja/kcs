@@ -33,7 +33,7 @@ use serde_json::Value;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::runner::{run_bounded_command, BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT};
+use crate::runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command};
 
 pub const FROZEN_GOLDEN_SHA256: &str =
     "sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163";
@@ -1849,7 +1849,7 @@ fn publish_report(parent: &fs::File, name: &Path, bytes: &[u8]) -> Result<(), Qh
             Err(e) => {
                 return Err(QhardError::Input(format!(
                     "cannot create Q_hard report: {e}"
-                )))
+                )));
             }
         }
     }
@@ -2304,10 +2304,10 @@ where
 {
     let mut first = None;
     for candidate in candidates {
-        if let Some(resolved) = probe(&candidate)? {
-            if first.is_none() {
-                first = Some(resolved);
-            }
+        if let Some(resolved) = probe(&candidate)?
+            && first.is_none()
+        {
+            first = Some(resolved);
         }
     }
     Ok(first)
@@ -3118,29 +3118,28 @@ fn parse_dyld_cache_catalog_optional(
         }
     };
     for line in output.lines() {
-        if let Some((path, arch)) = line.rsplit_once(" [") {
-            if let Some(arch) = arch.strip_suffix("]:") {
-                finish(&mut current, &mut images)?;
-                if arch.len() > 32 || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                {
-                    return Err(QhardError::Input(
-                        "dyld shared-cache image header is malformed".into(),
-                    ));
-                }
-                if arch != architecture || path.starts_with("/System/iOSSupport/") {
-                    current = Some(DyldCatalogRecord::Ignored);
-                    continue;
-                }
-                if !shared_cache_path_allowed(path) {
-                    return Err(QhardError::Input(
-                        "dyld shared-cache image header escapes macOS sealed roots".into(),
-                    ));
-                }
-                current = Some(DyldCatalogRecord::NeedUuid {
-                    path: path.to_owned(),
-                });
+        if let Some((path, arch)) = line.rsplit_once(" [")
+            && let Some(arch) = arch.strip_suffix("]:")
+        {
+            finish(&mut current, &mut images)?;
+            if arch.len() > 32 || !arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err(QhardError::Input(
+                    "dyld shared-cache image header is malformed".into(),
+                ));
+            }
+            if arch != architecture || path.starts_with("/System/iOSSupport/") {
+                current = Some(DyldCatalogRecord::Ignored);
                 continue;
             }
+            if !shared_cache_path_allowed(path) {
+                return Err(QhardError::Input(
+                    "dyld shared-cache image header escapes macOS sealed roots".into(),
+                ));
+            }
+            current = Some(DyldCatalogRecord::NeedUuid {
+                path: path.to_owned(),
+            });
+            continue;
         }
         let Some(record) = current.as_mut() else {
             if line.trim().is_empty() {
@@ -3189,7 +3188,7 @@ fn parse_dyld_cache_catalog_optional(
             DyldCatalogRecord::NeedUuid { .. } => {
                 return Err(QhardError::Input(
                     "dyld shared-cache record lacks -uuid marker".into(),
-                ))
+                ));
             }
             DyldCatalogRecord::NeedLinkedDylibs { .. } if trimmed == "-linked_dylibs:" => {
                 let DyldCatalogRecord::NeedLinkedDylibs { path, uuid } =
@@ -3203,7 +3202,7 @@ fn parse_dyld_cache_catalog_optional(
             DyldCatalogRecord::NeedLinkedDylibs { .. } => {
                 return Err(QhardError::Input(
                     "dyld shared-cache record lacks -linked_dylibs marker".into(),
-                ))
+                ));
             }
             DyldCatalogRecord::NeedAttributes { .. } if trimmed == "attributes     load path" => {
                 let DyldCatalogRecord::NeedAttributes { path, uuid } =
@@ -3221,7 +3220,7 @@ fn parse_dyld_cache_catalog_optional(
             DyldCatalogRecord::NeedAttributes { .. } => {
                 return Err(QhardError::Input(
                     "dyld shared-cache record lacks attributes/load header".into(),
-                ))
+                ));
             }
             DyldCatalogRecord::Edges { edges: linked, .. } => {
                 if trimmed.is_empty() {
@@ -5438,10 +5437,10 @@ mod tests {
     #[test]
     fn macho_parsers_reject_malformed_or_unbounded_closure_text() {
         assert!(parse_otool_load_commands("Load command 1\n  cmd LC_LOAD_DYLIB\n").is_err());
-        assert!(parse_otool_load_commands(
-            "Load command 1\n  cmd LC_LOAD_DYLIB\n  name lib.dylib\n"
-        )
-        .is_err());
+        assert!(
+            parse_otool_load_commands("Load command 1\n  cmd LC_LOAD_DYLIB\n  name lib.dylib\n")
+                .is_err()
+        );
         assert!(parse_otool_rpaths("cmd LC_RPATH\nLoad command 2\n").is_err());
         assert!(checked_macho_path(&"x".repeat(MAX_MACHO_PATH_BYTES + 1), "test").is_err());
         let (_, _, environment) = parse_otool_load_commands(
@@ -5475,12 +5474,14 @@ mod tests {
             test_dyld_info_binding()
         )
         .is_err());
-        assert!(parse_dyld_cache_catalog(
-            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        invalid\n",
-            "arm64e",
-            test_dyld_info_binding()
-        )
-        .is_err());
+        assert!(
+            parse_dyld_cache_catalog(
+                "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        invalid\n",
+                "arm64e",
+                test_dyld_info_binding()
+            )
+            .is_err()
+        );
         assert!(parse_dyld_cache_catalog(
             "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n", "arm64e", test_dyld_info_binding()).is_err());
         assert!(parse_dyld_cache_catalog(
@@ -5496,7 +5497,9 @@ mod tests {
             "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\nattributes load path\n",
             "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\nattributes     load path\ngarbage\n",
         ] {
-            assert!(parse_dyld_cache_catalog(malformed, "arm64e", test_dyld_info_binding()).is_err());
+            assert!(
+                parse_dyld_cache_catalog(malformed, "arm64e", test_dyld_info_binding()).is_err()
+            );
         }
     }
 
@@ -5571,20 +5574,21 @@ mod tests {
             path: "/usr/lib/__kio_eval_missing_required_edge.dylib".into(),
         };
         assert!(!classify_shared_cache_physical_edge(&weak, Err(io::ErrorKind::NotFound)).unwrap());
-        assert!(!classify_shared_cache_physical_edge(
-            &delay_init_weak,
-            Err(io::ErrorKind::NotFound)
-        )
-        .unwrap());
+        assert!(
+            !classify_shared_cache_physical_edge(&delay_init_weak, Err(io::ErrorKind::NotFound))
+                .unwrap()
+        );
         assert!(
             classify_shared_cache_physical_edge(&required, Err(io::ErrorKind::NotFound)).is_err()
         );
         assert!(classify_shared_cache_physical_edge(&weak, Ok(())).unwrap());
-        assert!(validate_shared_cache_edge_attributes(&DyldSharedCacheEdge {
-            attributes: "weak-link unexpected".into(),
-            path: weak.path.clone(),
-        })
-        .is_err());
+        assert!(
+            validate_shared_cache_edge_attributes(&DyldSharedCacheEdge {
+                attributes: "weak-link unexpected".into(),
+                path: weak.path.clone(),
+            })
+            .is_err()
+        );
 
         let mut images = BTreeMap::new();
         images.insert(
@@ -5782,20 +5786,24 @@ mod tests {
             .unwrap(),
             PathBuf::from("/sealed/runtime/lib/liba.dylib")
         );
-        assert!(safe_macho_join(
-            Path::new("/sealed/runtime/bin"),
-            "../../outside.dylib",
-            root,
-            "test",
-        )
-        .is_err());
-        assert!(safe_macho_join(
-            Path::new("/sealed/runtime/bin"),
-            "/outside.dylib",
-            root,
-            "test",
-        )
-        .is_err());
+        assert!(
+            safe_macho_join(
+                Path::new("/sealed/runtime/bin"),
+                "../../outside.dylib",
+                root,
+                "test",
+            )
+            .is_err()
+        );
+        assert!(
+            safe_macho_join(
+                Path::new("/sealed/runtime/bin"),
+                "/outside.dylib",
+                root,
+                "test",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -5835,13 +5843,15 @@ mod tests {
             runtime_rpath_candidate(root, "@executable_path/../../outside", owner, executable)
                 .is_err()
         );
-        assert!(runtime_rpath_candidate(
-            root,
-            "@loader_path",
-            Path::new("/outside/libowner.dylib"),
-            executable
-        )
-        .is_err());
+        assert!(
+            runtime_rpath_candidate(
+                root,
+                "@loader_path",
+                Path::new("/outside/libowner.dylib"),
+                executable
+            )
+            .is_err()
+        );
         assert!(runtime_rpath_candidate(root, "lib", owner, executable).is_err());
         assert!(runtime_rpath_candidate(root, "@rpath/lib", owner, executable).is_err());
     }
@@ -6105,20 +6115,24 @@ mod tests {
                 |_, _| Ok(()),
             )
         };
-        assert!(run(MachoInspection {
-            loads: vec![],
-            rpaths: vec![],
-            dylinker: Some("/tmp/untrusted-dyld".into()),
-            has_dyld_environment: false,
-        })
-        .is_err());
-        assert!(run(MachoInspection {
-            loads: vec![],
-            rpaths: vec![],
-            dylinker: Some("/usr/lib/dyld".into()),
-            has_dyld_environment: true,
-        })
-        .is_err());
+        assert!(
+            run(MachoInspection {
+                loads: vec![],
+                rpaths: vec![],
+                dylinker: Some("/tmp/untrusted-dyld".into()),
+                has_dyld_environment: false,
+            })
+            .is_err()
+        );
+        assert!(
+            run(MachoInspection {
+                loads: vec![],
+                rpaths: vec![],
+                dylinker: Some("/usr/lib/dyld".into()),
+                has_dyld_environment: true,
+            })
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -6132,12 +6146,14 @@ mod tests {
         let outside = external.join("libunsafe.dylib");
         fs::write(&outside, b"unsealed").unwrap();
         symlink(&outside, root.join("lib/libunsafe.dylib")).unwrap();
-        assert!(canonical_path_within(
-            &fs::canonicalize(&root).unwrap(),
-            &root.join("lib/libunsafe.dylib"),
-            "test external dylib",
-        )
-        .is_err());
+        assert!(
+            canonical_path_within(
+                &fs::canonicalize(&root).unwrap(),
+                &root.join("lib/libunsafe.dylib"),
+                "test external dylib",
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -6236,10 +6252,12 @@ mod tests {
             scope.public_path,
             fs::canonicalize(fixture.path().join("p01/home/work")).unwrap()
         );
-        assert!(environment
-            .directories
-            .iter()
-            .all(|(_, directory)| directory.public_path.starts_with(&expected_env)));
+        assert!(
+            environment
+                .directories
+                .iter()
+                .all(|(_, directory)| directory.public_path.starts_with(&expected_env))
+        );
         assert!(forwarded.is_empty());
     }
 
@@ -6699,12 +6717,14 @@ mod tests {
             combined_hits: None,
             combined_total: None,
         };
-        assert!(write_report(
-            &root.path().join("escape/report.json"),
-            fixture.path(),
-            &report
-        )
-        .is_err());
+        assert!(
+            write_report(
+                &root.path().join("escape/report.json"),
+                fixture.path(),
+                &report
+            )
+            .is_err()
+        );
     }
     #[test]
     fn missing_fixture_attestation_is_not_a_measurement() {

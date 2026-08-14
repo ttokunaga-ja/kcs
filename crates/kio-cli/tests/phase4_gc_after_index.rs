@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use kio_core::cas::{ObjectKind, ObjectStore};
-use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry};
+use kio_core::dag::{CommitObject, CommitStats, CommitType, TreeEntry, build_tree};
 use kio_core::scope::Repository;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -685,21 +685,22 @@ fn automatic_sweep_receipts_all_eligible_repaired_sharers_before_one_tree_remova
     json_success(&dir, &["index", "--offline", "--approve"], NOW);
 
     let store = ObjectStore::new(dir.path().join(".kio"));
-    let shared_tree = store
-        .write_json(
-            ObjectKind::Tree,
-            &serde_json::to_value(
-                build_tree(vec![TreeEntry::raw_file(
+    let shared_tree =
+        store
+            .write_json(
+                ObjectKind::Tree,
+                &serde_json::to_value(
+                    build_tree(vec![TreeEntry::raw_file(
                     "old.md",
                     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 )
                 .unwrap()])
+                    .unwrap(),
+                )
                 .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap()
-        .0;
+            .unwrap()
+            .0;
     let current_tree = Repository::open(dir.path())
         .unwrap()
         .read_commit(

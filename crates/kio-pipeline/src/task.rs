@@ -10,7 +10,7 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::markdownize::MarkdownizeMode;
-use crate::store_path::{resolve_existing_store_path, StorePathKind};
+use crate::store_path::{StorePathKind, resolve_existing_store_path};
 use crate::{IoResultExt, PipelineError, Result};
 
 /// Hard limits for persisted task state. They are deliberately above the normal
@@ -261,7 +261,7 @@ pub enum TaskOutputRef {
         path: PathBuf,
         raw_hash: String,
         tool_profile_hash: String,
-        gen: u64,
+        r#gen: u64,
     },
 }
 
@@ -503,7 +503,7 @@ impl TaskStore {
                     return Err(PipelineError::Io {
                         path: temp.display().to_string(),
                         message: err.to_string(),
-                    })
+                    });
                 }
             }
         }
@@ -818,14 +818,14 @@ fn rebase_task_output_ref(
     if components[0] != digest[0..2] || components[1] != digest[2..4] {
         return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
     }
-    let (tool_profile_hash, gen) =
+    let (tool_profile_hash, r#gen) =
         parse_normalized_output_basename(&descriptor.input_hash, &components[2])
             .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?;
     let expected_source = crate::markdownize::normalized_instance_dir(
         source_kio,
         &descriptor.input_hash,
         &tool_profile_hash,
-        gen,
+        r#gen,
     );
     if expected_source.to_str() != Some(descriptor.output_ref.as_str()) {
         return Err(invalid_output_ref(destination_kio, &descriptor.output_ref));
@@ -834,7 +834,7 @@ fn rebase_task_output_ref(
         destination_kio,
         &descriptor.input_hash,
         &tool_profile_hash,
-        gen,
+        r#gen,
     )
     .to_str()
     .ok_or_else(|| invalid_output_ref(destination_kio, &descriptor.output_ref))?
@@ -861,8 +861,8 @@ fn parse_normalized_output_basename(input_hash: &str, name: &str) -> Option<(Str
     if let Some(suffix) = canonical_suffix {
         let (tool_digest, gen_text) = suffix.rsplit_once(".g")?;
         if is_lower_sha256_digest(tool_digest) && is_canonical_generation(gen_text) {
-            let gen = gen_text.parse::<u64>().ok()?;
-            return Some((format!("sha256:{tool_digest}"), gen));
+            let r#gen = gen_text.parse::<u64>().ok()?;
+            return Some((format!("sha256:{tool_digest}"), r#gen));
         }
         return None;
     }
@@ -979,7 +979,7 @@ pub fn validate_task_output_ref(
     if components[0] != digest[0..2] || components[1] != digest[2..4] {
         return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
     }
-    let (tool_profile_hash, gen) =
+    let (tool_profile_hash, r#gen) =
         parse_normalized_output_basename(&descriptor.input_hash, &components[2])
             .ok_or_else(|| invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref))?;
     // `output_ref` is a durable identity, not merely a path that resolves to
@@ -997,7 +997,7 @@ pub fn validate_task_output_ref(
             kio_dir.as_ref(),
             &descriptor.input_hash,
             &tool_profile_hash,
-            gen,
+            r#gen,
         );
         if canonical.to_str() != Some(descriptor.output_ref.as_str()) {
             return Err(invalid_output_ref(kio_dir.as_ref(), &descriptor.output_ref));
@@ -1014,7 +1014,7 @@ pub fn validate_task_output_ref(
         path: absolute,
         raw_hash: descriptor.input_hash.clone(),
         tool_profile_hash,
-        gen,
+        r#gen,
     })
 }
 
@@ -1176,12 +1176,12 @@ fn validate_task_descriptor_fields(kio_dir: &Path, descriptor: &TaskDescriptor) 
             descriptor.input_hash
         )));
     }
-    if let Some(previous) = &descriptor.previous_raw_hash {
-        if !kio_core::cas::is_hash(previous) {
-            return Err(corrupt(format!(
-                "task previous_raw_hash is not a valid hash: {previous}"
-            )));
-        }
+    if let Some(previous) = &descriptor.previous_raw_hash
+        && !kio_core::cas::is_hash(previous)
+    {
+        return Err(corrupt(format!(
+            "task previous_raw_hash is not a valid hash: {previous}"
+        )));
     }
     if descriptor.changed_unit_keys.len() > MAX_TASK_UNIT_KEYS
         || descriptor
@@ -1216,12 +1216,12 @@ fn validate_task_descriptor_fields(kio_dir: &Path, descriptor: &TaskDescriptor) 
         (TaskStatus::Paused, _) => {
             return Err(corrupt(
                 "paused task requires a hold_reason matching its fallback_reason".to_owned(),
-            ))
+            ));
         }
         (_, Some(_)) => {
             return Err(corrupt(
                 "non-paused task must not carry a hold_reason".to_owned(),
-            ))
+            ));
         }
         (_, None) => {}
     }
@@ -1263,7 +1263,7 @@ fn validate_task_descriptor_fields(kio_dir: &Path, descriptor: &TaskDescriptor) 
         _ => {
             return Err(corrupt(
                 "task reservation stamp must be an all-null or valid complete triple".to_owned(),
-            ))
+            ));
         }
     }
     Ok(())
@@ -1776,8 +1776,8 @@ mod tests {
     /// error_category is the coarse rollup, not an independent classifier).
     #[test]
     fn qa16_adapter_error_code_matches_retry_policy() {
-        use kio_adapter::types::ErrorCategory;
         use kio_adapter::AdapterError;
+        use kio_adapter::types::ErrorCategory;
 
         // (AdapterError, the RetryErrorKind `task_failure_from_adapter` maps
         // it to in crates/kio-cli/src/main.rs).
@@ -1937,7 +1937,7 @@ mod tests {
         fs::create_dir_all(&task.output_ref).unwrap();
         assert!(matches!(
             validate_task_output_ref(dir.path(), &task).unwrap(),
-            TaskOutputRef::NormalizedInstance { gen: 7, .. }
+            TaskOutputRef::NormalizedInstance { r#gen: 7, .. }
         ));
 
         for foreign in [
@@ -2014,24 +2014,28 @@ mod tests {
             validate_task_output_ref(dir.path(), &task).unwrap(),
             TaskOutputRef::NormalizedInstance {
                 tool_profile_hash,
-                gen: 7,
+                r#gen: 7,
                 ..
             } if tool_profile_hash == tool_hash
         ));
 
         let store = TaskStore::new(dir.path());
         store.append(&task).unwrap();
-        assert!(store
-            .done_output_for(&raw_hash, &canonical.display().to_string())
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .done_output_for(&raw_hash, &canonical.display().to_string())
+                .unwrap()
+                .is_some()
+        );
 
         task.output_ref = legacy.display().to_string();
         assert!(validate_task_output_ref(dir.path(), &task).is_err());
-        assert!(store
-            .done_output_for(&raw_hash, &legacy.display().to_string())
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .done_output_for(&raw_hash, &legacy.display().to_string())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2120,20 +2124,18 @@ mod tests {
         let mut bytes = serde_json::to_vec(&task).unwrap();
         bytes.push(b'\n');
         fs::write(&path, &bytes).unwrap();
-        assert!(rebase_normalized_output_refs_for_relocated_store(
-            source.path(),
-            destination.path()
-        )
-        .is_err());
+        assert!(
+            rebase_normalized_output_refs_for_relocated_store(source.path(), destination.path())
+                .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
 
         fs::write(&path, b"{ malformed\n").unwrap();
         let malformed = fs::read(&path).unwrap();
-        assert!(rebase_normalized_output_refs_for_relocated_store(
-            source.path(),
-            destination.path()
-        )
-        .is_err());
+        assert!(
+            rebase_normalized_output_refs_for_relocated_store(source.path(), destination.path())
+                .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), malformed);
     }
 
@@ -2150,11 +2152,10 @@ mod tests {
         fs::write(&outside_journal, sentinel).unwrap();
         symlink(&outside_journal, destination.path().join("tasks.jsonl")).unwrap();
 
-        assert!(rebase_normalized_output_refs_for_relocated_store(
-            source.path(),
-            destination.path()
-        )
-        .is_err());
+        assert!(
+            rebase_normalized_output_refs_for_relocated_store(source.path(), destination.path())
+                .is_err()
+        );
         assert_eq!(fs::read(outside_journal).unwrap(), sentinel);
     }
 
@@ -2177,9 +2178,10 @@ mod tests {
         let tool_hash = format!("sha256:{}", "b".repeat(64));
         let path = crate::markdownize::normalized_instance_dir(&kio_dir, &raw_hash, &tool_hash, 2);
         fs::create_dir_all(&path).unwrap();
-        assert!(path
-            .components()
-            .any(|component| matches!(component, Component::Prefix(_))));
+        assert!(
+            path.components()
+                .any(|component| matches!(component, Component::Prefix(_)))
+        );
 
         let mut task = valid_task();
         task.input_hash = raw_hash.clone();

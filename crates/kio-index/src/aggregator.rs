@@ -52,12 +52,12 @@ use std::path::Path;
 use std::sync::{Once, OnceLock};
 
 use cap_primitives::fs as cap_fs;
-use rusqlite::{params, params_from_iter, types::Value, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::embedding_store::{f32_from_le_bytes, f32_to_le_bytes, EmbeddingProfileSummary};
 use crate::Result;
+use crate::embedding_store::{EmbeddingProfileSummary, f32_from_le_bytes, f32_to_le_bytes};
 
 /// One committed chunk as the collection sees it.
 ///
@@ -74,7 +74,7 @@ pub struct AggChunk {
     /// scope index after the replica selected a row.
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub text: String,
     pub heading_path: Option<String>,
     pub section_id: Option<String>,
@@ -109,7 +109,7 @@ pub struct AggBinding {
     pub chunk_id: String,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
@@ -283,7 +283,7 @@ pub struct AggBindingFilter {
     pub scope_id: String,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub manifest_hash: String,
     pub path_at_commit: String,
     pub pointer_commit: String,
@@ -327,7 +327,7 @@ pub struct AggCandidate {
     pub vector_rank: Option<u64>,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub heading_path: Option<String>,
     pub section_id: Option<String>,
     pub byte_start: u64,
@@ -581,7 +581,7 @@ fn open_or_create_cache_parent(
                 return Err(crate::IndexError::Schema(format!(
                     "open aggregator cache directory {} without following links: {e}",
                     path.display()
-                )))
+                )));
             }
         };
         resolved.push(component);
@@ -971,14 +971,14 @@ impl Aggregator {
                     return Err(crate::IndexError::Schema(format!(
                         "refusing to recreate aggregator cache through symlink or non-file: {}",
                         candidate.display()
-                    )))
+                    )));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
                     return Err(crate::IndexError::Schema(format!(
                         "inspect aggregator cache {}: {e}",
                         candidate.display()
-                    )))
+                    )));
                 }
             }
             cap_fs::remove_file(&parent_handle, candidate).map_err(|e| {
@@ -1669,13 +1669,12 @@ impl Aggregator {
                 if let (Some(stored), Some(incoming)) = (
                     stored_config.as_deref(),
                     completion.chunking_config_hash.as_deref(),
-                ) {
-                    if stored != incoming {
-                        return Err(crate::IndexError::Schema(format!(
-                            "conflicting config projection markers for {}:{}",
-                            key.0, key.1
-                        )));
-                    }
+                ) && stored != incoming
+                {
+                    return Err(crate::IndexError::Schema(format!(
+                        "conflicting config projection markers for {}:{}",
+                        key.0, key.1
+                    )));
                 }
                 if stored_config.is_none() {
                     *stored_config = completion.chunking_config_hash.clone();
@@ -1865,7 +1864,7 @@ impl Aggregator {
                     chunk.chunk_id,
                     chunk.raw_hash,
                     chunk.tool_profile_hash,
-                    chunk.gen as i64,
+                    chunk.r#gen as i64,
                     chunk.text,
                     chunk.heading_path,
                     chunk.section_id,
@@ -1936,7 +1935,7 @@ impl Aggregator {
                     binding.chunk_id,
                     binding.raw_hash,
                     binding.tool_profile_hash,
-                    binding.gen as i64,
+                    binding.r#gen as i64,
                     binding.manifest_hash,
                     binding.path_at_commit,
                     binding.pointer_commit,
@@ -2289,42 +2288,42 @@ impl Aggregator {
             }
         }
 
-        if request.search_vector {
-            if let Some(query) = request.query_embedding {
-                let mut vectors = self.replica_vector_seeds(query)?;
-                vectors.sort_by(|a, b| {
-                    b.1.total_cmp(&a.1)
-                        .then_with(|| a.0.scope_id.cmp(&b.0.scope_id))
-                        // A shared vector lane has one deterministic
-                        // `(scope_id, row identity)` tie-break. Comparing an
-                        // `Option<image_id>` here would put every chunk ahead
-                        // of every image on equal cosine, irrespective of
-                        // their actual row identities.
-                        .then_with(|| a.0.row_identity().cmp(b.0.row_identity()))
-                        .then_with(|| a.0.chunk_id.cmp(&b.0.chunk_id))
-                });
-                vectors.truncate(request.candidate_depth as usize);
-                for (rank, (mut seed, _)) in vectors.into_iter().enumerate() {
-                    seed.vector_rank = Some(rank as u64 + 1);
-                    if seed.image_id.is_some() {
-                        let chunk_key = (seed.scope_id.clone(), format!("chunk:{}", seed.chunk_id));
-                        if let Some(chunk) = seeds.get(&chunk_key) {
-                            seed.text_rank = chunk.text_rank;
-                        }
+        if request.search_vector
+            && let Some(query) = request.query_embedding
+        {
+            let mut vectors = self.replica_vector_seeds(query)?;
+            vectors.sort_by(|a, b| {
+                b.1.total_cmp(&a.1)
+                    .then_with(|| a.0.scope_id.cmp(&b.0.scope_id))
+                    // A shared vector lane has one deterministic
+                    // `(scope_id, row identity)` tie-break. Comparing an
+                    // `Option<image_id>` here would put every chunk ahead
+                    // of every image on equal cosine, irrespective of
+                    // their actual row identities.
+                    .then_with(|| a.0.row_identity().cmp(b.0.row_identity()))
+                    .then_with(|| a.0.chunk_id.cmp(&b.0.chunk_id))
+            });
+            vectors.truncate(request.candidate_depth as usize);
+            for (rank, (mut seed, _)) in vectors.into_iter().enumerate() {
+                seed.vector_rank = Some(rank as u64 + 1);
+                if seed.image_id.is_some() {
+                    let chunk_key = (seed.scope_id.clone(), format!("chunk:{}", seed.chunk_id));
+                    if let Some(chunk) = seeds.get(&chunk_key) {
+                        seed.text_rank = chunk.text_rank;
                     }
-                    let row_key = match &seed.image_id {
-                        Some(image_id) => format!("image:{image_id}"),
-                        None => format!("chunk:{}", seed.chunk_id),
-                    };
-                    let key = (seed.scope_id.clone(), row_key);
-                    match seeds.get_mut(&key) {
-                        Some(existing) => {
-                            existing.vector_rank = seed.vector_rank;
-                            existing.embedding = seed.embedding;
-                        }
-                        None => {
-                            seeds.insert(key, seed);
-                        }
+                }
+                let row_key = match &seed.image_id {
+                    Some(image_id) => format!("image:{image_id}"),
+                    None => format!("chunk:{}", seed.chunk_id),
+                };
+                let key = (seed.scope_id.clone(), row_key);
+                match seeds.get_mut(&key) {
+                    Some(existing) => {
+                        existing.vector_rank = seed.vector_rank;
+                        existing.embedding = seed.embedding;
+                    }
+                    None => {
+                        seeds.insert(key, seed);
                     }
                 }
             }
@@ -2408,7 +2407,7 @@ impl Aggregator {
                     filter.scope_id,
                     filter.raw_hash,
                     filter.tool_profile_hash,
-                    filter.gen as i64,
+                    filter.r#gen as i64,
                     filter.manifest_hash,
                     filter.path_at_commit,
                     filter.pointer_commit,
@@ -2691,7 +2690,7 @@ impl Aggregator {
         let Some((
             raw_hash,
             tool_profile_hash,
-            gen,
+            r#gen,
             heading_path,
             section_id,
             byte_start,
@@ -2736,7 +2735,7 @@ impl Aggregator {
                     chunk_id: seed.chunk_id.clone(),
                     raw_hash: row.get(1)?,
                     tool_profile_hash: row.get(2)?,
-                    gen: row.get::<_, i64>(3)? as u64,
+                    r#gen: row.get::<_, i64>(3)? as u64,
                     manifest_hash: row.get(4)?,
                     path_at_commit: row.get(5)?,
                     pointer_commit: row.get(6)?,
@@ -2758,7 +2757,7 @@ impl Aggregator {
             vector_rank: seed.vector_rank,
             raw_hash,
             tool_profile_hash,
-            gen: gen as u64,
+            r#gen: r#gen as u64,
             heading_path,
             section_id,
             byte_start: byte_start as u64,
@@ -3013,7 +3012,7 @@ mod tests {
             chunk_id: id.to_owned(),
             raw_hash: format!("raw:{id}"),
             tool_profile_hash: "tool:test".to_owned(),
-            gen: 0,
+            r#gen: 0,
             text: text.to_owned(),
             heading_path: None,
             section_id: None,
@@ -3041,7 +3040,7 @@ mod tests {
             chunk_id: chunk_id.to_owned(),
             raw_hash: format!("raw:{chunk_id}"),
             tool_profile_hash: "tool:test".to_owned(),
-            gen: 0,
+            r#gen: 0,
             manifest_hash: "manifest:test".to_owned(),
             path_at_commit: path.to_owned(),
             pointer_commit: snapshot.to_owned(),
@@ -3243,10 +3242,12 @@ mod tests {
             .expect("symlink cache target must fail");
         assert!(error.to_string().contains("symlink"));
         assert_eq!(std::fs::read(&target).unwrap(), b"must not be removed");
-        assert!(std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -3268,10 +3269,12 @@ mod tests {
             std::fs::read(&target).unwrap(),
             b"must not be opened as a cache"
         );
-        assert!(std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -3412,14 +3415,18 @@ mod tests {
             std::fs::read(&shm_target).unwrap(),
             b"must not be removed as SHM"
         );
-        assert!(std::fs::symlink_metadata(&wal)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(std::fs::symlink_metadata(&shm)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&wal)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::symlink_metadata(&shm)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -3611,7 +3618,7 @@ mod tests {
             scope_id: "s".to_owned(),
             raw_hash: "raw:current".to_owned(),
             tool_profile_hash: "tool:test".to_owned(),
-            gen: 0,
+            r#gen: 0,
             manifest_hash: "manifest:test".to_owned(),
             path_at_commit: "current.md".to_owned(),
             pointer_commit: "head".to_owned(),
@@ -3818,9 +3825,11 @@ mod tests {
         assert_eq!(marker.shallow_skipped, 2);
         assert_eq!(marker.binding_count, 0);
         assert_eq!(marker.completed_at, 456);
-        assert!(index
-            .has_completed_projection("empty", AggSelector::Current, "commit:head")
-            .unwrap());
+        assert!(
+            index
+                .has_completed_projection("empty", AggSelector::Current, "commit:head")
+                .unwrap()
+        );
         assert_eq!(
             index
                 .latest_completed_projection_snapshot("empty", AggSelector::Current)
@@ -3828,10 +3837,12 @@ mod tests {
                 .as_deref(),
             Some("commit:head")
         );
-        assert!(index
-            .projection_marker("empty", AggSelector::At, "commit:head")
-            .unwrap()
-            .is_none());
+        assert!(
+            index
+                .projection_marker("empty", AggSelector::At, "commit:head")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3879,9 +3890,11 @@ mod tests {
             })
             .unwrap();
 
-        assert!(index
-            .has_binding("scope", AggSelector::At, "commit:old")
-            .unwrap());
+        assert!(
+            index
+                .has_binding("scope", AggSelector::At, "commit:old")
+                .unwrap()
+        );
         assert_eq!(
             index
                 .conn
@@ -3970,12 +3983,16 @@ mod tests {
                 now_ms: 2,
             })
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("preserved At binding references missing incoming chunk: old"));
-        assert!(index
-            .has_binding("scope", AggSelector::At, "commit:old")
-            .unwrap());
+        assert!(
+            error
+                .to_string()
+                .contains("preserved At binding references missing incoming chunk: old")
+        );
+        assert!(
+            index
+                .has_binding("scope", AggSelector::At, "commit:old")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -4013,9 +4030,11 @@ mod tests {
                 now_ms: 2,
             })
             .unwrap();
-        assert!(index
-            .has_binding("scope", AggSelector::At, "commit:old")
-            .unwrap());
+        assert!(
+            index
+                .has_binding("scope", AggSelector::At, "commit:old")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -4153,9 +4172,11 @@ mod tests {
         let delta = ScopeDelta {
             vectors_added: vec![("a".to_owned(), vec![1.0, 0.0])],
         };
-        assert!(!index
-            .apply_delta("never-seen", "gen1", "gen1", &delta, 1)
-            .unwrap());
+        assert!(
+            !index
+                .apply_delta("never-seen", "gen1", "gen1", &delta, 1)
+                .unwrap()
+        );
         assert_eq!(index.scope_generation("never-seen").unwrap(), None);
         assert_eq!(index.corpus_size().unwrap(), (0, 0, 0));
     }
@@ -4203,10 +4224,12 @@ mod tests {
                 .is_empty(),
             "a purged chunk must leave the FTS, not only the content table"
         );
-        assert!(index
-            .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
-            .unwrap()
-            .is_empty());
+        assert!(
+            index
+                .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             index.scope_generation("s").unwrap().as_deref(),
             Some("gen2")
@@ -4351,11 +4374,13 @@ mod tests {
         assert_eq!(index.retain_scopes(&live).unwrap(), 1);
         assert_eq!(index.corpus_size().unwrap(), (1, 1, 0));
         assert!(index.scope_generation("dead").unwrap().is_none());
-        assert!(index
-            .text_scores("alpha", &only(&["live", "dead"]), 10)
-            .unwrap()
-            .iter()
-            .all(|score| score.scope_id != "dead"));
+        assert!(
+            index
+                .text_scores("alpha", &only(&["live", "dead"]), 10)
+                .unwrap()
+                .iter()
+                .all(|score| score.scope_id != "dead")
+        );
     }
 
     #[test]
@@ -4752,10 +4777,12 @@ mod tests {
                 now_ms: 1,
             })
             .unwrap();
-        assert!(index
-            .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
-            .unwrap()
-            .is_empty());
+        assert!(
+            index
+                .vector_scores(&[1.0, 0.0], &only(&["s"]), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

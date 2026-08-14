@@ -815,13 +815,15 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
 
         fn remove(key: &'static str) -> Self {
             let previous = std::env::var(key).ok();
-            std::env::remove_var(key);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }
@@ -829,8 +831,10 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }
@@ -1009,9 +1013,11 @@ mod tests {
             bytes: raw_docx,
         })
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("KIO-E-PREPARE-OFFICE-CONVERT-001"));
+        assert!(
+            error
+                .to_string()
+                .contains("KIO-E-PREPARE-OFFICE-CONVERT-001")
+        );
     }
 
     #[test]

@@ -468,10 +468,12 @@ mod tests {
         symlink(replacement.path(), temp.path().join("research")).unwrap();
         let kio = bound.scopes()[0].try_clone_kio_handle().unwrap();
         assert!(kio.metadata().unwrap().is_dir());
-        assert!(fs::symlink_metadata(temp.path().join("research"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            fs::symlink_metadata(temp.path().join("research"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

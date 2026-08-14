@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use assert_cmd::Command;
-use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
+use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::purge::PurgeState;
 use kio_core::scope::{PendingNormalizeRef, Repository};
 use kio_pipeline::task::{TaskStatus, TaskStore, TaskType};
@@ -123,11 +123,13 @@ fn ct4_purge_reingest_after_default_tombstone_republishes_and_retires() {
     );
     assert!(!raw_exists(&dir, &raw_hash));
     let purge = PurgeState::new(dir.path().join(".kio"));
-    assert!(purge
-        .read_tombstone(&raw_hash)
-        .unwrap()
-        .unwrap()
-        .is_active());
+    assert!(
+        purge
+            .read_tombstone(&raw_hash)
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
 
     // Repository-primitive path (auto_snapshot_with_bound_normalize, the same
     // entry point `kio index` uses): re-ingest succeeds, does not error.
@@ -160,11 +162,13 @@ fn ct4_purge_reingest_after_default_tombstone_republishes_and_retires() {
     // resolves the raw as alive (not a dead pointer).
     assert_eq!(current_raw(&dir, "doc.md"), raw_hash);
     let status = json_success(&dir, &["status"]);
-    assert!(status["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|file| file["relative_path"] == "doc.md"));
+    assert!(
+        status["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["relative_path"] == "doc.md")
+    );
 
     // Full CLI round trip too: purge again, then `kio index` (not just the
     // repository primitive) republishes and retires.
@@ -180,20 +184,24 @@ fn ct4_purge_reingest_after_default_tombstone_republishes_and_retires() {
             "--yes",
         ],
     );
-    assert!(purge
-        .read_tombstone(&raw_hash)
-        .unwrap()
-        .unwrap()
-        .is_active());
+    assert!(
+        purge
+            .read_tombstone(&raw_hash)
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
     fs::write(dir.path().join("doc.md"), bytes).unwrap();
     let index_output = json_success(&dir, &["index", "--offline", "--approve"]);
     assert!(index_output.get("error_code").is_none(), "{index_output}");
     assert!(raw_exists(&dir, &raw_hash));
-    assert!(!purge
-        .read_tombstone(&raw_hash)
-        .unwrap()
-        .unwrap()
-        .is_active());
+    assert!(
+        !purge
+            .read_tombstone(&raw_hash)
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
 }
 
 /// LC33: an erase receipt is retired the same way (appended `retired`, never
@@ -224,11 +232,13 @@ fn ct4_purge_erase_receipt_is_ignored_then_retired_by_explicit_ingest() {
         ],
     );
     let purge = PurgeState::new(dir.path().join(".kio"));
-    assert!(purge
-        .read_erase_receipt(&raw_hash)
-        .unwrap()
-        .unwrap()
-        .is_active());
+    assert!(
+        purge
+            .read_erase_receipt(&raw_hash)
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
 
     let historical = json_success(&dir, &["reindex", "--at", &historical_head]);
     assert_eq!(historical["blocked_raw_hashes"], 0);
@@ -321,12 +331,14 @@ fn ct4_purge_active_barrier_blocks_index_and_leaves_no_raw_or_temp() {
         .clone();
     let batch: Value = serde_json::from_slice(&batch_stdout).unwrap();
     assert_eq!(batch["tasks_executed"], 0);
-    assert!(TaskStore::new(repo.kio_dir())
-        .all()
-        .unwrap()
-        .iter()
-        .filter(|task| task.input_hash == raw_hash && task.task_type == TaskType::Markdownize)
-        .all(|task| !matches!(task.status, TaskStatus::Pending | TaskStatus::Running)));
+    assert!(
+        TaskStore::new(repo.kio_dir())
+            .all()
+            .unwrap()
+            .iter()
+            .filter(|task| task.input_hash == raw_hash && task.task_type == TaskType::Markdownize)
+            .all(|task| !matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+    );
 
     let error = json_failure(&dir, &["index", "--offline", "--approve"], 3);
     assert_eq!(error["error_code"], "KIO-E-PURGE-INCOMPLETE-001");

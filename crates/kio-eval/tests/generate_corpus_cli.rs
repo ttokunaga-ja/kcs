@@ -75,8 +75,10 @@ fn generate_corpus_accepts_a_relative_parent_path() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
-    assert!(temporary
-        .path()
-        .join("nested/corpus/corpus-manifest.json")
-        .is_file());
+    assert!(
+        temporary
+            .path()
+            .join("nested/corpus/corpus-manifest.json")
+            .is_file()
+    );
 }

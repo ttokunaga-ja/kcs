@@ -21,9 +21,9 @@
 
 use serde::Deserialize;
 
-use crate::batch_client::{BatchJobRecord, MistralBatchClient};
-use crate::gemini_batch_client::{display_name_intent_token, GeminiBatchClient};
 use crate::Result;
+use crate::batch_client::{BatchJobRecord, MistralBatchClient};
+use crate::gemini_batch_client::{GeminiBatchClient, display_name_intent_token};
 
 /// 10 §7.5.2's job "帰属" (attribution) key: the same 4-tuple task identity
 /// `kio_pipeline::ledger::TaskKey`/`batch_requests`'s PRIMARY KEY uses.
@@ -250,9 +250,12 @@ mod tests {
     #[test]
     fn production_default_is_empty_not_an_error() {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_BATCH_INVENTORY_ENV);
-        std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV);
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         let inventories = configured_inventories().unwrap();
         assert!(inventories.is_empty());
     }
@@ -264,7 +267,8 @@ mod tests {
     #[test]
     fn configured_client_listing_maps_metadata_and_filename_attribution() {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_BATCH_INVENTORY_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
         let script = serde_json::json!({
             "provider_scope_id": "ws-live",
             "jobs_listing": [
@@ -292,12 +296,16 @@ mod tests {
                 { "upload_id": "file-stray", "filename": "notes.bin" }
             ]
         });
-        std::env::set_var(
-            crate::batch_client::TEST_MISTRAL_BATCH_ENV,
-            script.to_string(),
-        );
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe {
+            std::env::set_var(
+                crate::batch_client::TEST_MISTRAL_BATCH_ENV,
+                script.to_string(),
+            )
+        };
         let inventories = configured_inventories().unwrap();
-        std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV) };
 
         assert_eq!(inventories.len(), 1);
         let inventory = &inventories[0];
@@ -363,9 +371,11 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path) };
         let inventories = configured_inventories().unwrap();
-        std::env::remove_var(TEST_BATCH_INVENTORY_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
 
         assert_eq!(inventories.len(), 1);
         let inventory = &inventories[0];
@@ -399,9 +409,11 @@ mod tests {
     #[test]
     fn missing_fixture_file_is_a_loud_error() {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        std::env::set_var(TEST_BATCH_INVENTORY_ENV, "/nonexistent/path/inventory.json");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, "/nonexistent/path/inventory.json") };
         let result = configured_inventories();
-        std::env::remove_var(TEST_BATCH_INVENTORY_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
         assert!(result.is_err());
     }
 
@@ -413,9 +425,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("bad.json");
         std::fs::write(&fixture_path, "{ not valid json").unwrap();
-        std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path) };
         let result = configured_inventories();
-        std::env::remove_var(TEST_BATCH_INVENTORY_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
         match result {
             Err(crate::AdapterError::ConfigSchema(_)) => {}
             other => panic!("expected ConfigSchema error, got {other:?}"),

@@ -442,23 +442,31 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(canonical.since().unwrap().seconds(), 604_800);
-        assert!(serde_json::from_value::<TimeSelector>(serde_json::json!({
-            "all_history": true,
-            "since": "7d"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<TimeSelector>(serde_json::json!({
-            "since": "604800s"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<TimeSelector>(serde_json::json!({
-            "all_history": false
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<TimeSelector>(serde_json::json!({
-            "at": "HEAD",
-            "unknown": true
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<TimeSelector>(serde_json::json!({
+                "all_history": true,
+                "since": "7d"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TimeSelector>(serde_json::json!({
+                "since": "604800s"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TimeSelector>(serde_json::json!({
+                "all_history": false
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TimeSelector>(serde_json::json!({
+                "at": "HEAD",
+                "unknown": true
+            }))
+            .is_err()
+        );
     }
 }

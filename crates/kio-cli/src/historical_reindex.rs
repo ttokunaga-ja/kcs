@@ -68,7 +68,7 @@ pub(super) fn pinned_done_units(
     }
     if manifest.raw_hash != raw_hash
         || manifest.tool_profile_hash != normalize.tool_profile_hash
-        || manifest.gen != normalize.gen
+        || manifest.r#gen != normalize.r#gen
     {
         return Err(crate::store_corrupt_error(
             &manifest_path,
@@ -82,7 +82,7 @@ pub(super) fn pinned_done_units(
     let identity = NormalizedInstanceIdentity {
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: normalize.tool_profile_hash.clone(),
-        gen: normalize.gen,
+        r#gen: normalize.r#gen,
     };
     validate_normalized_instance(&manifest_path, &identity, &manifest, &selected_units).map_err(
         |error| {
@@ -221,7 +221,7 @@ fn retained_history_instances_from_graph<'a>(
         let key = (
             binding.raw_hash.clone(),
             normalize.tool_profile_hash.clone(),
-            normalize.gen,
+            normalize.r#gen,
             normalize.manifest_hash.clone(),
         );
         let introductions = graph.ancestor_most_introductions(&binding);
@@ -237,7 +237,7 @@ fn retained_history_instances_from_graph<'a>(
     }
 
     let mut instances = Vec::with_capacity(by_instance.len());
-    for ((raw_hash, tool_profile_hash, gen, manifest_hash), candidates) in by_instance {
+    for ((raw_hash, tool_profile_hash, r#gen, manifest_hash), candidates) in by_instance {
         // Several bindings (distinct paths) can share the same introduction
         // commit; keep one representative binding per distinct commit before
         // the ancestor-most reduction below.
@@ -292,7 +292,7 @@ fn retained_history_instances_from_graph<'a>(
             raw_hash,
             normalize: NormalizeRef {
                 tool_profile_hash,
-                gen,
+                r#gen,
                 // PB04: carried forward from the winning binding's own
                 // normalize ref, not recomputed — this instance's manifest
                 // identity was fixed when its introducing commit was
@@ -363,14 +363,14 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
             blocked_raw_hashes.insert(entry.raw_hash.clone());
             continue;
         }
-        let (tool_profile_hash, gen, manifest_hash) =
+        let (tool_profile_hash, r#gen, manifest_hash) =
             entry
                 .normalize
                 .as_ref()
                 .map_or((None, None, None), |normalize| {
                     (
                         Some(normalize.tool_profile_hash.clone()),
-                        Some(normalize.gen),
+                        Some(normalize.r#gen),
                         Some(normalize.manifest_hash.clone()),
                     )
                 });
@@ -379,7 +379,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
             path: entry.path.clone(),
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash,
-            gen,
+            r#gen,
             manifest_hash,
         });
 
@@ -391,7 +391,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
         let key = (
             entry.raw_hash.clone(),
             normalize.tool_profile_hash.clone(),
-            normalize.gen,
+            normalize.r#gen,
             normalize.manifest_hash.clone(),
         );
         selected
@@ -475,7 +475,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                     Ok(NormalizedUnitInput {
                         raw_hash: unit.raw_hash,
                         tool_profile_hash: unit.tool_profile_hash,
-                        gen: unit.gen,
+                        r#gen: unit.r#gen,
                         unit_key: unit.unit_key,
                         unit_content_hash,
                         markdown: unit.markdown,
@@ -513,7 +513,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                     skipped_units.push(json!({
                         "raw_hash": instance.raw_hash,
                         "path": instance.raw_path,
-                        "gen": instance.normalize.gen,
+                        "gen": instance.normalize.r#gen,
                         "reason": error.error_code(),
                     }));
                     continue;
@@ -661,7 +661,7 @@ fn project_selected_snapshot(
             let key = (
                 instance.raw_hash.clone(),
                 instance.normalize.tool_profile_hash.clone(),
-                instance.normalize.gen,
+                instance.normalize.r#gen,
                 unit.unit_key,
                 unit_content_hash,
             );
@@ -692,7 +692,7 @@ fn project_selected_snapshot(
             && selected_units.contains(&(
                 chunk.row.raw_hash.clone(),
                 chunk.row.tool_profile_hash.clone(),
-                chunk.row.gen,
+                chunk.row.r#gen,
                 chunk.row.unit_key.clone(),
                 chunk.row.unit_content_hash.clone(),
             ))
@@ -760,7 +760,7 @@ fn project_selected_snapshot(
                         entry.path,
                         entry.raw_hash,
                         entry.tool_profile_hash,
-                        entry.gen,
+                        entry.r#gen,
                         entry.manifest_hash,
                     ],
                 )
@@ -804,8 +804,8 @@ fn project_selected_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kio_core::cas::{hash_bytes, ObjectKind};
-    use kio_core::dag::{build_tree, CommitStats, TreeEntry};
+    use kio_core::cas::{ObjectKind, hash_bytes};
+    use kio_core::dag::{CommitStats, TreeEntry, build_tree};
     use std::fs;
 
     #[test]
@@ -817,7 +817,7 @@ mod tests {
         let raw_hash = hash_bytes(b"same raw");
         let normalize = NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
-            gen: 1,
+            r#gen: 1,
             manifest_hash: hash_bytes(b"manifest"),
         };
         let commit = |label: &str, path: &str| {

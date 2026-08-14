@@ -40,7 +40,7 @@ use std::fs;
 use std::str::FromStr;
 
 use assert_cmd::Command;
-use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
+use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
 use kio_index::registry::{RegistryDb, RegistryEntry};
@@ -735,36 +735,46 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
         !dir.path().join("ordinary/.kio").exists(),
         "preview must not initialize children"
     );
-    assert!(preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|row| row["input_path"] != "ordinary/note.md"));
-    assert!(preview["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
-    assert!(preview["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "ordinary" && row["status"] == "planned"));
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["input_path"] != "ordinary/note.md")
+    );
+    assert!(
+        preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs")
+    );
+    assert!(
+        preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "ordinary" && row["status"] == "planned")
+    );
     assert_eq!(preview["estimated_aggregate_file_count"], 2);
     assert_eq!(preview["estimated_aggregate_size_bytes"], 14);
-    assert!(preview["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "ordinary"
-            && row["estimated_file_count"] == 1
-            && row["estimated_size_bytes"] == 8));
+    assert!(
+        preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "ordinary"
+                && row["estimated_file_count"] == 1
+                && row["estimated_size_bytes"] == 8)
+    );
     #[cfg(unix)]
-    assert!(preview["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "linked-child" && row["status"] == "skipped_symlink"));
+    assert!(
+        preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "linked-child" && row["status"] == "skipped_symlink")
+    );
     let indexed = success(&dir, &["index", "--offline", "--approve"]);
     assert!(dir.path().join("ordinary/.kio").is_dir());
     assert!(dir.path().join("ordinary/nested/.kio").is_dir());
@@ -779,22 +789,28 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
         !symlink_victim.path().join(".kio").exists(),
         "child discovery must not follow a directory symlink into the victim"
     );
-    assert!(indexed["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs"));
-    assert!(indexed["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "git-file" && row["status"] == "skipped_vcs"));
+    assert!(
+        indexed["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "git-dir" && row["status"] == "skipped_vcs")
+    );
+    assert!(
+        indexed["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "git-file" && row["status"] == "skipped_vcs")
+    );
     let nested = success(&dir, &["search", "nested", "--mode", "text"]);
-    assert!(nested["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["title"] == "deep.md"));
+    assert!(
+        nested["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["title"] == "deep.md")
+    );
 
     fs::write(
         kio_dir(&dir).join("config.toml"),
@@ -804,16 +820,20 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
     let opted_in = success(&dir, &["index", "--offline", "--approve"]);
     assert!(dir.path().join("git-dir/.kio").is_dir());
     assert!(dir.path().join("git-file/inner/.kio").is_dir());
-    assert!(opted_in["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "git-dir" && row["status"] == "indexed"));
-    assert!(opted_in["child_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["path"] == "ignored" && row["status"] == "skipped_ignored"));
+    assert!(
+        opted_in["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "git-dir" && row["status"] == "indexed")
+    );
+    assert!(
+        opted_in["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "ignored" && row["status"] == "skipped_ignored")
+    );
     assert!(
         !dir.path().join("git-file/.kio").exists(),
         "a gitfile marker alone is not file-bearing"
@@ -839,14 +859,18 @@ fn qb15_parent_ignore_is_persisted_and_excludes_child_cas() {
     assert!(child_config.contains("generated_parent_policy"));
     assert!(child_config.contains("scope_prefix = \"project\""));
     let store = ObjectStore::new(&child_kio);
-    assert!(store
-        .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
-        .unwrap()
-        .exists());
-    assert!(!store
-        .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
-        .unwrap()
-        .exists());
+    assert!(
+        store
+            .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
+            .unwrap()
+            .exists()
+    );
+    assert!(
+        !store
+            .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
+            .unwrap()
+            .exists()
+    );
 }
 
 /// QB19 [regression-lock, structural]: scope-local `access.jsonl` and

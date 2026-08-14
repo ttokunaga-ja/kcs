@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cap_primitives::fs as cap_fs;
-use kio_core::cas::{hash_bytes, is_hash, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES};
+use kio_core::cas::{MAX_RAW_OBJECT_BYTES, ObjectKind, ObjectStore, hash_bytes, is_hash};
 use kio_core::dag::{CommitType, TreeEntry};
 use kio_core::gc::ensure_no_active_sweep;
 use kio_core::history::HistoryReader;
 use kio_core::portable::portable_collision_key;
-use kio_core::purge::{canonical_final_event, EventKind, PurgeState};
+use kio_core::purge::{EventKind, PurgeState, canonical_final_event};
 use kio_core::scope::{Repository, StoreLock};
 use kio_core::{ExitCode, KioError, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Digest;
 
 use super::{ReadBarrierCheckpoint, RestoreArgs, ScopeTarget};
@@ -209,7 +209,7 @@ fn resolve_evidence_source(operand: &str) -> Result<RestoreSource> {
         entry.raw_hash == pointer.raw_hash
             && entry.normalize.as_ref().is_some_and(|normalize| {
                 normalize.tool_profile_hash == pointer.tool_profile_hash
-                    && normalize.gen == chunk.gen
+                    && normalize.r#gen == chunk.r#gen
             })
     });
     let entry = match pointer.path_at_commit.as_deref() {
@@ -941,15 +941,15 @@ fn open_destination_dir(
             "destination ancestor is not a real non-reparse directory",
         ));
     }
-    if let Some(expected) = expected_identity {
-        if !expected.matches_opened(&current) {
-            return Err(KioError::new(
-                "KIO-E-CONFIG-USAGE-001",
-                "restore destination identity changed between validation and open",
-                json!({ "path": path }),
-                ExitCode::InvalidUsage,
-            ));
-        }
+    if let Some(expected) = expected_identity
+        && !expected.matches_opened(&current)
+    {
+        return Err(KioError::new(
+            "KIO-E-CONFIG-USAGE-001",
+            "restore destination identity changed between validation and open",
+            json!({ "path": path }),
+            ExitCode::InvalidUsage,
+        ));
     }
     Ok(DestinationDir {
         path: path.to_path_buf(),
@@ -1947,12 +1947,11 @@ fn rollback_published_file(
         recheck_error.error_code()
     );
     let _ = cap_fs::remove_file(&destination.handle, Path::new(&quarantine));
-    if let Some(bak_name) = backup {
-        if let Err(error) =
+    if let Some(bak_name) = backup
+        && let Err(error) =
             restore_evacuated_backup(destination, bak_name, &preflight.source.path_at_commit)
-        {
-            return error;
-        }
+    {
+        return error;
     }
     // PA26: terminate with the SAME response a preflight encountering this
     // canonical state from the start would have given (tombstone / not-found
@@ -2127,7 +2126,7 @@ fn verify_open_file(
         }
         hasher.update(&buffer[..count]);
     }
-    let actual = format!("sha256:{:x}", hasher.finalize());
+    let actual = format!("sha256:{}", kio_core::cas::lower_hex(&hasher.finalize()));
     if actual != expected_hash {
         return Err(KioError::new(
             "KIO-E-STORE-CORRUPT-001",
@@ -2277,9 +2276,9 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        check_purge_state, create_private_temp, destination_lstat_identity, missing_live_raw_error,
-        no_replace_move, normalize_absolute, open_destination_dir, sync_directory_handle,
-        validate_source_names, RestoreItem, ScopeTarget,
+        RestoreItem, ScopeTarget, check_purge_state, create_private_temp,
+        destination_lstat_identity, missing_live_raw_error, no_replace_move, normalize_absolute,
+        open_destination_dir, sync_directory_handle, validate_source_names,
     };
 
     fn entry_names(path: &std::path::Path) -> Vec<String> {
@@ -2356,10 +2355,12 @@ mod tests {
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
         assert_eq!(error.exit_code(), kio_core::ExitCode::PermanentFailure);
         assert!(!error.context().to_string().contains("receipt"));
-        assert!(!error
-            .context()
-            .to_string()
-            .contains("private receipt contents"));
+        assert!(
+            !error
+                .context()
+                .to_string()
+                .contains("private receipt contents")
+        );
 
         let error = missing_live_raw_error(&target, &raw_hash);
         assert_eq!(error.error_code(), "KIO-E-PURGE-NOT-FOUND-001");

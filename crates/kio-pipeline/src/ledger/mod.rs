@@ -15,4 +15,4 @@ pub mod schema;
 pub mod time;
 
 pub use model::{BatchRequestRow, BatchState, CostLedgerRow, Outcome, RequestKind, TaskKey};
-pub use schema::{default_ledger_path, LedgerDb};
+pub use schema::{LedgerDb, default_ledger_path};

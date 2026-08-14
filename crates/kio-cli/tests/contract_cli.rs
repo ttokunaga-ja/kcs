@@ -263,12 +263,16 @@ fn ct_cli_snapshot_create_log_inspect_tag_diff() {
     let diff: Value = serde_json::from_slice(&diff_out).unwrap();
     let changes = diff["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 2);
-    assert!(changes
-        .iter()
-        .any(|c| c["change"] == "modified" && value_path_ends_with(&c["path"], "a.pdf")));
-    assert!(changes
-        .iter()
-        .any(|c| c["change"] == "added" && value_path_ends_with(&c["path"], "b.pdf")));
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["change"] == "modified" && value_path_ends_with(&c["path"], "a.pdf"))
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["change"] == "added" && value_path_ends_with(&c["path"], "b.pdf"))
+    );
 }
 
 #[test]
@@ -489,10 +493,12 @@ fn m1c_corrupt_tasks_jsonl_is_store_corrupt_not_schema() {
         .clone();
     let err: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(err["error_code"], "KIO-E-STORE-CORRUPT-001");
-    assert!(err["context"]["path"]
-        .as_str()
-        .unwrap()
-        .ends_with("tasks.jsonl"));
+    assert!(
+        err["context"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("tasks.jsonl")
+    );
 }
 
 // M1(c) note (2026-07-21): this test's exact premise ("a corrupt legacy JSONL

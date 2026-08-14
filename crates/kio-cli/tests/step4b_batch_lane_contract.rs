@@ -25,8 +25,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
-use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[

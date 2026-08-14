@@ -12,20 +12,20 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::ExitCode;
 use crate::cas::{
-    canonical_json_bytes, hash_bytes, is_hash, MAX_COMMIT_OBJECT_BYTES, MAX_RAW_OBJECT_BYTES,
-    MAX_TREE_OBJECT_BYTES,
+    MAX_COMMIT_OBJECT_BYTES, MAX_RAW_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES, canonical_json_bytes,
+    hash_bytes, is_hash,
 };
-use crate::dag::{CommitObject, CommitType, TreeObject, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES};
+use crate::dag::{CommitObject, CommitType, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES, TreeObject};
 use crate::error::{KioError, Result};
-use crate::schema::{validate_json_schema, SchemaKind};
+use crate::schema::{SchemaKind, validate_json_schema};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::scope::acquire_bound_reentrant_store_lock;
 use crate::scope::{
+    BoundReentrantStoreLock, BoundStoreLock, KIO_FORMAT_VERSION, Repository,
     acquire_bound_store_lock, enforce_config_semantics, format_utc_seconds, parse_utc_seconds,
-    BoundReentrantStoreLock, BoundStoreLock, Repository, KIO_FORMAT_VERSION,
 };
-use crate::ExitCode;
 
 const MAX_METADATA: u64 = 1024 * 1024;
 const MAX_REF: u64 = 4096;
@@ -282,28 +282,25 @@ impl GcInProgressMarker {
             generation,
             identity,
         } = &self.index_initial
+            && (!is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity))
         {
-            if !is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity) {
-                return Err(corrupt("invalid GC marker initial index generation"));
-            }
+            return Err(corrupt("invalid GC marker initial index generation"));
         }
         if let Some(GcIndexState::Present {
             generation,
             identity,
         }) = &self.index_pre_sweep
+            && (!is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity))
         {
-            if !is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity) {
-                return Err(corrupt("invalid GC marker pre-sweep index generation"));
-            }
+            return Err(corrupt("invalid GC marker pre-sweep index generation"));
         }
         if let Some(GcIndexState::Present {
             generation,
             identity,
         }) = &self.index_final
+            && (!is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity))
         {
-            if !is_canonical_ulid(generation) || !is_canonical_gc_index_identity(identity) {
-                return Err(corrupt("invalid GC marker final index generation"));
-            }
+            return Err(corrupt("invalid GC marker final index generation"));
         }
         let valid_pre_sweep = match (&self.index_initial, &self.index_pre_sweep) {
             (_, None) => matches!(
@@ -1942,13 +1939,25 @@ impl GcSweepSession {
             };
             let archive = format!("{}-{raw}", marker.sweep_id);
             let captured_name = tree_capture_name(marker, raw);
-            let (archived, captured) = if let Some(gc) = open_optional_dir(&self.kio, "gc")? {
-                if let Some(internal) = open_optional_dir(&gc, "internal")? {
-                    if let Some(archives) = open_optional_dir(&internal, "trees")? {
-                        match read_regular_observed(&archives, &archive, MAX_TREE_OBJECT_BYTES) {
+            // Keep each directory capability alive through the complete read.  In
+            // Rust 2021, the nested `if let` scrutinee temporaries lived until the
+            // end of this initializer; make that lifetime explicit for Rust 2024.
+            let (archived, captured) = {
+                let gc = open_optional_dir(&self.kio, "gc")?;
+                let internal = match gc.as_ref() {
+                    Some(gc) => open_optional_dir(gc, "internal")?,
+                    None => None,
+                };
+                let archives = match internal.as_ref() {
+                    Some(internal) => open_optional_dir(internal, "trees")?,
+                    None => None,
+                };
+                match archives.as_ref() {
+                    Some(archives) => {
+                        match read_regular_observed(archives, &archive, MAX_TREE_OBJECT_BYTES) {
                             Ok((sentinel, _)) if sentinel == GC_RETIRE_SENTINEL => {
                                 match read_regular_observed(
-                                    &archives,
+                                    archives,
                                     &captured_name,
                                     MAX_TREE_OBJECT_BYTES,
                                 ) {
@@ -1969,14 +1978,9 @@ impl GcSweepSession {
                             Err(error) if is_io_not_found(&error) => (false, false),
                             Err(error) => return Err(error),
                         }
-                    } else {
-                        (false, false)
                     }
-                } else {
-                    (false, false)
+                    None => (false, false),
                 }
-            } else {
-                (false, false)
             };
             if canonical && (archived || captured) {
                 return Err(corrupt("GC tree exists at canonical and archive paths"));
@@ -2021,7 +2025,7 @@ impl GcSweepSession {
             None => {
                 return Err(corrupt(
                     "GC source index changed: index directory is missing",
-                ))
+                ));
             }
         };
         let mut options = cap_fs::OpenOptions::new();
@@ -2035,10 +2039,10 @@ impl GcSweepSession {
                 if error.kind() == std::io::ErrorKind::NotFound
                     && matches!(expected, GcIndexState::Absent) =>
             {
-                return Ok(())
+                return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(corrupt("GC source index changed: sqlite.db is missing"))
+                return Err(corrupt("GC source index changed: sqlite.db is missing"));
             }
             Err(error) => return Err(ioerr(error, "index/sqlite.db")),
         };
@@ -2046,7 +2050,7 @@ impl GcSweepSession {
         let file = match cap_fs::open(&index, Path::new("sqlite.db"), &options) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(corrupt("GC source index changed while opening"))
+                return Err(corrupt("GC source index changed while opening"));
             }
             Err(error) => return Err(ioerr(error, "index/sqlite.db")),
         };
@@ -2113,12 +2117,12 @@ impl GcSweepSession {
         }
     }
     fn recheck_tree_receipts(&self, marker: &GcInProgressMarker, tree_hash: &str) -> Result<()> {
-        if let Some(expected) = &marker.operation_receipts_digest {
-            if &operation_receipt_observation_digest_bound(&self.kio, marker)? != expected {
-                return Err(corrupt(
-                    "marker-owned receipt identity/content changed before tree removal",
-                ));
-            }
+        if let Some(expected) = &marker.operation_receipts_digest
+            && &operation_receipt_observation_digest_bound(&self.kio, marker)? != expected
+        {
+            return Err(corrupt(
+                "marker-owned receipt identity/content changed before tree removal",
+            ));
         }
         let gc = open_required_dir(&self.kio, "gc", "GC directory is missing")?;
         let shallow = open_required_dir(&gc, "shallowed", "GC receipt directory is missing")?;
@@ -2598,8 +2602,8 @@ fn replace_snapshot_state_expected(
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+        DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileRenameInfoEx, SYNCHRONIZE, SetFileInformationByHandle,
     };
     const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 1;
     const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 2;
@@ -3029,16 +3033,15 @@ fn atomic_exchange_marker_expected(
         // retained for diagnosis instead of becoming an unlink victim.
         if let Ok((actual, observation)) =
             read_regular_observed(archives, &temporary, MAX_MARKER_BYTES)
+            && actual == bytes
         {
-            if actual == bytes {
-                let _ = remove_verified_leaf(
-                    archives,
-                    &temporary,
-                    &observation,
-                    MAX_MARKER_BYTES,
-                    "GC unpublished replacement marker",
-                );
-            }
+            let _ = remove_verified_leaf(
+                archives,
+                &temporary,
+                &observation,
+                MAX_MARKER_BYTES,
+                "GC unpublished replacement marker",
+            );
         }
         return Err(corrupt("GC marker changed before replacement"));
     }
@@ -3649,18 +3652,22 @@ impl GcPlanner {
                 .strip_prefix("sha256:")
                 .ok_or_else(|| corrupt("invalid shallow receipt tree"))?;
             let trees = open_path(&self.kio, "objects/trees")?;
-            let present = if let Some(a) = open_optional_dir(&trees, &raw[..2])? {
-                if let Some(dir) = open_optional_dir(&a, &raw[2..4])? {
-                    match read_regular_observed(&dir, raw, MAX_TREE_OBJECT_BYTES) {
+            // Preserve the Rust 2021 lifetime of the directory capabilities used
+            // for this object read instead of relying on tail-expression drops.
+            let present = {
+                let first = open_optional_dir(&trees, &raw[..2])?;
+                let second = match first.as_ref() {
+                    Some(first) => open_optional_dir(first, &raw[2..4])?,
+                    None => None,
+                };
+                match second.as_ref() {
+                    Some(dir) => match read_regular_observed(dir, raw, MAX_TREE_OBJECT_BYTES) {
                         Ok(_) => true,
                         Err(error) if is_io_not_found(&error) => false,
                         Err(error) => return Err(error),
-                    }
-                } else {
-                    false
+                    },
+                    None => false,
                 }
-            } else {
-                false
             };
             if present {
                 return Err(corrupt(
@@ -3761,12 +3768,12 @@ impl ShallowReceipt {
         {
             return Err(corrupt("invalid shallow receipt"));
         }
-        if let Some(leaf) = expected_leaf {
-            if leaf.len() != 64 || !hex(leaf) || self.commit_hash != format!("sha256:{leaf}") {
-                return Err(corrupt(
-                    "shallow receipt filename does not match commit hash",
-                ));
-            }
+        if let Some(leaf) = expected_leaf
+            && (leaf.len() != 64 || !hex(leaf) || self.commit_hash != format!("sha256:{leaf}"))
+        {
+            return Err(corrupt(
+                "shallow receipt filename does not match commit hash",
+            ));
         }
         Ok(())
     }
@@ -4695,10 +4702,10 @@ fn closure(
     let mut q: Vec<String> = vec![start.into()];
     while let Some(h) = q.pop() {
         graph_step(stats, limits)?;
-        if o.insert(h.clone()) {
-            if let Some(c) = all.get(&h) {
-                q.extend(c.parents.iter().cloned())
-            }
+        if o.insert(h.clone())
+            && let Some(c) = all.get(&h)
+        {
+            q.extend(c.parents.iter().cloned())
         }
     }
     Ok(o)

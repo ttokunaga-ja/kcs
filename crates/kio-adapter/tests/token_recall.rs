@@ -174,14 +174,13 @@ fn unescape_markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
-        if character == '\\' {
-            if let Some(&next) = characters.peek() {
-                if next.is_ascii_punctuation() {
-                    out.push(next);
-                    characters.next();
-                    continue;
-                }
-            }
+        if character == '\\'
+            && let Some(&next) = characters.peek()
+            && next.is_ascii_punctuation()
+        {
+            out.push(next);
+            characters.next();
+            continue;
         }
         out.push(character);
     }

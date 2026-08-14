@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::ledger::time::now_millis;
 use crate::{PipelineError, Result};
@@ -688,12 +688,16 @@ mod tests {
         assert!(tables.contains("cost_ledger"));
         assert!(tables.contains("batch_requests"));
         assert!(tables.contains("schema_migrations"));
-        assert!(object_sql(&db.conn, "index", "idx_cost_ledger_month")
-            .unwrap()
-            .is_some());
-        assert!(object_sql(&db.conn, "index", "idx_batch_requests_inflight")
-            .unwrap()
-            .is_some());
+        assert!(
+            object_sql(&db.conn, "index", "idx_cost_ledger_month")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            object_sql(&db.conn, "index", "idx_batch_requests_inflight")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -901,9 +905,11 @@ mod tests {
             // detection runs (and passes) BEFORE the pre-existing index repair.
         }
         let db = LedgerDb::open(&path).unwrap();
-        assert!(object_sql(&db.conn, "index", "idx_batch_requests_inflight")
-            .unwrap()
-            .is_some());
+        assert!(
+            object_sql(&db.conn, "index", "idx_batch_requests_inflight")
+                .unwrap()
+                .is_some()
+        );
     }
 
     // -----------------------------------------------------------------

@@ -1,11 +1,11 @@
 use std::fs;
 
 use kio_core::cas::{
-    canonical_json_bytes, fanout_path, hash_bytes, hash_json, ObjectKind, ObjectStore,
+    ObjectKind, ObjectStore, canonical_json_bytes, fanout_path, hash_bytes, hash_json,
 };
 use kio_core::dag::{
-    build_tree, commit_hash, gc_policy, protected, CommitObject, CommitStats, CommitType, GcPolicy,
-    NormalizeRef, TreeEntry,
+    CommitObject, CommitStats, CommitType, GcPolicy, NormalizeRef, TreeEntry, build_tree,
+    commit_hash, gc_policy, protected,
 };
 use kio_core::scope::Repository;
 use serde_json::json;
@@ -37,7 +37,10 @@ fn ct_hash_003_tree_jcs_vector() {
     let tree = vector_tree();
     let bytes = canonical_json_bytes(&serde_json::to_value(&tree).unwrap()).unwrap();
 
-    assert_eq!(String::from_utf8(bytes.clone()).unwrap(), "{\"entries\":[{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"notes.md\",\"raw_hash\":\"sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d90f9e5682ab0d72ee\",\"type\":\"file\"},{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"report.pdf\",\"raw_hash\":\"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a\",\"type\":\"file\"}],\"object_type\":\"tree\"}");
+    assert_eq!(
+        String::from_utf8(bytes.clone()).unwrap(),
+        "{\"entries\":[{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"notes.md\",\"raw_hash\":\"sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d90f9e5682ab0d72ee\",\"type\":\"file\"},{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"report.pdf\",\"raw_hash\":\"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a\",\"type\":\"file\"}],\"object_type\":\"tree\"}"
+    );
     assert_eq!(hash_bytes(&bytes), TREE_HASH);
 }
 
@@ -59,7 +62,10 @@ fn ct_hash_004_commit_jcs_vector() {
     .unwrap();
 
     let bytes = canonical_json_bytes(&serde_json::to_value(&commit).unwrap()).unwrap();
-    assert_eq!(String::from_utf8(bytes.clone()).unwrap(), "{\"commit_type\":\"manual\",\"created_at\":\"2026-04-29T12:00:00Z\",\"message\":\"snapshot after indexing docs\",\"object_type\":\"commit\",\"parents\":[\"sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a\"],\"stats\":{\"files_added\":12,\"files_deleted\":1,\"files_modified\":3},\"tool_lock_hash\":\"sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb\",\"tree\":\"sha256:484102953bc67a38fed8985744899fbde1d29d84623ad6ad6c5e363b9688a11a\"}");
+    assert_eq!(
+        String::from_utf8(bytes.clone()).unwrap(),
+        "{\"commit_type\":\"manual\",\"created_at\":\"2026-04-29T12:00:00Z\",\"message\":\"snapshot after indexing docs\",\"object_type\":\"commit\",\"parents\":[\"sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a\"],\"stats\":{\"files_added\":12,\"files_deleted\":1,\"files_modified\":3},\"tool_lock_hash\":\"sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb\",\"tree\":\"sha256:484102953bc67a38fed8985744899fbde1d29d84623ad6ad6c5e363b9688a11a\"}"
+    );
     assert_eq!(hash_bytes(&bytes), COMMIT_HASH);
 }
 
@@ -178,16 +184,18 @@ fn ct_commit_001_002_and_gc_mappings() {
     assert_eq!(gc_policy(CommitType::Imported), GcPolicy::None);
     assert_eq!(gc_policy(CommitType::Merged), GcPolicy::None);
     assert_eq!(gc_policy(CommitType::Purged), GcPolicy::None);
-    assert!(![
-        CommitType::Manual,
-        CommitType::Auto,
-        CommitType::Imported,
-        CommitType::Repaired,
-        CommitType::Merged,
-        CommitType::Purged,
-    ]
-    .into_iter()
-    .any(|ty| gc_policy(ty) == GcPolicy::Full));
+    assert!(
+        ![
+            CommitType::Manual,
+            CommitType::Auto,
+            CommitType::Imported,
+            CommitType::Repaired,
+            CommitType::Merged,
+            CommitType::Purged,
+        ]
+        .into_iter()
+        .any(|ty| gc_policy(ty) == GcPolicy::Full)
+    );
 
     assert!(protected(CommitType::Manual));
     assert!(!protected(CommitType::Auto));
@@ -348,7 +356,7 @@ fn vector_tree() -> kio_core::dag::TreeObject {
             raw_hash: RAW_NOTES.to_owned(),
             normalize: Some(NormalizeRef {
                 tool_profile_hash: TOOL_PROFILE.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 manifest_hash: MANIFEST_HASH.to_owned(),
             }),
         },
@@ -358,7 +366,7 @@ fn vector_tree() -> kio_core::dag::TreeObject {
             raw_hash: RAW_REPORT.to_owned(),
             normalize: Some(NormalizeRef {
                 tool_profile_hash: TOOL_PROFILE.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 manifest_hash: MANIFEST_HASH.to_owned(),
             }),
         },

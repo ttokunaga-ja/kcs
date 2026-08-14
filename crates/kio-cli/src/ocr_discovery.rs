@@ -3,7 +3,7 @@
 use kio_adapter::types::{PreparedUnitHint, UnitKind};
 use kio_core::{KioError, Result};
 use kio_pipeline::prepare::{
-    canonical_unit_key, fingerprint_for_bytes, hash_bytes, PreparedUnit, UnitType,
+    PreparedUnit, UnitType, canonical_unit_key, fingerprint_for_bytes, hash_bytes,
 };
 
 pub(crate) fn supports_ocr_from_scratch(media_type: &str) -> bool {

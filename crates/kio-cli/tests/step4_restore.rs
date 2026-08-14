@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use assert_cmd::Command;
-use kio_core::cas::{fanout_path, ObjectKind, ObjectStore};
+use kio_core::cas::{ObjectKind, ObjectStore, fanout_path};
 use kio_core::gc::ShallowReceipt;
 use kio_core::scope::Repository;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const CHILD_ENV_DENYLIST: &[&str] = &[
@@ -220,11 +220,13 @@ fn r23_26_restore_conflict_no_force_is_exit_3_with_retry_disposition() {
     // suffix check fails on the separator alone, which says nothing about the
     // behaviour under test. Same `.replace('\\', "/")` idiom as
     // step4b_ledger_contract.rs.
-    assert!(error["context"]["path"]
-        .as_str()
-        .unwrap()
-        .replace('\\', "/")
-        .ends_with("r23-26-out/notes.md"));
+    assert!(
+        error["context"]["path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("r23-26-out/notes.md")
+    );
     // Preflight rejection must not have touched the pre-existing file.
     assert_eq!(
         fs::read(destination.join("notes.md")).unwrap(),

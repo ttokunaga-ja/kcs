@@ -5,7 +5,7 @@
 //! searchable Markdown projection.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{AdapterError, Result};
@@ -329,12 +329,10 @@ mod tests {
             r#"{"short_description":1,"transcribed_text":"y"}"#,
             r#"{"short_description":"a","short_description":"b","transcribed_text":"y"}"#,
         ] {
-            assert!(decode_image_annotation(
-                invalid,
-                [0, 0, 1, 1],
-                &mut AnnotationTotals::default()
-            )
-            .is_err());
+            assert!(
+                decode_image_annotation(invalid, [0, 0, 1, 1], &mut AnnotationTotals::default())
+                    .is_err()
+            );
         }
         for bbox in [
             [-1, 0, 1, 1],
@@ -350,12 +348,10 @@ mod tests {
             "transcribed_text": ""
         })
         .to_string();
-        assert!(decode_image_annotation(
-            &expansion,
-            [0, 0, 1, 1],
-            &mut AnnotationTotals::default()
-        )
-        .is_err());
+        assert!(
+            decode_image_annotation(&expansion, [0, 0, 1, 1], &mut AnnotationTotals::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -381,12 +377,10 @@ mod tests {
             })
             .to_string(),
         ] {
-            assert!(decode_image_annotation(
-                &oversized,
-                [0, 0, 1, 1],
-                &mut AnnotationTotals::default()
-            )
-            .is_err());
+            assert!(
+                decode_image_annotation(&oversized, [0, 0, 1, 1], &mut AnnotationTotals::default())
+                    .is_err()
+            );
         }
 
         let minimal = r#"{"short_description":"a","transcribed_text":""}"#;

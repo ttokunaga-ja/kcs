@@ -783,7 +783,7 @@ fn hex_to_code(hex: &str) -> Option<u32> {
 
 fn hex_to_utf16_units(hex: &str) -> Option<Vec<u16>> {
     let cleaned: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.is_empty() || cleaned.len() % 4 != 0 {
+    if cleaned.is_empty() || !cleaned.len().is_multiple_of(4) {
         // A bare 2-digit destination is a raw byte value.
         if cleaned.len() == 2 {
             return u16::from_str_radix(&cleaned, 16)
@@ -951,13 +951,12 @@ fn decode_content_ops(content: &[u8], fonts: &HashMap<String, FontMap>) -> Vec<S
                 {
                     end += 1;
                 }
-                if let Some(items) = array_items.as_mut() {
-                    if let Ok(value) = std::str::from_utf8(&content[index..end])
+                if let Some(items) = array_items.as_mut()
+                    && let Ok(value) = std::str::from_utf8(&content[index..end])
                         .unwrap_or("")
                         .parse::<f64>()
-                    {
-                        items.push(ArrayItem::Kern(value));
-                    }
+                {
+                    items.push(ArrayItem::Kern(value));
                 }
                 index = end;
             }

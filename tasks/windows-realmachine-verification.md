@@ -210,7 +210,7 @@ CI がこの欠陥を見つけてくれることは、これからも無い。
 |---|---|
 | OS | Windows 10 / 11 実機 (VM 可。WSL は**不可** — WSL は Linux なので検証にならない) |
 | Git | Git for Windows (既定設定のまま。**`core.autocrlf` を触らないこと**) |
-| Rust | stable (`rustup default stable`)。MSRV は 1.86 |
+| Rust | canonical stable 1.97.1 (Edition 2024) |
 | ビルド | MSVC toolchain (Visual Studio Build Tools の C++ ワークロード) |
 
 **`core.autocrlf` を明示的に false にしてはいけない。** 既定のまま走らせるのが検証の

@@ -1,11 +1,11 @@
 use std::fs;
 
-use kio_core::cas::{hash_bytes, ChunkObject, ObjectKind, ObjectStore};
-use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry};
+use kio_core::cas::{ChunkObject, ObjectKind, ObjectStore, hash_bytes};
+use kio_core::dag::{CommitObject, CommitStats, CommitType, TreeEntry, build_tree};
 use kio_core::gc::{
-    validated_final_shallow_receipts, GcAutomationConfig, GcAutomationMode, GcInProgressMarker,
-    GcIndexState, GcPlan, GcPlanLimits, GcPlanner, GcReceiptPublication, GcSweepSession,
-    ShallowReceipt,
+    GcAutomationConfig, GcAutomationMode, GcInProgressMarker, GcIndexState, GcPlan, GcPlanLimits,
+    GcPlanner, GcReceiptPublication, GcSweepSession, ShallowReceipt,
+    validated_final_shallow_receipts,
 };
 use kio_core::scope::Repository;
 use serde_json::json;
@@ -222,9 +222,11 @@ fn recovery_rejects_preexisting_receipt_timestamp_or_inode_replacement() {
             .unwrap(),
     )
     .unwrap();
-    assert!(session
-        .validate_frozen_marker_current_truth(&marker)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&marker)
+            .is_err()
+    );
 
     let (f, commit, _tree, marker, session) = fixture();
     let path = f.kio().join("gc/shallowed").join(&commit[7..]);
@@ -232,9 +234,11 @@ fn recovery_rejects_preexisting_receipt_timestamp_or_inode_replacement() {
     let replacement = path.with_extension("replacement");
     fs::write(&replacement, &original).unwrap();
     fs::rename(&replacement, &path).unwrap();
-    assert!(session
-        .validate_frozen_marker_current_truth(&marker)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&marker)
+            .is_err()
+    );
 }
 
 #[test]
@@ -339,9 +343,11 @@ fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
     let (f, _expired, _expired_tree, _recent, _recent_tree, head, head_tree, marker, session) =
         fixture();
     let forged = forged_with_receipt(&f, &session, marker, head, head_tree);
-    assert!(session
-        .validate_frozen_marker_current_truth(&forged)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&forged)
+            .is_err()
+    );
 
     // A non-tip Auto commit that is still in its recent bucket is similarly
     // not an authorized victim even with a matching durable receipt.
@@ -349,9 +355,11 @@ fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
         fixture();
     assert_ne!(hashes(&f.plan()), vec![recent.clone()]);
     let forged = forged_with_receipt(&f, &session, marker, recent, recent_tree);
-    assert!(session
-        .validate_frozen_marker_current_truth(&forged)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&forged)
+            .is_err()
+    );
 
     // Adding an otherwise protected pair to the genuine selection is no more
     // authorized than replacing it; exact equality prevents both shapes.
@@ -397,9 +405,11 @@ fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
     )
     .unwrap();
     session.publish_marker(&marker).unwrap();
-    assert!(session
-        .validate_frozen_marker_current_truth(&marker)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&marker)
+            .is_err()
+    );
 
     // Omitting a currently eligible item is also forbidden: a forged marker
     // may not turn a full plan into a convenient subset.
@@ -419,9 +429,11 @@ fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
     marker.estimated_bytes = 0;
     marker.validate().unwrap();
     session.publish_marker(&marker).unwrap();
-    assert!(session
-        .validate_frozen_marker_current_truth(&marker)
-        .is_err());
+    assert!(
+        session
+            .validate_frozen_marker_current_truth(&marker)
+            .is_err()
+    );
 }
 
 #[test]
@@ -797,7 +809,7 @@ fn raw_chunk_and_commit_objects_are_never_planned() {
         spec_version: 1,
         raw_hash: raw_hash.clone(),
         tool_profile_hash: TOOL.into(),
-        gen: 0,
+        r#gen: 0,
         unit_key: "unit-1".into(),
         unit_content_hash: hash_bytes(text.as_bytes()),
         heading_path: vec!["heading".into()],
@@ -1091,17 +1103,21 @@ fn rejects_symlink_hardlink_and_traversal_limits() {
     let saved = f.kio().join("HEAD.saved");
     fs::rename(f.kio().join("HEAD"), &saved).unwrap();
     symlink("HEAD.saved", f.kio().join("HEAD")).unwrap();
-    assert!(GcPlanner::bind(f.canonical_root())
-        .unwrap()
-        .plan_at(NOW)
-        .is_err());
+    assert!(
+        GcPlanner::bind(f.canonical_root())
+            .unwrap()
+            .plan_at(NOW)
+            .is_err()
+    );
 
     let f = Fixture::new();
     fs::hard_link(f.kio().join("HEAD"), f.kio().join("HEAD.copy")).unwrap();
-    assert!(GcPlanner::bind(f.canonical_root())
-        .unwrap()
-        .plan_at(NOW)
-        .is_err());
+    assert!(
+        GcPlanner::bind(f.canonical_root())
+            .unwrap()
+            .plan_at(NOW)
+            .is_err()
+    );
 
     let f = Fixture::new();
     let auto = f.commit(

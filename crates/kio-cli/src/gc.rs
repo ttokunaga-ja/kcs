@@ -11,17 +11,17 @@ use kio_core::gc::{
     GcIndexRotationRole, GcIndexState, GcPlan, GcReceiptPublication, GcSweepPhase, GcSweepSession,
 };
 use kio_core::scope::{
-    format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds, Repository,
+    Repository, format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{
+    FtsSchemaConfig, FtsTokenizer, GcIndexRotationAttestation, PreparedGcIndexCleanup,
     cleanup_stale_bound_gc_index_rotations, exchange_prepared_bound_gc_index,
     prepare_bound_gc_index_rotation, read_bound_gc_index_metadata,
-    read_bound_gc_index_rotation_attestation, remove_prepared_bound_gc_index, FtsSchemaConfig,
-    FtsTokenizer, GcIndexRotationAttestation, PreparedGcIndexCleanup,
+    read_bound_gc_index_rotation_attestation, remove_prepared_bound_gc_index,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A soft monotonic execution budget.  The executor consults it only after a
 /// durable, resumable state transition, so an invocation always makes forward
@@ -467,10 +467,10 @@ fn require_automation_binding(
     session: &GcSweepSession,
     expected: Option<&GcAutomationBinding>,
 ) -> Result<()> {
-    if let Some(expected) = expected {
-        if &session.automation_binding()? != expected {
-            return Err(config_changed_after_publication());
-        }
+    if let Some(expected) = expected
+        && &session.automation_binding()? != expected
+    {
+        return Err(config_changed_after_publication());
     }
     Ok(())
 }

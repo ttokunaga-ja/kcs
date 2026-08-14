@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 use std::fs;
 
 use assert_cmd::Command;
-use kio_core::cas::{hash_bytes, ObjectKind, ObjectStore};
+use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::dag::{CommitObject, CommitStats, CommitType};
 use kio_core::gc::ShallowReceipt;
 use kio_core::scope::Repository;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -397,9 +397,11 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
         );
         assert_eq!(at["searched_scopes"][0]["snapshot_at"], c1);
         assert!(!results(&at).is_empty());
-        assert!(results(&at)
-            .iter()
-            .all(|result| { result_raw(result) == hash_bytes(a) && result_commit(result) == c1 }));
+        assert!(
+            results(&at).iter().all(|result| {
+                result_raw(result) == hash_bytes(a) && result_commit(result) == c1
+            })
+        );
         let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
         let projected: i64 = conn
             .query_row(
@@ -427,9 +429,11 @@ fn ct4_timetravel_002_exact_at_hash_tag_head_and_normalize_none() {
         ],
     );
     assert_eq!(head["searched_scopes"][0]["snapshot_at"], c2);
-    assert!(results(&head)
-        .iter()
-        .all(|result| result_raw(result) == hash_bytes(b)));
+    assert!(
+        results(&head)
+            .iter()
+            .all(|result| result_raw(result) == hash_bytes(b))
+    );
 
     // A manual snapshot captures the raw file but deliberately has no normalize
     // binding. A later index may create normalized/chunk/cache rows for the exact
@@ -985,10 +989,11 @@ fn ct4_timetravel_004_include_deleted_uses_final_version_and_frozen_tree() {
     let tree = repo
         .read_tree(&repo.read_commit(&c2).unwrap().tree)
         .unwrap();
-    assert!(tree
-        .entries
-        .iter()
-        .any(|entry| entry.path == "gone.md" && entry.raw_hash == hash_bytes(b)));
+    assert!(
+        tree.entries
+            .iter()
+            .any(|entry| entry.path == "gone.md" && entry.raw_hash == hash_bytes(b))
+    );
 
     let page1 = json_success(
         &dir,
@@ -1128,12 +1133,16 @@ fn ct4_timetravel_006_cursor_binds_and_inherits_selector() {
         payload["time_travel"],
         serde_json::json!({"all_history": true})
     );
-    assert!(payload["scopes"][0]["max_association_rowid"]
-        .as_u64()
-        .is_some());
-    assert!(payload["scopes"][0]["chunking_config_hash"]
-        .as_str()
-        .is_some_and(|hash| hash.starts_with("sha256:")));
+    assert!(
+        payload["scopes"][0]["max_association_rowid"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        payload["scopes"][0]["chunking_config_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
     let inherited = json_success(
         &dir,
         &[
@@ -1356,9 +1365,11 @@ fn ct4_timetravel_005_since_includes_cutoff_and_freezes_it_in_cursor() {
         ],
         Some("2026-07-13T00:00:00Z"),
     );
-    assert!(results(&page2_same_now)
-        .iter()
-        .any(|result| result_path(result) == "equal.md"));
+    assert!(
+        results(&page2_same_now)
+            .iter()
+            .any(|result| result_path(result) == "equal.md")
+    );
 
     // At this invocation time a recomputed 7d cutoff would be July 7 and would
     // drop equal.md. Selector-less replay must instead retain the signed July 6
@@ -1463,10 +1474,12 @@ fn ct4_timetravel_006_cursor_rejects_write_through_visible_append() {
     index_at(&dir, "2026-07-11T00:00:00Z");
 
     let fresh = search_all_history(&dir, "associationfixture", "100");
-    assert!(results(&fresh).iter().any(|result| result["snippet"]
-        .as_str()
-        .unwrap()
-        .contains("write-through-visible")));
+    assert!(results(&fresh).iter().any(|result| {
+        result["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("write-through-visible")
+    }));
 
     let replay = json_failure(
         &dir,
@@ -1532,7 +1545,7 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
         .unwrap();
     let c1_raw = c1_entry.raw_hash.clone();
     let c2_raw = c2_entry.raw_hash.clone();
-    let c1_gen = c1_entry.normalize.as_ref().unwrap().gen;
+    let c1_gen = c1_entry.normalize.as_ref().unwrap().r#gen;
     let head_before = fs::read(dir.path().join(".kio/HEAD")).unwrap();
     let branch_before = fs::read(dir.path().join(".kio/refs/heads/main")).unwrap();
 
@@ -1993,7 +2006,9 @@ fn ct4_timetravel_012_walks_full_parent_dag_and_chooses_canonical_introduction()
         ],
     );
     assert_eq!(page2["searched_scopes"][0]["snapshot_at"], merge);
-    assert!(results(&page2)
-        .iter()
-        .all(|result| result_commit(result) == canonical));
+    assert!(
+        results(&page2)
+            .iter()
+            .all(|result| result_commit(result) == canonical)
+    );
 }

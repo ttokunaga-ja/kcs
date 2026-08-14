@@ -130,12 +130,12 @@ pub fn query_hash(input: &QueryHashInput) -> Result<String> {
     chunking_configs.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
     validate_chunking_configs(&scopes, &chunking_configs)?;
 
-    if let Some(digest) = &input.query_vector_digest {
-        if !is_sha256_hash(digest) {
-            return Err(SearchError::Contract(
-                "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
-            ));
-        }
+    if let Some(digest) = &input.query_vector_digest
+        && !is_sha256_hash(digest)
+    {
+        return Err(SearchError::Contract(
+            "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
+        ));
     }
 
     let time_travel = serde_json::to_value(&input.time_travel)

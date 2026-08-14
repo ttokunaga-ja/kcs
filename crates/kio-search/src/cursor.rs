@@ -1,12 +1,12 @@
 //! Cursor token contracts for deterministic paging.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-use crate::query::{is_sha256_hash, TimeTravelSelector};
+use crate::query::{TimeTravelSelector, is_sha256_hash};
 use crate::{Result, SearchError};
 
 const CURSOR_VERSION: u64 = 2;
@@ -105,19 +105,19 @@ impl CursorToken {
         if !is_sha256_hash(&self.query_hash) {
             return Err("query_hash must be sha256: plus 64 lowercase hex digits".to_owned());
         }
-        if let Some(digest) = &self.query_vector_digest {
-            if !is_sha256_hash(digest) {
-                return Err(
-                    "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
-                );
-            }
+        if let Some(digest) = &self.query_vector_digest
+            && !is_sha256_hash(digest)
+        {
+            return Err(
+                "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
+            );
         }
-        if let Some(generation) = &self.collection_generation {
-            if !is_sha256_hash(generation) {
-                return Err(
-                    "collection_generation must be sha256: plus 64 lowercase hex digits".to_owned(),
-                );
-            }
+        if let Some(generation) = &self.collection_generation
+            && !is_sha256_hash(generation)
+        {
+            return Err(
+                "collection_generation must be sha256: plus 64 lowercase hex digits".to_owned(),
+            );
         }
         self.time_travel
             .validate_contract()
@@ -125,10 +125,10 @@ impl CursorToken {
         match (&self.time_travel.since, &self.since_cutoff) {
             (Some(_), Some(cutoff)) => validate_utc_seconds(cutoff)?,
             (Some(_), None) => {
-                return Err("since_cutoff is required when time_travel.since is set".to_owned())
+                return Err("since_cutoff is required when time_travel.since is set".to_owned());
             }
             (None, Some(_)) => {
-                return Err("since_cutoff is only valid when time_travel.since is set".to_owned())
+                return Err("since_cutoff is only valid when time_travel.since is set".to_owned());
             }
             (None, None) => {}
         }
@@ -360,7 +360,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn hash(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))

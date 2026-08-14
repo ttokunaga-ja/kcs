@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
@@ -74,7 +74,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       # Optional ranking features must take this same eval path; `--all-features`
       # prevents a default-off ranking lane from bypassing the only Recall gate.
       - run: cargo build --release --locked --all-features
@@ -99,20 +99,12 @@ jobs:
       - run: target/release/kio-eval --scenario M3-2 --corpus /tmp/kio-eval-corpus --bin target/release/kio
       - run: target/release/kio-eval --scenario M3-3 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
-  msrv:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.86.0
-      - run: cargo check --workspace --all-targets --locked
-
   macos-security-r23:
     runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --workspace --all-targets --locked
       - run: >-
           python3 -m unittest
@@ -125,5 +117,5 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --workspace --all-targets --locked

@@ -452,14 +452,14 @@ pub(crate) fn normalize_to_markdown_v1(text: &str) -> String {
             index += 1;
             continue;
         }
-        if !in_fence && !line.trim().is_empty() {
-            if let Some(next) = source_lines.get(index + 1) {
-                if let Some(level) = setext_level(next) {
-                    lines.push(format!("{} {}", "#".repeat(level), line.trim()));
-                    index += 2;
-                    continue;
-                }
-            }
+        if !in_fence
+            && !line.trim().is_empty()
+            && let Some(next) = source_lines.get(index + 1)
+            && let Some(level) = setext_level(next)
+        {
+            lines.push(format!("{} {}", "#".repeat(level), line.trim()));
+            index += 2;
+            continue;
         }
         lines.push(strip_trailing_space(line));
         index += 1;
@@ -1143,13 +1143,17 @@ stream\nBT (/Type /Page and /PageX) Tj ET\nendstream\nendobj\n";
         assert_eq!(response.updated_units.len(), 2);
         assert_eq!(response.updated_units[0].unit_key, "page:1");
         assert_eq!(response.updated_units[0].unit_type, UnitKind::Page);
-        assert!(response.updated_units[0]
-            .markdown
-            .contains("First converted page"));
+        assert!(
+            response.updated_units[0]
+                .markdown
+                .contains("First converted page")
+        );
         assert_eq!(response.updated_units[1].unit_key, "page:2");
-        assert!(response.updated_units[1]
-            .markdown
-            .contains("Second converted page"));
+        assert!(
+            response.updated_units[1]
+                .markdown
+                .contains("Second converted page")
+        );
     }
 
     // PPTX: UnitKind::Slide mints slide:N hints instead — same converted-PDF

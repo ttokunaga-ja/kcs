@@ -9,12 +9,12 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
+use crate::ExitCode;
 use crate::cas::{ObjectKind, ObjectStore, StoredObject};
 use crate::dag::{
-    CommitObject, NormalizeRef, TreeEntry, TreeObject, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
+    CommitObject, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES, NormalizeRef, TreeEntry, TreeObject,
 };
 use crate::error::{KioError, Result};
-use crate::ExitCode;
 
 pub const DEFAULT_MAX_HISTORY_COMMITS: u64 = 100_000;
 pub const DEFAULT_MAX_HISTORY_TREE_ENTRIES: u64 = 10_000_000;
@@ -1038,8 +1038,8 @@ mod tests {
     use serde_json::json;
 
     use super::{HistoryLimits, HistoryReader, TreeBinding};
-    use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
-    use crate::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
+    use crate::cas::{ObjectKind, ObjectStore, hash_bytes};
+    use crate::dag::{CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, build_tree};
     use crate::gc::ShallowReceipt;
 
     struct Fixture {
@@ -1112,7 +1112,7 @@ mod tests {
     fn profile() -> NormalizeRef {
         NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
-            gen: 7,
+            r#gen: 7,
             manifest_hash: hash_bytes(b"manifest"),
         }
     }
@@ -1201,9 +1201,11 @@ mod tests {
         );
 
         let roots_with_missing = BTreeSet::from([left, hash_bytes(b"missing-root")]);
-        assert!(HistoryReader::new(&fixture.kio_dir)
-            .all_parents_for_roots(&roots_with_missing)
-            .is_err());
+        assert!(
+            HistoryReader::new(&fixture.kio_dir)
+                .all_parents_for_roots(&roots_with_missing)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1245,10 +1247,12 @@ mod tests {
         assert_eq!(newest.binding.normalize, None);
         let deleted = history.final_deleted_bindings();
         assert_eq!(deleted, vec![newest]);
-        assert!(history
-            .final_deleted_bindings()
-            .iter()
-            .all(|binding| binding.binding.path != "live.md"));
+        assert!(
+            history
+                .final_deleted_bindings()
+                .iter()
+                .all(|binding| binding.binding.path != "live.md")
+        );
 
         let graph = HistoryReader::new(&fixture.kio_dir)
             .all_parents(&head)

@@ -109,7 +109,7 @@ pub struct ChunkObject {
     pub spec_version: u64,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub unit_key: String,
     /// Hash of the exact normalized Markdown bytes. This is the stable content
     /// axis in chunk identity: a same-gen body correction gets a new chunk,
@@ -351,7 +351,7 @@ impl ChunkObject {
         let mut value = Map::new();
         value.insert("byte_end".to_owned(), Value::from(self.byte_end));
         value.insert("byte_start".to_owned(), Value::from(self.byte_start));
-        value.insert("gen".to_owned(), Value::from(self.gen));
+        value.insert("gen".to_owned(), Value::from(self.r#gen));
         value.insert(
             "heading_path".to_owned(),
             serde_json::to_value(&self.heading_path)
@@ -1055,7 +1055,7 @@ impl ObjectStore {
                     return Err(KioError::io(
                         error.to_string(),
                         directory.display().to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1090,7 +1090,7 @@ impl ObjectStore {
                     return Err(KioError::io(
                         error.to_string(),
                         directory.display().to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1591,7 +1591,7 @@ impl ObjectStore {
                     return Err(KioError::io(
                         error.to_string(),
                         directory.display().to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -2560,7 +2560,7 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
     let source = source
@@ -3138,7 +3138,7 @@ fn same_windows_repair_quarantine_file_components(
 fn windows_file_information(file: &File) -> Option<WindowsFileInformation> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
@@ -3327,7 +3327,7 @@ fn base64_decode(text: &str) -> Result<Vec<u8>> {
         }
     };
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(embedding_corrupt_error(
             "embedding vector is not padded base64",
             None,
@@ -3560,7 +3560,9 @@ pub(crate) fn append_jsonl(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+/// Encode bytes as canonical lowercase hexadecimal text.
+#[must_use]
+pub fn lower_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -4070,7 +4072,7 @@ mod tests {
             spec_version: 1,
             raw_hash: format!("sha256:{}", "a".repeat(64)),
             tool_profile_hash: format!("sha256:{}", "b".repeat(64)),
-            gen: 3,
+            r#gen: 3,
             unit_key: "page:12".to_owned(),
             unit_content_hash: format!("sha256:{}", "c".repeat(64)),
             heading_path: vec!["Auth".to_owned()],
@@ -4089,10 +4091,12 @@ mod tests {
         let expected = chunk.identity_hash().unwrap();
         assert_eq!(store.write_chunk(&chunk).unwrap(), expected);
         assert_eq!(store.read_chunk(&expected).unwrap(), chunk);
-        assert!(!fs::read(store.chunk_path(&expected).unwrap())
-            .unwrap()
-            .windows(b"chunk_hash".len())
-            .any(|window| window == b"chunk_hash"));
+        assert!(
+            !fs::read(store.chunk_path(&expected).unwrap())
+                .unwrap()
+                .windows(b"chunk_hash".len())
+                .any(|window| window == b"chunk_hash")
+        );
     }
 
     #[test]
@@ -4173,11 +4177,13 @@ mod tests {
                 .unwrap(),
             bytes
         );
-        assert!(store
-            .content_path(ContentObjectKind::NormalizedUnit, &hash)
-            .unwrap()
-            .to_string_lossy()
-            .contains("objects/normalized_unit_objects"));
+        assert!(
+            store
+                .content_path(ContentObjectKind::NormalizedUnit, &hash)
+                .unwrap()
+                .to_string_lossy()
+                .contains("objects/normalized_unit_objects")
+        );
     }
 
     #[test]
@@ -4324,13 +4330,17 @@ mod tests {
         let path = store.content_path(ContentObjectKind::Image, &hash).unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, bytes).unwrap();
-        assert!(store
-            .remove_content(ContentObjectKind::Image, &hash)
-            .unwrap());
+        assert!(
+            store
+                .remove_content(ContentObjectKind::Image, &hash)
+                .unwrap()
+        );
         assert!(!path.exists());
-        assert!(!store
-            .remove_content(ContentObjectKind::Image, &hash)
-            .unwrap());
+        assert!(
+            !store
+                .remove_content(ContentObjectKind::Image, &hash)
+                .unwrap()
+        );
     }
 
     #[cfg(unix)]

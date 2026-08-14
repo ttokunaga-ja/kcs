@@ -4,26 +4,26 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use kio_adapter::catalog::{
-    builtin_prepare_profile, standard_online_markdownize_profile,
-    TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
+    TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, builtin_prepare_profile,
+    standard_online_markdownize_profile,
 };
 use kio_adapter::identity::{prompt_template_hash, tool_profile_hash};
 use kio_adapter::tool_lock::tool_lock_hash;
-use kio_pipeline::budget::{evaluate_budget_with_caps, BudgetCapKind, BudgetEstimate};
+use kio_pipeline::budget::{BudgetCapKind, BudgetEstimate, evaluate_budget_with_caps};
 use kio_pipeline::markdownize::{
-    choose_markdownize_mode, markdownize_units, normalized_identity, normalized_instance_dir,
-    validate_markdownize_response, IncrementalHints, IncrementalModeInput, MarkdownizeMode,
-    MarkdownizeStageRequest, NormalizedInstanceManifest, NormalizedUnitManifestEntry,
-    NormalizedUnitObject, RawRef, UnitStatus,
+    IncrementalHints, IncrementalModeInput, MarkdownizeMode, MarkdownizeStageRequest,
+    NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, RawRef,
+    UnitStatus, choose_markdownize_mode, markdownize_units, normalized_identity,
+    normalized_instance_dir, validate_markdownize_response,
 };
 use kio_pipeline::prepare::{
-    change_rate, hash_bytes, map_units, unit_ref, PreparedUnit, UnitFingerprint, UnitType,
+    PreparedUnit, UnitFingerprint, UnitType, change_rate, hash_bytes, map_units, unit_ref,
 };
 use kio_pipeline::task::{
-    idempotency_key, retry_policy, task_status_from_unit_counts, RetryErrorKind, TaskStatus,
-    TaskType,
+    RetryErrorKind, TaskStatus, TaskType, idempotency_key, retry_policy,
+    task_status_from_unit_counts,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
@@ -368,8 +368,7 @@ fn ct2_profile_004_execution_and_auth_are_not_identity() {
 
 #[test]
 fn ct2_profile_005_prompt_template_hash_vector() {
-    let raw =
-        "You are a markdownize adapter.  \r\nProcess the cafe\u{301} uncha\u{301}nged unit.\t\t\r\n\r\n";
+    let raw = "You are a markdownize adapter.  \r\nProcess the cafe\u{301} uncha\u{301}nged unit.\t\t\r\n\r\n";
     assert_eq!(
         prompt_template_hash(raw),
         "sha256:3f5200e929d23e1f113f605fb528b1b7b75e183d226064d319f57fb3e467d238"
@@ -412,7 +411,9 @@ fn ct2_unit_002_normalized_instance_layout() {
     let tool = "sha256:393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c";
     assert_eq!(
         normalized_instance_dir(".kio", raw, tool, 0),
-        PathBuf::from(".kio/objects/normalized_units/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0")
+        PathBuf::from(
+            ".kio/objects/normalized_units/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0"
+        )
     );
 }
 
@@ -423,7 +424,7 @@ fn ct2_unit_003_manifest_schema_and_status() {
             .to_owned(),
         tool_profile_hash:
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-        gen: 0,
+        r#gen: 0,
         parent_gen: None,
         run_id: "run_01H00000000000000000000000".to_owned(),
         units: vec![NormalizedUnitManifestEntry {
@@ -478,7 +479,7 @@ fn ct2_unit_013_full_markdownize_initial_output() {
         spec_version: 1,
     })
     .unwrap();
-    assert_eq!(output.manifest.gen, 0);
+    assert_eq!(output.manifest.r#gen, 0);
     assert_eq!(output.manifest.units[0].status, UnitStatus::Done);
     assert_eq!(output.updated_units[0].mode, MarkdownizeMode::Full);
 }
@@ -583,7 +584,7 @@ fn ct2_incr_008_identity_vector_ignores_mode() {
         prepared_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
             .to_owned(),
         tool_profile_hash: tool.to_owned(),
-        gen: 0,
+        r#gen: 0,
         mode: MarkdownizeMode::Full,
         markdown: "full".to_owned(),
         metadata: BTreeMap::new(),
@@ -706,9 +707,11 @@ fn ct2_accept_007_reject_triggers_full_fallback_path() {
             && task["mode"] == "full"
             && task["fallback_reason"] == "full_fallback_after_incremental_reject"
     }));
-    assert!(!normalized_units(&dir)
-        .iter()
-        .any(|unit| unit.markdown.starts_with("incremental ")));
+    assert!(
+        !normalized_units(&dir)
+            .iter()
+            .any(|unit| unit.markdown.starts_with("incremental "))
+    );
 }
 
 #[test]
@@ -990,11 +993,13 @@ fn ct2_secrets_001_tier_a_default_excluded_in_preview() {
     let dir = scope();
     fs::write(dir.path().join(".env"), "TOKEN=x").unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
-    assert!(preview["excluded_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|v| v == ".env"));
+    assert!(
+        preview["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == ".env")
+    );
 }
 
 #[test]
@@ -1025,16 +1030,20 @@ fn ct2_secrets_003_tier_b_local_but_online_held() {
     .unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
     // Still ingested (not hard-excluded like Tier A), but flagged sensitive.
-    assert!(!preview["excluded_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|v| v == "api_token.pdf"));
-    assert!(preview["sensitive_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["path"] == "api_token.pdf" && c["reason"] == "secrets_tier_b_warning"));
+    assert!(
+        !preview["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "api_token.pdf")
+    );
+    assert!(
+        preview["sensitive_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["path"] == "api_token.pdf" && c["reason"] == "secrets_tier_b_warning")
+    );
     json_success(&dir, ["index", "--yes"]);
     let status = json_success(&dir, ["status"]);
     // The online task is held, not sendable.
@@ -1077,19 +1086,23 @@ fn ct2_secrets_004_added_tier_a_is_quarantined() {
         .as_object()
         .expect("non-secret addition creates commit");
     let tree = inspect(&dir, commit["tree"].as_str().unwrap());
-    assert!(!tree["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == ".env"));
+    assert!(
+        !tree["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == ".env")
+    );
     let env_hash = hash_bytes(b"TOKEN=x");
     json_failure(&dir, ["inspect", &env_hash], 4);
     let status = json_success(&dir, ["status"]);
-    assert!(status["quarantine"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == ".env"));
+    assert!(
+        status["quarantine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == ".env")
+    );
 }
 
 #[test]
@@ -1102,29 +1115,37 @@ fn ct2_ignore_001_double_star_ext_pattern_excludes_nested_file() {
     fs::write(dir.path().join("keep.txt"), "keep direct").unwrap();
     fs::write(dir.path().join(".kioignore"), "**/*.log\n").unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
-    assert!(preview["excluded_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|path| path == "debug.log"));
-    assert!(preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["input_path"] == "keep.txt"
-            && !candidate["ignored"].as_bool().unwrap()));
-    assert!(!preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["input_path"]
-            .as_str()
-            .is_some_and(|path| path.starts_with("logs/"))));
-    assert!(!preview["excluded_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|path| path == "logs/app.log"));
+    assert!(
+        preview["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "debug.log")
+    );
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["input_path"] == "keep.txt"
+                && !candidate["ignored"].as_bool().unwrap())
+    );
+    assert!(
+        !preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["input_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("logs/")))
+    );
+    assert!(
+        !preview["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "logs/app.log")
+    );
 }
 
 #[test]
@@ -1144,23 +1165,29 @@ fn ct2_ignore_002_scope_ignore_config_is_accepted_and_applied() {
     fs::write(dir.path().join("scratch.tmp"), "ignore me").unwrap();
 
     let preview = json_success(&dir, ["index", "--preview"]);
-    assert!(preview["excluded_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|path| path == "scratch.tmp"));
-    assert!(preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["input_path"] == "keep.txt"
-            && !candidate["ignored"].as_bool().unwrap()));
-    assert!(preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["input_path"] == "scratch.tmp"
-            && candidate["ignored"].as_bool().unwrap()));
+    assert!(
+        preview["excluded_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "scratch.tmp")
+    );
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["input_path"] == "keep.txt"
+                && !candidate["ignored"].as_bool().unwrap())
+    );
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["input_path"] == "scratch.tmp"
+                && candidate["ignored"].as_bool().unwrap())
+    );
 
     // A full index also validates the schema and must succeed.
     json_success(&dir, ["index", "--approve"]);
@@ -1259,17 +1286,21 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
     // only be driven by `batch` (which gates on the persistent opt-in). So the task
     // is NOT actually sendable — it must report `network_opt_in_required`, not a false
     // `ready_for_online_adapter` that no `batch resume` could ever fulfill.
-    assert!(json_success(&online_dir, ["status"])["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|task| task["input_path"] == "a.pdf"
-            && task["fallback_reason"] == "network_opt_in_required"));
-    assert!(!json_success(&online_dir, ["status"])["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|task| task["fallback_reason"] == "ready_for_online_adapter"));
+    assert!(
+        json_success(&online_dir, ["status"])["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["input_path"] == "a.pdf"
+                && task["fallback_reason"] == "network_opt_in_required")
+    );
+    assert!(
+        !json_success(&online_dir, ["status"])["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["fallback_reason"] == "ready_for_online_adapter")
+    );
     let approvals = fs::read_to_string(online_dir.path().join(".kio/approvals.jsonl")).unwrap();
     assert!(approvals.contains(r#""network_opt_in":false"#));
 }
@@ -1417,9 +1448,11 @@ fn ct2_pdf_003_endstream_keyword_in_page_text_is_not_a_stream_boundary() {
     let page1 = units.iter().find(|unit| unit.unit_key == "page:1").unwrap();
     let page2 = units.iter().find(|unit| unit.unit_key == "page:2").unwrap();
     let page3 = units.iter().find(|unit| unit.unit_key == "page:3").unwrap();
-    assert!(page1
-        .markdown
-        .contains("this text mentions stream and endstream keywords"));
+    assert!(
+        page1
+            .markdown
+            .contains("this text mentions stream and endstream keywords")
+    );
     assert!(page2.markdown.contains("second page body"));
     assert!(page3.markdown.contains("third page body"));
     // No page collapses to empty, and the boundary did not bleed across pages.
@@ -1460,9 +1493,11 @@ fn ct2_incr_009_cli_mock_adapter_uses_incremental_for_light_change() {
                 .unwrap()
                 .contains(&json!("page:2"))
     }));
-    assert!(normalized_units(&dir)
-        .iter()
-        .any(|unit| unit.mode == MarkdownizeMode::Incremental && unit.reused_from.is_some()));
+    assert!(
+        normalized_units(&dir)
+            .iter()
+            .any(|unit| unit.mode == MarkdownizeMode::Incremental && unit.reused_from.is_some())
+    );
 }
 
 #[test]
@@ -1704,10 +1739,12 @@ fn f5_warn_at_percent_surfaces_non_blocking_warning() {
         status["budget"]["warned"], true,
         "status must warn at 90% of cap: {status}"
     );
-    assert!(status["budget"]["warning"]
-        .as_str()
-        .unwrap()
-        .contains("device budget"));
+    assert!(
+        status["budget"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("device budget")
+    );
     assert_eq!(status["budget"]["warn_at_percent"], 80);
     // Non-blocking: budget still remains (not over cap).
     assert!(
@@ -1718,10 +1755,12 @@ fn f5_warn_at_percent_surfaces_non_blocking_warning() {
     // The index result JSON also carries the warning; processing continues.
     let index = json_success_with_env(&dir, ["index", "--yes"], &[("KIO_FIXED_NOW", fixed_now)]);
     assert_eq!(index["status"], "indexed");
-    assert!(index["budget_warning"]
-        .as_str()
-        .unwrap()
-        .contains("device budget"));
+    assert!(
+        index["budget_warning"]
+            .as_str()
+            .unwrap()
+            .contains("device budget")
+    );
 }
 
 // F5: with `hard_stop` unspecified (default true) and `warn_at_percent` unspecified
@@ -2452,11 +2491,13 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
     assert_eq!(early["tasks_updated"], 0);
     assert_eq!(early["tasks_executed"], 0);
     let still_failed = json_success(&dir, ["status"]);
-    assert!(still_failed["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|task| is_online_output_ref(task) && task["status"] == "pending"));
+    assert!(
+        still_failed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| is_online_output_ref(task) && task["status"] == "pending")
+    );
 
     // Advance the clock past the backoff window: the task becomes due and runs.
     let late = json_success_with_env(
@@ -2595,11 +2636,13 @@ fn r13_4_missing_head_with_healthy_refs_is_repaired() {
     // (b) delete HEAD entirely; refs/heads/main still healthy.
     fs::remove_file(dir.path().join(".kio/HEAD")).unwrap();
     let log = json_success(&dir, ["log"]);
-    assert!(log["commits"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|commit| commit["commit_hash"] == c1_hash));
+    assert!(
+        log["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|commit| commit["commit_hash"] == c1_hash)
+    );
     assert_eq!(
         fs::read_to_string(dir.path().join(".kio/HEAD"))
             .unwrap()

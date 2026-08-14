@@ -6,8 +6,8 @@ use kio_index::chunking::slugify_heading;
 use thiserror::Error;
 
 use crate::{
-    manifest::{CorpusManifest, Expected, GoldenQuery, HistoryManifest, Scenario},
     ResultKey,
+    manifest::{CorpusManifest, Expected, GoldenQuery, HistoryManifest, Scenario},
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

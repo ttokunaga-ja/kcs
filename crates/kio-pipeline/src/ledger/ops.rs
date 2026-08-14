@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
@@ -210,16 +210,16 @@ pub fn cost_ledger_rows_for_key(conn: &Connection, key: &TaskKey) -> Result<Vec<
 /// the durable, non-retryable `KIO-E-STORE-CONSTRAINT-001` implementation error
 /// rather than a generic transport error.
 fn classify_check_violation(err: rusqlite::Error) -> PipelineError {
-    if let rusqlite::Error::SqliteFailure(ref ffi_err, _) = err {
-        if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK {
-            return PipelineError::contract(
-                "KIO-E-STORE-CONSTRAINT-001",
-                format!(
-                    "cost_ledger/batch_requests CHECK constraint violated — this is an \
-                     implementation error (pre-write validation should have prevented it): {err}"
-                ),
-            );
-        }
+    if let rusqlite::Error::SqliteFailure(ref ffi_err, _) = err
+        && ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+    {
+        return PipelineError::contract(
+            "KIO-E-STORE-CONSTRAINT-001",
+            format!(
+                "cost_ledger/batch_requests CHECK constraint violated — this is an \
+                 implementation error (pre-write validation should have prevented it): {err}"
+            ),
+        );
     }
     PipelineError::Sqlite(err)
 }
@@ -256,8 +256,22 @@ pub fn new_intent_token() -> String {
     bytes[8] = (bytes[8] & 0x3F) | 0x80; // variant 10xxxxxx
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -345,14 +359,14 @@ pub fn phase1_intent(
     estimated_usd: f64,
     sync_effective_timeout_seconds: Option<i64>,
 ) -> Result<Phase1Outcome> {
-    if let Some(existing) = get_batch_request(conn, key)? {
-        if existing.cleanup_pending() {
-            return Err(PipelineError::contract(
-                "KIO-E-BATCH-CLEANUP-PENDING-001",
-                "cannot start a new phase 1 before the previous attempt's residue cleanup \
-                 (upload/job reconciliation) has completed (04 §5.8 順序規範)",
-            ));
-        }
+    if let Some(existing) = get_batch_request(conn, key)?
+        && existing.cleanup_pending()
+    {
+        return Err(PipelineError::contract(
+            "KIO-E-BATCH-CLEANUP-PENDING-001",
+            "cannot start a new phase 1 before the previous attempt's residue cleanup \
+             (upload/job reconciliation) has completed (04 §5.8 順序規範)",
+        ));
     }
     // QA14 (10-operations.md §7.5.2): `phase1_intent` is the SOLE INSERT into
     // `batch_requests` (every other write is a CAS UPDATE/DELETE against an
@@ -904,15 +918,15 @@ pub fn terminal_transaction(
                 row_updated: false,
             });
         };
-        if let Some(guard) = write.intent_token_guard {
-            if current.intent_token.as_deref() != Some(guard) {
-                // CL51: claim already lost to another writer — record nothing.
-                return Ok(TerminalReceipt {
-                    recorded: false,
-                    submission_seq: current.submission_seq,
-                    row_updated: false,
-                });
-            }
+        if let Some(guard) = write.intent_token_guard
+            && current.intent_token.as_deref() != Some(guard)
+        {
+            // CL51: claim already lost to another writer — record nothing.
+            return Ok(TerminalReceipt {
+                recorded: false,
+                submission_seq: current.submission_seq,
+                row_updated: false,
+            });
         }
         // Whether the charge/state transition itself has already landed (a
         // prior call already recorded this outcome at this state — the CL22
@@ -1412,17 +1426,17 @@ pub fn device_claim(
     device_per_adapter_cap: Option<f64>,
 ) -> Result<ClaimOutcome> {
     let now = now_millis();
-    if let Some(existing) = get_batch_request(conn, key)? {
-        if existing.state.is_inflight() {
-            let stale = existing
-                .stale_after_at
-                .is_some_and(|deadline| deadline <= now);
-            if !stale {
-                return Ok(ClaimOutcome::InFlight);
-            }
-            if let Some(token) = existing.intent_token.clone() {
-                recovery_settle_unknown(conn, key, &token, existing.estimated_usd, true)?;
-            }
+    if let Some(existing) = get_batch_request(conn, key)?
+        && existing.state.is_inflight()
+    {
+        let stale = existing
+            .stale_after_at
+            .is_some_and(|deadline| deadline <= now);
+        if !stale {
+            return Ok(ClaimOutcome::InFlight);
+        }
+        if let Some(token) = existing.intent_token.clone() {
+            recovery_settle_unknown(conn, key, &token, existing.estimated_usd, true)?;
         }
     }
     // R23-02: `estimated_usd == 0.0` (a zero-priced local adapter) is exempt
@@ -1698,11 +1712,11 @@ pub fn execute_bounded_sweep(
     let report = with_savepoint(conn, "kio_ledger_device_sweep", || {
         let mut settled = Vec::new();
         for key in plan.own_key_stale.iter().chain(plan.general_stale.iter()) {
-            if let Some(row) = get_batch_request(conn, key)? {
-                if let Some(token) = row.intent_token.clone() {
-                    recovery_settle_unknown(conn, key, &token, row.estimated_usd, true)?;
-                    settled.push(key.clone());
-                }
+            if let Some(row) = get_batch_request(conn, key)?
+                && let Some(token) = row.intent_token.clone()
+            {
+                recovery_settle_unknown(conn, key, &token, row.estimated_usd, true)?;
+                settled.push(key.clone());
             }
         }
         let month_start = crate::ledger::time::current_month_start_millis(now_ms);

@@ -7,7 +7,7 @@ pub struct ChunkRow {
     pub chunk_id: String,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub unit_key: String,
     /// Hash of the exact normalized Markdown bytes. This is the stable chunk
     /// identity axis across re-ingest while separating body corrections.
@@ -84,7 +84,7 @@ pub struct TreeEntryRow {
     pub tool_profile_hash: Option<String>,
     /// `None` for a raw-only tree entry. A normalized entry must carry both
     /// this generation and `manifest_hash`; readers reject a partial pair.
-    pub gen: Option<u64>,
+    pub r#gen: Option<u64>,
     /// The normalized manifest selected by the immutable tree entry, or
     /// `None` when the entry has no `normalize` reference at all.
     pub manifest_hash: Option<String>,

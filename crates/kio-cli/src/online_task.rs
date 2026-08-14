@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use kio_pipeline::task::{validate_task_output_ref, TaskDescriptor, TaskOutputRef};
+use kio_pipeline::task::{TaskDescriptor, TaskOutputRef, validate_task_output_ref};
 
 /// Identify a markdownize task that the standard online executor owns across both
 /// output-ref phases. Fresh tasks carry the online placeholder; a Partial task requeued

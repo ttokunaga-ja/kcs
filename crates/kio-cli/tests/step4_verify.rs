@@ -1,8 +1,8 @@
 use std::fs;
 
 use assert_cmd::Command;
-use kio_core::cas::{canonical_json_bytes, ContentObjectKind, ObjectKind, ObjectStore};
-use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType};
+use kio_core::cas::{ContentObjectKind, ObjectKind, ObjectStore, canonical_json_bytes};
+use kio_core::dag::{CommitObject, CommitStats, CommitType, build_tree};
 use kio_core::gc::ShallowReceipt;
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_index::aggregator::{AggIndexStatus, AggSelector, Aggregator};
@@ -398,11 +398,13 @@ fn ct4_fsck_unrecoverable_raw_is_bounded_partial_and_logged() {
     let output: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(output["status"], "corrupt");
     assert_eq!(output["external_pointers_may_be_affected"], true);
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "missing_raw"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "missing_raw")
+    );
     assert!(dir.path().join(".test-data/kio/logs/errors.jsonl").exists());
 }
 
@@ -611,11 +613,13 @@ fn ct4_fsck_live_raw_with_stale_receipt_and_no_republication_commit_is_incomplet
         .clone();
     let output: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(output["error_code"], "KIO-E-PURGE-INCOMPLETE-001");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "purge_incomplete")
+    );
     assert_eq!(output["repaired_commit_hash"], Value::Null);
     assert!(receipt.exists());
     assert_eq!(fs::read(&receipt).unwrap(), receipt_before);
@@ -662,11 +666,13 @@ fn ct4_fsck_live_raw_with_republication_commit_backfills_retired_receipt() {
 
     let output = success(&dir, &["repair", "verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
-    assert!(!output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert!(
+        !output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "purge_incomplete")
+    );
 
     let state = PurgeState::new(dir.path().join(".kio"));
     let receipt = state.read_erase_receipt(&raw_hash).unwrap().unwrap();
@@ -738,11 +744,13 @@ fn ct4_fsck_rejects_linked_object_namespace_without_traversing_it() {
         .stdout
         .clone();
     let output: Value = serde_json::from_slice(&stdout).unwrap();
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "non_regular_object"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "non_regular_object")
+    );
 }
 
 /// §F/LC38: a verified raw coexisting with a tombstone (or with both a
@@ -767,16 +775,20 @@ fn ct4_fsck_live_raw_tombstone_and_dual_terminal_markers_are_incomplete_purge_no
         .stdout
         .clone();
     let output: Value = serde_json::from_slice(&stdout).unwrap();
-    assert!(!output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "tombstone_conflict"));
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert!(
+        !output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "tombstone_conflict")
+    );
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "purge_incomplete")
+    );
     assert!(tombstone.exists());
 
     // Raw removed: this is no longer a "live raw + marker" incomplete-purge
@@ -787,11 +799,13 @@ fn ct4_fsck_live_raw_tombstone_and_dual_terminal_markers_are_incomplete_purge_no
     write_receipt(&dir, raw_hash, &purged_hash, timestamp);
     assert!(tombstone.exists());
     let output = success(&dir, &["repair", "verify-objects"]);
-    assert!(!output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "purge_marker_conflict"));
+    assert!(
+        !output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "purge_marker_conflict")
+    );
     // Raw is no longer verified here, so the canonical marker (tombstone,
     // tie-break winner over the receipt per LC8) is a normal dead terminal.
     assert_eq!(output["status"], "ok", "{output}");

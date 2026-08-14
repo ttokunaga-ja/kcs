@@ -126,11 +126,13 @@ fn candidate_fixture() -> (TempDir, String, String) {
     let repo = Repository::open(dir.path()).unwrap();
     let old_tree = repo.read_commit(&old_commit).unwrap().tree;
     let preview = json_success(&dir, &["gc", "--dry-run"], NOW);
-    assert!(preview["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|candidate| candidate["commit_hash"] == old_commit));
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["commit_hash"] == old_commit)
+    );
     (dir, old_commit, old_tree)
 }
 
@@ -261,9 +263,11 @@ fn real_candidate_sweep_receipts_before_tree_removal_and_preserves_other_objects
     assert_eq!(report["status"], "completed");
     assert!(!tree_path(&dir, &tree).exists());
     assert!(receipt_path(&dir, &commit).is_file());
-    assert!(fs::read_to_string(receipt_path(&dir, &commit))
-        .unwrap()
-        .contains(&tree));
+    assert!(
+        fs::read_to_string(receipt_path(&dir, &commit))
+            .unwrap()
+            .contains(&tree)
+    );
     assert_eq!(objects_except_trees(&dir), other_before);
     assert!(!dir.path().join(".kio/gc/in_progress").exists());
     // The implementation quarantines the verified tree, unlinks the sole
@@ -751,8 +755,10 @@ fn initial_index_generation_mismatch_rejects_before_tree_delete() {
         .output()
         .unwrap();
     assert_eq!(blocked.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&blocked.stderr)
-        .contains("source index changed before the pre-sweep rotation"));
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr)
+            .contains("source index changed before the pre-sweep rotation")
+    );
     assert_eq!(fs::read(&tree_path).unwrap(), tree_before);
     assert!(dir.path().join(".kio/gc/in_progress").exists());
 }
@@ -1229,12 +1235,16 @@ fn shared_tree_requires_all_receipts_before_one_removal() {
         1
     );
     json_success(&dir, &["gc", "--yes"], NOW);
-    assert!(fs::read_to_string(receipt_path(&dir, &old_commit))
-        .unwrap()
-        .contains(&old_tree));
-    assert!(fs::read_to_string(receipt_path(&dir, &sibling_hash))
-        .unwrap()
-        .contains(&old_tree));
+    assert!(
+        fs::read_to_string(receipt_path(&dir, &old_commit))
+            .unwrap()
+            .contains(&old_tree)
+    );
+    assert!(
+        fs::read_to_string(receipt_path(&dir, &sibling_hash))
+            .unwrap()
+            .contains(&old_tree)
+    );
     assert!(!tree_path(&dir, &old_tree).exists());
 }
 

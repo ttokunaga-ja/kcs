@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use kio_core::cas::is_hash;
 use serde::{Deserialize, Serialize};
 
-use crate::store_path::{resolve_existing_store_path, StorePathKind};
+use crate::store_path::{StorePathKind, resolve_existing_store_path};
 use crate::task::is_scope_local_file_name;
 use crate::{IoResultExt, PipelineError, Result};
 

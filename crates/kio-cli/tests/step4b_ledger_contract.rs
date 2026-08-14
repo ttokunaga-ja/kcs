@@ -32,7 +32,10 @@ use std::path::PathBuf;
 
 use assert_cmd::Command;
 use kio_pipeline::ledger::ops::{
-    check_then_reserve, contract_violation_retry_allowed, cost_ledger_rows_for_key, device_claim,
+    AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount, BudgetCapConfig,
+    CapCheckResult, CapLayer, ClaimOutcome, DEFAULT_RECOVERY_DEADLINE_MS,
+    DEFAULT_VISIBILITY_GRACE_PERIOD_MS, ExtendOutcome, TerminalWrite, check_then_reserve,
+    contract_violation_retry_allowed, cost_ledger_rows_for_key, device_claim,
     device_extend_stale_after, device_input_hash, execute_abandon, execute_bounded_sweep,
     get_batch_request, ledger_month_total, nonbillable_charge, phase1_intent,
     phase2a_record_provider_scope, phase2a_record_upload_id, phase2a_restart_after_scope_mismatch,
@@ -40,19 +43,16 @@ use kio_pipeline::ledger::ops::{
     plan_bounded_sweep, recovery_deadline_passed, recovery_finish_cleanup, recovery_mark_found,
     recovery_settle_unknown, resolve_abandon_selector, resolve_billing_from_usd_field,
     stalled_rows, sync_record_provider_request_id, terminal_transaction,
-    visibility_grace_period_elapsed, with_immediate_transaction, AbandonExecution,
-    AbandonResolution, AbandonSelector, BilledAmount, BudgetCapConfig, CapCheckResult, CapLayer,
-    ClaimOutcome, ExtendOutcome, TerminalWrite, DEFAULT_RECOVERY_DEADLINE_MS,
-    DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
+    visibility_grace_period_elapsed, with_immediate_transaction,
 };
 use kio_pipeline::ledger::schema::{
-    canonical_sql_tokens, object_sql, CREATE_BATCH_REQUESTS_SQL, CREATE_COST_LEDGER_SQL,
-    CREATE_IDX_BATCH_REQUESTS_INFLIGHT_SQL, CREATE_IDX_COST_LEDGER_MONTH_SQL,
-    CREATE_SCHEMA_MIGRATIONS_SQL,
+    CREATE_BATCH_REQUESTS_SQL, CREATE_COST_LEDGER_SQL, CREATE_IDX_BATCH_REQUESTS_INFLIGHT_SQL,
+    CREATE_IDX_COST_LEDGER_MONTH_SQL, CREATE_SCHEMA_MIGRATIONS_SQL, canonical_sql_tokens,
+    object_sql,
 };
 use kio_pipeline::ledger::time::{current_month_start_millis, now_millis, utc_month_of};
 use kio_pipeline::ledger::{BatchState, LedgerDb, Outcome, RequestKind, TaskKey};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -408,12 +408,13 @@ fn cl06_schema_migrations_ddl_and_single_use_marker() {
         [],
     )
     .unwrap();
-    assert!(conn
-        .execute(
+    assert!(
+        conn.execute(
             "INSERT INTO schema_migrations (name, applied_at) VALUES ('jsonl-cutover', 1)",
             [],
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 /// CL07: required indexes' canonical shape, and the partial index is actually
@@ -618,9 +619,10 @@ fn cl15_submission_seq_max_plus_one_and_omission_regression() {
     )
     .unwrap();
     let rows = cost_ledger_rows_for_key(db.connection(), &task_key).unwrap();
-    assert!(rows
-        .iter()
-        .any(|row| row.submission_seq == 4 && row.usd == 5.0));
+    assert!(
+        rows.iter()
+            .any(|row| row.submission_seq == 4 && row.usd == 5.0)
+    );
 
     // (b) regression: an implementation that forgot to bump seq and reused the
     // old row's stale value (2) collides with an already-recorded ledger row at
@@ -707,13 +709,15 @@ fn cl16_phase2a_upload_ordering_and_residue_survives_job_create_failure() {
     let task_key = key("s", "markdownize", "h");
     let intent = phase1_intent(db.connection(), &task_key, RequestKind::Batch, 1.0, None).unwrap();
 
-    assert!(phase2a_record_provider_scope(
-        db.connection(),
-        &task_key,
-        &intent.intent_token,
-        "prov-scope-a"
-    )
-    .unwrap());
+    assert!(
+        phase2a_record_provider_scope(
+            db.connection(),
+            &task_key,
+            &intent.intent_token,
+            "prov-scope-a"
+        )
+        .unwrap()
+    );
     let before_upload = get_batch_request(db.connection(), &task_key)
         .unwrap()
         .unwrap();
@@ -726,13 +730,15 @@ fn cl16_phase2a_upload_ordering_and_residue_survives_job_create_failure() {
         "upload_id not set until upload succeeds"
     );
 
-    assert!(phase2a_record_upload_id(
-        db.connection(),
-        &task_key,
-        &intent.intent_token,
-        "upload-123"
-    )
-    .unwrap());
+    assert!(
+        phase2a_record_upload_id(
+            db.connection(),
+            &task_key,
+            &intent.intent_token,
+            "upload-123"
+        )
+        .unwrap()
+    );
     // Simulate phase 2b (job creation) failing — no further writes.
     let after = get_batch_request(db.connection(), &task_key)
         .unwrap()
@@ -788,13 +794,15 @@ fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
         BatchState::Intent,
         "not yet state=1 — job call has not succeeded"
     );
-    assert!(phase2b_record_job_created(
-        db.connection(),
-        &task_key,
-        &intent.intent_token,
-        "provider-job-1"
-    )
-    .unwrap());
+    assert!(
+        phase2b_record_job_created(
+            db.connection(),
+            &task_key,
+            &intent.intent_token,
+            "provider-job-1"
+        )
+        .unwrap()
+    );
     let done = get_batch_request(db.connection(), &task_key)
         .unwrap()
         .unwrap();
@@ -821,13 +829,15 @@ fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
     assert!(!phase2b_scope_matches(&row2, "prov-scope-new"));
 
     // R23-19: unconfirmed deletion — a no-op, locators must survive.
-    assert!(!phase2a_restart_after_scope_mismatch(
-        db2.connection(),
-        &key2,
-        &intent2.intent_token,
-        false
-    )
-    .unwrap());
+    assert!(
+        !phase2a_restart_after_scope_mismatch(
+            db2.connection(),
+            &key2,
+            &intent2.intent_token,
+            false
+        )
+        .unwrap()
+    );
     let unconfirmed = get_batch_request(db2.connection(), &key2).unwrap().unwrap();
     assert_eq!(unconfirmed.upload_id.as_deref(), Some("upload-old"));
     assert_eq!(
@@ -836,13 +846,10 @@ fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
     );
 
     // Confirmed deletion — now the restart proceeds.
-    assert!(phase2a_restart_after_scope_mismatch(
-        db2.connection(),
-        &key2,
-        &intent2.intent_token,
-        true
-    )
-    .unwrap());
+    assert!(
+        phase2a_restart_after_scope_mismatch(db2.connection(), &key2, &intent2.intent_token, true)
+            .unwrap()
+    );
     let restarted = get_batch_request(db2.connection(), &key2).unwrap().unwrap();
     assert!(restarted.upload_id.is_none());
     assert!(restarted.provider_scope_id.is_none());
@@ -1755,13 +1762,15 @@ fn cl43_sync_provider_request_id_recorded_before_terminal() {
         Some(300),
     )
     .unwrap();
-    assert!(sync_record_provider_request_id(
-        db.connection(),
-        &task_key,
-        &intent.intent_token,
-        "req-abc"
-    )
-    .unwrap());
+    assert!(
+        sync_record_provider_request_id(
+            db.connection(),
+            &task_key,
+            &intent.intent_token,
+            "req-abc"
+        )
+        .unwrap()
+    );
     let row = get_batch_request(db.connection(), &task_key)
         .unwrap()
         .unwrap();
@@ -2213,9 +2222,11 @@ fn cl55_terminal_device_row_pruning_conditions_and_abandon_after_pruning() {
 
     let report = execute_bounded_sweep(db.connection(), &plan, now).unwrap();
     assert!(report.pruned.contains(&prunable));
-    assert!(get_batch_request(db.connection(), &prunable)
-        .unwrap()
-        .is_none());
+    assert!(
+        get_batch_request(db.connection(), &prunable)
+            .unwrap()
+            .is_none()
+    );
 
     // Abandon on the now-pruned key is a no-op idempotent success.
     let resolution =
@@ -2295,9 +2306,11 @@ fn r23_02_device_claim_denies_on_per_adapter_cap_exceeded() {
     })
     .unwrap();
     assert_eq!(claim, ClaimOutcome::Denied(CapLayer::PerAdapter));
-    assert!(get_batch_request(db.connection(), &task_key)
-        .unwrap()
-        .is_none());
+    assert!(
+        get_batch_request(db.connection(), &task_key)
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// R23-02: `estimated_usd == 0.0` (a zero-priced local embedding adapter)
@@ -2617,9 +2630,11 @@ fn cl57_three_condition_and_and_same_tx_atomicity() {
     })
     .unwrap();
     assert_eq!(denied_adapter, CapCheckResult::Denied(CapLayer::PerAdapter));
-    assert!(get_batch_request(db2.connection(), &key2)
-        .unwrap()
-        .is_none());
+    assert!(
+        get_batch_request(db2.connection(), &key2)
+            .unwrap()
+            .is_none()
+    );
 
     // All three pass -> allowed, and the reservation lands in the same call.
     let (_dir3, db3) = open_temp_ledger();
@@ -2641,9 +2656,11 @@ fn cl57_three_condition_and_and_same_tx_atomicity() {
     })
     .unwrap();
     assert!(matches!(allowed, CapCheckResult::Allowed(_)));
-    assert!(get_batch_request(db3.connection(), &key3)
-        .unwrap()
-        .is_some());
+    assert!(
+        get_batch_request(db3.connection(), &key3)
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// CL58: `candidate=0` bypasses the cap check entirely, even when every layer
@@ -2670,9 +2687,11 @@ fn cl58_zero_candidate_bypasses_cap_even_when_over() {
     })
     .unwrap();
     assert!(matches!(result, CapCheckResult::ExemptZeroCost(_)));
-    assert!(get_batch_request(db.connection(), &task_key)
-        .unwrap()
-        .is_some());
+    assert!(
+        get_batch_request(db.connection(), &task_key)
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// CL59: `ledger(...)` = confirmed-month sum (estimate rows count too) +
@@ -3251,10 +3270,10 @@ fn walk_rust_files(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path
                 continue;
             }
             walk_rust_files(&path, visit);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                visit(&path, &contents);
-            }
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+            && let Ok(contents) = std::fs::read_to_string(&path)
+        {
+            visit(&path, &contents);
         }
     }
 }

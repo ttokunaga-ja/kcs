@@ -8,44 +8,41 @@ members = [
     "crates/kio-pipeline",
     "crates/kio-search",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-edition = "2021"
-rust-version = "1.86"
+edition = "2024"
+rust-version = "1.97.1"
 license-file = "LICENSE.md"
 
 [workspace.dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 kio-core = { path = "crates/kio-core" }
 kio-index = { path = "crates/kio-index" }
 kio-pipeline = { path = "crates/kio-pipeline" }
 kio-search = { path = "crates/kio-search" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_jcs = "0.1"
-jsonschema = { version = "0.26", default-features = false }
-sha2 = "0.10"
-thiserror = "1"
-toml = "0.8"
+serde_jcs = "0.2"
+jsonschema = { version = "0.49", default-features = false }
+sha2 = "0.11"
+thiserror = "2"
+toml = "1.1"
 # QA21 (2026-07-22 orchestrator ruling): format-preserving single-key TOML
 # edits for the network-approval write path (`.kio/config.toml`'s
-# `[adapter.policy].allow_network`) — `toml 0.8` already vendors this crate
+# `[adapter.policy].allow_network`) — `toml 1.1` already vendors this crate
 # internally, so pinning the same version adds no new dependency weight.
-toml_edit = "0.22"
+toml_edit = "0.25"
 unicode-normalization = "0.1"
-base64 = "0.22"
+base64 = "0.23"
+cap-primitives = "4.0.2"
 # Offline PDF text extraction (07 §2.1): real-world text-layer PDFs
 # (TeX / LibreOffice output) carry FlateDecode-compressed content streams and
 # ToUnicode CMaps; miniz_oxide is the bounded inflate primitive. Pure Rust,
 # no C build, already the narrow-waist inflate crate of the flate2 ecosystem.
-miniz_oxide = "0.8"
-getrandom = "0.3"
-ureq = { version = "2", default-features = false, features = ["json"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+miniz_oxide = "0.9"
+getrandom = "0.4"
+ureq = { version = "3.4", default-features = false, features = ["json", "rustls"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 windows-sys = { version = "0.61.2", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Threading", "Win32_UI_Shell"] }
-# Pinned to the stable 0.1.6: the 0.1.7+ alpha releases ship a broken build
-# (`sqlite-vec.c` #includes `sqlite-vec-diskann.c`, which is not packaged in the
-# crate, so cc-rs fails). 0.1.6 compiles cleanly against bundled rusqlite 0.32
-# and provides the `vec0` module used by `chunk_vec` (04 §4.3).
-sqlite-vec = "=0.1.6"
+sqlite-vec = "0.1.9"

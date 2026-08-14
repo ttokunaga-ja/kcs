@@ -626,7 +626,7 @@ fn discover_child_scopes_inner(
             return Err(crate::PipelineError::Io {
                 path: root.display().to_string(),
                 message: err.to_string(),
-            })
+            });
         }
     };
     if entries.len() > MAX_CHILD_SCOPE_DIRECTORIES {
@@ -832,7 +832,7 @@ pub fn load_index_vcs_repos(scope_path: &Path) -> Result<bool> {
             return Err(crate::PipelineError::Io {
                 path: path.display().to_string(),
                 message: err.to_string(),
-            })
+            });
         }
     };
     let value: toml::Value =
@@ -1233,7 +1233,7 @@ pub fn current_scan_policy_allows_file(scope_path: &Path, input_path: &str) -> R
             return Err(crate::PipelineError::Io {
                 path: path.display().to_string(),
                 message: err.to_string(),
-            })
+            });
         }
     };
     if !listed.file_type().is_file() {
@@ -1275,7 +1275,7 @@ pub fn current_bound_scan_policy_allows_file(
             return Err(crate::PipelineError::Io {
                 path: input_path.to_owned(),
                 message: error.to_string(),
-            })
+            });
         }
     };
     if !listed.file_type().is_file() {
@@ -1782,7 +1782,7 @@ fn read_bound_optional_regular_text(dir: &File, name: &str) -> Result<Option<Str
             return Err(crate::PipelineError::Io {
                 path: name.to_owned(),
                 message: error.to_string(),
-            })
+            });
         }
     };
     if !listed.file_type().is_file() || listed.len() > MAX_BOUND_SCAN_METADATA_BYTES {
@@ -2796,12 +2796,14 @@ mod tests {
             "[generated_parent_policy]\nunknown = true\n",
         )
         .unwrap();
-        assert!(build_scan_preview(ScanPreviewRequest {
-            scope_path: dir.path().display().to_string(),
-            include_raw_hashes: false,
-            require_network_approval: false,
-        })
-        .is_err());
+        assert!(
+            build_scan_preview(ScanPreviewRequest {
+                scope_path: dir.path().display().to_string(),
+                include_raw_hashes: false,
+                require_network_approval: false,
+            })
+            .is_err()
+        );
         assert!(parse_generated_parent_policy_payload(
             r#"{\"rules\":[{\"pattern\":\"private.md\",\"negated\":false,\"scope_prefix\":\"../escape\"}]}"#
         )
@@ -2833,9 +2835,10 @@ mod tests {
         )
         .unwrap();
         let plan = discover_child_scopes(dir.path()).unwrap();
-        assert!(plan
-            .candidates
-            .iter()
-            .all(|candidate| candidate.path != "private" || candidate.status != "planned"));
+        assert!(
+            plan.candidates
+                .iter()
+                .all(|candidate| candidate.path != "private" || candidate.status != "planned")
+        );
     }
 }

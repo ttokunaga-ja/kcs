@@ -33,8 +33,8 @@
 
 use std::collections::BTreeMap;
 
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 use crate::{AdapterError, Result};
 
@@ -356,6 +356,39 @@ fn xml_error(err: quick_xml::Error) -> AdapterError {
     AdapterError::ContractViolation(format!("XLSX XML is malformed: {err}"))
 }
 
+fn decoded_text(text: &quick_xml::events::BytesText<'_>) -> Result<String> {
+    let decoded = text.decode().map_err(|error| {
+        AdapterError::ContractViolation(format!("XLSX XML text is malformed: {error}"))
+    })?;
+    quick_xml::escape::unescape(&decoded)
+        .map(|value| value.into_owned())
+        .map_err(|error| {
+            AdapterError::ContractViolation(format!("XLSX XML text is malformed: {error}"))
+        })
+}
+
+/// quick-xml 0.41 surfaces references as their own event instead of folding
+/// them into text. Resolve only XML's predefined/numeric entities; user-defined
+/// entities have no OOXML-safe definition in this parser and must not become
+/// silently missing text.
+fn decoded_reference(reference: &quick_xml::events::BytesRef<'_>) -> Result<String> {
+    if let Some(character) = reference.resolve_char_ref().map_err(|error| {
+        AdapterError::ContractViolation(format!("XLSX XML text is malformed: {error}"))
+    })? {
+        return Ok(character.to_string());
+    }
+    let name = reference.decode().map_err(|error| {
+        AdapterError::ContractViolation(format!("XLSX XML text is malformed: {error}"))
+    })?;
+    quick_xml::escape::resolve_predefined_entity(&name)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AdapterError::ContractViolation(format!(
+                "XLSX XML contains unsupported entity reference `&{name};`"
+            ))
+        })
+}
+
 fn parse_workbook_sheets(xml: &[u8]) -> Result<Vec<SheetRef>> {
     let mut reader = reader_for(xml);
     let mut buf = Vec::new();
@@ -434,7 +467,12 @@ fn parse_shared_strings(xml: &[u8]) -> Result<Vec<String>> {
             },
             Event::Text(text) if in_text => {
                 if let Some(buffer) = current.as_mut() {
-                    buffer.push_str(&text.unescape().map_err(xml_error)?);
+                    buffer.push_str(&decoded_text(&text)?);
+                }
+            }
+            Event::GeneralRef(reference) if in_text => {
+                if let Some(buffer) = current.as_mut() {
+                    buffer.push_str(&decoded_reference(&reference)?);
                 }
             }
             Event::Eof => break,
@@ -583,7 +621,10 @@ fn parse_sheet(xml: &[u8], shared: &[String], formats: &CellFormats) -> Result<V
                 _ => {}
             },
             Event::Text(content) if in_value || in_inline_text => {
-                text.push_str(&content.unescape().map_err(xml_error)?);
+                text.push_str(&decoded_text(&content)?);
+            }
+            Event::GeneralRef(reference) if in_value || in_inline_text => {
+                text.push_str(&decoded_reference(&reference)?);
             }
             Event::Eof => break,
             _ => {}

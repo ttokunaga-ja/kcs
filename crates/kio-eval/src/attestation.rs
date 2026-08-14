@@ -10,10 +10,10 @@ use std::{collections::HashMap, fs, io::Read, path::Path};
 use cap_primitives::fs as cap_fs;
 use kio_core::{
     cas::{
-        canonical_json_bytes, hash_bytes, is_hash, ChunkObject, ObjectKind, MAX_CHUNK_OBJECT_BYTES,
-        MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES,
+        ChunkObject, MAX_CHUNK_OBJECT_BYTES, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES,
+        ObjectKind, canonical_json_bytes, hash_bytes, is_hash,
     },
-    dag::{CommitObject, TreeObject, MAX_TREE_ENTRIES},
+    dag::{CommitObject, MAX_TREE_ENTRIES, TreeObject},
     scope::KIO_FORMAT_VERSION,
 };
 use kio_search::EvidencePointer;
@@ -180,7 +180,7 @@ impl PointerAttestor {
                 "chunk profile does not match pointer",
             ));
         }
-        if chunk.gen != normalize.gen {
+        if chunk.r#gen != normalize.r#gen {
             return Err(PointerAttestationError::new(
                 "chunk generation does not match tree path",
             ));
@@ -546,11 +546,11 @@ mod tests {
     use std::fs;
 
     use kio_core::{
-        cas::{hash_bytes, ObjectKind, ObjectStore},
-        dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry},
+        cas::{ObjectKind, ObjectStore, hash_bytes},
+        dag::{CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, build_tree},
         scope::Repository,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use crate::boundary::BoundCorpus;
@@ -587,7 +587,7 @@ mod tests {
             spec_version: 1,
             raw_hash: RAW_HASH.to_owned(),
             tool_profile_hash: PROFILE_HASH.to_owned(),
-            gen: 3,
+            r#gen: 3,
             unit_key: "section:old".to_owned(),
             unit_content_hash: text_hash.clone(),
             heading_path: vec!["Old Document".to_owned(), "Historical".to_owned()],
@@ -604,7 +604,7 @@ mod tests {
             raw_hash: RAW_HASH.to_owned(),
             normalize: Some(NormalizeRef {
                 tool_profile_hash: PROFILE_HASH.to_owned(),
-                gen: 3,
+                r#gen: 3,
                 manifest_hash: MANIFEST_HASH.to_owned(),
             }),
         }])

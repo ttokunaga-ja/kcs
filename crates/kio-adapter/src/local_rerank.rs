@@ -42,10 +42,11 @@
 //! endorsed and measurement rejected. So [`RerankModel`] is a parameter, and
 //! the choice belongs to a `kio-eval` differential.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy, RERANK_RESPONSE_MAX_BYTES,
+    HttpPolicy, HttpResponse, RERANK_RESPONSE_MAX_BYTES, authenticated_agent, read_json_bounded,
+    require_success,
 };
 use crate::identity::tool_profile_hash;
 use crate::traits::RerankAdapter;
@@ -155,7 +156,8 @@ impl LocalRerankClient for EnvLocalRerankClient {
                 "top_n": top_n,
                 "truncate_prompt_tokens": TRUNCATE_TO_MODEL_LIMIT,
             }))
-            .map_err(rerank_http_error)?;
+            .map_err(rerank_http_error)
+            .and_then(|response| require_success(response, rerank_http_status_error))?;
         let body = read_json_bounded(response, RERANK_RESPONSE_MAX_BYTES, "rerank response")?;
         parse_rerank_results(&body, documents.len())
     }
@@ -164,25 +166,26 @@ impl LocalRerankClient for EnvLocalRerankClient {
 /// A local server has no credential and no invoice, so `Auth` and
 /// `QuotaExceeded` cannot arise. A full queue is a retry; nothing else is.
 fn rerank_http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(429, response) => {
+    AdapterError::Network(format!("rerank server unreachable: {error}"))
+}
+
+fn rerank_http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
-                message: format!("rerank server queue is full ({})", response.status_text()),
+                message: format!("rerank server queue is full ({})", response.status()),
                 retry_after_ms,
             }
         }
         // 400 is the measured shape for a malformed request AND for a
         // candidate over `max_model_len` when truncation was not requested.
         // Both are permanent for this request, so neither is retried.
-        ureq::Error::Status(code, _) => {
-            AdapterError::Network(format!("rerank server returned HTTP {code}"))
-        }
-        ureq::Error::Transport(transport) => {
-            AdapterError::Network(format!("rerank server unreachable: {transport}"))
-        }
+        code => AdapterError::Network(format!("rerank server returned HTTP {code}")),
     }
 }
 

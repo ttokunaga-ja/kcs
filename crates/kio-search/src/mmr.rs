@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::DiversifyStrategy;
 use crate::Result;
+use crate::query::DiversifyStrategy;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MmrConfig {

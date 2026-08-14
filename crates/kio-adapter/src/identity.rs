@@ -62,18 +62,18 @@ pub fn canonical_profile_value(profile: &Value) -> Result<Value> {
         .ok_or_else(|| AdapterError::ConfigSchema("profile must be an object".to_owned()))?;
     let mut canonical = Map::new();
     for field in PROFILE_FIELDS {
-        if let Some(value) = object.get(*field) {
-            if !value.is_null() {
-                canonical.insert((*field).to_owned(), value.clone());
-            }
+        if let Some(value) = object.get(*field)
+            && !value.is_null()
+        {
+            canonical.insert((*field).to_owned(), value.clone());
         }
     }
-    if let Some(pin) = canonical.get("model_version_pin").and_then(Value::as_str) {
-        if is_mutable_model_alias(pin) {
-            return Err(AdapterError::ConfigSchema(
-                "model_version_pin must be an immutable version, not a mutable alias".to_owned(),
-            ));
-        }
+    if let Some(pin) = canonical.get("model_version_pin").and_then(Value::as_str)
+        && is_mutable_model_alias(pin)
+    {
+        return Err(AdapterError::ConfigSchema(
+            "model_version_pin must be an immutable version, not a mutable alias".to_owned(),
+        ));
     }
     Ok(Value::Object(canonical))
 }

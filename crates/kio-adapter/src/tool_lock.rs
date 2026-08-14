@@ -531,13 +531,13 @@ fn validate_supported_runtime_target(
                 None => {}
             }
             require_declared_kind("markdown", table, target.kind)?;
-            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
-                if !model.starts_with(target.model_prefix) {
-                    return Err(AdapterError::ConfigSchema(format!(
-                        "unsupported markdown model `{model}`; expected a `{}` model for `{}`",
-                        target.model_prefix, target.tool_id
-                    )));
-                }
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str)
+                && !model.starts_with(target.model_prefix)
+            {
+                return Err(AdapterError::ConfigSchema(format!(
+                    "unsupported markdown model `{model}`; expected a `{}` model for `{}`",
+                    target.model_prefix, target.tool_id
+                )));
             }
         }
         "embedding" => {
@@ -567,13 +567,13 @@ fn validate_supported_runtime_target(
                 None => {}
             }
             require_declared_kind("embedding", table, target.kind)?;
-            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
-                if model != target.model {
-                    return Err(AdapterError::ConfigSchema(format!(
-                        "unsupported embedding model `{model}`; expected `{}` for `{}`",
-                        target.model, target.tool_id
-                    )));
-                }
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str)
+                && model != target.model
+            {
+                return Err(AdapterError::ConfigSchema(format!(
+                    "unsupported embedding model `{model}`; expected `{}` for `{}`",
+                    target.model, target.tool_id
+                )));
             }
             if table
                 .get("dimensions")
@@ -1152,29 +1152,27 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
             "declared {role} kind does not match effective `{expected_kind}` runtime"
         )));
     }
-    if let Some(target) = markdown_target {
-        if declared
+    if let Some(target) = markdown_target
+        && declared
             .model
             .as_deref()
             .is_some_and(|model| !model.starts_with(target.model_prefix))
-        {
-            return Err(AdapterError::ConfigSchema(format!(
-                "declared markdown model does not match effective `{}` runtime",
-                target.tool_id
-            )));
-        }
+    {
+        return Err(AdapterError::ConfigSchema(format!(
+            "declared markdown model does not match effective `{}` runtime",
+            target.tool_id
+        )));
     }
-    if let Some(target) = embedding_target {
-        if declared
+    if let Some(target) = embedding_target
+        && declared
             .model
             .as_deref()
             .is_some_and(|model| model != target.model)
-        {
-            return Err(AdapterError::ConfigSchema(format!(
-                "declared embedding model does not match effective `{}` runtime",
-                target.model
-            )));
-        }
+    {
+        return Err(AdapterError::ConfigSchema(format!(
+            "declared embedding model does not match effective `{}` runtime",
+            target.model
+        )));
     }
     // The Mistral-prefixed markdown model check that used to live here is gone:
     // the `markdown_target` block above does the same job against the resolved
@@ -1322,12 +1320,14 @@ auth = "env:MISTRAL_API_KEY"
 "#,
         )
         .unwrap();
-        assert!(validate_tools_toml(
-            br#"[markdown.mistral_ocr_markdownize]
+        assert!(
+            validate_tools_toml(
+                br#"[markdown.mistral_ocr_markdownize]
 auth = "file:/tmp/key"
 "#
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 
     // R13-2(a): unknown sections/fields and type mismatches are exit-2 schema
@@ -1349,16 +1349,18 @@ auth = "file:/tmp/key"
     // declarations are rejected until a matching dispatcher exists.
     #[test]
     fn declared_targets_must_match_builtin_runtime() {
-        assert!(validate_tools_toml(
-            br#"[markdown.mistral_ocr_markdownize]
+        assert!(
+            validate_tools_toml(
+                br#"[markdown.mistral_ocr_markdownize]
 kind = "online_api"
 cmd = "uvx kio-mistral-ocr-adapter"
 model = "mistral-ocr-latest"
 profile_hash = "sha256:..."
 capabilities = ["ocr", "layout_detection", "table_extraction"]
 "#,
-        )
-        .is_err());
+            )
+            .is_err()
+        );
         validate_tools_toml(
             br#"[markdown.mistral_ocr_markdownize]
 kind = "online_api"
@@ -1370,10 +1372,12 @@ auth = "env:MISTRAL_API_KEY"
         validate_tools_toml(b"[embedding.gemini_embedding_2]\nauth = \"env:GEMINI_API_KEY\"\n")
             .unwrap();
         validate_tools_toml(b"[markdown]\nauth = \"plain:sk-secret-key\"\n").unwrap();
-        assert!(validate_tools_toml(
-            b"[embedding.custom]\nurl = \"https://example.test\"\nauth = \"plain:key\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(
+                b"[embedding.custom]\nurl = \"https://example.test\"\nauth = \"plain:key\"\n"
+            )
+            .is_err()
+        );
     }
 
     /// Stage 1 (07 §3 / D1): an `offline_api` embedding target is accepted, and
@@ -1432,10 +1436,12 @@ auth = "env:MISTRAL_API_KEY"
     /// spawns a process; the external dispatcher is future work, 07 §7).
     #[test]
     fn offline_relaxation_does_not_leak_to_other_targets() {
-        assert!(validate_tools_toml(
-            b"[embedding.gemini_embedding_2]\nurl = \"http://127.0.0.1:8000\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(
+                b"[embedding.gemini_embedding_2]\nurl = \"http://127.0.0.1:8000\"\n"
+            )
+            .is_err()
+        );
         let cmd_entry = format!(
             "[embedding.{LOCAL_EMBEDDING_TOOL_ID}]\n\
              kind = \"offline_api\"\n\
@@ -1446,18 +1452,20 @@ auth = "env:MISTRAL_API_KEY"
         // the relaxation is per-target, not per-role. Mistral OCR is a cloud
         // API, so declaring it `offline_api` is a claim about the network that
         // is simply untrue.
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize]\nkind = \"offline_api\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize]\nkind = \"offline_api\"\n")
+                .is_err()
+        );
         // Symmetrically, the local pipeline may not be declared online.
         let online_local = format!("[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"online_api\"\n");
         assert!(validate_tools_toml(online_local.as_bytes()).is_err());
         // And an online markdown target still cannot name a url.
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize]\nurl = \"http://127.0.0.1:8118\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(
+                b"[markdown.mistral_ocr_markdownize]\nurl = \"http://127.0.0.1:8118\"\n"
+            )
+            .is_err()
+        );
         let cmd_local = format!(
             "[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"offline_api\"\ncmd = \"paddleocr\"\n"
         );
@@ -1519,10 +1527,12 @@ auth = "env:MISTRAL_API_KEY"
             "[markdown.{LOCAL_OCR_TOOL_ID}]\nkind = \"offline_api\"\nmodel = \"mistral-ocr-2505\"\n"
         );
         assert!(validate_tools_toml(crossed.as_bytes()).is_err());
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize]\nmodel = \"PaddleOCR-VL-0.9B\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(
+                b"[markdown.mistral_ocr_markdownize]\nmodel = \"PaddleOCR-VL-0.9B\"\n"
+            )
+            .is_err()
+        );
     }
 
     /// An unknown markdown tool_id must name what this build *can* run, the
@@ -1618,26 +1628,28 @@ auth = "env:MISTRAL_API_KEY"
         assert!(
             validate_tools_toml(b"[markdown.mistral_ocr_markdownize]\nurl = \"plain:\"\n").is_err()
         );
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize]\nmodel = \"keychain:\"\n"
-        )
-        .is_err());
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize]\nauth = \"file:/tmp/key\"\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize]\nmodel = \"keychain:\"\n")
+                .is_err()
+        );
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize]\nauth = \"file:/tmp/key\"\n")
+                .is_err()
+        );
     }
 
     // R13-2(2)/(e): auth resolution — env resolves, plain is literal, keychain is a
     // LOUD not-implemented error (never a silent noop).
     #[test]
     fn r13_2_resolve_auth_env_plain_and_keychain() {
-        std::env::set_var("KIO_TEST_R13_2_AUTH", "resolved-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("KIO_TEST_R13_2_AUTH", "resolved-key") };
         assert_eq!(
             resolve_auth("env:KIO_TEST_R13_2_AUTH").unwrap(),
             Some("resolved-key".to_owned())
         );
-        std::env::remove_var("KIO_TEST_R13_2_AUTH");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("KIO_TEST_R13_2_AUTH") };
         assert_eq!(resolve_auth("env:KIO_TEST_R13_2_AUTH").unwrap(), None);
         assert_eq!(
             resolve_auth("plain:abc123").unwrap(),
@@ -1655,7 +1667,8 @@ auth = "env:MISTRAL_API_KEY"
     // noop. Absent a declaration, the legacy fallback env var is used.
     #[test]
     fn r13_2_resolve_declared_or_env_api_key_honors_declaration() {
-        std::env::set_var("KIO_TEST_R13_2_DECLARED", "declared-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("KIO_TEST_R13_2_DECLARED", "declared-key") };
         let declared = DeclaredAdapter {
             tool_id: Some("gemini".to_owned()),
             model: None,
@@ -1666,7 +1679,8 @@ auth = "env:MISTRAL_API_KEY"
             resolve_declared_or_env_api_key(Some(&declared), "GEMINI_API_KEY").unwrap(),
             Some("declared-key".to_owned())
         );
-        std::env::remove_var("KIO_TEST_R13_2_DECLARED");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("KIO_TEST_R13_2_DECLARED") };
 
         // keychain → loud NotImplemented (e).
         let keychain = DeclaredAdapter {
@@ -1681,12 +1695,14 @@ auth = "env:MISTRAL_API_KEY"
         ));
 
         // No declaration → the legacy env fallback.
-        std::env::set_var("KIO_TEST_R13_2_FALLBACK", "fallback-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("KIO_TEST_R13_2_FALLBACK", "fallback-key") };
         assert_eq!(
             resolve_declared_or_env_api_key(None, "KIO_TEST_R13_2_FALLBACK").unwrap(),
             Some("fallback-key".to_owned())
         );
-        std::env::remove_var("KIO_TEST_R13_2_FALLBACK");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("KIO_TEST_R13_2_FALLBACK") };
     }
 
     #[test]
@@ -1779,18 +1795,18 @@ pages = 0.004
     /// silently-ignored/best-effort table.
     #[test]
     fn qa19_pricing_rejects_unknown_kind_and_bad_values() {
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize.pricing]\nbogus_kind = 0.01\n"
-        )
-        .is_err());
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize.pricing]\npages = \"0.004\"\n"
-        )
-        .is_err());
-        assert!(validate_tools_toml(
-            b"[markdown.mistral_ocr_markdownize.pricing]\npages = -0.004\n"
-        )
-        .is_err());
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize.pricing]\nbogus_kind = 0.01\n")
+                .is_err()
+        );
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize.pricing]\npages = \"0.004\"\n")
+                .is_err()
+        );
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize.pricing]\npages = -0.004\n")
+                .is_err()
+        );
         assert!(
             validate_tools_toml(b"[markdown.mistral_ocr_markdownize.pricing]\npages = nan\n")
                 .is_err()

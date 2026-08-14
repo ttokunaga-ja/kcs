@@ -9,7 +9,7 @@ license-file.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-cap-primitives = "3.4.5"
+cap-primitives.workspace = true
 kio-adapter = { path = "../kio-adapter" }
 kio-core.workspace = true
 rusqlite.workspace = true

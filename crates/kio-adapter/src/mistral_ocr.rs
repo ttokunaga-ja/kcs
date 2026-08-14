@@ -1,12 +1,12 @@
 //! Mistral OCR markdownize adapter.
 
 use crate::bbox_annotation::{
-    bbox_annotation_format, decode_image_annotation, mistral_markdownize_profile,
-    validate_bbox as validate_annotation_bbox, AnnotationTotals, BboxAnnotation,
+    AnnotationTotals, BboxAnnotation, bbox_annotation_format, decode_image_annotation,
+    mistral_markdownize_profile, validate_bbox as validate_annotation_bbox,
 };
 use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy, MODEL_CATALOG_MAX_BYTES,
-    OCR_RESPONSE_MAX_BYTES,
+    HttpPolicy, HttpResponse, MODEL_CATALOG_MAX_BYTES, OCR_RESPONSE_MAX_BYTES, authenticated_agent,
+    read_json_bounded, require_success,
 };
 use crate::identity::hash_bytes;
 use crate::traits::{MarkdownizeAdapter, PreferredRequestKind};
@@ -17,7 +17,7 @@ use crate::types::{
 use crate::{AdapterError, Result};
 use base64::Engine;
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -157,10 +157,11 @@ impl MistralOcrClient for EnvMistralOcrClient {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
             .get(&format!("{}/v1/models", self.base_url()))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_json_bounded(
             response,
             MODEL_CATALOG_MAX_BYTES,
@@ -214,15 +215,15 @@ impl MistralOcrClient for EnvMistralOcrClient {
         let expected_pages = expected_page_indices(request)?;
         let mut http_request = authenticated_agent(self.http_policy)
             .post(&format!("{}/v1/ocr", self.base_url()))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .set("Accept-Encoding", "identity");
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .header("Accept-Encoding", "identity");
         // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): attach the
         // provider idempotency header only when the profile resolved one —
         // dormant in production (the real Mistral OCR profile always declares
         // `ProviderIdempotency::NotProvided`), reachable via a test profile.
         if let Some((name, value)) = idempotency_header {
-            http_request = http_request.set(name, value);
+            http_request = http_request.header(name, value);
         }
         let response = http_request
             .send_json(ocr_request_body(
@@ -232,7 +233,8 @@ impl MistralOcrClient for EnvMistralOcrClient {
                 pages.as_deref(),
                 request.bbox_annotation_enabled,
             ))
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_ocr_json_bounded(
             response,
             OCR_RESPONSE_MAX_BYTES,
@@ -253,29 +255,33 @@ impl MistralOcrClient for EnvMistralOcrClient {
 /// `serde_json::Value` can collapse it. Other response semantics remain owned by
 /// `parse_ocr_response` below.
 fn read_ocr_json_bounded(
-    response: ureq::Response,
+    mut response: HttpResponse,
     max_bytes: usize,
     bbox_annotation_enabled: bool,
 ) -> Result<Value> {
     const CONTEXT: &str = "Mistral OCR response";
     if response
-        .header("Content-Encoding")
+        .headers()
+        .get("Content-Encoding")
+        .and_then(|encoding| encoding.to_str().ok())
         .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
     {
         return Err(AdapterError::ContractViolation(format!(
             "{CONTEXT} uses unsupported content encoding"
         )));
     }
-    if let Some(content_length) = response.header("Content-Length") {
-        if content_length
+    if let Some(content_length) = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        && content_length
             .parse::<u64>()
             .ok()
             .is_some_and(|length| length > max_bytes as u64)
-        {
-            return Err(AdapterError::ContractViolation(format!(
-                "{CONTEXT} exceeds {max_bytes} bytes"
-            )));
-        }
+    {
+        return Err(AdapterError::ContractViolation(format!(
+            "{CONTEXT} exceeds {max_bytes} bytes"
+        )));
     }
 
     let read_limit = max_bytes
@@ -283,7 +289,8 @@ fn read_ocr_json_bounded(
         .ok_or_else(|| AdapterError::ContractViolation("response limit overflow".to_owned()))?;
     let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
     response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .take(read_limit as u64)
         .read_to_end(&mut body)
         .map_err(|error| AdapterError::Network(format!("{CONTEXT} read failed: {error}")))?;
@@ -944,12 +951,12 @@ fn parse_ocr_response(
             policy.max_pages
         )));
     }
-    if let Some(expected) = expected_page_indices {
-        if page_values.len() != expected.len() {
-            return Err(AdapterError::ContractViolation(
-                "OCR response page count does not match requested pages".to_owned(),
-            ));
-        }
+    if let Some(expected) = expected_page_indices
+        && page_values.len() != expected.len()
+    {
+        return Err(AdapterError::ContractViolation(
+            "OCR response page count does not match requested pages".to_owned(),
+        ));
     }
 
     let explicit_count = page_values
@@ -1189,10 +1196,10 @@ fn parse_ocr_image(
 }
 
 fn split_data_uri(value: &str) -> (&str, &str) {
-    if let Some(rest) = value.strip_prefix("data:") {
-        if let Some((media, data)) = rest.split_once(";base64,") {
-            return (media, data);
-        }
+    if let Some(rest) = value.strip_prefix("data:")
+        && let Some((media, data)) = rest.split_once(";base64,")
+    {
+        return (media, data);
     }
     ("image/png", value)
 }
@@ -1333,32 +1340,31 @@ fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeM
 /// (`batch_client::EnvMistralBatchClient`, 07 §5.7) reuses the exact same
 /// mapping for its own requests.
 pub(crate) fn http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(401 | 403, response) => {
-            AdapterError::Auth(format!("Mistral OCR HTTP auth: {}", response.status_text()))
-        }
+    AdapterError::Network(error.to_string())
+}
+
+pub(crate) fn http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        401 | 403 => AdapterError::Auth(format!("Mistral OCR HTTP auth: {}", response.status())),
         // QA16: capture a real `Retry-After` header when the provider sent
         // one — never a fabricated value (`parse_retry_after_ms` returns
         // `None` for an absent/unparseable header, same as before this
         // field existed).
-        ureq::Error::Status(429, response) => {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
-                message: format!("Mistral OCR HTTP 429: {}", response.status_text()),
+                message: format!("Mistral OCR HTTP 429: {}", response.status()),
                 retry_after_ms,
             }
         }
-        ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
-            "Mistral OCR HTTP quota: {}",
-            response.status_text()
-        )),
-        ureq::Error::Status(code, response) => AdapterError::Network(format!(
-            "Mistral OCR HTTP {code}: {}",
-            response.status_text()
-        )),
-        ureq::Error::Transport(transport) => AdapterError::Network(transport.to_string()),
+        402 => {
+            AdapterError::QuotaExceeded(format!("Mistral OCR HTTP quota: {}", response.status()))
+        }
+        code => AdapterError::Network(format!("Mistral OCR HTTP {code}: {}", response.status())),
     }
 }
 
@@ -2097,14 +2103,16 @@ mod tests {
                 "images": [{"image_base64": "", "bbox": [1, 2, 30, 40]}]
             }]
         });
-        assert!(parse_ocr_response(
-            missing,
-            "mistral-ocr-2505",
-            Some(&[0]),
-            OcrResponsePolicy::default(),
-            true,
-        )
-        .is_err());
+        assert!(
+            parse_ocr_response(
+                missing,
+                "mistral-ocr-2505",
+                Some(&[0]),
+                OcrResponsePolicy::default(),
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2134,12 +2142,10 @@ mod tests {
         // Disabled annotation preserves the pre-existing response semantics, and
         // unrelated duplicate provider fields are still left to serde_json's
         // established last-value behavior.
-        assert!(parse_ocr_json_bytes_bounded(
-            duplicate_annotation,
-            duplicate_annotation.len(),
-            false,
-        )
-        .is_ok());
+        assert!(
+            parse_ocr_json_bytes_bounded(duplicate_annotation, duplicate_annotation.len(), false,)
+                .is_ok()
+        );
         let unrelated_duplicate = br#"{
             "pages": [{
                 "images": [{
@@ -2222,14 +2228,16 @@ mod tests {
                 {"index": 0, "markdown": "b"}
             ]
         });
-        assert!(parse_ocr_response(
-            duplicate,
-            "mistral-ocr-2505",
-            Some(&[0, 1]),
-            OcrResponsePolicy::default(),
-            false
-        )
-        .is_err());
+        assert!(
+            parse_ocr_response(
+                duplicate,
+                "mistral-ocr-2505",
+                Some(&[0, 1]),
+                OcrResponsePolicy::default(),
+                false
+            )
+            .is_err()
+        );
 
         let mixed = json!({
             "pages": [
@@ -2237,14 +2245,16 @@ mod tests {
                 {"markdown": "b"}
             ]
         });
-        assert!(parse_ocr_response(
-            mixed,
-            "mistral-ocr-2505",
-            Some(&[0, 1]),
-            OcrResponsePolicy::default(),
-            false
-        )
-        .is_err());
+        assert!(
+            parse_ocr_response(
+                mixed,
+                "mistral-ocr-2505",
+                Some(&[0, 1]),
+                OcrResponsePolicy::default(),
+                false
+            )
+            .is_err()
+        );
 
         let omitted = json!({
             "pages": [
@@ -2292,28 +2302,32 @@ mod tests {
             max_decoded_image_bytes_total: 3,
             max_persisted_image_bytes: 3,
         };
-        assert!(parse_ocr_response(
-            json!({"pages": [{"index": 0, "markdown": "1234"}]}),
-            "pin",
-            Some(&[0]),
-            policy,
-            false
-        )
-        .is_err());
-        assert!(parse_ocr_response(
-            json!({
-                "pages": [{
-                    "index": 0,
-                    "markdown": "ok",
-                    "images": [{"image_base64": "AAAA"}]
-                }]
-            }),
-            "pin",
-            Some(&[0]),
-            policy,
-            false
-        )
-        .is_err());
+        assert!(
+            parse_ocr_response(
+                json!({"pages": [{"index": 0, "markdown": "1234"}]}),
+                "pin",
+                Some(&[0]),
+                policy,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            parse_ocr_response(
+                json!({
+                    "pages": [{
+                        "index": 0,
+                        "markdown": "ok",
+                        "images": [{"image_base64": "AAAA"}]
+                    }]
+                }),
+                "pin",
+                Some(&[0]),
+                policy,
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]

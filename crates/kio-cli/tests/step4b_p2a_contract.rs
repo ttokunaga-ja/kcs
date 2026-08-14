@@ -9,11 +9,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kio_core::cas::{fanout_path, hash_bytes, ContentObjectKind, ObjectKind, ObjectStore};
+use kio_core::cas::{ContentObjectKind, ObjectKind, ObjectStore, fanout_path, hash_bytes};
 use kio_core::purge::{PurgeReason, PurgeState};
 use kio_core::scope::Repository;
 use kio_pipeline::markdownize::{load_validated_normalized_instance, persist_normalized_instance};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const CHILD_ENV_DENYLIST: &[&str] = &[
@@ -134,7 +134,7 @@ fn add_image_reference(dir: &TempDir, raw_hash: &str, image_bytes: &[u8]) -> Str
         repo.kio_dir(),
         raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
     )
     .unwrap();
     let image_hash = hash_bytes(image_bytes);
@@ -167,7 +167,7 @@ fn add_image_references(dir: &TempDir, raw_hash: &str, images: &[&[u8]]) -> Vec<
         repo.kio_dir(),
         raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
     )
     .unwrap();
     let mut hashes = Vec::with_capacity(images.len());
@@ -905,9 +905,11 @@ fn pa31_tombstone_is_durable_before_physical_deletion_and_history_is_append_only
         Some(PurgeReason::Legal)
     );
     // Physical deletion happened (raw object gone).
-    assert!(store
-        .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
+            .is_err()
+    );
     // History is append-only: HEAD moved forward to a NEW commit, the old
     // commit object is unmodified content-addressed history, not rewritten.
     let head_after = fs::read(kio_dir.join("HEAD")).unwrap();
@@ -932,13 +934,15 @@ fn pa32_shared_derived_objects_survive_purge_only_when_a_live_reference_remains(
         repo.kio_dir(),
         &fixture.raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
     )
     .unwrap();
     let prepared_hash = instance.manifest.units[0].prepared_hash.clone();
-    assert!(store
-        .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
-        .is_ok());
+    assert!(
+        store
+            .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
+            .is_ok()
+    );
 
     fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
     json_success(
@@ -953,9 +957,11 @@ fn pa32_shared_derived_objects_survive_purge_only_when_a_live_reference_remains(
         ],
     );
     // Non-shared prepared object was deleted.
-    assert!(store
-        .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1306,12 +1312,16 @@ fn pa43_closure_enumerates_raw_prepared_image_and_chunk_object_types() {
     assert!(object_types.contains("prepared"));
     assert!(object_types.contains("image"));
     assert!(object_types.contains("chunk"));
-    assert!(items
-        .iter()
-        .any(|item| item["object_type"] == "raw" && item["hash"] == fixture.raw_hash));
-    assert!(items
-        .iter()
-        .any(|item| item["object_type"] == "image" && item["hash"] == image_hash));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["object_type"] == "raw" && item["hash"] == fixture.raw_hash)
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["object_type"] == "image" && item["hash"] == image_hash)
+    );
 
     // Resume to completion — the journal + closure sidecar are removed on
     // `done` (LC51-style cleanup), confirming the earlier fault injection
@@ -1348,7 +1358,7 @@ fn pa44_pa45_resumed_purge_reuses_the_fixed_closure_not_a_live_rescan() {
             repo.kio_dir(),
             &fixture.raw_hash,
             &normalize.tool_profile_hash,
-            normalize.gen,
+            normalize.r#gen,
         )
         .unwrap();
         instance.manifest.units[0].prepared_hash.clone()
@@ -1374,11 +1384,13 @@ fn pa44_pa45_resumed_purge_reuses_the_fixed_closure_not_a_live_rescan() {
 
     let closure_before_resume = read_closure_sidecar(&kio_dir);
     // PA44: prepared_hash was decided REMOVABLE (non-shared) at `prepared`.
-    assert!(closure_before_resume["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["object_type"] == "prepared" && item["hash"] == prepared_hash));
+    assert!(
+        closure_before_resume["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["object_type"] == "prepared" && item["hash"] == prepared_hash)
+    );
 
     // Resume — the closure content hash referenced by the journal must be
     // unchanged (PA44's "fixed once, reused verbatim").
@@ -1400,9 +1412,11 @@ fn pa44_pa45_resumed_purge_reuses_the_fixed_closure_not_a_live_rescan() {
     assert_eq!(output["status"], "purged");
     let store = ObjectStore::new(&kio_dir);
     // PA45: the object recorded in the closure was actually deleted.
-    assert!(store
-        .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_content_object(ContentObjectKind::Prepared, &prepared_hash)
+            .is_err()
+    );
     let _ = closure_hash_before;
 }
 

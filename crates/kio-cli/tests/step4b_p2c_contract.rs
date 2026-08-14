@@ -38,8 +38,8 @@
 use std::fs;
 
 use assert_cmd::Command;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use kio_core::cas::{ObjectKind, ObjectStore};
 use kio_core::gc::ShallowReceipt;
 use serde_json::Value;

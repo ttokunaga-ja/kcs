@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cas::{canonical_json_bytes, fanout_path, is_hash};
 use crate::{ExitCode, KioError, Result};
@@ -220,7 +220,7 @@ impl LifecycleEvent {
             _ => {
                 return Err(corrupt_state(
                     "lifecycle event kind is not valid for this marker kind",
-                ))
+                ));
             }
         }
         validate_timestamp("lifecycle event at", &self.at)?;
@@ -879,10 +879,10 @@ impl PurgeState {
         // layer once the journal reaches its terminal-publish phase).
         let mut existing_tombstones = Vec::new();
         for raw_hash in &desired.target_raw_hashes {
-            if let Some(record) = self.read_tombstone(raw_hash)? {
-                if record.is_active() {
-                    existing_tombstones.push(record);
-                }
+            if let Some(record) = self.read_tombstone(raw_hash)?
+                && record.is_active()
+            {
+                existing_tombstones.push(record);
             }
         }
         if !existing_tombstones.is_empty()
@@ -1764,7 +1764,7 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
 fn replace_file(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
     let source = source
@@ -1957,7 +1957,7 @@ fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 fn same_windows_private_file(left: &File, right: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
     fn information(file: &File) -> Option<BY_HANDLE_FILE_INFORMATION> {

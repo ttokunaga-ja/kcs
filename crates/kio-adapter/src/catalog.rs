@@ -9,10 +9,10 @@ use sha2::{Digest, Sha256};
 
 use crate::deterministic::DeterministicAdapter;
 use crate::gemini_embedding::{
-    GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
+    ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN, GeminiEmbeddingAdapter, GeminiEmbeddingClient,
 };
 use crate::local_embedding::{
-    LocalEmbeddingAdapter, LocalEmbeddingExecution, LOCAL_EMBEDDING_DEFAULT_MODEL,
+    LOCAL_EMBEDDING_DEFAULT_MODEL, LocalEmbeddingAdapter, LocalEmbeddingExecution,
 };
 use crate::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
@@ -321,12 +321,12 @@ pub fn run_standard_online_markdownize_with_bytes(
             return Err(AdapterError::RateLimit {
                 message: "mock 429".to_owned(),
                 retry_after_ms: Some(30_000),
-            })
+            });
         }
         // R16-7: a retryable NetworkError (mapped from `AdapterError::Network`) — unlike
         // rate_limit it may have been billed server-side, so each retry re-reserves.
         Some("network_error") => {
-            return Err(AdapterError::Network("mock network failure".to_owned()))
+            return Err(AdapterError::Network("mock network failure".to_owned()));
         }
         // R13-1: `incr_incomplete` simulates an OCR response that drops a requested
         // unit ONLY in incremental mode (a full re-send returns everything), so the
@@ -559,11 +559,11 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
             return Err(AdapterError::RateLimit {
                 message: "mock 429".to_owned(),
                 retry_after_ms: Some(30_000),
-            })
+            });
         }
         // R16-7: keep the seam arms in sync with `run_standard_online_markdownize`.
         Some("network_error") => {
-            return Err(AdapterError::Network("mock network failure".to_owned()))
+            return Err(AdapterError::Network("mock network failure".to_owned()));
         }
         Some("mock")
         | Some("partial")
@@ -1199,16 +1199,16 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
     ) -> Result<crate::gemini_embedding::EmbedBatchOutput> {
         match self.execution {
             AdoptedEmbeddingExecution::AuthError => {
-                return Err(AdapterError::Auth("mock auth failure".to_owned()))
+                return Err(AdapterError::Auth("mock auth failure".to_owned()));
             }
             AdoptedEmbeddingExecution::RateLimit => {
-                return Err(AdapterError::rate_limit("mock 429"))
+                return Err(AdapterError::rate_limit("mock 429"));
             }
             AdoptedEmbeddingExecution::RateLimitAfter => {
                 return Err(AdapterError::RateLimit {
                     message: "mock 429".to_owned(),
                     retry_after_ms: Some(30_000),
-                })
+                });
             }
             _ => {}
         }
@@ -1363,7 +1363,8 @@ mod tests {
         let input_bytes = b"%PDF mock";
         std::fs::write(&input, input_bytes).unwrap();
         let input_hash = crate::identity::hash_bytes(input_bytes);
-        std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock") };
         let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
             scope_id: "01H00000000000000000000000",
             kio_dir: temp.path(),
@@ -1386,13 +1387,15 @@ mod tests {
             idempotency_token: None,
         })
         .unwrap();
-        std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
         assert_eq!(outcome.profile.adapter_kind, AdapterKind::Markdownize);
         assert_eq!(outcome.response.updated_units.len(), 1);
 
         // A test-only missing output must not shrink the Prepared manifest. Capture
         // the complete provider-discovered set before the seam removes page:1.
-        std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial") };
         let partial = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
             scope_id: "01H00000000000000000000000",
             kio_dir: temp.path(),
@@ -1408,7 +1411,8 @@ mod tests {
             idempotency_token: None,
         })
         .unwrap();
-        std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
         assert!(partial.response.updated_units.is_empty());
         assert_eq!(partial.effective_prepared_unit_hints.len(), 1);
         assert_eq!(partial.effective_prepared_unit_hints[0].unit_key, "page:1");
@@ -1426,7 +1430,8 @@ mod tests {
         let input_bytes = b"%PDF bbox mock";
         std::fs::write(&input, input_bytes).unwrap();
         let input_hash = crate::identity::hash_bytes(input_bytes);
-        std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock") };
         let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
             scope_id: "01H00000000000000000000000",
             kio_dir: temp.path(),
@@ -1449,7 +1454,8 @@ mod tests {
             idempotency_token: None,
         })
         .unwrap();
-        std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
 
         assert_eq!(
             outcome.profile.tool_profile_hash,

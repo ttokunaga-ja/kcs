@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use kio_adapter::tool_lock::{load_tool_lock, tool_lock_hash};
 use kio_core::cas::{is_hash, read_bounded_regular_file};
 use kio_core::{ExitCode, KioError};
-use kio_pipeline::markdownize::{load_validated_normalized_instance, UnitStatus};
-use kio_pipeline::task::{validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskStatus};
+use kio_pipeline::markdownize::{UnitStatus, load_validated_normalized_instance};
+use kio_pipeline::task::{TaskDescriptor, TaskOutputRef, TaskStatus, validate_task_output_ref};
 use kio_pipeline::{PipelineError, Result as PipelineResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::atomic_overwrite_file;
 use crate::*;
@@ -175,7 +175,7 @@ pub(crate) struct ValidatedOnlinePromotion {
     pub input_path: String,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub created_at: String,
     pub bbox_annotation_enabled: bool,
 }
@@ -204,7 +204,7 @@ pub(crate) fn validated_online_promotions(
         let TaskOutputRef::NormalizedInstance {
             raw_hash,
             tool_profile_hash,
-            gen,
+            r#gen,
             ..
         } = output
         else {
@@ -214,7 +214,7 @@ pub(crate) fn validated_online_promotions(
             ));
         };
         let instance =
-            load_validated_normalized_instance(kio_dir, &raw_hash, &tool_profile_hash, gen)?;
+            load_validated_normalized_instance(kio_dir, &raw_hash, &tool_profile_hash, r#gen)?;
         let complete = !instance.manifest.units.is_empty()
             && instance
                 .manifest
@@ -239,7 +239,7 @@ pub(crate) fn validated_online_promotions(
             input_path: task.input_path.clone(),
             raw_hash,
             tool_profile_hash,
-            gen,
+            r#gen,
             created_at: task.created_at.clone(),
             bbox_annotation_enabled,
         });
@@ -338,7 +338,7 @@ fn plan_online_markdownize_promotion(
                 .and_then(|entry| entry.normalize.as_ref())
                 .is_none_or(|normalize| {
                     normalize.tool_profile_hash != candidate.tool_profile_hash
-                        || normalize.gen != candidate.gen
+                        || normalize.r#gen != candidate.r#gen
                 })
         })
         .map(|candidate| candidate.bbox_annotation_enabled)
@@ -373,7 +373,7 @@ fn plan_online_markdownize_promotion(
                 .and_then(|entry| entry.normalize.as_ref())
                 .is_some_and(|normalize| {
                     normalize.tool_profile_hash == candidate.tool_profile_hash
-                        && normalize.gen == candidate.gen
+                        && normalize.r#gen == candidate.r#gen
                 })
         });
         if let Some(candidate) = resolved.or(already_bound) {
@@ -416,7 +416,7 @@ fn plan_online_markdownize_promotion(
                 repo.kio_dir(),
                 &candidate.raw_hash,
                 &candidate.tool_profile_hash,
-                candidate.gen,
+                candidate.r#gen,
             )?;
             Ok((
                 candidate.input_path,
@@ -424,7 +424,7 @@ fn plan_online_markdownize_promotion(
                     expected_raw_hash: candidate.raw_hash,
                     normalize: NormalizeRef {
                         tool_profile_hash: candidate.tool_profile_hash,
-                        gen: candidate.gen,
+                        r#gen: candidate.r#gen,
                         manifest_hash,
                     },
                 },
@@ -600,10 +600,10 @@ mod tests {
     use std::fs;
 
     use kio_pipeline::markdownize::{
-        normalized_instance_dir, persist_normalized_instance, MarkdownizeMode,
-        NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
+        MarkdownizeMode, NormalizedInstanceManifest, NormalizedUnitManifestEntry,
+        NormalizedUnitObject, UnitStatus, normalized_instance_dir, persist_normalized_instance,
     };
-    use kio_pipeline::prepare::{hash_bytes, unit_ref, UnitType};
+    use kio_pipeline::prepare::{UnitType, hash_bytes, unit_ref};
     use kio_pipeline::task::{TaskDescriptor, TaskStatus, TaskType};
 
     use super::validated_online_promotions;
@@ -647,7 +647,7 @@ mod tests {
         let manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: profile_hash.clone(),
-            gen: 0,
+            r#gen: 0,
             parent_gen: None,
             run_id: "run_01TEST".to_owned(),
             units: vec![NormalizedUnitManifestEntry {
@@ -668,7 +668,7 @@ mod tests {
             raw_hash: raw_hash.clone(),
             prepared_hash,
             tool_profile_hash: profile_hash.clone(),
-            gen: 0,
+            r#gen: 0,
             mode: MarkdownizeMode::Full,
             markdown: "promoted mock text".to_owned(),
             metadata: BTreeMap::new(),
@@ -687,9 +687,11 @@ mod tests {
 
         let mut partial = task;
         partial.status = TaskStatus::Partial;
-        assert!(validated_online_promotions(&kio_dir, &[partial])
-            .unwrap()
-            .is_empty());
+        assert!(
+            validated_online_promotions(&kio_dir, &[partial])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -703,7 +705,7 @@ mod tests {
         let manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: profile_hash.clone(),
-            gen: 0,
+            r#gen: 0,
             parent_gen: None,
             run_id: "run_current".to_owned(),
             units: vec![NormalizedUnitManifestEntry {
@@ -724,7 +726,7 @@ mod tests {
             raw_hash: raw_hash.clone(),
             prepared_hash,
             tool_profile_hash: profile_hash.clone(),
-            gen: 0,
+            r#gen: 0,
             mode: MarkdownizeMode::Full,
             markdown: "promoted mock text".to_owned(),
             metadata: BTreeMap::new(),

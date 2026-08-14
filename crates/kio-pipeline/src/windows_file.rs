@@ -72,8 +72,8 @@ fn join_u32(high: u32, low: u32) -> u64 {
 pub(crate) fn information(file: &std::fs::File) -> std::io::Result<WindowsFileInformation> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
     };
 
     let mut raw = BY_HANDLE_FILE_INFORMATION::default();
@@ -204,18 +204,24 @@ mod tests {
         let first = std::fs::File::open(&first_path).unwrap();
         let same = std::fs::File::open(&first_path).unwrap();
         let second = std::fs::File::open(&second_path).unwrap();
-        assert!(information(&first)
-            .unwrap()
-            .same_identity(information(&same).unwrap()));
-        assert!(!information(&first)
-            .unwrap()
-            .same_identity(information(&second).unwrap()));
+        assert!(
+            information(&first)
+                .unwrap()
+                .same_identity(information(&same).unwrap())
+        );
+        assert!(
+            !information(&first)
+                .unwrap()
+                .same_identity(information(&second).unwrap())
+        );
 
         let linked = open_path_no_follow(&linked_path).unwrap();
         let linked_information = information(&linked).unwrap();
-        assert!(information(&first)
-            .unwrap()
-            .same_identity(linked_information));
+        assert!(
+            information(&first)
+                .unwrap()
+                .same_identity(linked_information)
+        );
         assert!(!linked_information.has_single_link());
 
         let directory_handle = open_path_no_follow(directory.path()).unwrap();

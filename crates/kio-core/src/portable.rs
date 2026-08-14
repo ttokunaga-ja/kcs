@@ -3,6 +3,8 @@
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::cas::lower_hex;
+
 const MAX_PORTABLE_LEAF_UTF16_UNITS: usize = 255;
 
 /// Versioned directory below `.kio/refs` holding every tag ref, each named by
@@ -79,7 +81,7 @@ pub fn portable_tag_leaf(logical_name: &str) -> String {
 #[must_use]
 pub fn portable_tag_digest64(logical_name: &str) -> String {
     let key = portable_collision_key(logical_name);
-    format!("{:x}", Sha256::digest(key.as_bytes()))
+    lower_hex(&Sha256::digest(key.as_bytes()))
 }
 
 /// Derive a portable open/view cache leaf without reusing the source basename.
@@ -93,15 +95,14 @@ pub fn portable_cache_leaf(logical_name: &str) -> String {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(logical_name);
-    let mut leaf = format!("open-{:x}", Sha256::digest(basename.as_bytes()));
-    if let Some((_, extension)) = basename.rsplit_once('.') {
-        if !extension.is_empty()
-            && extension.len() <= 16
-            && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        {
-            leaf.push('.');
-            leaf.push_str(&extension.to_ascii_lowercase());
-        }
+    let mut leaf = format!("open-{}", lower_hex(&Sha256::digest(basename.as_bytes())));
+    if let Some((_, extension)) = basename.rsplit_once('.')
+        && !extension.is_empty()
+        && extension.len() <= 16
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        leaf.push('.');
+        leaf.push_str(&extension.to_ascii_lowercase());
     }
     leaf
 }

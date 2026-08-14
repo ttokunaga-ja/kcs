@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
@@ -22,7 +22,7 @@ pub struct ChunkingConfig {
 pub struct NormalizedUnitInput {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub unit_key: String,
     /// Hash of exact normalized Markdown bytes. There is deliberately no
     /// legacy missing-value fallback.
@@ -61,7 +61,7 @@ pub fn chunk_hash(row: &ChunkRow) -> Result<String> {
     let mut map = Map::new();
     map.insert("byte_end".to_owned(), json!(row.byte_end));
     map.insert("byte_start".to_owned(), json!(row.byte_start));
-    map.insert("gen".to_owned(), json!(row.gen));
+    map.insert("gen".to_owned(), json!(row.r#gen));
     map.insert(
         "heading_path".to_owned(),
         json!(row.heading_path.clone().unwrap_or_default()),
@@ -231,7 +231,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     chunk_id: String::new(),
                     raw_hash: unit.raw_hash.clone(),
                     tool_profile_hash: unit.tool_profile_hash.clone(),
-                    gen: unit.gen,
+                    r#gen: unit.r#gen,
                     unit_key: unit.unit_key.clone(),
                     unit_content_hash: unit.unit_content_hash.clone(),
                     chunking_config_hash: input.config.chunking_config_hash.clone(),
@@ -327,14 +327,12 @@ fn heading_events(markdown: &str) -> Vec<HeadingEvent> {
         if is_fence_delimiter(line) {
             in_fence = !in_fence;
         }
-        if !in_fence {
-            if let Some((level, text)) = parse_atx_heading(line) {
-                events.push(HeadingEvent {
-                    start: char_offset,
-                    level,
-                    text,
-                });
-            }
+        if !in_fence && let Some((level, text)) = parse_atx_heading(line) {
+            events.push(HeadingEvent {
+                start: char_offset,
+                level,
+                text,
+            });
         }
         char_offset += line.chars().count();
     }
@@ -452,12 +450,12 @@ mod tests {
     const TOOL: &str = "sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0";
     const UNIT: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn fixture_row(gen: u64, section_id: Option<&str>, heading_path: Vec<&str>) -> ChunkRow {
+    fn fixture_row(r#gen: u64, section_id: Option<&str>, heading_path: Vec<&str>) -> ChunkRow {
         ChunkRow {
             chunk_id: String::new(),
             raw_hash: RAW.to_owned(),
             tool_profile_hash: TOOL.to_owned(),
-            gen,
+            r#gen,
             unit_key: "page:12".to_owned(),
             unit_content_hash: UNIT.to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
@@ -498,7 +496,7 @@ mod tests {
             chunk_id: String::new(),
             raw_hash: RAW.to_owned(),
             tool_profile_hash: TOOL.to_owned(),
-            gen: 0,
+            r#gen: 0,
             unit_key: "doc:1".to_owned(),
             unit_content_hash: UNIT.to_owned(),
             chunking_config_hash: "sha256:cfg".to_owned(),
@@ -551,7 +549,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: "intro\n```text\n# not heading\n```\n# 認証仕様\npara one\n\npara two\n## API Token\nbody".to_owned(),
@@ -561,15 +559,19 @@ mod tests {
         };
         let rows = chunk_normalized_instance(input).unwrap();
         assert!(rows.iter().any(|row| row.heading_path == Some(Vec::new())));
-        assert!(rows
-            .iter()
-            .any(|row| row.section_id.as_deref() == Some("認証仕様")));
-        assert!(rows
-            .iter()
-            .any(|row| row.section_id.as_deref() == Some("認証仕様/api-token")));
-        assert!(!rows
-            .iter()
-            .any(|row| row.section_id.as_deref() == Some("not-heading")));
+        assert!(
+            rows.iter()
+                .any(|row| row.section_id.as_deref() == Some("認証仕様"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.section_id.as_deref() == Some("認証仕様/api-token"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.section_id.as_deref() == Some("not-heading"))
+        );
     }
 
     /// A document that opens with blank lines must not index the blank run.
@@ -586,7 +588,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: "\n\n\n# H\nbody".to_owned(),
@@ -614,7 +616,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: "abc\n# H\nbody".to_owned(),
@@ -644,7 +646,7 @@ mod tests {
                 NormalizedUnitInput {
                     raw_hash: RAW.to_owned(),
                     tool_profile_hash: TOOL.to_owned(),
-                    gen: 0,
+                    r#gen: 0,
                     unit_key: "doc:1".to_owned(),
                     unit_content_hash: UNIT.to_owned(),
                     markdown: "# First\nfirst body of some length".to_owned(),
@@ -652,7 +654,7 @@ mod tests {
                 NormalizedUnitInput {
                     raw_hash: RAW.to_owned(),
                     tool_profile_hash: TOOL.to_owned(),
-                    gen: 0,
+                    r#gen: 0,
                     unit_key: "doc:2".to_owned(),
                     unit_content_hash: UNIT.to_owned(),
                     markdown: "second body, no heading here".to_owned(),
@@ -690,7 +692,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 // Section body ("paragraph one long enough\n\nparagraph two also
@@ -760,7 +762,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.clone(),
@@ -819,7 +821,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.clone(),
@@ -898,7 +900,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "page:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: markdown.to_owned(),
@@ -959,7 +961,7 @@ mod tests {
             units: vec![NormalizedUnitInput {
                 raw_hash: RAW.to_owned(),
                 tool_profile_hash: TOOL.to_owned(),
-                gen: 0,
+                r#gen: 0,
                 unit_key: "doc:1".to_owned(),
                 unit_content_hash: UNIT.to_owned(),
                 markdown: "a".repeat(n),

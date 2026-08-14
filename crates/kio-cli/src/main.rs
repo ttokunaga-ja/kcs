@@ -11,8 +11,8 @@ mod search_time;
 mod verify_objects;
 
 use crate::historical_reindex::{
-    pinned_done_units, retained_history_instances, retained_history_instances_for_roots,
-    RetainedNormalizedInstance,
+    RetainedNormalizedInstance, pinned_done_units, retained_history_instances,
+    retained_history_instances_for_roots,
 };
 use crate::ocr_discovery::{prepared_units_from_ocr_discovery, supports_ocr_from_scratch};
 use crate::online_task::targets_standard_online_markdownize;
@@ -27,18 +27,18 @@ use std::time::Instant;
 use cap_primitives::fs as cap_fs;
 use clap::{Args, Parser, Subcommand};
 use kio_adapter::batch_client::{
-    batch_input_line, batch_upload_filename, configured_mistral_batch_client, ocr_batch_body,
-    BatchJobStatus, BatchOutputLine, MistralBatchClient,
+    BatchJobStatus, BatchOutputLine, MistralBatchClient, batch_input_line, batch_upload_filename,
+    configured_mistral_batch_client, ocr_batch_body,
 };
 use kio_adapter::catalog::{
-    active_embedding_execution, active_local_ocr_execution, adopted_embedding_profile,
-    builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
-    declared_embedding_profile_for, effective_prepared_unit_hints, embedding_adapter_profile,
-    embedding_preferred_request_kind, local_ocr_handles_media_type, local_ocr_markdownize_adapter,
-    resolve_standard_online_markdownize_profile_with_bbox, run_embedding,
-    run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
-    standard_online_markdownize_profile_with_bbox, AdoptedEmbeddingExecution,
-    DeclaredEmbeddingProfile, EmbeddingExecution, StandardOnlineMarkdownizeRequest,
+    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, EmbeddingExecution,
+    StandardOnlineMarkdownizeRequest, active_embedding_execution, active_local_ocr_execution,
+    adopted_embedding_profile, builtin_offline_markdownize_adapter, builtin_prepare_profile,
+    convert_office_to_pdf, declared_embedding_profile_for, effective_prepared_unit_hints,
+    embedding_adapter_profile, embedding_preferred_request_kind, local_ocr_handles_media_type,
+    local_ocr_markdownize_adapter, resolve_standard_online_markdownize_profile_with_bbox,
+    run_embedding, run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
+    standard_online_markdownize_profile_with_bbox,
 };
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::local_ocr_markdownize::LocalOcrExecution;
@@ -51,106 +51,108 @@ use kio_adapter::types::{
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kio_core::cas::{
-    canonical_json_bytes, fanout_path, is_hash, read_bounded_regular_file, ChunkObject,
-    ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    ChunkObject, ContentObjectKind, MAX_RAW_OBJECT_BYTES, ObjectStore, canonical_json_bytes,
+    fanout_path, is_hash, read_bounded_regular_file,
 };
 use kio_core::dag::{CommitObject, CommitType, NormalizeRef, TreeObject};
 use kio_core::gc::{
-    snapshot_auto_clock_error, GcAutomationBinding, GcAutomationMode, GcSweepSession,
-    SnapshotAutoBinding, SnapshotAutoStateBinding,
+    GcAutomationBinding, GcAutomationMode, GcSweepSession, SnapshotAutoBinding,
+    SnapshotAutoStateBinding, snapshot_auto_clock_error,
 };
 use kio_core::history::HistoryReader;
-use kio_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
-use kio_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMode};
-use kio_core::schema::{validate_json_schema, SchemaKind};
+use kio_core::portable::{PORTABLE_TAGS_DIRECTORY, portable_cache_leaf, portable_tag_leaf};
+use kio_core::purge::{EventKind, PurgeState, TombstoneMode, canonical_final_event};
+use kio_core::schema::{SchemaKind, validate_json_schema};
 use kio_core::scope::{
+    DEFAULT_MAX_ARCHIVE_SCOPE_BYTES, InspectedObject, PendingNormalizeRef, Repository, StoreLock,
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
-    parse_utc_seconds, InspectedObject, PendingNormalizeRef, Repository, StoreLock,
-    DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
+    parse_utc_seconds,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::chunking::{
-    chunk_hash, chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+    ChunkingConfig, ChunkingInput, NormalizedUnitInput, chunk_hash, chunk_normalized_instance,
 };
 use kio_index::embedding_store::{self, f32_from_le_bytes, f32_to_le_bytes};
 use kio_index::fts::{
-    open_existing_source_index_connection, read_bound_gc_index_metadata, BoundGcIndexMetadata,
-    ExistingSourceIndexOpenMode, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex,
-    CHUNK_VEC_DIMENSIONS,
+    BoundGcIndexMetadata, CHUNK_VEC_DIMENSIONS, ExistingSourceIndexOpenMode, FtsSchemaConfig,
+    FtsTokenizer, SqliteFtsIndex, open_existing_source_index_connection,
+    read_bound_gc_index_metadata,
 };
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_index::{
     ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
 };
 use kio_pipeline::budget::{
-    budget_warning, estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy,
-    utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate,
+    BudgetCapKind, BudgetCaps, BudgetEstimate, budget_warning, estimate_local_baseline_cost,
+    evaluate_budget_with_caps, read_budget_policy, utc_month,
 };
 use kio_pipeline::ledger::ops::{
-    batch_poll_candidates, check_then_reserve, device_claim, device_input_hash,
-    execute_bounded_sweep, get_batch_request, ledger_month_total, nonbillable_charge,
-    phase1_intent, phase2a_record_provider_scope, phase2a_record_upload_id,
+    AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount, BudgetCapConfig,
+    CapCheckResult, ClaimOutcome, TerminalWrite, batch_poll_candidates, check_then_reserve,
+    device_claim, device_input_hash, execute_bounded_sweep, get_batch_request, ledger_month_total,
+    nonbillable_charge, phase1_intent, phase2a_record_provider_scope, phase2a_record_upload_id,
     phase2b_record_job_create_started, phase2b_record_job_created, plan_bounded_sweep,
     recovery_finish_cleanup, recovery_settle_unknown, reset_contract_violations,
     resolve_abandon_selector, resolve_billing_from_reported_usage, stalled_rows,
     sync_record_provider_request_id, sync_recovery_candidates, terminal_transaction,
-    with_immediate_transaction, AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount,
-    BudgetCapConfig, CapCheckResult, ClaimOutcome, TerminalWrite,
+    with_immediate_transaction,
 };
 use kio_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kio_pipeline::ledger::{
     BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
 };
 use kio_pipeline::markdownize::{
-    build_normalized_view_layout, choose_markdownize_mode, load_validated_normalized_instance,
-    normalized_view_path, persist_normalized_instance, validate_markdownize_response,
-    validate_normalized_instance, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
-    MarkdownizeMode, NormalizedInstanceIdentity, NormalizedInstanceManifest,
-    NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus, ValidatedNormalizedInstance,
+    IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
+    NormalizedInstanceIdentity, NormalizedInstanceManifest, NormalizedUnitManifestEntry,
+    NormalizedUnitObject, UnitStatus, ValidatedNormalizedInstance, build_normalized_view_layout,
+    choose_markdownize_mode, load_validated_normalized_instance, normalized_view_path,
+    persist_normalized_instance, validate_markdownize_response, validate_normalized_instance,
 };
 use kio_pipeline::prepare::{
-    hash_bytes, map_units, pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
-    PrepareStageBytesRequest, PreparedUnit, UnitFingerprint, UnitType,
+    PrepareStageBytesRequest, PreparedUnit, UnitFingerprint, UnitType, hash_bytes, map_units,
+    pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
 };
 use kio_pipeline::scan::{
-    build_bound_scan_preview, build_scan_preview, build_scan_preview_with_inherited_rules,
-    classify_secret, configure_planned_child_index_command, current_bound_scan_policy_allows_file,
+    PlannedChildCommand, ScanCandidate, ScanPreview, ScanPreviewRequest, build_bound_scan_preview,
+    build_scan_preview, build_scan_preview_with_inherited_rules, classify_secret,
+    configure_planned_child_index_command, current_bound_scan_policy_allows_file,
     current_scan_policy_allows_file, discover_child_scopes, generated_parent_policy_for_child,
     generated_parent_policy_payload_for_child, hash_verified_scan_input,
     parse_generated_parent_policy_payload, read_bound_verified_scan_input,
-    read_verified_scan_input, PlannedChildCommand, ScanCandidate, ScanPreview, ScanPreviewRequest,
+    read_verified_scan_input,
 };
 use kio_pipeline::task::{
-    hold_reason_for_reason, retry_policy, task_can_complete_from_materialized_output,
-    task_can_enter_secret_hold, task_status_from_unit_counts, HoldReason, RetryErrorKind,
+    HoldReason, RetryErrorKind, hold_reason_for_reason, retry_policy,
+    task_can_complete_from_materialized_output, task_can_enter_secret_hold,
+    task_status_from_unit_counts,
 };
 use kio_pipeline::task::{
-    validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskStatus, TaskStore, TaskType,
+    TaskDescriptor, TaskOutputRef, TaskStatus, TaskStore, TaskType, validate_task_output_ref,
 };
 use kio_pipeline::unsupported::{
-    UnsupportedInputDisposition, UnsupportedInputStore, UNSUPPORTED_REASON_RESOLVED,
-    UNSUPPORTED_REASON_UNRECOGNIZED_BINARY,
+    UNSUPPORTED_REASON_RESOLVED, UNSUPPORTED_REASON_UNRECOGNIZED_BINARY,
+    UnsupportedInputDisposition, UnsupportedInputStore,
 };
 use kio_search::cursor::{
-    decode_cursor_token, encode_cursor_token, CursorExcludedScope, CursorToken, ScopeCursor,
-    ScopeMode,
+    CursorExcludedScope, CursorToken, ScopeCursor, ScopeMode, decode_cursor_token,
+    encode_cursor_token,
 };
 use kio_search::evidence::{
-    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
-    EvidencePointerIssueRequest, EVIDENCE_POINTER_SCHEMA_VERSION,
+    EVIDENCE_POINTER_SCHEMA_VERSION, EvidencePointer, EvidencePointerIssueRequest,
+    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri,
 };
-use kio_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
-use kio_search::object_uri::{extract_related_images, RelatedImage};
+use kio_search::mmr::{MmrCandidate, MmrConfig, diversify_candidates};
+use kio_search::object_uri::{RelatedImage, extract_related_images};
 use kio_search::query::{
-    query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
-    ScopeSelectionMode, SearchMode, TimeTravelSelector,
+    ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput, ScopeSelectionMode,
+    SearchMode, TimeTravelSelector, query_hash,
 };
 #[cfg(test)]
 use kio_search::rrf::BackendRank;
 use kio_search::rrf::RrfConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
@@ -160,13 +162,13 @@ use crate::promotion::{
     recover_pending_online_promotion,
 };
 use crate::search_history::{
-    at_target_ancestors, current_history_plan_from_cache, install_eligible_identities,
-    install_target_ancestors, plan_search_history, SearchContentKey, SearchHistoryBinding,
-    SearchHistoryPlan,
+    SearchContentKey, SearchHistoryBinding, SearchHistoryPlan, at_target_ancestors,
+    current_history_plan_from_cache, install_eligible_identities, install_target_ancestors,
+    plan_search_history,
 };
 use crate::search_time::{
-    reconcile_cursor_selector, since_cutoff_seconds, since_cutoff_utc, validate_cursor_cutoff,
-    PositiveDuration, TimeSelector, TimeSelectorFlags,
+    PositiveDuration, TimeSelector, TimeSelectorFlags, reconcile_cursor_selector,
+    since_cutoff_seconds, since_cutoff_utc, validate_cursor_cutoff,
 };
 
 /// 07-adapter-spec.md §5.1: `UnsupportedInputDisposition.reason` recorded for an
@@ -854,19 +856,17 @@ fn append_exit_override_error(output: &Value, code: ExitCode) {
         .map(str::to_owned)
         .unwrap_or_else(|| exit_override_error_code(code).to_owned());
     let mut context = json!({ "exit_code": code.code() });
-    if let Some(excluded) = output.get("excluded_scopes") {
-        if excluded.as_array().is_some_and(|array| !array.is_empty()) {
-            if let Some(object) = context.as_object_mut() {
-                object.insert("excluded_scopes".to_owned(), excluded.clone());
-            }
-        }
+    if let Some(excluded) = output.get("excluded_scopes")
+        && excluded.as_array().is_some_and(|array| !array.is_empty())
+        && let Some(object) = context.as_object_mut()
+    {
+        object.insert("excluded_scopes".to_owned(), excluded.clone());
     }
-    if let Some(failed) = output.get("failed_scopes") {
-        if failed.as_array().is_some_and(|array| !array.is_empty()) {
-            if let Some(object) = context.as_object_mut() {
-                object.insert("failed_scopes".to_owned(), failed.clone());
-            }
-        }
+    if let Some(failed) = output.get("failed_scopes")
+        && failed.as_array().is_some_and(|array| !array.is_empty())
+        && let Some(object) = context.as_object_mut()
+    {
+        object.insert("failed_scopes".to_owned(), failed.clone());
     }
     let _ = append_error_log(&KioError::new(
         error_code,
@@ -1304,7 +1304,7 @@ fn run_snapshot_auto() -> Result<Value> {
         match gc::preflight_automatic_bound(&session, &first_gc, "snapshot_auto")? {
             gc::AutomaticGcPreflight::Proceed { recovered, binding } => (recovered, binding),
             gc::AutomaticGcPreflight::Deferred(report) => {
-                return Ok(gc::deferred_before_publication("snapshot_auto", report))
+                return Ok(gc::deferred_before_publication("snapshot_auto", report));
             }
         };
     if gc_binding != first_gc
@@ -2068,7 +2068,7 @@ fn build_repository_scan_preview(
                 return Err(kio_pipeline::PipelineError::contract(
                     "KIO-E-SCOPE-BOUND-STATE-001",
                     "descriptor-bound repository is missing a retained scope or store handle",
-                ))
+                ));
             }
         }
     }
@@ -2084,14 +2084,14 @@ fn read_repository_scan_input(
     {
         match (repo.bound_root_handle(), repo.bound_kio_handle()) {
             (Some(root), Some(_)) => {
-                return read_bound_verified_scan_input(root, input_path, max_bytes)
+                return read_bound_verified_scan_input(root, input_path, max_bytes);
             }
             (None, None) => {}
             _ => {
                 return Err(kio_pipeline::PipelineError::contract(
                     "KIO-E-SCOPE-BOUND-STATE-001",
                     "descriptor-bound repository is missing a retained scope or store handle",
-                ))
+                ));
             }
         }
     }
@@ -2106,14 +2106,14 @@ fn repository_scan_policy_allows_file(
     {
         match (repo.bound_root_handle(), repo.bound_kio_handle()) {
             (Some(root), Some(kio)) => {
-                return current_bound_scan_policy_allows_file(root, kio, input_path, &[])
+                return current_bound_scan_policy_allows_file(root, kio, input_path, &[]);
             }
             (None, None) => {}
             _ => {
                 return Err(kio_pipeline::PipelineError::contract(
                     "KIO-E-SCOPE-BOUND-STATE-001",
                     "descriptor-bound repository is missing a retained scope or store handle",
-                ))
+                ));
             }
         }
     }
@@ -2313,12 +2313,13 @@ struct ParsedSearch {
 /// Kept out of `run_repair`'s body so the store lock stays within the window
 /// QB11 (`step4b_p3b_contract.rs`) scans for.
 fn reject_inert_repair_yes(args: &RepairArgs) -> Result<()> {
-    if let RepairOperation::VerifyObjects(verify) = &args.operation {
-        if verify.yes && !verify.prune_orphans {
-            return Err(KioError::invalid_usage(
-                "repair verify-objects --yes requires --prune-orphans",
-            ));
-        }
+    if let RepairOperation::VerifyObjects(verify) = &args.operation
+        && verify.yes
+        && !verify.prune_orphans
+    {
+        return Err(KioError::invalid_usage(
+            "repair verify-objects --yes requires --prune-orphans",
+        ));
     }
     Ok(())
 }
@@ -3397,7 +3398,7 @@ struct ScoredCandidate {
 struct ChunkMeta {
     raw_hash: String,
     tool_profile_hash: String,
-    gen: u64,
+    r#gen: u64,
     heading_path: Option<Vec<String>>,
     section_id: Option<String>,
     /// Unit-local UTF-8 byte offset (03 §8.1). NOT NULL in `chunks` — always
@@ -3623,7 +3624,7 @@ fn replica_candidates_for(
             meta: ChunkMeta {
                 raw_hash: row.raw_hash,
                 tool_profile_hash: row.tool_profile_hash,
-                gen: row.gen,
+                r#gen: row.r#gen,
                 heading_path: row
                     .heading_path
                     .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
@@ -3639,7 +3640,7 @@ fn replica_candidates_for(
                 .map(|binding| SearchHistoryBinding {
                     raw_hash: binding.raw_hash,
                     tool_profile_hash: binding.tool_profile_hash,
-                    gen: binding.gen,
+                    r#gen: binding.r#gen,
                     manifest_hash: binding.manifest_hash,
                     path_at_commit: binding.path_at_commit,
                     pointer_commit: binding.pointer_commit,
@@ -3952,7 +3953,7 @@ fn collect_scope_projection(
                 chunk_id: row.get(0)?,
                 raw_hash: row.get(1)?,
                 tool_profile_hash: row.get(2)?,
-                gen: row.get::<_, i64>(3)? as u64,
+                r#gen: row.get::<_, i64>(3)? as u64,
                 text: row.get(4)?,
                 heading_path: row.get(5)?,
                 section_id: row.get(6)?,
@@ -4081,7 +4082,7 @@ fn projection_bindings_for_plan(
             .expect("a grouped history identity always has a binding");
         let normalize = NormalizeRef {
             tool_profile_hash: key.tool_profile_hash.clone(),
-            gen: key.gen,
+            r#gen: key.r#gen,
             manifest_hash: key.manifest_hash.clone(),
         };
         match pinned_done_units(kio_dir, &binding.raw_hash, &normalize) {
@@ -4195,7 +4196,7 @@ fn projection_bindings_for_plan(
                     SearchContentKey {
                         raw_hash: row.get(1)?,
                         tool_profile_hash: row.get(2)?,
-                        gen: row.get::<_, i64>(3)? as u64,
+                        r#gen: row.get::<_, i64>(3)? as u64,
                         manifest_hash: row.get(6)?,
                     },
                 ))
@@ -4265,7 +4266,7 @@ fn projection_bindings_for_plan(
                 chunk_id: chunk_id.clone(),
                 raw_hash: binding.raw_hash.clone(),
                 tool_profile_hash: binding.tool_profile_hash.clone(),
-                gen: binding.gen,
+                r#gen: binding.r#gen,
                 manifest_hash: binding.manifest_hash.clone(),
                 path_at_commit: binding.path_at_commit.clone(),
                 pointer_commit: binding.pointer_commit.clone(),
@@ -4772,7 +4773,7 @@ fn source_tree_entry_projections(
                 path: row.get(0)?,
                 raw_hash: row.get(1)?,
                 tool_profile_hash: row.get(2)?,
-                gen: row.get(3)?,
+                r#gen: row.get(3)?,
                 manifest_hash: row.get(4)?,
             })
         })
@@ -4799,7 +4800,7 @@ fn normalized_tree_entry_projections(tree: &TreeObject) -> Vec<TreeEntryProjecti
                     path: entry.path.clone(),
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
-                    gen: Some(normalize.gen),
+                    r#gen: Some(normalize.r#gen),
                     manifest_hash: Some(normalize.manifest_hash.clone()),
                 })
         })
@@ -5412,10 +5413,10 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // a vector (a replay's own vector is already cached from ITS page 1 —
     // re-writing the identical bytes under the identical digest-derived path
     // is harmless but pointless). Best-effort (see `persist_query_vector_cache`).
-    if decoded_cursor.is_none() {
-        if let (Some(vector), Some(digest)) = (&query_embedding, &query_vector_digest) {
-            persist_query_vector_cache(digest, vector);
-        }
+    if decoded_cursor.is_none()
+        && let (Some(vector), Some(digest)) = (&query_embedding, &query_vector_digest)
+    {
+        persist_query_vector_cache(digest, vector);
     }
 
     // N8: the short-query short-circuit is NOT taken here — it must run after scope
@@ -6156,19 +6157,19 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // PC19/PC21's per-scope `index_generation` check has the same shape and the
     // same remedy: the state this page is replaying against moved, so the page
     // cannot be served and the caller re-runs without a cursor.
-    if let Some(Some(frozen)) = &cursor_collection_generation {
-        if global_ranks.collection_generation != *frozen {
-            return Err(KioError::new(
-                "KIO-E-SEARCH-CURSOR-001",
-                "search cursor aggregator collection generation changed",
-                json!({
-                    "reason": "collection_generation_mismatch",
-                    "expected": frozen,
-                    "actual": global_ranks.collection_generation,
-                }),
-                ExitCode::InvalidUsage,
-            ));
-        }
+    if let Some(Some(frozen)) = &cursor_collection_generation
+        && global_ranks.collection_generation != *frozen
+    {
+        return Err(KioError::new(
+            "KIO-E-SEARCH-CURSOR-001",
+            "search cursor aggregator collection generation changed",
+            json!({
+                "reason": "collection_generation_mismatch",
+                "expected": frozen,
+                "actual": global_ranks.collection_generation,
+            }),
+            ExitCode::InvalidUsage,
+        ));
     }
     candidates.sort_by(|a, b| {
         b.rrf_score
@@ -6456,7 +6457,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                 let key = (
                     candidate.meta.raw_hash.clone(),
                     candidate.meta.tool_profile_hash.clone(),
-                    candidate.meta.gen,
+                    candidate.meta.r#gen,
                     binding.manifest_hash.clone(),
                 );
                 let instance = unit_figures.entry(key).or_insert_with(|| {
@@ -6464,7 +6465,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                         &candidate.scope_path,
                         &candidate.meta.raw_hash,
                         &candidate.meta.tool_profile_hash,
-                        candidate.meta.gen,
+                        candidate.meta.r#gen,
                         &binding.manifest_hash,
                     )
                 });
@@ -6942,23 +6943,24 @@ fn prepare_scope_from_replica_header(
     // `.kio/index/sqlite.db`.  A Ready header is itself the durable replacement
     // for the old source-db "cached tree_entries" proof, so a deliberately
     // shallow current snapshot remains serviceable from that projection.  If a
-    // bare snapshot advanced HEAD and the writer marked its replica Rebuilding,
+    // manual snapshot advanced HEAD and the writer marked its replica Rebuilding,
     // however, a shallow selected tree has no certified projection and must be
     // reported as `snapshot_shallow`, not the less-specific rebuilding state.
-    if matches!(time_selector, TimeSelector::Current) && !exec.from_cursor {
-        if let Some(snapshot_commit) = header.current_snapshot_commit.as_deref() {
-            match HistoryReader::new(repo.kio_dir()).snapshot(snapshot_commit) {
-                Ok(_) => {}
-                Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {
-                    if !matches!(
-                        header.index_status,
-                        kio_index::aggregator::AggIndexStatus::Ready
-                    ) {
-                        return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
-                    }
+    if matches!(time_selector, TimeSelector::Current)
+        && !exec.from_cursor
+        && let Some(snapshot_commit) = header.current_snapshot_commit.as_deref()
+    {
+        match HistoryReader::new(repo.kio_dir()).snapshot(snapshot_commit) {
+            Ok(_) => {}
+            Err(error) if error.error_code() == "KIO-E-COMMIT-SHALLOW-001" => {
+                if !matches!(
+                    header.index_status,
+                    kio_index::aggregator::AggIndexStatus::Ready
+                ) {
+                    return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
                 }
-                Err(error) => return Err(ScopeSearchError::Fatal(error)),
             }
+            Err(error) => return Err(ScopeSearchError::Fatal(error)),
         }
     }
     // HEAD and the device replica are separate durable stores. A writer marks
@@ -7056,7 +7058,7 @@ fn prepare_scope_from_replica_header(
                     scope_id: exec.target.scope_id.clone(),
                     raw_hash: binding.raw_hash,
                     tool_profile_hash: binding.tool_profile_hash,
-                    gen: binding.gen,
+                    r#gen: binding.r#gen,
                     manifest_hash: binding.manifest_hash,
                     path_at_commit: binding.path_at_commit,
                     pointer_commit: binding.pointer_commit,
@@ -7356,12 +7358,12 @@ fn read_instance_figures(
     kio_dir: &Path,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
     manifest_hash: &str,
 ) -> BTreeMap<String, UnitFigures> {
     let normalize = NormalizeRef {
         tool_profile_hash: tool_profile_hash.to_owned(),
-        gen,
+        r#gen,
         manifest_hash: manifest_hash.to_owned(),
     };
     let Ok(units) = pinned_done_units(kio_dir, raw_hash, &normalize) else {
@@ -7499,14 +7501,14 @@ fn ensure_snapshot_tree_entries(
     }
     let mut rows: Vec<TreeEntryProjection> = Vec::new();
     for entry in &tree.entries {
-        let (tool_profile_hash, gen, manifest_hash) =
+        let (tool_profile_hash, r#gen, manifest_hash) =
             entry
                 .normalize
                 .as_ref()
                 .map_or((None, None, None), |normalize| {
                     (
                         Some(normalize.tool_profile_hash.clone()),
-                        Some(normalize.gen),
+                        Some(normalize.r#gen),
                         Some(normalize.manifest_hash.clone()),
                     )
                 });
@@ -7514,7 +7516,7 @@ fn ensure_snapshot_tree_entries(
             path: entry.path.clone(),
             raw_hash: entry.raw_hash.clone(),
             tool_profile_hash,
-            gen,
+            r#gen,
             manifest_hash,
         });
     }
@@ -7528,7 +7530,7 @@ struct TreeEntryProjection {
     path: String,
     raw_hash: String,
     tool_profile_hash: Option<String>,
-    gen: Option<u64>,
+    r#gen: Option<u64>,
     manifest_hash: Option<String>,
 }
 
@@ -7555,7 +7557,7 @@ fn insert_snapshot_tree_entries(
                 row.path,
                 row.raw_hash,
                 row.tool_profile_hash,
-                row.gen,
+                row.r#gen,
                 row.manifest_hash
             ],
         )
@@ -7969,12 +7971,11 @@ fn aggregate_store_recovery_hints(excluded: &[Value]) -> Vec<&'static str> {
         let present = excluded
             .iter()
             .any(|e| e.get("reason").and_then(Value::as_str) == Some(reason));
-        if present {
-            if let Some(hint) = store_corruption_recovery_hint(reason) {
-                if !out.contains(&hint) {
-                    out.push(hint);
-                }
-            }
+        if present
+            && let Some(hint) = store_corruption_recovery_hint(reason)
+            && !out.contains(&hint)
+        {
+            out.push(hint);
         }
     }
     out
@@ -8204,7 +8205,7 @@ fn thousands_separated(digits: &str) -> String {
     let bytes = digits.as_bytes();
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
     for (index, byte) in bytes.iter().enumerate() {
-        if index > 0 && (bytes.len() - index) % 3 == 0 {
+        if index > 0 && (bytes.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*byte as char);
@@ -8584,12 +8585,12 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
         let Some(normalize) = &entry.normalize else {
             continue;
         };
-        let new_gen = normalize.gen + 1;
+        let new_gen = normalize.r#gen + 1;
         match copy_normalized_instance_gen(
             repo.kio_dir(),
             &entry.raw_hash,
             &normalize.tool_profile_hash,
-            normalize.gen,
+            normalize.r#gen,
             new_gen,
         ) {
             Ok(()) => {
@@ -8609,7 +8610,7 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
                         expected_raw_hash: entry.raw_hash.clone(),
                         normalize: NormalizeRef {
                             tool_profile_hash: normalize.tool_profile_hash.clone(),
-                            gen: new_gen,
+                            r#gen: new_gen,
                             manifest_hash,
                         },
                     },
@@ -8626,7 +8627,7 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
                         expected_raw_hash: entry.raw_hash.clone(),
                         normalize: NormalizeRef {
                             tool_profile_hash: normalize.tool_profile_hash.clone(),
-                            gen: normalize.gen,
+                            r#gen: normalize.r#gen,
                             // PB04: gen is unchanged (copy failed, previous
                             // gen retained) — carry the existing manifest_hash
                             // forward rather than recompute.
@@ -8637,7 +8638,7 @@ fn run_reindex(args: ReindexArgs) -> Result<Value> {
                 reindex_skipped.push(json!({
                     "raw_hash": entry.raw_hash,
                     "path": entry.path,
-                    "gen": normalize.gen,
+                    "gen": normalize.r#gen,
                     "reason": error.error_code(),
                 }));
             }
@@ -8774,7 +8775,7 @@ pub(crate) fn retained_unit_introductions(
             let key = (
                 instance.raw_hash.clone(),
                 instance.normalize.tool_profile_hash.clone(),
-                instance.normalize.gen,
+                instance.normalize.r#gen,
                 unit.unit_key,
                 unit_content_hash,
             );
@@ -8810,7 +8811,7 @@ fn unit_authorities_from_inputs(units: &[NormalizedUnitInput]) -> AuthenticatedN
                 (
                     unit.raw_hash.clone(),
                     unit.tool_profile_hash.clone(),
-                    unit.gen,
+                    unit.r#gen,
                     unit.unit_key.clone(),
                     unit.unit_content_hash.clone(),
                 ),
@@ -8833,7 +8834,7 @@ pub(crate) fn authenticate_chunk_row(
     let key = (
         row.raw_hash.clone(),
         row.tool_profile_hash.clone(),
-        row.gen,
+        row.r#gen,
         row.unit_key.clone(),
         row.unit_content_hash.clone(),
     );
@@ -9021,14 +9022,14 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         .map_err(|error| annotate_index_stage(error, "walk retained history"))?;
     for node in graph.nodes_in_visit_order() {
         for entry in &node.tree.entries {
-            let (tool_profile_hash, gen, manifest_hash) =
+            let (tool_profile_hash, r#gen, manifest_hash) =
                 entry
                     .normalize
                     .as_ref()
                     .map_or((None, None, None), |normalize| {
                         (
                             Some(normalize.tool_profile_hash.clone()),
-                            Some(normalize.gen),
+                            Some(normalize.r#gen),
                             Some(normalize.manifest_hash.clone()),
                         )
                     });
@@ -9039,7 +9040,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                     path: entry.path.clone(),
                     raw_hash: entry.raw_hash.clone(),
                     tool_profile_hash,
-                    gen,
+                    r#gen,
                     manifest_hash,
                 },
             );
@@ -9064,7 +9065,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
             (
                 instance.raw_hash.clone(),
                 instance.normalize.tool_profile_hash.clone(),
-                instance.normalize.gen,
+                instance.normalize.r#gen,
             )
         })
         .collect::<BTreeSet<_>>();
@@ -9084,7 +9085,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 (
                     entry.raw_hash.clone(),
                     normalize.tool_profile_hash.clone(),
-                    normalize.gen,
+                    normalize.r#gen,
                 )
             })
         })
@@ -9104,7 +9105,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
             (
                 chunk.row.raw_hash.clone(),
                 chunk.row.tool_profile_hash.clone(),
-                chunk.row.gen,
+                chunk.row.r#gen,
             )
         })
         .collect::<BTreeSet<(String, String, u64)>>();
@@ -9161,7 +9162,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         let identity_key = (
             retained.raw_hash.clone(),
             retained.normalize.tool_profile_hash.clone(),
-            retained.normalize.gen,
+            retained.normalize.r#gen,
         );
         if !head_identity_keys.contains(&identity_key)
             && existing_identity_keys.contains(&identity_key)
@@ -9181,7 +9182,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                     Ok(NormalizedUnitInput {
                         raw_hash: unit.raw_hash,
                         tool_profile_hash: unit.tool_profile_hash,
-                        gen: unit.gen,
+                        r#gen: unit.r#gen,
                         unit_key: unit.unit_key,
                         unit_content_hash,
                         markdown: unit.markdown,
@@ -9204,7 +9205,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 skipped_units.push(json!({
                     "raw_hash": retained.raw_hash,
                     "path": retained.raw_path,
-                    "gen": retained.normalize.gen,
+                    "gen": retained.normalize.r#gen,
                     "reason": error.error_code(),
                 }));
                 continue;
@@ -9260,7 +9261,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         if retained_instance_keys.contains(&(
             entry.raw_hash.clone(),
             normalize.tool_profile_hash.clone(),
-            normalize.gen,
+            normalize.r#gen,
         )) {
             continue;
         }
@@ -9272,7 +9273,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                     Ok(NormalizedUnitInput {
                         raw_hash: unit.raw_hash,
                         tool_profile_hash: unit.tool_profile_hash,
-                        gen: unit.gen,
+                        r#gen: unit.r#gen,
                         unit_key: unit.unit_key,
                         unit_content_hash,
                         markdown: unit.markdown,
@@ -9291,7 +9292,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                     // R17-6: carry the tree entry's gen so `attach_skipped_units` can
                     // tell a stale-but-searchable document (its cached chunks at this
                     // gen survive in chunks.jsonl) from a genuinely unserveable one.
-                    "gen": normalize.gen,
+                    "gen": normalize.r#gen,
                     "reason": error.error_code(),
                 }));
                 continue;
@@ -9351,7 +9352,7 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // The source SQLite `tree_entries` table (below) is the writer-side cache for
     // live-chunk resolution and local short-hash resolution. Direct
     // search uses only replica corpus rows and bindings. The former JSON projection
-    // went stale after a bare snapshot and is no longer written (L3).
+    // went stale after a manual snapshot and is no longer written (L3).
     rebuild_sqlite_index(
         repo,
         &tree_entries,
@@ -9391,7 +9392,7 @@ fn stage_retained_unit_publication_events(
         let identity = (
             creation.row.raw_hash.clone(),
             creation.row.tool_profile_hash.clone(),
-            creation.row.gen,
+            creation.row.r#gen,
             creation.row.unit_key.clone(),
             creation.row.unit_content_hash.clone(),
         );
@@ -9477,7 +9478,7 @@ fn append_new_chunk_association(
             .is_some_and(|stored| {
                 stored.row.raw_hash == row.raw_hash
                     && stored.row.tool_profile_hash == row.tool_profile_hash
-                    && stored.row.gen == row.gen
+                    && stored.row.r#gen == row.r#gen
                     && stored.row.unit_key == row.unit_key
                     && stored.row.unit_content_hash == row.unit_content_hash
             });
@@ -9585,7 +9586,7 @@ fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kio_dir
     let live: BTreeSet<(String, u64)> = read_stored_chunks(kio_dir)
         .unwrap_or_default()
         .into_iter()
-        .map(|chunk| (chunk.row.raw_hash, chunk.row.gen))
+        .map(|chunk| (chunk.row.raw_hash, chunk.row.r#gen))
         .collect();
     let mut entries = report.skipped_units.clone();
     let mut any_unsearchable = false;
@@ -9595,8 +9596,8 @@ fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kio_dir
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let gen = entry.get("gen").and_then(Value::as_u64);
-        let searchable = gen.is_some_and(|gen| live.contains(&(raw_hash.clone(), gen)));
+        let r#gen = entry.get("gen").and_then(Value::as_u64);
+        let searchable = r#gen.is_some_and(|r#gen| live.contains(&(raw_hash.clone(), r#gen)));
         if !searchable {
             any_unsearchable = true;
         }
@@ -9786,7 +9787,7 @@ fn open_chunk_ledger_dir(kio_dir: &Path, create_missing: bool) -> Result<ChunkLe
                 Ok(()) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
                 Err(error) => {
-                    return Err(KioError::io(error.to_string(), path.display().to_string()))
+                    return Err(KioError::io(error.to_string(), path.display().to_string()));
                 }
             };
             if created {
@@ -9925,7 +9926,7 @@ pub(crate) fn replace_chunk_ledger_contents(kio_dir: &Path, bytes: &[u8]) -> Res
             return Err(KioError::io(
                 error.to_string(),
                 directory.path.join(target).display().to_string(),
-            ))
+            ));
         }
     }
 
@@ -9976,7 +9977,7 @@ pub(crate) fn replace_chunk_ledger_contents(kio_dir: &Path, bytes: &[u8]) -> Res
                 return Err(KioError::io(
                     error.to_string(),
                     directory.path.join(candidate).display().to_string(),
-                ))
+                ));
             }
         }
     }
@@ -10481,7 +10482,7 @@ fn persist_chunk_object(kio_dir: &Path, row: &ChunkRow) -> Result<()> {
         spec_version: 1,
         raw_hash: row.raw_hash.clone(),
         tool_profile_hash: row.tool_profile_hash.clone(),
-        gen: row.gen,
+        r#gen: row.r#gen,
         unit_key: row.unit_key.clone(),
         unit_content_hash: row.unit_content_hash.clone(),
         heading_path: row.heading_path.clone().unwrap_or_default(),
@@ -10533,7 +10534,7 @@ fn truncate_torn_chunk_tail(kio_dir: &Path) -> Result<()> {
                 Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound
             ) =>
         {
-            return Ok(())
+            return Ok(());
         }
         Err(error) => return Err(error),
     };
@@ -10684,7 +10685,7 @@ fn rebuild_sqlite_index(
             return Err(KioError::io(
                 error.to_string(),
                 temp_path.display().to_string(),
-            ))
+            ));
         }
     }
     match build_sqlite_index_at(
@@ -10972,7 +10973,7 @@ pub(crate) fn authenticate_publication_event_cached(
         event.introduction_commit.clone(),
         creation.row.raw_hash.clone(),
         creation.row.tool_profile_hash.clone(),
-        creation.row.gen,
+        creation.row.r#gen,
         creation.row.unit_key.clone(),
         creation.row.unit_content_hash.clone(),
     );
@@ -11011,7 +11012,7 @@ pub(crate) fn authenticate_publication_event_cached(
                 .entry((
                     entry.raw_hash,
                     normalize.tool_profile_hash.clone(),
-                    normalize.gen,
+                    normalize.r#gen,
                 ))
                 .or_default()
                 .insert(normalize);
@@ -11025,7 +11026,7 @@ pub(crate) fn authenticate_publication_event_cached(
         .get(&(
             creation.row.raw_hash.clone(),
             creation.row.tool_profile_hash.clone(),
-            creation.row.gen,
+            creation.row.r#gen,
         ))
         .cloned()
         .unwrap_or_default();
@@ -11033,7 +11034,7 @@ pub(crate) fn authenticate_publication_event_cached(
         let unit_key = (
             creation.row.raw_hash.clone(),
             normalize.tool_profile_hash.clone(),
-            normalize.gen,
+            normalize.r#gen,
             normalize.manifest_hash.clone(),
         );
         if !cache.pinned_unit_closures.contains_key(&unit_key) {
@@ -11136,7 +11137,7 @@ fn build_sqlite_index_at(
         let identity = (
             chunk.row.raw_hash.clone(),
             chunk.row.tool_profile_hash.clone(),
-            chunk.row.gen,
+            chunk.row.r#gen,
             chunk.row.unit_key.clone(),
             chunk.row.unit_content_hash.clone(),
         );
@@ -11231,7 +11232,7 @@ fn build_sqlite_index_at(
                     entry.path,
                     entry.raw_hash,
                     entry.tool_profile_hash,
-                    entry.gen,
+                    entry.r#gen,
                     entry.manifest_hash
                 ],
             )
@@ -11882,7 +11883,7 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
             let key = (
                 stored.row.raw_hash.clone(),
                 stored.row.tool_profile_hash.clone(),
-                stored.row.gen,
+                stored.row.r#gen,
             );
             live.get(&key).map(|path| SearchableChunk {
                 row: stored.row,
@@ -11920,10 +11921,10 @@ fn live_tree_entries_at(
         .map_err(|err| KioError::schema(err.to_string()))?;
     let mut map = BTreeMap::new();
     for row in rows {
-        let (raw_hash, tool_profile_hash, gen, path) =
+        let (raw_hash, tool_profile_hash, r#gen, path) =
             row.map_err(|err| KioError::schema(err.to_string()))?;
-        if let (Some(tool), Some(gen)) = (tool_profile_hash, gen) {
-            map.insert((raw_hash, tool, gen as u64), path);
+        if let (Some(tool), Some(r#gen)) = (tool_profile_hash, r#gen) {
+            map.insert((raw_hash, tool, r#gen as u64), path);
         }
     }
     Ok(map)
@@ -12242,10 +12243,10 @@ const RELATED_IMAGES_MIN_AREA_RATIO_DEFAULT: f64 = 0.25;
 /// floors, and taking the CWD's would let a scope that merely happens to be
 /// nearby decide how another scope's figures are presented.
 fn related_images_min_area_ratio(single_scope_kio_dir: Option<&Path>) -> Result<f64> {
-    if let Some(kio_dir) = single_scope_kio_dir {
-        if let Some(ratio) = read_related_images_min_area_ratio(&kio_dir.join("config.toml"))? {
-            return Ok(ratio);
-        }
+    if let Some(kio_dir) = single_scope_kio_dir
+        && let Some(ratio) = read_related_images_min_area_ratio(&kio_dir.join("config.toml"))?
+    {
+        return Ok(ratio);
     }
     Ok(
         read_related_images_min_area_ratio(&user_config_toml_path())?
@@ -12787,15 +12788,15 @@ fn resolve_manifest_missing(
     // Resurrection link: valid only when canonical final event (procedure 5)
     // is itself `retired` (not a stale non-canonical marker's own tail) --
     // re-run the same checks with `resurrection_commit` as the basis.
-    if canonical.event.kind == EventKind::Retired {
-        if let Some(link_commit) = &canonical.event.resurrection_commit {
-            match check_publication_and_association(target, repo, chunk_hash, link_commit)? {
-                AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
-                AssociationCheck::IndexRebuilding => {
-                    return Ok(PointInTimeAttribution::IndexRebuilding)
-                }
-                AssociationCheck::NotFound => {}
+    if canonical.event.kind == EventKind::Retired
+        && let Some(link_commit) = &canonical.event.resurrection_commit
+    {
+        match check_publication_and_association(target, repo, chunk_hash, link_commit)? {
+            AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
+            AssociationCheck::IndexRebuilding => {
+                return Ok(PointInTimeAttribution::IndexRebuilding);
             }
+            AssociationCheck::NotFound => {}
         }
     }
     Ok(PointInTimeAttribution::NotFound)
@@ -13005,7 +13006,7 @@ fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u
         kio_dir,
         &chunk.raw_hash,
         &chunk.tool_profile_hash,
-        chunk.gen,
+        chunk.r#gen,
     )
     .ok()?;
     let unit = instance.units.iter().find(|unit| {
@@ -13029,7 +13030,7 @@ fn resolve_chunk_view(kio_dir: &Path, chunk: &ChunkObject) -> Option<(PathBuf, u
         kio_dir,
         &chunk.raw_hash,
         &chunk.tool_profile_hash,
-        chunk.gen,
+        chunk.r#gen,
     );
     if fs::read(&view_path).ok()?.as_slice() != layout.text.as_bytes() {
         return None;
@@ -13119,10 +13120,10 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             // not apply to it): binding ambiguity only exists once there are
             // two or more raw_hash matches to choose between.
             let entry = if let [single] = raw_matches.as_slice() {
-                if let Some(normalize) = &single.normalize {
-                    if normalize.tool_profile_hash != pointer.tool_profile_hash {
-                        return Err(invalid_pointer_identity_error(pointer));
-                    }
+                if let Some(normalize) = &single.normalize
+                    && normalize.tool_profile_hash != pointer.tool_profile_hash
+                {
+                    return Err(invalid_pointer_identity_error(pointer));
                 }
                 *single
             } else {
@@ -13143,7 +13144,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             // missed, 08 §3). `entry_gen` stays `None` for a no-normalize
             // entry — the chunk (raw, tool) identity check below is the
             // available guard there.
-            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
+            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.r#gen);
             (false, entry_gen, entry.normalize.clone())
         }
         // Tree object gone (genuine shallow: commit present, tree GC'd) — resolve the
@@ -13213,10 +13214,10 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // from gen N+1 under a commit that only ever normalized gen N. The shallow
     // path has no tree entry, so gen stays unbound there (chunk (raw, tool)
     // identity is the only available check).
-    if let Some(entry_gen) = entry_gen {
-        if chunk.gen != entry_gen {
-            return Err(invalid_pointer_identity_error(pointer));
-        }
+    if let Some(entry_gen) = entry_gen
+        && chunk.r#gen != entry_gen
+    {
+        return Err(invalid_pointer_identity_error(pointer));
     }
 
     // 08 §3.1 procedures 6a/6b (item 2 of this session's task): point-in-time
@@ -13225,28 +13226,26 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // explicitly too so the two stay mutually exclusive by construction
     // (PB50).
     let mut manifest_missing = false;
-    if !commit_shallow {
-        if let Some(normalize) = &entry_normalize {
-            match verify_point_in_time_attribution(
-                &target,
-                &repo,
-                &pointer.raw_hash,
-                normalize,
-                &pointer.chunk_hash,
-                &chunk,
-                &pointer.commit,
-            )? {
-                PointInTimeAttribution::Alive => {}
-                PointInTimeAttribution::ManifestMissing => manifest_missing = true,
-                PointInTimeAttribution::NotFound => {
-                    return Err(purge_not_found_error(&target, &pointer.raw_hash));
-                }
-                PointInTimeAttribution::StoreCorrupt => {
-                    return Err(point_in_time_store_corrupt_error(pointer));
-                }
-                PointInTimeAttribution::IndexRebuilding => {
-                    return Err(point_in_time_index_rebuilding_error())
-                }
+    if !commit_shallow && let Some(normalize) = &entry_normalize {
+        match verify_point_in_time_attribution(
+            &target,
+            &repo,
+            &pointer.raw_hash,
+            normalize,
+            &pointer.chunk_hash,
+            &chunk,
+            &pointer.commit,
+        )? {
+            PointInTimeAttribution::Alive => {}
+            PointInTimeAttribution::ManifestMissing => manifest_missing = true,
+            PointInTimeAttribution::NotFound => {
+                return Err(purge_not_found_error(&target, &pointer.raw_hash));
+            }
+            PointInTimeAttribution::StoreCorrupt => {
+                return Err(point_in_time_store_corrupt_error(pointer));
+            }
+            PointInTimeAttribution::IndexRebuilding => {
+                return Err(point_in_time_index_rebuilding_error());
             }
         }
     }
@@ -13346,10 +13345,10 @@ fn resolve_scope_id_in_registry_with_hint(
         Ok(registry) => {
             if let Ok(entries) = registry.lookup_scope_id(scope_id) {
                 for entry in &entries {
-                    if let Some(target) = open_scope_from_hint(&entry.root_path) {
-                        if target.scope_id == scope_id {
-                            live.push(target);
-                        }
+                    if let Some(target) = open_scope_from_hint(&entry.root_path)
+                        && target.scope_id == scope_id
+                    {
+                        live.push(target);
                     }
                 }
             }
@@ -13394,12 +13393,11 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
     // Pragmatic fallback: the current working directory when it *is* the scope.
     // Object URIs carry no scope_path hint, and a freshly-created scope may not
     // yet be listed in the registry. Still gated on scope_id equality.
-    if let Ok(repo) = Repository::open_current() {
-        if let Ok(target) = scope_target(repo.root()) {
-            if target.scope_id == scope_id {
-                return Ok(target);
-            }
-        }
+    if let Ok(repo) = Repository::open_current()
+        && let Ok(target) = scope_target(repo.root())
+        && target.scope_id == scope_id
+    {
+        return Ok(target);
     }
     // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): every path above
     // resolves a candidate through `scope_target` / `Repository::open_current`,
@@ -13418,14 +13416,14 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
     if let Some(hint) = scope_path_hint {
         candidate_roots.push(PathBuf::from(hint));
     }
-    if let Ok(registry) = RegistryDb::open_default() {
-        if let Ok(entries) = registry.lookup_scope_id(scope_id) {
-            candidate_roots.extend(
-                entries
-                    .into_iter()
-                    .map(|entry| PathBuf::from(entry.root_path)),
-            );
-        }
+    if let Ok(registry) = RegistryDb::open_default()
+        && let Ok(entries) = registry.lookup_scope_id(scope_id)
+    {
+        candidate_roots.extend(
+            entries
+                .into_iter()
+                .map(|entry| PathBuf::from(entry.root_path)),
+        );
     }
     if let Ok(cwd) = std::env::current_dir() {
         candidate_roots.push(cwd);
@@ -13480,12 +13478,11 @@ fn open_scope_from_hint(hint: &str) -> Option<ScopeTarget> {
     if let Ok(target) = scope_target(path) {
         return Some(target);
     }
-    if path.file_name() == Some(std::ffi::OsStr::new(".kio")) {
-        if let Some(parent) = path.parent() {
-            if let Ok(target) = scope_target(parent) {
-                return Some(target);
-            }
-        }
+    if path.file_name() == Some(std::ffi::OsStr::new(".kio"))
+        && let Some(parent) = path.parent()
+        && let Ok(target) = scope_target(parent)
+    {
+        return Some(target);
     }
     None
 }
@@ -13516,10 +13513,8 @@ fn open_cas_byte_object(
     if !is_hash(hash) {
         return Err(KioError::invalid_usage("CAS object hash is invalid"));
     }
-    if scan_working_tree {
-        if let Some(path) = find_working_tree_raw(&target.repo_root, hash)? {
-            return Ok(Some((path, false)));
-        }
+    if scan_working_tree && let Some(path) = find_working_tree_raw(&target.repo_root, hash)? {
+        return Ok(Some((path, false)));
     }
     let Some((_object_path, bytes)) =
         read_cas_byte_object(&target.kio_dir, subdir, hash, MAX_RAW_OBJECT_BYTES)?
@@ -13660,7 +13655,7 @@ fn read_or_verify_bounded_cas_object(
             bytes.extend_from_slice(&buffer[..count]);
         }
     }
-    let actual_hash = format!("sha256:{:x}", hasher.finalize());
+    let actual_hash = format!("sha256:{}", kio_core::cas::lower_hex(&hasher.finalize()));
     if actual_hash != expected_hash {
         return Err(store_corrupt_error(path, "CAS object hash mismatch"));
     }
@@ -14487,7 +14482,7 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
             .ok_or_else(|| KioError::not_found(object.hash.clone()))?;
         if association.row.raw_hash != chunk.raw_hash
             || association.row.tool_profile_hash != chunk.tool_profile_hash
-            || association.row.gen != chunk.gen
+            || association.row.r#gen != chunk.r#gen
             || association.row.unit_key != chunk.unit_key
             || association.row.unit_content_hash != chunk.unit_content_hash
         {
@@ -14635,11 +14630,11 @@ fn copy_normalized_instance_gen(
             .map_err(pipeline_to_kio)?;
     let generated_at = now_utc_seconds();
     instance.manifest.parent_gen = Some(old_gen);
-    instance.manifest.gen = new_gen;
+    instance.manifest.r#gen = new_gen;
     instance.manifest.run_id = format!("run_{}", new_ulid(kio_dir));
     instance.manifest.generated_at = generated_at.clone();
     for unit in &mut instance.units {
-        unit.gen = new_gen;
+        unit.r#gen = new_gen;
         unit.generated_at.clone_from(&generated_at);
     }
     persist_normalized_instance(kio_dir, &instance.manifest, &instance.units)
@@ -15117,19 +15112,20 @@ fn run_batch_recovery_walk(
             now_ms,
             kio_pipeline::ledger::ops::DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
         );
-        if deadline_passed && grace_elapsed {
-            if let Some(token) = row.intent_token.clone() {
-                // `provider_scope_id` is `Some` in this branch by
-                // construction (the early-continue guard above), so upload
-                // cleanup can never already be confirmed complete here —
-                // mirrors `execute_abandon`'s own
-                // `row.provider_scope_id.is_none()` rule for the same
-                // `cleanup_already_complete` argument.
-                recovery_settle_unknown(conn, &row.key, &token, row.estimated_usd, false)
-                    .map_err(pipeline_to_kio)?;
-                report.settled_unknown += 1;
-                report.settled_unknown_keys.push(selector);
-            }
+        if deadline_passed
+            && grace_elapsed
+            && let Some(token) = row.intent_token.clone()
+        {
+            // `provider_scope_id` is `Some` in this branch by
+            // construction (the early-continue guard above), so upload
+            // cleanup can never already be confirmed complete here —
+            // mirrors `execute_abandon`'s own
+            // `row.provider_scope_id.is_none()` rule for the same
+            // `cleanup_already_complete` argument.
+            recovery_settle_unknown(conn, &row.key, &token, row.estimated_usd, false)
+                .map_err(pipeline_to_kio)?;
+            report.settled_unknown += 1;
+            report.settled_unknown_keys.push(selector);
         }
         // else: neither found nor confirmed-absent yet — 04 §5.8's "unknown"
         // bullet ("何も変更せず保持し、次回再試行する"): leave untouched,
@@ -15159,10 +15155,10 @@ fn verified_local_scope_ids() -> BTreeSet<String> {
     };
     for entry in entries {
         let kio_dir = PathBuf::from(&entry.root_path).join(".kio");
-        if let Ok(found_scope_id) = scope_id(&kio_dir) {
-            if found_scope_id == entry.scope_id {
-                verified.insert(entry.scope_id);
-            }
+        if let Ok(found_scope_id) = scope_id(&kio_dir)
+            && found_scope_id == entry.scope_id
+        {
+            verified.insert(entry.scope_id);
         }
     }
     verified
@@ -15286,13 +15282,12 @@ fn job_is_accounted_for(
             return Ok(true);
         }
     }
-    if let Some(token) = &job.intent_token {
-        if let AbandonResolution::Found(_) =
+    if let Some(token) = &job.intent_token
+        && let AbandonResolution::Found(_) =
             resolve_abandon_selector(conn, &AbandonSelector::IntentToken(token.clone()))
                 .map_err(pipeline_to_kio)?
-        {
-            return Ok(true);
-        }
+    {
+        return Ok(true);
     }
     Ok(false)
 }
@@ -15442,10 +15437,10 @@ fn confirm_repair_prune(what: &str, targets: &[String], yes: bool) -> Result<()>
         preview.push_str(line);
         preview.push('\n');
     }
-    if let Some(rest) = count.checked_sub(REPAIR_PRUNE_PROMPT_MAX_LINES as u64) {
-        if rest > 0 {
-            preview.push_str(&format!("  … and {rest} more\n"));
-        }
+    if let Some(rest) = count.checked_sub(REPAIR_PRUNE_PROMPT_MAX_LINES as u64)
+        && rest > 0
+    {
+        preview.push_str(&format!("  … and {rest} more\n"));
     }
     preview.push_str("Proceed?");
     if confirm_batch_action(&preview)? {
@@ -15680,7 +15675,7 @@ fn partial_retry_plan_from_instance(
     let TaskOutputRef::NormalizedInstance {
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
         ..
     } = identity
     else {
@@ -15690,7 +15685,7 @@ fn partial_retry_plan_from_instance(
         task_store.kio_dir(),
         &raw_hash,
         &tool_profile_hash,
-        gen,
+        r#gen,
     )
     .map_err(pipeline_to_kio)?
     .manifest;
@@ -17175,7 +17170,7 @@ fn execute_pending_offline_markdownize_tasks(
                         expected_raw_hash: task.input_hash.clone(),
                         normalize: NormalizeRef {
                             tool_profile_hash: profile.tool_profile_hash.clone(),
-                            gen: 0,
+                            r#gen: 0,
                             manifest_hash,
                         },
                     },
@@ -17409,8 +17404,10 @@ fn execute_online_markdownize_task(
     // PDFs' page correspondence, which nothing in this contract establishes.
     // Full re-markdownize is correct and safe; see the implementation report for
     // the fuller incremental-office design space this defers.
-    if retry_units.is_none() && !prepared_units.is_empty() && !is_office_media(&media_type) {
-        if let Some(outcome) = try_online_incremental_markdownize(
+    if retry_units.is_none()
+        && !prepared_units.is_empty()
+        && !is_office_media(&media_type)
+        && let Some(outcome) = try_online_incremental_markdownize(
             repo,
             task,
             &prepared_units,
@@ -17419,9 +17416,9 @@ fn execute_online_markdownize_task(
             &path,
             &bytes,
             idempotency_token.clone(),
-        )? {
-            return Ok(outcome);
-        }
+        )?
+    {
+        return Ok(outcome);
     }
     let request_units: Vec<PreparedUnit> = match &retry_units {
         Some(keys) => prepared_units
@@ -17540,22 +17537,20 @@ fn materialize_online_markdownize_response(
     // 07 §9's first-instance-wins freezes it for the life of the archive. The
     // online routes are left as they were: changing when a *billed* send is
     // rejected is a separate decision with a refund story attached.
-    if acceptance_is_fatal {
-        if let Err(reason) = &acceptance {
-            append_event_log(
-                "KIO-E-ADAPTER-CONTRACT-001",
-                "offline markdownize output failed acceptance",
-                json!({ "input_path": task.input_path, "detail": reason.to_string() }),
-            )
-            .map_err(|_| TaskExecutionFailure {
-                retry_kind: RetryErrorKind::ContractViolation,
-                retry_after_ms: None,
-            })?;
-            return Err(TaskExecutionFailure {
-                retry_kind: RetryErrorKind::ContractViolation,
-                retry_after_ms: None,
-            });
-        }
+    if acceptance_is_fatal && let Err(reason) = &acceptance {
+        append_event_log(
+            "KIO-E-ADAPTER-CONTRACT-001",
+            "offline markdownize output failed acceptance",
+            json!({ "input_path": task.input_path, "detail": reason.to_string() }),
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
+        })?;
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
+        });
     }
     let strict_valid = acceptance.is_ok();
     let generated_at = now_utc_seconds();
@@ -17862,7 +17857,7 @@ fn try_online_incremental_markdownize(
         &task.input_hash,
         &profile_tool_hash,
         0,
-        Some(previous.manifest.gen),
+        Some(previous.manifest.r#gen),
         &run_id,
         &generated_at,
         RetryErrorKind::NetworkError,
@@ -18420,7 +18415,7 @@ fn retained_history_chunks(
         let identity = (
             instance.raw_hash.clone(),
             instance.normalize.tool_profile_hash.clone(),
-            instance.normalize.gen,
+            instance.normalize.r#gen,
         );
         let candidate = (
             instance.embedding_path.clone(),
@@ -18465,10 +18460,10 @@ fn retained_history_chunks(
         .map_err(|error| KioError::schema(error.to_string()))?;
     let mut chunks = Vec::new();
     for row in rows {
-        let (chunk_id, text, text_hash, raw_hash, tool_profile_hash, gen) =
+        let (chunk_id, text, text_hash, raw_hash, tool_profile_hash, r#gen) =
             row.map_err(|error| KioError::schema(error.to_string()))?;
         let Some((raw_path, requires_secret_approval)) =
-            identities.get(&(raw_hash, tool_profile_hash, gen))
+            identities.get(&(raw_hash, tool_profile_hash, r#gen))
         else {
             continue;
         };
@@ -19284,7 +19279,7 @@ fn plan_embed_batch<'a>(
                 return Err(TaskExecutionFailure {
                     retry_kind: RetryErrorKind::ContractViolation,
                     retry_after_ms: None,
-                })
+                });
             }
         }
     }
@@ -20746,10 +20741,10 @@ fn referenced_image_hashes(conn: &Connection) -> Result<BTreeSet<String>> {
     for row in rows {
         let text = row.map_err(|err| KioError::schema(err.to_string()))?;
         for image in extract_related_images(&text) {
-            if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri) {
-                if object.is_image() {
-                    hashes.insert(object.hash().to_owned());
-                }
+            if let Ok(object) = kio_search::object_uri::parse_object_uri(&image.image_uri)
+                && object.is_image()
+            {
+                hashes.insert(object.hash().to_owned());
             }
         }
     }
@@ -22107,17 +22102,17 @@ fn run_index_pipeline(
         // edit landing inside the lock-held critical section between the scan and this
         // read, which no public seam exposes.)
         let current_hash = verified.raw_hash.clone();
-        if let Some(scan_hash) = &candidate.raw_hash {
-            if scan_hash != &current_hash {
-                append_event_log(
-                    "KIO-I-INDEX-INPUT-CHANGED-001",
-                    "input file changed between scan and normalize; skipped to preserve \
+        if let Some(scan_hash) = &candidate.raw_hash
+            && scan_hash != &current_hash
+        {
+            append_event_log(
+                "KIO-I-INDEX-INPUT-CHANGED-001",
+                "input file changed between scan and normalize; skipped to preserve \
                      content-addressing (re-run index)",
-                    json!({ "input_path": candidate.input_path }),
-                )?;
-                result.failed_files += 1;
-                continue;
-            }
+                json!({ "input_path": candidate.input_path }),
+            )?;
+            result.failed_files += 1;
+            continue;
         }
         if !repository_scan_policy_allows_file(repo, &candidate.input_path)
             .map_err(pipeline_to_kio)?
@@ -22315,7 +22310,7 @@ fn run_index_pipeline(
                     expected_raw_hash: raw_hash.clone(),
                     normalize: NormalizeRef {
                         tool_profile_hash: markdown_profile_hash.clone(),
-                        gen: 0,
+                        r#gen: 0,
                         manifest_hash,
                     },
                 },
@@ -22549,7 +22544,7 @@ fn run_index_pipeline(
             &raw_hash,
             &markdown_profile_hash,
             0,
-            previous.as_ref().map(|previous| previous.manifest.gen),
+            previous.as_ref().map(|previous| previous.manifest.r#gen),
             &run_id,
             &generated_at,
             // The local deterministic markdownize always returns every unit, so this
@@ -22597,7 +22592,7 @@ fn run_index_pipeline(
                 expected_raw_hash: raw_hash.clone(),
                 normalize: NormalizeRef {
                     tool_profile_hash: markdown_profile_hash.clone(),
-                    gen: 0,
+                    r#gen: 0,
                     manifest_hash,
                 },
             },
@@ -22678,8 +22673,8 @@ fn latest_normalized_instance(
     // pathological/adversarial store, not a real workload.
     const MAX_GEN_PROBE: u64 = 4096;
     let mut latest = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, 0)?;
-    for gen in 1..MAX_GEN_PROBE {
-        match load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, gen) {
+    for r#gen in 1..MAX_GEN_PROBE {
+        match load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, r#gen) {
             Ok(instance) => latest = instance,
             Err(_) => break,
         }
@@ -22750,7 +22745,7 @@ fn prepared_hash_drift_new_gen(
     if existing.keys().ne(fresh.keys()) {
         return None;
     }
-    (existing != fresh).then(|| latest.manifest.gen.saturating_add(1))
+    (existing != fresh).then(|| latest.manifest.r#gen.saturating_add(1))
 }
 
 /// QB41 (03 §2.1's second legal gen+1 path): create a FRESH normalized
@@ -22892,7 +22887,7 @@ fn create_prepared_hash_drift_instance(
             expected_raw_hash: raw_hash.to_owned(),
             normalize: NormalizeRef {
                 tool_profile_hash: tool_profile_hash.to_owned(),
-                gen: new_gen,
+                r#gen: new_gen,
                 manifest_hash,
             },
         },
@@ -22940,7 +22935,7 @@ fn ensure_contained_directory_chain(kio_dir: &Path, target: &Path) -> Result<()>
                 return Err(store_corrupt_error(
                     &current,
                     "derived object ancestor is not a real directory",
-                ))
+                ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&current)
                 .map_err(|error| KioError::io(error.to_string(), current.display().to_string()))?,
@@ -22948,7 +22943,7 @@ fn ensure_contained_directory_chain(kio_dir: &Path, target: &Path) -> Result<()>
                 return Err(KioError::io(
                     error.to_string(),
                     current.display().to_string(),
-                ))
+                ));
             }
         }
         let canonical = current
@@ -23202,7 +23197,7 @@ fn normalized_output_ref(
     repo: &Repository,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> String {
     // The child-index process keeps its operational store at `.` after
     // entering a retained `.kio` descriptor.  A task reference is durable,
@@ -23219,7 +23214,7 @@ fn normalized_output_ref(
         output_root,
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
     )
     .display()
     .to_string()
@@ -23364,7 +23359,7 @@ fn load_previous_instance_for_task(
     let TaskOutputRef::NormalizedInstance {
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
         ..
     } = identity
     else {
@@ -23373,7 +23368,7 @@ fn load_previous_instance_for_task(
     // A missing/corrupt previous instance degrades to a Full run for this document,
     // while a forged task reference is rejected above before it reaches the filesystem.
     Ok(
-        load_previous_instance_identity(task_store.kio_dir(), &raw_hash, &tool_profile_hash, gen)
+        load_previous_instance_identity(task_store.kio_dir(), &raw_hash, &tool_profile_hash, r#gen)
             .ok(),
     )
 }
@@ -23382,9 +23377,9 @@ fn load_previous_instance_identity(
     kio_dir: &Path,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> Result<PreviousInstance> {
-    let instance = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, gen)
+    let instance = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, r#gen)
         .map_err(pipeline_to_kio)?;
     let manifest = instance.manifest;
     let units = instance.units;
@@ -23505,7 +23500,7 @@ fn normalized_units_from_response(
     // that passes non-zero is `create_prepared_hash_drift_instance` -- a
     // prepared_hash drift under an UNCHANGED raw_hash is the second gen+1
     // path this field newly makes representable.
-    gen: u64,
+    r#gen: u64,
     mode: MarkdownizeMode,
     generated_at: &str,
 ) -> Result<Vec<NormalizedUnitObject>> {
@@ -23536,7 +23531,7 @@ fn normalized_units_from_response(
                 raw_hash: raw_hash.to_owned(),
                 prepared_hash: prepared.prepared_hash.clone(),
                 tool_profile_hash: tool_profile_hash.to_owned(),
-                gen,
+                r#gen,
                 mode,
                 markdown: unit.markdown.clone(),
                 metadata: unit.metadata.clone(),
@@ -23558,13 +23553,13 @@ fn normalized_units_from_response(
             raw_hash: raw_hash.to_owned(),
             prepared_hash: prepared.prepared_hash.clone(),
             tool_profile_hash: tool_profile_hash.to_owned(),
-            gen,
+            r#gen,
             mode,
             markdown: previous_unit.markdown.clone(),
             metadata: previous_unit.metadata.clone(),
             reused_from: Some(kio_pipeline::markdownize::ReusedFrom {
                 raw_hash: previous_unit.raw_hash.clone(),
-                gen: previous_unit.gen,
+                r#gen: previous_unit.r#gen,
                 unit_key: previous_unit.unit_key.clone(),
             }),
             generated_at: generated_at.to_owned(),
@@ -23587,7 +23582,7 @@ fn manifest_from_units(
     tool_profile_hash: &str,
     // QB41 (03 §2.1's second legal gen+1 path): see `normalized_units_from_response`'s
     // matching `gen` doc -- every existing call site passes `0`.
-    gen: u64,
+    r#gen: u64,
     parent_gen: Option<u64>,
     run_id: &str,
     generated_at: &str,
@@ -23600,7 +23595,7 @@ fn manifest_from_units(
     NormalizedInstanceManifest {
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: tool_profile_hash.to_owned(),
-        gen,
+        r#gen,
         parent_gen,
         run_id: run_id.to_owned(),
         units: prepared_units
@@ -23768,17 +23763,17 @@ fn reserve_or_reuse_task_charge(
     let sync_timeout =
         (request_kind == RequestKind::Sync).then_some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS);
     with_immediate_transaction(ledger.connection(), || {
-        if let Some(existing) = get_batch_request(ledger.connection(), key)? {
-            if existing.state.is_inflight() {
-                let intent_token = existing
-                    .intent_token
-                    .clone()
-                    .expect("an in-flight batch_requests row always carries an intent_token");
-                return Ok(TaskChargeOutcome::Reused {
-                    intent_token,
-                    estimated_usd: existing.estimated_usd,
-                });
-            }
+        if let Some(existing) = get_batch_request(ledger.connection(), key)?
+            && existing.state.is_inflight()
+        {
+            let intent_token = existing
+                .intent_token
+                .clone()
+                .expect("an in-flight batch_requests row always carries an intent_token");
+            return Ok(TaskChargeOutcome::Reused {
+                intent_token,
+                estimated_usd: existing.estimated_usd,
+            });
         }
         let result = check_then_reserve(
             ledger.connection(),
@@ -24375,7 +24370,7 @@ fn batch_markdownize_response_from_body(
             other => {
                 return Err(format!(
                     "OCR-from-scratch media type is unsupported: {other}"
-                ))
+                ));
             }
         };
         if kind == UnitKind::Image && pages.len() != 1 {
@@ -25549,10 +25544,10 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
     // A non-multimodal profile is rejected here (03 §7): `load_tool_lock` fails
     // with KIO-E-EMBED-MODALITY-001, which we surface as exit 2 (scenario (e))
     // *before* any indexing happens.
-    if let Some(entry) = embedding_tool_lock_entry()? {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("embedding".to_owned(), entry);
-        }
+    if let Some(entry) = embedding_tool_lock_entry()?
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("embedding".to_owned(), entry);
     }
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|err| KioError::schema(err.to_string()))?;
@@ -25927,11 +25922,11 @@ fn active_online_tool_identities(repo: &Repository) -> Result<Vec<(String, Strin
     )];
     // Same exclusion as `active_online_tool_ids`: an offline adapter has no
     // `approvals[]` row to publish or match.
-    if let Some(execution) = embedding_execution() {
-        if embedding_is_online(execution) {
-            let profile = declared_embedding_profile(execution);
-            identities.push((profile.tool_id, profile.profile_hash));
-        }
+    if let Some(execution) = embedding_execution()
+        && embedding_is_online(execution)
+    {
+        let profile = declared_embedding_profile(execution);
+        identities.push((profile.tool_id, profile.profile_hash));
     }
     identities.sort();
     identities.dedup();
@@ -26376,21 +26371,20 @@ fn read_existing_approval_keys(path: &Path) -> BTreeSet<String> {
 fn register_declared_adapters_from_tools_config() {
     use kio_adapter::tool_lock::{declared_adapter_for_role, register_declared_adapters};
     let mut map = std::collections::HashMap::new();
-    if let Some(path) = user_tools_toml_path() {
-        if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
-                for role in [
-                    "prepare",
-                    "markdown",
-                    "embedding",
-                    "summary",
-                    "classification",
-                    "rerank",
-                ] {
-                    if let Some(declared) = declared_adapter_for_role(&value, role) {
-                        map.insert(role.to_owned(), declared);
-                    }
-                }
+    if let Some(path) = user_tools_toml_path()
+        && let Ok(text) = fs::read_to_string(&path)
+        && let Ok(value) = toml::from_str::<toml::Value>(&text)
+    {
+        for role in [
+            "prepare",
+            "markdown",
+            "embedding",
+            "summary",
+            "classification",
+            "rerank",
+        ] {
+            if let Some(declared) = declared_adapter_for_role(&value, role) {
+                map.insert(role.to_owned(), declared);
             }
         }
     }
@@ -26413,19 +26407,17 @@ fn register_declared_adapters_from_tools_config() {
 fn register_execution_timeouts_from_user_config() {
     use kio_adapter::tool_lock::register_execution_timeouts;
     let mut map = std::collections::HashMap::new();
-    if let Ok(text) = fs::read_to_string(user_config_toml_path()) {
-        if let Ok(value) = toml::from_str::<toml::Value>(&text) {
-            if let Some(seconds) = value
-                .get("adapter")
-                .and_then(|adapter| adapter.get("policy"))
-                .and_then(|policy| policy.get("offline_api"))
-                .and_then(|mode| mode.get("timeout_seconds"))
-                .and_then(toml::Value::as_integer)
-                .and_then(|seconds| u64::try_from(seconds).ok())
-            {
-                map.insert("offline_api".to_owned(), seconds);
-            }
-        }
+    if let Ok(text) = fs::read_to_string(user_config_toml_path())
+        && let Ok(value) = toml::from_str::<toml::Value>(&text)
+        && let Some(seconds) = value
+            .get("adapter")
+            .and_then(|adapter| adapter.get("policy"))
+            .and_then(|policy| policy.get("offline_api"))
+            .and_then(|mode| mode.get("timeout_seconds"))
+            .and_then(toml::Value::as_integer)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+    {
+        map.insert("offline_api".to_owned(), seconds);
     }
     register_execution_timeouts(map);
 }
@@ -26441,22 +26433,21 @@ fn register_execution_timeouts_from_user_config() {
 fn register_declared_pricing_from_tools_config() {
     use kio_adapter::tool_lock::{declared_pricing_for_role, register_declared_pricing};
     let mut map = std::collections::HashMap::new();
-    if let Some(path) = user_tools_toml_path() {
-        if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
-                for role in [
-                    "prepare",
-                    "markdown",
-                    "embedding",
-                    "summary",
-                    "classification",
-                    "rerank",
-                ] {
-                    let pricing = declared_pricing_for_role(&value, role);
-                    if !pricing.is_empty() {
-                        map.insert(role.to_owned(), pricing);
-                    }
-                }
+    if let Some(path) = user_tools_toml_path()
+        && let Ok(text) = fs::read_to_string(&path)
+        && let Ok(value) = toml::from_str::<toml::Value>(&text)
+    {
+        for role in [
+            "prepare",
+            "markdown",
+            "embedding",
+            "summary",
+            "classification",
+            "rerank",
+        ] {
+            let pricing = declared_pricing_for_role(&value, role);
+            if !pricing.is_empty() {
+                map.insert(role.to_owned(), pricing);
             }
         }
     }
@@ -26500,19 +26491,19 @@ fn validate_user_tools_config() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if tools_toml_contains_plain_auth(&bytes) {
-            if let Ok(metadata) = fs::metadata(&path) {
-                let mode = metadata.permissions().mode();
-                if mode & 0o077 != 0 {
-                    let _ = append_warn_log(
-                        "KIO-E-ADAPTER-TOOLS-PERM-001",
-                        "tools.toml holds a plaintext `plain:` API key but is group/world-readable; restrict it to 0600",
-                        json!({
-                            "path": path.display().to_string(),
-                            "mode": format!("{:o}", mode & 0o7777),
-                        }),
-                    );
-                }
+        if tools_toml_contains_plain_auth(&bytes)
+            && let Ok(metadata) = fs::metadata(&path)
+        {
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                let _ = append_warn_log(
+                    "KIO-E-ADAPTER-TOOLS-PERM-001",
+                    "tools.toml holds a plaintext `plain:` API key but is group/world-readable; restrict it to 0600",
+                    json!({
+                        "path": path.display().to_string(),
+                        "mode": format!("{:o}", mode & 0o7777),
+                    }),
+                );
             }
         }
     }
@@ -26695,10 +26686,10 @@ fn ensure_device_dirs_resolvable() -> Result<()> {
 /// page — `query_hash` alone covers only public inputs.
 fn cursor_signing_key() -> Result<Vec<u8>> {
     let path = data_home().join("kio/cursor-key");
-    if let Ok(bytes) = fs::read(&path) {
-        if !bytes.is_empty() {
-            return Ok(bytes);
-        }
+    if let Ok(bytes) = fs::read(&path)
+        && !bytes.is_empty()
+    {
+        return Ok(bytes);
     }
     let key = random_key_32()?;
     if let Some(parent) = path.parent() {
@@ -26768,9 +26759,9 @@ fn compute_manifest_hash(
     kio_dir: &Path,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> Result<String> {
-    let instance = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, gen)
+    let instance = load_validated_normalized_instance(kio_dir, raw_hash, tool_profile_hash, r#gen)
         .map_err(pipeline_to_kio)?;
     hash_and_write_manifest_object(kio_dir, &instance.manifest)
 }
@@ -27009,10 +27000,12 @@ mod tests {
         assert!(super::child_result_payload(br#"{"status":"indexed","__exit_code":3}"#,).is_some());
         // A real error envelope may be JSON too, but it must be selected from
         // stderr so its code/context are not replaced by a generic partial.
-        assert!(super::child_result_payload(
-            br#"{"error_code":"KIO-E-STORE-CORRUPT-001","message":"bad"}"#,
-        )
-        .is_none());
+        assert!(
+            super::child_result_payload(
+                br#"{"error_code":"KIO-E-STORE-CORRUPT-001","message":"bad"}"#,
+            )
+            .is_none()
+        );
         assert_eq!(
             super::child_process_exit_code(Some(4)),
             kio_core::ExitCode::PermanentFailure
@@ -27022,17 +27015,18 @@ mod tests {
     use kio_index::ChunkRow;
 
     use super::{
-        append_chunk_publication_events, append_new_chunk_association, append_stored_chunks,
-        effective_invocation_lane, embedding_usd_per_token, estimate_embedding_cost,
-        estimate_embedding_tokens, first_parent_publication_index, lane_rate,
-        markdownize_send_lane, parse_chunk_ledger, parsed_repair, parsed_search,
-        publication_is_compatible, publication_is_include_deleted_compatible,
-        query_embedding_send_lane, read_chunk_publication_events, read_stored_chunks,
-        realtime_lane_requested, replace_chunk_ledger_contents, resolve_invocation_lane,
-        terminal_safe_text, truncate_torn_chunk_tail, unit_authorities_from_inputs,
-        write_through_projection_with_requested_at, ChunkPublicationEvent, Cli, Command, GcArgs,
-        LaneOverride, MarkdownizeSendLane, NormalizedUnitInput, PreferredRequestKind, RepairMode,
-        RepairOperation, RepositoryScopeId, SearchMode, SnapshotAction, SnapshotArgs, StoredChunk,
+        ChunkPublicationEvent, Cli, Command, GcArgs, LaneOverride, MarkdownizeSendLane,
+        NormalizedUnitInput, PreferredRequestKind, RepairMode, RepairOperation, RepositoryScopeId,
+        SearchMode, SnapshotAction, SnapshotArgs, StoredChunk, append_chunk_publication_events,
+        append_new_chunk_association, append_stored_chunks, effective_invocation_lane,
+        embedding_usd_per_token, estimate_embedding_cost, estimate_embedding_tokens,
+        first_parent_publication_index, lane_rate, markdownize_send_lane, parse_chunk_ledger,
+        parsed_repair, parsed_search, publication_is_compatible,
+        publication_is_include_deleted_compatible, query_embedding_send_lane,
+        read_chunk_publication_events, read_stored_chunks, realtime_lane_requested,
+        replace_chunk_ledger_contents, resolve_invocation_lane, terminal_safe_text,
+        truncate_torn_chunk_tail, unit_authorities_from_inputs,
+        write_through_projection_with_requested_at,
     };
 
     fn ledger_test_chunk() -> StoredChunk {
@@ -27045,7 +27039,7 @@ mod tests {
                     .into(),
                 tool_profile_hash:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
-                gen: 1,
+                r#gen: 1,
                 unit_key: "unit".into(),
                 unit_content_hash:
                     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
@@ -27215,7 +27209,7 @@ mod tests {
         let units = unit_authorities_from_inputs(&[NormalizedUnitInput {
             raw_hash: row.raw_hash.clone(),
             tool_profile_hash: row.tool_profile_hash.clone(),
-            gen: row.gen,
+            r#gen: row.r#gen,
             unit_key: row.unit_key.clone(),
             unit_content_hash: row.unit_content_hash.clone(),
             markdown: "x".to_owned(),
@@ -27546,11 +27540,13 @@ mod tests {
             )
             .unwrap();
         // The tombstone alone (in isolation) still looks active...
-        assert!(state
-            .read_tombstone(&coexist_raw)
-            .unwrap()
-            .unwrap()
-            .is_active());
+        assert!(
+            state
+                .read_tombstone(&coexist_raw)
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
         // ...but canonical across both markers is the receipt's
         // higher-epoch `retired`, so this must not block.
         assert!(!purge_blocks_historical_reindex_raw(&kio_dir, &coexist_raw).unwrap());
@@ -27648,7 +27644,7 @@ mod tests {
             raw_hash,
             normalize: kio_core::dag::NormalizeRef {
                 tool_profile_hash: profile_hash,
-                gen: 0,
+                r#gen: 0,
                 manifest_hash: kio_core::cas::hash_bytes(b"manifest"),
             },
             raw_path: "reintroduced.md".to_owned(),
@@ -27691,7 +27687,7 @@ mod tests {
 
     #[test]
     fn r23_aggregate_index_status_fails_closed_for_corrupt_scope_state() {
-        use super::{compute_index_status, SearchedScopeInfo};
+        use super::{SearchedScopeInfo, compute_index_status};
         use kio_core::scope::Repository;
 
         let healthy_root = tempfile::tempdir().unwrap();
@@ -27766,21 +27762,25 @@ mod tests {
                 })
             }));
         }
-        assert!(status["task_errors"][0]["error_code"]
-            .as_str()
-            .unwrap()
-            .contains("STORE-CORRUPT"));
-        assert!(status["unsupported_input_errors"][0]["error_code"]
-            .as_str()
-            .unwrap()
-            .contains("STORE-CORRUPT"));
+        assert!(
+            status["task_errors"][0]["error_code"]
+                .as_str()
+                .unwrap()
+                .contains("STORE-CORRUPT")
+        );
+        assert!(
+            status["unsupported_input_errors"][0]["error_code"]
+                .as_str()
+                .unwrap()
+                .contains("STORE-CORRUPT")
+        );
     }
 
     #[test]
     fn r23_cand_001_terminal_failure_does_not_spawn_releasable_secret_hold() {
         use super::{
-            embedding_task_output_ref, hold_secret_embedding_tasks, release_secret_holds,
-            EmbeddableChunk,
+            EmbeddableChunk, embedding_task_output_ref, hold_secret_embedding_tasks,
+            release_secret_holds,
         };
         use kio_adapter::catalog::DeclaredEmbeddingProfile;
         use kio_core::scope::Repository;
@@ -27862,8 +27862,8 @@ mod tests {
     #[test]
     fn r23_cand_001_duplicate_hold_cannot_override_terminal_failure() {
         use super::{
-            embedding_task_output_ref, filter_embeddable_by_task_state, release_secret_holds,
-            EmbeddableChunk, SECRETS_TIER_B_HOLD,
+            EmbeddableChunk, SECRETS_TIER_B_HOLD, embedding_task_output_ref,
+            filter_embeddable_by_task_state, release_secret_holds,
         };
         use kio_core::scope::Repository;
         use kio_pipeline::task::{HoldReason, TaskDescriptor, TaskStatus, TaskStore, TaskType};
@@ -27941,7 +27941,7 @@ mod tests {
 
     #[test]
     fn r23_secret_classification_preserves_retry_backoff_state() {
-        use super::{embedding_task_output_ref, hold_secret_embedding_tasks, EmbeddableChunk};
+        use super::{EmbeddableChunk, embedding_task_output_ref, hold_secret_embedding_tasks};
         use kio_adapter::catalog::DeclaredEmbeddingProfile;
         use kio_core::scope::Repository;
         use kio_pipeline::ledger::LedgerDb;
@@ -28096,7 +28096,7 @@ mod tests {
     /// chunk, so `fuse_rrf`'s `take(candidate_depth)` window cannot drop it.
     #[test]
     fn images_take_the_text_rank_of_their_citing_chunk() {
-        use super::{give_images_their_chunks_text_rank, ChunkMeta, ImageCandidate};
+        use super::{ChunkMeta, ImageCandidate, give_images_their_chunks_text_rank};
         use kio_search::rrf::BackendRank;
         use std::collections::BTreeMap;
 
@@ -28108,7 +28108,7 @@ mod tests {
                 meta: ChunkMeta {
                     raw_hash: "sha256:r".to_owned(),
                     tool_profile_hash: "sha256:p".to_owned(),
-                    gen: 0,
+                    r#gen: 0,
                     heading_path: None,
                     section_id: None,
                     byte_start: 0,
@@ -28159,8 +28159,8 @@ mod tests {
     #[test]
     fn r23_markdown_charge_and_send_share_one_verified_input() {
         use super::{
-            classify_online_markdownize_precondition, estimate_online_markdownize_cost,
-            prorated_markdownize_cost, OnlineMarkdownizePrecondition,
+            OnlineMarkdownizePrecondition, classify_online_markdownize_precondition,
+            estimate_online_markdownize_cost, prorated_markdownize_cost,
         };
         use kio_core::scope::Repository;
         use kio_pipeline::prepare::hash_bytes;
@@ -28244,7 +28244,7 @@ mod tests {
 
     #[test]
     fn r12_1_read_search_tuning_parses_documented_keys() {
-        use super::{read_search_tuning, DiversifyStrategy};
+        use super::{DiversifyStrategy, read_search_tuning};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -28306,8 +28306,8 @@ mod tests {
     #[test]
     fn ct4_bbox_001_config_reads_are_bounded_regular_and_fail_closed() {
         use super::{
-            effective_bbox_annotation_policy, read_bbox_annotation_config,
-            BBOX_ANNOTATION_CONFIG_MAX_BYTES,
+            BBOX_ANNOTATION_CONFIG_MAX_BYTES, effective_bbox_annotation_policy,
+            read_bbox_annotation_config,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -28781,21 +28781,25 @@ mod tests {
     fn search_at_still_requires_a_single_non_descendant_scope() {
         // PC59/PC60 — a usage-level check that must survive the move to clap.
         assert!(parsed_search(search_args_of(&["kio", "search", "q", "--at", "HEAD"])).is_err());
-        assert!(parsed_search(search_args_of(&[
-            "kio",
-            "search",
-            "q",
-            "--at",
-            "HEAD",
-            "--scope",
-            ".",
-            "--descendants"
-        ]))
-        .is_err());
-        assert!(parsed_search(search_args_of(&[
-            "kio", "search", "q", "--at", "HEAD", "--scope", "."
-        ]))
-        .is_ok());
+        assert!(
+            parsed_search(search_args_of(&[
+                "kio",
+                "search",
+                "q",
+                "--at",
+                "HEAD",
+                "--scope",
+                ".",
+                "--descendants"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parsed_search(search_args_of(&[
+                "kio", "search", "q", "--at", "HEAD", "--scope", "."
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -28880,14 +28884,16 @@ mod tests {
 
     #[test]
     fn batch_resume_budget_recheck_and_override_are_exclusive() {
-        assert!(Cli::try_parse_from([
-            "kio",
-            "batch",
-            "resume",
-            "--recheck-budget",
-            "--override-budget",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "kio",
+                "batch",
+                "resume",
+                "--recheck-budget",
+                "--override-budget",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -29102,7 +29108,7 @@ mod tests {
 
     #[test]
     fn r11_2_exit_override_priority_batch_vs_enrichment() {
-        use super::{batch_exit_override, enrichment_exit_override, ExecOutcome};
+        use super::{ExecOutcome, batch_exit_override, enrichment_exit_override};
         use kio_core::ExitCode;
 
         // A clean pass overrides nothing (exit 0).
@@ -29161,12 +29167,14 @@ mod tests {
             }),
             Some(ExitCode::BudgetExceeded)
         );
-        assert!(enrichment_exit_override(&ExecOutcome {
-            failed: 2,
-            failed_retryable: 2,
-            ..ExecOutcome::default()
-        })
-        .is_none());
+        assert!(
+            enrichment_exit_override(&ExecOutcome {
+                failed: 2,
+                failed_retryable: 2,
+                ..ExecOutcome::default()
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -29213,7 +29221,7 @@ mod tests {
 
     #[test]
     fn r10_4_partial_retry_plan_gates_on_retryability_and_budget() {
-        use super::{partial_retry_plan_from_manifest, unit_ref, NormalizedInstanceManifest};
+        use super::{NormalizedInstanceManifest, partial_retry_plan_from_manifest, unit_ref};
         let manifest = |first_error: Option<&str>, second_error: Option<&str>| {
             serde_json::from_value::<NormalizedInstanceManifest>(serde_json::json!({
                 "raw_hash": format!("sha256:{}", "a".repeat(64)),
@@ -29330,7 +29338,7 @@ mod tests {
 
     #[test]
     fn r10_8_snapshot_tree_entries_insert_is_atomic() {
-        use super::{insert_snapshot_tree_entries, TreeEntryProjection};
+        use super::{TreeEntryProjection, insert_snapshot_tree_entries};
         use rusqlite::Connection;
         let conn = Connection::open_in_memory().unwrap();
         // A CHECK lets the test force a mid-batch failure deterministically.
@@ -29360,14 +29368,14 @@ mod tests {
                 path: "a.md".to_owned(),
                 raw_hash: "sha256:aa".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: Some(0),
+                r#gen: Some(0),
                 manifest_hash: Some("sha256:manifest".to_owned()),
             },
             TreeEntryProjection {
                 path: "b.md".to_owned(),
                 raw_hash: "BAD".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: Some(0),
+                r#gen: Some(0),
                 manifest_hash: Some("sha256:manifest".to_owned()),
             },
         ];
@@ -29379,14 +29387,14 @@ mod tests {
                 path: "a.md".to_owned(),
                 raw_hash: "sha256:aa".to_owned(),
                 tool_profile_hash: Some("sha256:tool".to_owned()),
-                gen: Some(0),
+                r#gen: Some(0),
                 manifest_hash: Some("sha256:manifest".to_owned()),
             },
             TreeEntryProjection {
                 path: "b.md".to_owned(),
                 raw_hash: "sha256:bb".to_owned(),
                 tool_profile_hash: None,
-                gen: Some(1),
+                r#gen: Some(1),
                 manifest_hash: Some("sha256:manifest2".to_owned()),
             },
         ];
@@ -29436,7 +29444,7 @@ mod tests {
 
         use super::write_prepared_objects;
         use kio_core::scope::Repository;
-        use kio_pipeline::prepare::{hash_bytes, PreparedUnit, UnitFingerprint, UnitType};
+        use kio_pipeline::prepare::{PreparedUnit, UnitFingerprint, UnitType, hash_bytes};
 
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
@@ -29483,7 +29491,7 @@ mod tests {
         assert!(!is_normalized_unit_file("1A2B3C4D5E6F7089.json")); // uppercase hex
         assert!(!is_normalized_unit_file("1a2b.json")); // too short
         assert!(!is_normalized_unit_file("1a2b3c4d5e6f7089z.json")); // 17 chars / non-hex
-                                                                     // Orphan-temp detection (GC'd on reindex).
+        // Orphan-temp detection (GC'd on reindex).
         assert!(is_orphan_temp_name(".tmp-99999-0000abcd"));
         assert!(is_orphan_temp_name(".1a2b3c4d5e6f7089.json.tmp-123-456"));
         assert!(!is_orphan_temp_name(".DS_Store"));
@@ -29509,8 +29517,8 @@ mod tests {
     #[test]
     fn serial_task_charges_reread_and_enforce_the_cap() {
         use super::{
-            budget_cap_config, reserve_or_reuse_task_charge, task_ledger_key, BudgetCaps,
-            TaskChargeOutcome,
+            BudgetCaps, TaskChargeOutcome, budget_cap_config, reserve_or_reuse_task_charge,
+            task_ledger_key,
         };
         use kio_pipeline::ledger::RequestKind;
         use std::collections::BTreeMap;
@@ -29571,7 +29579,7 @@ mod tests {
 
     #[test]
     fn store_lock_preserves_retryable_cli_error_contract() {
-        use super::{pipeline_to_kio, ExitCode};
+        use super::{ExitCode, pipeline_to_kio};
 
         let err = pipeline_to_kio(kio_pipeline::PipelineError::locked(
             "/tmp/example-device-lock.lock",
@@ -29758,7 +29766,7 @@ mod tests {
 
     #[test]
     fn q2_open_cas_byte_object_rejects_corrupt_object() {
-        use super::{cas_object_path, hash_bytes, open_cas_byte_object, ScopeTarget};
+        use super::{ScopeTarget, cas_object_path, hash_bytes, open_cas_byte_object};
         let dir = tempfile::tempdir().unwrap();
         let kio_dir = dir.path().join(".kio");
         // The correct `sha256:` filename for the AUTHENTIC bytes...
@@ -29782,7 +29790,7 @@ mod tests {
 
     #[test]
     fn portable_cas_leaf_uses_digest_and_presence_rejects_nonregular_slot() {
-        use super::{cas_object_path, cas_object_present, hash_bytes, MAX_RAW_OBJECT_BYTES};
+        use super::{MAX_RAW_OBJECT_BYTES, cas_object_path, cas_object_present, hash_bytes};
 
         let dir = tempfile::tempdir().unwrap();
         let hash = hash_bytes(b"portable object");
@@ -29816,7 +29824,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn legacy_only_cas_leaf_is_ignored_as_not_found() {
-        use super::{cas_object_present, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
+        use super::{MAX_RAW_OBJECT_BYTES, cas_object_present, hash_bytes, read_cas_byte_object};
 
         let dir = tempfile::tempdir().unwrap();
         let bytes = b"historical legacy object";
@@ -29835,7 +29843,7 @@ mod tests {
 
     #[test]
     fn canonical_cas_read_succeeds_and_hash_mismatch_fails_closed() {
-        use super::{cas_object_path, hash_bytes, read_cas_byte_object, MAX_RAW_OBJECT_BYTES};
+        use super::{MAX_RAW_OBJECT_BYTES, cas_object_path, hash_bytes, read_cas_byte_object};
 
         let dir = tempfile::tempdir().unwrap();
         let bytes = b"canonical object";
@@ -29874,8 +29882,8 @@ mod tests {
     #[test]
     fn legacy_conflict_cannot_influence_canonical_read_or_write() {
         use super::{
-            cas_object_path, hash_bytes, read_cas_byte_object, write_canonical_cas_object_or_reuse,
-            MAX_RAW_OBJECT_BYTES,
+            MAX_RAW_OBJECT_BYTES, cas_object_path, hash_bytes, read_cas_byte_object,
+            write_canonical_cas_object_or_reuse,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -29945,15 +29953,15 @@ mod tests {
     #[test]
     fn chunk_authentication_rejects_forged_text_with_a_valid_identity_hash() {
         use super::{
-            authenticate_chunk_row, chunk_normalized_instance, hash_bytes,
-            unit_authorities_from_inputs, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+            ChunkingConfig, ChunkingInput, NormalizedUnitInput, authenticate_chunk_row,
+            chunk_normalized_instance, hash_bytes, unit_authorities_from_inputs,
         };
 
         let markdown = "# Heading\nattested text\n".to_owned();
         let unit = NormalizedUnitInput {
             raw_hash: hash_bytes(b"raw"),
             tool_profile_hash: hash_bytes(b"profile"),
-            gen: 3,
+            r#gen: 3,
             unit_key: "document".to_owned(),
             unit_content_hash: hash_bytes(markdown.as_bytes()),
             markdown,

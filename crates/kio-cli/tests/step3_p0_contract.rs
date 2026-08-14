@@ -587,9 +587,9 @@ fn ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion() {
 #[test]
 fn ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly() {
     let dir = indexed_scope(); // indexed without an embedding adapter → no vectors
-                               // (a) endpoint truly unconfigured → the 05 §1.7 example string.
-                               // "off" is an unrecognized seam value → no adapter, regardless of any
-                               // ambient GEMINI_API_KEY.
+    // (a) endpoint truly unconfigured → the 05 §1.7 example string.
+    // "off" is an unrecognized seam value → no adapter, regardless of any
+    // ambient GEMINI_API_KEY.
     let unconfigured = json_success_embed(&dir, "off", &["search", "トークン TTL 3600"]);
     assert_eq!(unconfigured["resolved_mode"], "text");
     assert_eq!(
@@ -774,14 +774,18 @@ fn ct3_evidence_001_search_results_include_pointer_and_uri() {
     assert_eq!(pointer["schema_version"], 1);
     assert!(pointer["commit"].as_str().unwrap().starts_with("sha256:"));
     assert!(pointer["raw_hash"].as_str().unwrap().starts_with("sha256:"));
-    assert!(pointer["tool_profile_hash"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
-    assert!(pointer["chunk_hash"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
+    assert!(
+        pointer["tool_profile_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        pointer["chunk_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
     // scope_id is a bare 26-char Crockford-base32 ULID (kio-core::scope::is_ulid),
     // not "scope_"-prefixed — that prefix only appears in the spec doc's
     // illustrative fixture strings.
@@ -791,10 +795,12 @@ fn ct3_evidence_001_search_results_include_pointer_and_uri() {
     assert_eq!(pointer["heading_path"][1], "API Token");
     assert!(pointer["byte_start"].as_u64().is_some());
     assert!(pointer["byte_end"].as_u64().is_some());
-    assert!(result["evidence_uri"]
-        .as_str()
-        .unwrap()
-        .starts_with("kio://"));
+    assert!(
+        result["evidence_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("kio://")
+    );
 }
 
 #[test]
@@ -955,7 +961,7 @@ fn view_degrades_view_fields_to_null_when_the_normalized_instance_is_unreadable(
         &kio_dir,
         &chunk.raw_hash,
         &chunk.tool_profile_hash,
-        chunk.gen,
+        chunk.r#gen,
     );
     assert!(
         instance_dir.is_dir(),
@@ -1047,10 +1053,12 @@ fn ct3_multi_004_single_scope_response_lists_searched_scopes() {
     // Bare 26-char ULID, see the ct3_evidence_001 scope_id note above.
     assert_eq!(searched[0]["scope_id"].as_str().unwrap().len(), 26);
     assert!(!searched[0]["scope_path"].as_str().unwrap().is_empty());
-    assert!(searched[0]["snapshot_at"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
+    assert!(
+        searched[0]["snapshot_at"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 }
 
 #[test]
@@ -1104,10 +1112,12 @@ fn ct3_chunk_009_chunks_have_first_seen_commit_after_index() {
     let dir = indexed_scope();
     let text = fs::read_to_string(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
     let row: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-    assert!(row["first_seen_commit"]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
+    assert!(
+        row["first_seen_commit"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 }
 
 // CT3-CHUNK-010: the tree_entries projection is asserted against the real
@@ -1141,7 +1151,7 @@ fn ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index() {
     assert!(rows.iter().all(|(commit, _, _, _)| *commit == head_commit));
     assert!(rows.iter().any(|(_, path, _, _)| path == "auth.md"));
     assert!(rows.iter().any(|(_, path, _, _)| path == "ranking.md"));
-    assert!(rows.iter().all(|(_, _, _, gen)| *gen == 0));
+    assert!(rows.iter().all(|(_, _, _, r#gen)| *r#gen == 0));
     // The projection is what actually gates search (chunks ⨝ tree_entries(HEAD),
     // 05 §1.6): cross-check a live search result's raw_hash is one of the
     // projected rows, proving this table (not just the unused pure function) is
@@ -1650,7 +1660,7 @@ fn ct4_rebuild_uses_immutable_pinned_unit_body_not_mutable_cache_body() {
         &dir.path().join(".kio/objects/normalized_units"),
         &entry.raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
         unit_ref,
     );
     assert!(
@@ -1706,7 +1716,7 @@ fn ct4_rebuild_missing_pinned_unit_cas_skips_without_reading_mutable_cache() {
         &dir.path().join(".kio/objects/normalized_units"),
         &entry.raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
         unit_ref,
     );
     let mut cache: Value = serde_json::from_slice(&fs::read(&mutable_unit).unwrap()).unwrap();
@@ -1921,9 +1931,11 @@ fn ct3_multi_001_default_searches_participating_indexed_scopes() {
     ));
     let searched = search["searched_scopes"].as_array().unwrap();
     assert_eq!(searched.len(), 2, "c (participates=false) must be excluded");
-    assert!(searched
-        .iter()
-        .all(|scope| !value_path_ends_with(&scope["scope_path"], "c/.kio")));
+    assert!(
+        searched
+            .iter()
+            .all(|scope| !value_path_ends_with(&scope["scope_path"], "c/.kio"))
+    );
 }
 
 #[test]
@@ -2230,12 +2242,14 @@ fn ct3_repair_device_active_purge_is_partial_and_leaves_no_stale_replica_rows() 
         .clone();
     let response: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(response["error_code"], "KIO-E-REPAIR-PARTIAL-001");
-    assert!(response["failed_scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|scope| scope["scope_id"] == blocked_scope
-            && scope["error_code"] == "KIO-E-PURGE-JOURNAL-ACTIVE-001"));
+    assert!(
+        response["failed_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope["scope_id"] == blocked_scope
+                && scope["error_code"] == "KIO-E-PURGE-JOURNAL-ACTIVE-001")
+    );
     let header = Aggregator::open(&data_home.join("cache/kio/aggregator.sqlite"))
         .unwrap()
         .scope_header(&blocked_scope)
@@ -4017,11 +4031,11 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
         .unwrap()
         .unwrap();
     assert_eq!(header_before.index_status, AggIndexStatus::Ready);
-    let cursor = json_success(&dir, &["search", "認証仕様", "--limit", "1"])["paging"]
-        ["next_cursor"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let cursor =
+        json_success(&dir, &["search", "認証仕様", "--limit", "1"])["paging"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
     fs::write(
         dir.path().join("auth.md"),
@@ -4143,8 +4157,7 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
     let hidden_source = HiddenSourceIndex::hide(&dir.path().join(".kio/index/sqlite.db"));
     let journal_error = json_failure(&dir, &["search", "admin", "--mode", "text"], 3);
     assert_eq!(
-        journal_error["error_code"],
-        "KIO-E-PURGE-JOURNAL-ACTIVE-001",
+        journal_error["error_code"], "KIO-E-PURGE-JOURNAL-ACTIVE-001",
         "an active journal takes priority over this stale header only at the selected candidate scope"
     );
     assert!(
@@ -5599,7 +5612,7 @@ fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
     // Sanity: resolves before the snapshot.
     let sanity = json_success(&dir, &["view", &chunk_hash]);
     assert!(view_slice(&sanity).contains("3600"));
-    // Advance HEAD via a bare snapshot (proves it is not a no-op).
+    // Advance HEAD via a manual snapshot (proves it is not a no-op).
     let snap = json_success(&dir, &["snapshot", "create", "-m", "advance"]);
     assert_eq!(
         snap["status"], "created",
@@ -5609,7 +5622,7 @@ fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
     let viewed = json_success(&dir, &["view", &chunk_hash]);
     assert!(
         view_slice(&viewed).contains("3600"),
-        "short-hash view must survive a bare snapshot (L3): {viewed}"
+        "short-hash view must survive a manual snapshot (L3): {viewed}"
     );
 }
 
@@ -6636,9 +6649,11 @@ fn p4_corrupt_store_error_message_has_no_absolute_path() {
         "message leaked an absolute path: {}",
         record["message"]
     );
-    assert!(!serde_json::to_string(&record["context"])
-        .unwrap()
-        .contains(&scope_abs));
+    assert!(
+        !serde_json::to_string(&record["context"])
+            .unwrap()
+            .contains(&scope_abs)
+    );
     // The path token is masked in the message, not just dropped.
     assert!(record["message"].as_str().unwrap().contains("[redacted]"));
     assert_eq!(record["context"]["path"], "[redacted]");
@@ -6717,8 +6732,8 @@ fn p3_plain_auth_tools_toml_permission_warning() {
 /// transient source SQLite file.
 #[test]
 fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -7079,8 +7094,8 @@ fn p10_genuine_no_hit_and_empty_scope_stay_exit_zero() {
 /// atomic rebuild alone does not close.
 #[test]
 fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let dir = tempfile::tempdir().unwrap();
     // Enough documents that the all-document re-generation + rebuild spans a window
@@ -7364,10 +7379,12 @@ fn r6_tool_lock_rejects_future_spec_version() {
 
     let err = json_failure(&dir, &["status"], 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-SCHEMA-001");
-    assert!(err["message"]
-        .as_str()
-        .unwrap()
-        .contains("unsupported tool-lock spec_version"));
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported tool-lock spec_version")
+    );
 }
 
 #[test]
@@ -7555,7 +7572,7 @@ fn mutable_unit_path_for(
     root: &Path,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
     unit_ref: &str,
 ) -> std::path::PathBuf {
     let mut stack = vec![root.to_path_buf()];
@@ -7573,7 +7590,7 @@ fn mutable_unit_path_for(
             let manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             if manifest["raw_hash"] == raw_hash
                 && manifest["tool_profile_hash"] == tool_profile_hash
-                && manifest["gen"] == gen
+                && manifest["gen"] == r#gen
             {
                 return path.parent().unwrap().join(format!("{unit_ref}.json"));
             }
@@ -9436,7 +9453,7 @@ fn r16_3_fresh_search_unreceipted_tree_loss_excludes_not_silent_empty() {
     json_success_path(&a, &data_home, &["index", "--approve"]);
     json_success_path(&b, &data_home, &["index", "--approve"]);
 
-    // Advance scope B's HEAD with a bare snapshot — the new commit's tree_entries are
+    // Advance scope B's HEAD with a manual snapshot — the new commit's tree_entries are
     // NOT projected (only index/reindex project) — then discard its tree object. B's
     // HEAD is now shallow with NO cached rows for the new commit (ShallowNoRows).
     fs::write(b.join("b.md"), "# B\n\n## Sec\nbetashared token v2\n").unwrap();
@@ -9757,7 +9774,7 @@ fn r17_4_unreceipted_missing_head_returns_store_corrupt_guidance() {
     kio(&dir, &["init"]).assert().success();
     json_success(&dir, &["index", "--yes"]);
 
-    // Advance HEAD with a bare snapshot (tree_entries NOT projected) then discard its
+    // Advance HEAD with a manual snapshot (tree_entries NOT projected) then discard its
     // tree object → the fresh search sees ShallowNoRows → Excluded("snapshot_shallow").
     fs::write(
         dir.path().join("a.md"),
@@ -10820,8 +10837,7 @@ fn ct4_reverted_chunk_reuses_retained_embedding_task() {
 #[test]
 fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     let dir = tempfile::tempdir().unwrap();
-    let shared =
-        "## 共有セクション\n\n共有される段落です。十分な長さの本文をここに置きます。あいうえお かきくけこ さしすせそ。\n";
+    let shared = "## 共有セクション\n\n共有される段落です。十分な長さの本文をここに置きます。あいうえお かきくけこ さしすせそ。\n";
     // Contextual-embedding addendum (07 §5.3, 2026-07-24): a content twin now
     // requires the same body AND the same humanized filename context. Two DIFFERENT
     // filenames normally embed to DIFFERENT identities (no cross-file twin — the

@@ -39,9 +39,11 @@
 use std::io::Write as _;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::http_policy::{authenticated_agent, read_json_bounded, HttpPolicy};
+use crate::http_policy::{
+    HttpPolicy, HttpResponse, authenticated_agent, read_json_bounded, require_success,
+};
 use crate::{AdapterError, Result};
 
 /// Hermetic test seam: an inline JSON [`MockGeminiBatchScript`]. When set, the
@@ -318,10 +320,10 @@ pub trait GeminiBatchClient {
 /// A bare, unwrapped object is accepted too.
 fn batch_object(value: &Value) -> &Value {
     for key in ["metadata", "response"] {
-        if let Some(inner) = value.get(key) {
-            if inner.get("state").is_some() || inner.get("name").is_some() {
-                return inner;
-            }
+        if let Some(inner) = value.get(key)
+            && (inner.get("state").is_some() || inner.get("name").is_some())
+        {
+            return inner;
         }
     }
     value
@@ -553,10 +555,11 @@ impl EnvGeminiBatchClient {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
             .get(url)
-            .set("x-goog-api-key", &api_key)
-            .set("Accept-Encoding", "identity")
+            .header("x-goog-api-key", &api_key)
+            .header("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         read_json_bounded(response, max_bytes, context)
     }
 }
@@ -585,10 +588,11 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
         );
         let response = authenticated_agent(self.http_policy)
             .post(&url)
-            .set("x-goog-api-key", &api_key)
-            .set("Accept-Encoding", "identity")
+            .header("x-goog-api-key", &api_key)
+            .header("Accept-Encoding", "identity")
             .send_json(body)
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_json_bounded(
             response,
             BATCH_METADATA_MAX_BYTES,
@@ -646,32 +650,30 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
 }
 
 fn http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(401 | 403, response) => AdapterError::Auth(format!(
-            "Gemini batch HTTP auth: {}",
-            response.status_text()
-        )),
+    AdapterError::Network(format!("Gemini batch transport: {error}"))
+}
+
+fn http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        401 | 403 => AdapterError::Auth(format!("Gemini batch HTTP auth: {}", response.status())),
         // QA16 posture (mirrors `gemini_embedding::http_error`): capture a real
         // `Retry-After` when the provider sent one, never a fabricated value.
-        ureq::Error::Status(429, response) => {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
-                message: format!("Gemini batch HTTP 429: {}", response.status_text()),
+                message: format!("Gemini batch HTTP 429: {}", response.status()),
                 retry_after_ms,
             }
         }
-        ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
-            "Gemini batch HTTP quota: {}",
-            response.status_text()
-        )),
-        ureq::Error::Status(status, response) => AdapterError::Network(format!(
-            "Gemini batch HTTP {status}: {}",
-            response.status_text()
-        )),
-        ureq::Error::Transport(transport) => {
-            AdapterError::Network(format!("Gemini batch transport: {transport}"))
+        402 => {
+            AdapterError::QuotaExceeded(format!("Gemini batch HTTP quota: {}", response.status()))
+        }
+        status => {
+            AdapterError::Network(format!("Gemini batch HTTP {status}: {}", response.status()))
         }
     }
 }
@@ -1327,8 +1329,10 @@ mod tests {
     #[test]
     fn mock_client_enforces_the_same_inline_bounds_as_the_real_one() {
         let client = MockGeminiBatchClient::from_env_value("{}").unwrap();
-        assert!(client
-            .create_embedding_job("gemini-embedding-2", 768, "kio-tok", &[])
-            .is_err());
+        assert!(
+            client
+                .create_embedding_job("gemini-embedding-2", 768, "kio-tok", &[])
+                .is_err()
+        );
     }
 }

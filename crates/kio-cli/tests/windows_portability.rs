@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kio_core::portable::{portable_leaf_error, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
+use kio_core::portable::{PORTABLE_TAGS_DIRECTORY, portable_leaf_error, portable_tag_leaf};
 use serde_json::Value;
 
 const TEST_ENV: &[&str] = &[
@@ -103,10 +103,12 @@ fn home_and_xdg_unset_use_windows_profile_without_cwd_device_state() {
     fs::remove_file(scope.path().join("profile.md")).unwrap();
     let viewed = windows_no_home_json(scope.path(), profile.path(), &["view", &pointer]);
 
-    assert!(profile
-        .path()
-        .join(".local/share/kio/scope-registry.sqlite")
-        .is_file());
+    assert!(
+        profile
+            .path()
+            .join(".local/share/kio/scope-registry.sqlite")
+            .is_file()
+    );
     assert!(profile.path().join(".local/share/kio/cursor-key").is_file());
     assert!(Path::new(viewed["path"].as_str().unwrap()).starts_with(profile.path().join(".cache")));
     for relative in ["kio", ".config", ".local", ".cache"] {

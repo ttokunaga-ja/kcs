@@ -87,11 +87,11 @@ pub fn percentile_nearest_rank<T: Ord + Copy>(
 mod golden_vectors {
     use std::{collections::HashSet, fs, path::PathBuf};
 
-    use kio_core::cas::{canonical_json_bytes, hash_bytes, ChunkObject};
+    use kio_core::cas::{ChunkObject, canonical_json_bytes, hash_bytes};
     use serde::Deserialize;
     use serde_json::Value;
 
-    use super::{percentile_nearest_rank, recall_at_k, RecallResult, ResultKey};
+    use super::{RecallResult, ResultKey, percentile_nearest_rank, recall_at_k};
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]

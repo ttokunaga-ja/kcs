@@ -13,7 +13,7 @@ name = "kio-eval"
 path = "src/main.rs"
 
 [dependencies]
-cap-primitives = "3.4.5"
+cap-primitives.workspace = true
 clap.workspace = true
 kio-core.workspace = true
 kio-index.workspace = true

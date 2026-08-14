@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 
 use cap_primitives::fs as cap_fs;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::search_projection::resolve_markdown_escapes;
-use crate::{chunking::validate_unit_hash, ChunkRow, IndexError, Result};
+use crate::{ChunkRow, IndexError, Result, chunking::validate_unit_hash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -293,13 +293,13 @@ fn bind_source_index(
     let file = cap_fs::open(&parent_handle, Path::new(leaf), &options)
         .map_err(|e| IndexError::Schema(format!("inspect source index {}: {e}", path.display())))?;
     validate_bound_source_file(&file, &path)?;
-    if let Some(before_leaf) = before_leaf {
-        if source_file_identity(&file)? != before_leaf {
-            return Err(IndexError::Schema(format!(
-                "source index leaf changed while opening: {}",
-                path.display()
-            )));
-        }
+    if let Some(before_leaf) = before_leaf
+        && source_file_identity(&file)? != before_leaf
+    {
+        return Err(IndexError::Schema(format!(
+            "source index leaf changed while opening: {}",
+            path.display()
+        )));
     }
     Ok(BoundSourceIndex {
         _root: root_handle,
@@ -1097,12 +1097,12 @@ pub fn remove_prepared_bound_gc_index(
     let file = match cap_fs::open(&private, Path::new(temp_leaf), &options) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(PreparedGcIndexCleanup::AlreadyAbsent)
+            return Ok(PreparedGcIndexCleanup::AlreadyAbsent);
         }
         Err(error) => {
             return Err(IndexError::Schema(format!(
                 "open GC private index copy for cleanup: {error}"
-            )))
+            )));
         }
     };
     validate_bound_source_file(&file, Path::new(temp_leaf))?;
@@ -1120,12 +1120,12 @@ pub fn remove_prepared_bound_gc_index(
     match cap_fs::remove_file(&private, Path::new(temp_leaf)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(PreparedGcIndexCleanup::AlreadyAbsent)
+            return Ok(PreparedGcIndexCleanup::AlreadyAbsent);
         }
         Err(error) => {
             return Err(IndexError::Schema(format!(
                 "remove GC private index copy: {error}"
-            )))
+            )));
         }
     }
     private
@@ -1560,7 +1560,7 @@ fn open_bound_gc_index(
         Err(error) => {
             return Err(IndexError::Schema(format!(
                 "open GC index directory below retained capability: {error}"
-            )))
+            )));
         }
     };
     open_bound_gc_index_leaf(&parent, "sqlite.db", config, writable)
@@ -1838,7 +1838,7 @@ impl SqliteFtsIndex {
                                 row.chunk_id,
                                 row.raw_hash,
                                 row.tool_profile_hash,
-                                row.gen,
+                                row.r#gen,
                                 row.unit_key,
                                 row.unit_content_hash,
                                 row.raw_path,
@@ -1865,7 +1865,7 @@ impl SqliteFtsIndex {
                                 row.chunk_id,
                                 row.raw_hash,
                                 row.tool_profile_hash,
-                                row.gen,
+                                row.r#gen,
                                 row.unit_key,
                                 row.unit_content_hash,
                                 row.raw_path,
@@ -2095,13 +2095,13 @@ pub fn record_chunk_config_association(
         .optional()?;
 
     if let Some(existing_rowid) = existing_for_triple {
-        if let Some(requested_rowid) = requested_rowid {
-            if existing_rowid != requested_rowid {
-                return Err(IndexError::Contract(format!(
-                    "chunk/config association {chunk_id}/{chunking_config_hash}/{introduction_commit} \
-                     has rowid {existing_rowid}, not requested rowid {requested_rowid}"
-                )));
-            }
+        if let Some(requested_rowid) = requested_rowid
+            && existing_rowid != requested_rowid
+        {
+            return Err(IndexError::Contract(format!(
+                "chunk/config association {chunk_id}/{chunking_config_hash}/{introduction_commit} \
+                 has rowid {existing_rowid}, not requested rowid {requested_rowid}"
+            )));
         }
         return sql_u64_rowid(existing_rowid);
     }
@@ -2879,8 +2879,7 @@ const CURRENT_EMBEDDINGS_SQL: &str = "CREATE TABLE embeddings (id TEXT NOT NULL 
 const CURRENT_TREE_ENTRIES_SQL: &str = "CREATE TABLE tree_entries (commit_hash TEXT NOT NULL, path TEXT NOT NULL, raw_hash TEXT NOT NULL, tool_profile_hash TEXT, gen INTEGER, manifest_hash TEXT, PRIMARY KEY (commit_hash, path))";
 const CURRENT_INDEX_METADATA_SQL: &str = "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), index_generation TEXT NOT NULL, last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0)";
 const CURRENT_GC_ROTATION_ATTESTATION_SQL: &str = "CREATE TABLE gc_rotation_attestation (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL CHECK (version = 1), sweep_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('pre_sweep', 'final')), plan_digest TEXT NOT NULL, source_generation TEXT NOT NULL, target_generation TEXT NOT NULL)";
-const CURRENT_IDX_CHUNKS_IDENT_SQL: &str =
-    "CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash)";
+const CURRENT_IDX_CHUNKS_IDENT_SQL: &str = "CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash)";
 const CURRENT_IDX_CHUNK_PUBLICATIONS_SQL: &str =
     "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id)";
 const CURRENT_IDX_EMBEDDINGS_TYPE_SQL: &str =
@@ -2903,7 +2902,11 @@ fn current_chunk_fts_sql(config: &FtsSchemaConfig) -> String {
 fn current_chunk_vec_sql(id_column: &str) -> String {
     format!(
         "CREATE VIRTUAL TABLE {} USING vec0({id_column} TEXT PRIMARY KEY, embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine)",
-        if id_column == "chunk_id" { "chunk_vec" } else { "image_vec" }
+        if id_column == "chunk_id" {
+            "chunk_vec"
+        } else {
+            "image_vec"
+        }
     )
 }
 
@@ -3131,7 +3134,7 @@ mod tests {
                 .to_owned(),
             tool_profile_hash:
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            gen: 0,
+            r#gen: 0,
             unit_key: "doc:1".to_owned(),
             unit_content_hash:
                 "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
@@ -3194,9 +3197,11 @@ mod tests {
             introductions,
             vec!["sha256:aaaaaaaa".to_owned(), "sha256:cccccccc".to_owned()]
         );
-        assert!(chunk_publication_introductions(conn, "c-never-published")
-            .unwrap()
-            .is_empty());
+        assert!(
+            chunk_publication_introductions(conn, "c-never-published")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3291,18 +3296,16 @@ mod tests {
             vec!["c-survivor"]
         );
         assert!(fts.search("unique purge", 10).unwrap().is_empty());
-        assert!(crate::embedding_store::read_chunk_vector(
-            fts.connection(),
-            &target_shared.chunk_id
-        )
-        .unwrap()
-        .is_none());
-        assert!(crate::embedding_store::read_chunk_vector(
-            fts.connection(),
-            &target_unique.chunk_id
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            crate::embedding_store::read_chunk_vector(fts.connection(), &target_shared.chunk_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::embedding_store::read_chunk_vector(fts.connection(), &target_unique.chunk_id)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             crate::embedding_store::read_chunk_vector(fts.connection(), &survivor.chunk_id)
                 .unwrap()
@@ -3370,9 +3373,11 @@ mod tests {
         let orphaned = BTreeSet::from([ORPHANED.to_owned()]);
         let report = fts.purge_raw(&target.raw_hash, &orphaned).unwrap();
         assert_eq!(report.deleted_image_vectors, 1);
-        assert!(report
-            .deleted_embedding_ids
-            .contains(&"sha256:embedding-image-0".to_owned()));
+        assert!(
+            report
+                .deleted_embedding_ids
+                .contains(&"sha256:embedding-image-0".to_owned())
+        );
 
         assert!(
             crate::embedding_store::read_image_vector(fts.connection(), ORPHANED)
@@ -3487,13 +3492,15 @@ mod tests {
         drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
         let before = std::fs::read(&path).unwrap();
         let reopened = SqliteFtsIndex::open(&path, config).unwrap();
-        assert!(validate_current_schema(
-            reopened.connection(),
-            &FtsSchemaConfig {
-                tokenizer: FtsTokenizer::Trigram
-            }
-        )
-        .unwrap());
+        assert!(
+            validate_current_schema(
+                reopened.connection(),
+                &FtsSchemaConfig {
+                    tokenizer: FtsTokenizer::Trigram
+                }
+            )
+            .unwrap()
+        );
         drop(reopened);
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -3560,17 +3567,21 @@ mod tests {
         assert_eq!(rotated.metadata.last_lifecycle_epoch, 7);
 
         std::fs::remove_file(&path).unwrap();
-        assert!(read_bound_gc_index_metadata(&kio_handle, &config)
+        assert!(
+            read_bound_gc_index_metadata(&kio_handle, &config)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            rotate_bound_gc_index_generation(
+                &kio_handle,
+                "01J00000000000000000000002",
+                None,
+                &config,
+            )
             .unwrap()
-            .is_none());
-        assert!(rotate_bound_gc_index_generation(
-            &kio_handle,
-            "01J00000000000000000000002",
-            None,
-            &config,
-        )
-        .unwrap()
-        .is_none());
+            .is_none()
+        );
     }
 
     #[test]
@@ -3600,9 +3611,11 @@ mod tests {
             &config,
         )
         .expect_err("mismatched initial generation must fail closed");
-        assert!(error
-            .to_string()
-            .contains("generation changed before rotation"));
+        assert!(
+            error
+                .to_string()
+                .contains("generation changed before rotation")
+        );
         let metadata = read_bound_gc_index_metadata(&kio_handle, &config)
             .unwrap()
             .unwrap();
@@ -3662,10 +3675,12 @@ mod tests {
             .expect("source index symlink must be rejected");
         assert!(error.to_string().contains("not a regular file"));
         assert_eq!(std::fs::read(&target).unwrap(), before);
-        assert!(std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -3718,9 +3733,11 @@ mod tests {
         let error = SqliteFtsIndex::open(&path, config.clone())
             .err()
             .expect("source index parent symlink must be rejected");
-        assert!(error
-            .to_string()
-            .contains("parent must be a real directory"));
+        assert!(
+            error
+                .to_string()
+                .contains("parent must be a real directory")
+        );
         assert!(
             !victim.path().join("sqlite.db").exists(),
             "fresh source-index bootstrap must not create a database through a parent symlink"
@@ -3732,9 +3749,11 @@ mod tests {
             &config,
         )
         .expect_err("existing-source helper must reject a symlink parent too");
-        assert!(error
-            .to_string()
-            .contains("parent must be a real directory"));
+        assert!(
+            error
+                .to_string()
+                .contains("parent must be a real directory")
+        );
     }
 
     #[cfg(unix)]
@@ -3845,10 +3864,12 @@ mod tests {
         .expect_err("source index symlink must be rejected");
         assert!(error.to_string().contains("not a regular file"));
         assert_eq!(std::fs::read(&target).unwrap(), before);
-        assert!(std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -3964,9 +3985,11 @@ mod tests {
         let error = SqliteFtsIndex::open(&path, config)
             .err()
             .expect("weakened table constraint must be rejected");
-        assert!(error
-            .to_string()
-            .contains("chunk_config_generations definition"));
+        assert!(
+            error
+                .to_string()
+                .contains("chunk_config_generations definition")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -4046,13 +4069,15 @@ mod tests {
             )
         );
         assert_eq!(rows[1], ("raw-only.md".to_owned(), None, None, None));
-        assert!(validate_current_schema(
-            conn,
-            &FtsSchemaConfig {
-                tokenizer: FtsTokenizer::Trigram
-            }
-        )
-        .unwrap());
+        assert!(
+            validate_current_schema(
+                conn,
+                &FtsSchemaConfig {
+                    tokenizer: FtsTokenizer::Trigram
+                }
+            )
+            .unwrap()
+        );
 
         conn.execute(
             "INSERT INTO tree_entries(
@@ -4116,13 +4141,15 @@ mod tests {
             chunk_has_current_config_association(conn, "c1", &first.chunking_config_hash, 17)
                 .unwrap()
         );
-        assert!(!chunk_has_current_config_association(
-            conn,
-            "c1",
-            &next_generation.chunking_config_hash,
-            17
-        )
-        .unwrap());
+        assert!(
+            !chunk_has_current_config_association(
+                conn,
+                "c1",
+                &next_generation.chunking_config_hash,
+                17
+            )
+            .unwrap()
+        );
         assert_eq!(
             current_config_eligible_chunk_ids(conn, &next_generation.chunking_config_hash, 1, 17)
                 .unwrap(),

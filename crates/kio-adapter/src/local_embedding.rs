@@ -30,17 +30,18 @@
 //! a mock vector and a real one are not interchangeable, and 03 §7 has only the
 //! profile hash to tell them apart with.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::catalog::deterministic_embedding_vector;
 use crate::http_policy::{
-    authenticated_agent, read_json_bounded, HttpPolicy, EMBEDDING_RESPONSE_MAX_BYTES,
+    EMBEDDING_RESPONSE_MAX_BYTES, HttpPolicy, HttpResponse, authenticated_agent, read_json_bounded,
+    require_success,
 };
 use crate::identity::tool_profile_hash;
 use crate::traits::EmbeddingAdapter;
 use crate::types::{
-    validate_cosine_vector, AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest,
-    EmbeddingResponse, EmbeddingVector, ExecutionMode,
+    AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest, EmbeddingResponse,
+    EmbeddingVector, ExecutionMode, validate_cosine_vector,
 };
 use crate::{AdapterError, Result};
 
@@ -175,7 +176,8 @@ impl LocalEmbeddingClient for EnvLocalEmbeddingClient {
                 "encoding_format": "float",
                 "messages": messages,
             }))
-            .map_err(local_http_error)?;
+            .map_err(local_http_error)
+            .and_then(|response| require_success(response, local_http_status_error))?;
         let body = read_json_bounded(
             response,
             EMBEDDING_RESPONSE_MAX_BYTES,
@@ -189,25 +191,26 @@ impl LocalEmbeddingClient for EnvLocalEmbeddingClient {
 /// online adapters need (`Auth`, `QuotaExceeded`) cannot arise. What can is a
 /// full request queue, which is a retry, and everything else, which is not.
 fn local_http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(429, response) => {
+    AdapterError::Network(format!("local embedding server unreachable: {error}"))
+}
+
+fn local_http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
                 message: format!(
                     "local embedding server queue is full ({})",
-                    response.status_text()
+                    response.status()
                 ),
                 retry_after_ms,
             }
         }
-        ureq::Error::Status(code, _) => {
-            AdapterError::Network(format!("local embedding server returned HTTP {code}"))
-        }
-        ureq::Error::Transport(transport) => {
-            AdapterError::Network(format!("local embedding server unreachable: {transport}"))
-        }
+        code => AdapterError::Network(format!("local embedding server returned HTTP {code}")),
     }
 }
 
@@ -569,10 +572,12 @@ mod tests {
     #[test]
     fn declares_the_image_object_capability_that_the_online_adapter_does_not() {
         let local = LocalEmbeddingAdapter::mock().profile();
-        assert!(local
-            .capability_flags
-            .iter()
-            .any(|flag| flag == IMAGE_OBJECT_CAPABILITY));
+        assert!(
+            local
+                .capability_flags
+                .iter()
+                .any(|flag| flag == IMAGE_OBJECT_CAPABILITY)
+        );
         let online = crate::catalog::adopted_embedding_profile();
         assert!(
             !online
@@ -1035,14 +1040,20 @@ mod tests {
     /// arise and must not be invented.
     #[test]
     fn a_busy_server_classifies_as_a_rate_limit_and_a_broken_one_does_not() {
-        let busy = ureq::Response::new(429, "Too Many Requests", "").unwrap();
+        let busy = ureq::http::Response::builder()
+            .status(429)
+            .body(ureq::Body::builder().data(Vec::new()))
+            .unwrap();
         assert!(matches!(
-            local_http_error(ureq::Error::Status(429, busy)),
+            local_http_status_error(&busy),
             AdapterError::RateLimit { .. }
         ));
-        let broken = ureq::Response::new(500, "Internal Server Error", "").unwrap();
+        let broken = ureq::http::Response::builder()
+            .status(500)
+            .body(ureq::Body::builder().data(Vec::new()))
+            .unwrap();
         assert!(matches!(
-            local_http_error(ureq::Error::Status(500, broken)),
+            local_http_status_error(&broken),
             AdapterError::Network(_)
         ));
     }

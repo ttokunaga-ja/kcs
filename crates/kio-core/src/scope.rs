@@ -11,27 +11,27 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::ExitCode;
 use crate::cas::{
-    append_jsonl, atomic_overwrite, atomic_write, hash_json, is_hash, ObjectKind, ObjectStore,
-    CAS_STREAM_BUFFER_BYTES, MAX_RAW_OBJECT_BYTES,
+    CAS_STREAM_BUFFER_BYTES, MAX_RAW_OBJECT_BYTES, ObjectKind, ObjectStore, append_jsonl,
+    atomic_overwrite, atomic_write, hash_json, is_hash, lower_hex,
 };
 use crate::dag::{
-    build_tree, is_materializable_direct_child, CommitObject, CommitStats, CommitType,
-    NormalizeRef, TreeEntry, TreeObject,
+    CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject, build_tree,
+    is_materializable_direct_child,
 };
 use crate::error::{IoResultExt, KioError, Result};
 use crate::gc::{SnapshotAutoBinding, SnapshotAutoStateBinding};
 use crate::portable::{
-    portable_collision_key, portable_leaf_error, portable_tag_digest64, portable_tag_leaf,
-    PORTABLE_TAGS_DIRECTORY,
+    PORTABLE_TAGS_DIRECTORY, portable_collision_key, portable_leaf_error, portable_tag_digest64,
+    portable_tag_leaf,
 };
 use crate::purge::PurgeState;
-use crate::schema::{validate_json_schema, SchemaKind};
-use crate::ExitCode;
+use crate::schema::{SchemaKind, validate_json_schema};
 
 /// Exact on-disk scope format understood by this pre-stable reader.
 pub const KIO_FORMAT_VERSION: &str = "0.1.0";
@@ -239,7 +239,7 @@ impl Repository {
                 return Err(KioError::io(
                     error.to_string(),
                     kio_dir.display().to_string(),
-                ))
+                ));
             }
         }
 
@@ -974,19 +974,19 @@ impl Repository {
                 ));
             }
         }
-        if let Some(expected) = expected_direct_entries {
-            if self.bound_snapshot_auto_direct_entries()? != *expected {
-                drop(staged);
-                if !scheduled_bound {
-                    let raw_dir = self.kio_dir.join("objects/raw");
-                    File::open(&raw_dir)
-                        .and_then(|dir| dir.sync_all())
-                        .kio_io(&raw_dir)?;
-                }
-                return Err(snapshot_authority_changed(
-                    "scheduled snapshot direct entries changed before CAS publication",
-                ));
+        if let Some(expected) = expected_direct_entries
+            && self.bound_snapshot_auto_direct_entries()? != *expected
+        {
+            drop(staged);
+            if !scheduled_bound {
+                let raw_dir = self.kio_dir.join("objects/raw");
+                File::open(&raw_dir)
+                    .and_then(|dir| dir.sync_all())
+                    .kio_io(&raw_dir)?;
             }
+            return Err(snapshot_authority_changed(
+                "scheduled snapshot direct entries changed before CAS publication",
+            ));
         }
 
         // Discover every candidate barrier before the first raw CAS publication.
@@ -1425,17 +1425,17 @@ impl Repository {
             (true, false) => {
                 return Err(snapshot_authority_changed(
                     "scheduled snapshot rejects an empty HEAD with a populated refs/heads/main",
-                ))
+                ));
             }
             (false, true) => {
                 return Err(snapshot_authority_changed(
                     "scheduled snapshot rejects a populated HEAD with an empty refs/heads/main",
-                ))
+                ));
             }
             (false, false) if head != branch => {
                 return Err(snapshot_authority_changed(
                     "scheduled snapshot rejects a HEAD/ref mismatch",
-                ))
+                ));
             }
             (false, false) => {}
         }
@@ -1600,16 +1600,16 @@ impl Repository {
                         "scheduled snapshot is blocked by an active purge journal",
                         json!({ "component": "snapshot_auto" }),
                         ExitCode::PartialFailure,
-                    ))
+                    ));
                 }
                 Ok(_) => {
                     return Err(unsafe_store_error(
                         Path::new("purge/in-progress.json"),
                         "purge journal is not a regular file",
-                    ))
+                    ));
                 }
                 Err(error) => {
-                    return Err(KioError::io(error.to_string(), "purge/in-progress.json"))
+                    return Err(KioError::io(error.to_string(), "purge/in-progress.json"));
                 }
             },
         }
@@ -3184,7 +3184,7 @@ fn create_bound_dir_all(root: &File, relative: &str) -> Result<()> {
                     Ok(_) => {
                         return Err(KioError::invalid_usage(
                             ".kio layout component must be a directory",
-                        ))
+                        ));
                     }
                     Err(err) => return Err(KioError::io(err.to_string(), relative)),
                 }
@@ -3410,7 +3410,7 @@ fn read_bound_regular_text_observed_at(
             ino: opened.ino(),
             len: opened.len(),
             nlink: opened.nlink(),
-            digest: format!("{:x}", Sha256::digest(&bytes)),
+            digest: lower_hex(&Sha256::digest(&bytes)),
         },
     ))
 }
@@ -3598,7 +3598,7 @@ pub fn empty_head_recovery_hash(kio_dir: &Path) -> Result<Option<String>> {
             return Err(KioError::io(
                 err.to_string(),
                 head_path.display().to_string(),
-            ))
+            ));
         }
     };
     if head_present_nonempty {
@@ -3612,7 +3612,7 @@ pub fn empty_head_recovery_hash(kio_dir: &Path) -> Result<Option<String>> {
             return Err(KioError::io(
                 err.to_string(),
                 refs_path.display().to_string(),
-            ))
+            ));
         }
     };
     if refs_value.is_empty() || !is_hash(&refs_value) {
@@ -3708,10 +3708,10 @@ pub fn append_jsonl_rotating(path: &Path, value: &Value, retention_days: u32) ->
     // rotation and the next append performs it; the lock is best-effort like the rotation
     // itself (R12-5/R13-3: a read-only log dir must never kill the command), and only the
     // final append can fail the caller.
-    if rotation_due(path, &today) {
-        if let Ok(_rotate_lock) = StoreLock::acquire_path(rotate_lock_path(path)) {
-            let _ = rotate_stale_log(path, &today);
-        }
+    if rotation_due(path, &today)
+        && let Ok(_rotate_lock) = StoreLock::acquire_path(rotate_lock_path(path))
+    {
+        let _ = rotate_stale_log(path, &today);
     }
     let _ = prune_rotated_logs(path, &today, retention_days);
     append_jsonl(path, value)
@@ -4067,12 +4067,12 @@ pub fn enforce_config_semantics(config: &Value) -> Result<()> {
         .and_then(|adapter| adapter.get("policy"))
     {
         // allowed_scope: only "." (scope containment, 07 §7.1.2 P1) is implemented.
-        if let Some(scope) = policy.get("allowed_scope").and_then(Value::as_str) {
-            if scope != "." {
-                return Err(KioError::not_implemented(
-                    "adapter.policy.allowed_scope other than \".\"",
-                ));
-            }
+        if let Some(scope) = policy.get("allowed_scope").and_then(Value::as_str)
+            && scope != "."
+        {
+            return Err(KioError::not_implemented(
+                "adapter.policy.allowed_scope other than \".\"",
+            ));
         }
         // Request/response body persistence is never done (07 §7 "ログ本文禁止" —
         // only hashes are logged), so a `true` request is unimplemented.
@@ -4101,12 +4101,12 @@ pub fn enforce_config_semantics(config: &Value) -> Result<()> {
         // the adapter HTTP path (it would touch every adapter's transport). Accept
         // the documented default (300); reject any other value loudly rather than
         // silently ignore it. (R12-2 decision: real wiring is a large change.)
-        if let Some(timeout) = policy.get("timeout_seconds").and_then(Value::as_i64) {
-            if timeout != 300 {
-                return Err(KioError::not_implemented(
-                    "adapter.policy.timeout_seconds other than 300",
-                ));
-            }
+        if let Some(timeout) = policy.get("timeout_seconds").and_then(Value::as_i64)
+            && timeout != 300
+        {
+            return Err(KioError::not_implemented(
+                "adapter.policy.timeout_seconds other than 300",
+            ));
         }
         // D7 (07 §7): `[adapter.policy.<execution_mode>]` overrides the parent
         // for that mode. Only `offline_api` is wired -- the CLI reads it into
@@ -4200,7 +4200,7 @@ fn ensure_portable_tags_directory(kio_dir: &Path) -> Result<PathBuf> {
                 return Err(KioError::io(
                     error.to_string(),
                     canonical_tags_dir.display().to_string(),
-                ))
+                ));
             }
         }
         validate_tag_refs_directory(&canonical_tags_dir, false)?;
@@ -4216,10 +4216,10 @@ fn validate_tag_refs_directory(path: &Path, allow_missing: bool) -> Result<bool>
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing => {
-            return Ok(false)
+            return Ok(false);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(tag_ref_corrupt(path, "tag refs directory is missing"))
+            return Err(tag_ref_corrupt(path, "tag refs directory is missing"));
         }
         Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
     };
@@ -4461,13 +4461,13 @@ fn validate_store_directory(kio_dir: &Path) -> Result<()> {
     let metadata = match fs::symlink_metadata(kio_dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(KioError::invalid_usage("not a kio scope"))
+            return Err(KioError::invalid_usage("not a kio scope"));
         }
         Err(error) => {
             return Err(KioError::io(
                 error.to_string(),
                 kio_dir.display().to_string(),
-            ))
+            ));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
@@ -4516,7 +4516,7 @@ fn validate_store_directory(kio_dir: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn effective_uid() -> u32 {
-    extern "C" {
+    unsafe extern "C" {
         fn geteuid() -> u32;
     }
     // SAFETY: geteuid has no preconditions and only returns process metadata.
@@ -4867,10 +4867,10 @@ pub fn cleanup_orphan_raw_ingest_temps(kio_dir: &Path) -> Result<u64> {
         fs::remove_file(&path).kio_io(&path)?;
         removed = removed.saturating_add(1);
     }
-    if removed > 0 {
-        if let Ok(directory) = File::open(&raw_base) {
-            let _ = directory.sync_all();
-        }
+    if removed > 0
+        && let Ok(directory) = File::open(&raw_base)
+    {
+        let _ = directory.sync_all();
     }
     Ok(removed)
 }
@@ -5562,7 +5562,7 @@ fn process_is_alive(pid: u32) -> bool {
     }
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
     };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -6031,7 +6031,7 @@ fn read_lock_snapshot(path: &Path) -> Result<Option<LockSnapshot>> {
     let lock = parse_canonical_lock(&bytes)?;
     Ok(Some(LockSnapshot {
         lock,
-        digest: format!("{:x}", Sha256::digest(&bytes)),
+        digest: lower_hex(&Sha256::digest(&bytes)),
         bytes,
         dev: opened.dev(),
         ino: opened.ino(),
@@ -6128,7 +6128,7 @@ fn read_bound_lock(kio: &File, leaf: &str) -> Result<(Vec<u8>, BoundLockObservat
             dev: opened.dev(),
             ino: opened.ino(),
             len: opened.len(),
-            digest: format!("{:x}", Sha256::digest(&bytes)),
+            digest: lower_hex(&Sha256::digest(&bytes)),
         },
     ))
 }
@@ -6295,10 +6295,10 @@ fn exchange_bound_lock(
 
 #[cfg(debug_assertions)]
 fn maybe_hold_lock_for_tests() {
-    if let Ok(value) = std::env::var("KIO_TEST_HOLD_LOCK_MS") {
-        if let Ok(ms) = value.parse::<u64>() {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
+    if let Ok(value) = std::env::var("KIO_TEST_HOLD_LOCK_MS")
+        && let Ok(ms) = value.parse::<u64>()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
 
@@ -6823,12 +6823,12 @@ pub fn revoke_network_approval(
 mod tests {
     use super::enforce_config_semantics;
     use super::{
-        append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
-        open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
-        read_adapter_lane, read_logs_retention_days, read_network_approval_pending,
-        read_network_approvals, redact_context, redact_message_paths, rotate_stale_log,
-        write_network_approval_pending, ArchiveLimits, PendingNormalizeRef, Repository, StoreLock,
-        DEFAULT_MAX_ARCHIVE_FILE_BYTES, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
+        ArchiveLimits, DEFAULT_MAX_ARCHIVE_FILE_BYTES, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
+        PendingNormalizeRef, Repository, StoreLock, append_jsonl_rotating, civil_from_days,
+        format_unix_seconds, format_utc_seconds, open_scope_file_nofollow, parse_utc_seconds,
+        process_is_alive, prune_rotated_logs, read_adapter_lane, read_logs_retention_days,
+        read_network_approval_pending, read_network_approvals, redact_context,
+        redact_message_paths, rotate_stale_log, write_network_approval_pending,
     };
 
     #[cfg(unix)]
@@ -7050,8 +7050,6 @@ mod tests {
 
     #[test]
     fn snapshot_rejects_invalid_shallow_base_before_archiving_working_bytes() {
-        use sha2::{Digest, Sha256};
-
         let scope = tempfile::tempdir().unwrap();
         std::fs::write(scope.path().join("note.txt"), b"base bytes").unwrap();
         let repo = Repository::init(scope.path()).unwrap();
@@ -7071,7 +7069,7 @@ mod tests {
 
         let new_bytes = b"must not be archived";
         std::fs::write(scope.path().join("new.txt"), new_bytes).unwrap();
-        let new_raw = format!("sha256:{:x}", Sha256::digest(new_bytes));
+        let new_raw = crate::cas::hash_bytes(new_bytes);
         let error = repo
             .snapshot(Some("must fail"), Some("2026-01-01T00:00:01Z"))
             .unwrap_err();
@@ -7224,7 +7222,7 @@ mod tests {
             );
         }
     }
-    use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
+    use crate::cas::{ObjectKind, ObjectStore, hash_bytes};
     use crate::dag::{CommitType, NormalizeRef};
     use crate::purge::PurgeState;
     use serde_json::json;
@@ -7386,7 +7384,11 @@ mod tests {
         // A pre-existing lock file at the path blocks a fresh acquisition with
         // STORE-LOCKED, proving acquire_path honors a held device-global lock.
         fs::write(&lock_path, b"held by another charge").unwrap();
-        match StoreLock::acquire_path(lock_path.clone()) {
+        // Keep the acquisition result (and a hypothetical successful guard)
+        // alive across the assertion, matching Rust 2021's tail-expression
+        // drop order even though this branch is expected to be an error.
+        let contested_acquisition = StoreLock::acquire_path(lock_path.clone());
+        match contested_acquisition {
             Ok(_) => panic!("a held device-global lock must block acquisition"),
             Err(err) => assert_eq!(err.error_code(), "KIO-E-STORE-LOCKED-001"),
         }
@@ -7914,7 +7916,7 @@ mod tests {
         fs::write(&path, b"old bytes").unwrap();
         let normalize = NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
-            gen: 0,
+            r#gen: 0,
             manifest_hash: hash_bytes(b"manifest"),
         };
         let pending = BTreeMap::from([(
@@ -7991,13 +7993,15 @@ mod tests {
         assert_eq!(error.error_code(), "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001");
         assert_eq!(repo.head_commit_hash().unwrap(), head_before);
         assert!(!changed_raw.exists());
-        assert!(fs::read_dir(repo.kio_dir().join("objects/raw"))
-            .unwrap()
-            .all(|entry| !entry
+        assert!(
+            fs::read_dir(repo.kio_dir().join("objects/raw"))
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".ingest-")));
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ingest-"))
+        );
     }
 
     #[test]

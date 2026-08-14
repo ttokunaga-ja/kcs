@@ -44,12 +44,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::bbox_annotation::{canonical_source_escape, validate_bbox as validate_annotation_bbox};
-use crate::http_policy::{authenticated_agent, read_json_bounded, HttpPolicy};
+use crate::http_policy::{
+    HttpPolicy, HttpResponse, authenticated_agent, read_json_bounded, require_success,
+};
 use crate::identity::tool_profile_hash;
-use crate::mistral_ocr::{image_hash, OcrImage};
+use crate::mistral_ocr::{OcrImage, image_hash};
 use crate::traits::MarkdownizeAdapter;
 use crate::types::{
     AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit, MarkdownizeRequest,
@@ -193,7 +195,8 @@ impl LocalOcrClient for EnvLocalOcrClient {
                 // chosen over the VLM-only one.
                 "useLayoutDetection": true,
             }))
-            .map_err(local_ocr_http_error)?;
+            .map_err(local_ocr_http_error)
+            .and_then(|response| require_success(response, local_ocr_http_status_error))?;
         read_json_bounded(
             response,
             LAYOUT_PARSING_RESPONSE_MAX_BYTES,
@@ -205,25 +208,23 @@ impl LocalOcrClient for EnvLocalOcrClient {
 /// A local pipeline has no credential and no invoice, so `Auth` and
 /// `QuotaExceeded` cannot arise. A full queue can, and that is a retry.
 fn local_ocr_http_error(error: ureq::Error) -> AdapterError {
-    match error {
-        ureq::Error::Status(429, response) => {
+    AdapterError::Network(format!("local OCR service unreachable: {error}"))
+}
+
+fn local_ocr_http_status_error(response: &HttpResponse) -> AdapterError {
+    match response.status().as_u16() {
+        429 => {
             let retry_after_ms = response
-                .header("Retry-After")
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok())
                 .and_then(crate::http_policy::parse_retry_after_ms);
             AdapterError::RateLimit {
-                message: format!(
-                    "local OCR service queue is full ({})",
-                    response.status_text()
-                ),
+                message: format!("local OCR service queue is full ({})", response.status()),
                 retry_after_ms,
             }
         }
-        ureq::Error::Status(code, _) => {
-            AdapterError::Network(format!("local OCR service returned HTTP {code}"))
-        }
-        ureq::Error::Transport(transport) => {
-            AdapterError::Network(format!("local OCR service unreachable: {transport}"))
-        }
+        code => AdapterError::Network(format!("local OCR service returned HTTP {code}")),
     }
 }
 
@@ -294,16 +295,16 @@ pub fn parse_layout_parsing(body: &Value) -> Result<Vec<LayoutParsedPage>> {
     // `errorCode` is checked before the payload because it rides on an HTTP
     // 200: the transport is happy while the pipeline is not, and reading past
     // it would turn a service-side failure into "a document with no pages".
-    if let Some(code) = body.get("errorCode").and_then(Value::as_i64) {
-        if code != 0 {
-            let message = body
-                .get("errorMsg")
-                .and_then(Value::as_str)
-                .unwrap_or("(no errorMsg)");
-            return Err(violation(format!(
-                "layout-parsing returned errorCode {code}: {message}"
-            )));
-        }
+    if let Some(code) = body.get("errorCode").and_then(Value::as_i64)
+        && code != 0
+    {
+        let message = body
+            .get("errorMsg")
+            .and_then(Value::as_str)
+            .unwrap_or("(no errorMsg)");
+        return Err(violation(format!(
+            "layout-parsing returned errorCode {code}: {message}"
+        )));
     }
     let results = body
         .get("result")
@@ -878,14 +879,13 @@ fn attribute_value(
             .chars()
             .next_back()
             .is_some_and(char::is_whitespace);
-        if boundary {
-            if let Some(&quote) = lower.as_bytes().get(after) {
-                if quote == b'"' || quote == b'\'' {
-                    let inner = after + 1;
-                    if let Some(len) = lower[inner..tag.end].find(quote as char) {
-                        return Some(inner..inner + len);
-                    }
-                }
+        if boundary
+            && let Some(&quote) = lower.as_bytes().get(after)
+            && (quote == b'"' || quote == b'\'')
+        {
+            let inner = after + 1;
+            if let Some(len) = lower[inner..tag.end].find(quote as char) {
+                return Some(inner..inner + len);
             }
         }
         scan = after;
@@ -2343,10 +2343,12 @@ mod tests {
             .map(|unit| unit.unit_key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(keys, ["page:1", "page:2"]);
-        assert!(response
-            .updated_units
-            .iter()
-            .all(|unit| unit.unit_type == UnitKind::Page));
+        assert!(
+            response
+                .updated_units
+                .iter()
+                .all(|unit| unit.unit_type == UnitKind::Page)
+        );
     }
 
     /// The service can only be answering about one image, so more than one

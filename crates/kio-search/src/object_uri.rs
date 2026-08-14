@@ -218,17 +218,21 @@ mod tests {
     #[test]
     fn rejects_hashes_outside_the_object_hash_grammar() {
         assert!(parse_object_uri("kio://scope/object/image/sha256:abc").is_err());
-        assert!(parse_object_uri(&format!(
-            "kio://scope/object/image/{}",
-            HASH_A.trim_start_matches("sha256:")
-        ))
-        .is_err());
+        assert!(
+            parse_object_uri(&format!(
+                "kio://scope/object/image/{}",
+                HASH_A.trim_start_matches("sha256:")
+            ))
+            .is_err()
+        );
         // Uppercase hex is not the canonical digest form.
-        assert!(parse_object_uri(&format!(
-            "kio://scope/object/image/{}",
-            HASH_A.to_uppercase()
-        ))
-        .is_err());
+        assert!(
+            parse_object_uri(&format!(
+                "kio://scope/object/image/{}",
+                HASH_A.to_uppercase()
+            ))
+            .is_err()
+        );
     }
 
     #[test]

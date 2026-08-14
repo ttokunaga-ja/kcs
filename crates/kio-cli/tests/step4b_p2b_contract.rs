@@ -10,8 +10,8 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use base64::Engine;
-use kio_core::cas::{hash_bytes, ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore};
-use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
+use kio_core::cas::{ContentObjectKind, EmbeddingObject, ObjectKind, ObjectStore, hash_bytes};
+use kio_core::dag::{CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, build_tree};
 use kio_core::gc::ShallowReceipt;
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
@@ -419,11 +419,7 @@ fn embedding_fixture_bytes(object: &EmbeddingObject) -> Vec<u8> {
     );
     out.push(b'\n');
     out.extend_from_slice(
-        format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(&vector_bytes)
-        )
-        .as_bytes(),
+        kio_core::cas::lower_hex(&<sha2::Sha256 as sha2::Digest>::digest(&vector_bytes)).as_bytes(),
     );
     out
 }
@@ -447,11 +443,13 @@ fn pb01_embedding_length_mismatch_is_a_finding() {
     write_embedding_fixture(&kio_dir(&dir), &[0.1, 0.2], 3);
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "embedding_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "embedding_corrupt")
+    );
 }
 
 /// PB01 (d)/(e): a non-finite (`NaN`/`Infinity`) vector element is a finding.
@@ -465,11 +463,13 @@ fn pb01_embedding_non_finite_vector_element_is_a_finding() {
     write_embedding_fixture(&kio_dir(&dir), &[f32::NAN], 1);
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "embedding_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "embedding_corrupt")
+    );
 }
 
 /// PB01 (g): the vector's bytes do not match the digest recorded beside them —
@@ -499,11 +499,13 @@ fn pb01_embedding_digest_mismatch_is_a_finding() {
     fs::write(&path, lines.join("\n")).unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "embedding_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "embedding_corrupt")
+    );
 }
 
 /// PB01 (2026-07-26, R25-6): an object filed under someone else's identity is a
@@ -529,11 +531,13 @@ fn pb01_embedding_under_a_foreign_identity_is_a_finding() {
     fs::write(&path, bytes).unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "embedding_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "embedding_corrupt")
+    );
 }
 
 /// PB02: manifest and toollock CAS objects join the fsck verification
@@ -566,11 +570,13 @@ fn pb02_manifest_and_toollock_join_the_verification_closure() {
     // from the fixture's indexing plus this test's own synthetic
     // `manifest-fixture` object above, so the closure now counts 2, not 1.
     assert_eq!(output["checked"]["manifests"], 2, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "toollock_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "toollock_corrupt")
+    );
 }
 
 /// PB03 [regression-lock]: chunk exact-span/text_hash mismatch is still
@@ -595,11 +601,13 @@ fn pb03_regression_chunk_span_mismatch_still_a_finding() {
     fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "chunk_span_mismatch"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "chunk_span_mismatch")
+    );
 }
 
 // ===========================================================================
@@ -636,11 +644,13 @@ fn pb07_names_jsonl_schema_and_digest_recompute() {
     .unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "names_jsonl_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "names_jsonl_corrupt")
+    );
 }
 
 /// PB08: only the FINAL line may be a torn (truncated) tail — tolerated. A
@@ -673,11 +683,13 @@ fn pb08_names_jsonl_torn_tail_tolerated_mid_malformed_rejected() {
     .unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "names_jsonl_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "names_jsonl_corrupt")
+    );
 }
 
 /// PB09: a canonical tag ref with no corresponding names.jsonl row is
@@ -709,11 +721,13 @@ fn pb09_canonical_ref_names_correspondence_is_asymmetric() {
     fs::write(canonical_dir.join(&orphan_leaf), head.trim()).unwrap();
     let (code, output) = run(&dir, &["repair", "verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "names_jsonl_corrupt"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "names_jsonl_corrupt")
+    );
 }
 
 // ===========================================================================
@@ -808,9 +822,11 @@ fn pb13_prune_orphans_deletes_unreferenced_prepared_and_image() {
         b"orphan image bytes never referenced by any manifest",
     );
     let store = ObjectStore::new(kio_dir(&dir));
-    assert!(store
-        .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
-        .is_ok());
+    assert!(
+        store
+            .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
+            .is_ok()
+    );
 
     let output = success(
         &dir,
@@ -823,12 +839,16 @@ fn pb13_prune_orphans_deletes_unreferenced_prepared_and_image() {
         "{output}"
     );
     assert_eq!(output["prune_orphans"]["pruned_image_count"], 1, "{output}");
-    assert!(store
-        .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
-        .is_err());
-    assert!(store
-        .inspect_content_accounted(ContentObjectKind::Image, &image_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_content_accounted(ContentObjectKind::Prepared, &prepared_hash)
+            .is_err()
+    );
+    assert!(
+        store
+            .inspect_content_accounted(ContentObjectKind::Image, &image_hash)
+            .is_err()
+    );
 }
 
 /// PB15 (partial — active purge journal only, one of four blocker
@@ -865,11 +885,13 @@ fn pb15_prune_orphans_blocked_by_active_purge_journal() {
     // The underlying verify pass itself reports the active journal as a
     // `purge_incomplete` finding (exit 3) before prune-orphans would even run.
     assert_eq!(code, 3, "{output}");
-    assert!(output["remaining_findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert!(
+        output["remaining_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "purge_incomplete")
+    );
     assert!(output.get("prune_orphans").is_none(), "{output}");
 }
 
@@ -1708,7 +1730,7 @@ fn pb42_open_view_side_binds_to_pointer_tool_profile_hash_not_first_raw_hash_mat
     // reaches the wrong (alias) entry first.
     let alias_normalize = NormalizeRef {
         tool_profile_hash: hash_bytes(b"a different tool profile entirely"),
-        gen: real_normalize.gen + 7,
+        r#gen: real_normalize.r#gen + 7,
         manifest_hash: hash_bytes(b"an unrelated manifest"),
     };
     let mut alias_entry = TreeEntry::raw_file("a-alias.md", real_entry.raw_hash.clone()).unwrap();

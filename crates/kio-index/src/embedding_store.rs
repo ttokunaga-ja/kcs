@@ -1,8 +1,8 @@
 //! Embedding metadata and chunk_vec store contracts.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -439,7 +439,7 @@ pub fn rebuild_chunk_vec(
                 _ => {
                     return Err(IndexError::Schema(format!(
                         "multiple contextual chunk embeddings match {chunk_id}"
-                    )))
+                    )));
                 }
             }
         }
@@ -1020,8 +1020,8 @@ mod tests {
         assert!(!wrong_dims.matches_profile(&expected));
     }
 
-    use crate::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
     use crate::ChunkRow;
+    use crate::fts::{CHUNK_VEC_DIMENSIONS, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
     use rusqlite::Connection;
 
     fn schema_conn() -> SqliteFtsIndex {
@@ -1036,7 +1036,7 @@ mod tests {
             chunk_id: chunk_id.to_owned(),
             raw_hash: "sha256:raw".to_owned(),
             tool_profile_hash: "sha256:tool".to_owned(),
-            gen: 0,
+            r#gen: 0,
             unit_key: "page:1".to_owned(),
             unit_content_hash:
                 "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
@@ -1500,9 +1500,11 @@ mod tests {
             .unwrap();
         }
         let error = rebuild_image_vec(conn, Some(&expected)).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("multiple compatible image embeddings"));
+        assert!(
+            error
+                .to_string()
+                .contains("multiple compatible image embeddings")
+        );
         assert_eq!(
             image_vec_count(conn).unwrap(),
             0,

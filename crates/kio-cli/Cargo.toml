@@ -10,7 +10,7 @@ name = "kio"
 path = "src/main.rs"
 
 [dependencies]
-cap-primitives = "3.4.5"
+cap-primitives.workspace = true
 clap.workspace = true
 getrandom.workspace = true
 kio-adapter = { path = "../kio-adapter" }

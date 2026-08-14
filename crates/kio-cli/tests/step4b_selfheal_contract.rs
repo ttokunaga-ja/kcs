@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use kio_adapter::catalog::standard_online_markdownize_profile_with_bbox;
 use kio_core::scope::{publish_network_approval, write_network_approval_pending};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[

@@ -2,17 +2,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kio_core::cas::{fanout_path, hash_bytes, ContentObjectKind, ObjectKind, ObjectStore};
+use kio_core::cas::{ContentObjectKind, ObjectKind, ObjectStore, fanout_path, hash_bytes};
 use kio_core::dag::CommitType;
 use kio_core::purge::{PurgeReason, PurgeState};
 use kio_core::scope::Repository;
 use kio_pipeline::markdownize::{
-    load_validated_normalized_instance, persist_normalized_instance, NormalizedInstanceManifest,
-    UnitStatus,
+    NormalizedInstanceManifest, UnitStatus, load_validated_normalized_instance,
+    persist_normalized_instance,
 };
 use kio_pipeline::task::TaskStore;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const CHILD_ENV_DENYLIST: &[&str] = &[
@@ -203,7 +203,7 @@ fn current_manifest_hash_for_raw(dir: &TempDir, raw_hash: &str) -> String {
         repo.kio_dir(),
         raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
     )
     .unwrap();
     kio_core::cas::hash_json(&serde_json::to_value(instance.manifest).unwrap()).unwrap()
@@ -228,7 +228,7 @@ fn add_image_reference(dir: &TempDir, raw_hash: &str, image_bytes: &[u8]) -> Str
         repo.kio_dir(),
         raw_hash,
         &normalize.tool_profile_hash,
-        normalize.gen,
+        normalize.r#gen,
     )
     .unwrap();
     let image_hash = hash_bytes(image_bytes);
@@ -415,10 +415,12 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     let current_manifest_hash = current_manifest_hash_for_raw(&fixture.dir, &fixture.raw_hash);
     assert_ne!(historical_manifest_hash, current_manifest_hash);
     for hash in [&historical_manifest_hash, &current_manifest_hash] {
-        assert!(ObjectStore::new(&kio_dir)
-            .content_path(ContentObjectKind::Manifest, hash)
-            .unwrap()
-            .exists());
+        assert!(
+            ObjectStore::new(&kio_dir)
+                .content_path(ContentObjectKind::Manifest, hash)
+                .unwrap()
+                .exists()
+        );
     }
     let image_path = fanout_path(kio_dir.join("objects/image"), &image_hash).unwrap();
 
@@ -492,10 +494,12 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     );
     assert_eq!(output["deleted_counts"]["image_objects"], 1);
     for hash in [&historical_manifest_hash, &current_manifest_hash] {
-        assert!(!ObjectStore::new(&kio_dir)
-            .content_path(ContentObjectKind::Manifest, hash)
-            .unwrap()
-            .exists());
+        assert!(
+            !ObjectStore::new(&kio_dir)
+                .content_path(ContentObjectKind::Manifest, hash)
+                .unwrap()
+                .exists()
+        );
     }
     assert!(output["deleted_counts"]["tasks"].as_u64().unwrap() >= 1);
     assert!(output["log_files_scrubbed"].as_u64().unwrap() >= 2);
@@ -505,13 +509,17 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     }
 
     let store = ObjectStore::new(&kio_dir);
-    assert!(store
-        .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
+            .is_err()
+    );
     assert!(store.read_chunk(&fixture.chunk_id).is_err());
-    assert!(store
-        .inspect_content_object(ContentObjectKind::Image, &image_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_content_object(ContentObjectKind::Image, &image_hash)
+            .is_err()
+    );
     assert!(!image_path.exists());
     assert!(!kio_dir.join("purge/in-progress.json").exists());
     assert!(tombstone_path(&kio_dir, &fixture.raw_hash).exists());
@@ -528,17 +536,23 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
         )
         .unwrap();
     assert_eq!(count, 0);
-    assert!(TaskStore::new(&kio_dir)
-        .all()
-        .unwrap()
-        .iter()
-        .all(|task| task.input_hash != fixture.raw_hash));
-    assert!(read_json_lines(&kio_dir.join("unsupported-inputs.jsonl"))
-        .iter()
-        .all(|row| row["raw_hash"] != fixture.raw_hash));
-    assert!(read_json_lines(&kio_dir.join("quarantine.jsonl"))
-        .iter()
-        .all(|row| row["path"] != "doc.md"));
+    assert!(
+        TaskStore::new(&kio_dir)
+            .all()
+            .unwrap()
+            .iter()
+            .all(|task| task.input_hash != fixture.raw_hash)
+    );
+    assert!(
+        read_json_lines(&kio_dir.join("unsupported-inputs.jsonl"))
+            .iter()
+            .all(|row| row["raw_hash"] != fixture.raw_hash)
+    );
+    assert!(
+        read_json_lines(&kio_dir.join("quarantine.jsonl"))
+            .iter()
+            .all(|row| row["path"] != "doc.md")
+    );
     for path in [
         device_logs.join("events.jsonl.1"),
         scope_logs.join("access.jsonl"),
@@ -559,10 +573,12 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
             "--all-history",
         ],
     ] {
-        assert!(json_success(&fixture.dir, &args)["results"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            json_success(&fixture.dir, &args)["results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
     let pointer = fixture.pointer.to_string();
     assert_eq!(
@@ -606,10 +622,12 @@ fn ct4_purge_deletes_target_immutable_normalized_unit_objects() {
     let unit_hashes = normalized_unit_pins_for(&fixture.dir, "doc.md");
     assert!(!unit_hashes.is_empty());
     for hash in &unit_hashes {
-        assert!(ObjectStore::new(&kio_dir)
-            .content_path(ContentObjectKind::NormalizedUnit, hash)
-            .unwrap()
-            .exists());
+        assert!(
+            ObjectStore::new(&kio_dir)
+                .content_path(ContentObjectKind::NormalizedUnit, hash)
+                .unwrap()
+                .exists()
+        );
     }
 
     fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
@@ -629,10 +647,12 @@ fn ct4_purge_deletes_target_immutable_normalized_unit_objects() {
         unit_hashes.len()
     );
     for hash in &unit_hashes {
-        assert!(!ObjectStore::new(&kio_dir)
-            .content_path(ContentObjectKind::NormalizedUnit, hash)
-            .unwrap()
-            .exists());
+        assert!(
+            !ObjectStore::new(&kio_dir)
+                .content_path(ContentObjectKind::NormalizedUnit, hash)
+                .unwrap()
+                .exists()
+        );
     }
 }
 
@@ -662,16 +682,20 @@ fn ct4_purge_preserves_other_raws_immutable_normalized_unit_objects() {
     );
     let store = ObjectStore::new(&kio_dir);
     for hash in target_units {
-        assert!(!store
-            .content_path(ContentObjectKind::NormalizedUnit, &hash)
-            .unwrap()
-            .exists());
+        assert!(
+            !store
+                .content_path(ContentObjectKind::NormalizedUnit, &hash)
+                .unwrap()
+                .exists()
+        );
     }
     for hash in survivor_units {
-        assert!(store
-            .content_path(ContentObjectKind::NormalizedUnit, &hash)
-            .unwrap()
-            .exists());
+        assert!(
+            store
+                .content_path(ContentObjectKind::NormalizedUnit, &hash)
+                .unwrap()
+                .exists()
+        );
     }
 }
 
@@ -725,18 +749,24 @@ fn ct4_purge_rejects_forged_target_ledger_row_before_deleting_survivor_chunk() {
         4,
     );
     assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
-    assert!(ObjectStore::new(repo.kio_dir())
-        .chunk_path(&survivor_chunk)
-        .unwrap()
-        .exists());
-    assert!(ObjectStore::new(repo.kio_dir())
-        .object_path(ObjectKind::Raw, &target_raw)
-        .unwrap()
-        .exists());
-    assert!(PurgeState::new(repo.kio_dir())
-        .read_tombstone(&target_raw)
-        .unwrap()
-        .is_none());
+    assert!(
+        ObjectStore::new(repo.kio_dir())
+            .chunk_path(&survivor_chunk)
+            .unwrap()
+            .exists()
+    );
+    assert!(
+        ObjectStore::new(repo.kio_dir())
+            .object_path(ObjectKind::Raw, &target_raw)
+            .unwrap()
+            .exists()
+    );
+    assert!(
+        PurgeState::new(repo.kio_dir())
+            .read_tombstone(&target_raw)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -799,24 +829,32 @@ fn ct4_purge_fails_closed_on_cross_raw_reachable_manifest_reuse() {
         4,
     );
     assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
-    assert!(store
-        .content_path(ContentObjectKind::Manifest, &target_manifest)
-        .unwrap()
-        .exists());
-    for unit_hash in target_units {
-        assert!(store
-            .content_path(ContentObjectKind::NormalizedUnit, &unit_hash)
+    assert!(
+        store
+            .content_path(ContentObjectKind::Manifest, &target_manifest)
             .unwrap()
-            .exists());
+            .exists()
+    );
+    for unit_hash in target_units {
+        assert!(
+            store
+                .content_path(ContentObjectKind::NormalizedUnit, &unit_hash)
+                .unwrap()
+                .exists()
+        );
     }
-    assert!(store
-        .object_path(ObjectKind::Raw, &target_raw)
-        .unwrap()
-        .exists());
-    assert!(PurgeState::new(repo.kio_dir())
-        .read_tombstone(&target_raw)
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .object_path(ObjectKind::Raw, &target_raw)
+            .unwrap()
+            .exists()
+    );
+    assert!(
+        PurgeState::new(repo.kio_dir())
+            .read_tombstone(&target_raw)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -846,14 +884,18 @@ fn ct4_purge_fails_closed_when_a_target_manifest_pinned_unit_is_missing() {
         4,
     );
     assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
-    assert!(ObjectStore::new(&kio_dir)
-        .object_path(ObjectKind::Raw, &fixture.raw_hash)
-        .unwrap()
-        .exists());
-    assert!(PurgeState::new(&kio_dir)
-        .read_tombstone(&fixture.raw_hash)
-        .unwrap()
-        .is_none());
+    assert!(
+        ObjectStore::new(&kio_dir)
+            .object_path(ObjectKind::Raw, &fixture.raw_hash)
+            .unwrap()
+            .exists()
+    );
+    assert!(
+        PurgeState::new(&kio_dir)
+            .read_tombstone(&fixture.raw_hash)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -990,9 +1032,11 @@ fn ct4_purge_deletes_image_and_embedding_objects_of_an_embedded_document() {
     // R25-6: the vector must stop existing in `objects/embeddings/` too, or the
     // next `repair rebuild-db` replays the purged vector back into the index.
     let store = ObjectStore::new(&kio_dir);
-    assert!(store
-        .inspect_content_object(ContentObjectKind::Image, &fixture.image_hash)
-        .is_err());
+    assert!(
+        store
+            .inspect_content_object(ContentObjectKind::Image, &fixture.image_hash)
+            .is_err()
+    );
     assert!(!image_path.exists());
     for hash in &fixture.embedding_hashes {
         assert!(store.read_embedding(hash).is_err(), "embedding={hash}");
@@ -1105,14 +1149,18 @@ fn ct4_purge_acquires_publication_lock_before_publishing_barrier() {
         3,
     );
     assert_eq!(error["error_code"], "KIO-E-STORE-LOCKED-001");
-    assert!(ObjectStore::new(fixture.dir.path().join(".kio"))
-        .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
-        .is_ok());
-    assert!(!fixture
-        .dir
-        .path()
-        .join(".kio/purge/in-progress.json")
-        .exists());
+    assert!(
+        ObjectStore::new(fixture.dir.path().join(".kio"))
+            .inspect_object(ObjectKind::Raw, &fixture.raw_hash)
+            .is_ok()
+    );
+    assert!(
+        !fixture
+            .dir
+            .path()
+            .join(".kio/purge/in-progress.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -1186,14 +1234,18 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
     .clone();
     let error: Value = serde_json::from_slice(&error).unwrap();
     assert_eq!(error["error_code"], "KIO-E-STORE-IO-001");
-    assert!(ObjectStore::new(prepared.dir.path().join(".kio"))
-        .inspect_object(ObjectKind::Raw, &prepared.raw_hash)
-        .is_ok());
-    assert!(!prepared
-        .dir
-        .path()
-        .join(".kio/purge/in-progress.json")
-        .exists());
+    assert!(
+        ObjectStore::new(prepared.dir.path().join(".kio"))
+            .inspect_object(ObjectKind::Raw, &prepared.raw_hash)
+            .is_ok()
+    );
+    assert!(
+        !prepared
+            .dir
+            .path()
+            .join(".kio/purge/in-progress.json")
+            .exists()
+    );
 
     // LC46/LC47: the journal's phase vocabulary is now `prepared -> tombstoned
     // -> deleted -> committed`. `tombstoned` is the first point at which the
@@ -1208,11 +1260,13 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
         assert_eq!(partial["error_code"], "KIO-E-PURGE-INCOMPLETE-001");
         assert_eq!(partial["status"], "purge_incomplete");
         assert!(!partial.to_string().contains(&fixture.raw_hash));
-        assert!(fixture
-            .dir
-            .path()
-            .join(".kio/purge/in-progress.json")
-            .exists());
+        assert!(
+            fixture
+                .dir
+                .path()
+                .join(".kio/purge/in-progress.json")
+                .exists()
+        );
         // §I (LC52-56, this session): search's read barrier now rejects the
         // WHOLE command outright while a journal is active/visible, rather
         // than silently degrading to a success response with the blocked
@@ -1249,10 +1303,12 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
             ],
         );
         assert_eq!(resumed["status"], "purged", "phase={phase}");
-        assert!(!fixture
-            .dir
-            .path()
-            .join(".kio/purge/in-progress.json")
-            .exists());
+        assert!(
+            !fixture
+                .dir
+                .path()
+                .join(".kio/purge/in-progress.json")
+                .exists()
+        );
     }
 }

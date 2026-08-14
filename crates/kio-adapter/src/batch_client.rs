@@ -27,9 +27,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::http_policy::{
-    authenticated_agent, read_bytes_bounded, read_json_bounded, HttpPolicy, OCR_RESPONSE_MAX_BYTES,
+    HttpPolicy, OCR_RESPONSE_MAX_BYTES, authenticated_agent, read_bytes_bounded, read_json_bounded,
+    require_success,
 };
-use crate::mistral_ocr::http_error;
+use crate::mistral_ocr::{http_error, http_status_error};
 use crate::{AdapterError, Result};
 
 /// Inline-JSON mock script env var (per-Command in tests; see
@@ -266,10 +267,11 @@ impl EnvMistralBatchClient {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
             .get(url)
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         read_json_bounded(response, BATCH_METADATA_MAX_BYTES, context)
     }
 
@@ -319,14 +321,15 @@ impl MistralBatchClient for EnvMistralBatchClient {
         let body = multipart_form_body(&boundary, filename, jsonl);
         let response = authenticated_agent(self.http_policy)
             .post(&format!("{}/v1/files", self.base_url()))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
-            .set(
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
+            .header(
                 "Content-Type",
                 &format!("multipart/form-data; boundary={boundary}"),
             )
-            .send_bytes(&body)
-            .map_err(http_error)?;
+            .send(&body)
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_json_bounded(
             response,
             BATCH_METADATA_MAX_BYTES,
@@ -357,15 +360,16 @@ impl MistralBatchClient for EnvMistralBatchClient {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
             .post(&format!("{}/v1/batch/jobs", self.base_url()))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
             .send_json(serde_json::json!({
                 "input_files": [input_file_id],
                 "endpoint": "/v1/ocr",
                 "model": model,
                 "metadata": metadata,
             }))
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let value = read_json_bounded(
             response,
             BATCH_METADATA_MAX_BYTES,
@@ -408,15 +412,16 @@ impl MistralBatchClient for EnvMistralBatchClient {
     /// success (07 §5.7): the sweep's delete is idempotent by contract.
     fn delete_upload(&self, upload_id: &str) -> Result<()> {
         let api_key = Self::api_key()?;
-        match authenticated_agent(self.http_policy)
+        let response = authenticated_agent(self.http_policy)
             .delete(&format!("{}/v1/files/{upload_id}", self.base_url()))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
             .call()
-        {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(404, _)) => Ok(()),
-            Err(error) => Err(http_error(error)),
+            .map_err(http_error)?;
+        if response.status().as_u16() == 404 {
+            Ok(())
+        } else {
+            require_success(response, http_status_error).map(|_| ())
         }
     }
 
@@ -431,10 +436,11 @@ impl MistralBatchClient for EnvMistralBatchClient {
                 "{}/v1/files/{output_file_id}/content",
                 self.base_url()
             ))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Accept-Encoding", "identity")
+            .header("Authorization", &format!("Bearer {api_key}"))
+            .header("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?;
+            .map_err(http_error)
+            .and_then(|response| require_success(response, http_status_error))?;
         let body = read_bytes_bounded(
             response,
             OCR_RESPONSE_MAX_BYTES,
@@ -829,10 +835,10 @@ impl MistralBatchClient for MockBatchClient {
 /// A declared-but-broken credential (`keychain:` / invalid runtime target)
 /// stays a loud error here, exactly as it is on the sync path.
 pub fn configured_mistral_batch_client() -> Result<Option<Box<dyn MistralBatchClient>>> {
-    if let Ok(raw) = std::env::var(TEST_MISTRAL_BATCH_ENV) {
-        if !raw.trim().is_empty() {
-            return Ok(Some(Box::new(MockBatchClient::from_env_value(&raw)?)));
-        }
+    if let Ok(raw) = std::env::var(TEST_MISTRAL_BATCH_ENV)
+        && !raw.trim().is_empty()
+    {
+        return Ok(Some(Box::new(MockBatchClient::from_env_value(&raw)?)));
     }
     if crate::tool_lock::resolve_role_api_key("markdown", "MISTRAL_API_KEY")?.is_some() {
         return Ok(Some(Box::new(EnvMistralBatchClient::new())));
@@ -1007,8 +1013,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "200 OK",
             &[],
@@ -1023,15 +1031,18 @@ mod tests {
         let uploaded = client
             .upload_batch_input(jsonl.as_bytes(), &filename)
             .unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         assert_eq!(uploaded, "file-verified-1");
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
-        assert!(request
-            .request_line()
-            .starts_with("POST /v1/files HTTP/1.1"));
+        assert!(
+            request
+                .request_line()
+                .starts_with("POST /v1/files HTTP/1.1")
+        );
         assert_eq!(
             request.header("Authorization").as_deref(),
             Some("Bearer test-key")
@@ -1082,8 +1093,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "200 OK",
             &[],
@@ -1100,7 +1113,8 @@ mod tests {
         let record = client
             .create_job("file-verified-1", "mistral-ocr-2505", &sent_metadata)
             .unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(record.job_id, "batch-verified-1");
         assert_eq!(record.status, BatchJobStatus::Queued);
@@ -1114,13 +1128,17 @@ mod tests {
 
         let requests = server.join().unwrap();
         let request = &requests[0];
-        assert!(request
-            .request_line()
-            .starts_with("POST /v1/batch/jobs HTTP/1.1"));
-        assert!(request
-            .header("Content-Type")
-            .unwrap()
-            .starts_with("application/json"));
+        assert!(
+            request
+                .request_line()
+                .starts_with("POST /v1/batch/jobs HTTP/1.1")
+        );
+        assert!(
+            request
+                .header("Content-Type")
+                .unwrap()
+                .starts_with("application/json")
+        );
         let sent: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(
             sent,
@@ -1138,8 +1156,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "404 Not Found",
             &[],
@@ -1148,11 +1168,14 @@ mod tests {
         let client = EnvMistralBatchClient::with_base_url(&base);
         // 07 §5.7: already-gone reports as success.
         client.delete_upload("file-gone").unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         let requests = server.join().unwrap();
-        assert!(requests[0]
-            .request_line()
-            .starts_with("DELETE /v1/files/file-gone HTTP/1.1"));
+        assert!(
+            requests[0]
+                .request_line()
+                .starts_with("DELETE /v1/files/file-gone HTTP/1.1")
+        );
     }
 
     #[test]
@@ -1160,8 +1183,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let page0 = serde_json::json!({
             "total": 3,
             "data": [
@@ -1184,7 +1209,8 @@ mod tests {
         ]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let jobs = client.list_jobs().unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(jobs.len(), 3);
         assert_eq!(jobs[0].job_id, "batch-1");
@@ -1195,12 +1221,16 @@ mod tests {
         assert_eq!(jobs[2].status, BatchJobStatus::Failed);
 
         let requests = server.join().unwrap();
-        assert!(requests[0]
-            .request_line()
-            .starts_with("GET /v1/batch/jobs?page_size=100&page=0 "));
-        assert!(requests[1]
-            .request_line()
-            .starts_with("GET /v1/batch/jobs?page_size=100&page=1 "));
+        assert!(
+            requests[0]
+                .request_line()
+                .starts_with("GET /v1/batch/jobs?page_size=100&page=0 ")
+        );
+        assert!(
+            requests[1]
+                .request_line()
+                .starts_with("GET /v1/batch/jobs?page_size=100&page=1 ")
+        );
     }
 
     #[test]
@@ -1208,8 +1238,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let page0 = serde_json::json!({
             "total": 2,
             "data": [
@@ -1221,7 +1253,8 @@ mod tests {
             spawn_scripted_server(vec![http_response("200 OK", &[], &page0.to_string())]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let uploads = client.list_uploads().unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(uploads.len(), 2);
         assert_eq!(uploads[0].upload_id, "file-a");
@@ -1234,9 +1267,11 @@ mod tests {
         assert_eq!(uploads[1].filename, "");
 
         let requests = server.join().unwrap();
-        assert!(requests[0]
-            .request_line()
-            .starts_with("GET /v1/files?purpose=batch&page_size=100&page=0 "));
+        assert!(
+            requests[0]
+                .request_line()
+                .starts_with("GET /v1/files?purpose=batch&page_size=100&page=0 ")
+        );
     }
 
     #[test]
@@ -1244,8 +1279,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         // Every page is non-empty and no `total` is reported: only the
         // 50-page bound can stop this walk. The server accepts exactly 50
         // connections, so a 51st request would fail loudly (refused).
@@ -1264,14 +1301,17 @@ mod tests {
         let (base, server) = spawn_scripted_server(responses);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let jobs = client.list_jobs().unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(jobs.len(), BATCH_LIST_MAX_PAGES);
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), BATCH_LIST_MAX_PAGES);
-        assert!(requests[BATCH_LIST_MAX_PAGES - 1]
-            .request_line()
-            .starts_with("GET /v1/batch/jobs?page_size=100&page=49 "));
+        assert!(
+            requests[BATCH_LIST_MAX_PAGES - 1]
+                .request_line()
+                .starts_with("GET /v1/batch/jobs?page_size=100&page=49 ")
+        );
     }
 
     #[test]
@@ -1279,8 +1319,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         // The verified out-batch/batch_results.jsonl envelope: one JSON object
         // per line, `{"id", "custom_id", "response": {"status_code", "body"}}`.
         let payload = concat!(
@@ -1292,7 +1334,8 @@ mod tests {
         let (base, server) = spawn_scripted_server(vec![http_response("200 OK", &[], payload)]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let lines = client.fetch_output("file-out-1").unwrap();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(lines.len(), 2, "blank lines are skipped, not errors");
         assert_eq!(lines[0].custom_id, "task-a");
@@ -1303,9 +1346,11 @@ mod tests {
         assert_eq!(lines[1].body["error"], "rate limited");
 
         let requests = server.join().unwrap();
-        assert!(requests[0]
-            .request_line()
-            .starts_with("GET /v1/files/file-out-1/content HTTP/1.1"));
+        assert!(
+            requests[0]
+                .request_line()
+                .starts_with("GET /v1/files/file-out-1/content HTTP/1.1")
+        );
     }
 
     #[test]
@@ -1313,8 +1358,10 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "429 Too Many Requests",
             &[("Retry-After", "7")],
@@ -1322,7 +1369,8 @@ mod tests {
         )]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let error = client.get_job("batch-1").unwrap_err();
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         server.join().unwrap();
 
         match error {
@@ -1339,15 +1387,18 @@ mod tests {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let client = EnvMistralBatchClient::with_base_url("http://127.0.0.1:9");
-        std::env::set_var(MISTRAL_WORKSPACE_ID_ENV, "  ws-team-a  ");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(MISTRAL_WORKSPACE_ID_ENV, "  ws-team-a  ") };
         assert_eq!(client.provider_scope_id().unwrap(), "ws-team-a");
-        std::env::set_var(MISTRAL_WORKSPACE_ID_ENV, "   ");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(MISTRAL_WORKSPACE_ID_ENV, "   ") };
         assert_eq!(
             client.provider_scope_id().unwrap(),
             DEFAULT_PROVIDER_SCOPE_ID,
             "a whitespace-only value degrades to the default scope"
         );
-        std::env::remove_var(MISTRAL_WORKSPACE_ID_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(MISTRAL_WORKSPACE_ID_ENV) };
         assert_eq!(
             client.provider_scope_id().unwrap(),
             DEFAULT_PROVIDER_SCOPE_ID
@@ -1359,26 +1410,33 @@ mod tests {
         let _guard = test_env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::remove_var("MISTRAL_API_KEY");
-        std::env::remove_var(MISTRAL_WORKSPACE_ID_ENV);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(MISTRAL_WORKSPACE_ID_ENV) };
         assert!(
             configured_mistral_batch_client().unwrap().is_none(),
             "no mock script and no credential → no batch client"
         );
 
-        std::env::set_var("MISTRAL_API_KEY", "test-key");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let real = configured_mistral_batch_client()
             .unwrap()
             .expect("the sync path's credential condition also configures the batch lane");
         assert_eq!(real.provider_scope_id().unwrap(), DEFAULT_PROVIDER_SCOPE_ID);
 
-        std::env::set_var(TEST_MISTRAL_BATCH_ENV, r#"{"provider_scope_id":"mock-ws"}"#);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var(TEST_MISTRAL_BATCH_ENV, r#"{"provider_scope_id":"mock-ws"}"#) };
         let mock = configured_mistral_batch_client()
             .unwrap()
             .expect("the inline mock script stays first-priority");
         assert_eq!(mock.provider_scope_id().unwrap(), "mock-ws");
-        std::env::remove_var(TEST_MISTRAL_BATCH_ENV);
-        std::env::remove_var("MISTRAL_API_KEY");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
     }
 }

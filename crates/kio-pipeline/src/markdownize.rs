@@ -9,8 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kio_adapter::types as adapter_types;
 use kio_core::cas::{
-    canonical_json_bytes, hash_bytes as cas_hash_bytes, ContentObjectKind, ObjectStore,
-    MAX_NORMALIZED_UNIT_OBJECT_BYTES,
+    ContentObjectKind, MAX_NORMALIZED_UNIT_OBJECT_BYTES, ObjectStore, canonical_json_bytes,
+    hash_bytes as cas_hash_bytes,
 };
 use kio_core::scope::{new_ulid, now_utc_seconds};
 use serde::{Deserialize, Serialize};
@@ -18,9 +18,9 @@ use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::prepare::{
-    hash_bytes, unit_ref as prepared_unit_ref, PreparedUnit, UnitFingerprint, UnitType,
+    PreparedUnit, UnitFingerprint, UnitType, hash_bytes, unit_ref as prepared_unit_ref,
 };
-use crate::store_path::{ensure_store_directory_path, resolve_existing_store_path, StorePathKind};
+use crate::store_path::{StorePathKind, ensure_store_directory_path, resolve_existing_store_path};
 use crate::{IoResultExt, PipelineError, Result};
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -63,7 +63,7 @@ pub enum UnitStatus {
 pub struct UnitRef {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub unit_key: String,
     pub unit_ref: String,
 }
@@ -71,7 +71,7 @@ pub struct UnitRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReusedFrom {
     pub raw_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub unit_key: String,
 }
 
@@ -83,7 +83,7 @@ pub struct NormalizedUnitObject {
     pub raw_hash: String,
     pub prepared_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub mode: MarkdownizeMode,
     pub markdown: String,
     /// Provider/layout metadata. This required object is part of the immutable
@@ -183,7 +183,7 @@ where
 pub struct NormalizedInstanceManifest {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub parent_gen: Option<u64>,
     pub run_id: String,
     pub units: Vec<NormalizedUnitManifestEntry>,
@@ -194,7 +194,7 @@ pub struct NormalizedInstanceManifest {
 pub struct NormalizedInstanceIdentity {
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +231,7 @@ pub struct NormalizationRun {
     pub run_id: String,
     pub raw_hash: String,
     pub tool_profile_hash: String,
-    pub gen: u64,
+    pub r#gen: u64,
     pub mode: MarkdownizeMode,
     pub status: NormalizationRunStatus,
     pub changed_unit_keys: Vec<String>,
@@ -296,7 +296,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
         raw_hash: request.new_raw.raw_hash.clone(),
         prepared_hash: prepared_hash.clone(),
         tool_profile_hash: request.tool_profile_hash.clone(),
-        gen: 0,
+        r#gen: 0,
         mode: request.mode,
         markdown: format!(
             "<!-- Kio deterministic baseline {} {} -->\n",
@@ -309,7 +309,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
     let manifest = NormalizedInstanceManifest {
         raw_hash: request.new_raw.raw_hash.clone(),
         tool_profile_hash: request.tool_profile_hash.clone(),
-        gen: 0,
+        r#gen: 0,
         parent_gen: None,
         run_id: format!("run_{}", new_ulid(Path::new("."))),
         units: vec![NormalizedUnitManifestEntry {
@@ -329,7 +329,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
             run_id: manifest.run_id.clone(),
             raw_hash: request.new_raw.raw_hash,
             tool_profile_hash: request.tool_profile_hash,
-            gen: 0,
+            r#gen: 0,
             mode: request.mode,
             status: NormalizationRunStatus::Done,
             changed_unit_keys: vec!["doc:1".to_owned()],
@@ -579,12 +579,12 @@ fn validate_unit_ref_injectivity<'a>(unit_keys: impl Iterator<Item = &'a String>
     let mut seen: BTreeMap<String, &'a str> = BTreeMap::new();
     for unit_key in unit_keys {
         let unit_ref = prepared_unit_ref(unit_key);
-        if let Some(existing) = seen.insert(unit_ref.clone(), unit_key.as_str()) {
-            if existing != unit_key.as_str() {
-                return Err(contract_violation(&format!(
-                    "unit_ref collision: `{existing}` and `{unit_key}` both map to {unit_ref}"
-                )));
-            }
+        if let Some(existing) = seen.insert(unit_ref.clone(), unit_key.as_str())
+            && existing != unit_key.as_str()
+        {
+            return Err(contract_violation(&format!(
+                "unit_ref collision: `{existing}` and `{unit_key}` both map to {unit_ref}"
+            )));
         }
     }
     Ok(())
@@ -595,16 +595,20 @@ pub fn normalized_instance_dir(
     kio_dir: impl AsRef<Path>,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> PathBuf {
     kio_dir.as_ref().join(normalized_instance_relative_path(
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
     ))
 }
 
-fn normalized_instance_relative_path(raw_hash: &str, tool_profile_hash: &str, gen: u64) -> PathBuf {
+fn normalized_instance_relative_path(
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    r#gen: u64,
+) -> PathBuf {
     let digest = normalized_path_digest(raw_hash);
     let tool_digest = normalized_path_digest(tool_profile_hash);
     let fanout_a = digest.get(0..2).unwrap_or(digest);
@@ -620,16 +624,16 @@ pub fn normalized_view_path(
     kio_dir: impl AsRef<Path>,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> PathBuf {
     kio_dir.as_ref().join(normalized_view_relative_path(
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
     ))
 }
 
-fn normalized_view_relative_path(raw_hash: &str, tool_profile_hash: &str, gen: u64) -> PathBuf {
+fn normalized_view_relative_path(raw_hash: &str, tool_profile_hash: &str, r#gen: u64) -> PathBuf {
     let digest = normalized_path_digest(raw_hash);
     let tool_digest = normalized_path_digest(tool_profile_hash);
     let fanout_a = digest.get(0..2).unwrap_or(digest);
@@ -661,7 +665,7 @@ pub fn load_validated_normalized_instance(
     kio_dir: impl AsRef<Path>,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> Result<ValidatedNormalizedInstance> {
     if !kio_core::cas::is_hash(raw_hash) || !kio_core::cas::is_hash(tool_profile_hash) {
         return Err(PipelineError::corrupt(
@@ -672,9 +676,9 @@ pub fn load_validated_normalized_instance(
     let identity = NormalizedInstanceIdentity {
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: tool_profile_hash.to_owned(),
-        gen,
+        r#gen,
     };
-    let canonical_relative = normalized_instance_relative_path(raw_hash, tool_profile_hash, gen);
+    let canonical_relative = normalized_instance_relative_path(raw_hash, tool_profile_hash, r#gen);
     let canonical_existing = resolve_existing_store_path(
         kio_dir.as_ref(),
         &canonical_relative,
@@ -701,13 +705,13 @@ pub fn normalized_instance_read_budget(
     kio_dir: impl AsRef<Path>,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
 ) -> Result<u64> {
     normalized_instance_read_budget_with_file_limit(
         kio_dir.as_ref(),
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
         MAX_NORMALIZED_INSTANCE_FILES,
     )
 }
@@ -716,7 +720,7 @@ fn normalized_instance_read_budget_with_file_limit(
     kio_dir: &Path,
     raw_hash: &str,
     tool_profile_hash: &str,
-    gen: u64,
+    r#gen: u64,
     max_files: usize,
 ) -> Result<u64> {
     if !kio_core::cas::is_hash(raw_hash) || !kio_core::cas::is_hash(tool_profile_hash) {
@@ -728,7 +732,7 @@ fn normalized_instance_read_budget_with_file_limit(
     let relatives = [normalized_instance_relative_path(
         raw_hash,
         tool_profile_hash,
-        gen,
+        r#gen,
     )];
 
     let mut total = 0_u64;
@@ -833,7 +837,7 @@ fn load_validated_normalized_units_from_manifest_with_size(
     let identity = NormalizedInstanceIdentity {
         raw_hash: manifest.raw_hash.clone(),
         tool_profile_hash: manifest.tool_profile_hash.clone(),
-        gen: manifest.gen,
+        r#gen: manifest.r#gen,
     };
     validate_manifest_identity(source_path, &identity, manifest)?;
     validate_manifest_unit_object_pins(source_path, manifest)?;
@@ -941,7 +945,7 @@ pub fn validate_normalized_instance(
         if !seen_units.insert(unit.unit_key.as_str())
             || unit.raw_hash != identity.raw_hash
             || unit.tool_profile_hash != identity.tool_profile_hash
-            || unit.gen != identity.gen
+            || unit.r#gen != identity.r#gen
             || unit.unit_key != entry.unit_key
             || unit.unit_type != entry.unit_type
             || unit.prepared_hash != entry.prepared_hash
@@ -1012,7 +1016,7 @@ fn validate_manifest_identity(
         || !kio_core::cas::is_hash(&identity.tool_profile_hash)
         || manifest.raw_hash != identity.raw_hash
         || manifest.tool_profile_hash != identity.tool_profile_hash
-        || manifest.gen != identity.gen
+        || manifest.r#gen != identity.r#gen
     {
         return Err(normalized_corrupt(
             source_path,
@@ -1138,7 +1142,7 @@ pub fn persist_normalized_instance(
     let identity = NormalizedInstanceIdentity {
         raw_hash: manifest.raw_hash.clone(),
         tool_profile_hash: manifest.tool_profile_hash.clone(),
-        gen: manifest.gen,
+        r#gen: manifest.r#gen,
     };
     // First prove the complete future manifest/unit tuple valid without
     // publishing anything, then persist its immutable bodies before the
@@ -1190,12 +1194,12 @@ pub fn persist_normalized_instance(
         &kio_dir,
         &manifest.raw_hash,
         &manifest.tool_profile_hash,
-        manifest.gen,
+        manifest.r#gen,
     );
     let instance_relative = normalized_instance_relative_path(
         &manifest.raw_hash,
         &manifest.tool_profile_hash,
-        manifest.gen,
+        manifest.r#gen,
     );
     let instance_parent_relative = instance_relative
         .parent()
@@ -1206,7 +1210,7 @@ pub fn persist_normalized_instance(
     let view_relative = normalized_view_relative_path(
         &manifest.raw_hash,
         &manifest.tool_profile_hash,
-        manifest.gen,
+        manifest.r#gen,
     );
     let view_path = kio_dir.as_ref().join(&view_relative);
     let view_parent_relative = view_relative.parent().ok_or_else(|| PipelineError::Io {
@@ -1327,7 +1331,7 @@ pub fn persist_normalized_instance(
         kio_dir.as_ref(),
         &manifest.raw_hash,
         &manifest.tool_profile_hash,
-        manifest.gen,
+        manifest.r#gen,
     )?;
     if persisted.manifest != *manifest || persisted.units.as_slice() != units {
         return Err(normalized_corrupt(
@@ -1382,7 +1386,7 @@ fn replace_store_file(source: &Path, destination: &Path) -> std::io::Result<()> 
 #[cfg(windows)]
 fn replace_store_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
 
     if !destination.exists() {
         return fs::rename(source, destination);
@@ -1495,7 +1499,7 @@ pub fn build_normalized_view_layout(
 
     let mut text = format!(
         "<!-- KIO-NORMALIZED-VIEW raw_hash={} tool_profile_hash={} gen={} -->\n",
-        manifest.raw_hash, manifest.tool_profile_hash, manifest.gen,
+        manifest.raw_hash, manifest.tool_profile_hash, manifest.r#gen,
     );
     let mut unit_starts = BTreeMap::new();
     let mut unit_lens = BTreeMap::new();
@@ -1765,12 +1769,12 @@ mod tests {
         let identity = NormalizedInstanceIdentity {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: tool_profile_hash.clone(),
-            gen: 7,
+            r#gen: 7,
         };
         let mut manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: tool_profile_hash.clone(),
-            gen: 7,
+            r#gen: 7,
             parent_gen: Some(6),
             run_id: "run_test".to_owned(),
             units: vec![NormalizedUnitManifestEntry {
@@ -1791,7 +1795,7 @@ mod tests {
             raw_hash,
             prepared_hash,
             tool_profile_hash,
-            gen: 7,
+            r#gen: 7,
             mode: MarkdownizeMode::Full,
             markdown: "trusted markdown".to_owned(),
             metadata: BTreeMap::from([(
@@ -1815,7 +1819,7 @@ mod tests {
         let unit_ref = UnitRef {
             raw_hash: "sha256:raw".to_owned(),
             tool_profile_hash: "sha256:tool".to_owned(),
-            gen: 2,
+            r#gen: 2,
             unit_key: "page:1".to_owned(),
             unit_ref: "3f2a9c0d1b4e5f60".to_owned(),
         };
@@ -1858,11 +1862,15 @@ mod tests {
         let dir = normalized_instance_dir(".kio", raw, tool, 0);
         assert_eq!(
             dir,
-            PathBuf::from(".kio/objects/normalized_units/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0")
+            PathBuf::from(
+                ".kio/objects/normalized_units/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0"
+            )
         );
         assert_eq!(
             normalized_view_path(".kio", raw, tool, 0),
-            PathBuf::from(".kio/objects/normalized/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0.md")
+            PathBuf::from(
+                ".kio/objects/normalized/bb/e1/bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c.g0.md"
+            )
         );
     }
 
@@ -1896,7 +1904,7 @@ mod tests {
         let manifest = NormalizedInstanceManifest {
             raw_hash: raw_hash.clone(),
             tool_profile_hash: tool_profile_hash.clone(),
-            gen: 3,
+            r#gen: 3,
             parent_gen: None,
             run_id: "run_layout_test".to_owned(),
             units: vec![
@@ -1943,7 +1951,7 @@ mod tests {
                 raw_hash: raw_hash.clone(),
                 prepared_hash: prepared_hash.clone(),
                 tool_profile_hash: tool_profile_hash.clone(),
-                gen: 3,
+                r#gen: 3,
                 mode: MarkdownizeMode::Full,
                 markdown: "first unit body\n\n".to_owned(),
                 metadata: BTreeMap::new(),
@@ -1956,7 +1964,7 @@ mod tests {
                 raw_hash: raw_hash.clone(),
                 prepared_hash: prepared_hash.clone(),
                 tool_profile_hash: tool_profile_hash.clone(),
-                gen: 3,
+                r#gen: 3,
                 mode: MarkdownizeMode::Full,
                 markdown: "third unit body".to_owned(),
                 metadata: BTreeMap::new(),
@@ -2294,15 +2302,15 @@ mod tests {
     // directly (the function `validate_markdownize_response` calls).
     #[test]
     fn qa40_unit_ref_collision_in_the_final_persisted_set_is_rejected() {
-        assert!(validate_unit_ref_injectivity(
-            [&"page:1".to_owned(), &"page:2".to_owned()].into_iter()
-        )
-        .is_ok());
+        assert!(
+            validate_unit_ref_injectivity([&"page:1".to_owned(), &"page:2".to_owned()].into_iter())
+                .is_ok()
+        );
         // Same key twice is not a collision (idempotent re-occurrence).
-        assert!(validate_unit_ref_injectivity(
-            [&"page:1".to_owned(), &"page:1".to_owned()].into_iter()
-        )
-        .is_ok());
+        assert!(
+            validate_unit_ref_injectivity([&"page:1".to_owned(), &"page:1".to_owned()].into_iter())
+                .is_ok()
+        );
     }
 
     // QA41: the 6 Normalized Markdown v1 structural violations (07 §5.2.1) —
@@ -2662,7 +2670,7 @@ mod tests {
                 .is_err()
         );
         bad_manifest = manifest.clone();
-        bad_manifest.gen = 8;
+        bad_manifest.r#gen = 8;
         assert!(
             validate_normalized_instance("manifest.json", &identity, &bad_manifest, &units)
                 .is_err()
@@ -2679,7 +2687,7 @@ mod tests {
             validate_normalized_instance("manifest.json", &identity, &manifest, &bad_unit).is_err()
         );
         let mut bad_unit = units.clone();
-        bad_unit[0].gen = 8;
+        bad_unit[0].r#gen = 8;
         assert!(
             validate_normalized_instance("manifest.json", &identity, &manifest, &bad_unit).is_err()
         );
@@ -2709,7 +2717,7 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .unwrap();
         assert_eq!(loaded.manifest, manifest);
@@ -2719,7 +2727,7 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         );
         let unit_path = instance_dir.join(format!(
             "{}.json",
@@ -2733,7 +2741,7 @@ mod tests {
                 dir.path(),
                 &identity.raw_hash,
                 &identity.tool_profile_hash,
-                identity.gen,
+                identity.r#gen,
             )
             .unwrap()
             .units,
@@ -2750,14 +2758,14 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .unwrap();
         let budget = normalized_instance_read_budget(
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .unwrap();
         assert!(budget > loaded.verified_bytes);
@@ -2766,7 +2774,7 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .join(format!(
             "{}.json",
@@ -2779,18 +2787,20 @@ mod tests {
                 dir.path(),
                 &identity.raw_hash,
                 &identity.tool_profile_hash,
-                identity.gen,
+                identity.r#gen,
             )
             .unwrap(),
             budget
         );
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_ok());
+        assert!(
+            load_validated_normalized_instance(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2810,19 +2820,21 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .unwrap();
         assert_eq!(loaded.manifest, manifest);
         assert_eq!(loaded.units, units);
-        assert!(fs::read_to_string(normalized_view_path(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        ))
-        .unwrap()
-        .contains("retry output"));
+        assert!(
+            fs::read_to_string(normalized_view_path(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            ))
+            .unwrap()
+            .contains("retry output")
+        );
     }
 
     #[test]
@@ -2881,19 +2893,21 @@ mod tests {
         persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
         let new_hash = manifest.units[0].unit_object_hash.clone().unwrap();
         assert_ne!(old_hash, new_hash);
-        assert!(ObjectStore::new(dir.path())
-            .read_content_object_bytes(
-                ContentObjectKind::NormalizedUnit,
-                &old_hash,
-                MAX_NORMALIZED_UNIT_BYTES
-            )
-            .is_ok());
+        assert!(
+            ObjectStore::new(dir.path())
+                .read_content_object_bytes(
+                    ContentObjectKind::NormalizedUnit,
+                    &old_hash,
+                    MAX_NORMALIZED_UNIT_BYTES
+                )
+                .is_ok()
+        );
 
         let cache_path = normalized_instance_dir(
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         )
         .join(format!("{}.json", prepared_unit_ref(&units[0].unit_key)));
         fs::write(&cache_path, b"not authoritative").unwrap();
@@ -2950,7 +2964,7 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         );
         let err = persist_normalized_instance(dir.path(), &manifest, &units).unwrap_err();
         assert!(err.to_string().contains("normalized manifest exceeds"));
@@ -2963,19 +2977,21 @@ mod tests {
         let (identity, manifest, units) = normalized_fixture();
         persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
 
-        assert!(normalized_instance_read_budget_with_file_limit(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-            2,
-        )
-        .is_ok());
+        assert!(
+            normalized_instance_read_budget_with_file_limit(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+                2,
+            )
+            .is_ok()
+        );
         let error = normalized_instance_read_budget_with_file_limit(
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
             1,
         )
         .unwrap_err();
@@ -3032,13 +3048,15 @@ mod tests {
         let poisoned = tempfile::tempdir().unwrap();
         let (identity, manifest, units) = normalized_fixture();
         persist_normalized_instance(trusted.path(), &manifest, &units).unwrap();
-        assert!(load_validated_normalized_instance(
-            trusted.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_ok());
+        assert!(
+            load_validated_normalized_instance(
+                trusted.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            )
+            .is_ok()
+        );
 
         fs::create_dir_all(poisoned.path().join("objects")).unwrap();
         symlink(
@@ -3046,13 +3064,15 @@ mod tests {
             poisoned.path().join("objects/normalized_units"),
         )
         .unwrap();
-        assert!(load_validated_normalized_instance(
-            poisoned.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_err());
+        assert!(
+            load_validated_normalized_instance(
+                poisoned.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -3068,7 +3088,7 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         );
         let name = format!("{}.json", prepared_unit_ref(&manifest.units[0].unit_key));
         let unit_path = instance_dir.join(&name);
@@ -3076,13 +3096,15 @@ mod tests {
         fs::write(&outside_path, serde_json::to_vec(&units[0]).unwrap()).unwrap();
         fs::remove_file(&unit_path).unwrap();
         symlink(&outside_path, &unit_path).unwrap();
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_ok());
+        assert!(
+            load_validated_normalized_instance(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -3094,17 +3116,19 @@ mod tests {
             dir.path(),
             &identity.raw_hash,
             &identity.tool_profile_hash,
-            identity.gen,
+            identity.r#gen,
         );
         let name = format!("{}.json", prepared_unit_ref(&manifest.units[0].unit_key));
         fs::remove_file(instance_dir.join(name)).unwrap();
 
-        assert!(load_validated_normalized_instance(
-            dir.path(),
-            &identity.raw_hash,
-            &identity.tool_profile_hash,
-            identity.gen,
-        )
-        .is_ok());
+        assert!(
+            load_validated_normalized_instance(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.r#gen,
+            )
+            .is_ok()
+        );
     }
 }

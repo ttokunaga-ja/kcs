@@ -19,6 +19,10 @@ pub(crate) const EMBEDDING_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const RERANK_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const OCR_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
+/// Canonical ureq 3 response type. Keeping the transport body explicit makes
+/// the bounded-read boundary visible at every adapter call site.
+pub(crate) type HttpResponse = ureq::http::Response<ureq::Body>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HttpPolicy {
     pub(crate) connect_timeout: Duration,
@@ -68,16 +72,34 @@ impl HttpPolicy {
 /// Authenticated provider requests fail closed on redirects. This prevents a
 /// provider-specific credential header from being replayed to a new origin.
 pub(crate) fn authenticated_agent(policy: HttpPolicy) -> ureq::Agent {
-    // ureq 2 gives `timeout()` precedence over `timeout_read()` and
-    // `timeout_write()`. Configure one overall deadline from the strictest
-    // policy cap so the nominal read/write limits cannot be silently widened
-    // by a longer overall timeout.
+    // ureq 3's global timeout covers DNS through response-body completion.
+    // Keep the strictest cap as the global deadline and explicitly return
+    // status responses: callers retain their authenticated 401/403, 402, and
+    // 429 classifications (including Retry-After) without losing the body or
+    // headers to the transport error type.
     let effective_overall_timeout = effective_overall_timeout(policy);
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(policy.connect_timeout)
-        .timeout(effective_overall_timeout)
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_connect(Some(policy.connect_timeout))
+        .timeout_global(Some(effective_overall_timeout))
         .build()
+        .into()
+}
+
+/// Convert every non-success response into the adapter-specific error while
+/// retaining direct access to response headers before the bounded body read
+/// begins. In particular, redirects are returned (not followed) by the agent
+/// and must still fail closed here.
+pub(crate) fn require_success(
+    response: HttpResponse,
+    map_status: impl FnOnce(&HttpResponse) -> AdapterError,
+) -> Result<HttpResponse> {
+    if !response.status().is_success() {
+        Err(map_status(&response))
+    } else {
+        Ok(response)
+    }
 }
 
 fn effective_overall_timeout(policy: HttpPolicy) -> Duration {
@@ -93,28 +115,32 @@ fn effective_overall_timeout(policy: HttpPolicy) -> Duration {
 /// non-JSON payloads (e.g. the Batch output-file JSONL, 07 §5.7);
 /// [`read_json_bounded`] layers JSON parsing on top for everything else.
 pub(crate) fn read_bytes_bounded(
-    response: ureq::Response,
+    mut response: HttpResponse,
     max_bytes: usize,
     context: &str,
 ) -> Result<Vec<u8>> {
     if response
-        .header("Content-Encoding")
+        .headers()
+        .get("Content-Encoding")
+        .and_then(|encoding| encoding.to_str().ok())
         .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
     {
         return Err(AdapterError::ContractViolation(format!(
             "{context} uses unsupported content encoding"
         )));
     }
-    if let Some(content_length) = response.header("Content-Length") {
-        if content_length
+    if let Some(content_length) = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        && content_length
             .parse::<u64>()
             .ok()
             .is_some_and(|length| length > max_bytes as u64)
-        {
-            return Err(AdapterError::ContractViolation(format!(
-                "{context} exceeds {max_bytes} bytes"
-            )));
-        }
+    {
+        return Err(AdapterError::ContractViolation(format!(
+            "{context} exceeds {max_bytes} bytes"
+        )));
     }
 
     let read_limit = max_bytes
@@ -122,7 +148,8 @@ pub(crate) fn read_bytes_bounded(
         .ok_or_else(|| AdapterError::ContractViolation("response limit overflow".to_owned()))?;
     let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
     response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .take(read_limit as u64)
         .read_to_end(&mut body)
         .map_err(|err| AdapterError::Network(format!("{context} read failed: {err}")))?;
@@ -135,7 +162,7 @@ pub(crate) fn read_bytes_bounded(
 }
 
 pub(crate) fn read_json_bounded(
-    response: ureq::Response,
+    response: HttpResponse,
     max_bytes: usize,
     context: &str,
 ) -> Result<Value> {
@@ -269,13 +296,17 @@ mod tests {
         let err = parse_json_bytes_bounded(exact, exact.len() - 1, "test response").unwrap_err();
         assert!(err.to_string().contains("exceeds"));
 
-        let response = ureq::Response::new(200, "OK", std::str::from_utf8(exact).unwrap())
+        let response = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().data(exact.to_vec()))
             .expect("synthetic response");
         assert_eq!(
             read_json_bounded(response, exact.len(), "test response").unwrap()["ok"],
             true
         );
-        let response = ureq::Response::new(200, "OK", std::str::from_utf8(exact).unwrap())
+        let response = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().data(exact.to_vec()))
             .expect("synthetic response");
         assert!(read_json_bounded(response, exact.len() - 1, "test response").is_err());
     }
@@ -302,10 +333,17 @@ mod tests {
 
         let result = authenticated_agent(HttpPolicy::default())
             .get(&format!("http://{address}/start"))
-            .set("x-provider-secret", "synthetic")
+            .header("x-provider-secret", "synthetic")
             .call();
         let response = result.expect("redirect is returned instead of followed");
         assert_eq!(response.status(), 302);
+        assert!(
+            require_success(response, |_| AdapterError::Network(
+                "redirect response".to_owned()
+            ))
+            .is_err(),
+            "a returned redirect must not enter provider response parsing"
+        );
         server.join().unwrap();
         let err = redirect_target
             .accept()
@@ -396,7 +434,7 @@ mod tests {
             "client returned after {elapsed:?}, exceeding {CLIENT_RETURN_DEADLINE:?}"
         );
         let err = result.expect_err("slow response must time out");
-        assert!(matches!(err, ureq::Error::Transport(_)));
+        assert!(matches!(err, ureq::Error::Timeout(_)));
     }
 
     // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the pure
