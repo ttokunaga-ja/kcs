@@ -4,10 +4,11 @@
 //! owns the explicit confirmation, store-lock and SQLite generation boundary.
 
 use std::io::{BufRead, IsTerminal, Read, Write};
+use std::time::Instant;
 
 use kio_core::gc::{
-    GcInProgressMarker, GcIndexRotation, GcIndexRotationRole, GcIndexState, GcPlan, GcSweepPhase,
-    GcSweepSession,
+    GcInProgressMarker, GcIndexRotation, GcIndexRotationRole, GcIndexState, GcPlan,
+    GcReceiptPublication, GcSweepPhase, GcSweepSession,
 };
 use kio_core::scope::{format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds};
 use kio_core::{ExitCode, KioError, Result};
@@ -15,10 +16,40 @@ use kio_index::fts::{
     cleanup_stale_bound_gc_index_rotations, exchange_prepared_bound_gc_index,
     prepare_bound_gc_index_rotation, read_bound_gc_index_metadata,
     read_bound_gc_index_rotation_attestation, remove_prepared_bound_gc_index, FtsSchemaConfig,
-    FtsTokenizer, GcIndexRotationAttestation,
+    FtsTokenizer, GcIndexRotationAttestation, PreparedGcIndexCleanup,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
+
+/// A soft monotonic execution budget.  The executor consults it only after a
+/// durable, resumable state transition, so an invocation always makes forward
+/// progress and never abandons an in-flight receipt/tree/index operation.
+struct ExecutionBudget {
+    deadline: Option<Instant>,
+    test_checkpoint_limit: Option<u64>,
+    completed_checkpoints: u64,
+}
+
+impl ExecutionBudget {
+    fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            deadline,
+            test_checkpoint_limit: test_runtime_checkpoint_limit(),
+            completed_checkpoints: 0,
+        }
+    }
+
+    fn should_defer_after_checkpoint(&mut self) -> bool {
+        self.completed_checkpoints = self.completed_checkpoints.saturating_add(1);
+        let synthetic_limit = self
+            .test_checkpoint_limit
+            .is_some_and(|limit| self.completed_checkpoints >= limit.max(1));
+        let elapsed = self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        synthetic_limit || elapsed
+    }
+}
 
 pub(super) fn run(dry_run: bool, yes: bool, json_mode: bool) -> Result<Value> {
     let now = fixed_now()?;
@@ -75,6 +106,16 @@ pub(super) fn run(dry_run: bool, yes: bool, json_mode: bool) -> Result<Value> {
 }
 
 fn start(root: std::path::PathBuf, now: i64, preview: GcPlan) -> Result<Value> {
+    let mut budget = ExecutionBudget::new(None);
+    start_with_budget(root, now, preview, &mut budget)
+}
+
+fn start_with_budget(
+    root: std::path::PathBuf,
+    now: i64,
+    preview: GcPlan,
+    budget: &mut ExecutionBudget,
+) -> Result<Value> {
     // Bind before acquiring the lock.  The session's forthcoming bound lock
     // API uses this retained `.kio` descriptor, so a replacement of the
     // public cwd cannot create or remove a victim `.kio/.lock`.
@@ -95,10 +136,22 @@ fn start(root: std::path::PathBuf, now: i64, preview: GcPlan) -> Result<Value> {
     let marker = marker_from_plan(&session, &locked, now)?;
     session.publish_marker(&marker)?;
     inject_fault("after_marker_fsync")?;
-    execute_locked(&session, marker, now)
+    if budget.should_defer_after_checkpoint() {
+        return Ok(runtime_limit_value(&marker));
+    }
+    execute_locked(&session, marker, now, budget)
 }
 
 fn resume(root: std::path::PathBuf, now: i64) -> Result<Value> {
+    let mut budget = ExecutionBudget::new(None);
+    resume_with_budget(root, now, &mut budget)
+}
+
+fn resume_with_budget(
+    root: std::path::PathBuf,
+    now: i64,
+    budget: &mut ExecutionBudget,
+) -> Result<Value> {
     let session = GcSweepSession::bind(root)?;
     let _lock = session.acquire_store_lock()?;
     session.ensure_index_rotation_supported()?;
@@ -123,17 +176,21 @@ fn resume(root: std::path::PathBuf, now: i64) -> Result<Value> {
     // invocation clock here would let an otherwise valid crash cross a
     // retention bucket boundary and become permanently unresumable.
     session.validate_frozen_marker_current_truth(&marker)?;
-    execute_locked(&session, marker, now)
+    execute_locked(&session, marker, now, budget)
 }
 
 fn execute_locked(
     session: &GcSweepSession,
     mut marker: GcInProgressMarker,
     _now: i64,
+    budget: &mut ExecutionBudget,
 ) -> Result<Value> {
     if marker.phase == GcSweepPhase::Prepared {
         marker.phase = GcSweepPhase::Receipting;
         session.advance_marker(&marker)?;
+        if budget.should_defer_after_checkpoint() {
+            return Ok(runtime_limit_value(&marker));
+        }
     }
     if marker.phase == GcSweepPhase::Receipting {
         for (index, frozen) in marker.candidates.iter().enumerate() {
@@ -145,11 +202,16 @@ fn execute_locked(
                 commit_type: kio_core::dag::CommitType::Auto,
                 created_at: marker.started_at.clone(),
                 policy: "shallow".to_owned(),
-                size_bytes: 0,
+                size_bytes: frozen.size_bytes,
             };
-            session.create_receipt(&candidate, marker.started_at.clone())?;
+            let publication = session.create_receipt(&candidate, marker.started_at.clone())?;
             if index == 0 {
                 inject_fault("after_first_receipt")?;
+            }
+            if publication == GcReceiptPublication::NewlyPublished
+                && budget.should_defer_after_checkpoint()
+            {
+                return Ok(runtime_limit_value(&marker));
             }
         }
         inject_fault("after_all_receipts_before_tree_delete")?;
@@ -160,10 +222,15 @@ fn execute_locked(
         marker = session.bind_operation_receipts(&marker)?;
         marker.phase = GcSweepPhase::Sweeping;
         session.advance_marker(&marker)?;
+        if budget.should_defer_after_checkpoint() {
+            return Ok(runtime_limit_value(&marker));
+        }
     }
     if marker.phase == GcSweepPhase::Sweeping {
         // Rotation happens before the first potential physical tree deletion.
-        ensure_pre_sweep_index_rotation(session, &mut marker)?;
+        if ensure_pre_sweep_index_rotation(session, &mut marker, budget)? {
+            return Ok(runtime_limit_value(&marker));
+        }
         inject_fault("after_pre_sweep_rotation")?;
         for (index, tree) in marker.trees.iter().enumerate() {
             // A logical generation is not enough to bind the SQLite source:
@@ -179,14 +246,20 @@ fn execute_locked(
                     attested_index_file.as_ref(),
                 )?
             };
-            let _removed = session.remove_candidate_tree(&permit, &marker, tree)?;
+            let removed = session.remove_candidate_tree(&permit, &marker, tree)?;
             if index == 0 {
                 inject_fault("after_first_tree_delete")?;
+            }
+            if removed && budget.should_defer_after_checkpoint() {
+                return Ok(runtime_limit_value(&marker));
             }
         }
         inject_fault("after_all_trees_before_final_rotation")?;
         marker.phase = GcSweepPhase::Finalizing;
         session.advance_marker(&marker)?;
+        if budget.should_defer_after_checkpoint() {
+            return Ok(runtime_limit_value(&marker));
+        }
     }
     if marker.phase == GcSweepPhase::Finalizing {
         // `index_final` is an audit record, never a permission slip.  Every
@@ -289,24 +362,32 @@ pub(super) fn validate_marker_index_binding_for_observer(
 fn ensure_pre_sweep_index_rotation(
     session: &GcSweepSession,
     marker: &mut GcInProgressMarker,
-) -> Result<()> {
+    budget: &mut ExecutionBudget,
+) -> Result<bool> {
     if matches!(marker.index_initial, GcIndexState::Absent) {
         if index_state_bound(session)? == GcIndexState::Absent {
             marker.index_pre_sweep = Some(GcIndexState::Absent);
             session.advance_marker(marker)?;
-            return Ok(());
+            return Ok(budget.should_defer_after_checkpoint());
         }
         return Err(index_binding_changed("before the pre-sweep rotation"));
     }
-    if marker.index_rotation.is_some() {
-        complete_marked_index_rotation(session, marker, GcIndexRotationRole::PreSweep)?;
+    if marker.index_rotation.is_some()
+        && complete_marked_index_rotation(
+            session,
+            marker,
+            GcIndexRotationRole::PreSweep,
+            Some(budget),
+        )?
+    {
+        return Ok(true);
     }
     // A completed pre-sweep rotation is already the durable barrier required
     // for recovery. Re-rotating it would both churn cursors and hide a forged
     // marker by manufacturing a fresh attestation before validation.
     if marker.index_pre_sweep.is_some() {
         let _ = ensure_sweep_index_binding(session, marker)?;
-        return Ok(());
+        return Ok(false);
     }
     cleanup_stale_index_rotations(session, None)?;
     let target = {
@@ -358,10 +439,13 @@ fn ensure_pre_sweep_index_rotation(
         });
         session.advance_marker(marker)?;
         inject_fault("after_rotation_marker_persist")?;
+        if budget.should_defer_after_checkpoint() {
+            return Ok(true);
+        }
         target
     };
     let _ = target;
-    complete_marked_index_rotation(session, marker, GcIndexRotationRole::PreSweep)
+    complete_marked_index_rotation(session, marker, GcIndexRotationRole::PreSweep, Some(budget))
 }
 
 fn ensure_final_index_rotation(
@@ -369,7 +453,7 @@ fn ensure_final_index_rotation(
     marker: &mut GcInProgressMarker,
 ) -> Result<()> {
     if marker.index_rotation.is_some() {
-        complete_marked_index_rotation(session, marker, GcIndexRotationRole::Final)?;
+        let _ = complete_marked_index_rotation(session, marker, GcIndexRotationRole::Final, None)?;
     }
     cleanup_stale_index_rotations(session, None)?;
     // A retry after the final-rotation fault point can only advance from the
@@ -426,7 +510,9 @@ fn ensure_final_index_rotation(
             });
             session.advance_marker(marker)?;
             inject_fault("after_rotation_marker_persist")?;
-            complete_marked_index_rotation(session, marker, GcIndexRotationRole::Final)
+            let _ =
+                complete_marked_index_rotation(session, marker, GcIndexRotationRole::Final, None)?;
+            Ok(())
         }
     }
 }
@@ -435,7 +521,8 @@ fn complete_marked_index_rotation(
     session: &GcSweepSession,
     marker: &mut GcInProgressMarker,
     role: GcIndexRotationRole,
-) -> Result<()> {
+    mut budget: Option<&mut ExecutionBudget>,
+) -> Result<bool> {
     let rotation = marker
         .index_rotation
         .clone()
@@ -467,13 +554,19 @@ fn complete_marked_index_rotation(
             )
             .map_err(|_| index_binding_changed("during durable rotation"))?;
             inject_fault("after_index_exchange")?;
+            if budget
+                .as_deref_mut()
+                .is_some_and(ExecutionBudget::should_defer_after_checkpoint)
+            {
+                return Ok(true);
+            }
         }
         state if state == rotation.target => {}
         _ => return Err(index_binding_changed("during durable rotation")),
     }
     // A prior crash may already have durably cleaned the exchanged old-source
     // leaf.  That is the only third recovery state accepted here.
-    remove_prepared_bound_gc_index(
+    let cleanup = remove_prepared_bound_gc_index(
         &kio,
         &rotation.temp_leaf,
         &rotation.private_dir_identity,
@@ -481,12 +574,20 @@ fn complete_marked_index_rotation(
     )
     .map_err(|_| index_binding_changed("during durable rotation"))?;
     inject_fault("after_temp_cleanup_before_marker_advance")?;
+    if cleanup == PreparedGcIndexCleanup::Removed
+        && budget
+            .as_deref_mut()
+            .is_some_and(ExecutionBudget::should_defer_after_checkpoint)
+    {
+        return Ok(true);
+    }
     match role {
         GcIndexRotationRole::PreSweep => marker.index_pre_sweep = Some(rotation.target),
         GcIndexRotationRole::Final => marker.index_final = Some(rotation.target),
     }
     marker.index_rotation = None;
-    session.advance_marker(marker)
+    session.advance_marker(marker)?;
+    Ok(budget.is_some_and(|budget| budget.should_defer_after_checkpoint()))
 }
 
 fn cleanup_stale_index_rotations(session: &GcSweepSession, keep: Option<&str>) -> Result<()> {
@@ -577,6 +678,35 @@ fn fixed_now() -> Result<i64> {
     let now = now_utc_seconds();
     parse_utc_seconds(&now)
         .ok_or_else(|| KioError::schema("current time is not canonical UTC seconds"))
+}
+
+fn runtime_limit_value(marker: &GcInProgressMarker) -> Value {
+    json!({
+        "status": "deferred",
+        "reason": "max_runtime_seconds",
+        "recovery_pending": true,
+        "sweep_id": marker.sweep_id,
+        "phase": marker.phase,
+        "candidate_count": marker.candidates.len(),
+        "candidate_tree_count": marker.trees.len(),
+        "estimated_bytes": marker.estimated_bytes,
+        "index_initial": marker.index_initial,
+        "index_pre_sweep": marker.index_pre_sweep,
+        "index_final": marker.index_final,
+    })
+}
+
+#[cfg(debug_assertions)]
+fn test_runtime_checkpoint_limit() -> Option<u64> {
+    std::env::var("KIO_TEST_GC_RUNTIME_CHECKPOINTS")
+        .ok()?
+        .parse()
+        .ok()
+}
+
+#[cfg(not(debug_assertions))]
+fn test_runtime_checkpoint_limit() -> Option<u64> {
+    None
 }
 
 fn plan_changed() -> KioError {

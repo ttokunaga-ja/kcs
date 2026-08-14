@@ -3,8 +3,9 @@ use std::fs;
 use kio_core::cas::{hash_bytes, ChunkObject, ObjectKind, ObjectStore};
 use kio_core::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry};
 use kio_core::gc::{
-    validated_final_shallow_receipts, GcInProgressMarker, GcIndexState, GcPlan, GcPlanLimits,
-    GcPlanner, GcSweepSession, ShallowReceipt,
+    validated_final_shallow_receipts, GcAutomationConfig, GcAutomationMode, GcInProgressMarker,
+    GcIndexState, GcPlan, GcPlanLimits, GcPlanner, GcReceiptPublication, GcSweepSession,
+    ShallowReceipt,
 };
 use kio_core::scope::Repository;
 use serde_json::json;
@@ -113,6 +114,31 @@ fn excluded(plan: &GcPlan, reason: &str) -> u64 {
         .iter()
         .find(|x| x.reason == reason)
         .map_or(0, |x| x.count)
+}
+
+#[test]
+fn automation_config_is_capability_bound_strict_and_defaults_manual() {
+    let f = Fixture::new();
+    let session = GcSweepSession::bind(f.canonical_root()).unwrap();
+    assert_eq!(
+        session.automation_config().unwrap(),
+        GcAutomationConfig {
+            mode: GcAutomationMode::ManualOnly,
+            max_runtime_seconds: 60,
+        }
+    );
+
+    f.policy("[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 17\n");
+    assert_eq!(
+        session.automation_config().unwrap(),
+        GcAutomationConfig {
+            mode: GcAutomationMode::AfterIndex,
+            max_runtime_seconds: 17,
+        }
+    );
+
+    f.policy("[gc]\nmode = \"after_index\"\nunknown = true\n");
+    assert!(session.automation_config().is_err());
 }
 
 #[test]
@@ -489,9 +515,18 @@ fn marker_owned_receipt_must_use_marker_timestamp() {
     marker.phase = kio_core::gc::GcSweepPhase::Receipting;
     session.advance_marker(&marker).unwrap();
     let candidate = plan.candidates.first().unwrap();
-    session
-        .create_receipt(candidate, marker.started_at.clone())
-        .unwrap();
+    assert_eq!(
+        session
+            .create_receipt(candidate, marker.started_at.clone())
+            .unwrap(),
+        GcReceiptPublication::NewlyPublished
+    );
+    assert_eq!(
+        session
+            .create_receipt(candidate, marker.started_at.clone())
+            .unwrap(),
+        GcReceiptPublication::AlreadyPresent
+    );
     let path = f
         .kio()
         .join("gc/shallowed")

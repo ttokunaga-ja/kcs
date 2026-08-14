@@ -688,6 +688,43 @@ pub struct GcSweepSession {
     scope: std::fs::File,
     kio: std::fs::File,
 }
+
+/// How the CLI may invoke bounded automatic shallow GC.
+///
+/// The default remains [`GcAutomationMode::ManualOnly`]; callers must not
+/// infer automatic deletion from the presence of a GC configuration table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcAutomationMode {
+    ManualOnly,
+    AfterIndex,
+    OnIdle,
+}
+
+/// Strictly validated GC automation settings read from `.kio/config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GcAutomationConfig {
+    pub mode: GcAutomationMode,
+    pub max_runtime_seconds: u64,
+}
+
+impl Default for GcAutomationConfig {
+    fn default() -> Self {
+        Self {
+            mode: GcAutomationMode::ManualOnly,
+            max_runtime_seconds: 60,
+        }
+    }
+}
+
+/// Whether a receipt was newly made durable by this invocation or already
+/// existed as the exact frozen receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcReceiptPublication {
+    NewlyPublished,
+    AlreadyPresent,
+}
+
 impl GcSweepSession {
     pub fn bind(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
@@ -719,6 +756,17 @@ impl GcSweepSession {
     pub fn acquire_store_lock(&self) -> Result<BoundStoreLock> {
         self.recheck_binding()?;
         acquire_bound_store_lock(&self.kio)
+    }
+    /// Read the validated GC automation settings through this session's
+    /// retained `.kio` descriptor.  Rechecking before and after the read
+    /// prevents a public scope replacement from silently changing the
+    /// configuration authority used by an automatic caller.
+    pub fn automation_config(&self) -> Result<GcAutomationConfig> {
+        self.recheck_binding()?;
+        let (bytes, _) = read_regular_observed(&self.kio, "config.toml", MAX_METADATA)?;
+        let config = read_automation_config_bytes(&bytes)?;
+        self.recheck_binding()?;
+        Ok(config)
     }
     pub fn ensure_index_rotation_supported(&self) -> Result<()> {
         self.recheck_binding()?;
@@ -1070,7 +1118,11 @@ impl GcSweepSession {
             expected,
         )
     }
-    pub fn create_receipt(&self, candidate: &GcCandidate, at: String) -> Result<ShallowReceipt> {
+    pub fn create_receipt(
+        &self,
+        candidate: &GcCandidate,
+        at: String,
+    ) -> Result<GcReceiptPublication> {
         self.recheck_binding()?;
         if !is_hash(&candidate.commit_hash) || !is_hash(&candidate.tree_hash) {
             return Err(corrupt("invalid GC candidate"));
@@ -1115,7 +1167,7 @@ impl GcSweepSession {
                 )?;
                 durable.sync_all().map_err(|error| ioerr(error, leaf))?;
                 shallowed.sync_all().map_err(|error| ioerr(error, leaf))?;
-                Ok(receipt)
+                Ok(GcReceiptPublication::AlreadyPresent)
             }
             Err(error) if is_io_not_found(&error) => {
                 let internal = ensure_child_dir(&gc, "internal")?;
@@ -1136,7 +1188,7 @@ impl GcSweepSession {
                 {
                     return Err(corrupt("GC receipt changed during atomic publication"));
                 }
-                Ok(receipt)
+                Ok(GcReceiptPublication::NewlyPublished)
             }
             Err(error) => Err(error),
         }
@@ -3180,30 +3232,23 @@ fn validate_scope_bytes(bytes: &[u8]) -> Result<String> {
 }
 
 fn read_policy_bytes(bytes: &[u8]) -> Result<(GcPolicy, String)> {
-    if bytes.is_empty() {
-        return Ok((GcPolicy::default(), hash_bytes(bytes)));
-    }
-    let value: toml::Value = toml::from_str(
-        std::str::from_utf8(bytes).map_err(|_| KioError::schema("config not utf8"))?,
-    )
-    .map_err(|error| KioError::schema(error.to_string()))?;
-    let json = serde_json::to_value(&value).map_err(|error| KioError::schema(error.to_string()))?;
-    validate_json_schema(SchemaKind::Config, &json)?;
-    enforce_config_semantics(&json)?;
+    let value = parse_config_bytes(bytes)?;
     let mut policy = GcPolicy::default();
-    if let Some(retention) = value.get("gc").and_then(|gc| gc.get("auto_retention")) {
-        policy.keep_last_hours = num(retention, "keep_last_hours", policy.keep_last_hours)?;
-        policy.keep_hourly_days = num(retention, "keep_hourly_days", policy.keep_hourly_days)?;
-        policy.keep_daily_weeks = num(retention, "keep_daily_weeks", policy.keep_daily_weeks)?;
-        policy.keep_weekly_months =
-            num(retention, "keep_weekly_months", policy.keep_weekly_months)?;
-    }
-    if let Some(retention) = value.get("gc").and_then(|gc| gc.get("derived_retention")) {
-        policy.keep_repaired_per_branch = num(
-            retention,
-            "keep_repaired_per_branch",
-            policy.keep_repaired_per_branch,
-        )?;
+    if let Some(value) = value.as_ref() {
+        if let Some(retention) = value.get("gc").and_then(|gc| gc.get("auto_retention")) {
+            policy.keep_last_hours = num(retention, "keep_last_hours", policy.keep_last_hours)?;
+            policy.keep_hourly_days = num(retention, "keep_hourly_days", policy.keep_hourly_days)?;
+            policy.keep_daily_weeks = num(retention, "keep_daily_weeks", policy.keep_daily_weeks)?;
+            policy.keep_weekly_months =
+                num(retention, "keep_weekly_months", policy.keep_weekly_months)?;
+        }
+        if let Some(retention) = value.get("gc").and_then(|gc| gc.get("derived_retention")) {
+            policy.keep_repaired_per_branch = num(
+                retention,
+                "keep_repaired_per_branch",
+                policy.keep_repaired_per_branch,
+            )?;
+        }
     }
     let hourly_hours = policy
         .keep_hourly_days
@@ -3224,6 +3269,54 @@ fn read_policy_bytes(bytes: &[u8]) -> Result<(GcPolicy, String)> {
         return Err(KioError::schema("gc retention horizons must be monotonic"));
     }
     Ok((policy, hash_bytes(bytes)))
+}
+
+/// Parse the complete user configuration once, applying the same schema and
+/// semantic checks used by planning and recovery. Empty configuration is the
+/// documented default configuration rather than an unvalidated TOML special
+/// case.
+fn parse_config_bytes(bytes: &[u8]) -> Result<Option<toml::Value>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let value: toml::Value = toml::from_str(
+        std::str::from_utf8(bytes).map_err(|_| KioError::schema("config not utf8"))?,
+    )
+    .map_err(|error| KioError::schema(error.to_string()))?;
+    let json = serde_json::to_value(&value).map_err(|error| KioError::schema(error.to_string()))?;
+    validate_json_schema(SchemaKind::Config, &json)?;
+    enforce_config_semantics(&json)?;
+    Ok(Some(value))
+}
+
+fn read_automation_config_bytes(bytes: &[u8]) -> Result<GcAutomationConfig> {
+    let Some(value) = parse_config_bytes(bytes)? else {
+        return Ok(GcAutomationConfig::default());
+    };
+    let Some(gc) = value.get("gc") else {
+        return Ok(GcAutomationConfig::default());
+    };
+    let mode = match gc.get("mode").and_then(toml::Value::as_str) {
+        None | Some("manual_only") => GcAutomationMode::ManualOnly,
+        Some("after_index") => GcAutomationMode::AfterIndex,
+        Some("on_idle") => GcAutomationMode::OnIdle,
+        // The full config schema above makes this unreachable for valid input;
+        // retain this fail-closed arm if that schema changes independently.
+        Some(_) => return Err(KioError::schema("invalid gc mode")),
+    };
+    let max_runtime_seconds = match gc.get("max_runtime_seconds") {
+        None => GcAutomationConfig::default().max_runtime_seconds,
+        Some(value) => u64::try_from(
+            value
+                .as_integer()
+                .ok_or_else(|| KioError::schema("gc max_runtime_seconds must be an integer"))?,
+        )
+        .map_err(|_| KioError::schema("gc max_runtime_seconds must be non-negative"))?,
+    };
+    Ok(GcAutomationConfig {
+        mode,
+        max_runtime_seconds,
+    })
 }
 
 fn open_bound_absolute(path: &Path) -> Result<std::fs::File> {

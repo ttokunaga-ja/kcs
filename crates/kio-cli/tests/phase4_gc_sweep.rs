@@ -32,6 +32,7 @@ fn kio(dir: &TempDir, args: &[&str]) -> Command {
         "KIO_TEST_GC_FAULT",
         "KIO_TEST_GC_INDEX_COPY_READY",
         "KIO_TEST_GC_PRE_QUARANTINE_READY",
+        "KIO_TEST_GC_RUNTIME_CHECKPOINTS",
         "KIO_TEST_GC_TREE_QUARANTINE_READY",
     ] {
         command.env_remove(name);
@@ -56,6 +57,7 @@ fn kio_process(dir: &TempDir, args: &[&str]) -> ProcessCommand {
         "KIO_TEST_GC_FAULT",
         "KIO_TEST_GC_INDEX_COPY_READY",
         "KIO_TEST_GC_PRE_QUARANTINE_READY",
+        "KIO_TEST_GC_RUNTIME_CHECKPOINTS",
         "KIO_TEST_GC_TREE_QUARANTINE_READY",
     ] {
         command.env_remove(name);
@@ -273,6 +275,46 @@ fn real_candidate_sweep_receipts_before_tree_removal_and_preserves_other_objects
             .count(),
         0
     );
+}
+
+#[test]
+fn bounded_sweep_checkpoints_only_durable_progress_and_converges() {
+    let (dir, commit, tree) = candidate_fixture();
+    let mut phases = Vec::new();
+    for _ in 0..20 {
+        let output = kio(&dir, &["gc", "--yes"])
+            .env("KIO_FIXED_NOW", NOW)
+            // One durable checkpoint per invocation deterministically forces
+            // every resumable boundary without depending on wall-clock speed.
+            .env("KIO_TEST_GC_RUNTIME_CHECKPOINTS", "1")
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        if report["status"] == "completed" {
+            assert!(receipt_path(&dir, &commit).exists());
+            assert!(!tree_path(&dir, &tree).exists());
+            assert!(!dir.path().join(".kio/gc/in_progress").exists());
+            assert!(
+                phases.len() >= 5,
+                "bounded run skipped expected checkpoints"
+            );
+            return;
+        }
+        assert_eq!(report["status"], "deferred");
+        assert_eq!(report["reason"], "max_runtime_seconds");
+        assert_eq!(report["recovery_pending"], true);
+        phases.push(report["phase"].as_str().unwrap().to_owned());
+        assert!(dir.path().join(".kio/gc/in_progress").exists());
+        // A missing tree is never observable before its exact receipt.
+        if !tree_path(&dir, &tree).exists() {
+            assert!(receipt_path(&dir, &commit).exists());
+        }
+    }
+    panic!("bounded GC did not converge: {phases:?}");
 }
 
 #[test]
