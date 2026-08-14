@@ -676,12 +676,26 @@ fn main() {
         Err(err) => exit_from_clap_error(err),
     };
     let json = cli.json;
+    // Parent-only transport contract: retain the private marker for a bound
+    // child so its parent can distinguish a result+nonzero payload from an
+    // ordinary JSON error envelope. It is never exposed to a user command.
+    let retain_exit_marker = matches!(
+        &cli.command,
+        Command::Index(IndexArgs {
+            internal_bound_child: true,
+            ..
+        })
+    );
     let exit_code = match run(cli) {
         Ok(mut output) => {
             // A command may request a non-zero success exit code (e.g. multi-scope
             // search partial failure returns its result JSON on stdout with exit 3,
             // 05 §1.8). The private `__exit_code` marker is stripped before printing.
-            let code = take_exit_override(&mut output).unwrap_or(ExitCode::Success);
+            let code = if retain_exit_marker {
+                peek_exit_override(&output).unwrap_or(ExitCode::Success)
+            } else {
+                take_exit_override(&mut output).unwrap_or(ExitCode::Success)
+            };
             // R12-4: a non-success exit that still prints result JSON (index/search
             // partial exit 3, enrichment auth exit 5, budget pause exit 6) went
             // through this Ok arm and so bypassed the Err arm's append_error_log —
@@ -992,7 +1006,16 @@ fn run(cli: Cli) -> Result<Value> {
             // behind the active-sweep barrier without following a replaced
             // public `.kio` pathname.
             let repo = Repository::open_current_without_head_repair()?;
-            let _lock = repo.lock_store()?;
+            let (recovered_before_publication, gc_binding) =
+                match gc::preflight_automatic(&repo, "snapshot")? {
+                    gc::AutomaticGcPreflight::Proceed { recovered, binding } => {
+                        (recovered, binding)
+                    }
+                    gc::AutomaticGcPreflight::Deferred(report) => {
+                        return Ok(gc::deferred_before_publication("snapshot", report));
+                    }
+                };
+            let lock = repo.lock_store()?;
             repo.self_heal_head_for_repair()?;
             validate_repo_tool_lock(&repo)?;
             // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment): a
@@ -1052,7 +1075,7 @@ fn run(cli: Cli) -> Result<Value> {
                     }
                 }
             }
-            Ok(json!({
+            let output = json!({
                 "status": if outcome.noop { "noop" } else { "created" },
                 "message": outcome.message,
                 "tree_hash": outcome.tree_hash,
@@ -1063,7 +1086,18 @@ fn run(cli: Cli) -> Result<Value> {
                     "files_modified": outcome.stats.files_modified,
                     "files_deleted": outcome.stats.files_deleted,
                 }
-            }))
+            });
+            // Automatic GC owns a distinct bound store lock.  The snapshot,
+            // replica publication, and event log are already durable here;
+            // release the writer lock before entering the resumable sweep.
+            drop(lock);
+            Ok(gc::attach_after_success(
+                &repo,
+                "snapshot",
+                recovered_before_publication,
+                gc_binding,
+                output,
+            ))
         }
         Command::Log(args) => {
             let repo = Repository::open_current()?; // (0) kio_format_version
@@ -1247,11 +1281,25 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
     // OCR lane selection and both reservation estimates read it, and by ruling
     // OCR and embedding must never end up on different lanes.
     resolve_invocation_lane(lane_override, Some(&repo.kio_dir().join("config.toml")))?;
+    // Preview and network-revoke are not successful index publications, so
+    // they never activate automatic GC.  A real index first resumes any
+    // after_index marker; if the bounded slice expires, return before taking
+    // the writer lock so the next invocation can continue recovery.
+    let (recovered_before_publication, gc_binding) = if args.preview || args.revoke_network {
+        (false, None)
+    } else {
+        match gc::preflight_automatic(&repo, "index")? {
+            gc::AutomaticGcPreflight::Proceed { recovered, binding } => (recovered, Some(binding)),
+            gc::AutomaticGcPreflight::Deferred(report) => {
+                return Ok(gc::deferred_before_publication("index", report));
+            }
+        }
+    };
     // M1(a): serialize the whole index command against concurrent index/repair/
     // reindex (05 §6). Held end-to-end, not just across the snapshot sub-step, so
     // two processes cannot interleave chunk writes / sqlite rebuilds. The lock is
     // reentrant, so the internal auto-snapshot re-acquisition does not deadlock.
-    let _lock = repo.lock_store()?;
+    let lock = repo.lock_store()?;
     validate_repo_tool_lock(&repo)?;
     if args.revoke_network {
         write_network_revoke_record(&repo)?;
@@ -1483,6 +1531,7 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
     }
     if let Some(plan) = child_plan {
         let mut children = Vec::new();
+        let mut child_gc_reports = BTreeMap::<String, Value>::new();
         let parent_exit_override = peek_exit_override(&output);
         let mut child_exit_overrides = Vec::new();
         let mut incomplete_child_discovery = plan.candidates.iter().any(|child| {
@@ -1502,9 +1551,15 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
                     child.reason = Some("vcs_marker_added_after_discovery".to_owned());
                 }
                 Ok(Some(child_output)) if peek_exit_override(&child_output).is_none() => {
+                    if let Some(gc) = child_output.get("gc") {
+                        child_gc_reports.insert(child.path.clone(), gc.clone());
+                    }
                     child.status = "indexed".to_owned()
                 }
                 Ok(Some(child_output)) => {
+                    if let Some(gc) = child_output.get("gc") {
+                        child_gc_reports.insert(child.path.clone(), gc.clone());
+                    }
                     let child_exit = peek_exit_override(&child_output)
                         .expect("guarded child output must carry a supported exit override");
                     child_exit_overrides.push(child_exit);
@@ -1540,7 +1595,18 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
             }
             children.push(child);
         }
-        output["child_scopes"] = serde_json::to_value(children).unwrap_or_else(|_| json!([]));
+        let mut child_values = serde_json::to_value(children).unwrap_or_else(|_| json!([]));
+        if let Some(rows) = child_values.as_array_mut() {
+            for row in rows {
+                let Some(path) = row.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(gc) = child_gc_reports.get(path) {
+                    row["gc"] = gc.clone();
+                }
+            }
+        }
+        output["child_scopes"] = child_values;
         if let Some(code) = merged_index_exit_override(
             parent_exit_override,
             child_exit_overrides,
@@ -1556,7 +1622,31 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
             set_exit_override(&mut output, code);
         }
     }
-    Ok(output)
+    let successful_publication = peek_exit_override(&output).is_none();
+    if !successful_publication && recovered_before_publication {
+        output["gc"] = json!({
+            "status": "completed",
+            "trigger": "preflight_recovery",
+            "mode": "after_index",
+            "recovered_before_publication": true,
+        });
+    }
+    // The index snapshot, rebuilt SQLite projection, generation recovery,
+    // optional child runs, and registry update are all complete.  Automatic
+    // GC must acquire its own descriptor-bound lock after this writer exits.
+    drop(lock);
+    if successful_publication {
+        let gc_binding = gc_binding.expect("successful index has automatic GC preflight binding");
+        Ok(gc::attach_after_success(
+            &repo,
+            "index",
+            recovered_before_publication,
+            gc_binding,
+            output,
+        ))
+    } else {
+        Ok(output)
+    }
 }
 
 /// Select the capability-bound scan path only for an internal child process.
@@ -1666,40 +1756,40 @@ fn run_bound_child_index(
         .output()
         .map_err(|err| KioError::io(err.to_string(), relative.to_owned()))?;
     if !output.status.success() {
-        let mut value: Value = serde_json::from_slice(&output.stderr).map_err(|err| {
+        // A result+nonzero child preserves `__exit_code` on stdout as a
+        // parent-only transport marker. Never treat arbitrary stdout (for
+        // example a partial log before a real error envelope) as success.
+        if let Some(mut value) = child_result_payload(&output.stdout) {
+            let code = peek_exit_override(&value)
+                .expect("child_result_payload requires a supported exit marker");
+            set_exit_override(&mut value, code);
+            return Ok(Some(value));
+        }
+        let value: Value = serde_json::from_slice(&output.stderr).map_err(|err| {
             KioError::io(
                 format!(
-                    "bound child did not emit JSON error: {err}; stderr: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    "bound child did not emit JSON: {err}; stdout: {}; stderr: {}",
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim(),
                 ),
                 relative.to_owned(),
             )
         })?;
-        if let Some(code) = output
-            .status
-            .code()
-            .and_then(|code| exit_code_from_override(code as u64))
-        {
-            set_exit_override(&mut value, code);
-        } else {
-            let code = value
+        return Err(KioError::new(
+            value
                 .get("error_code")
                 .and_then(Value::as_str)
-                .unwrap_or("KIO-E-INDEX-PARTIAL-001");
-            return Err(KioError::new(
-                code,
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("bound child failed"),
-                value
-                    .get("context")
-                    .cloned()
-                    .unwrap_or_else(|| json!({ "path": relative })),
-                ExitCode::PartialFailure,
-            ));
-        }
-        return Ok(Some(value));
+                .unwrap_or("KIO-E-INDEX-PARTIAL-001"),
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("bound child failed"),
+            value
+                .get("context")
+                .cloned()
+                .unwrap_or_else(|| json!({ "path": relative })),
+            child_process_exit_code(output.status.code()),
+        ));
     }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
         KioError::io(
@@ -1708,6 +1798,29 @@ fn run_bound_child_index(
         )
     })?;
     Ok(Some(value))
+}
+
+fn child_process_exit_code(code: Option<i32>) -> ExitCode {
+    match code {
+        Some(2) => ExitCode::InvalidUsage,
+        Some(3) => ExitCode::PartialFailure,
+        Some(4) => ExitCode::PermanentFailure,
+        Some(5) => ExitCode::AuthError,
+        Some(6) => ExitCode::BudgetExceeded,
+        Some(7) => ExitCode::Interrupted,
+        Some(8) => ExitCode::IncompatibleProfile,
+        Some(9) => ExitCode::ConfirmationRejected,
+        _ => ExitCode::Failure,
+    }
+}
+
+/// Bound-child transport accepts stdout only for a structured result carrying
+/// the private exit marker.  All other nonzero output is an error path and
+/// must retain stderr's original error code and context.
+fn child_result_payload(bytes: &[u8]) -> Option<Value> {
+    serde_json::from_slice(bytes)
+        .ok()
+        .filter(|value| peek_exit_override(value).is_some())
 }
 
 fn append_index_child_flags(command: &mut std::process::Command, args: &IndexArgs) {
@@ -26405,6 +26518,18 @@ fn print_output(value: Value, json_mode: bool) {
             serde_json::to_string_pretty(&value).expect("serializing command output cannot fail");
         println!("{}", terminal_safe_text(&rendered, true));
     }
+    if let Some(gc) = value.get("gc") {
+        let status = gc
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let reason = gc.get("reason").and_then(Value::as_str);
+        let line = reason.map_or_else(
+            || format!("gc: {status}"),
+            |reason| format!("gc: {status} ({reason})"),
+        );
+        println!("{}", terminal_safe_text(&line, false));
+    }
 }
 
 fn print_error(error: &KioError, json_mode: bool) {
@@ -26457,6 +26582,21 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use clap::Parser;
+
+    #[test]
+    fn bound_child_stdout_requires_the_private_result_exit_marker() {
+        assert!(super::child_result_payload(br#"{"status":"indexed","__exit_code":3}"#,).is_some());
+        // A real error envelope may be JSON too, but it must be selected from
+        // stderr so its code/context are not replaced by a generic partial.
+        assert!(super::child_result_payload(
+            br#"{"error_code":"KIO-E-STORE-CORRUPT-001","message":"bad"}"#,
+        )
+        .is_none());
+        assert_eq!(
+            super::child_process_exit_code(Some(4)),
+            kio_core::ExitCode::PermanentFailure
+        );
+    }
     use kio_adapter::catalog::deterministic_embedding_vector;
     use kio_index::ChunkRow;
 

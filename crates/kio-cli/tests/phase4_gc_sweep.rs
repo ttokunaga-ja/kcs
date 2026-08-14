@@ -2,6 +2,12 @@
 //!
 //! Every mutating invocation below is confined to a freshly-created fixture.
 
+// The executor deliberately refuses to publish a marker on platforms lacking
+// the descriptor-bound atomic index/tree primitives. Unsupported-platform
+// fail-closed behavior is covered by `phase4_gc_after_index`; this file tests
+// successful mutation and crash recovery only where those primitives exist.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;

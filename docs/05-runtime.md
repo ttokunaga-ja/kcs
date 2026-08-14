@@ -1113,7 +1113,7 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep である。`--prune-unreachable`、tiered hook、自動 scheduling、CoW 並行 GC はまだ実装しない。MVP (Step 1-4) では GC を実行せず、`gc_policy` × `commit_type` の対応 schema のみを契約として遵守していた (§2.6)。
+> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は同じ executor を安全な checkpoint で分割する明示 opt-in の `after_index` hook である。`--prune-unreachable`、scheduled snapshot / `on_idle`、CoW 並行 GC はまだ実装しない。MVP (Step 1-4) では GC を実行せず、`gc_policy` × `commit_type` の対応 schema のみを契約として遵守していた (§2.6)。
 
 ```text
 gc_policy(commit_type):
@@ -1155,16 +1155,22 @@ unknown field、filename/hash/tree/time不一致、symlink/reparse、非regular�
 
 GC は独立した常駐プロセスを持たない (§5 プロセスモデル)。実行契機は次の 3 つ:
 
-1. `manual_only` (MVP デフォルト): `kio gc` の明示実行のみ
-2. `after_index` (Phase 4+ の GC 実行系実装後のデフォルト): `kio index` / `kio snapshot` の成功終了後、同一プロセス内で `max_runtime_seconds` を上限に実行する。上限到達で中断し、残りは次回に持ち越す (`kio index` 実行中とは重ならないため I/O / lock 競合が起きない)
-3. `on_idle` (Phase 4+): OS スケジューラ委譲の定期 auto snapshot 実行時 (§8)、直近の Kio 書き込み操作から `idle_threshold_seconds` 以上経過していれば便乗実行する
+1. `manual_only` (**現行デフォルト**): `kio gc` の明示実行のみ
+2. `after_index` (Phase 4 milestone 3、明示 opt-in): `kio index` / manual `kio snapshot` の**成功かつ non-partial**な durable publication 後、既存 writer lock を解放してから同一プロセス内で `max_runtime_seconds` を soft upper bound として実行する。preview、usage error、失敗、partial index、`index --revoke-network` は発火点ではない
+3. `on_idle` (未実装): 将来は OS スケジューラ委譲の定期 auto snapshot 実行時 (§8) に便乗する。現行実装はこの mode で通常 index/snapshot を黙って自動化せず `KIO-E-CONFIG-NOT-IMPLEMENTED-001` で fail-closed する
 
-GC 実行系の実装自体は Phase 4+ (§2.6)。config schema は Step 1 の設計時から遵守する。
+`after_index` は wall clock でなく process-local monotonic clockを使う。deadline は hook 開始（config / plan / recovery 検証を含む）から計測するが、tree / SQLite copy の途中を打ち切らず、次の**耐久済み checkpoint**で停止するため、個々の bounded operation に要した時間だけ soft bound を超え得る。checkpoint は marker publish、phase marker 交換、新規 receipt publish、pre-sweep index rotation の各耐久段階、tree 1件の退役完了である。final index rotation と marker 完了は反復 starvation を避けるため一つの不可分な完了単位として扱う。各 invocation は期限超過時でも最低1つの耐久 stepを完了してから停止し、同一の既存 receipt の再確認は予算を消費しない。
+
+automatic activation は writer 開始前に capability-relative に検証した **`[gc]` 全体**（mode、runtime、retentionを含む）の canonical semantic digestと、retained scope / `.kio` directory identityへ固定する。index が自ら更新し得る adapter/network 設定はこの authority に含めない。durable publication 後とGC専用lock下のlocked re-plan前後で同じauthorityを要求し、差分があればtree/receipt/markerを変更せず `KIO-E-GC-CONFIG-CHANGED-001` / retryable exit 3 とする。publication 済みなら `publication_status=completed` を保持する。
+
+期限到達は corruption ではなく `status=deferred` / `KIO-E-GC-RUNTIME-LIMIT-001` / retryable exit 3 であり、markerと完了済みreceipt/tree進捗を残す。次の `after_index` index/snapshot は通常 writer lock より**前**にこの marker を同じbounded経路でresumeし、再び期限なら publication を開始せず `publication_status=not_started` で返す。post-publication sliceの期限・失敗は既にdurableなindex/snapshotをrollback扱いせず `publication_status=completed` とGC結果を同じpayloadに載せる。`manual_only` のactive markerは従来どおり通常writer barrierとなり、明示 `kio gc` でresumeする。
+
+default を `after_index` へ変更すると既存scopeで破壊的処理が暗黙に有効になるため、milestone 3では行わない。明示 `mode="after_index"` だけをactivation条件とし、default移行は別の判断・commitへ残す。
 
 ```toml
 [gc]
-mode = "manual_only"           # MVP デフォルト。"after_index" (Phase 4+ 実装後のデフォルト) | "on_idle" (Phase 4+)
-idle_threshold_seconds = 300   # on_idle 用 (Phase 4+)
+mode = "manual_only"           # 現行デフォルト。"after_index" は明示opt-in、"on_idle" は未実装
+idle_threshold_seconds = 300   # 将来の on_idle 用
 max_runtime_seconds = 60
 ```
 
@@ -1190,6 +1196,10 @@ keep_repaired_per_branch = 5
   `.kio/gc/in_progress` が残る crash recovery 中も、通常writerは
   `KIO-E-GC-SWEEP-ACTIVE-001`で拒否し、GC resumeだけが専用lock入口を使う。新規commitをblockしない
   CoW型GCは後続milestoneであり、本実装には含めない
+- milestone 3 の `after_index` は index/snapshot のdurable publicationとそのwriter lock解放後にGC専用lockを
+  取得する。active markerは通常writer取得前にauto-resumeする。internal child scopeはchild process自身が1回だけ
+  実行し、保持済みchild root/`.kio` capabilityと再bind先のidentityが一致しない限りfail-closedする。親hookが
+  childや親以外のscopeへ代理適用されることはない
 - markerはreceiptより先にatomic publishし、file/directory fsyncする。phaseは
   `prepared → receipting → sweeping → finalizing`。更新はstrict versioned markerを
   capability-relativeに交換し、operation/plan/truth/candidate/tree/index stateを固定する
@@ -1255,7 +1265,7 @@ GC が削除してはならないもの:
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
-なお on-demand tree-only shallow sweepはPhase 4 milestone 2で実装するが、tiered retention hook / on_idle / pruneは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
+なお on-demand tree-only shallow sweepはPhase 4 milestone 2、明示opt-inのbounded `after_index` hookはmilestone 3で実装済みである。scheduled snapshot / `on_idle`、defaultの自動有効化、pruneは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
 
 # 3. Purge (法務・秘匿・誤取り込み)
 

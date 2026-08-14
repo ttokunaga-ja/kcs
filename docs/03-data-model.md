@@ -952,7 +952,7 @@ lane = "batch"             # "batch" (既定・半額) | "realtime" (即時・�
 [budget]                   # folder cap (任意の追加制限)。device cap との判定は 04-pipeline.md §5.4
 monthly_usd_cap = 10.0
 [gc]
-mode = "manual_only"           # MVP デフォルト。GC 実行系の実装は Phase 4+ (05-runtime.md §2.3)
+mode = "manual_only"           # 現行デフォルト。"after_index" はPhase 4 milestone 3の明示opt-in (05-runtime.md §2.3)
 idle_threshold_seconds = 300
 ```
 

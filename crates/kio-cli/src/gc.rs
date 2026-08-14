@@ -4,13 +4,15 @@
 //! owns the explicit confirmation, store-lock and SQLite generation boundary.
 
 use std::io::{BufRead, IsTerminal, Read, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kio_core::gc::{
-    GcInProgressMarker, GcIndexRotation, GcIndexRotationRole, GcIndexState, GcPlan,
-    GcReceiptPublication, GcSweepPhase, GcSweepSession,
+    GcAutomationBinding, GcAutomationMode, GcInProgressMarker, GcIndexRotation,
+    GcIndexRotationRole, GcIndexState, GcPlan, GcReceiptPublication, GcSweepPhase, GcSweepSession,
 };
-use kio_core::scope::{format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds};
+use kio_core::scope::{
+    format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds, Repository,
+};
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{
     cleanup_stale_bound_gc_index_rotations, exchange_prepared_bound_gc_index,
@@ -49,6 +51,239 @@ impl ExecutionBudget {
             .is_some_and(|deadline| Instant::now() >= deadline);
         synthetic_limit || elapsed
     }
+}
+
+pub(super) enum AutomaticGcPreflight {
+    Proceed {
+        recovered: bool,
+        binding: GcAutomationBinding,
+    },
+    Deferred(Value),
+}
+
+/// Resume a marker before an ordinary writer acquires the store lock.  This
+/// path is enabled only by an explicit `mode = "after_index"`; manual-only
+/// scopes retain the ordinary active-marker writer barrier.
+pub(super) fn preflight_automatic(
+    repository: &Repository,
+    trigger: &str,
+) -> Result<AutomaticGcPreflight> {
+    let started = Instant::now();
+    let session = GcSweepSession::bind_repository(repository)?;
+    let binding = session.automation_binding()?;
+    let config = binding.config;
+    match config.mode {
+        GcAutomationMode::ManualOnly => Ok(AutomaticGcPreflight::Proceed {
+            recovered: false,
+            binding,
+        }),
+        GcAutomationMode::OnIdle => Err(KioError::not_implemented("gc.mode=on_idle")),
+        GcAutomationMode::AfterIndex => {
+            let deadline = automatic_deadline(started, config.max_runtime_seconds)?;
+            if session.read_marker()?.is_none() {
+                return Ok(AutomaticGcPreflight::Proceed {
+                    recovered: false,
+                    binding,
+                });
+            }
+            let mut budget = ExecutionBudget::new(Some(deadline));
+            let report =
+                resume_session_with_budget(session, fixed_now()?, &mut budget, Some(&binding))?;
+            let report =
+                decorate_automatic_report(report, trigger, config.max_runtime_seconds, true);
+            if is_runtime_deferred(&report) {
+                Ok(AutomaticGcPreflight::Deferred(report))
+            } else {
+                // Recovery itself does not authorize a later destructive
+                // handoff under a changed policy; retain the pre-publication
+                // complete `[gc]` authority binding for the post-publication
+                // comparison.
+                Ok(AutomaticGcPreflight::Proceed {
+                    recovered: true,
+                    binding,
+                })
+            }
+        }
+    }
+}
+
+/// Attach the automatic GC outcome to an already-durable index/snapshot
+/// result.  A GC failure cannot roll that publication back, so preserve the
+/// command payload, mark its publication complete, and request an observable
+/// non-success exit instead of returning a bare error envelope.
+pub(super) fn attach_after_success(
+    repository: &Repository,
+    trigger: &str,
+    recovered_before_publication: bool,
+    binding: GcAutomationBinding,
+    mut output: Value,
+) -> Value {
+    match run_after_success(repository, trigger, recovered_before_publication, &binding) {
+        Ok(report) => {
+            let deferred = is_runtime_deferred(&report);
+            if let Some(object) = output.as_object_mut() {
+                object.insert("gc".to_owned(), report);
+                if deferred {
+                    object.insert("publication_status".to_owned(), json!("completed"));
+                    object.insert("error_code".to_owned(), json!("KIO-E-GC-RUNTIME-LIMIT-001"));
+                }
+            }
+            if deferred {
+                super::set_exit_override(&mut output, ExitCode::PartialFailure);
+            }
+        }
+        Err(error) => {
+            let exit = if error.exit_code() == ExitCode::PermanentFailure {
+                ExitCode::PermanentFailure
+            } else {
+                ExitCode::PartialFailure
+            };
+            if let Some(object) = output.as_object_mut() {
+                object.insert("publication_status".to_owned(), json!("completed"));
+                object.insert("error_code".to_owned(), json!(error.error_code()));
+                object.insert(
+                    "gc".to_owned(),
+                    json!({
+                        "status": "failed",
+                        "trigger": trigger,
+                        "error": error.to_error_json(),
+                    }),
+                );
+            }
+            super::set_exit_override(&mut output, exit);
+        }
+    }
+    output
+}
+
+pub(super) fn deferred_before_publication(trigger: &str, report: Value) -> Value {
+    json!({
+        "status": "deferred",
+        "publication_status": "not_started",
+        "error_code": "KIO-E-GC-RUNTIME-LIMIT-001",
+        "message": "automatic GC recovery reached max_runtime_seconds before publication",
+        "trigger": trigger,
+        "gc": report,
+        "__exit_code": ExitCode::PartialFailure.code(),
+    })
+}
+
+fn run_after_success(
+    repository: &Repository,
+    trigger: &str,
+    recovered_before_publication: bool,
+    expected_binding: &GcAutomationBinding,
+) -> Result<Value> {
+    let started = Instant::now();
+    wait_at_post_publication_test_barrier();
+    let session = GcSweepSession::bind_repository(repository)?;
+    let binding = session.automation_binding()?;
+    if &binding != expected_binding {
+        return Err(config_changed_after_publication());
+    }
+    let config = binding.config;
+    match config.mode {
+        GcAutomationMode::ManualOnly => Ok(json!({
+            "status": "disabled",
+            "reason": "manual_only",
+            "trigger": trigger,
+            "mode": "manual_only",
+        })),
+        GcAutomationMode::OnIdle => Err(KioError::not_implemented("gc.mode=on_idle")),
+        GcAutomationMode::AfterIndex => {
+            let now = fixed_now()?;
+            let deadline = automatic_deadline(started, config.max_runtime_seconds)?;
+            let mut budget = ExecutionBudget::new(Some(deadline));
+            let report = if session.read_marker()?.is_some() {
+                resume_session_with_budget(session, now, &mut budget, Some(expected_binding))?
+            } else {
+                let preview = session.plan_at(now)?;
+                if preview.candidates.is_empty() {
+                    return Ok(json!({
+                        "status": "skipped",
+                        "reason": "no_candidates",
+                        "trigger": trigger,
+                        "mode": "after_index",
+                        "max_runtime_seconds": config.max_runtime_seconds,
+                        "recovered_before_publication": recovered_before_publication,
+                        "candidate_count": 0,
+                        "candidate_tree_count": 0,
+                        "estimated_bytes": 0,
+                    }));
+                }
+                start_session_with_budget(
+                    session,
+                    now,
+                    preview,
+                    &mut budget,
+                    Some(expected_binding),
+                )?
+            };
+            Ok(decorate_automatic_report(
+                report,
+                trigger,
+                config.max_runtime_seconds,
+                recovered_before_publication,
+            ))
+        }
+    }
+}
+
+fn config_changed_after_publication() -> KioError {
+    KioError::new(
+        "KIO-E-GC-CONFIG-CHANGED-001",
+        "GC configuration changed during the automatic handoff; automatic GC was not started",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+#[cfg(debug_assertions)]
+fn wait_at_post_publication_test_barrier() {
+    let Some(ready_path) = std::env::var_os("KIO_TEST_GC_POST_PUBLICATION_READY") else {
+        return;
+    };
+    let ready_path = std::path::PathBuf::from(ready_path);
+    if std::fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !release_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn wait_at_post_publication_test_barrier() {}
+
+fn automatic_deadline(started: Instant, max_runtime_seconds: u64) -> Result<Instant> {
+    started
+        .checked_add(Duration::from_secs(max_runtime_seconds))
+        .ok_or_else(|| KioError::schema("gc max_runtime_seconds exceeds monotonic clock range"))
+}
+
+fn decorate_automatic_report(
+    mut report: Value,
+    trigger: &str,
+    max_runtime_seconds: u64,
+    recovered_before_publication: bool,
+) -> Value {
+    if let Some(object) = report.as_object_mut() {
+        object.insert("trigger".to_owned(), json!(trigger));
+        object.insert("mode".to_owned(), json!("after_index"));
+        object.insert("max_runtime_seconds".to_owned(), json!(max_runtime_seconds));
+        object.insert(
+            "recovered_before_publication".to_owned(),
+            json!(recovered_before_publication),
+        );
+    }
+    report
+}
+
+fn is_runtime_deferred(report: &Value) -> bool {
+    report.get("status").and_then(Value::as_str) == Some("deferred")
+        && report.get("reason").and_then(Value::as_str) == Some("max_runtime_seconds")
 }
 
 pub(super) fn run(dry_run: bool, yes: bool, json_mode: bool) -> Result<Value> {
@@ -120,13 +355,27 @@ fn start_with_budget(
     // API uses this retained `.kio` descriptor, so a replacement of the
     // public cwd cannot create or remove a victim `.kio/.lock`.
     let session = GcSweepSession::bind(root)?;
+    start_session_with_budget(session, now, preview, budget, None)
+}
+
+fn start_session_with_budget(
+    session: GcSweepSession,
+    now: i64,
+    preview: GcPlan,
+    budget: &mut ExecutionBudget,
+    expected_binding: Option<&GcAutomationBinding>,
+) -> Result<Value> {
     let _lock = session.acquire_store_lock()?;
+    require_automation_binding(&session, expected_binding)?;
     // A platform without a descriptor-bound SQLite rotation must reject the
     // operation before publication.  In particular, do not manufacture an
     // active marker/receipts on Windows and then discover that finalization
     // can never complete.
     session.ensure_index_rotation_supported()?;
     let locked = session.plan_at(now)?;
+    // The locked plan's retention policy must still be precisely the policy
+    // that authorized this invocation immediately before marker publication.
+    require_automation_binding(&session, expected_binding)?;
     if !preview.mutation_equivalent(&locked) {
         return Err(plan_changed());
     }
@@ -153,7 +402,17 @@ fn resume_with_budget(
     budget: &mut ExecutionBudget,
 ) -> Result<Value> {
     let session = GcSweepSession::bind(root)?;
+    resume_session_with_budget(session, now, budget, None)
+}
+
+fn resume_session_with_budget(
+    session: GcSweepSession,
+    now: i64,
+    budget: &mut ExecutionBudget,
+    expected_binding: Option<&GcAutomationBinding>,
+) -> Result<Value> {
     let _lock = session.acquire_store_lock()?;
+    require_automation_binding(&session, expected_binding)?;
     session.ensure_index_rotation_supported()?;
     let marker = session.read_marker()?.ok_or_else(plan_changed)?;
     let marker_can_be_discarded = session.marker_can_be_discarded_after_fresh_replan(&marker)?;
@@ -177,6 +436,18 @@ fn resume_with_budget(
     // retention bucket boundary and become permanently unresumable.
     session.validate_frozen_marker_current_truth(&marker)?;
     execute_locked(&session, marker, now, budget)
+}
+
+fn require_automation_binding(
+    session: &GcSweepSession,
+    expected: Option<&GcAutomationBinding>,
+) -> Result<()> {
+    if let Some(expected) = expected {
+        if &session.automation_binding()? != expected {
+            return Err(config_changed_after_publication());
+        }
+    }
+    Ok(())
 }
 
 fn execute_locked(

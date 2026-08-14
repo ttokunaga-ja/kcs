@@ -20,7 +20,7 @@ use crate::error::{KioError, Result};
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::scope::{
     acquire_bound_store_lock, enforce_config_semantics, format_utc_seconds, parse_utc_seconds,
-    BoundStoreLock, KIO_FORMAT_VERSION,
+    BoundStoreLock, Repository, KIO_FORMAT_VERSION,
 };
 use crate::ExitCode;
 
@@ -708,6 +708,22 @@ pub struct GcAutomationConfig {
     pub max_runtime_seconds: u64,
 }
 
+/// A capability-bound observation of the complete validated `[gc]` authority
+/// subtree that authorized an automatic GC handoff. The canonical semantic
+/// digest covers retention policy and future schema-allowed GC controls, while
+/// intentionally excluding unrelated config such as network approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GcAutomationBinding {
+    pub config: GcAutomationConfig,
+    pub gc_config_digest: String,
+    // Keep the retained scope capabilities in the handoff authority as well
+    // as the GC policy. These fields stay private because callers only need
+    // equality; exposing platform-specific dev/inode identities would invite
+    // ambient-path reconstruction instead of capability reuse.
+    scope_identity: Identity,
+    kio_identity: Identity,
+}
+
 impl Default for GcAutomationConfig {
     fn default() -> Self {
         Self {
@@ -750,6 +766,30 @@ impl GcSweepSession {
             kio,
         })
     }
+    /// Bind an automatic sweep to the exact repository capability already
+    /// used by an internal child index. Ordinary repositories have no retained
+    /// handles and use the same public no-follow bind as [`Self::bind`].
+    pub fn bind_repository(repository: &Repository) -> Result<Self> {
+        let session = Self::bind(repository.canonical_root().to_path_buf())?;
+        #[cfg(unix)]
+        match (
+            repository.bound_root_handle(),
+            repository.bound_kio_handle(),
+        ) {
+            (Some(scope), Some(kio)) => {
+                if id_file(&session.scope)? != id_file(scope)?
+                    || id_file(&session.kio)? != id_file(kio)?
+                {
+                    return Err(corrupt(
+                        "automatic GC scope differs from bound child repository",
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => return Err(corrupt("incomplete bound child repository capability")),
+        }
+        Ok(session)
+    }
     pub fn read_marker(&self) -> Result<Option<GcInProgressMarker>> {
         read_active_marker_bound(&self.kio)
     }
@@ -762,11 +802,30 @@ impl GcSweepSession {
     /// prevents a public scope replacement from silently changing the
     /// configuration authority used by an automatic caller.
     pub fn automation_config(&self) -> Result<GcAutomationConfig> {
+        Ok(self.automation_binding()?.config)
+    }
+    /// Read the validated complete GC authority subtree and retain a canonical
+    /// semantic digest for the publication-to-GC handoff. Both reads are
+    /// descriptor-bound and bracketed by scope identity checks.
+    pub fn automation_binding(&self) -> Result<GcAutomationBinding> {
         self.recheck_binding()?;
         let (bytes, _) = read_regular_observed(&self.kio, "config.toml", MAX_METADATA)?;
         let config = read_automation_config_bytes(&bytes)?;
         self.recheck_binding()?;
-        Ok(config)
+        let parsed = parse_config_bytes(&bytes)?;
+        let gc = parsed
+            .as_ref()
+            .and_then(|value| value.get("gc"))
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| KioError::schema(error.to_string()))?
+            .unwrap_or(serde_json::Value::Null);
+        Ok(GcAutomationBinding {
+            config,
+            gc_config_digest: hash_bytes(&canonical_json_bytes(&gc)?),
+            scope_identity: id_file(&self.scope)?,
+            kio_identity: id_file(&self.kio)?,
+        })
     }
     pub fn ensure_index_rotation_supported(&self) -> Result<()> {
         self.recheck_binding()?;

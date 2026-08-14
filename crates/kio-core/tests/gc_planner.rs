@@ -137,6 +137,28 @@ fn automation_config_is_capability_bound_strict_and_defaults_manual() {
         }
     );
 
+    // Automatic deletion authority is the complete validated `[gc]` subtree,
+    // not unrelated configuration that `index --approve` may durably update
+    // during its own writer transaction.
+    f.policy(
+        "[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 17\n\
+         [gc.auto_retention]\nkeep_last_hours = 1\n\
+         [adapter.policy]\nallow_network = false\n",
+    );
+    let authority = session.automation_binding().unwrap();
+    f.policy(
+        "[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 17\n\
+         [gc.auto_retention]\nkeep_last_hours = 1\n\
+         [adapter.policy]\nallow_network = true\n",
+    );
+    assert_eq!(session.automation_binding().unwrap(), authority);
+    f.policy(
+        "[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 17\n\
+         [gc.auto_retention]\nkeep_last_hours = 2\n\
+         [adapter.policy]\nallow_network = true\n",
+    );
+    assert_ne!(session.automation_binding().unwrap(), authority);
+
     f.policy("[gc]\nmode = \"after_index\"\nunknown = true\n");
     assert!(session.automation_config().is_err());
 }
