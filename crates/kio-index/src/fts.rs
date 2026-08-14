@@ -1,9 +1,15 @@
 //! FTS5 external-content index contracts.
 
+#[cfg(target_os = "linux")]
+use std::cell::Cell;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::{Once, OnceLock};
 
@@ -549,6 +555,34 @@ fn gc_leaf_identity(parent: &std::fs::File, leaf: &str) -> Result<String> {
     canonical_gc_index_identity(&file)
 }
 
+/// `cap_fs::open_dir_nofollow` intentionally retains Linux directories as
+/// `O_PATH` capabilities.  That is the right authority for every name lookup
+/// below it, but Linux rejects `fsync` on the retained descriptor.  Reopen
+/// exactly `.` below that capability with read access before syncing; this
+/// neither reconstructs nor trusts an ambient pathname.  Comparing the two
+/// pinned identities makes an unexpected capability-wrapper regression fail
+/// closed before any durability claim is made.
+fn sync_bound_gc_directory(directory: &std::fs::File, context: &str) -> Result<()> {
+    let expected = source_file_identity(directory)?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable = cap_fs::open(directory, Path::new("."), &options)
+        .map_err(|error| IndexError::Schema(format!("{context}: {error}")))?;
+    let metadata = syncable
+        .metadata()
+        .map_err(|error| IndexError::Schema(format!("{context}: {error}")))?;
+    if !metadata.is_dir() || source_file_identity(&syncable)? != expected {
+        return Err(IndexError::Schema(format!(
+            "{context}: retained directory changed while reopening for fsync"
+        )));
+    }
+    syncable
+        .sync_all()
+        .map_err(|error| IndexError::Schema(format!("{context}: {error}")))
+}
+
 fn validate_gc_temp_leaf(leaf: &str) -> Result<()> {
     if !leaf.starts_with(".gc-index-")
         || leaf.len() > 128
@@ -576,9 +610,7 @@ fn open_gc_internal_index_dir(kio_dir: &std::fs::File) -> Result<std::fs::File> 
                 cap_fs::create_dir(parent, Path::new(leaf), &options).map_err(|error| {
                     IndexError::Schema(format!("create private GC index directory {leaf}: {error}"))
                 })?;
-                parent.sync_all().map_err(|error| {
-                    IndexError::Schema(format!("fsync private GC index parent {leaf}: {error}"))
-                })?;
+                sync_bound_gc_directory(parent, &format!("fsync private GC index parent {leaf}"))?;
                 cap_fs::open_dir_nofollow(parent, Path::new(leaf)).map_err(|error| {
                     IndexError::Schema(format!("open private GC index directory {leaf}: {error}"))
                 })
@@ -754,7 +786,17 @@ fn validate_bound_source_file(file: &std::fs::File, path: &Path) -> Result<()> {
     Ok(())
 }
 impl BoundSourceIndex {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    fn sqlite_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+
+        let leaf = self
+            .public_path
+            .file_name()
+            .expect("bound source index has a file name");
+        PathBuf::from(format!("/proc/self/fd/{}", self._parent.as_raw_fd())).join(leaf)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn sqlite_path(&self) -> PathBuf {
         use std::os::fd::AsRawFd;
         PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()))
@@ -773,9 +815,25 @@ static BOUND_SOURCE_VFS_INIT: Once = Once::new();
 static BOUND_SOURCE_VFS_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 #[cfg(unix)]
 static BOUND_SOURCE_DEFAULT_VFS: OnceLock<usize> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static BOUND_SOURCE_LINUX_OPEN: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "linux")]
+std::thread_local! {
+    static BOUND_SOURCE_LINUX_EXPECTED: Cell<Option<SourceFileIdentity>> = const { Cell::new(None) };
+}
 
 #[cfg(unix)]
-fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
+fn open_bound_source_connection(source: &BoundSourceIndex, flags: OpenFlags) -> Result<Connection> {
+    #[cfg(not(target_os = "linux"))]
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = source.sqlite_path();
+    #[cfg(not(target_os = "linux"))]
+    if !is_bound_source_fd_name(path.as_os_str().as_bytes()) {
+        return Err(IndexError::Schema(
+            "bound source SQLite path is not an internal descriptor path".to_owned(),
+        ));
+    }
     BOUND_SOURCE_VFS_INIT.call_once(|| {
         let result = unsafe {
             let original = rusqlite::ffi::sqlite3_vfs_find(std::ptr::null());
@@ -785,6 +843,7 @@ fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connect
                 let _ = BOUND_SOURCE_DEFAULT_VFS.set(original as usize);
                 let mut wrapped = Box::new(*original);
                 wrapped.zName = BOUND_SOURCE_VFS_NAME.as_ptr();
+                wrapped.xOpen = Some(bound_source_x_open);
                 wrapped.xFullPathname = Some(bound_source_x_full_pathname);
                 let code = rusqlite::ffi::sqlite3_vfs_register(Box::into_raw(wrapped), 0);
                 if code == rusqlite::ffi::SQLITE_OK {
@@ -803,15 +862,33 @@ fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connect
         .expect("VFS initializer sets result")
         .as_ref()
         .map_err(|e| IndexError::Schema(e.clone()))?;
+    #[cfg(target_os = "linux")]
+    {
+        if !is_bound_source_linux_parent_fd_name(path.as_os_str().as_encoded_bytes()) {
+            return Err(IndexError::Schema(
+                "bound source SQLite path is not an internal descriptor-root path".to_owned(),
+            ));
+        }
+        let _open_guard = BOUND_SOURCE_LINUX_OPEN.lock().map_err(|_| {
+            IndexError::Schema("bound source SQLite open mutex is poisoned".to_owned())
+        })?;
+        let expected = source_file_identity(&source.file)?;
+        BOUND_SOURCE_LINUX_EXPECTED.with(|slot| slot.set(Some(expected)));
+        let outcome = Connection::open_with_flags_and_vfs(&path, flags, "kio-bound-source-unix");
+        BOUND_SOURCE_LINUX_EXPECTED.with(|slot| slot.set(None));
+        let conn = outcome?;
+        Ok(conn)
+    }
+    #[cfg(not(target_os = "linux"))]
     Ok(Connection::open_with_flags_and_vfs(
-        path,
+        &path,
         flags,
         "kio-bound-source-unix",
     )?)
 }
 #[cfg(not(unix))]
-fn open_bound_source_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
-    Ok(Connection::open_with_flags(path, flags)?)
+fn open_bound_source_connection(source: &BoundSourceIndex, flags: OpenFlags) -> Result<Connection> {
+    Ok(Connection::open_with_flags(source.sqlite_path(), flags)?)
 }
 
 #[cfg(unix)]
@@ -825,7 +902,9 @@ unsafe extern "C" fn bound_source_x_full_pathname(
         return rusqlite::ffi::SQLITE_CANTOPEN;
     }
     let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
-    if is_bound_source_fd_name(bytes) {
+    if is_bound_source_fd_name(bytes)
+        || (cfg!(target_os = "linux") && is_bound_source_linux_parent_fd_name(bytes))
+    {
         if bytes.len() + 1 > output_len as usize {
             return rusqlite::ffi::SQLITE_CANTOPEN;
         }
@@ -848,11 +927,130 @@ unsafe extern "C" fn bound_source_x_full_pathname(
     };
     unsafe { callback(default_vfs, name, output_len, output) }
 }
+
+#[cfg(unix)]
+unsafe extern "C" fn bound_source_x_open(
+    _: *mut rusqlite::ffi::sqlite3_vfs,
+    name: rusqlite::ffi::sqlite3_filename,
+    file: *mut rusqlite::ffi::sqlite3_file,
+    flags: std::ffi::c_int,
+    out_flags: *mut std::ffi::c_int,
+) -> std::ffi::c_int {
+    let Some(default_vfs) = BOUND_SOURCE_DEFAULT_VFS.get() else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    let default_vfs = *default_vfs as *mut rusqlite::ffi::sqlite3_vfs;
+    let Some(callback) = (unsafe { (*default_vfs).xOpen }) else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+
+    #[cfg(target_os = "linux")]
+    if !name.is_null()
+        && is_bound_source_linux_parent_fd_name(unsafe { CStr::from_ptr(name).to_bytes() })
+        && flags & rusqlite::ffi::SQLITE_OPEN_MAIN_DB != 0
+    {
+        let expected = BOUND_SOURCE_LINUX_EXPECTED.with(Cell::get);
+        let Some(expected) = expected else {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        };
+        let Ok(before) = linux_regular_fd_inventory() else {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        };
+        let code = unsafe { callback(default_vfs, name, file, flags, out_flags) };
+        if code != rusqlite::ffi::SQLITE_OK {
+            return code;
+        }
+        let verified = linux_regular_fd_inventory().is_ok_and(|after| {
+            let opened: Vec<_> = after
+                .iter()
+                .filter(|(fd, identity)| before.get(fd) != Some(*identity))
+                .collect();
+            // The main database must add exactly one descriptor for the
+            // retained source. Concurrent same-process work may open other
+            // regular files, which cannot grant authority over this source;
+            // it is trusted in-process code. A second descriptor for this
+            // identity is fail-closed, so another operation cannot obscure
+            // which descriptor SQLite selected.
+            opened
+                .iter()
+                .filter(|(_, identity)| **identity == expected)
+                .count()
+                == 1
+        });
+        if verified {
+            return rusqlite::ffi::SQLITE_OK;
+        }
+        if !file.is_null() {
+            let methods = unsafe { (*file).pMethods };
+            if !methods.is_null()
+                && let Some(close) = unsafe { (*methods).xClose }
+            {
+                let _ = unsafe { close(file) };
+            }
+        }
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    }
+
+    unsafe { callback(default_vfs, name, file, flags, out_flags) }
+}
+
 #[cfg(unix)]
 fn is_bound_source_fd_name(value: &[u8]) -> bool {
     value
         .strip_prefix(b"/dev/fd/")
         .is_some_and(|fd| !fd.is_empty() && fd.iter().all(u8::is_ascii_digit))
+}
+
+/// A Linux-only descriptor-root spelling.  This names a retained parent
+/// directory and a single final leaf, so SQLite's unix VFS can apply
+/// O_NOFOLLOW to the real repository-controlled leaf while retaining its
+/// normal lock registry and close semantics.
+#[cfg(unix)]
+fn is_bound_source_linux_parent_fd_name(value: &[u8]) -> bool {
+    let Some(value) = value.strip_prefix(b"/proc/self/fd/") else {
+        return false;
+    };
+    let Some(separator) = value.iter().position(|byte| *byte == b'/') else {
+        return false;
+    };
+    let (fd, leaf_with_separator) = value.split_at(separator);
+    let leaf = &leaf_with_separator[1..];
+    !fd.is_empty()
+        && fd.iter().all(u8::is_ascii_digit)
+        && !leaf.is_empty()
+        && !leaf.contains(&b'/')
+        && leaf != b"."
+        && leaf != b".."
+}
+
+#[cfg(target_os = "linux")]
+fn linux_regular_fd_inventory() -> Result<BTreeMap<i32, SourceFileIdentity>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let entries = std::fs::read_dir("/proc/self/fd")
+        .map_err(|e| IndexError::Schema(format!("inspect process descriptor inventory: {e}")))?;
+    let mut result = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            IndexError::Schema(format!("read process descriptor inventory entry: {e}"))
+        })?;
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_file() {
+            result.insert(
+                fd,
+                SourceFileIdentity {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+            );
+        }
+    }
+    Ok(result)
 }
 
 /// Open an existing, current source index without following its final path
@@ -881,7 +1079,7 @@ pub fn open_existing_source_index_connection(
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW
         }
     };
-    let conn = open_bound_source_connection(&source.sqlite_path(), flags)?;
+    let conn = open_bound_source_connection(&source, flags)?;
     // The pre-open metadata check is not a lock. Recheck the visible leaf
     // after SQLite's NOFOLLOW lookup to catch the common replacement races
     // without making unsafe assumptions about raw file descriptors.
@@ -1024,9 +1222,7 @@ pub fn prepare_bound_gc_index_rotation(
         .sync_all()
         .map_err(|error| IndexError::Schema(format!("fsync GC private index copy: {error}")))?;
     drop(output);
-    private.sync_all().map_err(|error| {
-        IndexError::Schema(format!("fsync private GC index directory: {error}"))
-    })?;
+    sync_bound_gc_directory(&private, "fsync private GC index directory")?;
     // The exact descriptor copied above and the public name must still agree
     // before SQLite is allowed to mutate the private clone.  This makes the
     // source generation/identity binding cover the whole copy interval.
@@ -1046,9 +1242,7 @@ pub fn prepare_bound_gc_index_rotation(
         config,
     )?
     .ok_or_else(|| IndexError::Schema("GC private index copy disappeared".to_owned()))?;
-    private.sync_all().map_err(|error| {
-        IndexError::Schema(format!("fsync completed private GC index: {error}"))
-    })?;
+    sync_bound_gc_directory(&private, "fsync completed private GC index")?;
     Ok(PreparedBoundGcIndexRotation {
         temp_leaf: temp_leaf.to_owned(),
         private_dir_identity,
@@ -1128,9 +1322,7 @@ pub fn remove_prepared_bound_gc_index(
             )));
         }
     }
-    private
-        .sync_all()
-        .map_err(|error| IndexError::Schema(format!("fsync private GC index cleanup: {error}")))?;
+    sync_bound_gc_directory(&private, "fsync private GC index cleanup")?;
     Ok(PreparedGcIndexCleanup::Removed)
 }
 
@@ -1211,9 +1403,7 @@ pub fn cleanup_stale_bound_gc_index_rotations(
         cap_fs::remove_file(&private, Path::new(&leaf))
             .map_err(|error| IndexError::Schema(format!("remove stale GC index copy: {error}")))?;
     }
-    private.sync_all().map_err(|error| {
-        IndexError::Schema(format!("fsync private GC index stale cleanup: {error}"))
-    })
+    sync_bound_gc_directory(&private, "fsync private GC index stale cleanup")
 }
 
 pub fn exchange_prepared_bound_gc_index(
@@ -1245,12 +1435,8 @@ pub fn exchange_prepared_bound_gc_index(
     // Exchange spans two directories.  Persist the destination namespace
     // first: after a power loss recovery may see both names, but never rely on
     // a source-directory fsync having made the target name durable first.
-    index
-        .sync_all()
-        .map_err(|error| IndexError::Schema(format!("fsync GC index exchange: {error}")))?;
-    private
-        .sync_all()
-        .map_err(|error| IndexError::Schema(format!("fsync private GC index exchange: {error}")))?;
+    sync_bound_gc_directory(&index, "fsync GC index exchange")?;
+    sync_bound_gc_directory(&private, "fsync private GC index exchange")?;
     if gc_leaf_identity(&index, "sqlite.db")? != expected_target_identity
         || gc_leaf_identity(&private, temp_leaf)? != expected_source_identity
     {
@@ -1613,7 +1799,7 @@ fn open_bound_gc_index_leaf(
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW
     };
-    let conn = open_bound_source_connection(&source.sqlite_path(), flags)?;
+    let conn = open_bound_source_connection(&source, flags)?;
     validate_bound_source_name_identity(&source)?;
     if writable {
         conn.pragma_update(None, "journal_mode", "MEMORY")?;
@@ -1675,7 +1861,7 @@ impl SqliteFtsIndex {
         // symlinked.  SQLite then performs the security-sensitive final lookup
         // with `SQLITE_OPEN_NOFOLLOW`, closing the validation/open race.
         let conn = open_bound_source_connection(
-            &source.sqlite_path(),
+            &source,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         validate_bound_source_file(&source.file, &source.public_path)?;

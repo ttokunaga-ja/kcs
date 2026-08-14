@@ -52,12 +52,14 @@ const MAX_MACHO_LOAD_COMMANDS: usize = 256;
 const MAX_MACHO_PATH_BYTES: usize = 4 * 1024;
 const MAX_MACHO_INSPECT_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_DYLD_INFO_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_os = "macos")]
 const MAX_RUNTIME_XATTR_LIST_BYTES: usize = 64 * 1024;
 const MAX_DYLD_CACHE_IMAGES: usize = 16_384;
 const MAX_DYLD_CACHE_EDGES: usize = 262_144;
 // Darwin's `MNT_RDONLY`.  Keep this as a policy constant rather than relying
 // on an ambient mount option: comparator measurements must be backed by an
 // immutable filesystem, not merely root-owned directory modes.
+#[cfg(any(target_os = "macos", test))]
 const MACOS_MNT_RDONLY: u64 = 0x0000_0001;
 const MAX_LIVE_FIXTURE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_FIXTURE_BYTES: u64 = 128 * 1024 * 1024;
@@ -2652,6 +2654,7 @@ mod macos_xattr {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn runtime_xattr_names_allowed(names: &BTreeSet<String>) -> bool {
     names.is_empty() || names == &BTreeSet::from(["com.apple.provenance".to_owned()])
 }
@@ -3992,6 +3995,7 @@ fn runtime_closure_matches(
         && resolved.closure == provenance.closure
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn runtime_mount_is_read_only(flags: u64) -> bool {
     flags & MACOS_MNT_RDONLY != 0
 }

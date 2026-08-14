@@ -396,11 +396,11 @@ pub fn run(options: RerankDumpOptions) -> Result<RerankDumpSummary, RerankDumpEr
     let destination = CreateOnlyArtifact::bind(&options.out, &options.corpus, "rerank output")
         .map_err(|error| RerankDumpError::Input(error.to_string()))?;
     let corpus_manifest = load_corpus_manifest(&options.corpus.join("corpus-manifest.json"))?;
-    let history_manifest = load_history_manifest(
+    let _history_manifest = load_history_manifest(
         &options.corpus.join("history-manifest.json"),
         &corpus_manifest,
     )?;
-    let resolver = Resolver::new(&corpus_manifest, &history_manifest);
+    let resolver = Resolver::new(&corpus_manifest);
     let corpus_path = fs::canonicalize(&options.corpus).map_err(|error| {
         RerankDumpError::Input(format!("cannot open synthetic corpus: {error}"))
     })?;

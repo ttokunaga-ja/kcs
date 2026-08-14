@@ -12,7 +12,11 @@ use std::{
     io::Read,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -21,7 +25,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::{RecallResult, ResultKey, recall_at_k};
+use crate::{
+    RecallResult, ResultKey,
+    manifest::{HistoryOperation, frozen_history_plan},
+    recall_at_k,
+};
 use kio_search::EvidencePointer;
 
 pub const RECALL_K: usize = 10;
@@ -128,11 +136,75 @@ enum StreamEvent {
     OutputLimit(&'static str, usize),
 }
 
+#[cfg(unix)]
+fn read_stream<R: Read + std::os::fd::AsRawFd + Send + 'static>(
+    mut reader: R,
+    stream: &'static str,
+    limit: usize,
+    sender: mpsc::Sender<StreamEvent>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let mut descriptor = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Poll rather than blocking in `read` so cancellation can also release
+        // readers whose pipe write end escaped the evaluator process group.
+        let polled = unsafe { libc::poll(&mut descriptor, 1, 10) };
+        if polled == 0 {
+            continue;
+        }
+        if polled < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            let _ = sender.send(StreamEvent::ReadError(stream, error));
+            return;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                let _ = sender.send(StreamEvent::Data(stream, bytes));
+                let _ = sender.send(StreamEvent::End);
+                return;
+            }
+            Ok(count) => {
+                let Some(total) = bytes.len().checked_add(count) else {
+                    let _ = sender.send(StreamEvent::OutputLimit(stream, limit));
+                    return;
+                };
+                if total > limit {
+                    let _ = sender.send(StreamEvent::OutputLimit(stream, limit));
+                    return;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            Err(error) => {
+                let _ = sender.send(StreamEvent::ReadError(stream, error));
+                return;
+            }
+        }
+    }
+}
+
+// Windows kills the complete Job Object on cancellation, closing inherited
+// output handles. Keep the platform's existing blocking reader: it avoids
+// changing its pipe semantics while the Job Object provides the cancellation
+// boundary that Unix process groups cannot enforce after `setsid`.
+#[cfg(not(unix))]
 fn read_stream<R: Read + Send + 'static>(
     mut reader: R,
     stream: &'static str,
     limit: usize,
     sender: mpsc::Sender<StreamEvent>,
+    _cancelled: Arc<AtomicBool>,
 ) {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -293,12 +365,32 @@ pub fn run_bounded_command(
     let stdout = child.stdout.take().expect("stdout was configured as piped");
     let stderr = child.stderr.take().expect("stderr was configured as piped");
     let (sender, receiver) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
     let stdout_reader = thread::spawn({
         let sender = sender.clone();
-        move || read_stream(stdout, "stdout", options.max_stdout_bytes, sender)
+        let cancelled = Arc::clone(&cancelled);
+        move || {
+            read_stream(
+                stdout,
+                "stdout",
+                options.max_stdout_bytes,
+                sender,
+                cancelled,
+            )
+        }
     });
-    let stderr_reader =
-        thread::spawn(move || read_stream(stderr, "stderr", options.max_stderr_bytes, sender));
+    let stderr_reader = thread::spawn({
+        let cancelled = Arc::clone(&cancelled);
+        move || {
+            read_stream(
+                stderr,
+                "stderr",
+                options.max_stderr_bytes,
+                sender,
+                cancelled,
+            )
+        }
+    });
 
     let deadline = started + options.timeout;
     let mut status = None;
@@ -343,6 +435,9 @@ pub fn run_bounded_command(
         }
     };
     if result.is_err() {
+        // Readers wake within their short poll interval even when a descendant
+        // has escaped the Unix process group and retains a pipe write end.
+        cancelled.store(true, Ordering::Release);
         terminate_attached_tree(&process_tree);
         terminate_process_tree(&mut child);
     }
@@ -750,30 +845,6 @@ pub struct ScoredRecord {
     pub response: SearchResponse,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct HistoryManifestRef {
-    pub edited: Vec<HistoryEntryRef>,
-    pub renamed: Vec<RenameEntryRef>,
-    pub deleted: Vec<HistoryEntryRef>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HistoryEntryRef {
-    pub scope: String,
-    pub file: String,
-    /// Hex digest without the `sha256:` prefix.
-    pub raw_sha256: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct RenameEntryRef {
-    pub scope: String,
-    pub old_file: String,
-    pub new_file: String,
-    /// Hex digest without the `sha256:` prefix.
-    pub raw_sha256: String,
-}
-
 fn full_hash(hex: &str) -> String {
     format!("sha256:{hex}")
 }
@@ -813,27 +884,44 @@ fn recalled_hits<'a>(records: &'a [ScoredRecord], scenario: &str) -> Vec<&'a Sea
 /// History-specific structural gates. Restore validation is performed by the
 /// caller, then recorded with [`HistoryCoverage::set_restore_problems`].
 #[must_use]
-pub fn assess_history_coverage(
-    records: &[ScoredRecord],
-    manifest: &HistoryManifestRef,
-) -> HistoryCoverage {
+pub fn assess_history_coverage(records: &[ScoredRecord]) -> HistoryCoverage {
+    let plan = frozen_history_plan().expect("bundled history plan is validated at build time");
     let m32_hits = recalled_hits(records, "M3-2");
     let m33_hits = recalled_hits(records, "M3-3");
     let m32_raws: HashSet<_> = m32_hits
         .iter()
         .map(|hit| hit.pointer.raw_hash.as_str())
         .collect();
-    let mut edited_old_missing = manifest
-        .edited
+    let mut edited_old_missing = plan
+        .operations
         .iter()
-        .map(|entry| full_hash(&entry.raw_sha256))
+        .filter_map(|operation| match operation {
+            HistoryOperation::Edit {
+                before_raw_sha256, ..
+            } => Some(full_hash(before_raw_sha256)),
+            _ => None,
+        })
         .filter(|hash| !m32_raws.contains(hash.as_str()))
         .collect::<Vec<_>>();
     edited_old_missing.sort();
 
     let mut rename_failures = Vec::new();
-    for rename in &manifest.renamed {
-        let raw_hash = full_hash(&rename.raw_sha256);
+    for rename in plan
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            HistoryOperation::Rename {
+                scope,
+                old_file,
+                new_file,
+                before_raw_sha256,
+                ..
+            } => Some((scope, old_file, new_file, before_raw_sha256)),
+            _ => None,
+        })
+    {
+        let (scope, old_file, new_file, before_raw_sha256) = rename;
+        let raw_hash = full_hash(before_raw_sha256);
         let mut paths = BTreeSet::new();
         let mut aliases_valid = true;
         let mut saw_old = false;
@@ -842,11 +930,9 @@ pub fn assess_history_coverage(
                 .expected
                 .iter()
                 .filter(|(raw, _, path)| {
-                    raw == &raw_hash && path.as_deref() == Some(rename.old_file.as_str())
+                    raw == &raw_hash && path.as_deref() == Some(old_file.as_str())
                 })
-                .map(|(raw, section, _)| {
-                    (raw.clone(), section.clone(), Some(rename.new_file.clone()))
-                })
+                .map(|(raw, section, _)| (raw.clone(), section.clone(), Some(new_file.clone())))
                 .collect::<HashSet<_>>();
             if twin_identities.is_empty() {
                 continue;
@@ -857,25 +943,21 @@ pub fn assess_history_coverage(
                 }
                 let identity = result_key(&hit.pointer);
                 if record.expected.contains(&identity) || twin_identities.contains(&identity) {
-                    if hit.pointer.path_at_commit.as_deref() == Some(rename.old_file.as_str()) {
+                    if hit.pointer.path_at_commit.as_deref() == Some(old_file.as_str()) {
                         saw_old = true;
                     }
                     if let Some(path) = &hit.pointer.path_at_commit {
                         paths.insert(path.clone());
                     }
                     aliases_valid &= hit.current_paths.as_deref()
-                        == Some(std::slice::from_ref(&rename.new_file))
-                        && hit.current_path.as_deref() == Some(rename.new_file.as_str());
+                        == Some(std::slice::from_ref(new_file))
+                        && hit.current_path.as_deref() == Some(new_file.as_str());
                 }
             }
         }
-        if !saw_old
-            || !paths.contains(&rename.old_file)
-            || !paths.contains(&rename.new_file)
-            || !aliases_valid
-        {
+        if !saw_old || !paths.contains(old_file) || !paths.contains(new_file) || !aliases_valid {
             rename_failures.push(RenameFailure {
-                scope: rename.scope.clone(),
+                scope: scope.clone(),
                 raw_hash,
                 paths: paths.into_iter().collect(),
             });
@@ -885,20 +967,37 @@ pub fn assess_history_coverage(
         .iter()
         .map(|hit| hit.pointer.raw_hash.as_str())
         .collect();
-    let mut deleted_missing = manifest
-        .deleted
+    let mut deleted_missing = plan
+        .operations
         .iter()
-        .map(|entry| full_hash(&entry.raw_sha256))
+        .filter_map(|operation| match operation {
+            HistoryOperation::Delete {
+                before_raw_sha256, ..
+            } => Some(full_hash(before_raw_sha256)),
+            _ => None,
+        })
         .filter(|hash| !m33_raws.contains(hash.as_str()))
         .collect::<Vec<_>>();
     deleted_missing.sort();
     HistoryCoverage {
-        edited_old_required: manifest.edited.len(),
+        edited_old_required: plan
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, HistoryOperation::Edit { .. }))
+            .count(),
         passes_m3_2: edited_old_missing.is_empty() && rename_failures.is_empty(),
         edited_old_missing,
-        rename_required: manifest.renamed.len(),
+        rename_required: plan
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, HistoryOperation::Rename { .. }))
+            .count(),
         rename_failures,
-        deleted_required: manifest.deleted.len(),
+        deleted_required: plan
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, HistoryOperation::Delete { .. }))
+            .count(),
         passes_m3_3: deleted_missing.is_empty(),
         deleted_missing,
         ..HistoryCoverage::default()
@@ -1298,6 +1397,133 @@ mod tests {
             error,
             BoundedProcessError::Timeout { timeout_ms: 100 }
         ));
+    }
+
+    /// This is invoked in a separate test binary by
+    /// `bounded_process_timeout_does_not_wait_for_escaped_pipe_holders`.
+    /// The direct child remains in the evaluator process group while its forked
+    /// child creates a new session and keeps both inherited output pipes open.
+    #[cfg(unix)]
+    #[test]
+    fn escaped_pipe_holder_helper() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let Some(path) = std::env::var_os("KIO_EVAL_ESCAPED_PIPE_HOLDER") else {
+            return;
+        };
+        let path = CString::new(path.as_os_str().as_bytes()).expect("marker path has no NUL");
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            if unsafe { libc::setsid() } < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            let descriptor = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            let mut digits = [0_u8; 20];
+            let mut number = unsafe { libc::getpid() as u64 };
+            let mut start = digits.len();
+            loop {
+                start -= 1;
+                digits[start] = b'0' + (number % 10) as u8;
+                number /= 10;
+                if number == 0 {
+                    break;
+                }
+            }
+            let _ = unsafe {
+                libc::write(
+                    descriptor,
+                    digits[start..].as_ptr().cast(),
+                    digits.len() - start,
+                )
+            };
+            unsafe {
+                libc::close(descriptor);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        unsafe {
+            loop {
+                libc::pause();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct EscapedPipeHolder {
+        marker: tempfile::TempPath,
+    }
+
+    #[cfg(unix)]
+    impl Drop for EscapedPipeHolder {
+        fn drop(&mut self) {
+            let Ok(pid) = fs::read_to_string(&self.marker) else {
+                return;
+            };
+            let Ok(pid) = pid.trim().parse::<i32>() else {
+                return;
+            };
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_timeout_does_not_wait_for_escaped_pipe_holders() {
+        let marker = tempfile::NamedTempFile::new()
+            .expect("create marker")
+            .into_temp_path();
+        let _holder = EscapedPipeHolder { marker };
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg("--exact")
+            .arg("runner::tests::escaped_pipe_holder_helper")
+            .arg("--nocapture")
+            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker);
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(100),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::Timeout { timeout_ms: 100 }
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout waited for an escaped pipe holder"
+        );
+        for _ in 0..20 {
+            if fs::metadata(&_holder.marker)
+                .ok()
+                .is_some_and(|metadata| metadata.len() > 0)
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("escaped pipe holder did not record its pid");
     }
 
     #[cfg(unix)]

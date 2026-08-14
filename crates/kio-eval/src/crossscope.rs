@@ -178,9 +178,9 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
     let corpus_manifest = options.corpus.join("corpus-manifest.json");
     let history_manifest = options.corpus.join("history-manifest.json");
     let corpus = load_corpus_manifest(&corpus_manifest)?;
-    let history = load_history_manifest(&history_manifest, &corpus)?;
-    let model = CorpusModel::new(&corpus, &history);
-    let resolver = Resolver::new(&corpus, &history);
+    let _history = load_history_manifest(&history_manifest, &corpus)?;
+    let model = CorpusModel::new(&corpus);
+    let resolver = Resolver::new(&corpus);
     let problems = queries
         .iter()
         .flat_map(|query| validate_query(query, &model, &resolver))

@@ -10159,9 +10159,7 @@ fn open_chunk_ledger_dir(kio_dir: &Path, create_missing: bool) -> Result<ChunkLe
             if created {
                 // Persist the new `index` entry in `.kio` before its child
                 // ledger can be reported durable.
-                kio.sync_all().map_err(|error| {
-                    KioError::io(error.to_string(), kio_dir.display().to_string())
-                })?;
+                sync_bound_directory(&kio, kio_dir)?;
             }
             cap_fs::open_dir_nofollow(&kio, Path::new("index"))
                 .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
@@ -10252,13 +10250,32 @@ fn open_chunk_ledger_file(
 }
 
 fn sync_chunk_ledger_dir(directory: &ChunkLedgerDir) -> Result<()> {
+    sync_bound_directory(&directory.handle, &directory.path)
+}
+
+fn sync_bound_directory(directory: &std::fs::File, path: &Path) -> Result<()> {
     let mut options = cap_fs::OpenOptions::new();
-    options.read(true);
-    let syncable = cap_fs::open(&directory.handle, Path::new("."), &options)
-        .map_err(|error| KioError::io(error.to_string(), directory.path.display().to_string()))?;
+    options
+        .read(true)
+        // `.` is deliberately resolved through the retained directory
+        // capability.  Requesting no-follow keeps this reopen on the same
+        // no-symlink boundary as the original handle (and avoids a Linux
+        // O_PATH-only resolution through the capability wrapper).
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable = cap_fs::open(directory, Path::new("."), &options)
+        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+    let metadata = syncable
+        .metadata()
+        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+    if !metadata.is_dir() {
+        return Err(KioError::io(
+            "bound directory changed type",
+            path.display().to_string(),
+        ));
+    }
     syncable
         .sync_all()
-        .map_err(|error| KioError::io(error.to_string(), directory.path.display().to_string()))
+        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))
 }
 
 /// Atomically replace the complete chunk ledger using the already-validated

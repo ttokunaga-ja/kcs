@@ -26,15 +26,16 @@ use kio_eval::{
     boundary::{BoundCorpus, BoundScope},
     crossscope::CrossscopeOptions,
     manifest::{
-        SCOPES, Scenario, load_corpus_manifest, load_golden_queries, load_history_manifest,
+        HistoryOperation, SCOPES, Scenario, frozen_history_plan, load_corpus_manifest,
+        load_golden_queries, load_history_manifest,
     },
     qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
     rerank::{RerankApplyOptions, RerankApplySummary, RerankDumpOptions, RerankDumpSummary},
     resolver::{CorpusModel, Resolver, validate_query},
     runner::{
-        BoundedProcessOptions, HistoryEntryRef, HistoryManifestRef, RenameEntryRef, ResolvedQuery,
-        ScoredRecord, assess_history_coverage, evaluate_queries_with_validator, final_exit_code,
-        run_bounded_command, write_report, write_results,
+        BoundedProcessOptions, ResolvedQuery, ScoredRecord, assess_history_coverage,
+        evaluate_queries_with_validator, final_exit_code, run_bounded_command, write_report,
+        write_results,
     },
     scale::{self, ScaleOptions},
 };
@@ -121,6 +122,13 @@ enum Commands {
         out: PathBuf,
         #[arg(long)]
         force: bool,
+    },
+    /// Rebuild the frozen synthetic history corpus using the Rust-only plan.
+    ReplayHistory {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        bin: PathBuf,
     },
     /// Measure deterministic search latency on an attested scale corpus.
     Benchmark {
@@ -225,6 +233,8 @@ pub enum AppError {
     Rerank(#[from] kio_eval::rerank::RerankDumpError),
     #[error(transparent)]
     RerankApply(#[from] kio_eval::rerank::RerankApplyError),
+    #[error(transparent)]
+    Replay(#[from] kio_eval::replay::ReplayError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -401,39 +411,6 @@ fn verify_logs(
     problems
 }
 
-fn history_ref(history: &kio_eval::manifest::HistoryManifest) -> HistoryManifestRef {
-    HistoryManifestRef {
-        edited: history
-            .edited
-            .iter()
-            .map(|entry| HistoryEntryRef {
-                scope: entry.scope.clone(),
-                file: entry.file.clone(),
-                raw_sha256: entry.raw_sha256.clone(),
-            })
-            .collect(),
-        renamed: history
-            .renamed
-            .iter()
-            .map(|entry| RenameEntryRef {
-                scope: entry.scope.clone(),
-                old_file: entry.old_file.clone(),
-                new_file: entry.new_file.clone(),
-                raw_sha256: entry.raw_sha256.clone(),
-            })
-            .collect(),
-        deleted: history
-            .deleted
-            .iter()
-            .map(|entry| HistoryEntryRef {
-                scope: entry.scope.clone(),
-                file: entry.file.clone(),
-                raw_sha256: entry.raw_sha256.clone(),
-            })
-            .collect(),
-    }
-}
-
 fn read_bound_regular(scope: &BoundScope, name: &std::ffi::OsStr) -> Result<Vec<u8>, AppError> {
     let handle = scope
         .try_clone_handle()
@@ -516,7 +493,6 @@ fn tree_fingerprint(corpus: &BoundCorpus) -> Result<Vec<(String, String, String)
 fn verify_restore(
     bin: &Path,
     corpus: &BoundCorpus,
-    history: &kio_eval::manifest::HistoryManifest,
     records: &[ScoredRecord],
     environment: &[(OsString, OsString)],
 ) -> Vec<String> {
@@ -543,12 +519,29 @@ fn verify_restore(
         }
     }
     let mut problems = Vec::new();
-    for entry in &history.deleted {
-        let raw = format!("sha256:{}", entry.raw_sha256);
+    let plan = match frozen_history_plan() {
+        Ok(plan) => plan,
+        Err(error) => return vec![error.to_string()],
+    };
+    for entry in plan
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            HistoryOperation::Delete {
+                scope,
+                file,
+                before_raw_sha256,
+                ..
+            } => Some((scope, file, before_raw_sha256)),
+            _ => None,
+        })
+    {
+        let (scope, file, before_raw_sha256) = entry;
+        let raw = format!("sha256:{before_raw_sha256}");
         let Some(pointer) = pointers.get(&raw) else {
             problems.push(format!(
                 "deleted result absent for restore: {}/{}",
-                entry.scope, entry.file
+                scope, file
             ));
             continue;
         };
@@ -572,18 +565,15 @@ fn verify_restore(
             .env_clear()
             .envs(environment.iter().cloned());
         if let Err(error) = research.configure_command_cwd(&mut command) {
-            problems.push(format!(
-                "restore failed for {}/{}: {error}",
-                entry.scope, entry.file
-            ));
+            problems.push(format!("restore failed for {}/{}: {error}", scope, file));
             continue;
         }
         let output = run_bounded_command(&mut command, BoundedProcessOptions::default());
         let Ok(output) = output else {
             problems.push(format!(
                 "restore failed for {}/{}: {}",
-                entry.scope,
-                entry.file,
+                scope,
+                file,
                 output.unwrap_err()
             ));
             continue;
@@ -591,28 +581,22 @@ fn verify_restore(
         if !output.status.success() {
             problems.push(format!(
                 "restore failed for {}/{}: {}",
-                entry.scope,
-                entry.file,
+                scope,
+                file,
                 output.stderr.trim()
             ));
             continue;
         }
         let files = walk_regular_files(destination.path());
         if files.len() != 1 {
-            problems.push(format!(
-                "restore count mismatch for {}/{}",
-                entry.scope, entry.file
-            ));
+            problems.push(format!("restore count mismatch for {}/{}", scope, file));
             continue;
         }
         match read_bounded_regular_file(&files[0], MAX_RAW_OBJECT_BYTES)
             .map(|bytes| hash_bytes(&bytes))
         {
             Ok(actual) if actual == raw => {}
-            _ => problems.push(format!(
-                "restore hash mismatch for {}/{}",
-                entry.scope, entry.file
-            )),
+            _ => problems.push(format!("restore hash mismatch for {}/{}", scope, file)),
         }
     }
     match tree_fingerprint(corpus) {
@@ -701,6 +685,15 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                 })
             }
             Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
+            Commands::ReplayHistory { corpus, bin } => {
+                let summary = kio_eval::replay::replay_history(corpus, bin)?;
+                println!(
+                    "[ok] history replay: scopes={} commits={}",
+                    summary.scopes, summary.commits
+                );
+                println!("     manifest: {}", summary.manifest.display());
+                Ok(ExitCode::Success)
+            }
             Commands::Benchmark { command } => match command {
                 BenchmarkCommands::BaselineAttest {
                     golden,
@@ -985,8 +978,8 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
         })?;
     let corpus = load_corpus_manifest(&corpus_manifest)?;
     let history = load_history_manifest(&history_manifest, &corpus)?;
-    let model = CorpusModel::new(&corpus, &history);
-    let resolver = Resolver::new(&corpus, &history);
+    let model = CorpusModel::new(&corpus);
+    let resolver = Resolver::new(&corpus);
     let active = ["M3-1", "M3-2", "M3-3"]
         .iter()
         .filter(|scenario| {
@@ -1117,20 +1110,14 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
             }
         },
     )?;
-    let mut coverage = assess_history_coverage(&records, &history_ref(&history));
+    let mut coverage = assess_history_coverage(&records);
     if active.iter().any(|scenario| scenario == "M3-2") {
         coverage.pointer_attested = results.counts.n_pointer_attested;
         coverage.pointer_attestation_failures = attestation_failures;
         coverage.passes_pointer_attestation = attestation_failures == 0;
     }
     if active.iter().any(|scenario| scenario == "M3-3") && coverage.passes_m3_3 {
-        coverage.set_restore_problems(verify_restore(
-            &bin,
-            &bound_corpus,
-            &history,
-            &records,
-            &environment,
-        ));
+        coverage.set_restore_problems(verify_restore(&bin, &bound_corpus, &records, &environment));
     }
     results.history_coverage = coverage;
     write_results(&out, &results)?;
@@ -1146,6 +1133,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
 mod tests {
     use std::{ffi::OsString, fs, path::Path};
 
+    use clap::Parser;
     use kio_core::ExitCode;
     use kio_eval::boundary::BoundCorpus;
     use serde_json::json;
@@ -1165,6 +1153,49 @@ mod tests {
         assert_eq!(parse_rerank_limit("100").unwrap(), 100);
         assert!(parse_rerank_limit("0").is_err());
         assert!(parse_rerank_limit("101").is_err());
+    }
+
+    #[test]
+    fn replay_history_has_one_required_canonical_surface() {
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "replay-history",
+                "--corpus",
+                "/tmp/corpus",
+                "--bin",
+                "/tmp/kio",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from(["kio-eval", "replay-history", "--corpus", "/tmp/corpus"])
+                .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "replay-history",
+                "--corpus",
+                "/tmp/corpus",
+                "--bin",
+                "/tmp/kio",
+                "--manifest",
+                "/tmp/legacy.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "replay_history",
+                "--corpus",
+                "/tmp/corpus",
+                "--bin",
+                "/tmp/kio",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

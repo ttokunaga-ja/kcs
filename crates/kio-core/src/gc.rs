@@ -1063,9 +1063,7 @@ impl GcSweepSession {
                 observation,
             )?,
         }
-        self.kio
-            .sync_all()
-            .map_err(|error| ioerr(error, SNAPSHOT_AUTO_STATE_LEAF))?;
+        sync_bound_directory(&self.kio, SNAPSHOT_AUTO_STATE_LEAF)?;
         let published = self.snapshot_auto_state()?;
         if published.state.as_ref() != Some(&state) {
             return Err(corrupt("snapshot auto state changed during publication"));
@@ -1404,8 +1402,8 @@ impl GcSweepSession {
         create_new_bound(&markers, &staged, &bytes, MAX_MARKER_BYTES)?;
         inject_gc_tree_fault("after_marker_stage_fsync")?;
         rename_noreplace_between(&markers, &staged, &gc, "in_progress")?;
-        gc.sync_all().map_err(|error| ioerr(error, "in_progress"))?;
-        markers.sync_all().map_err(|error| ioerr(error, &staged))?;
+        sync_bound_directory(&gc, "in_progress")?;
+        sync_bound_directory(&markers, &staged)?;
         let (published, _) = read_regular_observed(&gc, "in_progress", MAX_MARKER_BYTES)?;
         if published != bytes || GcInProgressMarker::parse_canonical(&published)? != *marker {
             return Err(corrupt("GC marker changed during atomic publication"));
@@ -1519,7 +1517,7 @@ impl GcSweepSession {
                     "existing GC shallow receipt",
                 )?;
                 durable.sync_all().map_err(|error| ioerr(error, leaf))?;
-                shallowed.sync_all().map_err(|error| ioerr(error, leaf))?;
+                sync_bound_directory(&shallowed, leaf)?;
                 Ok(GcReceiptPublication::AlreadyPresent)
             }
             Err(error) if is_io_not_found(&error) => {
@@ -1533,8 +1531,8 @@ impl GcSweepSession {
                 create_new_bound(&receipts, &staged, &bytes, MAX_METADATA)?;
                 inject_gc_tree_fault("after_receipt_stage_fsync")?;
                 rename_noreplace_between(&receipts, &staged, &shallowed, leaf)?;
-                shallowed.sync_all().map_err(|error| ioerr(error, leaf))?;
-                receipts.sync_all().map_err(|error| ioerr(error, &staged))?;
+                sync_bound_directory(&shallowed, leaf)?;
+                sync_bound_directory(&receipts, &staged)?;
                 let (published, _) = read_regular_observed(&shallowed, leaf, MAX_METADATA)?;
                 if published != bytes
                     || ShallowReceipt::parse_canonical(&published, leaf)? != receipt
@@ -1655,10 +1653,8 @@ impl GcSweepSession {
                 rename_noreplace_between(&d, raw, &archive_dir, &quarantine)?;
                 // Persist disappearance from CAS and appearance in quarantine
                 // before any crash seam or byte reclamation.
-                archive_dir
-                    .sync_all()
-                    .map_err(|error| ioerr(error, &quarantine))?;
-                d.sync_all().map_err(|error| ioerr(error, raw))?;
+                sync_bound_directory(&archive_dir, &quarantine)?;
+                sync_bound_directory(&d, raw)?;
                 (bytes, before, writable, false)
             }
             Err(error) if is_io_not_found(&error) => {
@@ -1678,9 +1674,7 @@ impl GcSweepSession {
                                     // only after the fresh marker binding above.
                                     self.require_active_marker(marker)?;
                                     remove_sentinel_leaf(&archive_dir, &quarantine)?;
-                                    archive_dir
-                                        .sync_all()
-                                        .map_err(|error| ioerr(error, &quarantine))?;
+                                    sync_bound_directory(&archive_dir, &quarantine)?;
                                     return Ok(true);
                                 }
                                 Err(error) => return Err(error),
@@ -1781,9 +1775,7 @@ impl GcSweepSession {
             "GC captured tree archive",
         )?;
         remove_sentinel_leaf(&archive_dir, &quarantine)?;
-        archive_dir
-            .sync_all()
-            .map_err(|error| ioerr(error, &quarantine))?;
+        sync_bound_directory(&archive_dir, &quarantine)?;
         let unlinked = cap_fs::Metadata::from_file(&writable).map_err(|error| ioerr(error, raw))?;
         if id_meta(&unlinked)? != before.identity || link_count(&unlinked)? != 0 {
             return Err(corrupt("tree archive gained a hardlink before byte erase"));
@@ -1796,7 +1788,7 @@ impl GcSweepSession {
                 "tree archive truncate did not bind expected object",
             ));
         }
-        d.sync_all().map_err(|e| ioerr(e, raw))?;
+        sync_bound_directory(&d, raw)?;
         Ok(true)
     }
     pub fn remove_marker(&self, expected: &GcInProgressMarker) -> Result<()> {
@@ -1810,11 +1802,11 @@ impl GcSweepSession {
         let markers = ensure_child_dir(&internal, "markers")?;
         let archive = unique_internal_name("completed");
         rename_noreplace_between(&gc, "in_progress", &markers, &archive)?;
-        markers.sync_all().map_err(|error| ioerr(error, &archive))?;
+        sync_bound_directory(&markers, &archive)?;
         // Commit the source disappearance before retiring the destination,
         // otherwise a power loss could resurrect the public marker after the
         // internal archive has been unlinked.
-        gc.sync_all().map_err(|error| ioerr(error, "gc"))?;
+        sync_bound_directory(&gc, "gc")?;
         let (moved_bytes, moved) = read_regular_observed(&markers, &archive, MAX_MARKER_BYTES)?;
         if moved.identity != observation.identity
             || moved.state.len != observation.state.len
@@ -1857,13 +1849,13 @@ impl GcSweepSession {
             "GC captured completed marker",
         )?;
         remove_sentinel_leaf(&markers, &archive)?;
-        markers.sync_all().map_err(|error| ioerr(error, &archive))?;
+        sync_bound_directory(&markers, &archive)?;
         let unlinked =
             cap_fs::Metadata::from_file(&moved_handle).map_err(|error| ioerr(error, &archive))?;
         if id_meta(&unlinked)? != moved.identity || link_count(&unlinked)? != 0 {
             return Err(corrupt("GC completed marker gained another name"));
         }
-        gc.sync_all().map_err(|e| ioerr(e, "gc"))
+        sync_bound_directory(&gc, "gc")
     }
     /// Check that the caller's public scope pathname still names exactly the
     /// retained capability handles. Invoke around any external index operation.
@@ -2356,7 +2348,7 @@ fn ensure_child_dir(parent: &std::fs::File, name: &str) -> Result<std::fs::File>
             let options = cap_fs::DirOptions::new();
             cap_fs::create_dir(parent, Path::new(name), &options).map_err(|e| ioerr(e, name))?;
             let dir = open_dir(parent, name)?;
-            parent.sync_all().map_err(|e| ioerr(e, name))?;
+            sync_bound_directory(parent, name)?;
             Ok(dir)
         }
     }
@@ -2373,7 +2365,7 @@ fn create_new_bound(dir: &std::fs::File, leaf: &str, bytes: &[u8], max: u64) -> 
     if observed.digest != hash_bytes(bytes) {
         return Err(corrupt("receipt changed after create"));
     }
-    dir.sync_all().map_err(|e| ioerr(e, leaf))
+    sync_bound_directory(dir, leaf)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2408,7 +2400,7 @@ fn replace_snapshot_state_expected(
     expected: &FileObservation,
 ) -> Result<()> {
     exchange_bound(dir, leaf, temporary)?;
-    dir.sync_all().map_err(|error| ioerr(error, leaf))?;
+    sync_bound_directory(dir, leaf)?;
     let (old_bytes, old) = read_regular_observed(dir, temporary, MAX_METADATA)?;
     let old_ok = old.identity == expected.identity
         && old.state.len == expected.state.len
@@ -2427,7 +2419,7 @@ fn replace_snapshot_state_expected(
         let captured_before = old.clone();
         let replacement_before = public.map(|(_, observation)| observation)?;
         exchange_bound(dir, leaf, temporary)?;
-        dir.sync_all().map_err(|error| ioerr(error, leaf))?;
+        sync_bound_directory(dir, leaf)?;
         let restored = read_regular_observed(dir, leaf, MAX_METADATA);
         let retired_replacement = read_regular_observed(dir, temporary, MAX_METADATA);
         let restored_ok = restored.as_ref().is_ok_and(|(_, observation)| {
@@ -2474,7 +2466,7 @@ fn replace_snapshot_state_expected(
         "snapshot auto captured predecessor state",
     )?;
     remove_sentinel_leaf(dir, temporary)?;
-    dir.sync_all().map_err(|error| ioerr(error, temporary))?;
+    sync_bound_directory(dir, temporary)?;
     let unlinked =
         cap_fs::Metadata::from_file(&old_handle).map_err(|error| ioerr(error, temporary))?;
     if id_meta(&unlinked)? != old.identity || link_count(&unlinked)? != 0 {
@@ -2519,7 +2511,7 @@ fn retire_snapshot_state_temporary(
         "snapshot auto captured temporary",
     )?;
     remove_sentinel_leaf(dir, temporary)?;
-    dir.sync_all().map_err(|error| ioerr(error, temporary))
+    sync_bound_directory(dir, temporary)
 }
 
 /// Retire only scheduler state temporaries which could have been produced by
@@ -2558,8 +2550,7 @@ fn cleanup_snapshot_auto_state_temporaries(dir: &std::fs::File) -> Result<()> {
     }
     // The individual retirement operation syncs the directory, including the
     // no-op case this makes the cleanup completion boundary explicit.
-    dir.sync_all()
-        .map_err(|error| ioerr(error, "snapshot auto temporary cleanup"))
+    sync_bound_directory(dir, "snapshot auto temporary cleanup")
 }
 
 fn is_snapshot_auto_state_temporary_name(name: &str) -> bool {
@@ -2697,7 +2688,7 @@ fn exchange_capture_verified_named(
     exchange_bound(dir, leaf, captured)?;
     // The deterministic captured state is a recovery state, so it must reach
     // stable storage before any caller can expose a crash seam after capture.
-    dir.sync_all().map_err(|error| ioerr(error, leaf))?;
+    sync_bound_directory(dir, leaf)?;
     let (_bytes, observed) = read_regular_observed(dir, captured, max)?;
     if observed.identity != expected.identity
         || observed.state.len != expected.state.len
@@ -2711,7 +2702,7 @@ fn exchange_capture_verified_named(
     // crash or remove the captured object.  Without this directory fsync, a
     // power loss could resurrect the pre-exchange archive name while recovery
     // observes marker progress that assumes the deterministic capture exists.
-    dir.sync_all().map_err(|error| ioerr(error, captured))?;
+    sync_bound_directory(dir, captured)?;
     // The exchange changes ctime, but this exact observation is used by the
     // immediate descriptor-relative unlink below.
     Ok((captured.to_owned(), observed))
@@ -3062,8 +3053,8 @@ fn atomic_exchange_marker_expected(
         // path. Preserve both entries for fail-closed recovery/diagnosis.
         return Err(corrupt("GC marker exchange validation failed"));
     }
-    dir.sync_all().map_err(|e| ioerr(e, leaf))?;
-    archives.sync_all().map_err(|e| ioerr(e, &temporary))?;
+    sync_bound_directory(dir, leaf)?;
+    sync_bound_directory(archives, &temporary)?;
     let (_, archived_observation) = archived?;
     let retired_handle = open_verified_file_handle(
         archives,
@@ -3087,7 +3078,7 @@ fn atomic_exchange_marker_expected(
         "GC captured retired marker",
     )?;
     remove_sentinel_leaf(archives, &temporary)?;
-    archives.sync_all().map_err(|e| ioerr(e, &temporary))?;
+    sync_bound_directory(archives, &temporary)?;
     let unlinked =
         cap_fs::Metadata::from_file(&retired_handle).map_err(|error| ioerr(error, &temporary))?;
     if id_meta(&unlinked)? != archived_observation.identity || link_count(&unlinked)? != 0 {
@@ -4318,6 +4309,30 @@ fn validate_directory_handle(directory: &std::fs::File, display: impl AsRef<Path
         }
     }
     Ok(())
+}
+
+/// Capability directory handles are intentionally opened as `O_PATH` on
+/// Linux, which is valid for descriptor-relative traversal but cannot be
+/// passed to `fsync`. Reopen exactly `.` below the retained capability with
+/// no-follow read access, verify that it is the same directory, then flush
+/// that syncable descriptor. No ambient pathname is reconstructed.
+fn sync_bound_directory(directory: &std::fs::File, label: impl AsRef<Path>) -> Result<()> {
+    let label = label.as_ref();
+    let expected = cap_fs::Metadata::from_file(directory).map_err(|error| ioerr(error, label))?;
+    validate_directory_handle(directory, label)?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable =
+        cap_fs::open(directory, Path::new("."), &options).map_err(|error| ioerr(error, label))?;
+    let observed = cap_fs::Metadata::from_file(&syncable).map_err(|error| ioerr(error, label))?;
+    if !observed.is_dir() || id_meta(&observed)? != id_meta(&expected)? {
+        return Err(corrupt(
+            "retained directory changed while reopening for fsync",
+        ));
+    }
+    syncable.sync_all().map_err(|error| ioerr(error, label))
 }
 fn names(
     d: &std::fs::File,

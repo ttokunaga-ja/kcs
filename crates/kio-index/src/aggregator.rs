@@ -44,10 +44,14 @@
 //! It is a CACHE, never truth (03 §4). Deleting it costs a re-projection and
 //! nothing else, which is why it lives under the cache root.
 
+#[cfg(target_os = "linux")]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::CStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::{Once, OnceLock};
 
@@ -439,12 +443,12 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 struct BoundCache {
     _parent: std::fs::File,
     file: std::fs::File,
-    public_path: std::path::PathBuf,
+    public_path: PathBuf,
 }
 
 struct BoundCacheParent {
     parent: std::fs::File,
-    public_path: std::path::PathBuf,
+    public_path: PathBuf,
 }
 
 /// Bind the immediate cache parent without following it. Ancestors may be
@@ -682,10 +686,39 @@ static BOUND_CACHE_VFS_INIT: Once = Once::new();
 static BOUND_CACHE_VFS_RESULT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 #[cfg(unix)]
 static BOUND_CACHE_DEFAULT_VFS: OnceLock<usize> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static BOUND_CACHE_LINUX_OPEN: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "linux")]
+std::thread_local! {
+    static BOUND_CACHE_LINUX_EXPECTED: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+}
+
+impl BoundCache {
+    #[cfg(target_os = "linux")]
+    fn sqlite_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+
+        let leaf = self
+            .public_path
+            .file_name()
+            .expect("bound cache has a file name");
+        PathBuf::from(format!("/proc/self/fd/{}", self._parent.as_raw_fd())).join(leaf)
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn sqlite_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()))
+    }
+
+    #[cfg(not(unix))]
+    fn sqlite_path(&self) -> PathBuf {
+        self.public_path.clone()
+    }
+}
 
 #[cfg(unix)]
 fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<Connection> {
-    use std::os::fd::AsRawFd;
     BOUND_CACHE_VFS_INIT.call_once(|| {
         let result = unsafe {
             let original = rusqlite::ffi::sqlite3_vfs_find(std::ptr::null());
@@ -695,6 +728,7 @@ fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<C
                 let _ = BOUND_CACHE_DEFAULT_VFS.set(original as usize);
                 let mut wrapped = Box::new(*original);
                 wrapped.zName = BOUND_CACHE_VFS_NAME.as_ptr();
+                wrapped.xOpen = Some(bound_cache_x_open);
                 wrapped.xFullPathname = Some(bound_cache_x_full_pathname);
                 let code = rusqlite::ffi::sqlite3_vfs_register(Box::into_raw(wrapped), 0);
                 if code == rusqlite::ffi::SQLITE_OK {
@@ -713,12 +747,40 @@ fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<C
         .expect("VFS initializer sets result")
         .as_ref()
         .map_err(|e| crate::IndexError::Schema(e.clone()))?;
-    let path = std::path::PathBuf::from(format!("/dev/fd/{}", cache.file.as_raw_fd()));
-    Ok(Connection::open_with_flags_and_vfs(
-        &path,
-        flags,
-        "kio-bound-cache-unix",
-    )?)
+    let path = cache.sqlite_path();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !is_bound_cache_linux_parent_fd_name(path.as_os_str().as_bytes()) {
+            return Err(crate::IndexError::Schema(
+                "bound cache SQLite path is not an internal descriptor-root path".to_owned(),
+            ));
+        }
+        let _open_guard = BOUND_CACHE_LINUX_OPEN.lock().map_err(|_| {
+            crate::IndexError::Schema("bound cache SQLite open mutex is poisoned".to_owned())
+        })?;
+        let expected = cache_file_identity(&cache.file)?;
+        BOUND_CACHE_LINUX_EXPECTED.with(|slot| slot.set(Some(expected)));
+        let outcome = Connection::open_with_flags_and_vfs(&path, flags, "kio-bound-cache-unix");
+        BOUND_CACHE_LINUX_EXPECTED.with(|slot| slot.set(None));
+        Ok(outcome?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !is_bound_cache_fd_name(path.as_os_str().as_bytes()) {
+            return Err(crate::IndexError::Schema(
+                "bound cache SQLite path is not an internal descriptor path".to_owned(),
+            ));
+        }
+        Ok(Connection::open_with_flags_and_vfs(
+            &path,
+            flags,
+            "kio-bound-cache-unix",
+        )?)
+    }
 }
 #[cfg(not(unix))]
 fn open_bound_cache_connection(cache: &BoundCache, flags: OpenFlags) -> Result<Connection> {
@@ -735,9 +797,8 @@ unsafe extern "C" fn bound_cache_x_full_pathname(
         return rusqlite::ffi::SQLITE_CANTOPEN;
     }
     let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
-    if bytes
-        .strip_prefix(b"/dev/fd/")
-        .is_some_and(|fd| !fd.is_empty() && fd.iter().all(u8::is_ascii_digit))
+    if is_bound_cache_fd_name(bytes)
+        || (cfg!(target_os = "linux") && is_bound_cache_linux_parent_fd_name(bytes))
     {
         if bytes.len() + 1 > output_len as usize {
             return rusqlite::ffi::SQLITE_CANTOPEN;
@@ -762,11 +823,128 @@ unsafe extern "C" fn bound_cache_x_full_pathname(
     unsafe { callback(default_vfs, name, output_len, output) }
 }
 
+#[cfg(unix)]
+unsafe extern "C" fn bound_cache_x_open(
+    _: *mut rusqlite::ffi::sqlite3_vfs,
+    name: rusqlite::ffi::sqlite3_filename,
+    file: *mut rusqlite::ffi::sqlite3_file,
+    flags: std::ffi::c_int,
+    out_flags: *mut std::ffi::c_int,
+) -> std::ffi::c_int {
+    let Some(default_vfs) = BOUND_CACHE_DEFAULT_VFS.get() else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+    let default_vfs = *default_vfs as *mut rusqlite::ffi::sqlite3_vfs;
+    let Some(callback) = (unsafe { (*default_vfs).xOpen }) else {
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    };
+
+    #[cfg(target_os = "linux")]
+    if !name.is_null()
+        && is_bound_cache_linux_parent_fd_name(unsafe { CStr::from_ptr(name).to_bytes() })
+        && flags & rusqlite::ffi::SQLITE_OPEN_MAIN_DB != 0
+    {
+        let expected = BOUND_CACHE_LINUX_EXPECTED.with(Cell::get);
+        let Some(expected) = expected else {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        };
+        let Ok(before) = linux_regular_fd_inventory() else {
+            return rusqlite::ffi::SQLITE_CANTOPEN;
+        };
+        let code = unsafe { callback(default_vfs, name, file, flags, out_flags) };
+        if code != rusqlite::ffi::SQLITE_OK {
+            return code;
+        }
+        let verified = linux_regular_fd_inventory().is_ok_and(|after| {
+            let opened: Vec<_> = after
+                .iter()
+                .filter(|(fd, identity)| before.get(fd) != Some(*identity))
+                .collect();
+            // SQLite must add exactly one descriptor for the retained cache
+            // inode. Other trusted in-process opens cannot grant authority
+            // over this cache; a second matching descriptor is fail-closed.
+            opened
+                .iter()
+                .filter(|(_, identity)| **identity == expected)
+                .count()
+                == 1
+        });
+        if verified {
+            return rusqlite::ffi::SQLITE_OK;
+        }
+        if !file.is_null() {
+            let methods = unsafe { (*file).pMethods };
+            if !methods.is_null()
+                && let Some(close) = unsafe { (*methods).xClose }
+            {
+                let _ = unsafe { close(file) };
+            }
+        }
+        return rusqlite::ffi::SQLITE_CANTOPEN;
+    }
+
+    unsafe { callback(default_vfs, name, file, flags, out_flags) }
+}
+
+#[cfg(unix)]
+fn is_bound_cache_fd_name(value: &[u8]) -> bool {
+    value
+        .strip_prefix(b"/dev/fd/")
+        .is_some_and(|fd| !fd.is_empty() && fd.iter().all(u8::is_ascii_digit))
+}
+
+/// Linux uses a retained parent directory plus one final leaf, allowing the
+/// stock Unix VFS to apply `O_NOFOLLOW` to the real cache file rather than to
+/// `/dev/fd/N` (which the Linux VFS rejects with `O_NOFOLLOW`).
+#[cfg(unix)]
+fn is_bound_cache_linux_parent_fd_name(value: &[u8]) -> bool {
+    let Some(value) = value.strip_prefix(b"/proc/self/fd/") else {
+        return false;
+    };
+    let Some(separator) = value.iter().position(|byte| *byte == b'/') else {
+        return false;
+    };
+    let (fd, leaf_with_separator) = value.split_at(separator);
+    let leaf = &leaf_with_separator[1..];
+    !fd.is_empty()
+        && fd.iter().all(u8::is_ascii_digit)
+        && !leaf.is_empty()
+        && !leaf.contains(&b'/')
+        && leaf != b"."
+        && leaf != b".."
+}
+
+#[cfg(target_os = "linux")]
+fn linux_regular_fd_inventory() -> Result<BTreeMap<i32, (u64, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let entries = std::fs::read_dir("/proc/self/fd").map_err(|e| {
+        crate::IndexError::Schema(format!("inspect process descriptor inventory: {e}"))
+    })?;
+    let mut result = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            crate::IndexError::Schema(format!("read process descriptor inventory entry: {e}"))
+        })?;
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_file() {
+            result.insert(fd, (metadata.dev(), metadata.ino()));
+        }
+    }
+    Ok(result)
+}
+
 pub struct Aggregator {
     conn: Connection,
     // Retain the directory and leaf capabilities for the lifetime of SQLite.
-    // On Unix the VFS opens `/dev/fd/N`; on Windows this denies delete-sharing
-    // while SQLite completes its public-path open.
+    // Linux opens the final leaf through the retained parent descriptor;
+    // other Unix platforms use `/dev/fd/N`. On Windows this denies
+    // delete-sharing while SQLite completes its public-path open.
     _cache: BoundCache,
 }
 

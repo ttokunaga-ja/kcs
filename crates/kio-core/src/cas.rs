@@ -1770,9 +1770,7 @@ impl BoundObjectDirs {
             }
             bound_remove(&self.raw, name)?;
         }
-        self.raw
-            .sync_all()
-            .kio_io(Path::new("bound raw stage directory"))
+        sync_bound_directory(&self.raw, Path::new("bound raw stage directory"))
     }
 
     fn dir(&self, kind: ObjectKind) -> &File {
@@ -1942,6 +1940,32 @@ impl BoundObjectDirs {
         }
         result
     }
+}
+
+#[cfg(unix)]
+fn sync_bound_directory(directory: &File, label: &Path) -> Result<()> {
+    use cap_primitives::fs::{self as cap_fs, MetadataExt};
+
+    let expected = cap_fs::Metadata::from_file(directory).kio_io(label)?;
+    if !expected.is_dir() {
+        return Err(KioError::io(
+            "bound CAS directory changed type",
+            label.display().to_string(),
+        ));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable = cap_fs::open(directory, Path::new("."), &options).kio_io(label)?;
+    let observed = cap_fs::Metadata::from_file(&syncable).kio_io(label)?;
+    if !observed.is_dir() || observed.dev() != expected.dev() || observed.ino() != expected.ino() {
+        return Err(KioError::io(
+            "bound CAS directory changed while reopening for fsync",
+            label.display().to_string(),
+        ));
+    }
+    syncable.sync_all().kio_io(label)
 }
 
 #[cfg(unix)]
@@ -2192,7 +2216,7 @@ fn bound_publish_between(
     match cap_primitives::fs::hard_link(from, Path::new(temp), to, Path::new(leaf)) {
         Ok(()) => {
             bound_remove(from, temp)?;
-            to.sync_all().kio_io(Path::new(leaf))?;
+            sync_bound_directory(to, Path::new(leaf))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let (_, existing) = bound_read_verified(to, leaf, kind, hash, true)?;

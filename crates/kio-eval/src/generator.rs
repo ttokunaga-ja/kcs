@@ -13,7 +13,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::manifest::{
-    CORPUS_ANCHOR_COUNT, CORPUS_FILE_COUNT, CorpusManifest, SCOPES, validate_corpus_manifest,
+    CORPUS_ANCHOR_COUNT, CORPUS_FILE_COUNT, CorpusManifest, SCOPES, serialize_corpus_manifest,
+    validate_corpus_manifest,
 };
 
 const FIXTURE: &str = include_str!("../../../eval/corpus-fixture.json");
@@ -70,7 +71,8 @@ struct FixtureContent {
 /// `force` is set, preserving the stable generator contract.
 pub fn generate_corpus(out: &Path, force: bool) -> Result<GenerationSummary, GeneratorError> {
     let fixture = fixture()?;
-    let manifest_bytes = frozen_manifest_bytes(&fixture.manifest)?;
+    let manifest_bytes = serialize_corpus_manifest(&fixture.manifest)
+        .map_err(|error| GeneratorError::Fixture(error.to_string()))?;
     let output = absolute(out)?;
     let (parent_handle, leaf) = safe_parent_and_leaf(&output)?;
     let (root, root_created) = open_or_create_root(&parent_handle, &leaf, &output)?;
@@ -159,7 +161,8 @@ fn fixture() -> Result<Fixture, GeneratorError> {
             "frozen corpus counts mismatch".into(),
         ));
     }
-    let bytes = frozen_manifest_bytes(&fixture.manifest)?;
+    let bytes = serialize_corpus_manifest(&fixture.manifest)
+        .map_err(|error| GeneratorError::Fixture(error.to_string()))?;
     if hash_hex(&bytes) != fixture.manifest_sha256 {
         return Err(GeneratorError::Fixture(format!(
             "manifest bytes digest mismatch: {}",
@@ -204,17 +207,6 @@ fn fixture() -> Result<Fixture, GeneratorError> {
         ));
     }
     Ok(fixture)
-}
-
-// `serde_json::Map` is ordered without the preserve_order feature. Converting
-// through Value therefore gives the frozen manifest a deterministic key order.
-fn frozen_manifest_bytes(manifest: &CorpusManifest) -> Result<Vec<u8>, GeneratorError> {
-    let value = serde_json::to_value(manifest)
-        .map_err(|error| GeneratorError::Fixture(error.to_string()))?;
-    let mut text = serde_json::to_string_pretty(&value)
-        .map_err(|error| GeneratorError::Fixture(error.to_string()))?;
-    text.push('\n');
-    Ok(text.into_bytes())
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, GeneratorError> {
@@ -439,7 +431,28 @@ fn reject_unsafe_target(dir: &fs::File, name: &str, path: &Path) -> Result<(), G
 
 fn sync_dir(dir: &fs::File, path: &Path) -> Result<(), GeneratorError> {
     #[cfg(unix)]
-    dir.sync_all().map_err(|source| io_error(path, source))?;
+    {
+        // `cap_fs::open_dir_nofollow` may retain an `O_PATH` descriptor on
+        // Linux. It is valid capability authority but cannot itself be
+        // fsynced. Reopen exactly that retained directory as `.` with read
+        // access, then durably flush the directory entry updates through the
+        // sync-capable descriptor.
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let syncable =
+            cap_fs::open(dir, Path::new("."), &options).map_err(|source| io_error(path, source))?;
+        let metadata = syncable
+            .metadata()
+            .map_err(|source| io_error(path, source))?;
+        if !metadata.is_dir() {
+            return Err(boundary(path, "directory handle changed type"));
+        }
+        syncable
+            .sync_all()
+            .map_err(|source| io_error(path, source))?;
+    }
     #[cfg(windows)]
     {
         let metadata = dir.metadata().map_err(|source| io_error(path, source))?;
@@ -475,10 +488,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_is_complete_and_has_frozen_manifest_bytes() {
+    fn fixture_is_complete_and_has_canonical_manifest_bytes() {
         let fixture = fixture().unwrap();
         assert_eq!(
-            hash_hex(&frozen_manifest_bytes(&fixture.manifest).unwrap()),
+            hash_hex(&serialize_corpus_manifest(&fixture.manifest).unwrap()),
             FIXTURE_MANIFEST_SHA256
         );
     }

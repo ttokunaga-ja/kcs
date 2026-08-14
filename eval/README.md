@@ -4,7 +4,8 @@
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
 (`docs/09-mvp-scope.md` §5.5、**Step 3 着手前ゲート**) の成果物。
 
-- Python 補助スクリプトの依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
+- 残る Python fixture 補助スクリプトの依存: **Python3 標準ライブラリのみ**
+  (追加インストール不要)。合成コーパスの生成・履歴 replay・検索評価の正本は Rust。
 - 決定論: 凍結済み `corpus-fixture.json` を Rust generator が materialize する。2 回実行で byte 同一。
 - 通常評価は Rust の `kio-eval` と評価対象の `kio` を使う。
   `cargo build --release --locked --all-features` 済み前提。
@@ -14,10 +15,10 @@
 | ファイル | 役割 |
 | --- | --- |
 | `corpus-fixture.json` | **生成物の凍結正本**。305 文書の bytes と manifest を保持し、Rust `kio-eval generate-corpus` が検証して materialize する |
-| `corpus_spec.py` | Python history replay 用の薄い metadata view。fixture と checked-in `history-manifest.json` を読むだけで、文書を render しない |
-| `replay_history.py` | 各 scope で `init → index → snapshot create → 編集 → snapshot create → リネーム → snapshot create → 削除 → snapshot create` を決定論再現。`history-manifest.json` を出力 |
+| `history-plan.json` | version・Rust generator identity・corpus manifest digestを固定した JCS+LF の closed operation plan。Rust 実装はバンドルした digest と完全一致するplanだけを受理 |
+| `kio-eval replay-history` | retained capabilityと隔離device上で、各 scope の `init → offline index → manual snapshot → edit/rename/delete` を決定論再現。48 commitとstrict log evidenceを検証後にmanifestをcreate-only公開 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
-| `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
+| `history-manifest.json` | `kio-eval replay-history/v1` のstrictな出力fixture。plan/corpus digestと、scope別step/message/commit数の実行証拠だけを保持。操作materialの正本は`history-plan.json`に一本化 |
 | `golden-queries-crossscope.jsonl` | **横断増補 16 問** (09 §4.3、2026-07-26 凍結)。expected が必ず 2 scope に跨る。正解担体は既存 anchor そのもので、コーパスには手を入れていない |
 | `kio-eval crossscope` | 横断増補のRust専用ランナー。full evaluatorのセット全体ゲートを部分集合へ誤適用せず、Recall/latency/Evidenceと診断値`worst_expected_rank`を検証する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
@@ -45,8 +46,10 @@ cargo build --release --locked --all-features
 # 1. 合成コーパス生成
 target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
 
-# 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
-python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+# 2. Rust履歴シナリオ再現 (single-link binary copyを使い、manifestはcorpus直下へcreate-only公開)
+install -m 0755 target/release/kio /tmp/kio-replay-kio
+target/release/kio-eval replay-history \
+  --corpus /tmp/kio-eval-corpus --bin /tmp/kio-replay-kio
 
 # 3c. 横断増補 (別ファイル・Rust専用ランナー、09 §4.3)。既存 50 問とは独立に走る
 target/release/kio-eval crossscope --corpus /tmp/kio-eval-corpus --bin target/release/kio --dry-run --out /tmp/crossscope-unused.json
@@ -71,6 +74,13 @@ target/release/kio-eval rerank-dump --corpus /tmp/kio-eval-corpus \
 target/release/kio-eval rerank-apply --input /tmp/rerank-input.json \
   --output /tmp/rerank-output.json --report /tmp/rerank-report.json
 ```
+
+`replay-history` は、既に open した executable と HOME/XDG directory を pathname
+再解決なしで child process へ渡せる Linux だけで実行する。macOS/Windows では
+descriptor-exec 相当の安全な境界がないため、corpus を変更する前に structured error で
+fail-closed にする。`--bin` はsingle-link regular executableに限定し、Cargoが
+`target/release/kio`を`deps/`とhardlinkした環境では、`install -m 0755`で`/tmp`へ
+single-link copyを作ってそのpathを渡す。pathname fallbackやhardlink例外は設けない。
 
 `crossscope` と `rerank-dump` の出力は measured corpus 外の既存directoryに置き、
 既存fileを上書きしない。再測定は新しい出力名を使い、比較後に採用するartifactだけを
@@ -277,15 +287,16 @@ Recall の突き合わせ単位は `(raw_hash, section_id)` (docs/09 §4.3)。`e
 `{scope, file}` の分離形式なので、ハーネスが以下の手順で実値へ解決する:
 
 1. **section (ニーモニック) → heading (実見出しテキスト)**
-   `corpus-manifest.json` / `history-manifest.json` の anchor `sections[]` が
-   `{slug: ニーモニック, heading: 実見出し}` を持つ (正本は `corpus_spec.ANCHORS`)。
+   現行内容は`corpus-manifest.json`、履歴操作対象は凍結`history-plan.json`の
+   `sections[]`が`{slug: ニーモニック, heading: 実見出し}`を持つ。
+   `history-manifest.json`は操作materialを重複保持せず、実行証拠だけを記録する。
    例: `"recall"` → 見出し `"回収率と精度"`。
 2. **heading → section_id** … `docs/04-pipeline.md §4.1` の slug 規則で `slugify(heading)`。
    例: `slugify("回収率と精度")` = `"回収率と精度"` (日本語は保持。英語ニーモニックとは一致しない)。
    これが J2 の核心: `"recall"` を実 `section_id` として突き合わせると必ずミスする。
-3. **{scope, file} → raw_hash** … manifest が記録する `raw_sha256` (ファイル bytes の sha256) から
-   `raw_hash = "sha256:" + raw_sha256`。M3-2 (編集/リネーム) / M3-3 (削除) は
-   `history-manifest.json` が **旧内容** の `raw_sha256` と heading を記録し、そちらを優先する。
+3. **{scope, file} → raw_hash** … 現行内容は`corpus-manifest.json`、M3-2
+   (編集/リネーム) / M3-3 (削除) の旧内容は`history-plan.json`が記録する
+   `before_raw_sha256`から`raw_hash = "sha256:" + digest`を得る。
 
 突き合わせ時、`evidence_pointer.section_id` (docs/08 §2 では heading_path を "/" 連結した slug) は
 最深 (leaf) セグメントを取り、`slugify(heading)` と比較する (見出し「回収率と精度」→ `"回収率と精度"`)。
@@ -323,8 +334,10 @@ target/release/kio-eval generate-corpus --out /tmp/c2
 diff -r /tmp/c1 /tmp/c2   # 差分なし (byte 同一) であること
 ```
 
-`history-manifest.json` の renamed/edited/deleted と scope 別 commit 件数も、フレッシュな
-コーパスに対して 2 回再現すれば同一になる (commit hash / timestamp は非決定なので manifest に含めない)。
+`history-manifest.json` の plan/corpus digestとscope別step/message/commit数も、別のフレッシュ
+コーパスに Rust replay すれば byte 同一になる。edit/rename/delete materialは凍結
+`history-plan.json`だけが保持し、manifestへ重複させない。commit hash / timestamp は非決定なので
+manifestに含めない。同じcorpusでの2回目実行は、半端な履歴へ追記せずfail-closedに拒否する。
 
 ## 20 scope / 12 万 chunk 性能 fixture
 

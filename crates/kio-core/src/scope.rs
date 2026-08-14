@@ -387,7 +387,8 @@ impl Repository {
         // on the opened inode even if a same-UID process replaces the public
         // `.kio` entry. Source access is kept separate through `bound_root`.
         use std::os::fd::AsRawFd;
-        if unsafe { libc::fchdir(kio.as_raw_fd()) } != 0 {
+        let kio_cwd = open_bound_directory_for_io(&kio, Path::new(".kio"))?;
+        if unsafe { libc::fchdir(kio_cwd.as_raw_fd()) } != 0 {
             return Err(KioError::io(
                 std::io::Error::last_os_error().to_string(),
                 ".kio",
@@ -446,7 +447,8 @@ impl Repository {
         }
         // SAFETY: `kio` is a retained, no-follow directory descriptor verified
         // above and remains owned by the repository for its full lifetime.
-        if unsafe { libc::fchdir(kio.as_raw_fd()) } != 0 {
+        let kio_cwd = open_bound_directory_for_io(&kio, Path::new(".kio"))?;
+        if unsafe { libc::fchdir(kio_cwd.as_raw_fd()) } != 0 {
             return Err(KioError::io(
                 std::io::Error::last_os_error().to_string(),
                 ".kio",
@@ -3411,9 +3413,7 @@ fn replace_bound_regular_file_at(kio: &File, relative: &str, contents: &[u8]) ->
         // The directory that directly contains the renamed leaf is the
         // durability boundary.  Syncing only the retained `.kio` ancestor is
         // insufficient for nested metadata such as `refs/heads/main`.
-        directory
-            .sync_all()
-            .map_err(|error| KioError::io(error.to_string(), relative))?;
+        sync_bound_directory(&directory, relative)?;
         return Ok(());
     }
     Err(KioError::io(
@@ -5787,15 +5787,13 @@ fn preflight_bound_lock_entry(kio: &File) -> Result<()> {
 
 #[cfg(unix)]
 fn acquire_bound_lock_gate(kio: &File) -> Result<File> {
-    use cap_primitives::fs as cap_fs;
     use std::os::fd::AsRawFd;
 
     // `try_clone` shares an open-file description with the caller on Unix;
     // that would keep flock held by the retained session FD after this guard
     // drops. Re-open `.` capability-relatively to obtain an independent
     // description while staying inside the already-bound `.kio` directory.
-    let gate = cap_fs::open_dir_nofollow(kio, Path::new("."))
-        .map_err(|error| KioError::io(error.to_string(), ".kio"))?;
+    let gate = open_bound_directory_for_io(kio, Path::new(".kio"))?;
     // SAFETY: this retained descriptor names the same `.kio` directory used
     // for every later capability-relative operation and outlives the lock.
     if unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -5858,8 +5856,8 @@ impl Drop for BoundStoreLock {
         if cap_primitives::fs::remove_file(&self.locks, Path::new(&archive)).is_err() {
             return;
         }
-        let _ = self.kio.sync_all();
-        let _ = self.locks.sync_all();
+        let _ = sync_bound_directory(&self.kio, ".lock");
+        let _ = sync_bound_directory(&self.locks, &archive);
     }
 }
 
@@ -5954,6 +5952,41 @@ fn read_lock_snapshot(path: &Path) -> Result<Option<LockSnapshot>> {
 }
 
 #[cfg(unix)]
+fn open_bound_directory_for_io(directory: &File, label: impl AsRef<Path>) -> Result<File> {
+    use cap_primitives::fs::{self as cap_fs, MetadataExt};
+
+    let label = label.as_ref();
+    let expected = cap_fs::Metadata::from_file(directory)
+        .map_err(|error| KioError::io(error.to_string(), label.display().to_string()))?;
+    if !expected.is_dir() {
+        return Err(unsafe_store_error(label, "retained directory changed type"));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable = cap_fs::open(directory, Path::new("."), &options)
+        .map_err(|error| KioError::io(error.to_string(), label.display().to_string()))?;
+    let observed = cap_fs::Metadata::from_file(&syncable)
+        .map_err(|error| KioError::io(error.to_string(), label.display().to_string()))?;
+    if !observed.is_dir() || observed.dev() != expected.dev() || observed.ino() != expected.ino() {
+        return Err(unsafe_store_error(
+            label,
+            "retained directory changed while reopening",
+        ));
+    }
+    Ok(syncable)
+}
+
+#[cfg(unix)]
+fn sync_bound_directory(directory: &File, label: impl AsRef<Path>) -> Result<()> {
+    let label = label.as_ref();
+    open_bound_directory_for_io(directory, label)?
+        .sync_all()
+        .map_err(|error| KioError::io(error.to_string(), label.display().to_string()))
+}
+
+#[cfg(unix)]
 fn bound_lock_archive_dir(kio: &File) -> Result<File> {
     use cap_primitives::fs as cap_fs;
     fn ensure(parent: &File, leaf: &str) -> Result<File> {
@@ -5965,9 +5998,7 @@ fn bound_lock_archive_dir(kio: &File) -> Result<File> {
                     .map_err(|e| KioError::io(e.to_string(), leaf))?;
                 let dir = cap_fs::open_dir_nofollow(parent, Path::new(leaf))
                     .map_err(|e| KioError::io(e.to_string(), leaf))?;
-                parent
-                    .sync_all()
-                    .map_err(|e| KioError::io(e.to_string(), leaf))?;
+                sync_bound_directory(parent, leaf)?;
                 Ok(dir)
             }
         }
@@ -5998,8 +6029,7 @@ fn create_bound_lock(kio: &File, leaf: &str, bytes: &[u8]) -> Result<BoundLockOb
     if actual != bytes || parse_canonical_lock(&actual).is_err() {
         return Err(bound_lock_corrupt("GC lock changed after creation"));
     }
-    kio.sync_all()
-        .map_err(|e| KioError::io(e.to_string(), leaf))?;
+    sync_bound_directory(kio, leaf)?;
     Ok(observed)
 }
 
@@ -6104,11 +6134,8 @@ fn reclaim_stale_bound_lock(
     }
     cap_primitives::fs::remove_file(locks, Path::new(&archive))
         .map_err(|e| KioError::io(e.to_string(), &archive))?;
-    kio.sync_all()
-        .map_err(|e| KioError::io(e.to_string(), ".lock"))?;
-    locks
-        .sync_all()
-        .map_err(|e| KioError::io(e.to_string(), &archive))?;
+    sync_bound_directory(kio, ".lock")?;
+    sync_bound_directory(locks, &archive)?;
     Ok(Some(new))
 }
 
@@ -6744,6 +6771,17 @@ mod tests {
         read_network_approval_pending, read_network_approvals, redact_context,
         redact_message_paths, rotate_stale_log, write_network_approval_pending,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_lock_directory_sync_reopens_linux_o_path_capability() {
+        use cap_primitives::{ambient_authority, fs as cap_fs};
+
+        let scope = tempfile::tempdir().unwrap();
+        let repo = Repository::init(scope.path()).unwrap();
+        let retained = cap_fs::open_ambient_dir(repo.kio_dir(), ambient_authority()).unwrap();
+        super::sync_bound_directory(&retained, repo.kio_dir()).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

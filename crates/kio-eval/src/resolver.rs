@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use crate::{
     ResultKey,
-    manifest::{CorpusManifest, Expected, GoldenQuery, HistoryManifest, Scenario},
+    manifest::{
+        CorpusManifest, Expected, GoldenQuery, HistoryOperation, Scenario, frozen_history_plan,
+    },
 };
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -77,7 +79,7 @@ pub struct CorpusModel {
 
 impl CorpusModel {
     #[must_use]
-    pub fn new(corpus: &CorpusManifest, history: &HistoryManifest) -> Self {
+    pub fn new(corpus: &CorpusManifest) -> Self {
         let mut sections = HashMap::new();
         let mut original = HashSet::new();
         for entry in &corpus.files {
@@ -95,23 +97,31 @@ impl CorpusModel {
         let mut renames_old = HashSet::new();
         let mut renames_new = HashSet::new();
         let mut rename_new_to_old = HashMap::new();
-        for rename in &history.renamed {
-            let old = (rename.scope.clone(), rename.old_file.clone());
-            let new = (rename.scope.clone(), rename.new_file.clone());
-            renames_old.insert(old.clone());
-            renames_new.insert(new.clone());
-            rename_new_to_old.insert(new, old);
+        let plan = frozen_history_plan().expect("bundled history plan is validated at build time");
+        let mut deleted = HashSet::new();
+        let mut edited = HashSet::new();
+        for operation in &plan.operations {
+            match operation {
+                HistoryOperation::Rename {
+                    scope,
+                    old_file,
+                    new_file,
+                    ..
+                } => {
+                    let old = (scope.clone(), old_file.clone());
+                    let new = (scope.clone(), new_file.clone());
+                    renames_old.insert(old.clone());
+                    renames_new.insert(new.clone());
+                    rename_new_to_old.insert(new, old);
+                }
+                HistoryOperation::Edit { scope, file, .. } => {
+                    edited.insert((scope.clone(), file.clone()));
+                }
+                HistoryOperation::Delete { scope, file, .. } => {
+                    deleted.insert((scope.clone(), file.clone()));
+                }
+            }
         }
-        let deleted: HashSet<(String, String)> = history
-            .deleted
-            .iter()
-            .map(|entry| (entry.scope.clone(), entry.file.clone()))
-            .collect();
-        let edited: HashSet<(String, String)> = history
-            .edited
-            .iter()
-            .map(|entry| (entry.scope.clone(), entry.file.clone()))
-            .collect();
         let current = original
             .difference(&renames_old)
             .filter(|key| !deleted.contains(*key))
@@ -172,7 +182,7 @@ pub struct Resolver {
 
 impl Resolver {
     #[must_use]
-    pub fn new(corpus: &CorpusManifest, history: &HistoryManifest) -> Self {
+    pub fn new(corpus: &CorpusManifest) -> Self {
         let mut by_key = HashMap::new();
         for entry in corpus.files.iter().filter(|entry| entry.anchor) {
             by_key.insert(
@@ -187,34 +197,36 @@ impl Resolver {
                 },
             );
         }
-        // Old contents are deliberately overlaid after corpus data. This is
-        // material for edited files as well as renamed/deleted files.
-        for entry in &history.renamed {
-            Self::overlay(
-                &mut by_key,
-                &entry.scope,
-                &entry.old_file,
-                &entry.raw_sha256,
-                &entry.sections,
-            );
-        }
-        for entry in &history.edited {
-            Self::overlay(
-                &mut by_key,
-                &entry.scope,
-                &entry.file,
-                &entry.raw_sha256,
-                &entry.sections,
-            );
-        }
-        for entry in &history.deleted {
-            Self::overlay(
-                &mut by_key,
-                &entry.scope,
-                &entry.file,
-                &entry.raw_sha256,
-                &entry.sections,
-            );
+        // Historical identities are derived exclusively from the frozen plan,
+        // never duplicated in execution evidence.
+        let plan = frozen_history_plan().expect("bundled history plan is validated at build time");
+        for operation in &plan.operations {
+            match operation {
+                HistoryOperation::Edit {
+                    scope,
+                    file,
+                    before_raw_sha256,
+                    sections,
+                    ..
+                }
+                | HistoryOperation::Delete {
+                    scope,
+                    file,
+                    before_raw_sha256,
+                    sections,
+                } => {
+                    Self::overlay(&mut by_key, scope, file, before_raw_sha256, sections);
+                }
+                HistoryOperation::Rename {
+                    scope,
+                    old_file,
+                    before_raw_sha256,
+                    sections,
+                    ..
+                } => {
+                    Self::overlay(&mut by_key, scope, old_file, before_raw_sha256, sections);
+                }
+            }
         }
         Self { by_key }
     }
@@ -227,22 +239,11 @@ impl Resolver {
         sections: &[crate::manifest::Section],
     ) {
         let key = (scope.to_owned(), file.to_owned());
-        let fallback = by_key.get(&key).cloned();
-        let raw_sha256 = if raw_sha256.is_empty() {
-            fallback
-                .as_ref()
-                .map_or_else(String::new, |entry| entry.raw_sha256.clone())
-        } else {
-            raw_sha256.to_owned()
-        };
-        let resolved_sections = if sections.is_empty() {
-            fallback.map_or_else(HashMap::new, |entry| entry.sections)
-        } else {
-            sections
-                .iter()
-                .map(|section| (section.slug.clone(), section.heading.clone()))
-                .collect()
-        };
+        let raw_sha256 = raw_sha256.to_owned();
+        let resolved_sections = sections
+            .iter()
+            .map(|section| (section.slug.clone(), section.heading.clone()))
+            .collect();
         by_key.insert(
             key,
             AnchorInfo {
@@ -366,7 +367,7 @@ pub fn validate_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{CorpusFile, Deleted, Section};
+    use crate::manifest::{CorpusFile, Section};
 
     fn corpus() -> CorpusManifest {
         CorpusManifest {
@@ -389,34 +390,14 @@ mod tests {
             }],
         }
     }
-    fn history() -> HistoryManifest {
-        HistoryManifest {
-            replay: "eval/replay_history.py".into(),
-            seed: 20_260_703,
-            scopes: vec![],
-            renamed: vec![],
-            edited: vec![],
-            deleted: vec![Deleted {
-                scope: "research".into(),
-                file: "gone.md".into(),
-                raw_sha256: "b".repeat(64),
-                sections: vec![Section {
-                    slug: "fact".into(),
-                    heading: "Old Fact".into(),
-                }],
-            }],
-            verified: Default::default(),
-        }
-    }
-
     #[test]
     fn overlays_old_content_and_resolves_three_tuple() {
-        let resolver = Resolver::new(&corpus(), &history());
+        let resolver = Resolver::new(&corpus());
         assert_eq!(
             resolver.resolve_one("research", "gone.md", "fact").unwrap(),
             (
-                format!("sha256:{}", "b".repeat(64)),
-                Some("old-fact".into()),
+                format!("sha256:{}", "a".repeat(64)),
+                Some("fact-heading".into()),
                 Some("gone.md".into())
             )
         );

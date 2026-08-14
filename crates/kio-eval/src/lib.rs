@@ -7,6 +7,8 @@ pub mod crossscope;
 pub mod generator;
 pub mod manifest;
 pub mod qhard;
+pub mod replay;
+pub mod replay_boundary;
 pub mod rerank;
 pub mod resolver;
 pub mod runner;

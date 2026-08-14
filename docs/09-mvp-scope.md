@@ -416,7 +416,8 @@ Status: decided
 `eval/golden-queries-crossscope.jsonl`
 (digest sha256:1fe0ebf2b51f35323d91bb1a235a282b5fa68a59de7a9c0bac2bc0f4ebade868、専用ランナー
 `kio-eval crossscope`) として凍結する。**正解担体は合成コーパスの既存 anchor そのもの**であり
-`corpus_spec.py`・コーパス・履歴・決定論には一切手を入れていない (既存 2 ファイルの digest は不変を実測確認)。
+既存 corpus/history scenario の担体と決定論には手を入れていない。現行の Rust-only
+history plan は、その操作列と実際の edit 後 bytes を current schema で固定する。
 Rust専用ランナーである理由は `HISTORY_QUERY_COUNT`(=16 厳密一致) と `assess_history_coverage`(rename 7/edit 3/delete 9 の
 全 anchor 掘り起こし) が**セット全体の契約**であり、部分集合に当てると必ず落ちるためである。
 **重要な計測所見: Recall@10 はこの欠陥クラスをほぼ検出できない** — replica を無効化しても 16 問すべて 1.000 のままだった
