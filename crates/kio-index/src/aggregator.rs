@@ -455,6 +455,11 @@ struct BoundCacheParent {
 /// OS-owned symlinks (such as `/var`), so only the direct parent is selected
 /// relative to a canonicalized *outer* directory capability.
 fn bind_cache_parent(path: &Path, create_parent: bool) -> Result<BoundCacheParent> {
+    #[cfg(target_os = "linux")]
+    {
+        validate_linux_cache_path_lexical(path)?;
+        let _ = inherited_cache_descriptor(path)?;
+    }
     let lexical_parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path.file_name().ok_or_else(|| {
         crate::IndexError::Schema(format!(
@@ -469,10 +474,37 @@ fn bind_cache_parent(path: &Path, create_parent: bool) -> Result<BoundCacheParen
     })
 }
 
+/// Reject spelling aliases before either the retained-descriptor route or the
+/// ordinary ambient resolver has a chance to normalize them. In particular a
+/// `..` before a later `/dev/fd/N` component must not be canonicalized into a
+/// descriptor-root-looking path and then escape through ambient resolution.
+#[cfg(target_os = "linux")]
+fn validate_linux_cache_path_lexical(path: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = path.as_os_str().as_bytes();
+    if raw.windows(2).any(|window| window == b"//")
+        || (raw.len() > 1 && raw.ends_with(b"/"))
+        || raw
+            .split(|byte| *byte == b'/')
+            .any(|component| component == b"." || component == b"..")
+    {
+        return Err(crate::IndexError::Schema(format!(
+            "aggregator cache path is not canonical (lexical): {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn open_or_create_cache_parent(
     path: &Path,
     create_missing: bool,
 ) -> Result<(std::fs::File, std::path::PathBuf)> {
+    #[cfg(target_os = "linux")]
+    if let Some(bound) = open_or_create_inherited_cache_parent(path, create_missing)? {
+        return Ok(bound);
+    }
     let mut existing = path;
     while matches!(std::fs::symlink_metadata(existing), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
     {
@@ -591,6 +623,174 @@ fn open_or_create_cache_parent(
         resolved.push(component);
     }
     Ok((handle, resolved))
+}
+
+/// Bind a cache parent below a replay-inherited directory descriptor.
+///
+/// Linux's `/dev/fd/N` is a symlink spelling, so it must never reach the
+/// ordinary ambient-path resolver above: that resolver correctly rejects
+/// symlink ancestors, while treating this one specially would follow an
+/// attacker-controlled pathname.  Instead duplicate the already-inherited
+/// descriptor and traverse every remaining component relative to that retained
+/// capability with no-follow operations.
+#[cfg(target_os = "linux")]
+fn open_or_create_inherited_cache_parent(
+    path: &Path,
+    create_missing: bool,
+) -> Result<Option<(std::fs::File, std::path::PathBuf)>> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(fd) = inherited_cache_descriptor(path)? else {
+        return Ok(None);
+    };
+    let mut components = path.components();
+    // `inherited_cache_descriptor` already validated the raw spelling. This
+    // component walk only converts those canonical normal components back to
+    // OS strings for the capability-relative operations below.
+    let root = components.next();
+    let dev = components.next().and_then(component_as_bytes);
+    let fd_directory = components.next().and_then(component_as_bytes);
+    let fd_number = components.next();
+    debug_assert_eq!(root, Some(std::path::Component::RootDir));
+    debug_assert_eq!(dev, Some(&b"dev"[..]));
+    debug_assert_eq!(fd_directory, Some(&b"fd"[..]));
+    debug_assert!(fd_number.is_some());
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(crate::IndexError::Schema(format!(
+            "duplicate inherited aggregator cache descriptor {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `F_DUPFD_CLOEXEC` returned a new owned descriptor.
+    let mut handle = unsafe { std::fs::File::from_raw_fd(duplicate) };
+    let metadata = handle.metadata().map_err(|error| {
+        crate::IndexError::Schema(format!(
+            "inspect inherited aggregator cache descriptor {fd}: {error}"
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(crate::IndexError::Schema(format!(
+            "inherited aggregator cache descriptor must name a directory: {fd}"
+        )));
+    }
+
+    for component in components {
+        let Some(component) = component_as_bytes(component) else {
+            return Err(crate::IndexError::Schema(format!(
+                "inherited aggregator cache path contains traversal: {}",
+                path.display()
+            )));
+        };
+        let component = std::ffi::OsStr::from_bytes(component);
+        handle = match cap_fs::open_dir_nofollow(&handle, Path::new(component)) {
+            Ok(child) => child,
+            Err(_)
+                if create_missing
+                    && matches!(cap_fs::stat(&handle, Path::new(component), cap_fs::FollowSymlinks::No), Err(e) if e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                cap_fs::create_dir(&handle, Path::new(component), &cap_fs::DirOptions::new())
+                    .map_err(|e| {
+                        crate::IndexError::Schema(format!(
+                            "create inherited aggregator cache directory {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                cap_fs::open_dir_nofollow(&handle, Path::new(component)).map_err(|e| {
+                    crate::IndexError::Schema(format!(
+                        "open created inherited aggregator cache directory {}: {e}",
+                        path.display()
+                    ))
+                })?
+            }
+            Err(e) => {
+                return Err(crate::IndexError::Schema(format!(
+                    "open inherited aggregator cache directory {} without following links: {e}",
+                    path.display()
+                )));
+            }
+        };
+    }
+    Ok(Some((handle, path.to_path_buf())))
+}
+
+/// Return the descriptor in the one accepted `/dev/fd` spelling.
+///
+/// This examines raw bytes before `Path::components`, whose separator and dot
+/// normalization would otherwise turn an alias into authority. `None` means
+/// an ordinary cache path; a path under `/dev/fd` which is not canonical is a
+/// structured error rather than a fallback to ambient traversal.
+#[cfg(target_os = "linux")]
+fn inherited_cache_descriptor(path: &Path) -> Result<Option<i32>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = path.as_os_str().as_bytes();
+    let mut normalized = path.components();
+    let names_retained_descriptor_root = normalized.next() == Some(std::path::Component::RootDir)
+        && normalized.next().and_then(component_as_bytes) == Some(&b"dev"[..])
+        && normalized.next().and_then(component_as_bytes) == Some(&b"fd"[..]);
+    if !names_retained_descriptor_root {
+        return Ok(None);
+    }
+    if raw != b"/dev/fd" && !raw.starts_with(b"/dev/fd/") {
+        return Err(crate::IndexError::Schema(format!(
+            "inherited aggregator cache path is not canonical: {}",
+            path.display()
+        )));
+    }
+    let suffix = raw.strip_prefix(b"/dev/fd/").ok_or_else(|| {
+        crate::IndexError::Schema(format!(
+            "inherited aggregator cache descriptor is missing: {}",
+            path.display()
+        ))
+    })?;
+    if suffix.is_empty()
+        || suffix.starts_with(b"/")
+        || suffix.windows(2).any(|window| window == b"//")
+    {
+        return Err(crate::IndexError::Schema(format!(
+            "inherited aggregator cache path is not canonical: {}",
+            path.display()
+        )));
+    }
+    let mut components = suffix.split(|byte| *byte == b'/');
+    let fd = components
+        .next()
+        .expect("non-empty suffix has a first component");
+    if fd.is_empty() || !fd.iter().all(u8::is_ascii_digit) || (fd.len() > 1 && fd[0] == b'0') {
+        return Err(crate::IndexError::Schema(format!(
+            "inherited aggregator cache descriptor is not canonical: {}",
+            path.display()
+        )));
+    }
+    let fd = std::str::from_utf8(fd)
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| *fd >= 0)
+        .ok_or_else(|| {
+            crate::IndexError::Schema(format!(
+                "inherited aggregator cache descriptor is invalid: {}",
+                path.display()
+            ))
+        })?;
+    if components.any(|component| component.is_empty() || component == b"." || component == b"..") {
+        return Err(crate::IndexError::Schema(format!(
+            "inherited aggregator cache path is not canonical: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(fd))
+}
+
+#[cfg(target_os = "linux")]
+fn component_as_bytes(component: std::path::Component<'_>) -> Option<&[u8]> {
+    use std::os::unix::ffi::OsStrExt;
+
+    match component {
+        std::path::Component::Normal(component) => Some(component.as_bytes()),
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -3262,6 +3462,132 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = Aggregator::open(&dir.path().join("aggregator.sqlite")).unwrap();
         (dir, index)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_fd_cache_root_is_capability_relative() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let retained_root = std::fs::File::open(directory.path()).unwrap();
+        let path = PathBuf::from(format!(
+            "/dev/fd/{}/kio/aggregator.sqlite",
+            retained_root.as_raw_fd()
+        ));
+
+        drop(Aggregator::open(&path).expect("inherited cache root opens"));
+        assert!(directory.path().join("kio/aggregator.sqlite").is_file());
+        drop(Aggregator::open(&path).expect("inherited cache root reopens"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_fd_can_be_the_direct_cache_parent() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let retained_root = std::fs::File::open(directory.path()).unwrap();
+        let path = PathBuf::from(format!(
+            "/dev/fd/{}/aggregator.sqlite",
+            retained_root.as_raw_fd()
+        ));
+
+        drop(Aggregator::open(&path).expect("direct inherited parent opens"));
+        assert!(directory.path().join("aggregator.sqlite").is_file());
+        drop(Aggregator::open(&path).expect("direct inherited parent reopens"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_fd_cache_root_rejects_invalid_or_non_directory_descriptor() {
+        let invalid = Path::new("/dev/fd/999999/kio/aggregator.sqlite");
+        let error = match Aggregator::open(invalid) {
+            Ok(_) => panic!("invalid descriptor must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("descriptor"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let regular = directory.path().join("not-a-directory");
+        std::fs::write(&regular, b"not a directory").unwrap();
+        let retained_file = std::fs::File::open(&regular).unwrap();
+        use std::os::fd::AsRawFd;
+        let path = PathBuf::from(format!(
+            "/dev/fd/{}/kio/aggregator.sqlite",
+            retained_file.as_raw_fd()
+        ));
+        let error = match Aggregator::open(&path) {
+            Ok(_) => panic!("regular descriptor must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("must name a directory"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_fd_cache_root_rejects_every_noncanonical_alias() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let retained_root = std::fs::File::open(directory.path()).unwrap();
+        let fd = retained_root.as_raw_fd();
+        let aliases = [
+            format!("/dev/fd/0{fd}/kio/aggregator.sqlite"),
+            format!("/dev/fd//{fd}/kio/aggregator.sqlite"),
+            format!("/dev/fd/{fd}//kio/aggregator.sqlite"),
+            format!("/dev/fd/{fd}/./kio/aggregator.sqlite"),
+            format!("/dev/fd/{fd}/kio/../other/aggregator.sqlite"),
+            format!("/dev/fd/{fd}/kio/aggregator.sqlite/"),
+            format!("/dev//fd/{fd}/../victim/aggregator.sqlite"),
+            format!("/dev/./fd/{fd}/../victim/aggregator.sqlite"),
+            format!("/dev/shm/../fd/{fd}/../victim/aggregator.sqlite"),
+        ];
+        for alias in aliases {
+            let error = match Aggregator::open(Path::new(&alias)) {
+                Ok(_) => panic!("noncanonical inherited descriptor path must fail: {alias}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("not canonical"),
+                "unexpected error for {alias}: {error}"
+            );
+        }
+        assert!(!directory.path().join("kio/aggregator.sqlite").exists());
+        assert!(!directory.path().join("other/aggregator.sqlite").exists());
+        assert!(!directory.path().join("victim/aggregator.sqlite").exists());
+
+        let error = match Aggregator::open(Path::new("/tmp/../kio-ordinary-alias.sqlite")) {
+            Ok(_) => panic!("ordinary traversal alias must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("not canonical"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_fd_cache_root_rejects_symlink_child_without_touching_victim() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let retained_root = std::fs::File::open(directory.path()).unwrap();
+        let original = directory.path().join("kio");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::rename(&original, directory.path().join("kio-original")).unwrap();
+        symlink(victim.path(), &original).unwrap();
+        let path = PathBuf::from(format!(
+            "/dev/fd/{}/kio/aggregator.sqlite",
+            retained_root.as_raw_fd()
+        ));
+
+        let error = match Aggregator::open(&path) {
+            Ok(_) => panic!("symlink child must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("without following links"));
+        assert!(!victim.path().join("aggregator.sqlite").exists());
     }
 
     #[test]

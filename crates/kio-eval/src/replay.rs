@@ -567,6 +567,15 @@ fn validate_result(
     output: &BoundedProcessOutput,
     requested_message: Option<&str>,
 ) -> Result<(), ReplayError> {
+    if !output.stderr.is_empty() {
+        return Err(ReplayError::Result {
+            command,
+            reason: format!(
+                "successful command emitted stderr: {}",
+                output.stderr.escape_default()
+            ),
+        });
+    }
     let value = object(output, command)?;
     let status = value.get("status").and_then(Value::as_str);
     match command {
@@ -889,6 +898,20 @@ mod tests {
         let out = BoundedProcessOutput { stdout: r#"{"status":"indexed","failed_files":1,"network_allowed":false,"network_opt_in":false,"commit":{"commit_type":"auto","message":"kio index auto snapshot"}}"#.into(), ..out };
         assert!(validate_result("index", &out, None).is_err());
     }
+
+    #[test]
+    fn successful_replay_command_rejects_stderr() {
+        let out = BoundedProcessOutput {
+            status: Command::new("true").status().unwrap(),
+            stdout: r#"{"status":"initialized"}"#.into(),
+            stderr: "degraded cache write\n".into(),
+            duration: std::time::Duration::ZERO,
+        };
+        assert!(matches!(
+            validate_result("init", &out, None),
+            Err(ReplayError::Result { reason, .. }) if reason.contains("degraded cache write\\n")
+        ));
+    }
     #[test]
     fn malformed_json_is_rejected() {
         let status = Command::new("true").status().unwrap();
@@ -956,6 +979,38 @@ mod tests {
         assert!(!corpus.join("history-manifest.json").exists());
         let second = replay_history(&corpus, false_bin).unwrap_err().to_string();
         assert!(second.contains("fresh corpus already contains replay state"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_child_stderr_never_publishes_a_history_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let corpus = temporary.path().join("corpus");
+        crate::generator::generate_corpus(&corpus, false).unwrap();
+        let fake_kio = temporary.path().join("fake-kio");
+        fs::write(
+            &fake_kio,
+            br##"#!/bin/sh
+set -eu
+case "${2-}" in
+  init)
+    mkdir .kio
+    : > .kio/config.toml
+    printf '%s\n' '{"status":"initialized"}'
+    printf '%s\n' 'degraded cache write' >&2
+    ;;
+  *) exit 10 ;;
+esac
+"##,
+        )
+        .unwrap();
+        fs::set_permissions(&fake_kio, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = replay_history(&corpus, &fake_kio).unwrap_err().to_string();
+        assert!(error.contains("successful command emitted stderr"));
+        assert!(!corpus.join("history-manifest.json").exists());
     }
 
     #[cfg(target_os = "linux")]
