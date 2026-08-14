@@ -1127,7 +1127,7 @@ fn registry_scope_relative(
     // interior `.` segments, so compare the original registry strings too.
     // This makes the accepted records canonical lexical descendants, rather
     // than merely paths that happen to resolve below the bound root.
-    if root_path != expected_root {
+    if root_path != Path::new(expected_root) {
         return Err(QhardError::Input(format!(
             "{label} scope registry root_path is not a canonical descendant"
         )));
