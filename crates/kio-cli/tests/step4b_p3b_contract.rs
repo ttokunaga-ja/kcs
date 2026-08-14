@@ -524,7 +524,8 @@ fn qb9_new_version_store_write_command_rejects_with_zero_writes() {
 // ===========================================================================
 
 /// QB11 [regression-lock, structural]: `.kio/.lock` (`repo.lock_store()`) is
-/// acquired exactly at the top of `run_index`/the scoped repair dispatcher/
+/// acquired at the top of the scoped `run_index_for_repo` writer path, after
+/// the bounded automatic-GC preflight, and at the top of the repair dispatcher/
 /// each device-repair scope/`run_reindex`/
 /// `run_batch` (covering batch resume/retry/abandon, which share `run_batch`'s
 /// one lock guard across their dispatch) and nowhere in the `open`/`view`
@@ -534,7 +535,7 @@ fn qb9_new_version_store_write_command_rejects_with_zero_writes() {
 fn qb11_lock_store_call_sites_are_write_commands_only() {
     let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
     for needle in [
-        "fn run_index(",
+        "fn run_index_for_repo(",
         "fn run_repair(",
         "fn run_one_device_repair(",
         "fn run_reindex(",
@@ -554,6 +555,21 @@ fn qb11_lock_store_call_sites_are_write_commands_only() {
             "{needle} must acquire the store lock near its top"
         );
     }
+    let index_body = source
+        .split("fn run_index_for_repo(")
+        .nth(1)
+        .expect("fn run_index_for_repo( not found");
+    let index_head = &index_body[..index_body.len().min(3000)];
+    let automatic_preflight = index_head
+        .find("gc::preflight_automatic(")
+        .expect("index writer must run the bounded automatic-GC preflight");
+    let writer_lock = index_head
+        .find("lock_store()")
+        .expect("index writer must acquire the store lock");
+    assert!(
+        automatic_preflight < writer_lock,
+        "automatic GC recovery must finish before the ordinary writer lock"
+    );
     for needle in [
         "fn resolve_pointer_for_cli(",
         "fn resolve_object_uri(",
