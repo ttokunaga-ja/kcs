@@ -1113,7 +1113,7 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は同じ executor を安全な checkpoint で分割する明示 opt-in の `after_index` hook である。milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot を公開するが、`on_idle` GC は引き続き未実装である。`--prune-unreachable`、`on_idle`、CoW 並行 GC はまだ実装しない。MVP (Step 1-4) では GC を実行せず、`gc_policy` × `commit_type` の対応 schema のみを契約として遵守していた (§2.6)。
+> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は bounded `after_index` hook、milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot、milestone 5 は同じ `kio snapshot auto` invocation 内だけで動く Rust-only `on_idle` GC である。Kio は daemon / scheduler installer を持たない。`--prune-unreachable` と CoW 並行 GC は未公開である。
 
 ```text
 gc_policy(commit_type):
@@ -1157,21 +1157,21 @@ GC は独立した常駐プロセスを持たない (§5 プロセスモデル)�
 
 1. `manual_only` (**現行デフォルト**): `kio gc` の明示実行のみ
 2. `after_index` (Phase 4 milestone 3、明示 opt-in): `kio index` / manual `kio snapshot create` の**成功かつ non-partial**な durable publication 後、既存 writer lock を解放してから同一プロセス内で `max_runtime_seconds` を soft upper bound として実行する。preview、usage error、失敗、partial index、`index --revoke-network` は発火点ではない
-3. `on_idle` (未実装): 将来は OS スケジューラ委譲の定期 auto snapshot 実行時 (§8) に便乗し得るが、milestone 4 の `kio snapshot auto` は GC を新規発火しない。現行実装はこの mode で通常 index/snapshotを黙って自動化せず `KIO-E-CONFIG-NOT-IMPLEMENTED-001` で fail-closed する
+3. `on_idle` (Phase 4 milestone 5、明示 opt-in): OS scheduler が起動する indexed scope の `kio snapshot auto` (§8.2) だけが発火点である。eligible な idle 観測の後、snapshot writer の publication を完了して `.kio/.lock` を解放してから、GC 専用 bound lock と fresh plan の下で既存 receipt / index rotation / recovery / runtime budget 規約を実行する。`kio index`、manual `kio snapshot create`、preview、usage error、失敗、partial index、`after_index` は cofire しない
 
 `after_index` は wall clock でなく process-local monotonic clockを使う。deadline は hook 開始（config / plan / recovery 検証を含む）から計測するが、tree / SQLite copy の途中を打ち切らず、次の**耐久済み checkpoint**で停止するため、個々の bounded operation に要した時間だけ soft bound を超え得る。checkpoint は marker publish、phase marker 交換、新規 receipt publish、pre-sweep index rotation の各耐久段階、tree 1件の退役完了である。final index rotation と marker 完了は反復 starvation を避けるため一つの不可分な完了単位として扱う。各 invocation は期限超過時でも最低1つの耐久 stepを完了してから停止し、同一の既存 receipt の再確認は予算を消費しない。
 
 automatic activation は writer 開始前に capability-relative に検証した **`[gc]` 全体**（mode、runtime、retentionを含む）の canonical semantic digestと、retained scope / `.kio` directory identityへ固定する。index が自ら更新し得る adapter/network 設定はこの authority に含めない。durable publication 後とGC専用lock下のlocked re-plan前後で同じauthorityを要求し、差分があればtree/receipt/markerを変更せず `KIO-E-GC-CONFIG-CHANGED-001` / retryable exit 3 とする。publication 済みなら `publication_status=completed` を保持する。
 
-期限到達は corruption ではなく `status=deferred` / `KIO-E-GC-RUNTIME-LIMIT-001` / retryable exit 3 であり、markerと完了済みreceipt/tree進捗を残す。次の `after_index` index/snapshot は通常 writer lock より**前**にこの marker を同じbounded経路でresumeし、再び期限なら publication を開始せず `publication_status=not_started` で返す。post-publication sliceの期限・失敗は既にdurableなindex/snapshotをrollback扱いせず `publication_status=completed` とGC結果を同じpayloadに載せる。`manual_only` のactive markerは従来どおり通常writer barrierとなり、明示 `kio gc` でresumeする。
+期限到達は corruption ではなく `status=deferred` / `KIO-E-GC-RUNTIME-LIMIT-001` / retryable exit 3 であり、markerと完了済みreceipt/tree進捗を残す。次の同 mode の automatic writer入口（`after_index` は index/manual snapshot、`on_idle` は `snapshot auto`）は通常 writer lock より**前**にこの marker を同じbounded経路でresumeし、再び期限なら publication を開始せず `publication_status=not_started` で返す。post-publication sliceの期限・失敗は既にdurableなindex/snapshotをrollback扱いせず `publication_status=completed` とGC結果を同じpayloadに載せる。`manual_only` のactive markerは従来どおり通常writer barrierとなり、明示 `kio gc` でresumeする。
 
-default を `after_index` へ変更すると既存scopeで破壊的処理が暗黙に有効になるため、milestone 3では行わない。明示 `mode="after_index"` だけをactivation条件とし、default移行は別の判断・commitへ残す。
+automatic mode は明示 opt-in である。`[gc]` 不在時だけ `manual_only` を既定とし、table がある場合は `mode` を必須とする。`manual_only` は runtime / idle を禁止、`after_index` は `max_runtime_seconds` (1..86400) を必須・idle を禁止、`on_idle` は同 runtime と `idle_threshold_seconds` (1..31536000) を両方必須とする。default を automatic mode へ変更しない。
 
 ```toml
 [gc]
-mode = "manual_only"           # 現行デフォルト。"after_index" は明示opt-in、"on_idle" は未実装
-idle_threshold_seconds = 300   # 将来の on_idle 用
+mode = "on_idle"               # Phase 4 milestone 5 の明示 opt-in
 max_runtime_seconds = 60
+idle_threshold_seconds = 300
 ```
 
 ## 2.4 Tiered Retention
@@ -1265,7 +1265,7 @@ GC が削除してはならないもの:
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
-なお on-demand tree-only shallow sweepはPhase 4 milestone 2、明示opt-inのbounded `after_index` hookはmilestone 3、scheduled auto snapshotはmilestone 4で実装済みである。`on_idle`、defaultの自動有効化、pruneは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
+なお on-demand tree-only shallow sweepはPhase 4 milestone 2、bounded `after_index` hookはmilestone 3、scheduled auto snapshotはmilestone 4、Rust-only `on_idle` GCはmilestone 5で実装済みである。defaultの自動有効化、prune、CoW並行GCは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
 
 # 3. Purge (法務・秘匿・誤取り込み)
 
@@ -1686,7 +1686,7 @@ kio view <path> --at <commit>
 Kio は **常駐 daemon を持たない**。すべての処理は CLI コマンドのプロセス内で完結する。
 
 - interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から `kio snapshot auto` を起動する委譲方式とする (§8.2)
-- idle 検出 (GC on_idle, Phase 4+) も同様に委譲実行時に判定し、Kio 自身は常駐しない (§2.3)
+- idle 検出 (`gc.mode="on_idle"`) も OS scheduler が起動する `kio snapshot auto` の都度に判定し、Kio 自身は常駐しない (§2.3, §8.2)
 - 同一 `.kio` に対する多重起動は `.kio/.lock` で防止する (§6)
 - **ローカルモデルサーバ (`execution_mode = "offline_api"`) の重み常駐は、サーバ側の責務であって Kio の責務ではない** (2026-07-26)。Kio はプロセスを起動も管理も常駐もせず、[07-adapter-spec.md §3](07-adapter-spec.md) が定める loopback url を呼ぶだけである — この点で online_api Adapter の呼出と何ら変わらない。モデルの遅延ロード・idle TTL による重み解放は当該サーバの設定であり、Kio の「常駐なし」原則と矛盾しない。サーバが起動していない場合の扱いは §1 の既存縮退に従う (embedding なら text fallback)。**`cmd` によるプロセス起動は将来仕様のままである** ([07-adapter-spec.md §7](07-adapter-spec.md)) — offline_api の導入はこれを前倒ししない
 
@@ -1756,7 +1756,7 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 
 **snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で dangling event 行が残った場合、rebuild はそれを無視し ([04-pipeline.md §5.7](04-pipeline.md) と同一条件 — 生存する creation 行 / chunk object を持たない、**または** introduction commit の **object が store に存在しない**行。commit object が存在するが ref 不達の行 (orphan / disconnected — `--at` の正当対象) は無視しない)、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
 
-## 8.2 定期 Auto Snapshot (Phase 4 milestone 4)
+## 8.2 定期 Auto Snapshot と on_idle GC (Phase 4 milestones 4–5)
 
 ```text
 - ユーザー操作なし時に一定間隔で auto snapshot を作る (commit_type=auto)
@@ -1785,8 +1785,9 @@ not_eligible                  上記のいずれも不成立
 
 `first_run`、interval、thresholdのいずれかを満たしたときだけsnapshotを試みる。eligibleな
 attemptはworking bytesとimmutable tree/commitを準備・再検証した後、HEAD/ref/manifestより先に
-`.kio/snapshot-auto.json` (version 1 canonical JSON+LF) の
-`last_successful_eligible_attempt_at`をconditional publishする。state CASが競合した場合はrefを
+`.kio/snapshot-auto.json` (version 2, JCS canonical JSON+LF) の state をconditional publishする。
+required field は `version=2`、`last_successful_eligible_attempt_at`、`working_set_digest`、
+`idle_observed_since` の4個だけである。v1 は migration / dual read をせず reject する。state CASが競合した場合はrefを
 進めず、同時writerのstateを上書きしない。eligibleでもtreeと`tool_lock_hash`の両方がHEADと
 同じならcommitを作らないが、no-op自体は成功したattemptなのでcheckpointを進める。checkpoint
 publish後のscope/policy再検証またはref publishがfail-closedした場合、既に耐久化したcheckpointは
@@ -1797,17 +1798,21 @@ fail-closedする。checkpointはprivate tempのfile fsync後にatomic publish�
 `.snapshot-auto-state-<pid>-<nanos>` residueは次回writerが最大64件まで検証・回収する。
 malformedな予約namespace、上限超過、非canonical recordは削除せずfail-closedする。
 
-change countはcurrent HEADと現在のdirect-scope regular filesのraw hashを比較する。既存の
+change countはcurrent HEADと現在のdirect-scope regular filesのraw hashを比較する。`working_set_digest`
+は同じ path→raw hash の JCS digestであり、同じ filtered input（generated parent policy、`[scope].ignore`、
+`.kioignore`、Tier A）だけを含む。mtime は digest に含めない。既存の
 generated parent policy、`[scope].ignore`、`.kioignore`、Tier A規則をそのまま適用し、directory、
 symlink/reparse、hardlink、special/non-UTF-8 leafをworking fileへ暗黙変換しない。unchanged rawは
 HEAD treeに固定されたimmutable normalize referenceだけを持ち越す。changed/new rawへ過去の
 normalize referenceやmutable cacheを流用しない。
 
-enabledかつindexedなscheduled invocationはwriter開始前にactive GCを既存規則どおり処理する。
-`after_index`の既存markerはbounded recoveryできるが、scheduled snapshot成功後に新しい
-`after_index` GC hookを発火しない。config欠落/disabledまたはnot-indexedのskipはread-onlyで、
-既存after-index markerもresumeしない。`manual_only`のactive markerは通常writer barrier、
-`on_idle`はsnapshot configに関係なくnot-implementedのままである。snapshot config、GC config、
+`on_idle` の activation は `gc.mode="on_idle"`、enabled な `[snapshot.auto]`、indexed scope の全てを
+要する。config欠落/disabled/not-indexed の skip は read-only で、GC を発火・resume しない。
+first observation は baseline を記録するだけで GC を実行せず、digest が変われば
+`idle_observed_since` を now へ reset して GC を実行しない。同一 digest が threshold 以上継続した時だけ
+eligible となる。scheduled snapshot 成功後に `after_index` を新規発火しない。`on_idle` GC は writer
+publication の後、lock release の後だけに実行し、timeout は exit 3、integrity failure は exit 4、
+scheduled mutation 非対応 platform は state / lock / HEAD より前に unsupported で fail-closed する。snapshot config、GC config、
 index metadata、state、scope/`.kio` identity、scanはwriter lock前後とpublication直前に再検証し、
 差替えをskipへ縮退しない。完全なignore authority（validated config、generated parent policy、
 root `.kioignore`）はretained handleで固定し、最初のraw CAS publish直前、checkpoint/ref境界、
@@ -1845,7 +1850,14 @@ macOS / Linuxだけで有効である。Windowsおよびその他のplatformで�
 canonical CLIの起動形だけを示す将来用の設定例であり、現行Windows版の有効化やinstallを
 意味しない。
 
-JSONは`operation,status,reason,eligibility_reason,eligible,change_count,next_eligible_at,
-commit_hash,tree_hash,stats,recovered_gc`を固定fieldとして返す。disabled/not-indexed/not-eligible
-は`status=skipped`、eligibleな同一tree/tool lockは`status=noop`、commit publicationは
-`status=created`である。human outputも同じ分類とnext eligible時刻を決定的に表示する。
+JSONは`operation,status,reason,publication_status,snapshot_status,eligibility_reason,eligible,change_count,next_eligible_at,
+commit_hash,tree_hash,stats,working_set_digest,idle_observed_since,idle_observed_seconds,
+idle_threshold_seconds,idle_eligible,recovered_gc,recovery_pending,gc`を固定fieldとして返す。
+on_idle の human / JSON output は `baseline_recorded`、`not_idle`、`completed`、`noop`、`deferred` を
+同じ field set で返す。GC は `gc` object に status / reason / mode を返す。human outputも同じ分類と
+next eligible時刻を決定的に表示する。
+
+state が unsupported / malformed で clean recreation が必要な場合は、Kio writer を停止し、
+`.kio/gc/in_progress` が無く `.kio/.lock` に live operation が無いことを確認してから、正確に
+`.kio/snapshot-auto.json` の leaf だけを除去する。広い `rm` は使わない。次の `kio snapshot auto` が
+baseline state を v2 として再作成する。

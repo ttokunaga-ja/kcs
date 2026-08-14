@@ -952,11 +952,15 @@ lane = "batch"             # "batch" (既定・半額) | "realtime" (即時・�
 [budget]                   # folder cap (任意の追加制限)。device cap との判定は 04-pipeline.md §5.4
 monthly_usd_cap = 10.0
 [gc]
-mode = "manual_only"           # 現行デフォルト。"after_index" はPhase 4 milestone 3の明示opt-in (05-runtime.md §2.3)
-idle_threshold_seconds = 300
+mode = "on_idle"               # 明示 opt-in。省略時は manual_only (05-runtime.md §2.3)
+max_runtime_seconds = 60         # 1..86400
+idle_threshold_seconds = 300     # 1..31536000
 ```
 
 すべての設定は JSON Schema/TOML Schema で validate ([10-operations.md §12.3](10-operations.md))。
+`[gc]` を置かない場合だけ `manual_only` が既定となる。`[gc]` がある場合は `mode` が必須で、
+`manual_only` は `idle_threshold_seconds` と `max_runtime_seconds` を禁止、`after_index` は
+`max_runtime_seconds` を必須・`idle_threshold_seconds` を禁止、`on_idle` は両方を必須とする。
 
 ## 11.1 .kioignore 文法 (2026-07-03 追記)
 

@@ -83,7 +83,7 @@ kio repair replica | kio repair -r                                # device repli
                                         # KIO-E-CONFIRM-REJECTED-001 で拒否し、**何も削除しない**。
 kio gc --dry-run                       # Phase 4 milestone 1: retention による shallow 候補のread-only plan (§6.1)
 kio snapshot create [-m "<message>"]    # manual snapshot。-m省略時は自動 message
-kio snapshot auto                        # Phase 4 milestone 4: current indexed scopeのscheduled auto snapshot
+kio snapshot auto                        # Phase 4 milestone 4–5: OS scheduler invoked auto snapshot / explicit on_idle GC
 kio log [--at <commit>] [--since <dur>]
 kio diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kio search "<query>" [options]          # 詳細 §3
@@ -129,8 +129,10 @@ kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 ```json
 {
   "operation": "snapshot_auto",
-  "status": "skipped|noop|created",
-  "reason": "disabled|not_indexed|not_eligible|tree_and_tool_lock_unchanged|snapshot_created",
+  "status": "skipped|baseline_recorded|not_idle|noop|completed|deferred",
+  "reason": "disabled|not_indexed|not_eligible|first_observation|working_set_changed|idle_threshold_not_reached|tree_and_tool_lock_unchanged|snapshot_created|idle_gc_completed|no_gc_candidates|max_runtime_seconds|gc_failed",
+  "publication_status": "not_started|completed",
+  "snapshot_status": "not_started|noop|completed",
   "eligibility_reason": null,
   "eligible": false,
   "change_count": null,
@@ -138,14 +140,28 @@ kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
   "commit_hash": null,
   "tree_hash": null,
   "stats": null,
-  "recovered_gc": false
+  "working_set_digest": null,
+  "idle_observed_since": null,
+  "idle_observed_seconds": null,
+  "idle_threshold_seconds": null,
+  "idle_eligible": false,
+  "recovered_gc": false,
+  "recovery_pending": false,
+  "gc": null
 }
 ```
+
+`gc.mode="on_idle"` は enabled `[snapshot.auto]` と indexed scope の OS-scheduler invocation だけで
+activation する。first baseline / digest change は state の記録・resetだけでGCを実行せず、unchanged
+digest が idle threshold 以上ならGC eligibleである。`kio index`、manual snapshot、preview、失敗、partial
+index、`after_index` は cofire しない。GCはsnapshot writer publicationとlock releaseの後に実行する。
+`[gc]` 不在は `manual_only`、存在時はmode必須であり、mode別の strict field rules / ranges は
+[05-runtime.md §2.3](05-runtime.md)を正本とする。
 
 eligible resultでは`eligibility_reason`は
 `first_run|interval_elapsed|change_threshold|interval_and_change_threshold`、`change_count`はinteger、
 `next_eligible_at`はcanonical UTC seconds、
-created/no-opはcommit/tree/statsを該当値へ置換する。usage/configはexit 2、clock/lock/state/authority
+`completed` / `noop` はcommit/tree/statsを該当値へ置換する。usage/configはexit 2、clock/lock/state/authority
 競合はretryable exit 3、unsafe filesystem/store corruptionはexit 4である。scheduled mutationを
 実装済みのplatformはmacOS / Linuxであり、その他ではlock・HEAD・state publication前に
 `KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001` / exit 4でfail-closedする。
@@ -209,7 +225,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (**照合 = 既存 cache leaf の内容 sha256 が dir key の raw_hash と一致することの再計算** — 展開 leaf は raw object の byte 列そのもの。**不一致は改変・破損の残骸として KIO-E-STORE-CORRUPT-001 / exit 4 で fail-closed に終端する** (§7 の「4 = 再試行で進展しない」— 回復はユーザーの cache 削除。context に cache path と「削除後の再実行で回復」を載せる)。既存 cache には触れず自 temp も残さない。この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。**起動直前検査で拒否した場合の終端は拒否理由の code に従う** — tombstone 検出は手順 2 と同じ §7 規約どおり exit 4、active journal は KIO-E-PURGE-JOURNAL-ACTIVE-001 (exit 3 — 回復後に再試行可)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kio repair verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kio restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kio restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (**照合 = 既存 cache leaf の内容 sha256 が dir key の raw_hash と一致することの再計算** — 展開 leaf は raw object の byte 列そのもの。**不一致は改変・破損の残骸として KIO-E-STORE-CORRUPT-001 / exit 4 で fail-closed に終端する** (§7 の「4 = 再試行で進展しない」— 回復はユーザーの cache 削除。context に cache path と「削除後の再実行で回復」を載せる)。既存 cache には触れず自 temp も残さない。この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。**起動直前検査で拒否した場合の終端は拒否理由の code に従う** — tombstone 検出は手順 2 と同じ §7 規約どおり exit 4、active journal は KIO-E-PURGE-JOURNAL-ACTIVE-001 (exit 3 — 回復後に再試行可)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kio repair verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、tree-only の `on_idle` GC 対象には含めない。必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kio restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kio restore --to」の注記を stderr に表示する。
 
 ---
 
@@ -401,14 +417,14 @@ kio gc --yes --json
 - 実行は `.kio/gc/in_progress` を atomic publish + fsync してから `prepared → receipting → sweeping → finalizing` を進める。marker はcandidate/tree各100,000件、canonical body 8 MiB、推定対象4 GiBを上限とし、publish前に超過を拒否する。receipt は `.kio/gc/shallowed/<commit64>` に canonical JSON+LF で create-new/fsyncし、全 shared-tree receipt が耐久化されるまで tree を一つも削除しない。commit/raw/chunk/manifest/toollock/index/chunks ledger は削除対象外である。
 - tree leafはretained descriptorからnofollow・single-link・hash/schema/identityを再検証し、no-replaceでCAS fanout外の`.kio/gc/internal/trees/`へ隔離する。隔離 leafを同じbound directoryでunlinkし、link count 0 を確認してから同じretained file handleをtruncate+fsyncする。canonical tree leafと隔離 leafは消失する。ambient pathname unlinkやempty fanout掃除は行わない。`.kio/gc/internal/`はoperation-reserved namespaceであり、検出可能な差替えはfail-closedにする。POSIXにidentity条件付きunlinkが存在しないため、検証直後のreserved nameへの直接第三者書込みだけは[05-runtime.md §2.5](05-runtime.md)・同§3.5と同じ保護契約外の残余窓であり、public CAS path・scope/fanout・receipt/marker public name・hardlinkの保護を緩めない。
 - marker がある間、`kio gc --dry-run` は recovery pending を read-only で報告する。`kio gc --yes` は凍結 marker を validator で再検証して再開する。receipt または tree deletion 後に truth が矛盾すれば fail-closed し、marker は残す。最初の physical tree deletion 前と**finalizing の各実行・再開時**に index generation を descriptor-bound に回転する（sqlite がない scope は `index_absent` として記録する）。回転は公開DBのin-place更新ではなく、`.kio/gc/internal/index/`のprivate copyを更新・file/directory fsyncし、source file stateとsource/target/private-directory identityをmarkerへ耐久化してexchange直前に再照合してから、公開`index/sqlite.db`とatomic exchangeし、両directoryをfsyncする。pre-sweep private copyではgeneration更新と同一SQLite transactionにstrict singleton attestation（sweep ID、role、plan digest、source/target generation）を記録し、treeごとに公開DBのgeneration/identityとattestationを再検証したprocess-local permitだけをcore除去APIへ渡す。完了 rotation の耐久化後だけ marker を削除する。descriptor-bound SQLite rotationを安全に実装できないplatform（現行Windowsを含む）では、marker/receiptのpublishより前にsweepをfail-closedする。
-- active marker は通常 writer を retryable に拒否し、search は新規 cursor を発行しない。ページ 1 は結果を返せても `next_cursor=null` と recovery-pending 注記を含める。明示 `after_index` modeのindex/snapshot入口だけは、通常writer lockより前にbounded recoveryを行う。
-- milestone 3 は `[gc] mode="after_index"` を**明示したscopeだけ**で、成功かつnon-partialな `kio index` / manual `kio snapshot create` のdurable publication後に同じexecutorを呼ぶ。既存writer lockは先に解放し、GCは専用bound lockの下でfresh replan/revalidationする。preview、revoke、usage error、失敗・partial indexからは発火しない。`manual_only`は現行defaultのままであり自動mutationを行わない。`on_idle`は未実装としてfail-closedする。
+- active marker は通常 writer を retryable に拒否し、search は新規 cursor を発行しない。ページ 1 は結果を返せても `next_cursor=null` と recovery-pending 注記を含める。明示 `after_index` の index/manual snapshot入口と、`on_idle` の `snapshot auto` 入口だけは、通常writer lockより前に同modeのbounded recoveryを行う。
+- milestone 3 は `[gc] mode="after_index"` を**明示したscopeだけ**で、成功かつnon-partialな `kio index` / manual `kio snapshot create` のdurable publication後に同じexecutorを呼ぶ。既存writer lockは先に解放し、GCは専用bound lockの下でfresh replan/revalidationする。preview、revoke、usage error、失敗・partial indexからは発火しない。`manual_only`は現行defaultのままであり自動mutationを行わない。milestone 5の`on_idle`はOS scheduler起動の`kio snapshot auto`だけで発火し、after_indexとはcofireしない。
 - automatic authority はwriter開始前のcanonicalな`[gc]` subtree digestとretained scope / `.kio` identityへ固定し、publication後およびGC lock下のlocked re-plan前後で一致を要求する。mode/runtime/retentionまたはscope bindingが途中で変わればGC mutationを開始せず `KIO-E-GC-CONFIG-CHANGED-001` / exit 3 とする。既にdurableなpublicationは`publication_status="completed"`のままであり、index自身が更新する非GCのadapter/network設定はこのdigestの対象外である。
 - `max_runtime_seconds` はmonotonic soft deadlineである。安全なdurable checkpointで `status="deferred"`、`reason="max_runtime_seconds"`、`recovery_pending=true` を返しmarkerを残す。次回のautomatic writer入口は通常lockより前にresumeし、未完ならindex/snapshotを開始しない。shared treeは全candidate receiptが耐久化するまでtree phaseへ移らないためbatch境界でsharing closureを分割しない。
 - automatic resultはindex/snapshot payloadの`gc` objectに載せる。post-publication timeout/errorは`publication_status="completed"`を保持し、timeoutは`KIO-E-GC-RUNTIME-LIMIT-001` / exit 3、permanent integrity failureはexit 4、それ以外のpost-publication failureはpartial exit 3とする。pre-publication recovery timeoutは`publication_status="not_started"` / exit 3である。human outputにも`gc: <status> (<reason>)`を追記する。
 - internal child scopeはchild subprocess自身がそのscopeへ1回だけhookを適用し、保持済みchild capabilityと再bind identityが一致しない場合はfail-closedする。親scope hookがchildへ代理適用されることはなく、childのGC結果は親の`child_scopes[].gc`へ保持する。
 
-未公開の次段階は `--prune-unreachable`、Rust-only `on_idle`、CoW並行GC、既存scopeのdefaultを`after_index`へ変更する判断である。scheduled snapshotはPhase 4 milestone 4で公開済みである ([05-runtime.md §2.2-§2.6](05-runtime.md))。
+未公開の次段階は `--prune-unreachable`、CoW並行GC、既存scopeのdefaultをautomatic modeへ変更する判断である。scheduled snapshotはPhase 4 milestone 4、Rust-only `on_idle` はmilestone 5で公開済みである ([05-runtime.md §2.2-§2.6](05-runtime.md))。
 
 ---
 

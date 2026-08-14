@@ -199,12 +199,17 @@ fn json_success(dir: &TempDir, args: &[&str], now: &str) -> Value {
 }
 
 fn configure(dir: &TempDir, mode: &str) {
+    let runtime = if mode == "manual_only" {
+        String::new()
+    } else {
+        "max_runtime_seconds = 60\n".to_owned()
+    };
     fs::write(
         dir.path().join(".kio/config.toml"),
         // Completion-path tests must not depend on machine load. Tests of the
         // soft bound use `KIO_TEST_GC_RUNTIME_CHECKPOINTS`, so leave ample real
         // monotonic time for every other fixture.
-        format!("[gc]\nmode = \"{mode}\"\nmax_runtime_seconds = 60\n"),
+        format!("[gc]\nmode = \"{mode}\"\n{runtime}"),
     )
     .unwrap();
 }
@@ -511,28 +516,6 @@ fn preview_and_failed_index_never_start_after_index_gc() {
     assert!(!failed.status.success());
     assert_eq!(fs::read(tree_path(&dir, &tree)).unwrap(), before);
     assert!(!dir.path().join(".kio/gc").exists());
-}
-
-#[test]
-fn on_idle_fails_closed_before_index_or_snapshot_mutation() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("note.md"), "unchanged\n").unwrap();
-    json_success(&dir, &["init"], NOW);
-    configure(&dir, "on_idle");
-    let head_before = fs::read(dir.path().join(".kio/HEAD")).unwrap();
-
-    for args in [
-        &["index", "--offline", "--approve", "--json"][..],
-        &["snapshot", "create", "-m", "blocked", "--json"][..],
-        &["snapshot", "auto", "--json"][..],
-    ] {
-        let output = kio(&dir, args).output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        let error = output_json(&output);
-        assert_eq!(error["error_code"], "KIO-E-CONFIG-NOT-IMPLEMENTED-001");
-        assert_eq!(fs::read(dir.path().join(".kio/HEAD")).unwrap(), head_before);
-    }
-    assert!(!Path::new(dir.path()).join(".kio/gc").exists());
 }
 
 #[test]

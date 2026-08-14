@@ -64,9 +64,9 @@ use kio_core::portable::{PORTABLE_TAGS_DIRECTORY, portable_cache_leaf, portable_
 use kio_core::purge::{EventKind, PurgeState, TombstoneMode, canonical_final_event};
 use kio_core::schema::{SchemaKind, validate_json_schema};
 use kio_core::scope::{
-    DEFAULT_MAX_ARCHIVE_SCOPE_BYTES, InspectedObject, PendingNormalizeRef, Repository, StoreLock,
-    append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
-    parse_utc_seconds,
+    DEFAULT_MAX_ARCHIVE_SCOPE_BYTES, InspectedObject, PendingNormalizeRef, Repository,
+    SnapshotOutcome, StoreLock, append_error_log, append_event_log, append_warn_log, new_ulid,
+    now_utc_seconds, parse_utc_seconds,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::chunking::{
@@ -1256,6 +1256,78 @@ struct ScheduledAutoObservation {
     eligible: bool,
     eligibility_reason: Option<&'static str>,
     next_eligible_at: Option<String>,
+    working_set_digest: String,
+    idle: ScheduledIdleObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScheduledIdleObservation {
+    Inactive,
+    Baseline {
+        observed_since: String,
+        threshold_seconds: u64,
+    },
+    Changed {
+        observed_since: String,
+        threshold_seconds: u64,
+    },
+    Waiting {
+        observed_since: String,
+        observed_seconds: u64,
+        threshold_seconds: u64,
+    },
+    Eligible {
+        observed_since: String,
+        observed_seconds: u64,
+        threshold_seconds: u64,
+    },
+}
+
+impl ScheduledIdleObservation {
+    fn needs_state_publication(&self) -> bool {
+        matches!(self, Self::Baseline { .. } | Self::Changed { .. })
+    }
+
+    fn observed_since(&self) -> Option<&str> {
+        match self {
+            Self::Inactive => None,
+            Self::Baseline { observed_since, .. }
+            | Self::Changed { observed_since, .. }
+            | Self::Waiting { observed_since, .. }
+            | Self::Eligible { observed_since, .. } => Some(observed_since),
+        }
+    }
+
+    fn observed_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Waiting {
+                observed_seconds, ..
+            }
+            | Self::Eligible {
+                observed_seconds, ..
+            } => Some(*observed_seconds),
+            Self::Baseline { .. } | Self::Changed { .. } => Some(0),
+            Self::Inactive => None,
+        }
+    }
+
+    fn threshold_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Waiting {
+                threshold_seconds, ..
+            }
+            | Self::Eligible {
+                threshold_seconds, ..
+            } => Some(*threshold_seconds),
+            Self::Baseline {
+                threshold_seconds, ..
+            }
+            | Self::Changed {
+                threshold_seconds, ..
+            } => Some(*threshold_seconds),
+            Self::Inactive => None,
+        }
+    }
 }
 
 fn run_snapshot_auto() -> Result<Value> {
@@ -1270,14 +1342,14 @@ fn run_snapshot_auto() -> Result<Value> {
             "scheduled snapshot configuration changed during observation",
         ));
     }
-    if first_gc.config.mode == GcAutomationMode::OnIdle {
-        return Err(KioError::not_implemented("gc.mode=on_idle"));
-    }
     if !first_config.config.is_some_and(|config| config.enabled) {
-        return Ok(snapshot_auto_skip(
+        return Ok(snapshot_auto_output(
+            "skipped",
             "disabled",
-            Value::Null,
-            Value::Null,
+            "not_started",
+            None,
+            None,
+            None,
             false,
         ));
     }
@@ -1292,21 +1364,42 @@ fn run_snapshot_auto() -> Result<Value> {
         ));
     }
     if !first_indexed {
-        return Ok(snapshot_auto_skip(
+        return Ok(snapshot_auto_output(
+            "skipped",
             "not_indexed",
-            Value::Null,
-            Value::Null,
+            "not_started",
+            None,
+            None,
+            None,
             false,
         ));
     }
     wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_PRE_GC_PREFLIGHT_READY");
-    let (recovered_gc, gc_binding) =
-        match gc::preflight_automatic_bound(&session, &first_gc, "snapshot_auto")? {
-            gc::AutomaticGcPreflight::Proceed { recovered, binding } => (recovered, binding),
-            gc::AutomaticGcPreflight::Deferred(report) => {
-                return Ok(gc::deferred_before_publication("snapshot_auto", report));
-            }
-        };
+    let (recovered_gc, gc_binding) = match gc::preflight_automatic_bound(
+        &session,
+        &first_gc,
+        Some(&first_config),
+        "snapshot_auto",
+    )? {
+        gc::AutomaticGcPreflight::Proceed { recovered, binding } => (recovered, binding),
+        gc::AutomaticGcPreflight::Deferred(report) => {
+            let mut output = snapshot_auto_output(
+                "deferred",
+                "recovery_pending",
+                "not_started",
+                None,
+                None,
+                Some(report),
+                true,
+            );
+            output
+                .as_object_mut()
+                .expect("snapshot output object")
+                .insert("error_code".to_owned(), json!("KIO-E-GC-RUNTIME-LIMIT-001"));
+            set_exit_override(&mut output, ExitCode::PartialFailure);
+            return Ok(output);
+        }
+    };
     if gc_binding != first_gc
         || session.automation_binding()? != first_gc
         || session.snapshot_auto_binding()? != first_config
@@ -1329,11 +1422,21 @@ fn run_snapshot_auto() -> Result<Value> {
             "scheduled snapshot authority changed during observation",
         ));
     }
-    if !initial.eligible {
-        return Ok(snapshot_auto_skip(
-            "not_eligible",
-            json!(initial.change_count),
-            json!(initial.next_eligible_at),
+    let on_idle = initial.gc.config.mode == GcAutomationMode::OnIdle;
+    let idle_eligible = matches!(initial.idle, ScheduledIdleObservation::Eligible { .. });
+    if !initial.eligible && !initial.idle.needs_state_publication() && !idle_eligible {
+        let (status, reason) = if on_idle {
+            ("not_idle", "idle_threshold_not_reached")
+        } else {
+            ("skipped", "not_eligible")
+        };
+        return Ok(snapshot_auto_output(
+            status,
+            reason,
+            "not_started",
+            Some(&initial),
+            None,
+            None,
             recovered_gc,
         ));
     }
@@ -1364,52 +1467,251 @@ fn run_snapshot_auto() -> Result<Value> {
             "scheduled snapshot authority changed at publication boundary",
         ));
     }
-    let excluded = scheduled_auto_excluded(&publication_observation.preview);
-    let allowed = explicitly_allowed_tier_a_paths(&publication_observation.preview);
-    let expected_raw_by_path = scheduled_auto_expected_raw(&publication_observation.preview)?;
-    session.prepare_snapshot_auto_state_publication(&publication_observation.state)?;
-    session.assert_public_identity()?;
-    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY");
-    session.assert_public_identity()?;
-    // This closure runs only after immutable snapshot preparation and before
-    // any scheduled ref/manifest publication. A failed conditional state CAS
-    // therefore leaves the candidate commit unreachable.
-    let mut publish_checkpoint =
-        || session.publish_snapshot_auto_state(&publication_observation.state, &now);
-    let outcome = bound_repo.scheduled_auto_snapshot(
-        &now,
-        &excluded,
-        &allowed,
-        &expected_raw_by_path,
-        &publication_observation.direct_entries,
-        &publication_observation.config,
-        &mut publish_checkpoint,
-    )?;
-    if let Some(commit_hash) = outcome.commit_hash.as_deref() {
-        mark_replica_rebuilding_or_log(bound_repo.kio_dir(), commit_hash);
-        append_event_log(
-            "KIO-I-COMMIT-CREATED-001",
-            "commit created",
-            json!({
-                "commit_hash": commit_hash,
-                "tree_hash": outcome.tree_hash,
-                "trigger": "snapshot_auto",
-            }),
+    let mut state_published = false;
+    let outcome = if publication_observation.eligible {
+        let excluded = scheduled_auto_excluded(&publication_observation.preview);
+        let allowed = explicitly_allowed_tier_a_paths(&publication_observation.preview);
+        let expected_raw_by_path = scheduled_auto_expected_raw(&publication_observation.preview)?;
+        session.prepare_snapshot_auto_state_publication(&publication_observation.state)?;
+        session.assert_public_identity()?;
+        wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY");
+        session.assert_public_identity()?;
+        // This closure runs only after immutable snapshot preparation and
+        // before any scheduled ref/manifest publication. A failed conditional
+        // state CAS therefore leaves the candidate commit unreachable.
+        let mut publish_checkpoint = || {
+            session.publish_snapshot_auto_state(
+                &publication_observation.state,
+                &now,
+                &publication_observation.working_set_digest,
+                true,
+            )
+        };
+        let outcome = bound_repo.scheduled_auto_snapshot(
+            &now,
+            &excluded,
+            &allowed,
+            &expected_raw_by_path,
+            &publication_observation.direct_entries,
+            &publication_observation.config,
+            &mut publish_checkpoint,
         )?;
-    }
+        state_published = true;
+        if let Some(commit_hash) = outcome.commit_hash.as_deref() {
+            mark_replica_rebuilding_or_log(bound_repo.kio_dir(), commit_hash);
+            append_event_log(
+                "KIO-I-COMMIT-CREATED-001",
+                "commit created",
+                json!({
+                    "commit_hash": commit_hash,
+                    "tree_hash": outcome.tree_hash,
+                    "trigger": "snapshot_auto",
+                }),
+            )?;
+        }
+        Some(outcome)
+    } else if publication_observation.idle.needs_state_publication() {
+        session.prepare_snapshot_auto_state_publication(&publication_observation.state)?;
+        if session.automation_binding()? != publication_observation.gc
+            || session.snapshot_auto_binding()? != publication_observation.config
+        {
+            return Err(snapshot_auto_authority_changed(
+                "scheduled snapshot authority changed before idle state publication",
+            ));
+        }
+        session.publish_snapshot_auto_state(
+            &publication_observation.state,
+            &now,
+            &publication_observation.working_set_digest,
+            false,
+        )?;
+        if session.automation_binding()? != publication_observation.gc
+            || session.snapshot_auto_binding()? != publication_observation.config
+        {
+            return Err(snapshot_auto_authority_changed(
+                "scheduled snapshot authority changed during idle state publication",
+            ));
+        }
+        state_published = true;
+        None
+    } else {
+        None
+    };
     drop(lock);
-    Ok(
-        json!({"operation":"snapshot_auto","status":if outcome.noop {"noop"} else {"created"},"reason":if outcome.noop {"tree_and_tool_lock_unchanged"} else {"snapshot_created"},"eligibility_reason":publication_observation.eligibility_reason,"eligible":true,"change_count":publication_observation.change_count,"next_eligible_at":publication_observation.next_eligible_at,"commit_hash":outcome.commit_hash,"tree_hash":outcome.tree_hash,"stats":{"files_added":outcome.stats.files_added,"files_modified":outcome.stats.files_modified,"files_deleted":outcome.stats.files_deleted},"recovered_gc":recovered_gc}),
-    )
+    let publication_status = if state_published || outcome.is_some() {
+        "completed"
+    } else {
+        "not_started"
+    };
+
+    match &publication_observation.idle {
+        ScheduledIdleObservation::Baseline { .. } => Ok(snapshot_auto_output(
+            "baseline_recorded",
+            "first_observation",
+            publication_status,
+            Some(&publication_observation),
+            outcome.as_ref(),
+            Some(json!({"status":"skipped","reason":"baseline_recorded","mode":"on_idle"})),
+            recovered_gc,
+        )),
+        ScheduledIdleObservation::Changed { .. } => Ok(snapshot_auto_output(
+            "not_idle",
+            "working_set_changed",
+            publication_status,
+            Some(&publication_observation),
+            outcome.as_ref(),
+            Some(json!({"status":"skipped","reason":"working_set_changed","mode":"on_idle"})),
+            recovered_gc,
+        )),
+        ScheduledIdleObservation::Waiting { .. } => Ok(snapshot_auto_output(
+            "not_idle",
+            "idle_threshold_not_reached",
+            publication_status,
+            Some(&publication_observation),
+            outcome.as_ref(),
+            Some(
+                json!({"status":"skipped","reason":"idle_threshold_not_reached","mode":"on_idle"}),
+            ),
+            recovered_gc,
+        )),
+        ScheduledIdleObservation::Eligible { .. } => {
+            let gc = match gc::run_on_idle_after_snapshot_bound(
+                &session,
+                &gc_binding,
+                &publication_observation.config,
+                &publication_observation.index,
+                recovered_gc,
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    let recovery_pending = session
+                        .read_marker()
+                        .map(|marker| marker.is_some())
+                        .unwrap_or(true);
+                    let mut output = snapshot_auto_output(
+                        if publication_status == "completed" {
+                            "completed"
+                        } else {
+                            "skipped"
+                        },
+                        "gc_failed",
+                        publication_status,
+                        Some(&publication_observation),
+                        outcome.as_ref(),
+                        Some(json!({
+                            "status": "failed",
+                            "reason": "gc_failed",
+                            "mode": "on_idle",
+                            "recovery_pending": recovery_pending,
+                            "error": error.to_error_json(),
+                        })),
+                        recovered_gc,
+                    );
+                    output
+                        .as_object_mut()
+                        .expect("snapshot output object")
+                        .insert("error_code".to_owned(), json!(error.error_code()));
+                    let exit = if error.exit_code() == ExitCode::PermanentFailure {
+                        ExitCode::PermanentFailure
+                    } else {
+                        ExitCode::PartialFailure
+                    };
+                    set_exit_override(&mut output, exit);
+                    return Ok(output);
+                }
+            };
+            let deferred = gc.get("status").and_then(Value::as_str) == Some("deferred");
+            let no_candidates = gc.get("reason").and_then(Value::as_str) == Some("no_candidates");
+            let snapshot_created = outcome.as_ref().is_some_and(|value| !value.noop);
+            let (status, reason) = if deferred {
+                ("deferred", "max_runtime_seconds")
+            } else if no_candidates && !snapshot_created {
+                ("noop", "no_gc_candidates")
+            } else {
+                ("completed", "idle_gc_completed")
+            };
+            let mut output = snapshot_auto_output(
+                status,
+                reason,
+                publication_status,
+                Some(&publication_observation),
+                outcome.as_ref(),
+                Some(gc),
+                recovered_gc,
+            );
+            if deferred {
+                output
+                    .as_object_mut()
+                    .expect("snapshot output object")
+                    .insert("error_code".to_owned(), json!("KIO-E-GC-RUNTIME-LIMIT-001"));
+                set_exit_override(&mut output, ExitCode::PartialFailure);
+            }
+            Ok(output)
+        }
+        ScheduledIdleObservation::Inactive => {
+            let (status, reason) = match outcome.as_ref() {
+                Some(outcome) if outcome.noop => ("noop", "tree_and_tool_lock_unchanged"),
+                Some(_) => ("completed", "snapshot_created"),
+                None => ("skipped", "not_eligible"),
+            };
+            Ok(snapshot_auto_output(
+                status,
+                reason,
+                publication_status,
+                Some(&publication_observation),
+                outcome.as_ref(),
+                None,
+                recovered_gc,
+            ))
+        }
+    }
 }
 
-fn snapshot_auto_skip(
+fn snapshot_auto_output(
+    status: &str,
     reason: &str,
-    change_count: Value,
-    next_eligible_at: Value,
+    publication_status: &str,
+    observation: Option<&ScheduledAutoObservation>,
+    outcome: Option<&SnapshotOutcome>,
+    gc: Option<Value>,
     recovered_gc: bool,
 ) -> Value {
-    json!({"operation":"snapshot_auto","status":"skipped","reason":reason,"eligibility_reason":Value::Null,"eligible":false,"change_count":change_count,"next_eligible_at":next_eligible_at,"commit_hash":Value::Null,"tree_hash":Value::Null,"stats":Value::Null,"recovered_gc":recovered_gc})
+    let idle = observation.map(|value| &value.idle);
+    let recovery_pending = gc
+        .as_ref()
+        .and_then(|value| value.get("recovery_pending"))
+        .and_then(Value::as_bool)
+        .unwrap_or(status == "deferred");
+    json!({
+        "operation": "snapshot_auto",
+        "status": status,
+        "reason": reason,
+        "publication_status": publication_status,
+        "snapshot_status": match outcome {
+            Some(value) if value.noop => "noop",
+            Some(_) => "completed",
+            None => "not_started",
+        },
+        "eligibility_reason": observation.and_then(|value| value.eligibility_reason),
+        "eligible": observation.is_some_and(|value| value.eligible),
+        "change_count": observation.map(|value| value.change_count),
+        "next_eligible_at": observation.and_then(|value| value.next_eligible_at.as_deref()),
+        "commit_hash": outcome.and_then(|value| value.commit_hash.as_deref()),
+        "tree_hash": outcome.map(|value| value.tree_hash.as_str()),
+        "stats": outcome.map(|value| json!({
+            "files_added": value.stats.files_added,
+            "files_modified": value.stats.files_modified,
+            "files_deleted": value.stats.files_deleted,
+        })),
+        "working_set_digest": observation.map(|value| value.working_set_digest.as_str()),
+        "idle_observed_since": idle.and_then(|value| value.observed_since()),
+        "idle_observed_seconds": idle.and_then(|value| value.observed_seconds()),
+        "idle_threshold_seconds": idle.and_then(|value| value.threshold_seconds()),
+        "idle_eligible": idle.is_some_and(|value| matches!(value, ScheduledIdleObservation::Eligible { .. })),
+        "recovered_gc": recovered_gc,
+        "recovery_pending": recovery_pending,
+        "gc": gc,
+    })
 }
 
 fn snapshot_auto_authority_changed(message: &str) -> KioError {
@@ -1492,6 +1794,61 @@ fn observe_scheduled_auto(
         &[],
     )
     .map_err(pipeline_to_kio)?;
+    let working_set_digest = scheduled_working_set_digest(&preview)?;
+    let idle = if gc.config.mode == GcAutomationMode::OnIdle {
+        let threshold_seconds = gc
+            .config
+            .idle_threshold_seconds
+            .ok_or_else(|| KioError::schema("gc.mode=on_idle requires idle_threshold_seconds"))?;
+        match state.state.as_ref() {
+            None => ScheduledIdleObservation::Baseline {
+                observed_since: now.to_owned(),
+                threshold_seconds,
+            },
+            Some(previous) if previous.working_set_digest != working_set_digest => {
+                ScheduledIdleObservation::Changed {
+                    observed_since: now.to_owned(),
+                    threshold_seconds,
+                }
+            }
+            Some(previous) => {
+                let observed_since = parse_utc_seconds(&previous.idle_observed_since)
+                    .filter(|seconds| {
+                        kio_core::scope::format_utc_seconds(*seconds)
+                            == previous.idle_observed_since
+                    })
+                    .ok_or_else(|| {
+                        snapshot_auto_clock_error(
+                            "scheduler idle observation time is not canonical UTC seconds",
+                        )
+                    })?;
+                if now_seconds < observed_since {
+                    return Err(snapshot_auto_clock_error(
+                        "scheduled snapshot idle clock moved backwards",
+                    ));
+                }
+                let observed_seconds =
+                    u64::try_from(now_seconds - observed_since).map_err(|_| {
+                        snapshot_auto_clock_error("scheduled idle duration is outside u64 range")
+                    })?;
+                if observed_seconds >= threshold_seconds {
+                    ScheduledIdleObservation::Eligible {
+                        observed_since: previous.idle_observed_since.clone(),
+                        observed_seconds,
+                        threshold_seconds,
+                    }
+                } else {
+                    ScheduledIdleObservation::Waiting {
+                        observed_since: previous.idle_observed_since.clone(),
+                        observed_seconds,
+                        threshold_seconds,
+                    }
+                }
+            }
+        }
+    } else {
+        ScheduledIdleObservation::Inactive
+    };
     let change_count = scheduled_preview_change_count(repo, session, &preview)?;
     let threshold = change_count >= config_value.on_change_threshold;
     let (eligible, eligibility_reason) = match (state.state.is_none(), interval_elapsed, threshold)
@@ -1520,6 +1877,8 @@ fn observe_scheduled_auto(
         } else {
             prior_next
         },
+        working_set_digest,
+        idle,
     })
 }
 
@@ -1559,6 +1918,17 @@ fn scheduled_auto_expected_raw(preview: &ScanPreview) -> Result<BTreeMap<String,
             ))
         })
         .collect()
+}
+
+fn scheduled_working_set_digest(preview: &ScanPreview) -> Result<String> {
+    let entries = scheduled_auto_expected_raw(preview)?;
+    let bytes = canonical_json_bytes(
+        &serde_json::to_value(entries).map_err(|error| KioError::schema(error.to_string()))?,
+    )?;
+    Ok(format!(
+        "sha256:{}",
+        kio_core::cas::lower_hex(&Sha256::digest(bytes))
+    ))
 }
 
 fn scheduled_auto_index_metadata(session: &GcSweepSession) -> Result<Option<BoundGcIndexMetadata>> {
@@ -26862,9 +27232,16 @@ fn print_output(value: Value, json_mode: bool) {
         for key in [
             "status",
             "reason",
+            "publication_status",
+            "snapshot_status",
             "eligibility_reason",
             "change_count",
             "next_eligible_at",
+            "idle_observed_since",
+            "idle_observed_seconds",
+            "idle_threshold_seconds",
+            "idle_eligible",
+            "recovery_pending",
             "commit_hash",
             "tree_hash",
         ] {
@@ -26874,6 +27251,16 @@ fn print_output(value: Value, json_mode: bool) {
                 None => "null".to_owned(),
             };
             println!("{}: {}", key, terminal_safe_text(&rendered, false));
+        }
+        if let Some(gc) = value.get("gc").and_then(Value::as_object)
+            && let Some(status) = gc.get("status").and_then(Value::as_str)
+        {
+            let reason = gc
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let rendered = format!("{status} ({reason})");
+            println!("gc: {}", terminal_safe_text(&rendered, false));
         }
     } else if let Some(text) = value.get("text").and_then(Value::as_str) {
         println!("{}", terminal_safe_text(text, true));
@@ -26926,7 +27313,7 @@ fn print_output(value: Value, json_mode: bool) {
             serde_json::to_string_pretty(&value).expect("serializing command output cannot fail");
         println!("{}", terminal_safe_text(&rendered, true));
     }
-    if let Some(gc) = value.get("gc") {
+    if let Some(gc) = value.get("gc").and_then(Value::as_object) {
         let status = gc
             .get("status")
             .and_then(Value::as_str)

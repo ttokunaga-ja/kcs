@@ -9,16 +9,18 @@ use std::time::{Duration, Instant};
 use kio_core::gc::{
     GcAutomationBinding, GcAutomationMode, GcInProgressMarker, GcIndexRotation,
     GcIndexRotationRole, GcIndexState, GcPlan, GcReceiptPublication, GcSweepPhase, GcSweepSession,
+    SnapshotAutoBinding,
 };
 use kio_core::scope::{
     Repository, format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{
-    FtsSchemaConfig, FtsTokenizer, GcIndexRotationAttestation, PreparedGcIndexCleanup,
-    cleanup_stale_bound_gc_index_rotations, exchange_prepared_bound_gc_index,
-    prepare_bound_gc_index_rotation, read_bound_gc_index_metadata,
-    read_bound_gc_index_rotation_attestation, remove_prepared_bound_gc_index,
+    BoundGcIndexMetadata, FtsSchemaConfig, FtsTokenizer, GcIndexRotationAttestation,
+    PreparedGcIndexCleanup, cleanup_stale_bound_gc_index_rotations,
+    exchange_prepared_bound_gc_index, prepare_bound_gc_index_rotation,
+    read_bound_gc_index_metadata, read_bound_gc_index_rotation_attestation,
+    remove_prepared_bound_gc_index,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -62,15 +64,15 @@ pub(super) enum AutomaticGcPreflight {
 }
 
 /// Resume a marker before an ordinary writer acquires the store lock.  This
-/// path is enabled only by an explicit `mode = "after_index"`; manual-only
-/// scopes retain the ordinary active-marker writer barrier.
+/// path is enabled only by the automatic mode associated with this trigger;
+/// ordinary writers retain their active-marker barrier.
 pub(super) fn preflight_automatic(
     repository: &Repository,
     trigger: &str,
 ) -> Result<AutomaticGcPreflight> {
     let session = GcSweepSession::bind_repository(repository)?;
     let binding = session.automation_binding()?;
-    preflight_automatic_bound(&session, &binding, trigger)
+    preflight_automatic_bound(&session, &binding, None, trigger)
 }
 
 /// Scheduler variant of automatic-GC preflight.  The caller has already
@@ -80,6 +82,7 @@ pub(super) fn preflight_automatic(
 pub(super) fn preflight_automatic_bound(
     session: &GcSweepSession,
     expected_binding: &GcAutomationBinding,
+    expected_snapshot_auto: Option<&SnapshotAutoBinding>,
     trigger: &str,
 ) -> Result<AutomaticGcPreflight> {
     let started = Instant::now();
@@ -94,9 +97,22 @@ pub(super) fn preflight_automatic_bound(
             recovered: false,
             binding,
         }),
-        GcAutomationMode::OnIdle => Err(KioError::not_implemented("gc.mode=on_idle")),
-        GcAutomationMode::AfterIndex => {
-            let deadline = automatic_deadline(started, config.max_runtime_seconds)?;
+        GcAutomationMode::OnIdle if trigger != "snapshot_auto" => {
+            // `on_idle` is deliberately a scheduler-only handoff.  In
+            // particular, an ordinary writer must not consume its recovery
+            // marker before taking its normal writer barrier.
+            Ok(AutomaticGcPreflight::Proceed {
+                recovered: false,
+                binding,
+            })
+        }
+        GcAutomationMode::OnIdle => {
+            let expected_snapshot_auto = expected_snapshot_auto.ok_or_else(|| {
+                KioError::schema("on-idle automatic GC requires a snapshot.auto authority binding")
+            })?;
+            require_snapshot_auto_binding(session, Some(expected_snapshot_auto))?;
+            let max_runtime_seconds = required_max_runtime_seconds(config)?;
+            let deadline = automatic_deadline(started, max_runtime_seconds)?;
             if session.read_marker()?.is_none() {
                 return Ok(AutomaticGcPreflight::Proceed {
                     recovered: false,
@@ -109,13 +125,52 @@ pub(super) fn preflight_automatic_bound(
                 fixed_now()?,
                 &mut budget,
                 Some(expected_binding),
+                Some(expected_snapshot_auto),
             )?;
             session.assert_public_identity()?;
             if &session.automation_binding()? != expected_binding {
                 return Err(config_changed_after_publication());
             }
+            require_snapshot_auto_binding(session, Some(expected_snapshot_auto))?;
             let report =
-                decorate_automatic_report(report, trigger, config.max_runtime_seconds, true);
+                decorate_automatic_report(report, trigger, "on_idle", max_runtime_seconds, true);
+            if is_runtime_deferred(&report) {
+                Ok(AutomaticGcPreflight::Deferred(report))
+            } else {
+                Ok(AutomaticGcPreflight::Proceed {
+                    recovered: true,
+                    binding,
+                })
+            }
+        }
+        GcAutomationMode::AfterIndex => {
+            let max_runtime_seconds = required_max_runtime_seconds(config)?;
+            let deadline = automatic_deadline(started, max_runtime_seconds)?;
+            if session.read_marker()?.is_none() {
+                return Ok(AutomaticGcPreflight::Proceed {
+                    recovered: false,
+                    binding,
+                });
+            }
+            let mut budget = ExecutionBudget::new(Some(deadline));
+            let report = resume_session_with_budget(
+                session,
+                fixed_now()?,
+                &mut budget,
+                Some(expected_binding),
+                None,
+            )?;
+            session.assert_public_identity()?;
+            if &session.automation_binding()? != expected_binding {
+                return Err(config_changed_after_publication());
+            }
+            let report = decorate_automatic_report(
+                report,
+                trigger,
+                "after_index",
+                max_runtime_seconds,
+                true,
+            );
             if is_runtime_deferred(&report) {
                 Ok(AutomaticGcPreflight::Deferred(report))
             } else {
@@ -214,13 +269,25 @@ fn run_after_success(
             "trigger": trigger,
             "mode": "manual_only",
         })),
-        GcAutomationMode::OnIdle => Err(KioError::not_implemented("gc.mode=on_idle")),
+        GcAutomationMode::OnIdle => Ok(json!({
+            "status": "skipped",
+            "reason": "on_idle_requires_snapshot_auto",
+            "trigger": trigger,
+            "mode": "on_idle",
+        })),
         GcAutomationMode::AfterIndex => {
             let now = fixed_now()?;
-            let deadline = automatic_deadline(started, config.max_runtime_seconds)?;
+            let max_runtime_seconds = required_max_runtime_seconds(config)?;
+            let deadline = automatic_deadline(started, max_runtime_seconds)?;
             let mut budget = ExecutionBudget::new(Some(deadline));
             let report = if session.read_marker()?.is_some() {
-                resume_session_with_budget(&session, now, &mut budget, Some(expected_binding))?
+                resume_session_with_budget(
+                    &session,
+                    now,
+                    &mut budget,
+                    Some(expected_binding),
+                    None,
+                )?
             } else {
                 let preview = session.plan_at(now)?;
                 if preview.candidates.is_empty() {
@@ -229,7 +296,7 @@ fn run_after_success(
                         "reason": "no_candidates",
                         "trigger": trigger,
                         "mode": "after_index",
-                        "max_runtime_seconds": config.max_runtime_seconds,
+                        "max_runtime_seconds": max_runtime_seconds,
                         "recovered_before_publication": recovered_before_publication,
                         "candidate_count": 0,
                         "candidate_tree_count": 0,
@@ -237,21 +304,83 @@ fn run_after_success(
                     }));
                 }
                 start_session_with_budget(
-                    session,
+                    &session,
                     now,
                     preview,
                     &mut budget,
                     Some(expected_binding),
+                    None,
+                    None,
                 )?
             };
             Ok(decorate_automatic_report(
                 report,
                 trigger,
-                config.max_runtime_seconds,
+                "after_index",
+                max_runtime_seconds,
                 recovered_before_publication,
             ))
         }
     }
+}
+
+/// Run the scheduler-only automatic sweep after a successful automatic
+/// snapshot publication.  The scheduler has already released its writer
+/// barrier; GC takes its own descriptor-bound lock so the potentially long
+/// receipt/tree/index sequence is never nested inside snapshot publication.
+pub(super) fn run_on_idle_after_snapshot_bound(
+    session: &GcSweepSession,
+    expected_binding: &GcAutomationBinding,
+    expected_snapshot_auto: &SnapshotAutoBinding,
+    expected_index: &BoundGcIndexMetadata,
+    recovered_before_publication: bool,
+) -> Result<Value> {
+    let started = Instant::now();
+    wait_at_post_publication_test_barrier();
+    session.assert_public_identity()?;
+    let binding = session.automation_binding()?;
+    if &binding != expected_binding || binding.config.mode != GcAutomationMode::OnIdle {
+        return Err(config_changed_after_publication());
+    }
+    require_snapshot_auto_binding(session, Some(expected_snapshot_auto))?;
+    require_automatic_index_binding(session, Some(expected_index))?;
+    let max_runtime_seconds = required_max_runtime_seconds(binding.config)?;
+    let now = fixed_now()?;
+    let mut budget = ExecutionBudget::new(Some(automatic_deadline(started, max_runtime_seconds)?));
+    let report = if session.read_marker()?.is_some() {
+        resume_session_with_budget(
+            session,
+            now,
+            &mut budget,
+            Some(expected_binding),
+            Some(expected_snapshot_auto),
+        )?
+    } else {
+        // This is a preview only. `start_session_with_budget` re-plans under
+        // the GC lock and rejects a changed plan before publishing a marker.
+        let preview = session.plan_at(now)?;
+        start_session_with_budget(
+            session,
+            now,
+            preview,
+            &mut budget,
+            Some(expected_binding),
+            Some(expected_index),
+            Some(expected_snapshot_auto),
+        )?
+    };
+    session.assert_public_identity()?;
+    if &session.automation_binding()? != expected_binding {
+        return Err(config_changed_after_publication());
+    }
+    require_snapshot_auto_binding(session, Some(expected_snapshot_auto))?;
+    Ok(decorate_automatic_report(
+        report,
+        "snapshot_auto",
+        "on_idle",
+        max_runtime_seconds,
+        recovered_before_publication,
+    ))
 }
 
 fn config_changed_after_publication() -> KioError {
@@ -282,6 +411,12 @@ fn wait_at_post_publication_test_barrier() {
 #[cfg(not(debug_assertions))]
 fn wait_at_post_publication_test_barrier() {}
 
+fn required_max_runtime_seconds(config: kio_core::gc::GcAutomationConfig) -> Result<u64> {
+    config
+        .max_runtime_seconds
+        .ok_or_else(|| KioError::schema("gc max_runtime_seconds is required for automatic GC mode"))
+}
+
 fn automatic_deadline(started: Instant, max_runtime_seconds: u64) -> Result<Instant> {
     started
         .checked_add(Duration::from_secs(max_runtime_seconds))
@@ -291,12 +426,13 @@ fn automatic_deadline(started: Instant, max_runtime_seconds: u64) -> Result<Inst
 fn decorate_automatic_report(
     mut report: Value,
     trigger: &str,
+    mode: &str,
     max_runtime_seconds: u64,
     recovered_before_publication: bool,
 ) -> Value {
     if let Some(object) = report.as_object_mut() {
         object.insert("trigger".to_owned(), json!(trigger));
-        object.insert("mode".to_owned(), json!("after_index"));
+        object.insert("mode".to_owned(), json!(mode));
         object.insert("max_runtime_seconds".to_owned(), json!(max_runtime_seconds));
         object.insert(
             "recovered_before_publication".to_owned(),
@@ -380,40 +516,68 @@ fn start_with_budget(
     // API uses this retained `.kio` descriptor, so a replacement of the
     // public cwd cannot create or remove a victim `.kio/.lock`.
     let session = GcSweepSession::bind(root)?;
-    start_session_with_budget(session, now, preview, budget, None)
+    start_session_with_budget(&session, now, preview, budget, None, None, None)
 }
 
 fn start_session_with_budget(
-    session: GcSweepSession,
+    session: &GcSweepSession,
     now: i64,
     preview: GcPlan,
     budget: &mut ExecutionBudget,
     expected_binding: Option<&GcAutomationBinding>,
+    expected_index: Option<&BoundGcIndexMetadata>,
+    expected_snapshot_auto: Option<&SnapshotAutoBinding>,
 ) -> Result<Value> {
     let _lock = session.acquire_store_lock()?;
-    require_automation_binding(&session, expected_binding)?;
+    require_automation_binding(session, expected_binding)?;
+    require_automatic_index_binding(session, expected_index)?;
+    require_snapshot_auto_binding(session, expected_snapshot_auto)?;
+    let locked = session.plan_at(now)?;
+    // The locked plan's retention policy must still be precisely the policy
+    // that authorized this invocation immediately before marker publication.
+    require_automation_binding(session, expected_binding)?;
+    require_automatic_index_binding(session, expected_index)?;
+    require_snapshot_auto_binding(session, expected_snapshot_auto)?;
+    if !preview.mutation_equivalent(&locked) {
+        return Err(plan_changed());
+    }
+    // A locked empty replan has no mutation to authorize. This follows plan
+    // equivalence so a changed plan always remains fail-closed, and precedes
+    // the platform gate and marker publication.
+    if locked.candidates.is_empty() {
+        return Ok(no_candidates_execution_value());
+    }
+    if session.read_marker()?.is_some() {
+        return Err(plan_changed());
+    }
     // A platform without a descriptor-bound SQLite rotation must reject the
     // operation before publication.  In particular, do not manufacture an
     // active marker/receipts on Windows and then discover that finalization
     // can never complete.
     session.ensure_index_rotation_supported()?;
-    let locked = session.plan_at(now)?;
-    // The locked plan's retention policy must still be precisely the policy
-    // that authorized this invocation immediately before marker publication.
-    require_automation_binding(&session, expected_binding)?;
-    if !preview.mutation_equivalent(&locked) {
-        return Err(plan_changed());
-    }
-    if session.read_marker()?.is_some() {
-        return Err(plan_changed());
-    }
-    let marker = marker_from_plan(&session, &locked, now)?;
+    let marker = marker_from_plan(session, &locked, now)?;
+    // The marker is the mutation boundary. Re-read every retained automatic
+    // authority immediately before publishing it so a same-path scheduler
+    // configuration change cannot authorize a destructive on-idle handoff.
+    require_automation_binding(session, expected_binding)?;
+    require_automatic_index_binding(session, expected_index)?;
+    require_snapshot_auto_binding(session, expected_snapshot_auto)?;
     session.publish_marker(&marker)?;
     inject_fault("after_marker_fsync")?;
     if budget.should_defer_after_checkpoint() {
         return Ok(runtime_limit_value(&marker));
     }
-    execute_locked(&session, marker, now, budget)
+    execute_locked(session, marker, now, budget)
+}
+
+fn no_candidates_execution_value() -> Value {
+    json!({
+        "status": "skipped",
+        "reason": "no_candidates",
+        "candidate_count": 0,
+        "candidate_tree_count": 0,
+        "estimated_bytes": 0,
+    })
 }
 
 fn resume(root: std::path::PathBuf, now: i64) -> Result<Value> {
@@ -427,7 +591,7 @@ fn resume_with_budget(
     budget: &mut ExecutionBudget,
 ) -> Result<Value> {
     let session = GcSweepSession::bind(root)?;
-    resume_session_with_budget(&session, now, budget, None)
+    resume_session_with_budget(&session, now, budget, None, None)
 }
 
 fn resume_session_with_budget(
@@ -435,9 +599,11 @@ fn resume_session_with_budget(
     now: i64,
     budget: &mut ExecutionBudget,
     expected_binding: Option<&GcAutomationBinding>,
+    expected_snapshot_auto: Option<&SnapshotAutoBinding>,
 ) -> Result<Value> {
     let _lock = session.acquire_store_lock()?;
     require_automation_binding(session, expected_binding)?;
+    require_snapshot_auto_binding(session, expected_snapshot_auto)?;
     session.ensure_index_rotation_supported()?;
     let marker = session.read_marker()?.ok_or_else(plan_changed)?;
     let marker_can_be_discarded = session.marker_can_be_discarded_after_fresh_replan(&marker)?;
@@ -460,6 +626,7 @@ fn resume_session_with_budget(
     // invocation clock here would let an otherwise valid crash cross a
     // retention bucket boundary and become permanently unresumable.
     session.validate_frozen_marker_current_truth(&marker)?;
+    require_snapshot_auto_binding(session, expected_snapshot_auto)?;
     execute_locked(session, marker, now, budget)
 }
 
@@ -471,6 +638,50 @@ fn require_automation_binding(
         && &session.automation_binding()? != expected
     {
         return Err(config_changed_after_publication());
+    }
+    Ok(())
+}
+
+fn require_snapshot_auto_binding(
+    session: &GcSweepSession,
+    expected: Option<&SnapshotAutoBinding>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let observed = session.snapshot_auto_binding()?;
+    if &observed != expected || !observed.config.is_some_and(|config| config.enabled) {
+        return Err(config_changed_after_publication());
+    }
+    Ok(())
+}
+
+fn require_automatic_index_binding(
+    session: &GcSweepSession,
+    expected: Option<&BoundGcIndexMetadata>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let kio = session.retained_kio_handle()?;
+    let observed = read_bound_gc_index_metadata(&kio, &bound_fts_config())
+        .map_err(super::index_to_kio)?
+        .ok_or_else(|| {
+            KioError::new(
+                "KIO-E-GC-INDEX-BINDING-001",
+                "indexed scope disappeared during the on-idle GC handoff",
+                json!({}),
+                ExitCode::PermanentFailure,
+            )
+        })?;
+    session.assert_public_identity()?;
+    if &observed != expected {
+        return Err(KioError::new(
+            "KIO-E-GC-INDEX-BINDING-001",
+            "index changed during the on-idle GC handoff",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ));
     }
     Ok(())
 }

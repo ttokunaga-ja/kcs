@@ -124,7 +124,8 @@ fn automation_binding_is_capability_bound_strict_and_defaults_manual() {
         session.automation_binding().unwrap().config,
         GcAutomationConfig {
             mode: GcAutomationMode::ManualOnly,
-            max_runtime_seconds: 60,
+            max_runtime_seconds: None,
+            idle_threshold_seconds: None,
         }
     );
 
@@ -133,7 +134,8 @@ fn automation_binding_is_capability_bound_strict_and_defaults_manual() {
         session.automation_binding().unwrap().config,
         GcAutomationConfig {
             mode: GcAutomationMode::AfterIndex,
-            max_runtime_seconds: 17,
+            max_runtime_seconds: Some(17),
+            idle_threshold_seconds: None,
         }
     );
 
@@ -161,6 +163,29 @@ fn automation_binding_is_capability_bound_strict_and_defaults_manual() {
 
     f.policy("[gc]\nmode = \"after_index\"\nunknown = true\n");
     assert!(session.automation_binding().is_err());
+
+    for invalid in [
+        "[gc]\nmode = \"manual_only\"\nmax_runtime_seconds = 1\n",
+        "[gc]\nmode = \"manual_only\"\nidle_threshold_seconds = 1\n",
+        "[gc]\nmode = \"after_index\"\n",
+        "[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 1\nidle_threshold_seconds = 1\n",
+        "[gc]\nmode = \"on_idle\"\nmax_runtime_seconds = 1\n",
+        "[gc]\nmode = \"on_idle\"\nidle_threshold_seconds = 1\n",
+        "[gc]\nmode = \"on_idle\"\nmax_runtime_seconds = 86401\nidle_threshold_seconds = 1\n",
+        "[gc]\nmode = \"on_idle\"\nmax_runtime_seconds = 1\nidle_threshold_seconds = 31536001\n",
+    ] {
+        f.policy(invalid);
+        assert!(session.automation_binding().is_err(), "{invalid}");
+    }
+    f.policy("[gc]\nmode = \"on_idle\"\nmax_runtime_seconds = 17\nidle_threshold_seconds = 23\n");
+    assert_eq!(
+        session.automation_binding().unwrap().config,
+        GcAutomationConfig {
+            mode: GcAutomationMode::OnIdle,
+            max_runtime_seconds: Some(17),
+            idle_threshold_seconds: Some(23),
+        }
+    );
 }
 
 #[test]
@@ -629,7 +654,7 @@ fn sweeping_receipt_binding_rejects_same_bytes_inode_replacement() {
 #[test]
 fn retention_tier_boundaries_keep_each_tier_and_plan_only_expired_auto() {
     let f = Fixture::new();
-    f.policy("[gc.auto_retention]\nkeep_last_hours=1\nkeep_hourly_days=1\nkeep_daily_weeks=1\nkeep_weekly_months=1\n");
+    f.policy("[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=1\nkeep_hourly_days=1\nkeep_daily_weeks=1\nkeep_weekly_months=1\n");
     let old = f.commit(
         &f.tree("old"),
         vec![],
@@ -678,7 +703,9 @@ fn retention_tier_boundaries_keep_each_tier_and_plan_only_expired_auto() {
 #[test]
 fn retention_policy_rejects_unknown_fields_and_non_monotonic_horizons() {
     let unknown = Fixture::new();
-    unknown.policy("[gc.auto_retention]\nkeep_last_hours=24\nkeep_forever=true\n");
+    unknown.policy(
+        "[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=24\nkeep_forever=true\n",
+    );
     assert_eq!(
         GcPlanner::bind(unknown.canonical_root())
             .unwrap()
@@ -689,7 +716,9 @@ fn retention_policy_rejects_unknown_fields_and_non_monotonic_horizons() {
     );
 
     let non_monotonic = Fixture::new();
-    non_monotonic.policy("[gc.auto_retention]\nkeep_last_hours=25\nkeep_hourly_days=1\n");
+    non_monotonic.policy(
+        "[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=25\nkeep_hourly_days=1\n",
+    );
     assert_eq!(
         GcPlanner::bind(non_monotonic.canonical_root())
             .unwrap()
@@ -703,7 +732,7 @@ fn retention_policy_rejects_unknown_fields_and_non_monotonic_horizons() {
 #[test]
 fn fractional_timestamps_preserve_true_future_and_latest_bucket_member() {
     let f = Fixture::new();
-    f.policy("[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=7\nkeep_daily_weeks=1\nkeep_weekly_months=1\n");
+    f.policy("[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=7\nkeep_daily_weeks=1\nkeep_weekly_months=1\n");
     let older = f.commit(
         &f.tree("fraction-older"),
         vec![],
@@ -739,7 +768,7 @@ fn fractional_timestamps_preserve_true_future_and_latest_bucket_member() {
 #[test]
 fn head_branch_tag_tips_and_protected_types_are_excluded() {
     let f = Fixture::new();
-    f.policy("[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n");
+    f.policy("[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n");
     let auto = f.commit(
         &f.tree("auto"),
         vec![],
@@ -801,7 +830,7 @@ fn head_branch_tag_tips_and_protected_types_are_excluded() {
 #[test]
 fn raw_chunk_and_commit_objects_are_never_planned() {
     let f = Fixture::new();
-    f.policy("[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n");
+    f.policy("[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n");
     let store = ObjectStore::new(f.kio());
     let raw_hash = store.write_raw(b"retained raw bytes").unwrap();
     let text = "retained chunk text";
@@ -849,7 +878,7 @@ fn raw_chunk_and_commit_objects_are_never_planned() {
 #[test]
 fn repaired_retention_is_per_branch_and_shared_trees_are_not_candidates() {
     let f = Fixture::new();
-    f.policy("[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n[gc.derived_retention]\nkeep_repaired_per_branch=1\n");
+    f.policy("[gc]\nmode=\"manual_only\"\n[gc.auto_retention]\nkeep_last_hours=0\nkeep_hourly_days=0\nkeep_daily_weeks=0\nkeep_weekly_months=0\n[gc.derived_retention]\nkeep_repaired_per_branch=1\n");
     let repaired_old = f.commit(
         &f.tree("old"),
         vec![],

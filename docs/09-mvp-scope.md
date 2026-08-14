@@ -40,7 +40,7 @@
 - 高度な分類器の自動移動 (auto_organize は提案表示のみ)
 - 多デバイス同期 (synchronization は v2+)
 - Adapter の OS サンドボックス強制・第三者 Adapter の配布/署名 (07-adapter-spec.md §7.1)
-- GC の実行系のうち、receipt先行・crash recovery付きの on-demand tree-only shallow sweep は Phase 4 milestone 2、同じexecutorをmonotonic runtime budgetで安全に分割する明示opt-inの`after_index` hookはmilestone 3として [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する。OS schedulerから呼ぶRust scheduled auto snapshotはmilestone 4として公開する。`manual_only`が現行defaultであり、`--prune-unreachable`、default自動有効化、CoW 並行 GC、`on_idle` 実行は未公開である
+- GC の実行系のうち、receipt先行・crash recovery付きの on-demand tree-only shallow sweep は Phase 4 milestone 2、同じexecutorをmonotonic runtime budgetで安全に分割する明示opt-inの`after_index` hookはmilestone 3として [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する。OS schedulerから呼ぶRust scheduled auto snapshotはmilestone 4、同じ `kio snapshot auto` invocation だけで動くRust-only `on_idle` GCはmilestone 5として公開する。`manual_only`が現行defaultであり、`--prune-unreachable`、default自動有効化、CoW 並行 GCは未公開である
 - purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース。05-runtime.md §3.5)
 - export / import (.kioz bundle)
 - kio evidence verify --batch / kio evidence retarget の実装
@@ -110,7 +110,7 @@ Step 別の目安 (テスト除く):
 | 機能 | 正本 | 実装 |
 | --- | --- | --- |
 | CAS raw object store + snapshot DAG (tree / commit) | [03-data-model.md](03-data-model.md) | Step 1 |
-| `init` / `status` / `snapshot create` / `snapshot auto` / `log` / `diff` / `inspect` / `tag` | [06-cli-spec.md §1](06-cli-spec.md) | Step 1 + Phase 4 milestone 4 |
+| `init` / `status` / `snapshot create` / `snapshot auto` / `log` / `diff` / `inspect` / `tag` | [06-cli-spec.md §1](06-cli-spec.md) | Step 1 + Phase 4 milestones 4–5 |
 | `gc_policy` × `commit_type` 対応の schema 遵守 (GC 実行はしない) | [05-runtime.md §2.2](05-runtime.md) | Step 1 |
 | JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加) | [06-cli-spec.md §11](06-cli-spec.md) | Step 1〜 |
 | 観測ログ `events.jsonl` / `errors.jsonl` | [06-cli-spec.md §13](06-cli-spec.md) | Step 1 |
@@ -144,7 +144,7 @@ Step 別の目安 (テスト除く):
 | `after_index` のdefault自動有効化 | [05-runtime.md §2.3](05-runtime.md) | Phase 4+ (未決定・未公開) |
 | CoW 並行 GC | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) | Phase 4 milestone 4 |
-| Rust-only on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §2.3](05-runtime.md) | Phase 4+ (未公開) |
+| Rust-only on_idle GC (OS scheduler が起動する `kio snapshot auto` に限定、常駐なし) | [05-runtime.md §2.3](05-runtime.md) | Phase 4 milestone 5 |
 | export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |
 | `kio evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
@@ -152,7 +152,7 @@ Step 別の目安 (テスト除く):
 | agent API の外部公開・発見導線 / navigation | [06-cli-spec.md §9](06-cli-spec.md) | Phase 5 |
 | GUI 用語翻訳マッピング | [06-cli-spec.md §14](06-cli-spec.md) | Phase 4+ |
 
-注: 定期 auto snapshotは09 §2のPhase plan (Phase 4: 自動化) に従いmilestone 4で公開した。`on_idle` GCは同じOS scheduler委譲候補だが、milestone 4には含めずfail-closedのまま残す。
+注: 定期 auto snapshotは09 §2のPhase plan (Phase 4: 自動化) に従いmilestone 4、Rust-only `on_idle` GCはmilestone 5で公開した。後者はOS schedulerが呼ぶ `kio snapshot auto` に限定し、daemon / scheduler installer は追加しない。
 
 ## 3.2 Step 1 着手ゲート
 

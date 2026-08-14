@@ -166,11 +166,17 @@ fn configure(dir: &TempDir, enabled: bool, interval: u64, threshold: u64) {
 }
 
 fn configure_gc(dir: &TempDir, mode: &str, interval: u64, threshold: u64) {
+    let gc = match mode {
+        "manual_only" => "[gc]\nmode = \"manual_only\"\n".to_owned(),
+        "on_idle" => format!(
+            "[gc]\nmode = \"on_idle\"\nidle_threshold_seconds = {interval}\nmax_runtime_seconds = 60\n"
+        ),
+        _ => format!("[gc]\nmode = \"{mode}\"\nmax_runtime_seconds = 60\n"),
+    };
     fs::write(
         dir.path().join(".kio/config.toml"),
         format!(
-            "[gc]\nmode = \"{mode}\"\nmax_runtime_seconds = 60\n\
-             \n[snapshot.auto]\nenabled = true\ninterval_seconds = {interval}\n\
+            "{gc}\n[snapshot.auto]\nenabled = true\ninterval_seconds = {interval}\n\
              on_change_threshold = {threshold}\n"
         ),
     )
@@ -253,23 +259,6 @@ fn skips_disabled_missing_and_not_indexed_without_mutating_kio() {
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
 }
 
-#[test]
-fn on_idle_gc_remains_fail_closed_for_scheduled_snapshot() {
-    let dir = indexed_fixture(60, 1);
-    configure_gc(&dir, "on_idle", 60, 1);
-    let before = kio_bytes(&dir.path().join(".kio"));
-
-    let output = kio(&dir, &["snapshot", "auto", "--json"], T0)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        output_json(&output)["error_code"],
-        "KIO-E-CONFIG-NOT-IMPLEMENTED-001"
-    );
-    assert_eq!(kio_bytes(&dir.path().join(".kio")), before);
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn eligible_snapshot_fails_before_lock_or_state_on_unsupported_platform() {
@@ -303,9 +292,14 @@ fn first_run_noop_advances_canonical_state_and_json_and_human_agree() {
     assert_eq!(report["change_count"], 0);
     assert_eq!(head(&dir), before_head);
     let state = fs::read(dir.path().join(".kio/snapshot-auto.json")).unwrap();
-    assert_eq!(
-        state,
-        b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n"
+    let state: Value = serde_json::from_slice(&state).unwrap();
+    assert_eq!(state["version"], 2);
+    assert_eq!(state["idle_observed_since"], T0);
+    assert_eq!(state["last_successful_eligible_attempt_at"], T0);
+    assert!(
+        state["working_set_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
     );
     let human = kio(&dir, &["snapshot", "auto"], "2026-08-14T00:01:00Z")
         .assert()
@@ -333,7 +327,7 @@ fn interval_boundaries_and_threshold_boundaries_are_deterministic() {
     assert_eq!(kio_bytes(&dir.path().join(".kio")), skipped_bytes);
     fs::write(dir.path().join("second.md"), "second change\n").unwrap();
     let threshold = auto(&dir, "2026-08-14T00:00:59Z");
-    assert_eq!(threshold["status"], "created");
+    assert_eq!(threshold["status"], "completed");
     assert_eq!(threshold["eligibility_reason"], "change_threshold");
 
     let equal = auto(&dir, "2026-08-14T00:01:59Z");
@@ -469,7 +463,7 @@ fn auto_preserves_existing_normalize_refs_and_never_runs_after_index_gc() {
     configure(&dir, true, 60, 1);
     fs::write(dir.path().join("new.md"), "new raw has no normalized CAS\n").unwrap();
     let preserved = auto(&dir, T0);
-    assert_eq!(preserved["status"], "created");
+    assert_eq!(preserved["status"], "completed");
     let preserved_tree = repo
         .read_tree(&repo.read_commit(&head(&dir).unwrap()).unwrap().tree)
         .unwrap();
@@ -495,7 +489,7 @@ fn auto_preserves_existing_normalize_refs_and_never_runs_after_index_gc() {
     )
     .unwrap();
     let report = auto(&dir, "2026-08-14T00:00:01Z");
-    assert_eq!(report["status"], "created");
+    assert_eq!(report["status"], "completed");
     let current = head(&dir).unwrap();
     let entry = repo
         .read_tree(&repo.read_commit(&current).unwrap().tree)
@@ -565,7 +559,7 @@ fn tool_lock_only_change_waits_for_interval_then_creates_auto_commit() {
     assert_eq!(head(&dir).as_deref(), Some(before_hash.as_str()));
 
     let due = auto(&dir, "2026-08-14T00:01:00Z");
-    assert_eq!(due["status"], "created");
+    assert_eq!(due["status"], "completed");
     assert_eq!(due["change_count"], 0);
     assert_eq!(due["stats"]["files_added"], 0);
     assert_eq!(due["stats"]["files_modified"], 0);
@@ -852,10 +846,11 @@ fn crash_after_checkpoint_before_ref_keeps_cooldown_and_head_boundary() {
     child.kill().unwrap();
     assert!(!child.wait().unwrap().success());
     assert_eq!(head(&dir), before_head);
-    assert_eq!(
-        fs::read(dir.path().join(".kio/snapshot-auto.json")).unwrap(),
-        b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n"
-    );
+    let state: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(".kio/snapshot-auto.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["version"], 2);
+    assert_eq!(state["idle_observed_since"], T0);
 
     let early = auto(&dir, "2026-08-14T00:00:01Z");
     assert_eq!(early["status"], "skipped");
@@ -864,7 +859,7 @@ fn crash_after_checkpoint_before_ref_keeps_cooldown_and_head_boundary() {
     assert_eq!(head(&dir), before_head);
 
     let due = auto(&dir, "2026-08-14T00:01:00Z");
-    assert_eq!(due["status"], "created");
+    assert_eq!(due["status"], "completed");
     assert_ne!(head(&dir), before_head);
 }
 

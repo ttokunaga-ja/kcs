@@ -34,7 +34,7 @@ const MAX_SWEEP_CANDIDATES: usize = 100_000;
 const MAX_SWEEP_ESTIMATED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const GC_RETIRE_SENTINEL: &[u8] = b"kio gc retirement sentinel\n";
 const SNAPSHOT_AUTO_STATE_LEAF: &str = "snapshot-auto.json";
-const SNAPSHOT_AUTO_STATE_VERSION: u32 = 1;
+const SNAPSHOT_AUTO_STATE_VERSION: u32 = 2;
 const SNAPSHOT_AUTO_STATE_TEMP_PREFIX: &str = ".snapshot-auto-state-";
 /// Scheduler state publishing may leave a private create-new file behind if
 /// the process dies after fsync and before the final rename/exchange.  Keep
@@ -715,7 +715,8 @@ pub enum GcAutomationMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcAutomationConfig {
     pub mode: GcAutomationMode,
-    pub max_runtime_seconds: u64,
+    pub max_runtime_seconds: Option<u64>,
+    pub idle_threshold_seconds: Option<u64>,
 }
 
 /// A capability-bound observation of the complete validated `[gc]` authority
@@ -768,6 +769,8 @@ pub struct SnapshotAutoBinding {
 pub struct SnapshotAutoState {
     pub version: u32,
     pub last_successful_eligible_attempt_at: String,
+    pub working_set_digest: String,
+    pub idle_observed_since: String,
 }
 
 /// Exact optional state-file observation.  Callers compare this value before
@@ -783,7 +786,8 @@ impl Default for GcAutomationConfig {
     fn default() -> Self {
         Self {
             mode: GcAutomationMode::ManualOnly,
-            max_runtime_seconds: 60,
+            max_runtime_seconds: None,
+            idle_threshold_seconds: None,
         }
     }
 }
@@ -957,6 +961,8 @@ impl GcSweepSession {
         &self,
         expected: &SnapshotAutoStateBinding,
         now: &str,
+        working_set_digest: &str,
+        record_eligible_attempt: bool,
     ) -> Result<SnapshotAutoStateBinding> {
         self.prepare_snapshot_auto_state_publication(expected)?;
         let seconds = parse_utc_seconds(now)
@@ -964,18 +970,43 @@ impl GcSweepSession {
             .ok_or_else(|| {
                 snapshot_auto_clock_error("current time is not canonical UTC seconds")
             })?;
+        if !is_hash(working_set_digest) {
+            return Err(corrupt(
+                "snapshot auto working-set digest is not canonical sha256",
+            ));
+        }
+        if expected.state.is_none() && !record_eligible_attempt {
+            return Err(corrupt(
+                "first snapshot auto state publication must record an eligible attempt",
+            ));
+        }
         if let Some(previous) = expected.state.as_ref() {
             let previous_seconds = parse_utc_seconds(&previous.last_successful_eligible_attempt_at)
                 .ok_or_else(|| corrupt("snapshot auto state time is invalid"))?;
-            if seconds < previous_seconds {
+            let observed_since_seconds = parse_utc_seconds(&previous.idle_observed_since)
+                .ok_or_else(|| corrupt("snapshot auto state idle time is invalid"))?;
+            if seconds < previous_seconds || seconds < observed_since_seconds {
                 return Err(snapshot_auto_clock_error(
                     "scheduled snapshot clock moved backwards",
                 ));
             }
         }
+        let previous = expected.state.as_ref();
         let state = SnapshotAutoState {
             version: SNAPSHOT_AUTO_STATE_VERSION,
-            last_successful_eligible_attempt_at: format_utc_seconds(seconds),
+            last_successful_eligible_attempt_at: match previous {
+                Some(state) if !record_eligible_attempt => {
+                    state.last_successful_eligible_attempt_at.clone()
+                }
+                _ => format_utc_seconds(seconds),
+            },
+            working_set_digest: working_set_digest.to_owned(),
+            idle_observed_since: match previous {
+                Some(state) if state.working_set_digest == working_set_digest => {
+                    state.idle_observed_since.clone()
+                }
+                _ => format_utc_seconds(seconds),
+            },
         };
         let bytes = canonical_snapshot_auto_state_bytes(&state)?;
         let temporary = unique_internal_name(".snapshot-auto-state");
@@ -3978,25 +4009,38 @@ fn read_automation_config_bytes(bytes: &[u8]) -> Result<GcAutomationConfig> {
         return Ok(GcAutomationConfig::default());
     };
     let mode = match gc.get("mode").and_then(toml::Value::as_str) {
-        None | Some("manual_only") => GcAutomationMode::ManualOnly,
+        Some("manual_only") => GcAutomationMode::ManualOnly,
         Some("after_index") => GcAutomationMode::AfterIndex,
         Some("on_idle") => GcAutomationMode::OnIdle,
+        None => return Err(KioError::schema("gc mode is required when [gc] is present")),
         // The full config schema above makes this unreachable for valid input;
         // retain this fail-closed arm if that schema changes independently.
         Some(_) => return Err(KioError::schema("invalid gc mode")),
     };
-    let max_runtime_seconds = match gc.get("max_runtime_seconds") {
-        None => GcAutomationConfig::default().max_runtime_seconds,
-        Some(value) => u64::try_from(
-            value
-                .as_integer()
-                .ok_or_else(|| KioError::schema("gc max_runtime_seconds must be an integer"))?,
-        )
-        .map_err(|_| KioError::schema("gc max_runtime_seconds must be non-negative"))?,
-    };
+    let max_runtime_seconds = gc
+        .get("max_runtime_seconds")
+        .map(|value| {
+            u64::try_from(
+                value
+                    .as_integer()
+                    .ok_or_else(|| KioError::schema("gc max_runtime_seconds must be an integer"))?,
+            )
+            .map_err(|_| KioError::schema("gc max_runtime_seconds must be non-negative"))
+        })
+        .transpose()?;
+    let idle_threshold_seconds =
+        gc.get("idle_threshold_seconds")
+            .map(|value| {
+                u64::try_from(value.as_integer().ok_or_else(|| {
+                    KioError::schema("gc idle_threshold_seconds must be an integer")
+                })?)
+                .map_err(|_| KioError::schema("gc idle_threshold_seconds must be non-negative"))
+            })
+            .transpose()?;
     Ok(GcAutomationConfig {
         mode,
         max_runtime_seconds,
+        idle_threshold_seconds,
     })
 }
 
@@ -4058,15 +4102,26 @@ fn canonical_snapshot_auto_state_bytes(state: &SnapshotAutoState) -> Result<Vec<
 }
 
 fn parse_snapshot_auto_state(bytes: &[u8]) -> Result<SnapshotAutoState> {
-    let state: SnapshotAutoState = serde_json::from_slice(bytes)
+    let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| corrupt(&format!("invalid snapshot auto state: {error}")))?;
-    if state.version != SNAPSHOT_AUTO_STATE_VERSION {
-        return Err(corrupt("unsupported snapshot auto state version"));
+    if value.get("version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(SNAPSHOT_AUTO_STATE_VERSION))
+    {
+        return Err(corrupt(
+            "unsupported snapshot auto state version; remove it and allow clean recreation",
+        ));
     }
+    let state: SnapshotAutoState = serde_json::from_value(value)
+        .map_err(|error| corrupt(&format!("invalid snapshot auto state: {error}")))?;
     let seconds = parse_utc_seconds(&state.last_successful_eligible_attempt_at)
         .filter(|seconds| format_utc_seconds(*seconds) == state.last_successful_eligible_attempt_at)
         .ok_or_else(|| corrupt("snapshot auto state time is not canonical UTC seconds"))?;
-    if format_utc_seconds(seconds) != state.last_successful_eligible_attempt_at
+    let idle_seconds = parse_utc_seconds(&state.idle_observed_since)
+        .filter(|seconds| format_utc_seconds(*seconds) == state.idle_observed_since)
+        .ok_or_else(|| corrupt("snapshot auto state idle time is not canonical UTC seconds"))?;
+    if !is_hash(&state.working_set_digest)
+        || format_utc_seconds(seconds) != state.last_successful_eligible_attempt_at
+        || format_utc_seconds(idle_seconds) != state.idle_observed_since
         || canonical_snapshot_auto_state_bytes(&state)? != bytes
     {
         return Err(corrupt("snapshot auto state is not canonical JCS+LF"));
@@ -5073,6 +5128,13 @@ mod tests {
 
     #[test]
     fn snapshot_auto_state_is_canonical_durable_and_monotonic() {
+        let legacy = parse_snapshot_auto_state(
+            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n",
+        )
+        .unwrap_err();
+        assert_eq!(legacy.error_code(), "KIO-E-STORE-CORRUPT-001");
+        assert!(legacy.message().contains("clean recreation"));
+
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
         let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
@@ -5080,7 +5142,12 @@ mod tests {
         assert!(absent.state.is_none());
 
         let first = session
-            .publish_snapshot_auto_state(&absent, "2026-08-14T00:00:00Z")
+            .publish_snapshot_auto_state(
+                &absent,
+                "2026-08-14T00:00:00Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                true,
+            )
             .unwrap();
         assert_eq!(
             first
@@ -5092,15 +5159,25 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(repo.kio_dir().join(SNAPSHOT_AUTO_STATE_LEAF)).unwrap(),
-            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n"
+            b"{\"idle_observed_since\":\"2026-08-14T00:00:00Z\",\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":2,\"working_set_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n"
         );
         let backwards = session
-            .publish_snapshot_auto_state(&first, "2026-08-13T23:59:59Z")
+            .publish_snapshot_auto_state(
+                &first,
+                "2026-08-13T23:59:59Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                true,
+            )
             .unwrap_err();
         assert_eq!(backwards.error_code(), "KIO-E-SNAPSHOT-CLOCK-001");
 
         let second = session
-            .publish_snapshot_auto_state(&first, "2026-08-14T00:01:00Z")
+            .publish_snapshot_auto_state(
+                &first,
+                "2026-08-14T00:01:00Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                true,
+            )
             .unwrap();
         assert_eq!(
             second
@@ -5109,6 +5186,46 @@ mod tests {
                 .unwrap()
                 .last_successful_eligible_attempt_at,
             "2026-08-14T00:01:00Z"
+        );
+        let unchanged = session
+            .publish_snapshot_auto_state(
+                &second,
+                "2026-08-14T00:02:00Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged
+                .state
+                .as_ref()
+                .unwrap()
+                .last_successful_eligible_attempt_at,
+            "2026-08-14T00:01:00Z"
+        );
+        assert_eq!(
+            unchanged.state.as_ref().unwrap().idle_observed_since,
+            "2026-08-14T00:00:00Z"
+        );
+        let changed = session
+            .publish_snapshot_auto_state(
+                &unchanged,
+                "2026-08-14T00:03:00Z",
+                &format!("sha256:{}", "b".repeat(64)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            changed
+                .state
+                .as_ref()
+                .unwrap()
+                .last_successful_eligible_attempt_at,
+            "2026-08-14T00:01:00Z"
+        );
+        assert_eq!(
+            changed.state.as_ref().unwrap().idle_observed_since,
+            "2026-08-14T00:03:00Z"
         );
     }
 
@@ -5119,14 +5236,19 @@ mod tests {
         let temporary = repo.kio_dir().join(".snapshot-auto-state-123-456");
         std::fs::write(
             &temporary,
-            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n",
+            b"{\"idle_observed_since\":\"2026-08-14T00:00:00Z\",\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":2,\"working_set_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
         )
         .unwrap();
 
         let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
         let absent = session.snapshot_auto_state().unwrap();
         session
-            .publish_snapshot_auto_state(&absent, "2026-08-14T00:01:00Z")
+            .publish_snapshot_auto_state(
+                &absent,
+                "2026-08-14T00:01:00Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                true,
+            )
             .unwrap();
 
         assert!(!temporary.exists());
@@ -5146,14 +5268,19 @@ mod tests {
         let malformed = repo.kio_dir().join(".snapshot-auto-state-not-a-pid-456");
         std::fs::write(
             &malformed,
-            b"{\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":1}\n",
+            b"{\"idle_observed_since\":\"2026-08-14T00:00:00Z\",\"last_successful_eligible_attempt_at\":\"2026-08-14T00:00:00Z\",\"version\":2,\"working_set_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
         )
         .unwrap();
 
         let session = GcSweepSession::bind(repo.canonical_root().to_path_buf()).unwrap();
         let absent = session.snapshot_auto_state().unwrap();
         let error = session
-            .publish_snapshot_auto_state(&absent, "2026-08-14T00:01:00Z")
+            .publish_snapshot_auto_state(
+                &absent,
+                "2026-08-14T00:01:00Z",
+                &format!("sha256:{}", "a".repeat(64)),
+                true,
+            )
             .unwrap_err();
 
         assert_eq!(error.error_code(), "KIO-E-STORE-CORRUPT-001");
