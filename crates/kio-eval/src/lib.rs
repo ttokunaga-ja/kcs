@@ -13,6 +13,7 @@ pub mod rerank;
 pub mod resolver;
 pub mod runner;
 pub mod scale;
+pub mod scale_spec;
 
 use std::collections::HashSet;
 

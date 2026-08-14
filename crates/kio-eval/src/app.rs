@@ -37,7 +37,7 @@ use kio_eval::{
         evaluate_queries_with_validator, final_exit_code, run_bounded_command, write_report,
         write_results,
     },
-    scale::{self, ScaleOptions},
+    scale_spec::ScaleProfile,
 };
 use thiserror::Error;
 
@@ -130,7 +130,12 @@ enum Commands {
         #[arg(long)]
         bin: PathBuf,
     },
-    /// Measure deterministic search latency on an attested scale corpus.
+    /// Scale-fixture lifecycle and deterministic search measurement.
+    Scale {
+        #[command(subcommand)]
+        command: ScaleCommands,
+    },
+    /// Fixture-B baseline and external Q_hard benchmark operations.
     Benchmark {
         #[command(subcommand)]
         command: BenchmarkCommands,
@@ -173,23 +178,6 @@ enum BenchmarkCommands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Run the 20-scope scale search measurement lane.
-    Scale {
-        #[arg(long)]
-        corpus: PathBuf,
-        #[arg(long)]
-        manifest: Option<PathBuf>,
-        #[arg(long)]
-        attestation: Option<PathBuf>,
-        #[arg(long, default_value = DEFAULT_BIN)]
-        bin: PathBuf,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        #[arg(long, default_value_t = 5)]
-        warmups: usize,
-        #[arg(long, default_value_t = 100)]
-        samples: usize,
-    },
     /// Measure the frozen external raster/vector Q_hard fixture.
     Qhard {
         #[arg(long, default_value = "eval/golden-queries-qhard.jsonl")]
@@ -214,6 +202,49 @@ enum BenchmarkCommands {
         /// Generated synthetic corpus measured in this same evaluator invocation.
         #[arg(long)]
         synthetic_corpus: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScaleCommands {
+    /// Materialize a Rust v2 deterministic scale fixture.
+    Generate {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, value_enum)]
+        profile: ScaleProfile,
+        /// Reset only a fully validated current Rust-owned fixture.
+        #[arg(long)]
+        reset_owned: bool,
+    },
+    /// Initialize and index all scale scopes in an isolated device root.
+    Prepare {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        bin: PathBuf,
+    },
+    /// Independently attest a prepared Rust v2 scale fixture.
+    Attest {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Optional create-only external report, or the canonical corpus leaf.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Measure deterministic search latency on an attested Rust v2 fixture.
+    Benchmark {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        bin: PathBuf,
+        #[arg(long)]
+        warmups: usize,
+        #[arg(long)]
+        samples: usize,
+        /// New report file. Existing measurements are never overwritten.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -694,6 +725,41 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                 println!("     manifest: {}", summary.manifest.display());
                 Ok(ExitCode::Success)
             }
+            Commands::Scale { command } => match command {
+                ScaleCommands::Generate {
+                    out,
+                    profile,
+                    reset_owned,
+                } => Err(AppError::Input(format!(
+                    "kio-eval scale generate is not implemented yet (out={}, profile={profile:?}, reset_owned={reset_owned})",
+                    out.display()
+                ))),
+                ScaleCommands::Prepare { corpus, bin } => Err(AppError::Input(format!(
+                    "kio-eval scale prepare is not implemented yet (corpus={}, bin={})",
+                    corpus.display(),
+                    bin.display()
+                ))),
+                ScaleCommands::Attest { corpus, out } => Err(AppError::Input(format!(
+                    "kio-eval scale attest is not implemented yet (corpus={}, out={})",
+                    corpus.display(),
+                    out.as_ref().map_or_else(
+                        || "<canonical>".to_owned(),
+                        |path| path.display().to_string()
+                    )
+                ))),
+                ScaleCommands::Benchmark {
+                    corpus,
+                    bin,
+                    warmups,
+                    samples,
+                    out,
+                } => Err(AppError::Input(format!(
+                    "kio-eval scale benchmark v2 is not implemented yet (corpus={}, bin={}, warmups={warmups}, samples={samples}, out={})",
+                    corpus.display(),
+                    bin.display(),
+                    out.display()
+                ))),
+            },
             Commands::Benchmark { command } => match command {
                 BenchmarkCommands::BaselineAttest {
                     golden,
@@ -745,46 +811,6 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                         ExitCode::Success
                     } else {
                         ExitCode::Failure
-                    })
-                }
-                BenchmarkCommands::Scale {
-                    corpus,
-                    manifest,
-                    attestation,
-                    bin,
-                    out,
-                    warmups,
-                    samples,
-                } => {
-                    let report = scale::run(ScaleOptions {
-                        corpus: corpus.clone(),
-                        manifest: manifest.clone(),
-                        attestation: attestation.clone(),
-                        bin: bin.clone(),
-                        warmups: *warmups,
-                        samples: *samples,
-                    })
-                    .map_err(|error| AppError::Input(error.to_string()))?;
-                    let rendered = serde_json::to_vec_pretty(&report).map_err(|error| {
-                        AppError::Input(format!("cannot serialize scale report: {error}"))
-                    })?;
-                    if let Some(path) = out {
-                        scale::write_report(path, corpus, &report)
-                            .map_err(|error| AppError::Input(error.to_string()))?;
-                    } else {
-                        println!("{}", String::from_utf8_lossy(&rendered));
-                        if report.acceptance_failed() {
-                            let fallback = std::env::temp_dir()
-                                .join(format!("kio-scale-failed-{}.json", std::process::id()));
-                            scale::write_report(&fallback, corpus, &report)
-                                .map_err(|error| AppError::Input(error.to_string()))?;
-                            eprintln!("saved failed scale report: {}", fallback.display());
-                        }
-                    }
-                    Ok(if report.acceptance_failed() {
-                        ExitCode::Failure
-                    } else {
-                        ExitCode::Success
                     })
                 }
                 BenchmarkCommands::Qhard {
@@ -1193,6 +1219,92 @@ mod tests {
                 "/tmp/corpus",
                 "--bin",
                 "/tmp/kio",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scale_has_one_required_canonical_subcommand_tree() {
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "scale",
+                "generate",
+                "--out",
+                "/tmp/scale",
+                "--profile",
+                "tiny",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "scale",
+                "prepare",
+                "--corpus",
+                "/tmp/scale",
+                "--bin",
+                "/tmp/kio",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from(["kio-eval", "scale", "attest", "--corpus", "/tmp/scale",])
+                .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "scale",
+                "benchmark",
+                "--corpus",
+                "/tmp/scale",
+                "--bin",
+                "/tmp/kio",
+                "--warmups",
+                "1",
+                "--samples",
+                "1",
+                "--out",
+                "/tmp/report.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "scale",
+                "benchmark",
+                "--corpus",
+                "/tmp/scale",
+                "--bin",
+                "/tmp/kio",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "benchmark",
+                "scale",
+                "--corpus",
+                "/tmp/scale",
+                "--bin",
+                "/tmp/kio",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "scale",
+                "generate",
+                "--out",
+                "/tmp/scale",
+                "--profile",
+                "legacy",
             ])
             .is_err()
         );
