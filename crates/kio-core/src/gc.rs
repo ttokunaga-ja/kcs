@@ -704,8 +704,7 @@ pub struct GcSweepSession {
 ///
 /// The default remains [`GcAutomationMode::ManualOnly`]; callers must not
 /// infer automatic deletion from the presence of a GC configuration table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcAutomationMode {
     ManualOnly,
     AfterIndex,
@@ -713,7 +712,7 @@ pub enum GcAutomationMode {
 }
 
 /// Strictly validated GC automation settings read from `.kio/config.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcAutomationConfig {
     pub mode: GcAutomationMode,
     pub max_runtime_seconds: u64,
@@ -723,10 +722,10 @@ pub struct GcAutomationConfig {
 /// subtree that authorized an automatic GC handoff. The canonical semantic
 /// digest covers retention policy and future schema-allowed GC controls, while
 /// intentionally excluding unrelated config such as network approval.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcAutomationBinding {
     pub config: GcAutomationConfig,
-    pub gc_config_digest: String,
+    gc_config_digest: String,
     // Keep the retained scope capabilities in the handoff authority as well
     // as the GC policy. These fields stay private because callers only need
     // equality; exposing platform-specific dev/inode identities would invite
@@ -738,7 +737,7 @@ pub struct GcAutomationBinding {
 /// Strict scheduler settings from the optional `[snapshot.auto]` table.
 /// Absence of the table is represented by `None`; there are deliberately no
 /// field defaults or legacy aliases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotAutoConfig {
     pub enabled: bool,
     pub interval_seconds: u64,
@@ -884,13 +883,6 @@ impl GcSweepSession {
             }
             Ok(lock)
         }
-    }
-    /// Read the validated GC automation settings through this session's
-    /// retained `.kio` descriptor.  Rechecking before and after the read
-    /// prevents a public scope replacement from silently changing the
-    /// configuration authority used by an automatic caller.
-    pub fn automation_config(&self) -> Result<GcAutomationConfig> {
-        Ok(self.automation_binding()?.config)
     }
     /// Read the validated complete GC authority subtree and retain a canonical
     /// semantic digest for the publication-to-GC handoff. Both reads are
@@ -1094,36 +1086,7 @@ impl GcSweepSession {
     /// interpreted as document inputs.
     pub fn validate_snapshot_auto_direct_entries(&self) -> Result<BTreeSet<String>> {
         self.recheck_binding()?;
-        let mut names = BTreeSet::new();
-        for entry in cap_fs::read_base_dir(&self.scope).map_err(|error| ioerr(error, "scope"))? {
-            let entry = entry.map_err(|error| ioerr(error, "scope"))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| snapshot_auto_unsafe_entry("non-UTF-8 direct entry"))?;
-            if name == ".kio" {
-                continue;
-            }
-            let metadata = cap_fs::stat(&self.scope, Path::new(&name), cap_fs::FollowSymlinks::No)
-                .map_err(|error| ioerr(error, &name))?;
-            if metadata.is_dir() {
-                #[cfg(windows)]
-                {
-                    use cap_fs::_WindowsByHandle;
-                    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-                    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                        return Err(snapshot_auto_unsafe_entry(
-                            "direct directory is a reparse point",
-                        ));
-                    }
-                }
-                continue;
-            }
-            valid_file(&metadata, MAX_RAW_OBJECT_BYTES).map_err(|_| {
-                snapshot_auto_unsafe_entry("direct entry is not a safe single-link regular file")
-            })?;
-            names.insert(name);
-        }
+        let names = validated_snapshot_auto_direct_entries(&self.scope)?;
         self.recheck_binding()?;
         Ok(names)
     }
@@ -2338,6 +2301,9 @@ fn wait_at_gc_tree_quarantine_barrier() {
 }
 
 fn wait_at_gc_test_barrier(variable: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let Some(ready_path) = std::env::var_os(variable) else {
         return;
     };
@@ -4142,6 +4108,64 @@ fn snapshot_auto_unsafe_entry(message: &str) -> KioError {
         json!({}),
         ExitCode::PermanentFailure,
     )
+}
+
+/// Inventory one scheduler working-set root through its retained directory
+/// capability. This is the single direct-entry contract used by both the CLI
+/// observation and the repository's final publication checks: directories are
+/// out of scope, while every other entry must be an unchanged, no-follow,
+/// single-link regular file.
+pub(crate) fn validated_snapshot_auto_direct_entries(
+    scope: &std::fs::File,
+) -> Result<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for entry in cap_fs::read_base_dir(scope).map_err(|error| ioerr(error, "scope"))? {
+        let entry = entry.map_err(|error| ioerr(error, "scope"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| snapshot_auto_unsafe_entry("non-UTF-8 direct entry"))?;
+        if name == ".kio" {
+            continue;
+        }
+        let path = Path::new(&name);
+        let before = cap_fs::stat(scope, path, cap_fs::FollowSymlinks::No)
+            .map_err(|error| ioerr(error, &name))?;
+        if before.is_dir() {
+            #[cfg(windows)]
+            {
+                use cap_fs::_WindowsByHandle;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if before.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(snapshot_auto_unsafe_entry(
+                        "direct directory is a reparse point",
+                    ));
+                }
+            }
+            continue;
+        }
+        valid_file(&before, MAX_RAW_OBJECT_BYTES).map_err(|_| {
+            snapshot_auto_unsafe_entry("direct entry is not a safe single-link regular file")
+        })?;
+        let mut options = cap_fs::OpenOptions::new();
+        options.read(true);
+        options._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let file = cap_fs::open(scope, path, &options).map_err(|error| ioerr(error, &name))?;
+        let opened = cap_fs::Metadata::from_file(&file).map_err(|error| ioerr(error, &name))?;
+        let after = cap_fs::stat(scope, path, cap_fs::FollowSymlinks::No)
+            .map_err(|error| ioerr(error, &name))?;
+        if valid_file(&opened, MAX_RAW_OBJECT_BYTES).is_err()
+            || valid_file(&after, MAX_RAW_OBJECT_BYTES).is_err()
+            || id_meta(&before)? != id_meta(&opened)?
+            || id_meta(&before)? != id_meta(&after)?
+        {
+            return Err(snapshot_auto_unsafe_entry(
+                "direct entry changed during scheduler validation",
+            ));
+        }
+        names.insert(name);
+    }
+    Ok(names)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

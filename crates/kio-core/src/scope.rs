@@ -1344,61 +1344,12 @@ impl Repository {
 
     #[cfg(unix)]
     fn bound_snapshot_auto_direct_entries(&self) -> Result<BTreeSet<String>> {
-        use cap_primitives::fs as cap_fs;
-        use cap_primitives::fs::MetadataExt;
-        use std::os::unix::fs::MetadataExt as _;
-
         let root = self.bound_root.as_deref().ok_or_else(|| {
             KioError::invalid_usage(
                 "scheduled snapshot publication requires a retained scope capability",
             )
         })?;
-        let mut names = BTreeSet::new();
-        for entry in cap_fs::read_base_dir(root).map_err(|error| {
-            KioError::io(error.to_string(), self.canonical_root.display().to_string())
-        })? {
-            let entry = entry.map_err(|error| {
-                KioError::io(error.to_string(), self.canonical_root.display().to_string())
-            })?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| snapshot_unsafe_direct_entry("direct entry name is not UTF-8"))?;
-            if name == ".kio" {
-                continue;
-            }
-            let path = Path::new(&name);
-            let before = cap_fs::stat(root, path, cap_fs::FollowSymlinks::No)
-                .map_err(|error| KioError::io(error.to_string(), name.clone()))?;
-            if before.is_dir() {
-                continue;
-            }
-            if !before.is_file() || before.nlink() != 1 || before.len() > MAX_RAW_OBJECT_BYTES {
-                return Err(snapshot_unsafe_direct_entry(
-                    "direct entry is not a safe single-link regular file",
-                ));
-            }
-            let file =
-                open_bound_scope_file_nofollow(root, &name, &self.canonical_root.join(&name))?;
-            let opened = file.metadata().kio_io(Path::new(&name))?;
-            let after = cap_fs::stat(root, path, cap_fs::FollowSymlinks::No)
-                .map_err(|error| KioError::io(error.to_string(), name.clone()))?;
-            if !opened.is_file()
-                || opened.nlink() != 1
-                || opened.len() > MAX_RAW_OBJECT_BYTES
-                || after.nlink() != 1
-                || after.dev() != before.dev()
-                || after.ino() != before.ino()
-                || opened.dev() != before.dev()
-                || opened.ino() != before.ino()
-            {
-                return Err(snapshot_unsafe_direct_entry(
-                    "direct entry changed or gained another link during publication",
-                ));
-            }
-            names.insert(name);
-        }
-        Ok(names)
+        crate::gc::validated_snapshot_auto_direct_entries(root)
     }
 
     /// Validate the scheduler's immutable writer inputs through the retained
@@ -1553,27 +1504,6 @@ impl Repository {
             json!({}),
             ExitCode::PermanentFailure,
         ))
-    }
-
-    #[cfg(unix)]
-    fn scheduled_bound_head_hash(&self) -> Result<Option<String>> {
-        let kio = self.bound_kio.as_deref().ok_or_else(|| {
-            KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
-        })?;
-        let head = read_bound_regular_text_at(kio, "HEAD", MAX_BOUND_CONFIG_BYTES)?;
-        let value = head.trim();
-        if value.is_empty() {
-            return Ok(None);
-        }
-        if !is_hash(value) {
-            return Err(KioError::schema("HEAD must contain a commit_hash"));
-        }
-        Ok(Some(value.to_owned()))
-    }
-
-    #[cfg(not(unix))]
-    fn scheduled_bound_head_hash(&self) -> Result<Option<String>> {
-        self.head_commit_hash()
     }
 
     #[cfg(unix)]
@@ -2029,8 +1959,6 @@ impl Repository {
             } else {
                 Some(head.to_owned())
             }
-        } else if scheduled_bound {
-            self.scheduled_bound_head_hash()?
         } else {
             self.head_commit_hash()?
         };
@@ -3229,7 +3157,7 @@ fn write_bound_new(root: &File, relative: &str, contents: &[u8]) -> Result<()> {
 /// `.kio` entry therefore cannot redirect the inherited-policy read or write.
 #[cfg(unix)]
 fn persist_bound_generated_parent_policy(kio: &File, policy: toml::Value) -> Result<()> {
-    let text = read_bound_regular_text(kio, "config.toml")?;
+    let text = read_bound_regular_text_at(kio, "config.toml", MAX_BOUND_CONFIG_BYTES)?;
     let mut config: toml::Value =
         toml::from_str(&text).map_err(|error| KioError::schema(error.to_string()))?;
     let table = config
@@ -3243,11 +3171,6 @@ fn persist_bound_generated_parent_policy(kio: &File, policy: toml::Value) -> Res
     enforce_config_semantics(&json_value)?;
     let text = toml::to_string(&config).map_err(|error| KioError::schema(error.to_string()))?;
     replace_bound_regular_file(kio, "config.toml", text.as_bytes())
-}
-
-#[cfg(unix)]
-fn read_bound_regular_text(kio: &File, relative: &str) -> Result<String> {
-    read_bound_regular_text_at(kio, relative, MAX_BOUND_CONFIG_BYTES)
 }
 
 /// Read a regular `.kio` metadata leaf through a retained directory
@@ -5070,15 +4993,6 @@ fn snapshot_authority_changed(message: &str) -> KioError {
         message,
         json!({}),
         ExitCode::PartialFailure,
-    )
-}
-
-fn snapshot_unsafe_direct_entry(message: &str) -> KioError {
-    KioError::new(
-        "KIO-E-SNAPSHOT-UNSAFE-ENTRY-001",
-        message,
-        json!({}),
-        ExitCode::PermanentFailure,
     )
 }
 

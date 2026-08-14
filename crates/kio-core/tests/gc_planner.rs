@@ -117,11 +117,11 @@ fn excluded(plan: &GcPlan, reason: &str) -> u64 {
 }
 
 #[test]
-fn automation_config_is_capability_bound_strict_and_defaults_manual() {
+fn automation_binding_is_capability_bound_strict_and_defaults_manual() {
     let f = Fixture::new();
     let session = GcSweepSession::bind(f.canonical_root()).unwrap();
     assert_eq!(
-        session.automation_config().unwrap(),
+        session.automation_binding().unwrap().config,
         GcAutomationConfig {
             mode: GcAutomationMode::ManualOnly,
             max_runtime_seconds: 60,
@@ -130,7 +130,7 @@ fn automation_config_is_capability_bound_strict_and_defaults_manual() {
 
     f.policy("[gc]\nmode = \"after_index\"\nmax_runtime_seconds = 17\n");
     assert_eq!(
-        session.automation_config().unwrap(),
+        session.automation_binding().unwrap().config,
         GcAutomationConfig {
             mode: GcAutomationMode::AfterIndex,
             max_runtime_seconds: 17,
@@ -160,7 +160,7 @@ fn automation_config_is_capability_bound_strict_and_defaults_manual() {
     assert_ne!(session.automation_binding().unwrap(), authority);
 
     f.policy("[gc]\nmode = \"after_index\"\nunknown = true\n");
-    assert!(session.automation_config().is_err());
+    assert!(session.automation_binding().is_err());
 }
 
 #[test]

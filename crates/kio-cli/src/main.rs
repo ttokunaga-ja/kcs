@@ -1281,8 +1281,8 @@ fn run_snapshot_auto() -> Result<Value> {
             false,
         ));
     }
-    let first_indexed = scheduled_auto_indexed(&session)?;
-    let second_indexed = scheduled_auto_indexed(&session)?;
+    let first_indexed = scheduled_auto_index_metadata(&session)?.is_some();
+    let second_indexed = scheduled_auto_index_metadata(&session)?.is_some();
     if first_indexed != second_indexed
         || session.automation_binding()? != first_gc
         || session.snapshot_auto_binding()? != first_config
@@ -1310,7 +1310,7 @@ fn run_snapshot_auto() -> Result<Value> {
     if gc_binding != first_gc
         || session.automation_binding()? != first_gc
         || session.snapshot_auto_binding()? != first_config
-        || scheduled_auto_indexed(&session)? != first_indexed
+        || scheduled_auto_index_metadata(&session)?.is_some() != first_indexed
     {
         return Err(snapshot_auto_authority_changed(
             "scheduled snapshot authority changed during automatic GC preflight",
@@ -1559,10 +1559,6 @@ fn scheduled_auto_expected_raw(preview: &ScanPreview) -> Result<BTreeMap<String,
             ))
         })
         .collect()
-}
-
-fn scheduled_auto_indexed(session: &GcSweepSession) -> Result<bool> {
-    Ok(scheduled_auto_index_metadata(session)?.is_some())
 }
 
 fn scheduled_auto_index_metadata(session: &GcSweepSession) -> Result<Option<BoundGcIndexMetadata>> {
