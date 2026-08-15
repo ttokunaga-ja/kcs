@@ -6,6 +6,7 @@ pub mod boundary;
 pub mod crossscope;
 pub mod generator;
 pub mod manifest;
+pub mod persona_plan;
 pub(crate) mod process_boundary;
 pub mod qhard;
 pub mod replay;
