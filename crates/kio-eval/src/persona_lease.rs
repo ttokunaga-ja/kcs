@@ -114,6 +114,12 @@ pub fn claim(
     let _lock = guard(dir.file())?;
     dir.after_mutation()?;
     a.recheck()?;
+    // scope_claim takes this same parent guard first.  While holding it, a
+    // validated scope lease is a stable veto: do not create a replacement
+    // parent session over an orphaned child lease.
+    if active_scopes(&a, persona)?.next().is_some() {
+        return bad("active scope lease blocks parent claim");
+    }
     let token = token()?;
     let stored = StoredParent {
         schema: "kio.persona.lease/v1".into(),
@@ -244,7 +250,7 @@ pub fn scope_claim(
     let p = persona_dir(&a, persona)?;
     p.recheck()?;
     let _pl = guard(p.file())?;
-    p.after_mutation()?;
+    p.recheck()?;
     if read_parent(p.file(), persona)?.session != parent_session {
         return bad("parent session changed");
     }
@@ -355,8 +361,11 @@ pub fn scope_recover(
     p.recheck()?;
     let _pl = guard(p.file())?;
     p.after_mutation()?;
-    if read_parent(p.file(), persona)?.session != parent_session {
-        return bad("parent session changed");
+    match read_parent(p.file(), persona) {
+        Ok(parent) if parent.session == parent_session => {}
+        Ok(_) => return bad("parent session changed"),
+        Err(PersonaLeaseError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let d = scope_dir(&a, persona, scope)?;
     d.recheck()?;
@@ -1104,6 +1113,36 @@ mod tests {
         scope_release(&root, "p01", &scope, "parent", &child.release_token).unwrap();
         release(&root, "p01", &parent.release_token).unwrap();
         assert!(claim(&root, "p99", "x", None).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn orphan_scope_blocks_reclaim_and_can_be_explicitly_recovered() {
+        let (_t, root, scope) = workspace();
+        let parent = claim(&root, "p01", "parent-a", None).unwrap();
+        let child = scope_claim(&root, "p01", &scope, "parent-a", "worker-a", None).unwrap();
+
+        // Simulate the interrupted/manual parent deletion which used to allow
+        // a new parent session to strand this child indefinitely.
+        std::fs::remove_file(root.join("_control/personas/p01/lease.json")).unwrap();
+        assert!(claim(&root, "p01", "parent-b", None).is_err());
+        assert!(scope_release(&root, "p01", &scope, "parent-a", &child.release_token).is_err());
+        assert!(!root.join("_control/personas/p01/lease.json").exists());
+
+        let receipt = scope_recover(
+            &root,
+            "p01",
+            &scope,
+            "parent-a",
+            "worker-a",
+            "recover orphan",
+        )
+        .unwrap();
+        assert_eq!(receipt.lease.parent_session, "parent-a");
+        assert!(scope_show(&root, "p01", &scope).is_err());
+        let next = claim(&root, "p01", "parent-b", None).unwrap();
+        release(&root, "p01", &next.release_token).unwrap();
+        assert_eq!(parent.lease.session, "parent-a");
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
