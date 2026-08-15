@@ -36,11 +36,9 @@ jobs:
           eval.test_u7_same_space
           eval.test_persona_storage
           eval.test_persona_streaming_storage
-          eval.test_persona_root_lock
-          eval.test_persona_kio_runner
-          eval.test_persona_prepare_receipt
+          eval.test_persona_skill_corpus_lease
           eval.test_persona_history_attestation
-          eval.test_generate_persona_corpus
+          eval.test_persona_skill_corpus_docs
 
   persona-w0-integration:
     runs-on: ubuntu-latest
@@ -61,89 +59,66 @@ jobs:
           --plan /tmp/kio-persona-plan.json
           --out /tmp/kio-persona-render.json
       - run: >-
-          python3 -m eval.generate_persona_corpus materialize
+          target/debug/kio-eval persona materialize
           --plan /tmp/kio-persona-plan.json
           --schedule /tmp/kio-persona-schedule.json
           --render /tmp/kio-persona-render.json
           --destination /tmp/kio-persona-artifacts
           --replay-id replay-01
+      - name: Refuse a second materialization without mutating the first
+        run: |
+          sha256sum \
+            /tmp/kio-persona-artifacts/persona-plan.json \
+            /tmp/kio-persona-artifacts/persona-schedule.json \
+            /tmp/kio-persona-artifacts/persona-render.json \
+            /tmp/kio-persona-artifacts/persona-materialization.json \
+            > /tmp/kio-persona-materialization.before
+          if target/debug/kio-eval persona materialize \
+            --plan /tmp/kio-persona-plan.json \
+            --schedule /tmp/kio-persona-schedule.json \
+            --render /tmp/kio-persona-render.json \
+            --destination /tmp/kio-persona-artifacts \
+            --replay-id replay-01; then
+            echo "second create-only materialization unexpectedly succeeded" >&2
+            exit 1
+          fi
+          sha256sum --check /tmp/kio-persona-materialization.before
       - run: >-
-          python3 -m eval.generate_persona_corpus materialize
+          target/debug/kio-eval persona scaffold
           --plan /tmp/kio-persona-plan.json
-          --schedule /tmp/kio-persona-schedule.json
-          --render /tmp/kio-persona-render.json
-          --destination /tmp/kio-persona-artifacts
-          --replay-id replay-01
+          --root /tmp/kio-persona-workspaces
       - name: Bind real Rust artifacts through retained Python boundaries
         run: |
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
 
-          from eval import persona_artifacts as artifacts
           from eval import persona_history_attestation as history
-          from eval import persona_prepare_receipt as receipts
-          from eval import persona_root_lock as root_lock
-          from eval import persona_storage as storage
+          from eval import persona_skill_corpus_lease as leases
 
-          plan = Path("/tmp/kio-persona-plan.json")
-          schedule = Path("/tmp/kio-persona-schedule.json")
-          render = Path("/tmp/kio-persona-render.json")
-          root = Path("/tmp/kio-persona-artifacts")
-          binding_path = root / "persona-root-binding.json"
-          bundle = artifacts.load_bundle(plan, schedule, render)
-          _, binding_sha = artifacts.read_exact_artifact(
-              binding_path, "root binding", 64 * 1024
-          )
-          artifact_sha = "sha256:" + hashlib.sha256(
-              storage.canonical_json_bytes(
-                  artifacts.artifact_bundle_record(
-                      fixture_id=bundle.fixture_id,
-                      profile=bundle.profile,
-                      plan_digest=bundle.plan_digest,
-                      plan_sha256=bundle.plan_sha256,
-                      schedule_sha256=bundle.schedule_sha256,
-                      render_sha256=bundle.render_sha256,
-                  )
-              )
+          artifacts = Path("/tmp/kio-persona-artifacts")
+          workspace = Path("/tmp/kio-persona-workspaces")
+          owner_digest = "sha256:" + hashlib.sha256(
+              (workspace / "persona-workspace-owner.json").read_bytes()
           ).hexdigest()
-          with root_lock.replay_root_lock(
-              root,
-              expected_profile="tiny",
-              expected_replay_id="replay-01",
-              expected_artifact_bundle_sha256=artifact_sha,
-              expected_root_binding_sha256=binding_sha,
-          ) as lease:
-              root_lock.require_active_lease(lease, root)
-              intent = receipts.build_prepare_receipt_intent(
-                  bundle=bundle,
-                  replay_id="replay-01",
-                  destination_root=root,
-                  root_binding_path=binding_path,
-                  root_binding_sha256=binding_sha,
-              )
-              receipts.validate_prepare_receipt(
-                  receipts.build_prepare_receipt(intent)
-              )
-              evidence = history.build_filesystem_attestation(
-                  bundle=bundle,
-                  root_binding_sha256=binding_sha,
-                  directory=root,
-              )
-              assert evidence["claims"] == {
-                  "actual_kio_evidence": False,
-                  "history_ready": False,
-              }
+          materialization_digest = "sha256:" + hashlib.sha256(
+              (artifacts / "persona-materialization.json").read_bytes()
+          ).hexdigest()
+          parent = leases.claim(workspace, "p01", owner_digest, "ci-parent", "ci")
+          scope = leases.scope_claim(
+              workspace, "p01", "p01-primary-01", owner_digest,
+              "ci-parent", "ci-worker", "ci",
+          )
+          leases.scope_release(
+              workspace, "p01", "p01-primary-01", owner_digest,
+              "ci-parent", scope["release_token"],
+          )
+          leases.release(workspace, "p01", owner_digest, parent["release_token"])
+          evidence = history.build_filesystem_attestation(
+              directory=artifacts, materialization_sha256=materialization_digest,
+          )
+          assert evidence["claims"] == {"actual_kio_evidence": False, "history_ready": False}
           PY
-      - run: >-
-          python3 -m eval.scaffold_persona_skill_corpus
-          --plan /tmp/kio-persona-plan.json
-          --root /tmp/kio-persona-workspaces
-      - run: >-
-          python3 -m unittest -v
-          eval.test_generate_persona_corpus
-          eval.test_scaffold_persona_skill_corpus
-          eval.test_persona_skill_corpus_lease
 
   synthetic-history-eval:
     needs: rust
@@ -219,8 +194,7 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       - run: >-
           python3 -m unittest
-          eval.test_persona_root_lock
-          eval.test_persona_prepare_receipt
+          eval.test_persona_skill_corpus_lease
           eval.test_persona_history_attestation
 
   windows-security-r23:

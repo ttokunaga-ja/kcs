@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -63,6 +64,19 @@ class FilesystemAttestationTests(unittest.TestCase):
             attestation.walk_directory_content_root(alias)
         with self.assertRaises(attestation.PersonaHistoryAttestationError):
             attestation.build_filesystem_attestation(directory=alias, materialization_sha256=self.digest)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin fixed filesystem aliases only")
+    def test_darwin_tmp_alias_binds_same_root(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            physical = Path(directory).resolve() / "root"
+            physical.mkdir()
+            record = physical / "persona-materialization.json"
+            record.write_bytes(b'{}\n')
+            import hashlib
+            digest = "sha256:" + hashlib.sha256(record.read_bytes()).hexdigest()
+            alias = Path("/tmp") / physical.relative_to("/private/tmp")
+            value = attestation.build_filesystem_attestation(directory=alias, materialization_sha256=digest)
+            self.assertEqual(value["materialization_sha256"], digest)
 
     def test_rejects_root_swap_after_authority_open(self):
         replacement = Path(self.temp.name).resolve() / "replacement"; replacement.mkdir()

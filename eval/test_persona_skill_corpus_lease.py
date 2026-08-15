@@ -1,5 +1,6 @@
 import hashlib
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,4 +99,11 @@ class PersonaSkillCorpusLeaseTests(unittest.TestCase):
         with mock.patch("sys.stderr"):
             with self.assertRaises(SystemExit):
                 lease._parser().parse_args(["scope-show","--root","/tmp/workspace","--persona","p01","--owner-digest",digest,"--scope","p01-primary-01"])
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin fixed filesystem aliases only")
+    def test_darwin_tmp_alias_binds_same_workspace(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root,digest=self.make(Path(directory))
+            alias=Path("/tmp")/root.relative_to("/private/tmp")
+            claimed=claim(alias,"alice",digest,"s",None)
+            self.assertEqual(claimed["owner_digest"],digest)
 if __name__=="__main__": unittest.main()

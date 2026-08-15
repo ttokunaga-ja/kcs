@@ -66,6 +66,13 @@ cargo test -p kio-eval --all-targets --locked
 python3 -m unittest eval.test_eval_env eval.test_persona_storage
 ```
 
+For a local persona-boundary smoke, create canonical artifacts only through the
+Rust CLI: `kio-eval persona materialize --plan ABS --schedule ABS --render ABS
+--destination ABS --replay-id ID`, and create its separate workspace with
+`kio-eval persona scaffold --plan ABS --root ABS`. The retained Python lease and
+history modules consume those opaque Rust-owned records; they do not generate,
+parse, or reconstruct persona artifacts.
+
 Development, CI, and the workspace contract all use Rust `1.97.1` with
 Edition 2024 (see `rust-toolchain.toml` and the workspace `Cargo.toml`). Kio is
 pre-stable and does not maintain a second MSRV compatibility contract.

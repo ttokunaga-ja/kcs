@@ -453,118 +453,61 @@ entry があれば削除前に停止する。ready corpus の再生成と再 pre
 cargo test -p kio-eval --all-targets --locked
 ```
 
-## 20人の独立persona-PC fixture（設計契約）
+## 20人の独立 persona-PC fixture（Rust-only contract）
 
-上のbalanced fixtureは「1 registryの20用途」であり、20人のPC再現ではない。別の
-persona-PC suiteでは、1人につき独立したPC root、XDG device state/registry、12個の
-職種固有leaf scopeと8個の共通PC leaf scopeを持たせる。20人の各PCがformal fullで
-W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks以上を満たす。
-
-- normative Rust contract: `tasks/persona-pc-eval-contract.md`
-- closed plan: `kio-eval persona plan --profile <tiny|pilot|full> --out <absolute>`
-- plan-bound render projection: `kio-eval persona render --plan <absolute> --out <absolute>`
-- plan-bound W0--W5 schedule projection: `kio-eval persona schedule --plan <absolute> --out <absolute>`
-- direct implementation/tests: `crates/kio-eval/src/persona_{plan,render,manifest,schedule}.rs`
-- non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
-- read-only replay-root lease primitive: `eval/persona_root_lock.py`
-- fail-closed Kio command/result boundary: `eval/persona_kio_runner.py`
-- canonical non-executing artifact-bound prepare-receipt composer:
-  `eval/persona_prepare_receipt.py`
-- bounded filesystem-byte observer with explicit false Kio/history claims:
-  `eval/persona_history_attestation.py`
-- retained Python boundary tests: `eval/test_persona_storage.py`,
-  `eval/test_persona_streaming_storage.py`, `eval/test_persona_root_lock.py`,
-  `eval/test_persona_kio_runner.py`, `eval/test_persona_prepare_receipt.py`,
-  `eval/test_persona_history_attestation.py`, and filesystem integration only.
-
-15形式のW0物理ファイル比率、20人×12 primary paths、7,000〜16,000 files/person、
-75% primary / 25% common-secondary contributor負荷、W0〜W5操作集合を固定済みである。
-比率の分母はW0の物理direct-child filesで、current chunk数とは別台帳にする。
-Office、scan PDF、image、media、domain binaryを作成しただけでは120,000の検索可能
-chunkへ数えない。
-
-20人それぞれのOS semantics、device class、locale/language、work style、
-synthetic export source、sensitivity、nesting、size/domain-binary profileは、共通の
-small/medium/large/tail size-complexity bucketとともにmachine-readableな仮説metadataとして
-実装済みである。ただし、それらは実ユーザー統計ではなく、
-`implemented_by_renderer=false`である。現在のrendererのbytes、サイズ分布、
-extension/domain-binary variants、OS動作は従来のままで、検索可能性も主張しない。
-
-`tiny`は200 files/personとする。100 files/personではfinance-controllerの安定
-contributorが19件にしかならず、20個すべてのscopeへ非ゼロchunk targetを割り当てられない。
-200件なら比率を整数のまま保ちつつ、全scopeへ最低1 contributorを配置できる。
-
-### Rust-only planning status
-
-The pure contract is produced only by `kio-eval persona plan`, `persona render`,
-and `persona schedule`. The accepted plan fixes twenty people, twenty scopes per
-person, source identities, allocation, and structural rows. Renderer and
-manifest outputs are plan-bound deterministic projections; schedule derives
-W0--W5 dependencies and deltas from that same plan. Rust validates canonical
-artifacts, bounded parsing, checked totals, and deterministic suite merging.
-
-These artifacts are not filesystem materialization, Kio prepare/index/replay,
-or actual chunk evidence. They neither authorize nor replace the retained
-filesystem/runtime boundary work, which remains fail-closed until independent
-readback and attestation requirements are met.
-
-The current schedule uses the closed P/X/Y/N/U cohorts: W1 and W3 add planned
-history, W4 replaces X without changing the current target, and W5 corrects N,
-creates P replacements, indexes coexistence, serially purges old P versions,
-then emits one no-op index per affected scope. Structural rows are
-history-neutral. This remains planning evidence, rather than a replay claim.
-
-`tiny`, `pilot`, and `full` are supported plan profiles. A tiny output is a
-contract smoke only; a pilot or full plan is not permission to write a corpus,
-nor evidence of filesystem capacity, Kio chunks, history readiness, or latency.
-
-The retained Python code has a deliberately narrow role: bounded artifact
-storage, topology-only workspace scaffolding, root locking, command/runtime
-handling, prepare receipts, and opaque filesystem-byte attestation. It must
-consume accepted Rust artifacts rather
-than reconstruct persona topology, render bytes, allocation, ledgers, or event
-schedules. Its security boundaries remain non-authorizing: none of them makes
-physical publication, mutation/replay, actual chunk counts, history readiness,
-or performance a passing claim without independent readback.
+persona-PC suite の唯一の semantic authority は Rust の canonical artifacts である。
+`plan` は persona、Rust scope ID、home path、allocation、source identity を固定し、
+`schedule` と `render` は同一 plan に束縛された deterministic projection である。Python
+に semantic parser、generator、renderer、materializer、scaffold、prepare/replay runner はない。
 
 ```bash
 target/release/kio-eval persona plan --profile tiny \
   --out /private/tmp/kio-persona-tiny-plan.json
-target/release/kio-eval persona render \
-  --plan /private/tmp/kio-persona-tiny-plan.json \
-  --out /private/tmp/kio-persona-tiny-render.json
 target/release/kio-eval persona schedule \
   --plan /private/tmp/kio-persona-tiny-plan.json \
   --out /private/tmp/kio-persona-tiny-schedule.json
-
-python3 -m eval.generate_persona_corpus materialize \
+target/release/kio-eval persona render \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --out /private/tmp/kio-persona-tiny-render.json
+target/release/kio-eval persona materialize \
   --plan /private/tmp/kio-persona-tiny-plan.json \
   --schedule /private/tmp/kio-persona-tiny-schedule.json \
   --render /private/tmp/kio-persona-tiny-render.json \
-  --destination /private/tmp/kio-persona-artifacts \
-  --replay-id replay-01
-
-python3 -m eval.scaffold_persona_skill_corpus \
+  --destination /private/tmp/kio-persona-artifacts --replay-id replay-01
+target/release/kio-eval persona scaffold \
   --plan /private/tmp/kio-persona-tiny-plan.json \
   --root /private/tmp/kio-persona-workspaces
 ```
 
-`materialize` copies the three exact Rust artifacts and publishes only their
-identity envelope. Its root binding fixes `sources_materialized=false`,
-`actual_kio_evidence=false`, and `history_ready=false`. The scaffold consumes
-only safe persona/scope path topology and does not validate or recreate the
-plan's allocation, manifest, renderer, or schedule semantics.
+Both Rust publication commands are create-only. Materialization publishes only
+the three canonical artifacts and `persona-materialization.json`; scaffold
+publishes workspace topology and `persona-workspace-owner.json`. A plan profile
+is planning/materialization evidence only: it is not Kio prepare/index/replay,
+chunk, history-readiness, or performance evidence.
+
+The only retained Python persona boundaries are generic streaming storage, an
+opaque owner-record-bound lease, and a materialization-record-bound filesystem
+observer. Lease calls require the exact owner-record digest and scope calls use
+the Rust scope ID, never a home path:
+
+```bash
+python3 -m eval.persona_skill_corpus_lease scope-claim \
+  --root /private/tmp/kio-persona-workspaces --persona p01 \
+  --scope-id <rust-scope-id> \
+  --owner-digest sha256:<lowercase-hash-of-owner-bytes> \
+  --parent-session parent-01 --worker-session worker-01
+```
+
+`eval.persona_history_attestation` is a bounded bytes-only observation bound to
+the exact digest of `persona-materialization.json`. It explicitly reports no
+actual Kio evidence and no history readiness. It neither parses the artifacts
+nor establishes replay/search success.
 
 ```bash
 python3 -m unittest \
-  eval.test_persona_storage \
   eval.test_persona_streaming_storage \
-  eval.test_persona_root_lock \
-  eval.test_persona_kio_runner \
-  eval.test_persona_prepare_receipt \
   eval.test_persona_history_attestation \
-  eval.test_generate_persona_corpus \
-  eval.test_scaffold_persona_skill_corpus \
   eval.test_persona_skill_corpus_lease \
+  eval.test_persona_skill_corpus_docs \
   eval.test_eval_env
 ```

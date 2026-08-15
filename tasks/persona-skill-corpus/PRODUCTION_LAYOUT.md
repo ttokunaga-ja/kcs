@@ -1,99 +1,49 @@
-# Production layout and checkpoint metadata
+# Rust workspace layout
 
-This file records the legacy directory shape only; it is not an executable
-topology authority. A current v4 root must be a separately authorized location
-outside the repository and must be scaffolded from an accepted Rust plan. The
-current plan has exactly twenty projected persona directories, with no central
-device or production-state directory:
+`kio-eval persona scaffold --plan <absolute-plan> --root <absolute-root>` is
+the only producer of this workspace. It accepts an absolute, new root and
+publishes an exact create-only tree. Runbooks and Python do not create,
+complete, or reinterpret it.
 
 ```text
-<authorized-v4-root>/
-  p01-software-engineer/
-    WORKSPACE.md                       # parent-chat guidance
-    home/
-      <12 plan-defined primary paths>/
-      <8 shared secondary paths>/
-    _production/
-      status.json                      # parent chat only
-      lease.json                       # active parent-chat lease
-      manifest.json                    # parent chat only
-      inventory.jsonl                 # parent-built aggregate
-      provenance.jsonl                # parent-built aggregate
-      narrative.json                  # parent chat only
-      qa.jsonl                         # parent-built aggregate
-      lease-recovery.jsonl  .lease.lock
-      prompts/                         # parent plans
-      scopes/
-        <stable-scope-id>/
-          WORKSPACE.md                 # one exact home folder assignment
-          assignment.json              # parent-owned fixed file list
-          status.json
-          inventory.jsonl
-          provenance.jsonl
-          qa.jsonl
-          lease.json                   # active subagent lease
-          lease-recovery.jsonl  .lease.lock
-          prompts/  temp/  renders/  evidence/
-  p02-site-reliability-engineer/
-  ... p20-investigative-journalist/
+<workspace-root>/
+  persona-plan.json
+  persona-workspace-owner.json
+  _control/
+    personas/
+      <persona-id>/
+    scopes/
+      <persona-id>/
+        <rust-scope-id>/
+  people/
+    <persona-id>-<role>/
+      home/
+        <scope-path>/
 ```
 
-The persona-level `WORKSPACE.md` is an immutable, scaffold-owned control file.
-It identifies the persona, points to the common rules, batch protocol, and
-persona brief, and states that one parent chat coordinates the complete persona.
-Each scope-level `WORKSPACE.md` binds one stable scope ID to exactly one
-plan-defined `home/` leaf folder and states the narrower subagent boundary.
-Control files never live inside `home/`, so they cannot enter the corpus.
-The parent writes `assignment.json` before dispatch. Its `files` array fixes the
-artifact ID, direct relative filename, family/variant, skill route, narrative
-anchors, and cross-file links. Scope workers read but never modify it.
+The exact persona IDs, role slugs, Rust scope IDs, and `scope-path` values are
+read from the accepted plan; the illustrative names above are not a second
+schema. `persona-plan.json` and `persona-workspace-owner.json` are Rust-owned
+records and must not be edited.
 
-One parent chat session owns one complete persona folder `<persona>/` and holds
-the lease at `<root>/<persona>/_production/`. Its subagents intentionally split
-the persona by plan-defined leaf folder. Each subagent owns one
-`<persona>/home/<scope-path>/` plus the single matching
-`<persona>/_production/scopes/<scope-id>/` area. Distinct leaf folders have no
-ancestor/descendant overlap and may run concurrently; never assign the same
-leaf folder twice.
+`_control/`, `_control/personas/`, `_control/scopes/`, and each
+`_control/scopes/<persona-id>/` are sealed routing directories. The direct
+persona and scope leaf directories beneath them are mutable only for the
+opaque lease implementation. No additional operator-managed record hierarchy
+is created by the scaffold or required for production.
 
-The authoritative primary and shared-secondary paths come only from the
-accepted Rust plan artifact. The scaffold consumes their safe path projection;
-runbooks and Python control files do not maintain a duplicate path table.
-`_production/` is outside its persona's `home/` tree, so it
-cannot enter corpus format ratios or evaluation scopes.
+For a plan row, final content belongs only in the corresponding
+`people/<persona-id>-<role>/home/<scope-path>/`. The scope's control directory
+is selected by its separate Rust scope ID:
 
-Create the complete directory skeleton before content production. The
-scaffold records the reversible scope-path-to-ID mapping in each scope manifest;
-workers must not invent IDs or use a non-fixture path. A persona's parent
-`status.json` must at least contain `persona_id`, `role`, `owner_session`, `state`
-(`scaffolded|generating|qa|blocked|complete`), `updated_at`, `next_action`,
-and `blocking_issue`. `owner_session` is informational; only `lease.json` is
-authoritative for parent-chat ownership. Scope status uses the corresponding
-scope lease as its writer authority. Scope-local `inventory.jsonl` records every
-final relative `home/`
-path, scope key, format family, format variant, size, checksum, narrative/source
-ID, immutable `artifact_id`, and `active` state.
-`manifest.json` identifies the persona, fixture version, scope allocation, and
-the inventory/provenance/QA record versions. `provenance.jsonl` records synthetic
-seed, generation method/skill, inputs, and promotion time. `narrative.json` records
-the approved fictional entities, timeline, terminology, and numeric anchors.
-`qa.jsonl` records artifact path, required render/inspection, result, evidence
-location, and reviewer/date. Only the parent chat may rebuild the persona-level
-aggregate journals from scope-local records, and only while no included scope
-journal is being mutated.
+```bash
+python3 -m eval.persona_skill_corpus_lease scope-claim \
+  --root <workspace-root> --persona <persona-id> \
+  --scope-id <rust-scope-id> \
+  --owner-digest sha256:<lowercase-hash-of-owner-bytes> \
+  --parent-session <parent-session> --worker-session <worker-session>
+```
 
-`artifact_id` is the join key shared by the scope-local `inventory.jsonl`,
-`provenance.jsonl`, and `qa.jsonl`. An artifact counts as final only when its latest active inventory
-row and latest QA row have the same `artifact_id` and checksum, and that QA row
-has `result: "pass"`. Replacements receive a new `artifact_id`; the prior
-inventory row is superseded rather than silently edited. `completed_artifacts`
-may advance only from that joined predicate. Keep failed/replaced material under
-the matching scope's `_production/scopes/<scope-id>/temp/` with its reason,
-never under `home/`.
-
-The scaffold resolves all known directories relative to retained no-follow
-directory descriptors and rejects internal symlinks, non-directories, foreign
-ownership, permissive directories, and non-regular/multiply-linked control
-files, including parent and scope leases, on resume. The marker identifies the
-layout version; it is not an authorization token. Corpus workers must preserve
-the same no-link rule when promoting final artifacts.
+The lease is duplicate-writer coordination, not a semantic plan parser or
+authorization for Kio replay. Filesystem attestation is separately bound to
+the exact `persona-materialization.json` digest and makes no Kio/history claim.

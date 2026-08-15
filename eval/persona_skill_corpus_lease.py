@@ -36,6 +36,7 @@ def _directory(meta,label):
 def _root(root):
     _platform(); raw=os.fspath(root)
     if not isinstance(raw,str) or not raw.startswith("/") or raw.startswith("//") or "/./" in raw or raw.endswith("/.") or "/../" in raw or raw.endswith("/..") or raw.endswith("/"): raise LeaseError("workspace root must be absolute and normalized")
+    if sys.platform=="darwin" and (raw=="/tmp" or raw.startswith("/tmp/") or raw=="/var" or raw.startswith("/var/")): raw="/private"+raw
     supplied=Path(raw)
     path=supplied; descriptor=None
     try:

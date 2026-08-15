@@ -167,8 +167,11 @@ formal gateにはcurrent binaryを束縛した上記fresh reportだけを使い�
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - `cargo test --workspace --all-targets --locked`
 - `.github/workflows/ci.yml` の Rust job と同じ Python unittest module 列
-- `KIO_RUN_PERSONA_FS_INTEGRATION=1 python3 -m unittest -v eval.test_generate_persona_corpus`
 - `git diff --check`
+
+この記録で言及していた旧 Python persona generator の filesystem integration
+command は Rust-only cutover により廃止済みです。これは当時の Phase 3 受入れを
+記録する歴史的な validation であり、現行の validation command ではありません。
 
 ## Non-substitution and phase boundary
 

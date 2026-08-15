@@ -1,50 +1,43 @@
 # Common production rules
 
-1. Treat an accepted `kio-eval persona plan` artifact as authoritative. Do not
-   rename, omit, add, or reweight personas, scopes, source IDs, families,
-   variants, or quotas. Materialize files only below the assigned
-   `<pXX-role>/home/` root.
-2. All content is synthetic: never use real PII, PHI, credentials, secrets,
-   customer data, or copied private documents. Use invented but internally
-   consistent people, organizations, account numbers, and identifiers.
-3. Maintain a believable per-persona narrative. Names, project/study/account
-   IDs, dates, milestones, amounts, terminology, conclusions, and revisions
-   must agree across related files. Record the persona lexicon and timeline in
-   its production metadata.
-4. Use ordinary generation for text, code, and data. Where quality benefits,
+1. Treat the accepted Rust `kio-eval persona plan` artifact as authoritative.
+   Do not rename, omit, add, reweight, or derive personas, Rust scope IDs,
+   home paths, source IDs, families, variants, or quotas. Rust is the only
+   plan parser, renderer, materializer, and scaffold.
+2. Create fresh artifact and workspace roots only with `kio-eval persona
+   materialize` and `kio-eval persona scaffold`. Both are create-only. Do not
+   adopt the checked-in skeleton or write a compatibility layout.
+3. All content is synthetic: never use real PII, PHI, credentials, secrets,
+   customer data, or copied private documents. Keep invented people,
+   organizations, identifiers, dates, amounts, terminology, and conclusions
+   internally consistent across the plan-authorized files.
+4. Write final corpus files only below the plan row's exact
+   `people/<persona-id>-<role>/home/<scope-path>/` directory. `scope_path` is
+   not the Rust `scope_id`; never derive either value from the other.
+5. Use ordinary generation for text, code, and data. When quality benefits,
    use the named **Documents**, **PDF**, **Spreadsheets**, **Presentations**, or
    **ImageGen** skill for DOCX, XLSX, PPTX, `pdf_text`, `pdf_scan`, or image
-   artifacts. A scan PDF requires ImageGen plus the PDF workflow.
-5. Before using any named skill, the worker must read its relevant `SKILL.md`.
-   Render and inspect every final document page, PDF page, spreadsheet sheet,
-   slide, and image as that skill requires. Store QA evidence outside `home/`.
-6. Keep temporary sources, render outputs, and scratch work separate from final
-   corpus paths. Promote only reviewed final files into `home/`; record source,
-   generator/skill, seed, and checksum or equivalent provenance in the manifest.
+   artifacts. Read the applicable `SKILL.md` before use and inspect every final
+   artifact as that skill requires.
+6. Temporary sources, render outputs, and operational notes must stay outside
+   the Rust-published workspace root unless a separate, non-formal storage
+   location is explicitly chosen. The scaffold creates no operator-managed
+   record hierarchy beyond its own Rust-owned records and lease controls.
 7. Do not design product-search QA or assert searchability from raw artifacts.
-   This workflow produces corpus files and artifact QA only; evaluator/index
-   validation remains governed by the Rust plan/manifest/schedule contracts.
-8. Ownership has two levels. One parent chat session owns one complete persona
-   and holds its persona lease. Within that chat, each artifact-producing
-   subagent owns exactly one plan-defined leaf folder for the duration of an
-   assignment, for which the parent must hold a bound scope lease. Different leaf folders
-   in the same persona may run concurrently; the same folder may not have two
-   active writers. A Markdown claim alone is not ownership.
-9. Before dispatch, the parent records the exact relative filenames, format
-   families, artifact IDs, and narrative anchors assigned to each leaf folder.
-   A scope worker may write only those final files below its assigned `home/`
-   folder. Within its matching `_production/scopes/<scope-id>/`, it may update
-   only scope-local status, inventory, provenance, QA, prompts, temp, renders,
-   and evidence. It must not edit persona-wide controls or aggregates, another
-   scope, or the parent-owned scope `WORKSPACE.md`, `manifest.json`,
-   `assignment.json`, lease, lock, or recovery log.
-10. At each checkpoint the scope worker updates its scope-local status,
-    inventory, failures, decisions, and exact next action. After workers stop,
-    the parent chat validates and deterministically aggregates those records
-    into the persona-wide checkpoint. A later parent chat must be able to
-    resume without rediscovering what was generated or inspected.
-11. Persona and scope leases prevent accidental duplicate assignment among
+   This workflow produces files and visual/structural inspection only. It does
+   not establish Kio prepare/index/replay, chunks, search correctness, history
+   readiness, or latency.
+8. One parent chat coordinates one persona at a time. Before assigning a
+   worker, it obtains the opaque lease with the exact
+   `--owner-digest sha256:<hex>` of `persona-workspace-owner.json`. A worker
+   owns one Rust scope ID at a time; the parent alone retains release tokens.
+   Scope lease commands use `--scope-id <Rust scope id>`, never a home path.
+9. Workers may create only the planned final files in their assigned home path.
+   They must not write `_control/`, replace the Rust plan/owner/materialization
+   records, or alter lease, lock, or recovery files. The parent verifies planned
+   placement and artifact quality before releasing the scope lease.
+10. Persona and scope leases prevent accidental duplicate assignment among
     cooperating sessions. They are not security boundaries against processes
     with direct write access as the same OS user. Forced recovery is a trusted
-    parent/user operation and must never be delegated to an artifact-producing
-    subagent.
+    parent/user action and must never be delegated to an artifact-producing
+    worker.

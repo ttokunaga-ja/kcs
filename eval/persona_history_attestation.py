@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import unicodedata
 
 
@@ -90,6 +91,8 @@ def _normalized_absolute_path(value: os.PathLike[str] | str) -> Path:
     raw = os.fspath(value)
     if type(raw) is not str or not raw.startswith("/") or raw.startswith("//") or raw != os.path.normpath(raw) or any(component in (".", "..") for component in raw.split("/")):
         raise PersonaHistoryAttestationError("runtime root path must be absolute and lexically normalized")
+    if sys.platform == "darwin" and (raw == "/tmp" or raw.startswith("/tmp/") or raw == "/var" or raw.startswith("/var/")):
+        raw = "/private" + raw
     return Path(raw)
 
 def _file(parent: int, name: str, expected: os.stat_result, limits: AttestationLimits):

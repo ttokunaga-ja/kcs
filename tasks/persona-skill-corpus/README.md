@@ -1,54 +1,50 @@
 # Persona skill corpus production
 
-This directory is the operating runbook for producing a high-fidelity, synthetic
-20-persona corpus across multiple Codex sessions. The executable authority for
-persona IDs, roles, format ratios, scope paths, weights, source identities, and
-count profiles is an accepted Rust `kio-eval persona plan` artifact; these
-documents do not replace it.
+This is an operational runbook for a synthetic 20-persona corpus. The only
+authority for persona IDs, roles, scope IDs, home paths, ratios, sources, and
+counts is the accepted Rust plan. These documents are not an alternate schema,
+parser, generator, renderer, or scaffold contract.
 
-Start with [COMMON_RULES.md](COMMON_RULES.md), choose work from the
-[persona index](PERSONA_INDEX.md), and follow [BATCH_PROTOCOL.md](BATCH_PROTOCOL.md).
-The retained scaffold may consume an accepted Rust plan only for safe directory
-topology when workspace creation is separately authorized. It does not derive
-ratios, validate semantic plan contents, or materialize rendered sources.
+Create all four canonical artifacts with Rust, then create new roots only with
+the Rust create-only commands:
 
-```text
-kio-eval persona plan --profile <tiny|pilot|full> --out <absolute>
-python3 -m eval.scaffold_persona_skill_corpus \
-  --plan <absolute-plan> --root <absolute-new-root>
+```bash
+kio-eval persona plan --profile <tiny|pilot|full> --out <absolute-plan>
+kio-eval persona schedule --plan <absolute-plan> --out <absolute-schedule>
+kio-eval persona render --plan <absolute-plan> --out <absolute-render>
+kio-eval persona materialize \
+  --plan <absolute-plan> --schedule <absolute-schedule> \
+  --render <absolute-render> --destination <absolute-artifact-root> \
+  --replay-id <id>
+kio-eval persona scaffold --plan <absolute-plan> --root <absolute-workspace-root>
 ```
 
-The checked-in `persona-corpus/` skeleton predates this Rust-only authority and
-is historical evidence; this milestone does not adopt or mutate it. Create any
-new v4 scaffold outside the repository. The legacy layout in
-[PRODUCTION_LAYOUT.md](PRODUCTION_LAYOUT.md) is historical reference only. Use
-[SESSION_HANDOFF.md](SESSION_HANDOFF.md) only after the retained boundary has
-stored the exact accepted Rust plan in a separately authorized new workspace.
+`materialize` publishes exactly the canonical plan, schedule, render, and its
+Rust materialization record. `scaffold` creates the workspace topology and its
+Rust workspace-owner record. Both reject existing destinations; create new
+workspace roots outside the repository and never adopt,
+mutate, or infer a workspace from the checked-in historical `persona-corpus/`
+skeleton.
 
-An authorized v4 production root contains exactly twenty direct persona folders,
-`p01-...` through `p20-...`, as supplied by the accepted Rust plan.
-The corpus itself belongs only in `<pXX-role>/home/`. Production state,
-receipts, prompts, temporary renders, and QA evidence belong in that persona's
-`<pXX-role>/_production/` tree and must never be copied into `home/`.
+The scaffolded content path for a given plan row is
+`people/<persona-id>-<role>/home/<scope-path>`. The lease API never accepts that
+path: it accepts the distinct Rust `scope_id`, and writes coordination state
+only beneath `_control/`. Do not derive a scope ID from a path.
 
-Each persona is an independent synthetic PC. Produce only the twelve primary
-scopes plus eight shared secondary scopes specified by the accepted plan; retain
-its frozen 75/25 primary/secondary weighting and format percentages exactly.
+The remaining Python utilities have deliberately opaque, bounded roles only:
 
-Ownership has two levels:
+- `eval.persona_skill_corpus_lease` coordinates writers against the exact bytes
+  of `persona-workspace-owner.json`, supplied as `--owner-digest sha256:<hex>`.
+- `eval.persona_history_attestation` observes filesystem bytes and binds that
+  observation to the exact `persona-materialization.json` digest. Its claims
+  explicitly leave Kio evidence and history readiness false.
+- Generic streaming storage remains non-formal artifact storage.
 
-- One parent chat session coordinates exactly one complete persona folder and
-  holds that persona's parent lease.
-- Inside that chat, each artifact-producing subagent is assigned exactly one of
-  the persona's twenty plan-defined leaf folders. It writes only the fixed
-  files in that folder and that folder's matching production-control area.
+They do not parse Rust persona artifacts, reconstruct allocation or topology,
+materialize files, prepare/replay Kio, or make search/history claims.
 
-Different folder assignments inside the same persona may run concurrently.
-Never assign two active subagents to the same leaf folder, and never let a
-subagent append to persona-wide shared journals. The parent chat owns narrative
-decisions, assignment planning, persona-wide status, and deterministic
-aggregation of the folder journals. Subagents have the same artifact
-capabilities as the parent session and may produce routed files after reading
-the applicable skill instructions. They do not provide a permanent background
-workforce across closed sessions: every turn must finish or checkpoint its
-folder batch and leave complete scope-local status.
+Production work is plan-authoritative. A parent owns one persona lease; a
+worker owns one plan-defined leaf scope at a time. Worker output belongs only
+under that row's `home/<scope-path>`; the control scope is identified by its
+Rust `scope_id`. Read [BATCH_PROTOCOL.md](BATCH_PROTOCOL.md) and
+[SESSION_HANDOFF.md](SESSION_HANDOFF.md) before starting work.
