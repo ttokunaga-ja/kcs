@@ -30,7 +30,10 @@ const MAX_OBJECT_MEMBERS: usize = 16;
 const MAX_LOGICAL_MEMBERS_PER_SOURCE: usize = 128;
 const MAX_TRANSFORMS_PER_PERSON: usize = 64;
 const MAX_CONTAINER_ELEMENTS: usize = 16_000;
-const MAX_TOKENS: usize = MAX_SOURCES * 64;
+// The frozen Full artifact contains 17,327,512 structural JSON tokens.  Keep
+// this pre-Serde scan bounded while admitting the largest canonical profile.
+// Any renderer-schema change must still update the frozen artifact vectors.
+const MAX_TOKENS: usize = MAX_SOURCES * 90;
 const MAX_OBJECTS: usize = MAX_SOURCES * 20;
 const MAX_ARRAYS: usize = MAX_SOURCES * 4;
 
@@ -531,6 +534,7 @@ mod tests {
             assert!(artifact.source_count as usize <= MAX_SOURCES);
             let bytes = artifact.canonical_bytes().unwrap();
             assert!(bytes.len() <= MAX_CANONICAL_BYTES);
+            preflight_json(&bytes).unwrap();
         }
     }
     #[test]

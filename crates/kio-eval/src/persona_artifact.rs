@@ -46,6 +46,47 @@ struct Observation {
     hash: String,
 }
 
+/// A descriptor-bound observation of one strict artifact file.
+///
+/// It retains the parent directory descriptor and initial file identity, so a
+/// later recheck rejects replacement even when replacement bytes are identical.
+#[derive(Debug)]
+pub struct StrictArtifact {
+    parent: BoundParent,
+    path: PathBuf,
+    maximum: usize,
+    bytes: Vec<u8>,
+    observation: Observation,
+}
+
+impl StrictArtifact {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Re-read through the retained descriptor and require the original file
+    /// identity, length, hash, and bytes to remain exact.
+    pub fn recheck(&self) -> Result<(), PersonaArtifactError> {
+        recheck_parent(&self.parent)?;
+        let (bytes, observation) = observe_regular(
+            &self.parent.handle,
+            &self.parent.leaf,
+            self.maximum,
+            &self.path,
+        )?;
+        if bytes != self.bytes || observation != self.observation {
+            return unsafe_state("artifact changed after initial observation");
+        }
+        recheck_parent(&self.parent)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     #[cfg(unix)]
@@ -61,11 +102,22 @@ struct FileIdentity {
 /// Read a bounded, single-link UTF-8 regular artifact through a retained,
 /// no-follow path walk.  Inputs must be absolute and lexically normalized.
 pub fn read_strict(path: &Path, maximum: usize) -> Result<Vec<u8>, PersonaArtifactError> {
+    Ok(bind_strict(path, maximum)?.bytes)
+}
+
+/// Bind a strict artifact for an exact identity recheck before later mutation.
+pub fn bind_strict(path: &Path, maximum: usize) -> Result<StrictArtifact, PersonaArtifactError> {
     let parent = bind_parent(path)?;
     recheck_parent(&parent)?;
-    let (bytes, _) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
+    let (bytes, observation) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
     recheck_parent(&parent)?;
-    Ok(bytes)
+    Ok(StrictArtifact {
+        parent,
+        path: path.to_owned(),
+        maximum,
+        bytes,
+        observation,
+    })
 }
 
 /// Publish canonical bytes once.  The destination is never overwritten and
@@ -249,25 +301,16 @@ fn bind_parent(path: &Path) -> Result<BoundParent, PersonaArtifactError> {
 
 fn recheck_parent(parent: &BoundParent) -> Result<(), PersonaArtifactError> {
     let retained = cap_fs::Metadata::from_file(&parent.handle)?;
-    let public = fs::symlink_metadata(&parent.public)?;
-    #[cfg(unix)]
-    let public_identity_matches = same_std(&parent.identity, &public);
-    #[cfg(windows)]
-    let public_identity_matches = matches!(
-        (
-            kio_core::cas::windows_directory_handle_identity(&parent.handle),
-            kio_core::cas::windows_real_directory_identity(&parent.public)?,
-        ),
-        (Some(handle), Some(path)) if handle == path
-    );
-    #[cfg(not(any(unix, windows)))]
-    let public_identity_matches = false;
+    // Rewalk every public ancestor without following links.  A plain metadata
+    // lookup would follow an ancestor symlink that points back to the retained
+    // directory and incorrectly preserve the apparent identity.
+    let rebound = bind_parent(&parent.public.join(&parent.leaf))?;
     if !retained.is_dir()
         || retained.file_type().is_symlink()
-        || public.file_type().is_symlink()
-        || !public.is_dir()
         || !same(&parent.identity, &retained)
-        || !public_identity_matches
+        || rebound.public != parent.public
+        || rebound.leaf != parent.leaf
+        || !same(&parent.identity, &rebound.identity)
     {
         return unsafe_state("artifact parent identity changed");
     }
@@ -435,12 +478,6 @@ fn same(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
     identity(left) == identity(right)
 }
 
-#[cfg(unix)]
-fn same_std(left: &cap_fs::Metadata, right: &fs::Metadata) -> bool {
-    use {cap_fs::MetadataExt as _, std::os::unix::fs::MetadataExt as _};
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +565,24 @@ mod tests {
         let bound = bind_parent(&target).unwrap();
         fs::rename(&parent, base.join("old")).unwrap();
         fs::create_dir(&parent).unwrap();
+        assert!(recheck_parent(&bound).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_ancestor_replaced_by_symlink_to_retained_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let base = absolute(root.path());
+        let ancestor = base.join("ancestor");
+        let parent = ancestor.join("out");
+        fs::create_dir(&ancestor).unwrap();
+        fs::create_dir(&parent).unwrap();
+        let bound = bind_parent(&parent.join("plan.json")).unwrap();
+        let retained_ancestor = base.join("retained-ancestor");
+        fs::rename(&ancestor, &retained_ancestor).unwrap();
+        symlink(&retained_ancestor, &ancestor).unwrap();
         assert!(recheck_parent(&bound).is_err());
     }
 }

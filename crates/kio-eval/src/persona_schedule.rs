@@ -14,7 +14,7 @@ use thiserror::Error;
 
 pub const SCHEMA: &str = "kio.persona.schedule/v2";
 const MAX_EVENTS_PER_PERSON: usize = 100_000;
-const MAX_CANONICAL_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CANONICAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 128;
 const MAX_JSON_STRING_BYTES: usize = 8 * 1024;
 const MAX_SUITE_PROJECTIONS: usize = MAX_EVENTS_PER_PERSON * 20;
