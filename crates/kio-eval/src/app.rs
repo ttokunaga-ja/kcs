@@ -191,6 +191,13 @@ enum PersonaCommands {
         #[arg(long)]
         root: PathBuf,
     },
+    /// Independently attest one Rust materialization and publish a report.
+    Attest {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Coordinate plan-bound persona and scope writers.
     Lease {
         #[command(subcommand)]
@@ -439,6 +446,8 @@ pub enum AppError {
     PersonaScaffold(#[from] kio_eval::persona_scaffold::PersonaScaffoldError),
     #[error(transparent)]
     PersonaLease(#[from] kio_eval::persona_lease::PersonaLeaseError),
+    #[error(transparent)]
+    PersonaAttest(#[from] kio_eval::persona_attest::PersonaAttestError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -1396,6 +1405,9 @@ fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
         PersonaCommands::Scaffold { plan, root } => {
             kio_eval::persona_scaffold::scaffold(plan, root)?;
         }
+        PersonaCommands::Attest { root, out } => {
+            kio_eval::persona_attest::attest(root, out)?;
+        }
         PersonaCommands::Lease { command } => return run_persona_lease(command),
     }
     Ok(ExitCode::Success)
@@ -1649,6 +1661,32 @@ mod tests {
                 "/tmp/persona-workspace",
             ])
             .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "attest",
+                "--root",
+                "/tmp/materialized",
+                "--out",
+                "/tmp/persona-attestation.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "attest",
+                "--root",
+                "/tmp/materialized",
+                "--out",
+                "/tmp/persona-attestation.json",
+                "--materialization-digest",
+                "sha256:deadbeef",
+            ])
+            .is_err()
         );
         assert!(
             Args::try_parse_from([

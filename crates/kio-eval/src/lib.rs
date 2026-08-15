@@ -7,6 +7,7 @@ pub mod crossscope;
 pub mod generator;
 pub mod manifest;
 pub mod persona_artifact;
+pub mod persona_attest;
 pub mod persona_consumer;
 pub mod persona_lease;
 pub mod persona_manifest;

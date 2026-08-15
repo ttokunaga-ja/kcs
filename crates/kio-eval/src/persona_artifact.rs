@@ -8,16 +8,14 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::hash_bytes;
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
 
 const TEMP_PREFIX: &str = ".kio-persona-artifact-";
 const MAX_PATH_COMPONENTS: usize = 64;
 const MAX_PATH_COMPONENT_BYTES: usize = 255;
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum PersonaArtifactError {
@@ -44,6 +42,18 @@ struct Observation {
     identity: FileIdentity,
     len: u64,
     hash: String,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    nlink: u64,
+    #[cfg(unix)]
+    mtime: i64,
+    #[cfg(unix)]
+    mtime_nsec: i64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
 }
 
 /// A descriptor-bound observation of one strict artifact file.
@@ -53,6 +63,7 @@ struct Observation {
 #[derive(Debug)]
 pub struct StrictArtifact {
     parent: BoundParent,
+    file: fs::File,
     path: PathBuf,
     maximum: usize,
     bytes: Vec<u8>,
@@ -74,7 +85,12 @@ impl StrictArtifact {
     /// identity, length, hash, and bytes to remain exact.
     pub fn recheck(&self) -> Result<(), PersonaArtifactError> {
         recheck_parent(&self.parent)?;
-        let (bytes, observation) = observe_regular(
+        let (retained_bytes, retained_observation) =
+            observe_open_file(&self.file, self.maximum, &self.path)?;
+        if retained_bytes != self.bytes || retained_observation != self.observation {
+            return unsafe_state("retained artifact descriptor changed after initial observation");
+        }
+        let (_file, bytes, observation) = observe_regular(
             &self.parent.handle,
             &self.parent.leaf,
             self.maximum,
@@ -109,11 +125,61 @@ pub fn read_strict(path: &Path, maximum: usize) -> Result<Vec<u8>, PersonaArtifa
 pub fn bind_strict(path: &Path, maximum: usize) -> Result<StrictArtifact, PersonaArtifactError> {
     let parent = bind_parent(path)?;
     recheck_parent(&parent)?;
-    let (bytes, observation) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
+    let (file, bytes, observation) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
     recheck_parent(&parent)?;
     Ok(StrictArtifact {
         parent,
+        file,
         path: path.to_owned(),
+        maximum,
+        bytes,
+        observation,
+    })
+}
+
+/// Bind a strict leaf below an already-retained, no-follow directory.
+///
+/// Callers which need a multi-file transaction use this to ensure every leaf
+/// is observed beneath one root descriptor, rather than independently walking
+/// public paths that could be swapped between observations. `root_path` is the
+/// canonical public spelling of that retained directory and is used solely for
+/// the diagnostic rewalk performed by [`StrictArtifact::recheck`].
+pub fn bind_strict_at(
+    root: &fs::File,
+    root_path: &Path,
+    leaf: &str,
+    maximum: usize,
+) -> Result<StrictArtifact, PersonaArtifactError> {
+    if !root_path.is_absolute()
+        || root_path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || !safe_leaf(leaf)
+    {
+        return unsafe_state("strict artifact root or leaf is unsafe");
+    }
+    let public = normalize_persona_path(root_path)?;
+    if public != root_path {
+        return unsafe_state("strict artifact root must use canonical alias spelling");
+    }
+    let identity = cap_fs::Metadata::from_file(root)?;
+    if !identity.is_dir() || identity.file_type().is_symlink() {
+        return unsafe_state("strict artifact root is not a real directory");
+    }
+    let parent = BoundParent {
+        handle: root.try_clone()?,
+        identity,
+        public,
+        leaf: leaf.to_owned(),
+    };
+    recheck_parent(&parent)?;
+    let path = parent.public.join(leaf);
+    let (file, bytes, observation) = observe_regular(&parent.handle, leaf, maximum, &path)?;
+    recheck_parent(&parent)?;
+    Ok(StrictArtifact {
+        parent,
+        file,
+        path,
         maximum,
         bytes,
         observation,
@@ -127,21 +193,42 @@ pub fn publish_create_only(
     bytes: &[u8],
     maximum: usize,
 ) -> Result<PathBuf, PersonaArtifactError> {
+    publish_create_only_after(path, bytes, maximum, || Ok(()))
+}
+
+/// Stage and fsync canonical bytes, run `barrier` immediately before the
+/// atomic no-replace rename, then verify the published bytes.  The barrier is
+/// for a producer which retains authority over other input descriptors and
+/// must prove they still match at the last safe point before publication.
+///
+/// If the barrier fails no destination rename has been attempted. The private
+/// temporary is removed only when it still has the exact retained identity.
+pub(crate) fn publish_create_only_after<F>(
+    path: &Path,
+    bytes: &[u8],
+    maximum: usize,
+    barrier: F,
+) -> Result<PathBuf, PersonaArtifactError>
+where
+    F: FnOnce() -> Result<(), PersonaArtifactError>,
+{
     if bytes.len() > maximum {
         return unsafe_state("artifact exceeds byte limit");
     }
     let parent = bind_parent(path)?;
     recheck_parent(&parent)?;
+    validate_publication_parent(&parent)?;
     absent(&parent.handle, &parent.leaf)?;
 
-    let temp_name = temporary_name(&parent.leaf)?;
-    let mut temp = TempArtifact::create(&parent, temp_name)?;
+    let mut temp = TempArtifact::create(&parent)?;
     temp.file.write_all(bytes)?;
     temp.file.sync_all()?;
-    let (_, staged) = observe_regular(&parent.handle, &temp.name, maximum, path)?;
+    let (_, _, staged) = observe_regular(&parent.handle, &temp.name, maximum, path)?;
     if staged.len != bytes.len() as u64 || staged.hash != hash_bytes(bytes) {
         return unsafe_state("staged artifact differs from requested bytes");
     }
+    recheck_parent(&parent)?;
+    barrier()?;
     recheck_parent(&parent)?;
     crate::scale_fixture::rename_noreplace(
         &parent.handle,
@@ -166,12 +253,13 @@ pub fn publish_create_only(
 
     let verification = (|| {
         sync_parent(&parent)?;
-        let (readback, published) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
-        if published != staged || readback != bytes {
+        let (_, readback, published) =
+            observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
+        if !same_across_rename(&staged, &published) || readback != bytes {
             return unsafe_state("published artifact differs from staged artifact");
         }
         recheck_parent(&parent)?;
-        let (again, repeated) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
+        let (_, again, repeated) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
         if repeated != published || again != readback {
             return unsafe_state("published artifact changed after readback");
         }
@@ -190,21 +278,36 @@ struct TempArtifact {
 }
 
 impl TempArtifact {
-    fn create(parent: &BoundParent, name: String) -> Result<Self, PersonaArtifactError> {
-        let mut options = cap_fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        let file = cap_fs::open(&parent.handle, Path::new(&name), &options)?;
-        let identity = cap_fs::Metadata::from_file(&file)?;
-        if !regular(&identity, usize::MAX) {
-            return unsafe_state("temporary artifact is not a single-link regular file");
+    fn create(parent: &BoundParent) -> Result<Self, PersonaArtifactError> {
+        for _ in 0..32 {
+            let name = temporary_name()?;
+            let mut options = cap_fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use cap_fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = match cap_fs::open(&parent.handle, Path::new(&name), &options) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let identity = cap_fs::Metadata::from_file(&file)?;
+            if !private_temporary(&identity) {
+                return unsafe_state(
+                    "temporary artifact is not a private single-link regular file",
+                );
+            }
+            return Ok(Self {
+                parent: parent.handle.try_clone()?,
+                name,
+                identity,
+                file,
+                published: false,
+            });
         }
-        Ok(Self {
-            parent: parent.handle.try_clone()?,
-            name,
-            identity,
-            file,
-            published: false,
-        })
+        unsafe_state("exhausted secure artifact staging candidates")
     }
 }
 
@@ -251,7 +354,7 @@ fn bind_parent(path: &Path) -> Result<BoundParent, PersonaArtifactError> {
     {
         return unsafe_state("path exceeds component bounds");
     }
-    let path = normalize_alias(path)?;
+    let path = normalize_persona_path(path)?;
     let leaf = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -330,7 +433,7 @@ fn observe_regular(
     leaf: &str,
     maximum: usize,
     label: &Path,
-) -> Result<(Vec<u8>, Observation), PersonaArtifactError> {
+) -> Result<(fs::File, Vec<u8>, Observation), PersonaArtifactError> {
     let before = cap_fs::stat(parent, Path::new(leaf), cap_fs::FollowSymlinks::No)?;
     if !regular(&before, maximum) {
         return unsafe_state(format!(
@@ -342,31 +445,50 @@ fn observe_regular(
     options
         .read(true)
         ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
-    let mut file = cap_fs::open(parent, Path::new(leaf), &options)?;
+    let file = cap_fs::open(parent, Path::new(leaf), &options)?;
     let opened = cap_fs::Metadata::from_file(&file)?;
     let after = cap_fs::stat(parent, Path::new(leaf), cap_fs::FollowSymlinks::No)?;
     if !regular(&opened, maximum)
         || !regular(&after, maximum)
-        || !same(&before, &opened)
-        || !same(&opened, &after)
+        || !same_metadata(&before, &opened)
+        || !same_metadata(&opened, &after)
     {
         return unsafe_state("artifact changed while opening");
     }
+    let (bytes, observation) = observe_open_file(&file, maximum, label)?;
+    let named = cap_fs::stat(parent, Path::new(leaf), cap_fs::FollowSymlinks::No)?;
+    if !regular(&named, maximum) || !same_metadata(&opened, &named) {
+        return unsafe_state("artifact changed after reading");
+    }
+    Ok((file, bytes, observation))
+}
+
+fn observe_open_file(
+    file: &fs::File,
+    maximum: usize,
+    label: &Path,
+) -> Result<(Vec<u8>, Observation), PersonaArtifactError> {
+    let opened = cap_fs::Metadata::from_file(file)?;
+    if !regular(&opened, maximum) {
+        return unsafe_state(format!(
+            "{} must remain a bounded single-link regular file",
+            label.display()
+        ));
+    }
+    let mut reader = file.try_clone()?;
+    reader.seek(std::io::SeekFrom::Start(0))?;
     let mut bytes = Vec::with_capacity(opened.len() as usize);
     let read_limit = u64::try_from(maximum)
         .ok()
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| PersonaArtifactError::Unsafe("artifact byte limit is unsupported".into()))?;
-    (&mut file).take(read_limit).read_to_end(&mut bytes)?;
-    let final_metadata = cap_fs::Metadata::from_file(&file)?;
-    let named = cap_fs::stat(parent, Path::new(leaf), cap_fs::FollowSymlinks::No)?;
+    (&mut reader).take(read_limit).read_to_end(&mut bytes)?;
+    let final_metadata = cap_fs::Metadata::from_file(file)?;
     if bytes.len() as u64 != opened.len()
         || !regular(&final_metadata, maximum)
-        || !regular(&named, maximum)
-        || !same(&opened, &final_metadata)
-        || !same(&final_metadata, &named)
+        || !same_metadata(&opened, &final_metadata)
     {
-        return unsafe_state("artifact changed while reading");
+        return unsafe_state("retained artifact changed while reading");
     }
     std::str::from_utf8(&bytes)
         .map_err(|_| PersonaArtifactError::Unsafe("artifact is not UTF-8".into()))?;
@@ -374,6 +496,18 @@ fn observe_regular(
         identity: identity(&opened),
         len: opened.len(),
         hash: hash_bytes(&bytes),
+        #[cfg(unix)]
+        mode: mode(&opened),
+        #[cfg(unix)]
+        nlink: links(&opened),
+        #[cfg(unix)]
+        mtime: mtime(&opened),
+        #[cfg(unix)]
+        mtime_nsec: mtime_nsec(&opened),
+        #[cfg(unix)]
+        ctime: ctime(&opened),
+        #[cfg(unix)]
+        ctime_nsec: ctime_nsec(&opened),
     };
     Ok((bytes, observation))
 }
@@ -404,11 +538,17 @@ fn safe_leaf(name: &str) -> bool {
     !name.is_empty() && Path::new(name).components().count() == 1 && !name.contains('\0')
 }
 
-fn temporary_name(leaf: &str) -> Result<String, PersonaArtifactError> {
+fn temporary_name() -> Result<String, PersonaArtifactError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|error| {
+        PersonaArtifactError::Unsafe(format!("secure staging randomness unavailable: {error}"))
+    })?;
     let name = format!(
-        "{TEMP_PREFIX}{leaf}.{}.{}",
-        std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        "{TEMP_PREFIX}{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     );
     if safe_leaf(&name) {
         Ok(name)
@@ -417,8 +557,45 @@ fn temporary_name(leaf: &str) -> Result<String, PersonaArtifactError> {
     }
 }
 
+fn validate_publication_parent(parent: &BoundParent) -> Result<(), PersonaArtifactError> {
+    let metadata = cap_fs::Metadata::from_file(&parent.handle)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return unsafe_state("artifact publication parent is not a real directory");
+    }
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        let mode = metadata.mode();
+        let writable_by_others = mode & 0o022 != 0;
+        let trusted_sticky_owner = mode & 0o1000 != 0
+            && (metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() });
+        if writable_by_others && !trusted_sticky_owner {
+            return unsafe_state("artifact publication parent permissions are untrusted");
+        }
+    }
+    Ok(())
+}
+
+fn private_temporary(metadata: &cap_fs::Metadata) -> bool {
+    if !regular(metadata, usize::MAX) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        metadata.mode() & 0o777 == 0o600
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Canonicalize only the Darwin public aliases used by descriptor-bound persona
+/// boundaries.  This is intentionally not filesystem canonicalization: every
+/// caller must still walk components with no-follow descriptors.
 #[cfg(target_os = "macos")]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
+pub(crate) fn normalize_persona_path(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
     let text = path
         .to_str()
         .ok_or_else(|| PersonaArtifactError::Unsafe("path is not UTF-8".into()))?;
@@ -430,7 +607,7 @@ fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
+pub(crate) fn normalize_persona_path(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
     Ok(path.to_owned())
 }
 
@@ -476,6 +653,72 @@ fn identity(metadata: &cap_fs::Metadata) -> FileIdentity {
 
 fn same(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
     identity(left) == identity(right)
+}
+
+/// Identity alone is insufficient for a retained artifact: chmod/utime can
+/// alter the object without replacement. Require every observable Unix
+/// metadata field the persona boundaries bind, as well as the object identity.
+fn same_metadata(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    if !same(left, right) || left.len() != right.len() || links(left) != links(right) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        mode(left) == mode(right)
+            && mtime(left) == mtime(right)
+            && mtime_nsec(left) == mtime_nsec(right)
+            && ctime(left) == ctime(right)
+            && ctime_nsec(left) == ctime_nsec(right)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// A successful rename preserves the object and its data but may update ctime.
+/// Keep every stable binding (identity, size, hash, mode, links and mtime)
+/// while treating that kernel-authored ctime transition as expected.
+fn same_across_rename(left: &Observation, right: &Observation) -> bool {
+    left.identity == right.identity && left.len == right.len && left.hash == right.hash && {
+        #[cfg(unix)]
+        {
+            left.mode == right.mode
+                && left.nlink == right.nlink
+                && left.mtime == right.mtime
+                && left.mtime_nsec == right.mtime_nsec
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+}
+
+#[cfg(unix)]
+fn mode(metadata: &cap_fs::Metadata) -> u32 {
+    use cap_fs::MetadataExt;
+    metadata.mode()
+}
+#[cfg(unix)]
+fn mtime(metadata: &cap_fs::Metadata) -> i64 {
+    use cap_fs::MetadataExt;
+    metadata.mtime()
+}
+#[cfg(unix)]
+fn mtime_nsec(metadata: &cap_fs::Metadata) -> i64 {
+    use cap_fs::MetadataExt;
+    metadata.mtime_nsec()
+}
+#[cfg(unix)]
+fn ctime(metadata: &cap_fs::Metadata) -> i64 {
+    use cap_fs::MetadataExt;
+    metadata.ctime()
+}
+#[cfg(unix)]
+fn ctime_nsec(metadata: &cap_fs::Metadata) -> i64 {
+    use cap_fs::MetadataExt;
+    metadata.ctime_nsec()
 }
 
 #[cfg(test)]
@@ -550,6 +793,18 @@ mod tests {
         let hard = base.join("hard");
         fs::hard_link(&source, &hard).unwrap();
         assert!(read_strict(&hard, 64).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_artifact_rejects_same_inode_metadata_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir().unwrap();
+        let path = absolute(root.path()).join("artifact.json");
+        fs::write(&path, b"{}\n").unwrap();
+        let bound = bind_strict(&path, 64).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(bound.recheck().is_err());
     }
 
     #[cfg(unix)]

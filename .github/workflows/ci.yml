@@ -34,7 +34,6 @@ jobs:
           eval.test_build_macos_comparator_runtime
           eval.test_eval_env
           eval.test_u7_same_space
-          eval.test_persona_history_attestation
           eval.test_persona_skill_corpus_docs
 
   persona-w0-integration:
@@ -106,25 +105,15 @@ jobs:
             --persona p01 \
             --release-token "$(jq -er .release_token /tmp/kio-persona-parent-lease.json)" \
             > /tmp/kio-persona-parent-release.json
-      - name: Attest the Rust materialization through the retained Python boundary
+      - name: Attest the Rust materialization through the Rust boundary
         run: |
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          from eval import persona_history_attestation as history
-
-          root = Path("/tmp/kio-persona-artifacts")
-          digest = "sha256:" + hashlib.sha256(
-              (root / "persona-materialization.json").read_bytes()
-          ).hexdigest()
-          evidence = history.build_filesystem_attestation(
-              directory=root, materialization_sha256=digest,
-          )
-          assert evidence["claims"] == {
-              "actual_kio_evidence": False, "history_ready": False,
-          }
-          PY
+          target/debug/kio-eval persona attest \
+            --root /tmp/kio-persona-artifacts \
+            --out /tmp/kio-persona-filesystem-attestation.json
+          jq -e '
+            .schema == "kio.persona.filesystem-attestation/v1" and
+            .claims == {"actual_kio_evidence":false,"history_ready":false}
+          ' /tmp/kio-persona-filesystem-attestation.json
 
   synthetic-history-eval:
     needs: rust
@@ -198,7 +187,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --workspace --all-targets --locked
-      - run: python3 -m unittest eval.test_persona_history_attestation
 
   windows-security-r23:
     runs-on: windows-latest
