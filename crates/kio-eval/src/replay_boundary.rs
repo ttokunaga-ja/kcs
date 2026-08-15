@@ -18,6 +18,10 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(target_os = "linux")]
+use crate::process_boundary::configure_descriptor_environment;
+use crate::process_boundary::{DescriptorExecutable, ProcessBoundaryError, configure_retained_cwd};
+
 const DEVICE_DIR: &str = ".kio-eval-device";
 const HISTORY_MANIFEST: &str = "history-manifest.json";
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
@@ -46,6 +50,15 @@ impl ReplayBoundaryError {
     }
     fn io(path: impl Into<PathBuf>, error: io::Error) -> Self {
         Self::unsafe_(path, error.to_string())
+    }
+}
+
+fn process_boundary_error(error: ProcessBoundaryError) -> ReplayBoundaryError {
+    match error {
+        ProcessBoundaryError::Unsafe { path, message } => {
+            ReplayBoundaryError::Unsafe { path, message }
+        }
+        ProcessBoundaryError::Unsupported(message) => ReplayBoundaryError::Unsupported(message),
     }
 }
 
@@ -85,14 +98,7 @@ impl ReplayBoundary {
     /// Call this before binding or preparing a corpus device.
     #[cfg(target_os = "linux")]
     pub fn preflight_platform() -> ReplayBoundaryResult<()> {
-        let metadata =
-            fs::metadata("/dev/fd").map_err(|e| ReplayBoundaryError::io("/dev/fd", e))?;
-        if !metadata.is_dir() {
-            return Err(ReplayBoundaryError::Unsupported(
-                "Linux descriptor execution requires /dev/fd",
-            ));
-        }
-        Ok(())
+        DescriptorExecutable::preflight_platform().map_err(process_boundary_error)
     }
     #[cfg(not(target_os = "linux"))]
     pub fn preflight_platform() -> ReplayBoundaryResult<()> {
@@ -527,21 +533,7 @@ impl ReplayScope {
     /// exec. The parent cwd is never modified.
     #[cfg(unix)]
     pub fn configure_command_cwd(&self, command: &mut Command) -> ReplayBoundaryResult<()> {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        let cwd = self
-            .handle
-            .try_clone()
-            .map_err(|e| ReplayBoundaryError::io(&self.public_path, e))?;
-        unsafe {
-            command.pre_exec(move || {
-                if libc::fchdir(cwd.as_raw_fd()) == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            });
-        }
-        Ok(())
+        configure_retained_cwd(command, &self.handle).map_err(process_boundary_error)
     }
     #[cfg(not(unix))]
     pub fn configure_command_cwd(&self, _command: &mut Command) -> ReplayBoundaryResult<()> {
@@ -764,13 +756,8 @@ impl ReplayDevice {
         &self,
         command: &mut std::process::Command,
     ) -> ReplayBoundaryResult<()> {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
         self.recheck()?;
-        command.env_clear();
-        command.env("PATH", "/usr/bin:/bin");
-        command.env("LANG", "C.UTF-8");
-        command.env("LC_ALL", "C.UTF-8");
-        command.env("TZ", "UTC");
+        let mut directories = Vec::new();
         for (directory, variable) in [
             ("home", "HOME"),
             ("config", "XDG_CONFIG_HOME"),
@@ -787,19 +774,13 @@ impl ReplayDevice {
                 .handle
                 .try_clone()
                 .map_err(|e| ReplayBoundaryError::io(&self.public_path, e))?;
-            let fd = handle.as_raw_fd();
-            command.env(variable, format!("/dev/fd/{fd}"));
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fcntl(handle.as_raw_fd(), libc::F_SETFD, 0) == -1 {
-                        Err(io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
-            }
+            directories.push((variable, handle));
         }
-        Ok(())
+        let borrowed: Vec<_> = directories
+            .iter()
+            .map(|(variable, handle)| (*variable, handle))
+            .collect();
+        configure_descriptor_environment(command, &borrowed).map_err(process_boundary_error)
     }
     #[cfg(not(target_os = "linux"))]
     pub fn configure_hermetic_environment(
@@ -883,8 +864,7 @@ impl ReplayDevice {
                 "binary changed while snapshotting",
             ));
         }
-        #[cfg(target_os = "linux")]
-        let sealed_executable = sealed_memfd(&bytes)?;
+        let descriptor = DescriptorExecutable::bind(source).map_err(process_boundary_error)?;
         Ok(BoundExecutable {
             path: bin_path,
             original: FileBinding {
@@ -896,8 +876,7 @@ impl ReplayDevice {
             original_identity: source_identity,
             private_parent: bin,
             private_identity,
-            #[cfg(target_os = "linux")]
-            sealed_executable,
+            descriptor,
         })
     }
 
@@ -980,13 +959,19 @@ pub struct BoundExecutable {
     original_identity: FileIdentity,
     private_parent: fs::File,
     private_identity: FileIdentity,
-    #[cfg(target_os = "linux")]
-    sealed_executable: fs::File,
+    descriptor: DescriptorExecutable,
 }
 impl BoundExecutable {
+    #[cfg(all(test, target_os = "linux"))]
+    fn sealed_fd(&self) -> std::os::fd::RawFd {
+        self.descriptor.sealed_fd()
+    }
     /// Recheck both the original supplied binary and the private immutable
     /// snapshot before/after every subprocess invocation.
     pub fn recheck_original(&self) -> ReplayBoundaryResult<()> {
+        self.descriptor
+            .recheck_original()
+            .map_err(process_boundary_error)?;
         let observed = regular_observed_at(
             &self.original_parent,
             &self.original_name,
@@ -1022,25 +1007,8 @@ impl BoundExecutable {
     /// descriptor. The public snapshot path is never used as exec authority.
     #[cfg(target_os = "linux")]
     pub fn command(&self) -> ReplayBoundaryResult<std::process::Command> {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
         self.recheck_original()?;
-        verify_sealed_memfd(&self.sealed_executable)?;
-        let executable = self
-            .sealed_executable
-            .try_clone()
-            .map_err(|e| ReplayBoundaryError::io(&self.path, e))?;
-        let fd = executable.as_raw_fd();
-        let mut command = std::process::Command::new(format!("/dev/fd/{fd}"));
-        unsafe {
-            command.pre_exec(move || {
-                if libc::fcntl(executable.as_raw_fd(), libc::F_SETFD, 0) == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
-        Ok(command)
+        self.descriptor.command().map_err(process_boundary_error)
     }
     #[cfg(not(target_os = "linux"))]
     pub fn command(&self) -> ReplayBoundaryResult<std::process::Command> {
@@ -1561,62 +1529,6 @@ fn sha256(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
-#[cfg(target_os = "linux")]
-const MEMFD_SEALS: libc::c_int =
-    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
-#[cfg(target_os = "linux")]
-fn sealed_memfd(bytes: &[u8]) -> ReplayBoundaryResult<fs::File> {
-    use std::{
-        ffi::CString,
-        os::fd::{AsRawFd, FromRawFd},
-    };
-    const MFD_CLOEXEC: libc::c_uint = 0x0001;
-    const MFD_ALLOW_SEALING: libc::c_uint = 0x0002;
-    let name = CString::new("kio-replay-exec").expect("literal has no NUL");
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr(),
-            MFD_CLOEXEC | MFD_ALLOW_SEALING,
-        )
-    };
-    if raw < 0 {
-        return Err(ReplayBoundaryError::io(
-            "memfd:kio-replay-exec",
-            io::Error::last_os_error(),
-        ));
-    }
-    let mut file = unsafe { fs::File::from_raw_fd(raw as i32) };
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        return Err(ReplayBoundaryError::io("memfd:kio-replay-exec", error));
-    }
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } != 0 {
-        return Err(ReplayBoundaryError::io(
-            "memfd:kio-replay-exec",
-            io::Error::last_os_error(),
-        ));
-    }
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, MEMFD_SEALS) } == -1 {
-        return Err(ReplayBoundaryError::io(
-            "memfd:kio-replay-exec",
-            io::Error::last_os_error(),
-        ));
-    }
-    verify_sealed_memfd(&file)?;
-    Ok(file)
-}
-#[cfg(target_os = "linux")]
-fn verify_sealed_memfd(file: &fs::File) -> ReplayBoundaryResult<()> {
-    use std::os::fd::AsRawFd;
-    let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
-    if seals == -1 || (seals & MEMFD_SEALS) != MEMFD_SEALS {
-        return Err(ReplayBoundaryError::unsafe_(
-            "memfd:kio-replay-exec",
-            "executable memfd seals are incomplete",
-        ));
-    }
-    Ok(())
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     #[cfg(unix)]
@@ -2045,7 +1957,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn bound_executable_command_executes_retained_copy_and_rejects_replacement() {
-        use std::os::fd::AsRawFd;
         let (temp, scopes) = fixture();
         let binary_dir = tempfile::tempdir().unwrap();
         let binary = binary_dir.path().join("kio-eval-under-test");
@@ -2056,14 +1967,7 @@ mod tests {
         let device = boundary.prepare_device().unwrap();
         let bound = device.snapshot_executable(&binary).unwrap();
         assert_eq!(
-            unsafe {
-                libc::pwrite(
-                    bound.sealed_executable.as_raw_fd(),
-                    b"X".as_ptr().cast(),
-                    1,
-                    0,
-                )
-            },
+            unsafe { libc::pwrite(bound.sealed_fd(), b"X".as_ptr().cast(), 1, 0,) },
             -1
         );
         assert!(matches!(

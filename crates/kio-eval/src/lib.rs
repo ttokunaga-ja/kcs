@@ -6,6 +6,7 @@ pub mod boundary;
 pub mod crossscope;
 pub mod generator;
 pub mod manifest;
+pub(crate) mod process_boundary;
 pub mod qhard;
 pub mod replay;
 pub mod replay_boundary;
@@ -13,7 +14,9 @@ pub mod rerank;
 pub mod resolver;
 pub mod runner;
 pub mod scale;
+pub mod scale_attest;
 pub mod scale_fixture;
+pub mod scale_prepare;
 pub mod scale_spec;
 
 use std::collections::HashSet;

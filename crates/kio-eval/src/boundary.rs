@@ -15,6 +15,8 @@ use std::{
 use cap_primitives::fs as cap_fs;
 use thiserror::Error;
 
+use crate::process_boundary::configure_retained_cwd;
+
 const DEVICE_DIR: &str = ".kio-eval-device";
 const DEVICE_SUBDIRS: [&str; 6] = ["home", "config", "cache", "data", "state", "runtime"];
 
@@ -183,26 +185,8 @@ impl BoundScope {
     /// stable while this bound corpus remains alive.
     #[cfg(unix)]
     pub fn configure_command_cwd(&self, command: &mut std::process::Command) -> BoundaryResult<()> {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
-
-        let runner_cwd = self
-            .runner_cwd
-            .try_clone()
-            .map_err(|error| BoundaryError::io(&self.public_path, error))?;
-        // `runner_cwd` is a readable directory descriptor opened relative to
-        // the held capability (rather than Linux's O_PATH capability handle).
-        // `fchdir` is async-signal-safe and this callback composes with other
-        // runner callbacks such as `setpgid`.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::fchdir(runner_cwd.as_raw_fd()) == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            });
-        }
-        Ok(())
+        configure_retained_cwd(command, &self.runner_cwd)
+            .map_err(|error| BoundaryError::new(&self.public_path, error.to_string()))
     }
 
     #[cfg(windows)]

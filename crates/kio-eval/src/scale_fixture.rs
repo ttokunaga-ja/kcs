@@ -1069,15 +1069,30 @@ fn normalize_alias(p: &Path) -> Result<PathBuf, ScaleFixtureError> {
     Ok(p.to_path_buf())
 }
 #[cfg(target_os = "linux")]
-fn rename_noreplace(a: &fs::File, x: &str, b: &fs::File, y: &str) -> Result<(), ScaleFixtureError> {
+pub(crate) fn rename_noreplace(
+    a: &fs::File,
+    x: &str,
+    b: &fs::File,
+    y: &str,
+) -> Result<(), ScaleFixtureError> {
     rename_at(a, x, b, y, 1)
 }
 #[cfg(target_os = "macos")]
-fn rename_noreplace(a: &fs::File, x: &str, b: &fs::File, y: &str) -> Result<(), ScaleFixtureError> {
+pub(crate) fn rename_noreplace(
+    a: &fs::File,
+    x: &str,
+    b: &fs::File,
+    y: &str,
+) -> Result<(), ScaleFixtureError> {
     rename_at(a, x, b, y, 4)
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn rename_noreplace(_: &fs::File, _: &str, _: &fs::File, _: &str) -> Result<(), ScaleFixtureError> {
+pub(crate) fn rename_noreplace(
+    _: &fs::File,
+    _: &str,
+    _: &fs::File,
+    _: &str,
+) -> Result<(), ScaleFixtureError> {
     bad("atomic no-replace publication unsupported")
 }
 #[cfg(target_os = "linux")]

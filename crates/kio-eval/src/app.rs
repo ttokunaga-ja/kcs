@@ -261,6 +261,8 @@ pub enum AppError {
     #[error(transparent)]
     ScaleFixture(#[from] kio_eval::scale_fixture::ScaleFixtureError),
     #[error(transparent)]
+    ScalePrepare(#[from] kio_eval::scale_prepare::ScalePrepareError),
+    #[error(transparent)]
     Crossscope(#[from] kio_eval::crossscope::CrossscopeError),
     #[error(transparent)]
     Rerank(#[from] kio_eval::rerank::RerankDumpError),
@@ -737,11 +739,16 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     println!("[ok] scale fixture {outcome:?}: {}", out.display());
                     Ok(ExitCode::Success)
                 }
-                ScaleCommands::Prepare { corpus, bin } => Err(AppError::Input(format!(
-                    "kio-eval scale prepare is not implemented yet (corpus={}, bin={})",
-                    corpus.display(),
-                    bin.display()
-                ))),
+                ScaleCommands::Prepare { corpus, bin } => {
+                    let summary = kio_eval::scale_prepare::prepare(corpus, bin)?;
+                    println!("[ok] scale fixture prepared: {}", summary.corpus.display());
+                    println!(
+                        "     initialized={} indexed={}",
+                        summary.initialized_scopes, summary.indexed_scopes
+                    );
+                    println!("     report: {}", summary.report.display());
+                    Ok(ExitCode::Success)
+                }
                 ScaleCommands::Attest { corpus, out } => Err(AppError::Input(format!(
                     "kio-eval scale attest is not implemented yet (corpus={}, out={})",
                     corpus.display(),
