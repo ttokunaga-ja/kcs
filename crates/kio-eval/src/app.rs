@@ -259,6 +259,8 @@ pub enum AppError {
     #[error(transparent)]
     Generator(#[from] kio_eval::generator::GeneratorError),
     #[error(transparent)]
+    ScaleFixture(#[from] kio_eval::scale_fixture::ScaleFixtureError),
+    #[error(transparent)]
     Crossscope(#[from] kio_eval::crossscope::CrossscopeError),
     #[error(transparent)]
     Rerank(#[from] kio_eval::rerank::RerankDumpError),
@@ -730,10 +732,11 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     out,
                     profile,
                     reset_owned,
-                } => Err(AppError::Input(format!(
-                    "kio-eval scale generate is not implemented yet (out={}, profile={profile:?}, reset_owned={reset_owned})",
-                    out.display()
-                ))),
+                } => {
+                    let outcome = kio_eval::scale_fixture::generate(out, *profile, *reset_owned)?;
+                    println!("[ok] scale fixture {outcome:?}: {}", out.display());
+                    Ok(ExitCode::Success)
+                }
                 ScaleCommands::Prepare { corpus, bin } => Err(AppError::Input(format!(
                     "kio-eval scale prepare is not implemented yet (corpus={}, bin={})",
                     corpus.display(),
