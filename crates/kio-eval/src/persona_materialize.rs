@@ -113,11 +113,13 @@ impl PersonaMaterializationRecord {
         if record.schema != "kio.persona.materialization/v1" {
             return bad("unsupported materialization record schema");
         }
+        let record_destination = Path::new(&record.destination_root);
         if record.fixture_id != FIXTURE_ID
             || !valid_replay(&record.replay_id)
             || record.destination_root.is_empty()
             || record.destination_root.len() > 16 * 1024
             || !valid_record_destination(&record.destination_root)
+            || normalize_alias(record_destination)? != record_destination
             || record.plan.digest != record.plan.sha256
             || !valid_hash(&record.plan.digest)
             || !valid_hash(&record.plan.sha256)
@@ -160,6 +162,11 @@ pub fn materialize(
         return bad("replay id is outside the closed set");
     }
     let parent = bind_parent(request.destination)?;
+    // `bind_parent` applies the Darwin /tmp and /var aliases before retaining
+    // the parent descriptor. Every public path identity must use that same
+    // bound spelling; otherwise the returned value and sealed record could
+    // identify a different lexical destination than the one we published.
+    let canonical_destination = parent.public.join(&parent.leaf);
     recheck_parent(&parent)?;
     match cap_fs::stat(
         &parent.handle,
@@ -175,7 +182,7 @@ pub fn materialize(
         }
         Ok(_) => {
             return Err(PersonaMaterializeError::AlreadyExists(
-                request.destination.to_owned(),
+                canonical_destination,
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -210,7 +217,7 @@ pub fn materialize(
         let record = build_record(
             &bundle,
             request.replay_id,
-            request.destination,
+            &canonical_destination,
             device(&stage_cap_metadata),
         )?;
         let record_bytes = record.canonical_bytes()?;
@@ -226,7 +233,7 @@ pub fn materialize(
         sync_retained_directory(&stage, &stage_metadata, &parent.public.join(&stage_name))
             .map_err(|e| PersonaMaterializeError::Unsafe(e.to_string()))?;
         bundle.recheck_sources()?;
-        run_before_rename_hook(request.destination);
+        run_before_rename_hook(&canonical_destination);
         bundle.recheck_sources()?;
         verify_stage(&stage, &bundle, &record_bytes)?;
         recheck_parent(&parent)?;
@@ -243,7 +250,7 @@ pub fn materialize(
         verify_published(&parent, &stage_cap_metadata, &bundle, &record_bytes)
             .map_err(|e| PersonaMaterializeError::Indeterminate(e.to_string()))?;
         Ok(Materialization {
-            destination: request.destination.to_owned(),
+            destination: canonical_destination,
             record,
         })
     })();
@@ -543,6 +550,8 @@ type BeforeRenameHook = Box<dyn FnOnce() + Send>;
 static BEFORE_RENAME_HOOK: OnceLock<Mutex<BTreeMap<PathBuf, BeforeRenameHook>>> = OnceLock::new();
 #[cfg(test)]
 fn install_before_rename_hook(destination: PathBuf, hook: BeforeRenameHook) {
+    let destination = normalize_alias(&destination)
+        .expect("before-rename test hook destination must be valid UTF-8");
     let previous = BEFORE_RENAME_HOOK
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
@@ -655,7 +664,7 @@ mod tests {
         persona_schedule::build_suite_schedule,
     };
     use std::fs;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, tempdir_in};
 
     fn inputs(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let plan = frozen_plan(PersonaProfile::Tiny);
@@ -685,6 +694,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(created.destination, destination);
+        assert_eq!(
+            created.record.destination_root,
+            destination.to_str().unwrap(),
+        );
         let entries: Vec<_> = fs::read_dir(&destination)
             .unwrap()
             .map(|x| x.unwrap().file_name())
@@ -699,6 +712,53 @@ mod tests {
             fs::read(destination.join("persona-plan.json")).unwrap(),
             fs::read(plan).unwrap()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_aliases_return_and_record_the_bound_canonical_destination() {
+        let input_root = tempdir().unwrap();
+        let input_root = fs::canonicalize(input_root.path()).unwrap();
+        let (plan, schedule, render) = inputs(&input_root);
+
+        // Both locations are deliberately created by this test. `/tmp` and
+        // `/var/tmp` exercise the two aliases without selecting an existing
+        // public output path.
+        for alias_base in [Path::new("/tmp"), Path::new("/var/tmp")] {
+            let output_root = tempdir_in(alias_base).unwrap();
+            let alias_root = alias_base.join(output_root.path().file_name().unwrap());
+            let destination = alias_root.join("published");
+            let canonical_destination = PathBuf::from("/private").join(
+                destination
+                    .strip_prefix("/")
+                    .expect("alias test destination is absolute"),
+            );
+            assert!(!canonical_destination.exists());
+
+            let created = materialize(MaterializeRequest {
+                plan: &plan,
+                schedule: &schedule,
+                render: &render,
+                destination: &destination,
+                replay_id: "replay-01",
+            })
+            .unwrap();
+            let record_path = canonical_destination.join("persona-materialization.json");
+            let record =
+                PersonaMaterializationRecord::parse_canonical(&fs::read(record_path).unwrap())
+                    .unwrap();
+
+            assert_eq!(created.destination, canonical_destination);
+            assert_eq!(
+                created.record.destination_root,
+                canonical_destination.to_str().unwrap()
+            );
+            assert_eq!(
+                record.destination_root,
+                canonical_destination.to_str().unwrap()
+            );
+            assert!(destination.is_dir());
+        }
     }
 
     #[test]
@@ -806,6 +866,34 @@ mod tests {
                 &invalid_claim.canonical_bytes().unwrap()
             )
             .is_err()
+        );
+
+        // This was accepted by the retired Python attestation boundary when
+        // the caller supplied the matching digest.  Rust record identity is
+        // established by the closed canonical schema, never by a digest of
+        // arbitrary caller-selected bytes.
+        assert!(PersonaMaterializationRecord::parse_canonical(b"{\"opaque\":true}\n").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn record_rejects_darwin_alias_destination_spelling() {
+        let root = tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let (plan, schedule, render) = inputs(&root_path);
+        let created = materialize(MaterializeRequest {
+            plan: &plan,
+            schedule: &schedule,
+            render: &render,
+            destination: &root_path.join("published"),
+            replay_id: "replay-01",
+        })
+        .unwrap();
+        let mut aliased = created.record;
+        aliased.destination_root = "/tmp/kio-persona-materialization-record".into();
+        assert!(
+            PersonaMaterializationRecord::parse_canonical(&aliased.canonical_bytes().unwrap())
+                .is_err()
         );
     }
 
