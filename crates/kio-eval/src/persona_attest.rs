@@ -16,6 +16,10 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::{canonical_json_bytes, hash_bytes};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::btree_map::Entry;
+#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::{
     collections::BTreeSet,
@@ -220,7 +224,7 @@ pub fn attest(root: &Path, out: &Path) -> Result<PersonaFilesystemAttestation, P
     }
     let prepared = persona_artifact::prepare_create_only(&output, &bytes, MAX_REPORT_BYTES)
         .map_err(publication_error)?;
-    run_before_publish_hook();
+    run_before_publish_hook(&output);
     recheck_bundle(
         &bound,
         &record_source,
@@ -233,7 +237,7 @@ pub fn attest(root: &Path, out: &Path) -> Result<PersonaFilesystemAttestation, P
     if published != output {
         return bad("published report path identity differs");
     }
-    run_after_publish_hook();
+    run_after_publish_hook(&output);
     recheck_bundle(
         &bound,
         &record_source,
@@ -565,54 +569,61 @@ fn publication_error(error: PersonaArtifactError) -> PersonaAttestError {
 #[cfg(test)]
 type AfterPublishHook = Box<dyn FnOnce() + Send>;
 #[cfg(test)]
-static AFTER_PUBLISH_HOOK: OnceLock<Mutex<Option<AfterPublishHook>>> = OnceLock::new();
+static AFTER_PUBLISH_HOOK: OnceLock<Mutex<BTreeMap<PathBuf, AfterPublishHook>>> = OnceLock::new();
 #[cfg(test)]
-static BEFORE_PUBLISH_HOOK: OnceLock<Mutex<Option<AfterPublishHook>>> = OnceLock::new();
+static BEFORE_PUBLISH_HOOK: OnceLock<Mutex<BTreeMap<PathBuf, AfterPublishHook>>> = OnceLock::new();
 #[cfg(test)]
-fn install_after_publish_hook(hook: AfterPublishHook) {
+fn install_after_publish_hook(output: PathBuf, hook: AfterPublishHook) {
     let mut slot = AFTER_PUBLISH_HOOK
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
-        .unwrap();
-    assert!(slot.replace(hook).is_none(), "duplicate after-publish hook");
+        .unwrap_or_else(|poison| poison.into_inner());
+    match slot.entry(output) {
+        Entry::Vacant(entry) => {
+            entry.insert(hook);
+        }
+        Entry::Occupied(_) => panic!("duplicate after-publish hook"),
+    }
 }
 #[cfg(test)]
-fn run_after_publish_hook() {
+fn run_after_publish_hook(output: &Path) {
     if let Some(hook) = AFTER_PUBLISH_HOOK
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
-        .unwrap()
-        .take()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(output)
     {
         hook();
     }
 }
 #[cfg(not(test))]
-fn run_after_publish_hook() {}
+fn run_after_publish_hook(_: &Path) {}
 #[cfg(test)]
-fn install_before_publish_hook(hook: AfterPublishHook) {
+fn install_before_publish_hook(output: PathBuf, hook: AfterPublishHook) {
     let mut slot = BEFORE_PUBLISH_HOOK
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
-        .unwrap();
-    assert!(
-        slot.replace(hook).is_none(),
-        "duplicate before-publish hook"
-    );
+        .unwrap_or_else(|poison| poison.into_inner());
+    match slot.entry(output) {
+        Entry::Vacant(entry) => {
+            entry.insert(hook);
+        }
+        Entry::Occupied(_) => panic!("duplicate before-publish hook"),
+    }
 }
 #[cfg(test)]
-fn run_before_publish_hook() {
+fn run_before_publish_hook(output: &Path) {
     if let Some(hook) = BEFORE_PUBLISH_HOOK
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
-        .unwrap()
-        .take()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(output)
     {
         hook();
     }
 }
 #[cfg(not(test))]
-fn run_before_publish_hook() {}
+fn run_before_publish_hook(_: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -623,7 +634,13 @@ mod tests {
         persona_render_artifact::RenderArtifact,
         persona_schedule::build_suite_schedule,
     };
-    use std::fs;
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tempfile::tempdir;
 
     fn bundle() -> (tempfile::TempDir, PathBuf) {
@@ -649,6 +666,35 @@ mod tests {
         })
         .unwrap();
         (temp, root)
+    }
+    #[test]
+    fn duplicate_hook_install_keeps_original_pending_hook() {
+        let temp = tempdir().unwrap();
+        let output = fs::canonicalize(temp.path())
+            .unwrap()
+            .join("hook-report.json");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let original_calls = Arc::clone(&calls);
+        install_before_publish_hook(
+            output.clone(),
+            Box::new(move || {
+                original_calls.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let replacement_calls = Arc::clone(&calls);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                install_before_publish_hook(
+                    output.clone(),
+                    Box::new(move || {
+                        replacement_calls.fetch_add(100, Ordering::SeqCst);
+                    }),
+                );
+            }))
+            .is_err()
+        );
+        run_before_publish_hook(&output);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
     #[test]
     fn attests_stably_and_creates_only_once() {
@@ -690,10 +736,13 @@ mod tests {
         let plan = root.join(PLAN_NAME);
         let replacement = root.parent().unwrap().join("replacement-plan.json");
         fs::copy(&plan, &replacement).unwrap();
-        install_after_publish_hook(Box::new(move || {
-            fs::rename(&plan, plan.with_extension("old")).unwrap();
-            fs::rename(&replacement, &plan).unwrap();
-        }));
+        install_after_publish_hook(
+            out.clone(),
+            Box::new(move || {
+                fs::rename(&plan, plan.with_extension("old")).unwrap();
+                fs::rename(&replacement, &plan).unwrap();
+            }),
+        );
         assert!(matches!(
             attest(&root, &out),
             Err(PersonaAttestError::Indeterminate(_))
@@ -711,10 +760,13 @@ mod tests {
         let plan = root.join(PLAN_NAME);
         let replacement = root.parent().unwrap().join("replacement-plan.json");
         fs::copy(&plan, &replacement).unwrap();
-        install_before_publish_hook(Box::new(move || {
-            fs::rename(&plan, plan.with_extension("old")).unwrap();
-            fs::rename(&replacement, &plan).unwrap();
-        }));
+        install_before_publish_hook(
+            out.clone(),
+            Box::new(move || {
+                fs::rename(&plan, plan.with_extension("old")).unwrap();
+                fs::rename(&replacement, &plan).unwrap();
+            }),
+        );
         assert!(attest(&root, &out).is_err());
         assert!(!out.exists(), "barrier fails before no-replace publication");
     }
@@ -724,10 +776,13 @@ mod tests {
         let (_temp, root) = bundle();
         let out = root.parent().unwrap().join("report-root.json");
         let public_root = root.clone();
-        install_before_publish_hook(Box::new(move || {
-            fs::rename(&public_root, public_root.with_extension("old")).unwrap();
-            fs::create_dir(&public_root).unwrap();
-        }));
+        install_before_publish_hook(
+            out.clone(),
+            Box::new(move || {
+                fs::rename(&public_root, public_root.with_extension("old")).unwrap();
+                fs::create_dir(&public_root).unwrap();
+            }),
+        );
         assert!(attest(&root, &out).is_err());
         assert!(!out.exists());
 
@@ -736,10 +791,13 @@ mod tests {
         let record = root.join(RECORD_NAME);
         let replacement = root.parent().unwrap().join("replacement-record.json");
         fs::copy(&record, &replacement).unwrap();
-        install_before_publish_hook(Box::new(move || {
-            fs::rename(&record, record.with_extension("old")).unwrap();
-            fs::rename(&replacement, &record).unwrap();
-        }));
+        install_before_publish_hook(
+            out.clone(),
+            Box::new(move || {
+                fs::rename(&record, record.with_extension("old")).unwrap();
+                fs::rename(&replacement, &record).unwrap();
+            }),
+        );
         assert!(attest(&root, &out).is_err());
         assert!(!out.exists());
     }
