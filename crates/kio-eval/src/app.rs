@@ -184,6 +184,13 @@ enum PersonaCommands {
         #[arg(long)]
         replay_id: String,
     },
+    /// Create one exact plan-bound workspace without adopting an existing root.
+    Scaffold {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -320,6 +327,8 @@ pub enum AppError {
     Replay(#[from] kio_eval::replay::ReplayError),
     #[error(transparent)]
     PersonaMaterialize(#[from] kio_eval::persona_materialize::PersonaMaterializeError),
+    #[error(transparent)]
+    PersonaScaffold(#[from] kio_eval::persona_scaffold::PersonaScaffoldError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -1274,6 +1283,9 @@ fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
                 replay_id,
             })?;
         }
+        PersonaCommands::Scaffold { plan, root } => {
+            kio_eval::persona_scaffold::scaffold(plan, root)?;
+        }
     }
     Ok(ExitCode::Success)
 }
@@ -1365,6 +1377,18 @@ mod tests {
             Args::try_parse_from([
                 "kio-eval",
                 "persona",
+                "scaffold",
+                "--plan",
+                "/tmp/plan.json",
+                "--root",
+                "/tmp/persona-workspace",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
                 "schedule",
                 "--plan",
                 "/tmp/plan.json",
@@ -1435,7 +1459,6 @@ mod tests {
         let plan = root.join("plan.json");
         let schedule = root.join("schedule.json");
         let render = root.join("render.json");
-        let materialized = root.join("materialized");
         assert_eq!(
             run(Args {
                 command: Some(Commands::Persona {
@@ -1547,61 +1570,115 @@ mod tests {
             &render_bytes,
         )
         .unwrap();
-        assert_eq!(
-            run(Args {
-                command: Some(Commands::Persona {
-                    command: PersonaCommands::Materialize {
-                        plan: plan.clone(),
-                        schedule: schedule.clone(),
-                        render: render.clone(),
-                        destination: materialized.clone(),
-                        replay_id: "replay-01".into(),
-                    },
-                }),
-                golden: None,
-                corpus: None,
-                corpus_manifest: None,
-                history_manifest: None,
-                bin: Path::new("kio").to_path_buf(),
-                out: None,
-                report: None,
-                scenario: vec![],
-                min_recall: 0.8,
-                dry_run: false,
-            })
-            .unwrap(),
-            ExitCode::Success
-        );
-        assert!(materialized.join("persona-materialization.json").is_file());
-        let before = fs::read(materialized.join("persona-plan.json")).unwrap();
-        assert!(
-            run(Args {
-                command: Some(Commands::Persona {
-                    command: PersonaCommands::Materialize {
-                        plan: plan.clone(),
-                        schedule: schedule.clone(),
-                        render: render.clone(),
-                        destination: materialized.clone(),
-                        replay_id: "replay-01".into(),
-                    },
-                }),
-                golden: None,
-                corpus: None,
-                corpus_manifest: None,
-                history_manifest: None,
-                bin: Path::new("kio").to_path_buf(),
-                out: None,
-                report: None,
-                scenario: vec![],
-                min_recall: 0.8,
-                dry_run: false,
-            })
-            .is_err()
-        );
-        assert_eq!(
-            fs::read(materialized.join("persona-plan.json")).unwrap(),
-            before
-        );
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let materialized = root.join("materialized");
+            let workspace = root.join("workspace");
+            assert_eq!(
+                run(Args {
+                    command: Some(Commands::Persona {
+                        command: PersonaCommands::Materialize {
+                            plan: plan.clone(),
+                            schedule: schedule.clone(),
+                            render: render.clone(),
+                            destination: materialized.clone(),
+                            replay_id: "replay-01".into(),
+                        },
+                    }),
+                    golden: None,
+                    corpus: None,
+                    corpus_manifest: None,
+                    history_manifest: None,
+                    bin: Path::new("kio").to_path_buf(),
+                    out: None,
+                    report: None,
+                    scenario: vec![],
+                    min_recall: 0.8,
+                    dry_run: false,
+                })
+                .unwrap(),
+                ExitCode::Success
+            );
+            assert!(materialized.join("persona-materialization.json").is_file());
+            let before = fs::read(materialized.join("persona-plan.json")).unwrap();
+            assert!(
+                run(Args {
+                    command: Some(Commands::Persona {
+                        command: PersonaCommands::Materialize {
+                            plan: plan.clone(),
+                            schedule: schedule.clone(),
+                            render: render.clone(),
+                            destination: materialized.clone(),
+                            replay_id: "replay-01".into(),
+                        },
+                    }),
+                    golden: None,
+                    corpus: None,
+                    corpus_manifest: None,
+                    history_manifest: None,
+                    bin: Path::new("kio").to_path_buf(),
+                    out: None,
+                    report: None,
+                    scenario: vec![],
+                    min_recall: 0.8,
+                    dry_run: false,
+                })
+                .is_err()
+            );
+            assert_eq!(
+                fs::read(materialized.join("persona-plan.json")).unwrap(),
+                before
+            );
+            assert_eq!(
+                run(Args {
+                    command: Some(Commands::Persona {
+                        command: PersonaCommands::Scaffold {
+                            plan: plan.clone(),
+                            root: workspace.clone(),
+                        },
+                    }),
+                    golden: None,
+                    corpus: None,
+                    corpus_manifest: None,
+                    history_manifest: None,
+                    bin: Path::new("kio").to_path_buf(),
+                    out: None,
+                    report: None,
+                    scenario: vec![],
+                    min_recall: 0.8,
+                    dry_run: false,
+                })
+                .unwrap(),
+                ExitCode::Success
+            );
+            assert!(workspace.join("persona-workspace-owner.json").is_file());
+            let owner_before = fs::read(workspace.join("persona-workspace-owner.json")).unwrap();
+            assert!(
+                run(Args {
+                    command: Some(Commands::Persona {
+                        command: PersonaCommands::Scaffold {
+                            plan: plan.clone(),
+                            root: workspace.clone(),
+                        },
+                    }),
+                    golden: None,
+                    corpus: None,
+                    corpus_manifest: None,
+                    history_manifest: None,
+                    bin: Path::new("kio").to_path_buf(),
+                    out: None,
+                    report: None,
+                    scenario: vec![],
+                    min_recall: 0.8,
+                    dry_run: false,
+                })
+                .is_err()
+            );
+            assert_eq!(
+                fs::read(workspace.join("persona-workspace-owner.json")).unwrap(),
+                owner_before
+            );
+        }
         let text = std::str::from_utf8(&render_bytes).unwrap();
         assert!(!text.contains("\"bytes\""));
         assert!(!text.contains("history_ready"));

@@ -13,6 +13,7 @@ pub mod persona_materialize;
 pub mod persona_plan;
 pub mod persona_render;
 pub mod persona_render_artifact;
+pub mod persona_scaffold;
 pub mod persona_schedule;
 pub(crate) mod process_boundary;
 pub mod qhard;

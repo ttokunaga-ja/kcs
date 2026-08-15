@@ -856,6 +856,7 @@ version = "0.1.0"
 dependencies = [
  "cap-primitives",
  "clap",
+ "getrandom 0.4.3",
  "kio-core",
  "kio-index",
  "kio-pipeline",
