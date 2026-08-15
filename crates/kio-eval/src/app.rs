@@ -263,6 +263,8 @@ pub enum AppError {
     #[error(transparent)]
     ScalePrepare(#[from] kio_eval::scale_prepare::ScalePrepareError),
     #[error(transparent)]
+    ScaleAttest(#[from] kio_eval::scale_attest::AttestError),
+    #[error(transparent)]
     Crossscope(#[from] kio_eval::crossscope::CrossscopeError),
     #[error(transparent)]
     Rerank(#[from] kio_eval::rerank::RerankDumpError),
@@ -749,14 +751,17 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     println!("     report: {}", summary.report.display());
                     Ok(ExitCode::Success)
                 }
-                ScaleCommands::Attest { corpus, out } => Err(AppError::Input(format!(
-                    "kio-eval scale attest is not implemented yet (corpus={}, out={})",
-                    corpus.display(),
-                    out.as_ref().map_or_else(
-                        || "<canonical>".to_owned(),
-                        |path| path.display().to_string()
-                    )
-                ))),
+                ScaleCommands::Attest { corpus, out } => {
+                    let summary =
+                        kio_eval::scale_attest::attest_and_publish(corpus, out.as_deref())?;
+                    println!("[ok] scale fixture attested: {}", summary.corpus.display());
+                    println!(
+                        "     scopes={} current_chunks={}",
+                        summary.scopes, summary.current_chunks
+                    );
+                    println!("     report: {}", summary.report.display());
+                    Ok(ExitCode::Success)
+                }
                 ScaleCommands::Benchmark {
                     corpus,
                     bin,

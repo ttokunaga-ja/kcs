@@ -8,17 +8,17 @@ use crate::{
     scale_fixture::ValidatedFixture,
     scale_spec::{self, SCOPES, ScaleScope},
 };
-use cap_primitives::fs as cap_fs;
 #[cfg(unix)]
 use cap_primitives::fs::MetadataExt;
+use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::{canonical_json_bytes, hash_bytes, is_hash};
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Component, Path, PathBuf},
     str,
 };
 use thiserror::Error;
@@ -30,6 +30,8 @@ const MAX_SQLITE_LEAF: u64 = 512 << 20;
 const MAX_SQLITE_TOTAL: u64 = 1024 << 20;
 const MAX_ROWS: u64 = 250_000;
 const MAX_REGISTRY_ROWS: usize = SCOPES.len() + 1;
+const MAX_REPORT_BYTES: usize = 1024 * 1024;
+const REPORT_TEMP_PREFIX: &str = ".kio-scale-attest-v2.tmp-";
 
 const INDEX_SQL_FINGERPRINTS: &[(&str, &str)] = &[
     (
@@ -99,6 +101,7 @@ const TABLE_SQL_FINGERPRINTS: &[(&str, &str)] = &[
         "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), index_generation TEXT NOT NULL, last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0)",
     ),
 ];
+const REGISTRY_SCOPES_SQL: &str = "CREATE TABLE scopes (scope_id TEXT NOT NULL, kio_path TEXT NOT NULL, root_path TEXT NOT NULL, participates_in_global_search INTEGER NOT NULL DEFAULT 1, indexed INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT NOT NULL, PRIMARY KEY (scope_id, kio_path))";
 
 #[derive(Debug, Clone)]
 struct SqliteSource {
@@ -166,9 +169,12 @@ pub enum AttestError {
     Unsafe(String),
     #[error("scale fixture binding failed: {0}")]
     Fixture(#[from] crate::scale_fixture::ScaleFixtureError),
+    #[error("scale attestation publication outcome is indeterminate: {0}")]
+    Indeterminate(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeEvidence {
     pub name: String,
     pub scope_id: String,
@@ -183,6 +189,31 @@ pub struct ScopeEvidence {
 pub struct CorpusEvidence {
     pub scopes: Vec<ScopeEvidence>,
     pub registry_rows: usize,
+    pub current_chunks: u64,
+}
+
+/// The only public product of the independent scale attestor.  It is an
+/// exact, current-v2 receipt rather than a compatibility envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationReport {
+    pub schema_version: u64,
+    pub attestor: String,
+    pub fixture_id: String,
+    pub profile: scale_spec::ScaleProfile,
+    pub manifest_hash: String,
+    pub content_root_hash: String,
+    pub corpus: String,
+    pub scopes: Vec<ScopeEvidence>,
+    pub registry_rows: usize,
+    pub current_chunks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationSummary {
+    pub corpus: PathBuf,
+    pub report: PathBuf,
+    pub scopes: usize,
     pub current_chunks: u64,
 }
 
@@ -1502,6 +1533,22 @@ fn attest_index_schema(db: &Connection) -> Result<(), AttestError> {
     Ok(())
 }
 
+fn attest_registry_schema(db: &Connection) -> Result<(), AttestError> {
+    let actual: (String, String) = db
+        .query_row(
+            "SELECT type,sql FROM sqlite_schema WHERE name='scopes'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| other("registry schema SQL", error))?;
+    if actual.0 != "table" || canonical_sql(&actual.1) != canonical_sql(REGISTRY_SCOPES_SQL) {
+        return Err(unsafe_state(
+            "registry scopes SQL differs from current contract",
+        ));
+    }
+    Ok(())
+}
+
 /// Attest all per-scope immutable and index evidence.  The fixture must stay
 /// locked by the caller for a skip decision; this function still rechecks it
 /// before and after every scope to reject replacement races.
@@ -1691,6 +1738,7 @@ pub fn attest_registry(
     let kio = required_dir(&data, "kio", "device kio data")?;
     let (db, _snapshot, sources) =
         sqlite_snapshot(&kio, "scope-registry.sqlite", "scope registry")?;
+    attest_registry_schema(&db)?;
     let tables: BTreeSet<String> = db
         .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
         .map_err(|e| other("registry schema", e))?
@@ -1789,4 +1837,599 @@ pub fn attest_ready(fixture: &ValidatedFixture) -> Result<CorpusEvidence, Attest
         registry_rows,
         current_chunks,
     })
+}
+
+/// Bind a ready Rust-v2 fixture, independently re-attest it under the fixture
+/// lock, and create one canonical receipt.  Publication is intentionally
+/// create-only: an existing (including old-format) receipt is never adopted.
+pub fn attest_and_publish(
+    corpus: &Path,
+    requested_out: Option<&Path>,
+) -> Result<AttestationSummary, AttestError> {
+    let fixture = crate::scale_fixture::bind_ready(corpus)?;
+    let _lock = fixture.lock()?;
+    fixture.recheck()?;
+    let evidence = attest_ready(&fixture)?;
+    let report = AttestationReport {
+        schema_version: scale_spec::SCHEMA_VERSION,
+        attestor: scale_spec::ATTESTOR_ID.to_owned(),
+        fixture_id: scale_spec::FIXTURE_ID.to_owned(),
+        profile: fixture.profile(),
+        manifest_hash: scale_spec::manifest_hash(fixture.manifest())
+            .map_err(|error| unsafe_state(format!("cannot bind manifest: {error}")))?,
+        content_root_hash: fixture.manifest().content_root_hash.clone(),
+        corpus: fixture.root().to_string_lossy().into_owned(),
+        scopes: evidence.scopes.clone(),
+        registry_rows: evidence.registry_rows,
+        current_chunks: evidence.current_chunks,
+    };
+    let mut bytes = canonical_json_bytes(
+        &serde_json::to_value(&report)
+            .map_err(|error| unsafe_state(format!("cannot serialize attestation: {error}")))?,
+    )
+    .map_err(|error| unsafe_state(format!("cannot canonicalize attestation: {error}")))?;
+    bytes.push(b'\n');
+    verify_report(&bytes, &report)?;
+    let official = fixture.root().join(scale_spec::ATTESTATION_NAME);
+    let public_report = match requested_out {
+        None => publish_official(&fixture, &bytes)?,
+        Some(path) if !path.is_absolute() => {
+            return Err(unsafe_state("explicit attestation output must be absolute"));
+        }
+        Some(path) if exact_clean_path(path, &official)? && is_official_output(path, &fixture)? => {
+            publish_official(&fixture, &bytes)?
+        }
+        Some(path) => publish_external(path, &fixture, &bytes)?,
+    };
+    fixture.recheck()?;
+    Ok(AttestationSummary {
+        corpus: fixture.root().to_owned(),
+        report: public_report,
+        scopes: evidence.scopes.len(),
+        current_chunks: evidence.current_chunks,
+    })
+}
+
+fn verify_report(bytes: &[u8], expected: &AttestationReport) -> Result<(), AttestError> {
+    if bytes.len() > MAX_REPORT_BYTES || !bytes.ends_with(b"\n") {
+        return Err(unsafe_state("attestation is not bounded LF JSON"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| unsafe_state(format!("attestation is invalid JSON: {error}")))?;
+    let mut canonical = canonical_json_bytes(&value)
+        .map_err(|error| unsafe_state(format!("cannot recanonicalize attestation: {error}")))?;
+    canonical.push(b'\n');
+    if canonical != bytes {
+        return Err(unsafe_state("attestation is not canonical JCS plus LF"));
+    }
+    let actual: AttestationReport = serde_json::from_slice(bytes)
+        .map_err(|error| unsafe_state(format!("attestation violates v2 schema: {error}")))?;
+    if &actual != expected {
+        return Err(unsafe_state("attestation does not bind current evidence"));
+    }
+    Ok(())
+}
+
+fn exact_clean_path(path: &Path, official: &Path) -> Result<bool, AttestError> {
+    let absolute = absolute_clean(path)?;
+    Ok(absolute == absolute_clean(official)?)
+}
+
+fn is_official_output(path: &Path, fixture: &ValidatedFixture) -> Result<bool, AttestError> {
+    let absolute = absolute_clean(path)?;
+    let Some(parent) = absolute.parent() else {
+        return Ok(false);
+    };
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|error| unsafe_state(format!("cannot inspect official output parent: {error}")))?;
+    let root_metadata = fixture
+        .try_clone_root()?
+        .metadata()
+        .map_err(|error| unsafe_state(format!("cannot inspect fixture root: {error}")))?;
+    Ok(!parent_metadata.file_type().is_symlink()
+        && crate::boundary::same_directory_identity(&parent_metadata, &root_metadata)
+        && absolute.file_name() == Some(std::ffi::OsStr::new(scale_spec::ATTESTATION_NAME)))
+}
+
+fn absolute_clean(path: &Path) -> Result<PathBuf, AttestError> {
+    let absolute = path.to_owned();
+    if !path.is_absolute()
+        || absolute.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(unsafe_state(
+            "output path must be a clean absolute lexical path",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    let absolute = {
+        let text = absolute
+            .to_str()
+            .ok_or_else(|| unsafe_state("output path is not UTF-8"))?;
+        if text == "/tmp"
+            || text.starts_with("/tmp/")
+            || text == "/var"
+            || text.starts_with("/var/")
+        {
+            PathBuf::from(format!("/private{text}"))
+        } else {
+            absolute
+        }
+    };
+    Ok(absolute)
+}
+
+fn publish_official(fixture: &ValidatedFixture, bytes: &[u8]) -> Result<PathBuf, AttestError> {
+    let root = fixture.try_clone_root()?;
+    let metadata = root
+        .metadata()
+        .map_err(|error| other("fixture root", error))?;
+    let device = cap_fs::open_dir_nofollow(&root, Path::new(scale_spec::DEVICE_DIR_NAME))
+        .map_err(|error| other("fixture device", error))?;
+    let state = cap_fs::open_dir_nofollow(&device, Path::new("state"))
+        .map_err(|error| other("fixture device state", error))?;
+    let state_metadata = state
+        .metadata()
+        .map_err(|error| other("fixture device state", error))?;
+    publish_in_parent(
+        &state,
+        &state_metadata,
+        &fixture
+            .root()
+            .join(scale_spec::DEVICE_DIR_NAME)
+            .join("state"),
+        &root,
+        &metadata,
+        fixture.root(),
+        scale_spec::ATTESTATION_NAME,
+        bytes,
+    )?;
+    Ok(fixture.root().join(scale_spec::ATTESTATION_NAME))
+}
+
+fn publish_external(
+    path: &Path,
+    fixture: &ValidatedFixture,
+    bytes: &[u8],
+) -> Result<PathBuf, AttestError> {
+    if !path.is_absolute() {
+        return Err(unsafe_state("external attestation output must be absolute"));
+    }
+    let absolute = absolute_clean(path)?;
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| unsafe_state("external output has no parent"))?;
+    let name = absolute
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| unsafe_state("external output has an unsafe leaf"))?;
+    let corpus_identity = fixture
+        .try_clone_root()?
+        .metadata()
+        .map_err(|error| other("corpus", error))?;
+    let mut handle = cap_fs::open_ambient_dir(Path::new("/"), ambient_authority())
+        .map_err(|error| other("external output root", error))?;
+    let mut retained_path = PathBuf::from("/");
+    for component in parent.components() {
+        if let Component::Normal(part) = component {
+            handle = cap_fs::open_dir_nofollow(&handle, Path::new(part))
+                .map_err(|error| other("external output parent", error))?;
+            retained_path.push(part);
+            let retained = handle
+                .metadata()
+                .map_err(|error| other("external output parent", error))?;
+            let public = fs::symlink_metadata(&retained_path)
+                .map_err(|error| other("external output parent", error))?;
+            if !retained.is_dir()
+                || public.file_type().is_symlink()
+                || !crate::boundary::same_directory_identity(&retained, &public)
+            {
+                return Err(unsafe_state("external output parent changed while binding"));
+            }
+            if crate::boundary::same_directory_identity(&retained, &corpus_identity) {
+                return Err(unsafe_state(
+                    "external attestation output aliases the corpus",
+                ));
+            }
+        }
+    }
+    let metadata = handle
+        .metadata()
+        .map_err(|error| other("external output parent", error))?;
+    publish_in_parent(
+        &handle,
+        &metadata,
+        &retained_path,
+        &handle,
+        &metadata,
+        &retained_path,
+        name,
+        bytes,
+    )?;
+    Ok(retained_path.join(name))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_in_parent(
+    staging_parent: &fs::File,
+    staging_metadata: &fs::Metadata,
+    staging_path: &Path,
+    target_parent: &fs::File,
+    target_metadata: &fs::Metadata,
+    target_path: &Path,
+    leaf: &str,
+    bytes: &[u8],
+) -> Result<(), AttestError> {
+    if bytes.len() > MAX_REPORT_BYTES {
+        return Err(unsafe_state("attestation exceeds output bound"));
+    }
+    match cap_fs::stat(target_parent, Path::new(leaf), cap_fs::FollowSymlinks::No) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(unsafe_state(
+                "attestation output already exists; never overwrite",
+            ));
+        }
+        Err(error) => return Err(other("attestation output", error)),
+    }
+    let temp = format!("{REPORT_TEMP_PREFIX}{leaf}");
+    match cap_fs::stat(staging_parent, Path::new(&temp), cap_fs::FollowSymlinks::No) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {}
+        Err(error) => return Err(other("attestation staging", error)),
+    }
+    if cap_fs::stat(staging_parent, Path::new(&temp), cap_fs::FollowSymlinks::No)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        let mut options = cap_fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut staged = cap_fs::open(staging_parent, Path::new(&temp), &options)
+            .map_err(|error| other("attestation staging", error))?;
+        staged
+            .write_all(bytes)
+            .and_then(|_| staged.sync_all())
+            .map_err(|error| other("attestation staging", error))?;
+    }
+    let (_, staged_observation) = observed_regular(
+        staging_parent,
+        &temp,
+        MAX_REPORT_BYTES as u64,
+        "attestation staging",
+    )?;
+    if staged_observation.sha256 != hash_bytes(bytes)
+        || staged_observation.bytes != bytes.len() as u64
+    {
+        return Err(unsafe_state("attestation staging bytes differ from report"));
+    }
+    recheck_public_parent(target_path, target_metadata)?;
+    crate::scale_fixture::rename_noreplace(staging_parent, &temp, target_parent, leaf)
+        .map_err(AttestError::Fixture)?;
+    let verification = (|| -> Result<(), AttestError> {
+        crate::boundary::sync_retained_directory(staging_parent, staging_metadata, staging_path)
+            .map_err(|error| {
+                unsafe_state(format!("cannot sync attestation staging parent: {error}"))
+            })?;
+        crate::boundary::sync_retained_directory(target_parent, target_metadata, target_path)
+            .map_err(|error| unsafe_state(format!("cannot sync attestation parent: {error}")))?;
+        let (_, published) = observed_regular(
+            target_parent,
+            leaf,
+            MAX_REPORT_BYTES as u64,
+            "published attestation",
+        )?;
+        if published != staged_observation {
+            return Err(unsafe_state(
+                "published attestation differs from staged binding",
+            ));
+        }
+        recheck_public_parent(target_path, target_metadata)?;
+        let reread = observed_regular(
+            target_parent,
+            leaf,
+            MAX_REPORT_BYTES as u64,
+            "published attestation",
+        )?
+        .1;
+        if reread != published {
+            return Err(unsafe_state(
+                "published attestation changed after verification",
+            ));
+        }
+        Ok(())
+    })();
+    verification.map_err(|error| AttestError::Indeterminate(error.to_string()))
+}
+
+fn recheck_public_parent(path: &Path, expected: &fs::Metadata) -> Result<(), AttestError> {
+    let public = fs::symlink_metadata(path)
+        .map_err(|error| unsafe_state(format!("cannot recheck public output parent: {error}")))?;
+    if public.file_type().is_symlink()
+        || !public.is_dir()
+        || !crate::boundary::same_directory_identity(expected, &public)
+    {
+        return Err(unsafe_state(
+            "public output parent changed during publication",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn report() -> AttestationReport {
+        AttestationReport {
+            schema_version: 2,
+            attestor: scale_spec::ATTESTOR_ID.to_owned(),
+            fixture_id: scale_spec::FIXTURE_ID.to_owned(),
+            profile: scale_spec::ScaleProfile::Tiny,
+            manifest_hash: format!("sha256:{}", "a".repeat(64)),
+            content_root_hash: format!("sha256:{}", "b".repeat(64)),
+            corpus: "/tmp/fixture".to_owned(),
+            scopes: vec![ScopeEvidence {
+                name: "research-papers".to_owned(),
+                scope_id: "scope".to_owned(),
+                head: format!("sha256:{}", "c".repeat(64)),
+                source_files: 1,
+                current_chunks: 3,
+                physical_chunks: 3,
+                embedded_chunks: 0,
+            }],
+            registry_rows: 1,
+            current_chunks: 3,
+        }
+    }
+
+    fn canonical(report: &AttestationReport) -> Vec<u8> {
+        let mut bytes = canonical_json_bytes(&serde_json::to_value(report).unwrap()).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn report_is_strict_canonical_lf_v2() {
+        let receipt = report();
+        let bytes = canonical(&receipt);
+        verify_report(&bytes, &receipt).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        let mut malformed = canonical_json_bytes(&value).unwrap();
+        malformed.push(b'\n');
+        assert!(verify_report(&malformed, &receipt).is_err());
+        assert!(verify_report(&bytes[..bytes.len() - 1], &receipt).is_err());
+    }
+
+    #[test]
+    fn publication_is_create_only_and_recovers_exact_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = cap_fs::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        let metadata = handle.metadata().unwrap();
+        let bytes = canonical(&report());
+        publish_in_parent(
+            &handle,
+            &metadata,
+            temp.path(),
+            &handle,
+            &metadata,
+            temp.path(),
+            "receipt.json",
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(fs::read(temp.path().join("receipt.json")).unwrap(), bytes);
+        assert!(
+            publish_in_parent(
+                &handle,
+                &metadata,
+                temp.path(),
+                &handle,
+                &metadata,
+                temp.path(),
+                "receipt.json",
+                &bytes,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn output_paths_must_be_absolute_and_lexically_clean() {
+        assert!(absolute_clean(Path::new("relative.json")).is_err());
+        let dirty = Path::new("/tmp/../tmp/receipt.json");
+        assert!(absolute_clean(dirty).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_output_rejects_corpus_and_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let corpus = base.join("corpus");
+        crate::scale_fixture::generate(&corpus, scale_spec::ScaleProfile::Tiny, false).unwrap();
+        let fixture = crate::scale_fixture::bind_ready(&corpus).unwrap();
+        let bytes = canonical(&report());
+        assert!(publish_external(&corpus.join("unexpected.json"), &fixture, &bytes).is_err());
+        let alias = base.join("alias");
+        symlink(&corpus, &alias).unwrap();
+        assert!(publish_external(&alias.join("receipt.json"), &fixture, &bytes).is_err());
+        assert!(!corpus.join("unexpected.json").exists());
+        assert!(!corpus.join("receipt.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_rejects_existing_symlink_and_hardlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let handle = cap_fs::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        let metadata = handle.metadata().unwrap();
+        let bytes = canonical(&report());
+        let victim = temp.path().join("victim.json");
+        fs::write(&victim, b"victim").unwrap();
+        symlink(&victim, temp.path().join("receipt.json")).unwrap();
+        assert!(
+            publish_in_parent(
+                &handle,
+                &metadata,
+                temp.path(),
+                &handle,
+                &metadata,
+                temp.path(),
+                "receipt.json",
+                &bytes,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"victim");
+        fs::remove_file(temp.path().join("receipt.json")).unwrap();
+        fs::hard_link(&victim, temp.path().join("receipt.json")).unwrap();
+        assert!(
+            publish_in_parent(
+                &handle,
+                &metadata,
+                temp.path(),
+                &handle,
+                &metadata,
+                temp.path(),
+                "receipt.json",
+                &bytes,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"victim");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_parent_replacement_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("output");
+        let displaced = temp.path().join("displaced");
+        fs::create_dir(&parent).unwrap();
+        let expected = fs::metadata(&parent).unwrap();
+        fs::rename(&parent, &displaced).unwrap();
+        fs::create_dir(&parent).unwrap();
+        assert!(recheck_public_parent(&parent, &expected).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_regular_rejects_unsafe_leaves_and_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let handle = cap_fs::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        fs::write(temp.path().join("file"), b"same").unwrap();
+        let (_, binding) = bind_regular(&handle, "file", 16, "test").unwrap();
+        fs::rename(temp.path().join("file"), temp.path().join("old")).unwrap();
+        fs::write(temp.path().join("file"), b"same").unwrap();
+        assert!(binding.recheck().is_err());
+        fs::remove_file(temp.path().join("file")).unwrap();
+        symlink(temp.path().join("old"), temp.path().join("file")).unwrap();
+        assert!(observed_regular(&handle, "file", 16, "test").is_err());
+        fs::remove_file(temp.path().join("file")).unwrap();
+        fs::hard_link(temp.path().join("old"), temp.path().join("file")).unwrap();
+        assert!(observed_regular(&handle, "file", 16, "test").is_err());
+        fs::remove_file(temp.path().join("file")).unwrap();
+        fs::write(temp.path().join("file"), b"too-large").unwrap();
+        assert!(observed_regular(&handle, "file", 3, "test").is_err());
+    }
+
+    #[test]
+    fn config_must_be_exactly_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = cap_fs::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        fs::write(temp.path().join("config.toml"), b"x=1\n").unwrap();
+        assert!(check_config(&handle).is_err());
+        fs::write(temp.path().join("config.toml"), b"").unwrap();
+        assert!(check_config(&handle).is_ok());
+    }
+
+    fn current_schema(db: &Connection, changed_chunks: bool, ordinary_fts: bool) {
+        kio_index::vec::ensure_registered();
+        for (name, ddl) in TABLE_SQL_FINGERPRINTS {
+            let ddl = if changed_chunks && *name == "chunks" {
+                ddl.replace(
+                    "CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*')",
+                    "CHECK (1)",
+                )
+            } else {
+                (*ddl).to_owned()
+            };
+            db.execute_batch(&ddl).unwrap();
+        }
+        for (_, ddl) in &INDEX_SQL_FINGERPRINTS[..4] {
+            db.execute_batch(ddl).unwrap();
+        }
+        if ordinary_fts {
+            db.execute_batch("CREATE TABLE chunk_fts (text TEXT, heading_path TEXT)")
+                .unwrap();
+        } else {
+            db.execute_batch(INDEX_SQL_FINGERPRINTS[7].1).unwrap();
+        }
+        db.execute_batch(INDEX_SQL_FINGERPRINTS[8].1).unwrap();
+        db.execute_batch(INDEX_SQL_FINGERPRINTS[9].1).unwrap();
+        for (_, ddl) in &INDEX_SQL_FINGERPRINTS[4..7] {
+            db.execute_batch(ddl).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_index_schema_rejects_virtual_and_principal_constraint_drift() {
+        kio_index::vec::ensure_registered();
+        let db = Connection::open_in_memory().unwrap();
+        current_schema(&db, false, false);
+        assert!(attest_index_schema(&db).is_ok());
+        let fts_replaced = Connection::open_in_memory().unwrap();
+        current_schema(&fts_replaced, false, true);
+        assert!(attest_index_schema(&fts_replaced).is_err());
+        let changed_constraint = Connection::open_in_memory().unwrap();
+        current_schema(&changed_constraint, true, false);
+        assert!(attest_index_schema(&changed_constraint).is_err());
+    }
+
+    #[test]
+    fn exact_registry_schema_rejects_default_and_key_drift() {
+        let current = Connection::open_in_memory().unwrap();
+        current.execute_batch(REGISTRY_SCOPES_SQL).unwrap();
+        assert!(attest_registry_schema(&current).is_ok());
+
+        let changed_default = Connection::open_in_memory().unwrap();
+        changed_default
+            .execute_batch(&REGISTRY_SCOPES_SQL.replace("DEFAULT 1", "DEFAULT 0"))
+            .unwrap();
+        assert!(attest_registry_schema(&changed_default).is_err());
+
+        let changed_key = Connection::open_in_memory().unwrap();
+        changed_key
+            .execute_batch(
+                &REGISTRY_SCOPES_SQL
+                    .replace("PRIMARY KEY (scope_id, kio_path)", "PRIMARY KEY (scope_id)"),
+            )
+            .unwrap();
+        assert!(attest_registry_schema(&changed_key).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_snapshot_rejects_hardlinked_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("index.sqlite");
+        Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (id INTEGER)")
+            .unwrap();
+        fs::hard_link(&db_path, temp.path().join("index-copy.sqlite")).unwrap();
+        let handle = cap_fs::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        assert!(sqlite_snapshot(&handle, "index.sqlite", "test sqlite").is_err());
+    }
 }
