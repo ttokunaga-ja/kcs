@@ -2,27 +2,33 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from eval import persona_history_attestation as attestation
-
-class Bundle:
-    fixture_id = "kio-persona-pc-v2"; profile = "tiny"
-    plan_digest = "sha256:" + "1" * 64
-    plan_sha256 = "sha256:" + "1" * 64
-    schedule_sha256 = "sha256:" + "2" * 64
-    render_sha256 = "sha256:" + "3" * 64
 
 class FilesystemAttestationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / "root"; self.root.mkdir(); (self.root / "a.txt").write_bytes(b"a")
+        self.record = self.root / "persona-materialization.json"; self.record.write_bytes(b'{"opaque":true}\n')
+        import hashlib
+        self.digest = "sha256:" + hashlib.sha256(self.record.read_bytes()).hexdigest()
 
     def test_stable_content_and_false_claims(self):
         content = attestation.walk_directory_content_root(self.root)
         self.assertTrue(content.content_root_sha256.startswith("sha256:"))
-        value = attestation.build_filesystem_attestation(bundle=Bundle(), root_binding_sha256="sha256:" + "4" * 64, directory=self.root)
+        value = attestation.build_filesystem_attestation(directory=self.root, materialization_sha256=self.digest)
         self.assertFalse(value["claims"]["actual_kio_evidence"])
         self.assertFalse(value["claims"]["history_ready"])
+        self.assertEqual(value["materialization_sha256"], self.digest)
+
+    def test_rejects_wrong_digest_and_record_links(self):
+        with self.assertRaises(attestation.PersonaHistoryAttestationError):
+            attestation.build_filesystem_attestation(directory=self.root, materialization_sha256="sha256:" + "0" * 64)
+        other = self.root / "other"; other.write_bytes(self.record.read_bytes())
+        self.record.unlink(); os.link(other, self.record)
+        with self.assertRaises(attestation.PersonaHistoryAttestationError):
+            attestation.build_filesystem_attestation(directory=self.root, materialization_sha256=self.digest)
 
     def test_rejects_links_hardlinks_and_bounds(self):
         link = self.root / "link"; link.symlink_to("a.txt")
@@ -40,6 +46,36 @@ class FilesystemAttestationTests(unittest.TestCase):
         with self.assertRaises(attestation.PersonaHistoryAttestationError): attestation.walk_directory_content_root(alias)
         pipe = self.root / "pipe"; os.mkfifo(pipe)
         with self.assertRaises(attestation.PersonaHistoryAttestationError): attestation.walk_directory_content_root(self.root)
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "descriptor directory unavailable")
+    def test_nondirectory_ancestor_failure_does_not_leak_descriptors(self):
+        regular = Path(self.temp.name).resolve() / "regular"
+        regular.write_bytes(b"not a directory")
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(100):
+            with self.assertRaises(attestation.PersonaHistoryAttestationError):
+                attestation.walk_directory_content_root(regular / "child")
+        self.assertLessEqual(len(os.listdir("/dev/fd")), before + 1)
+
+    def test_rejects_raw_path_alias(self):
+        alias = str(self.root.parent) + "/./" + self.root.name
+        with self.assertRaises(attestation.PersonaHistoryAttestationError):
+            attestation.walk_directory_content_root(alias)
+        with self.assertRaises(attestation.PersonaHistoryAttestationError):
+            attestation.build_filesystem_attestation(directory=alias, materialization_sha256=self.digest)
+
+    def test_rejects_root_swap_after_authority_open(self):
+        replacement = Path(self.temp.name).resolve() / "replacement"; replacement.mkdir()
+        (replacement / "persona-materialization.json").write_bytes(self.record.read_bytes())
+        (replacement / "different.txt").write_bytes(b"different")
+        displaced = Path(self.temp.name).resolve() / "displaced"
+        original_walk = attestation.walk_directory_content_root
+        def swap_then_walk(path, **kwargs):
+            self.root.rename(displaced); replacement.rename(self.root)
+            return original_walk(path, **kwargs)
+        with mock.patch.object(attestation, "walk_directory_content_root", side_effect=swap_then_walk):
+            with self.assertRaises(attestation.PersonaHistoryAttestationError):
+                attestation.build_filesystem_attestation(directory=self.root, materialization_sha256=self.digest)
 
     def test_rejects_casefold_collision_and_depth(self):
         upper, lower = self.root / "A", self.root / "a"

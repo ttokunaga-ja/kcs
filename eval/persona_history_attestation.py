@@ -7,17 +7,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
 import stat
 import unicodedata
 
-from . import persona_artifacts
 
 CONTENT_ROOT_SCHEMA = "kio.persona.filesystem-content-root/v2"
-FILESYSTEM_ATTESTATION_SCHEMA = "kio.persona.filesystem-attestation/v2"
+FILESYSTEM_ATTESTATION_SCHEMA = "kio.persona.filesystem-attestation/v3"
 FILESYSTEM_COVERAGE = "filesystem_structure_and_file_bytes_only"
 HARD_MAX_ENTRIES = 250_000
 HARD_MAX_DIRECT_ENTRIES = 16_384
@@ -88,6 +86,12 @@ def _component(name: str):
     if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or "\x00" in name or unicodedata.normalize("NFC", name) != name or len(name.encode()) > 255:
         raise PersonaHistoryAttestationError("runtime entry is not a portable component")
 
+def _normalized_absolute_path(value: os.PathLike[str] | str) -> Path:
+    raw = os.fspath(value)
+    if type(raw) is not str or not raw.startswith("/") or raw.startswith("//") or raw != os.path.normpath(raw) or any(component in (".", "..") for component in raw.split("/")):
+        raise PersonaHistoryAttestationError("runtime root path must be absolute and lexically normalized")
+    return Path(raw)
+
 def _file(parent: int, name: str, expected: os.stat_result, limits: AttestationLimits):
     if expected.st_nlink != 1 or expected.st_size < 0 or expected.st_size > limits.max_file_bytes:
         raise PersonaHistoryAttestationError("runtime file link count or size is invalid")
@@ -128,6 +132,8 @@ def _open_absolute_directory(path: Path) -> tuple[int, os.stat_result]:
     try:
         descriptor = os.open(path.anchor, _flags(True))
         for component in path.parts[1:]:
+            if component in (".", ".."):
+                raise PersonaHistoryAttestationError("runtime root path is not lexically normalized")
             before = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
             if not stat.S_ISDIR(before.st_mode):
                 raise PersonaHistoryAttestationError("runtime root component is not a directory")
@@ -148,16 +154,24 @@ def _open_absolute_directory(path: Path) -> tuple[int, os.stat_result]:
         if descriptor >= 0:
             os.close(descriptor)
         raise PersonaHistoryAttestationError("cannot open runtime root safely") from error
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
 
-def walk_directory_content_root(path: os.PathLike[str] | str, *, limits: AttestationLimits = DEFAULT_LIMITS) -> DirectoryContentRoot:
+def walk_directory_content_root(path: os.PathLike[str] | str, *, limits: AttestationLimits = DEFAULT_LIMITS, _bound_root_fd: int | None = None) -> DirectoryContentRoot:
     """Walk a stable same-device tree, rejecting links, replacements and bounds."""
     if type(limits) is not AttestationLimits or os.name == "nt":
         raise PersonaHistoryAttestationError("handle-relative attestation is unavailable")
-    supplied = Path(os.fspath(path))
-    if not supplied.is_absolute() or Path(os.path.normpath(supplied)) != supplied:
-        raise PersonaHistoryAttestationError("runtime root path must be absolute and lexically normalized")
-    root = supplied
-    rootfd, opened = _open_absolute_directory(root)
+    root = _normalized_absolute_path(path)
+    owns_root_fd = _bound_root_fd is None
+    if owns_root_fd:
+        rootfd, opened = _open_absolute_directory(root)
+    else:
+        rootfd = _bound_root_fd
+        try: opened = os.fstat(rootfd)
+        except OSError as error: raise PersonaHistoryAttestationError("bound runtime root is unavailable") from error
+        if not stat.S_ISDIR(opened.st_mode): raise PersonaHistoryAttestationError("bound runtime root is not a directory")
     seen = {(opened.st_dev, opened.st_ino)}; counts = {"entries": 0, "files": 0, "dirs": 0, "bytes": 0, "depth": 0}
     def visit(fd: int, depth: int, path_bytes: int):
         start = os.fstat(fd); rows = []; direct = 0; folds = set()
@@ -200,21 +214,79 @@ def walk_directory_content_root(path: os.PathLike[str] | str, *, limits: Attesta
         digest = visit(rootfd, 0, 0)
         if _stable(os.fstat(rootfd)) != _stable(opened) or _stable(root.lstat()) != _stable(opened): raise PersonaHistoryAttestationError("runtime root changed during traversal")
         return DirectoryContentRoot(CONTENT_ROOT_SCHEMA, 2, FILESYSTEM_COVERAGE, opened.st_dev, opened.st_ino, opened.st_nlink, counts["dirs"], counts["files"], counts["bytes"], counts["depth"], "sha256:" + digest.hex())
-    finally: os.close(rootfd)
+    finally:
+        if owns_root_fd: os.close(rootfd)
 
-def build_filesystem_attestation(*, bundle: object, root_binding_sha256: str, directory: os.PathLike[str] | str, limits: AttestationLimits = DEFAULT_LIMITS) -> dict[str, object]:
-    """Bind an opaque directory observation to supplied Rust artifact identities."""
-    try: fields = {name: getattr(bundle, name) for name in ("fixture_id", "profile", "plan_digest", "plan_sha256", "schedule_sha256", "render_sha256")}
-    except AttributeError as error: raise PersonaHistoryAttestationError("artifact bundle is invalid") from error
-    if (
-        fields["fixture_id"] != persona_artifacts.FIXTURE_ID
-        or fields["profile"] not in {"tiny", "pilot", "full"}
-        or any(type(fields[name]) is not str for name in fields)
-        or any(_DIGEST.fullmatch(fields[name]) is None for name in ("plan_digest", "plan_sha256", "schedule_sha256", "render_sha256"))
-        or fields["plan_digest"] != fields["plan_sha256"]
-        or _DIGEST.fullmatch(root_binding_sha256 or "") is None
-    ):
-        raise PersonaHistoryAttestationError("artifact binding digest is invalid")
-    supplied = Path(os.fspath(directory))
-    content = walk_directory_content_root(supplied, limits=limits)
-    return {"schema": FILESYSTEM_ATTESTATION_SCHEMA, "schema_version": 2, **fields, "root_binding_sha256": root_binding_sha256, "directory": str(supplied), "content_root": content.__dict__, "claims": {"actual_kio_evidence": False, "history_ready": False}}
+_MATERIALIZATION_FILE = "persona-materialization.json"
+_MAX_MATERIALIZATION_BYTES = 64 * 1024
+
+def _open_materialization_record(directory: Path, expected_digest: str) -> tuple[int, int, os.stat_result, bytes]:
+    if _DIGEST.fullmatch(expected_digest or "") is None:
+        raise PersonaHistoryAttestationError("materialization digest is invalid")
+    parent_fd = record_fd = -1
+    retained = False
+    try:
+        parent_fd, _parent_stat = _open_absolute_directory(directory)
+        before = os.stat(_MATERIALIZATION_FILE, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 <= before.st_size <= _MAX_MATERIALIZATION_BYTES:
+            raise PersonaHistoryAttestationError("materialization record is not a bounded single-link file")
+        record_fd = os.open(_MATERIALIZATION_FILE, _flags(False), dir_fd=parent_fd)
+        opened = os.fstat(record_fd)
+        if _stable(opened) != _stable(before):
+            raise PersonaHistoryAttestationError("materialization record changed while opening")
+        raw = b""
+        while len(raw) < opened.st_size:
+            block = os.read(record_fd, min(64 * 1024, opened.st_size - len(raw)))
+            if not block: break
+            raw += block
+        after = os.fstat(record_fd)
+        named = os.stat(_MATERIALIZATION_FILE, dir_fd=parent_fd, follow_symlinks=False)
+        if _stable(after) != _stable(opened) or _stable(named) != _stable(opened) or len(raw) != opened.st_size or "sha256:" + hashlib.sha256(raw).hexdigest() != expected_digest:
+            raise PersonaHistoryAttestationError("materialization record changed while reading")
+        retained = True
+        return parent_fd, record_fd, opened, raw
+    except OSError as error:
+        raise PersonaHistoryAttestationError("cannot read materialization record safely") from error
+    finally:
+        if not retained:
+            if record_fd >= 0: os.close(record_fd)
+            if parent_fd >= 0: os.close(parent_fd)
+
+def _recheck_materialization_record(parent_fd: int, record_fd: int, expected: os.stat_result, raw: bytes, digest: str) -> None:
+    try:
+        after = os.fstat(record_fd)
+        named = os.stat(_MATERIALIZATION_FILE, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as error:
+        raise PersonaHistoryAttestationError("materialization record namespace changed") from error
+    if _stable(after) != _stable(expected) or _stable(named) != _stable(expected):
+        raise PersonaHistoryAttestationError("materialization record changed during attestation")
+    try:
+        os.lseek(record_fd, 0, os.SEEK_SET)
+        reread = b""
+        while len(reread) < expected.st_size:
+            block = os.read(record_fd, min(64 * 1024, expected.st_size - len(reread)))
+            if not block: break
+            reread += block
+        final = os.fstat(record_fd)
+    except OSError as error:
+        raise PersonaHistoryAttestationError("cannot re-read materialization record") from error
+    if _stable(final) != _stable(expected) or reread != raw or "sha256:" + hashlib.sha256(reread).hexdigest() != digest:
+        raise PersonaHistoryAttestationError("materialization record changed during attestation")
+
+def build_filesystem_attestation(*, directory: os.PathLike[str] | str, materialization_sha256: str, limits: AttestationLimits = DEFAULT_LIMITS) -> dict[str, object]:
+    """Bind a filesystem-only observation to opaque Rust materialization bytes."""
+    supplied = _normalized_absolute_path(directory)
+    parent_fd = record_fd = -1
+    try:
+        parent_fd, record_fd, record_stat, raw = _open_materialization_record(supplied, materialization_sha256)
+        content = walk_directory_content_root(supplied, limits=limits, _bound_root_fd=parent_fd)
+        _recheck_materialization_record(parent_fd, record_fd, record_stat, raw, materialization_sha256)
+        try:
+            if _stable(os.fstat(parent_fd)) != _stable(supplied.lstat()):
+                raise PersonaHistoryAttestationError("runtime root changed during attestation")
+        except OSError as error:
+            raise PersonaHistoryAttestationError("cannot recheck runtime root") from error
+        return {"schema": FILESYSTEM_ATTESTATION_SCHEMA, "schema_version": 3, "materialization_sha256": materialization_sha256, "directory": str(supplied), "content_root": content.__dict__, "claims": {"actual_kio_evidence": False, "history_ready": False}}
+    finally:
+        if record_fd >= 0: os.close(record_fd)
+        if parent_fd >= 0: os.close(parent_fd)
