@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod persona_manifest;
 pub mod persona_plan;
 pub mod persona_render;
+pub mod persona_schedule;
 pub(crate) mod process_boundary;
 pub mod qhard;
 pub mod replay;
