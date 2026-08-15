@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod persona_artifact;
 pub mod persona_consumer;
 pub mod persona_manifest;
+pub mod persona_materialize;
 pub mod persona_plan;
 pub mod persona_render;
 pub mod persona_render_artifact;

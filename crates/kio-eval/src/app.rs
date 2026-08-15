@@ -171,6 +171,19 @@ enum PersonaCommands {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Materialize one exact canonical persona bundle into a new replay root.
+    Materialize {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        schedule: PathBuf,
+        #[arg(long)]
+        render: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        replay_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -305,6 +318,8 @@ pub enum AppError {
     RerankApply(#[from] kio_eval::rerank::RerankApplyError),
     #[error(transparent)]
     Replay(#[from] kio_eval::replay::ReplayError),
+    #[error(transparent)]
+    PersonaMaterialize(#[from] kio_eval::persona_materialize::PersonaMaterializeError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -1211,6 +1226,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
 fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
     use kio_eval::{
         persona_artifact::{publish_create_only, read_strict},
+        persona_materialize::{MaterializeRequest, materialize},
         persona_plan::{MAX_CANONICAL_BYTES as PLAN_MAX, PersonaPlan, frozen_plan},
         persona_render_artifact::{MAX_CANONICAL_BYTES as RENDER_MAX, RenderArtifact},
         persona_schedule::build_suite_schedule,
@@ -1242,6 +1258,21 @@ fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
                 .map_err(|e| AppError::Input(e.to_string()))?;
             publish_create_only(out, &bytes, RENDER_MAX)
                 .map_err(|e| AppError::Input(e.to_string()))?;
+        }
+        PersonaCommands::Materialize {
+            plan,
+            schedule,
+            render,
+            destination,
+            replay_id,
+        } => {
+            materialize(MaterializeRequest {
+                plan,
+                schedule,
+                render,
+                destination,
+                replay_id,
+            })?;
         }
     }
     Ok(ExitCode::Success)
@@ -1357,6 +1388,24 @@ mod tests {
         assert!(
             Args::try_parse_from([
                 "kio-eval",
+                "persona",
+                "materialize",
+                "--plan",
+                "/tmp/plan.json",
+                "--schedule",
+                "/tmp/schedule.json",
+                "--render",
+                "/tmp/render.json",
+                "--destination",
+                "/tmp/persona-root",
+                "--replay-id",
+                "replay-01",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
                 "persona-plan",
                 "--profile",
                 "tiny",
@@ -1386,6 +1435,7 @@ mod tests {
         let plan = root.join("plan.json");
         let schedule = root.join("schedule.json");
         let render = root.join("render.json");
+        let materialized = root.join("materialized");
         assert_eq!(
             run(Args {
                 command: Some(Commands::Persona {
@@ -1497,6 +1547,61 @@ mod tests {
             &render_bytes,
         )
         .unwrap();
+        assert_eq!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Materialize {
+                        plan: plan.clone(),
+                        schedule: schedule.clone(),
+                        render: render.clone(),
+                        destination: materialized.clone(),
+                        replay_id: "replay-01".into(),
+                    },
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false,
+            })
+            .unwrap(),
+            ExitCode::Success
+        );
+        assert!(materialized.join("persona-materialization.json").is_file());
+        let before = fs::read(materialized.join("persona-plan.json")).unwrap();
+        assert!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Materialize {
+                        plan: plan.clone(),
+                        schedule: schedule.clone(),
+                        render: render.clone(),
+                        destination: materialized.clone(),
+                        replay_id: "replay-01".into(),
+                    },
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(materialized.join("persona-plan.json")).unwrap(),
+            before
+        );
         let text = std::str::from_utf8(&render_bytes).unwrap();
         assert!(!text.contains("\"bytes\""));
         assert!(!text.contains("history_ready"));
