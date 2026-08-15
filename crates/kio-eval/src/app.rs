@@ -29,6 +29,7 @@ use kio_eval::{
         HistoryOperation, SCOPES, Scenario, frozen_history_plan, load_corpus_manifest,
         load_golden_queries, load_history_manifest,
     },
+    persona_plan::PersonaProfile,
     qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
     rerank::{RerankApplyOptions, RerankApplySummary, RerankDumpOptions, RerankDumpSummary},
     resolver::{CorpusModel, Resolver, validate_query},
@@ -74,6 +75,11 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Rust-owned, pure persona planning artifacts.
+    Persona {
+        #[command(subcommand)]
+        command: PersonaCommands,
+    },
     /// Evaluate the frozen cross-scope query supplement without full-suite gates.
     Crossscope {
         #[arg(long, default_value = "eval/golden-queries-crossscope.jsonl")]
@@ -139,6 +145,31 @@ enum Commands {
     Benchmark {
         #[command(subcommand)]
         command: BenchmarkCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PersonaCommands {
+    /// Emit one exact canonical persona plan.
+    Plan {
+        #[arg(long, value_enum)]
+        profile: PersonaProfile,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Strict-read a plan and emit its deterministic history schedule.
+    Schedule {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Strict-read a plan and emit a compact renderer receipt (never corpus bytes).
+    Render {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -664,6 +695,7 @@ fn walk_regular_files(root: &Path) -> Vec<PathBuf> {
 pub fn run(args: Args) -> Result<ExitCode, AppError> {
     if let Some(command) = args.command.as_ref() {
         return match command {
+            Commands::Persona { command } => run_persona(command),
             Commands::Crossscope {
                 golden,
                 corpus,
@@ -1176,6 +1208,45 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
     })
 }
 
+fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
+    use kio_eval::{
+        persona_artifact::{publish_create_only, read_strict},
+        persona_plan::{MAX_CANONICAL_BYTES as PLAN_MAX, PersonaPlan, frozen_plan},
+        persona_render_artifact::{MAX_CANONICAL_BYTES as RENDER_MAX, RenderArtifact},
+        persona_schedule::build_suite_schedule,
+    };
+    match command {
+        PersonaCommands::Plan { profile, out } => {
+            let bytes = frozen_plan(*profile)
+                .canonical_bytes()
+                .map_err(|e| AppError::Input(e.to_string()))?;
+            publish_create_only(out, &bytes, RENDER_MAX)
+                .map_err(|e| AppError::Input(e.to_string()))?;
+        }
+        PersonaCommands::Schedule { plan, out } => {
+            let bytes = read_strict(plan, PLAN_MAX).map_err(|e| AppError::Input(e.to_string()))?;
+            let plan =
+                PersonaPlan::parse_canonical(&bytes).map_err(|e| AppError::Input(e.to_string()))?;
+            let bytes = build_suite_schedule(&plan)
+                .and_then(|suite| suite.canonical_bytes())
+                .map_err(|e| AppError::Input(e.to_string()))?;
+            publish_create_only(out, &bytes, RENDER_MAX)
+                .map_err(|e| AppError::Input(e.to_string()))?;
+        }
+        PersonaCommands::Render { plan, out } => {
+            let bytes = read_strict(plan, PLAN_MAX).map_err(|e| AppError::Input(e.to_string()))?;
+            let plan =
+                PersonaPlan::parse_canonical(&bytes).map_err(|e| AppError::Input(e.to_string()))?;
+            let bytes = RenderArtifact::build(&plan)
+                .and_then(|artifact| artifact.canonical_bytes())
+                .map_err(|e| AppError::Input(e.to_string()))?;
+            publish_create_only(out, &bytes, RENDER_MAX)
+                .map_err(|e| AppError::Input(e.to_string()))?;
+        }
+    }
+    Ok(ExitCode::Success)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, fs, path::Path};
@@ -1186,8 +1257,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Args, Commands, bundled_eval_path, output_is_within_input_root, parse_recall,
-        parse_rerank_limit, parse_scenario, run,
+        Args, Commands, PersonaCommands, bundled_eval_path, output_is_within_input_root,
+        parse_recall, parse_rerank_limit, parse_scenario, run,
     };
 
     #[test]
@@ -1241,6 +1312,214 @@ mod tests {
                 "--bin",
                 "/tmp/kio",
             ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn persona_has_only_nested_canonical_commands_and_create_only_artifacts() {
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "plan",
+                "--profile",
+                "tiny",
+                "--out",
+                "/tmp/plan.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "schedule",
+                "--plan",
+                "/tmp/plan.json",
+                "--out",
+                "/tmp/schedule.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "render",
+                "--plan",
+                "/tmp/plan.json",
+                "--out",
+                "/tmp/render.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona-plan",
+                "--profile",
+                "tiny",
+                "--out",
+                "/tmp/plan.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["kio-eval", "persona", "plan", "--profile", "tiny"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "plan",
+                "--profile",
+                "legacy",
+                "--out",
+                "/tmp/plan.json"
+            ])
+            .is_err()
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let plan = root.join("plan.json");
+        let schedule = root.join("schedule.json");
+        let render = root.join("render.json");
+        assert_eq!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Plan {
+                        profile: kio_eval::persona_plan::PersonaProfile::Tiny,
+                        out: plan.clone()
+                    }
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false
+            })
+            .unwrap(),
+            ExitCode::Success
+        );
+        assert!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Plan {
+                        profile: kio_eval::persona_plan::PersonaProfile::Tiny,
+                        out: plan.clone()
+                    }
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false
+            })
+            .is_err()
+        );
+        assert_eq!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Schedule {
+                        plan: plan.clone(),
+                        out: schedule.clone()
+                    }
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false
+            })
+            .unwrap(),
+            ExitCode::Success
+        );
+        assert_eq!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Render {
+                        plan: plan.clone(),
+                        out: render.clone()
+                    }
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false
+            })
+            .unwrap(),
+            ExitCode::Success
+        );
+        let plan_bytes = kio_eval::persona_artifact::read_strict(
+            &plan,
+            kio_eval::persona_render_artifact::MAX_CANONICAL_BYTES,
+        )
+        .unwrap();
+        let parsed_plan =
+            kio_eval::persona_plan::PersonaPlan::parse_canonical(&plan_bytes).unwrap();
+        let schedule_bytes = kio_eval::persona_artifact::read_strict(
+            &schedule,
+            kio_eval::persona_render_artifact::MAX_CANONICAL_BYTES,
+        )
+        .unwrap();
+        kio_eval::persona_schedule::SuiteSchedule::parse_canonical(&parsed_plan, &schedule_bytes)
+            .unwrap();
+        let render_bytes = kio_eval::persona_artifact::read_strict(
+            &render,
+            kio_eval::persona_render_artifact::MAX_CANONICAL_BYTES,
+        )
+        .unwrap();
+        kio_eval::persona_render_artifact::RenderArtifact::parse_canonical(
+            &parsed_plan,
+            &render_bytes,
+        )
+        .unwrap();
+        let text = std::str::from_utf8(&render_bytes).unwrap();
+        assert!(!text.contains("\"bytes\""));
+        assert!(!text.contains("history_ready"));
+        let relative = Path::new("relative.json");
+        assert!(
+            run(Args {
+                command: Some(Commands::Persona {
+                    command: PersonaCommands::Plan {
+                        profile: kio_eval::persona_plan::PersonaProfile::Tiny,
+                        out: relative.into()
+                    }
+                }),
+                golden: None,
+                corpus: None,
+                corpus_manifest: None,
+                history_manifest: None,
+                bin: Path::new("kio").to_path_buf(),
+                out: None,
+                report: None,
+                scenario: vec![],
+                min_recall: 0.8,
+                dry_run: false
+            })
             .is_err()
         );
     }

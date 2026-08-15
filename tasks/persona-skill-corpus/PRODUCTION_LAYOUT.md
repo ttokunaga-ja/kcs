@@ -7,7 +7,7 @@ persona-corpus/
   p01-software-engineer/
     WORKSPACE.md                       # parent-chat guidance
     home/
-      <12 fixture-defined primary paths>/
+      <12 plan-defined primary paths>/
       <8 shared secondary paths>/
     _production/
       status.json                      # parent chat only
@@ -38,7 +38,7 @@ The persona-level `WORKSPACE.md` is an immutable, scaffold-owned control file.
 It identifies the persona, points to the common rules, batch protocol, and
 persona brief, and states that one parent chat coordinates the complete persona.
 Each scope-level `WORKSPACE.md` binds one stable scope ID to exactly one
-fixture-defined `home/` leaf folder and states the narrower subagent boundary.
+plan-defined `home/` leaf folder and states the narrower subagent boundary.
 Control files never live inside `home/`, so they cannot enter the corpus.
 The parent writes `assignment.json` before dispatch. Its `files` array fixes the
 artifact ID, direct relative filename, family/variant, skill route, narrative
@@ -46,7 +46,7 @@ anchors, and cross-file links. Scope workers read but never modify it.
 
 One parent chat session owns one complete persona folder `<persona>/` and holds
 the lease at `<root>/<persona>/_production/`. Its subagents intentionally split
-the persona by fixture-defined leaf folder. Each subagent owns one
+the persona by plan-defined leaf folder. Each subagent owns one
 `<persona>/home/<scope-path>/` plus the single matching
 `<persona>/_production/scopes/<scope-id>/` area. Distinct leaf folders have no
 ancestor/descendant overlap and may run concurrently; never assign the same

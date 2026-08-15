@@ -12,7 +12,7 @@ Windows VDI export のコンサルティングラップトップ（en-US、en）
 
 `engagements/client-alpha/2026/phase-1/data-room`; `engagements/client-alpha/2026/phase-1/interviews`; `engagements/client-alpha/2026/phase-1/analysis`; `engagements/client-alpha/2026/phase-1/deliverables`; `engagements/client-beta/2026/phase-2/data-room`; `engagements/client-beta/2026/phase-2/interviews`; `engagements/client-beta/2026/phase-2/analysis`; `engagements/client-beta/2026/phase-2/deliverables`; `proposals/active`; `benchmarks/industry`; `templates/consulting`; `meetings/internal-reviews`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` のみを参照する。
+secondary は accepted Rust plan の共通 secondary paths のみを参照する。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

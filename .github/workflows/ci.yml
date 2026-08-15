@@ -26,30 +26,20 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # This directly exercises the Rust-owned persona plan, renderer, manifest,
+      # and schedule contracts alongside their public CLI/binary targets.
       - run: cargo test --workspace --all-targets --locked
       - run: >-
           python3 -m unittest
           eval.test_build_macos_comparator_runtime
           eval.test_eval_env
           eval.test_u7_same_space
-          eval.test_persona_fixture
-          eval.test_persona_person_plan
-          eval.test_persona_full_scale_limits
-          eval.test_persona_allocation
-          eval.test_persona_history_allocation
-          eval.test_persona_structural_allocation
-          eval.test_persona_event_manifest
-          eval.test_persona_suite_event_manifest
-          eval.test_persona_suite_event_streaming
-          eval.test_persona_capacity
           eval.test_persona_storage
           eval.test_persona_streaming_storage
           eval.test_persona_root_lock
           eval.test_persona_kio_runner
           eval.test_persona_prepare_receipt
           eval.test_persona_history_attestation
-          eval.test_persona_renderers
-          eval.test_persona_manifest
           eval.test_generate_persona_corpus
 
   persona-w0-integration:

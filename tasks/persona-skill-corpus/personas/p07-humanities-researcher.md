@@ -12,7 +12,7 @@ macOS 人文学研究ラップトップ（en-GB、en/fr/de/ja）。架空の **L
 
 `research/primary-sources`; `research/archive-scans`; `research/ocr-transcripts`; `research/bibliography-exports`; `notes/source-annotations`; `notes/literature`; `dissertation/chapter-01`; `dissertation/chapter-02`; `dissertation/appendices`; `translations/working`; `conferences/presentations`; `correspondence/archive-requests`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` のみ。
+secondary は accepted Rust plan の共通 secondary paths のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

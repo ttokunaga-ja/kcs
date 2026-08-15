@@ -16,10 +16,11 @@ corpus production を担当してください。このチャットはこの1ペ�
 別ペルソナの制作は行いません。
 最初に tasks/persona-skill-corpus/README.md、COMMON_RULES.md、BATCH_PROTOCOL.md、
 PERSONA_INDEX.md、PRODUCTION_LAYOUT.md、SESSION_HANDOFF.md と
-eval/persona_fixture_spec.py を読み、
-fixture を唯一の topology/ratio/path authority としてください。production root は
-repository-root/persona-corpus とし、python3 eval/scaffold_persona_skill_corpus.py
---root <production-root>（既存のowned rootは --resume）で全20人分 skeleton を作成し、
+tasks/persona-pc-eval-contract.md を読み、accepted Rust plan を唯一の
+topology/ratio/path authority としてください。`kio-eval persona plan --profile ...
+--out <absolute>` で作成・検証済みの artifact を親が渡すまで、topology を導出したり
+filesystem を作成したりしてはいけません。production root は repository-root/persona-corpus
+とし、承認済みの retained filesystem boundary が全20人分の skeleton を作成した後、
 各persona直下の home 外 `_production` に status/inventory/provenance/narrative/qa metadata を置いてください。
 まず eval/persona_skill_corpus_lease.py claim で `<PERSONA_ID>` の親leaseをこのチャット固有の
 session IDに対して取得してください。claimが一度だけ返すrelease_tokenは親チャット内だけに保持し、
@@ -27,7 +28,7 @@ production metadataやSubagent promptへ書かないでください。既存leas
 persona-wide statusと全scope status/inventory/tempを点検してください。中断した親writerが停止済みであることを
 ユーザーが確認した場合だけ、recover --expected-session ... --reason ... で回収記録を残してください。
 
-次にこのペルソナの fixture-defined leaf folder 20個について、既存inventoryと目標比率から
+次にこのペルソナの plan-defined leaf folder 20個について、既存inventoryと目標比率から
 各フォルダで今回作る固定ファイル一覧（相対名、形式、artifact_id、日付・数値・用語アンカー）を先に決めてください。
 Subagentをspawnし、1 Subagent assignmentにつき重複しないleaf folderをちょうど1つ割り当てます。
 親チャットが各workerのspawn直前に、親leaseへ結合した `scope-claim --scope <exact-path>

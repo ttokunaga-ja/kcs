@@ -84,6 +84,16 @@ pub fn render_structural(
 ) -> Result<(RenderedSource, TransformWitness), RenderError> {
     plan.validate()
         .map_err(|error| RenderError::Invalid(format!("invalid persona plan: {error}")))?;
+    render_structural_validated(plan, event_id, parent, version)
+}
+
+/// Plan-validated structural rendering for bounded suite construction.
+pub(crate) fn render_structural_validated(
+    plan: &PersonaPlan,
+    event_id: &str,
+    parent: &RenderedSource,
+    version: u32,
+) -> Result<(RenderedSource, TransformWitness), RenderError> {
     let mut found = None;
     for person in &plan.personas {
         if let Some(event) = person
@@ -101,10 +111,27 @@ pub fn render_structural(
         .parent_source_id
         .as_deref()
         .ok_or_else(|| RenderError::Invalid("structural event has no transform parent".into()))?;
+    let expected_parent = source_projections(person)
+        .map_err(|error| RenderError::Invalid(format!("source projection: {error}")))?
+        .into_iter()
+        .find(|source| source.source_id == parent_id)
+        .ok_or_else(|| {
+            RenderError::Invalid("structural parent is not a source projection".into())
+        })?;
+    let canonical_parent = render_canonical(&SourceRenderPlan {
+        persona_id: person.id.as_str().into(),
+        scope_id: expected_parent.scope_id,
+        source_id: expected_parent.source_id,
+        version,
+        variant: expected_parent.variant,
+        gate_role: expected_parent.gate_role,
+        disposition: expected_parent.disposition,
+        planned_chunks: expected_parent.planned_chunks,
+    })?;
     if parent.source_id != parent_id
         || parent.variant != FormatVariant::Png
         || parent.renderer_byte_digest != digest(&parent.bytes)
-        || *parent != render_source(plan, parent_id, 0)?
+        || *parent != canonical_parent
     {
         return Err(RenderError::Invalid(
             "structural parent does not match canonical PNG source".into(),

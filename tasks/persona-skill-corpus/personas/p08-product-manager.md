@@ -12,7 +12,7 @@ macOS PM ラップトップ（ja-JP、ja/en）。架空組織 **Juniper Works** 
 
 `portfolio/product-alpha/2026/q3/prds`; `portfolio/product-alpha/2026/q3/discovery`; `portfolio/product-beta/2026/q4/prds`; `portfolio/product-beta/2026/q4/discovery`; `roadmap/quarterly`; `roadmap/dependencies`; `customer-feedback/interviews`; `customer-feedback/support-summaries`; `analytics/product-metrics`; `launches/release-plans`; `decisions/meeting-notes`; `research/market`。
 
-secondary は共通 `SECONDARY_PATHS`（`eval/persona_fixture_spec.py`）参照のみ。
+secondary は accepted Rust plan の共通 secondary paths 参照のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

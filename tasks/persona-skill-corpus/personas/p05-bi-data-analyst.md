@@ -12,7 +12,7 @@ Windows 分析ラップトップ（ja-JP、ja/en）。架空組織 **Mosaic Reta
 
 `analytics/sql/production`; `analytics/sql/ad-hoc`; `analytics/data-dictionary`; `analytics/lineage`; `dashboards/sales`; `dashboards/product`; `reports/weekly`; `reports/monthly`; `forecasts/scenarios`; `requests/stakeholder`; `exports/warehouse`; `meetings/metric-reviews`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` のみ。
+secondary は accepted Rust plan の共通 secondary paths のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

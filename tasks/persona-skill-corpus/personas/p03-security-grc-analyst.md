@@ -12,7 +12,7 @@ Windows 管理対象 GRC ラップトップ（ja-JP、ja/en）。架空組織 **
 
 `security/threat-models`; `security/pentest-reports`; `security/vulnerabilities`; `security/incident-reports`; `compliance/policies`; `compliance/control-evidence`; `compliance/audit-requests`; `vendor-risk/questionnaires`; `soc/siem-exports`; `soc/detection-rules`; `privacy/risk-assessments`; `meetings/security-reviews`。
 
-secondary は共通 `SECONDARY_PATHS`（`eval/persona_fixture_spec.py`）参照のみ。
+secondary は accepted Rust plan の共通 secondary paths 参照のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

@@ -1,7 +1,7 @@
 # Persona production index
 
 Each link is the complete operational brief for one persona coordinated by one
-parent chat. That chat divides the persona's twenty fixture-defined folders
+parent chat. That chat divides the persona's twenty plan-defined folders
 among folder-owning subagents.
 The `skill files at 200` column is the sum of `pdf_text`, `pdf_scan`, `docx`,
 `xlsx`, `pptx`, and `image` targets at the first 200-file milestone.

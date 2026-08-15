@@ -1,8 +1,8 @@
 # Common production rules
 
-1. Treat `eval/persona_fixture_spec.py` as authoritative. Do not rename,
-   omit, add, or reweight personas, primary paths, shared secondary paths,
-   format families, or percentages. Materialize files only below the assigned
+1. Treat an accepted `kio-eval persona plan` artifact as authoritative. Do not
+   rename, omit, add, or reweight personas, scopes, source IDs, families,
+   variants, or quotas. Materialize files only below the assigned
    `<pXX-role>/home/` root.
 2. All content is synthetic: never use real PII, PHI, credentials, secrets,
    customer data, or copied private documents. Use invented but internally
@@ -23,10 +23,10 @@
    generator/skill, seed, and checksum or equivalent provenance in the manifest.
 7. Do not design product-search QA or assert searchability from raw artifacts.
    This workflow produces corpus files and artifact QA only; evaluator/index
-   validation remains governed by the fixture and its existing tooling.
+   validation remains governed by the Rust plan/manifest/schedule contracts.
 8. Ownership has two levels. One parent chat session owns one complete persona
    and holds its persona lease. Within that chat, each artifact-producing
-   subagent owns exactly one fixture-defined leaf folder for the duration of an
+   subagent owns exactly one plan-defined leaf folder for the duration of an
    assignment, for which the parent must hold a bound scope lease. Different leaf folders
    in the same persona may run concurrently; the same folder may not have two
    active writers. A Markdown claim alone is not ownership.

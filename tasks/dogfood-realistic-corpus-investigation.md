@@ -126,8 +126,8 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
 2. **Do NOT drop a real code repo with a `.git`** into an indexed area (it will be
    skipped) — use plain `repos/<name>/docs/` folders instead, matching the existing
    topology.
-3. Reuse the **20 leaf folders/persona** already defined in
-   `eval/persona_fixture_spec.py`: e.g. SRE = `desktop/active-incident`,
+3. Reuse the **20 leaf folders/persona** frozen in an accepted Rust
+   `kio-eval persona plan` artifact: e.g. SRE = `desktop/active-incident`,
    `changes/deployments/production`, `infrastructure/terraform/environments`,
    `downloads/inbox/diagnostic-bundles`; legal = `matters/matter-alpha/correspondence`,
    `mail/outlook/legal-hold/recent`, `archive/legal/matters/…`. These are excellent —
@@ -280,8 +280,9 @@ embedding, indexing, and history are done by the real Kio pipeline. No test-only
 content or shortcuts.
 
 ### Phase 1 — Create (Codex, plain files only)
-- **Topology**: reuse the 20 personas × ~20 leaf folders (`persona_fixture_spec.py`
-  vocab; see §7 + the p01 example). Files go **directly** in each file-bearing
+- **Topology**: reuse the 20 personas × ~20 leaf folders from an accepted Rust
+  plan artifact (see §7 + the p01 example). This historical investigation is
+  not an executable Python authority. Files go **directly** in each file-bearing
   folder (the pipeline auto-creates a child `.kio` per such folder). **No `.git`**
   in indexed areas (VCS roots are skipped) — use `repos/<name>/docs/` folders.
 - **Format spread per persona**: hit offline (md/txt/code/structured), online OCR

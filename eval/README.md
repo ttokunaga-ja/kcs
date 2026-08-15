@@ -460,20 +460,11 @@ persona-PC suiteでは、1人につき独立したPC root、XDG device state/reg
 職種固有leaf scopeと8個の共通PC leaf scopeを持たせる。20人の各PCがformal fullで
 W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks以上を満たす。
 
-- machine-readable matrix: `eval/persona_fixture_spec.py`
-- contract and implementation order: `tasks/persona-pc-eval-contract.md`
-- readable 20-person/ratio proposal: `tasks/persona-pc-eval-proposal.md`
-- W0 plan/writer/strict verifier and read-only prepare-envelope verifier:
-  `eval/generate_persona_corpus.py`
-- bounded one-person plan API and full planned-count/resource oracle:
-  `eval/generate_persona_corpus.py`, `eval/persona_full_scale_limits.py`
-- W1-W5 contributor cohort allocator: `eval/persona_history_allocation.py`
-- W1-W5 structural allocator: `eval/persona_structural_allocation.py`
-- root-independent planned event manifest: `eval/persona_event_manifest.py`
-- 20-person root-wide planned schedule: `eval/persona_suite_event_manifest.py`
-- bounded per-person event shards and O(20) schedule/locator/MMR composer:
-  `eval/persona_suite_event_streaming.py`
-- blocked-until-readback capacity projection: `eval/persona_capacity.py`
+- normative Rust contract: `tasks/persona-pc-eval-contract.md`
+- closed plan: `kio-eval persona plan --profile <tiny|pilot|full> --out <absolute>`
+- plan-bound render projection: `kio-eval persona render --plan <absolute> --out <absolute>`
+- plan-bound W0--W5 schedule projection: `kio-eval persona schedule --plan <absolute> --out <absolute>`
+- direct implementation/tests: `crates/kio-eval/src/persona_{plan,render,manifest,schedule}.rs`
 - non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
 - read-only replay-root lease primitive: `eval/persona_root_lock.py`
 - fail-closed Kio command/result boundary: `eval/persona_kio_runner.py`
@@ -481,14 +472,10 @@ W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks�
   `eval/persona_prepare_receipt.py`
 - partial filesystem/content/quota semantic attestor:
   `eval/persona_history_attestation.py`
-- topology/generator tests: `eval/test_persona_fixture.py`,
-  `eval/test_persona_history_allocation.py`,
-  `eval/test_persona_structural_allocation.py`,
-  `eval/test_persona_event_manifest.py`,
-  `eval/test_persona_suite_event_manifest.py`,
-  `eval/test_persona_suite_event_streaming.py`,
-  `eval/test_persona_root_lock.py`,
-  `eval/test_generate_persona_corpus.py`
+- retained Python boundary tests: `eval/test_persona_storage.py`,
+  `eval/test_persona_streaming_storage.py`, `eval/test_persona_root_lock.py`,
+  `eval/test_persona_kio_runner.py`, `eval/test_persona_prepare_receipt.py`,
+  `eval/test_persona_history_attestation.py`, and filesystem integration only.
 
 15形式のW0物理ファイル比率、20人×12 primary paths、7,000〜16,000 files/person、
 75% primary / 25% common-secondary contributor負荷、W0〜W5操作集合を固定済みである。
@@ -507,133 +494,57 @@ extension/domain-binary variants、OS動作は従来のままで、検索可能�
 contributorが19件にしかならず、20個すべてのscopeへ非ゼロchunk targetを割り当てられない。
 200件なら比率を整数のまま保ちつつ、全scopeへ最低1 contributorを配置できる。
 
-実装順は次で固定する。
+### Rust-only planning status
 
-1. W0のfolder/fileとphysical/logical/search-plan台帳を生成する。
-2. W0をprepare/init/indexし、編集前の履歴境界とactual chunk receiptを作る。
-3. mutation前にevent manifest全体をpreflightし、同じrootへW1〜W5を適用する。
-4. 同一の不変manifestから3つのfresh rootへ全waveを独立replayする（`.kio`はコピーしない）。
-5. 60 registries / 1,200 scopesが完成してからattest、Recall、history、latencyを測る。
+The pure contract is produced only by `kio-eval persona plan`, `persona render`,
+and `persona schedule`. The accepted plan fixes twenty people, twenty scopes per
+person, source identities, allocation, and structural rows. Renderer and
+manifest outputs are plan-bound deterministic projections; schedule derives
+W0--W5 dependencies and deltas from that same plan. Rust validates canonical
+artifacts, bounded parsing, checked totals, and deterministic suite merging.
 
-W0 indexを省くと編集前のbytesが履歴にならない。これは最終評価を前倒しする手順ではなく、
-履歴を成立させるための必須境界である。
+These artifacts are not filesystem materialization, Kio prepare/index/replay,
+or actual chunk evidence. They neither authorize nor replace the retained
+filesystem/runtime boundary work, which remains fail-closed until independent
+readback and attestation requirements are met.
 
-現在はtiny W0 generatorに加え、contributor/structural allocatorとplanned event manifestまで
-実装済みである。20人×200 files、400 scope、4,131 planned contract chunksを原子的に生成し、
-2 fresh rootsのbyte同一性、inode非共有、strict no-op、改ざん拒否を検証する。400 scope中63 scopeは
-深さ4以上、10人は深さ5以上、最大深さ6である。
-全suiteをメモリに展開せず、1人のcanonical planを最大16,000 sources、8 MiB、
-20 scopesに制限して生成・再検算するAPIと、fullの正確なcount oracleも実装済みである。
-このoracleは1 replay当たり43,596 events、5,175 boundaries、48,771 schedule items、
-3 replayで130,788 / 15,525 / 146,313をcanonical allocationから導出するが、
-full event manifestの構築やKio実測は行わない。
+The current schedule uses the closed P/X/Y/N/U cohorts: W1 and W3 add planned
+history, W4 replaces X without changing the current target, and W5 corrects N,
+creates P replacements, indexes coexistence, serially purges old P versions,
+then emits one no-op index per affected scope. Structural rows are
+history-neutral. This remains planning evidence, rather than a replay claim.
 
-構造laneはtiny/pilotで1人11 events、fullで1人30 events。full W2は20 scopesすべてへ
-same-scope U renameを置き、cross-scope moveはraw-only travelerを使う。near PNGは親RGBの
-1 channelだけを±1し、derived scan PDFは親PNGのdecoded pixelsをそのまま埋め込む。
-source/version/materializationを分離し、restoreは削除済みpath/checkpointをsourceにして別の
-既存active scopeへ新materializationを作る。final active file数はfull 195,080/replay、
-3 replayで585,240である。
+`tiny`, `pilot`, and `full` are supported plan profiles. A tiny output is a
+contract smoke only; a pilot or full plan is not permission to write a corpus,
+nor evidence of filesystem capacity, Kio chunks, history readiness, or latency.
 
-`pilot`/`full`はplan生成のみ可能で、物理writeはstreaming/RSS、rich-file size、pilot容量の
-承認前なのでblockedである。旧raw-file bucketはfull 20人中16人でpurge quotaを運べず、
-正本候補をwhole-source contributor cohort `P=4%, X=10%, Y=6%, N=4%, U=76%`へ変更した。
-現行W0 planについてsource-ID allocatorを実装し、tiny/pilot/full全60 persona-profileで
-person単位のexact subsetを生成・再検算できる。fullはP/X/Y/Nすべてを全20 scopesへ配置する。
-scopeごとのexact割合は多数の
-整数cellで不可能なので要求しない。
-
-W5はP'をold Pと並存させてindexし、old Pを1 pathずつremove→path purgeする。これにより
-1人あたり4,800 current + 4,800 historical = 9,600 version-chunksをpurgeし、最終の
-120,000 current / 60,000 contributor historyへ戻す。event manifestはevents/boundaries/scheduleを
-分離し、wave×scopeのordinary indexを1件へcoalesceし、W5の逐次purge順を凍結する。
-suite manifestは20人の個人manifestをhashで束縛し、W1--W4の全regular→全index、W5の
-全regular→全index→persona/source順purge pair→全noopを、root-wide lock 1本で実行する
-単一依存鎖へする。tiny全20人は1,076 events、908 boundaries、1,984 schedule itemsである。
-旧in-memory builderと別に、完全なevent manifestは一度に1人分だけ保持し、
-events/boundaries/schedule projectionをbounded JSONL shardへpublishするlayerを実装した。
-suite composerは20人のcompact summaryだけを持つO(20) mergeで、global schedule、
-external row locator、schedule/locator bindingのMMRを構成し、20個のfull manifest objectを同時に保持しない。
-tinyは旧builderの1,076 / 908 / 1,984、schedule SHA-256、suite-manifest SHA-256と完全一致する。
-ただし、下位のsource-inode rename blockerを引き継ぐためすべてのartifactは
-`formal_publication_attested=false`であり、fullのsupervisor実測RSS・artifact readback・`wait4`
-receiptも未証明である。このstreaming実装はformal fullまたはW1〜W5の実行を許可しない。
-p01/fullのCI回帰は120,000 current、60,000 history、30 structural events、20-scope W2を
-一度の構築で検査する。W0 immutable verifierとpost-W0 envelope verifierは分離済みで、
-後者はcanonical intent、400 `.kio`、20 `.kio-eval-device`と固定control/receipt namespaceを
-外側から検証する。opaque内部はtyped checker observationなしでは明示的にunattestedであり、
-history-readyを主張しない。partial semantic attestorはprofile、canonical persona/scope、
-contract quota算術、file bytes/content roots、typed runtime observationを束縛できるが、
-SQLite/CAS、HEAD/commit、Kio binary/config、root/prepare-intentの統合的検証ではなく、
-完全な400-scope入力でも`history_ready_attested=false`のままである。
-attestorは各directoryの子entryを名前またはMerkle childとして保持する前に
-16,384 direct entriesのhard capを適用する。
-
-non-executing prepare-receipt composerはcanonical all-person plan SHAを1人分ずつ
-streaming再構成し、root/person/device/scopeのexact 20×20 projectionへroot binding、
-binary identity、environment、init、indexの宣言SHAを束縛する。artifact本文、SQLite/CAS、
-HEAD/registryは検査しないため、全semantic/history/execution/mutation claimはfalse固定である。
-rootは`/`を許さず、4 KiB/64 components/255 bytes per component、person bindingは20 scopeを
-走査前に要求する。
-
-Kio runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
-unbound receipt形式まで実装した。しかしpathname検証後の`Popen(cwd=...)`には
-same-user TOCTOUが残るため、`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
-`PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`は全てfalseであり、
-init/index/version subprocessも物理mutationも許可しない。root/owner inodeへのread-only leaseと、
-lease保持済みroot FDのnon-inheritable duplicateを貸すAPIは実装済みである。これにより
-trusted-rootのpath-check/open seamは閉じるが、同一プロセスcheckerのFD複製・一時再束縛、
-持続的なsame-inode reopenはDarwin/Linux共通のopen-description flag probeで拒否する。
-ただしsame-UID ABA、immutable snapshot、process isolationは未解決である。prepare runner統合、
-handle-relative safe mutation、journal、replay executorも未実装なので、W1〜W5 mutationは
-引き続きfail closedである。
-
-complete W0 semantic checkerには、HEAD/ref/commit/tree/raw/normalize/chunk CAS、strict
-JSONL/task/approval/unsupported state、scope SQLite/FTS、person registryのexact 20行を
-同一snapshotで検査する必要がある。Python標準`sqlite3`は既存directory FDをauthorityとして
-main/WAL/SHMをcross-platformに開けず、registryのread-only openもsidecarへ書く可能性がある。
-FD-bound native read-only VFSまたはwriter排除下の同一epoch immutable snapshotが入るまで、
-checker-local evidenceは`semantics_attested=true`を要求しても、receiptの
-`formal_transport_attested`、suite formal semantic coverage、actual chunks、history readinessは
-falseのままで、legacy nine-field callbackへ変換できない。
-
-capacity APIはcardinalityと呼出側宣言値を束縛するが、pilot measurement receiptと
-destination-root availabilityの読み戻しがない限りblockedで、receiptはphysical writeを承認しない。
-bounded streaming storageはcanonical JSONL shardをno-replace publish/readbackできるが、
-verified source directory inodeをrenameのatomic preconditionにできないため、
-`formal_publication_attested=false` / `source_directory_inode_not_bound_by_rename`のままである。
-これらはformal full実測、W0 prepare、actual Kio chunk/history attestationの証拠ではない。
+The retained Python code has a deliberately narrow role: bounded artifact
+storage, root locking, command/runtime handling, prepare receipts, and partial
+filesystem/content attestation. It must consume accepted Rust artifacts rather
+than reconstruct persona topology, render bytes, allocation, ledgers, or event
+schedules. Its security boundaries remain non-authorizing: none of them makes
+physical publication, mutation/replay, actual chunk counts, history readiness,
+or performance a passing claim without independent readback.
 
 ```bash
-python3 eval/generate_persona_corpus.py plan \
-  --profile tiny --plan-out /private/tmp/kio-persona-tiny-plan.json
-mkdir -p /private/tmp/kio-persona-runs
-python3 eval/generate_persona_corpus.py generate \
+target/release/kio-eval persona plan --profile tiny \
+  --out /private/tmp/kio-persona-tiny-plan.json
+target/release/kio-eval persona render \
   --plan /private/tmp/kio-persona-tiny-plan.json \
-  --out /private/tmp/kio-persona-runs/replay-01 \
-  --replay-id replay-01
+  --out /private/tmp/kio-persona-tiny-render.json
+target/release/kio-eval persona schedule \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --out /private/tmp/kio-persona-tiny-schedule.json
 ```
 
 ```bash
 python3 -m unittest \
-  eval.test_persona_fixture \
-  eval.test_persona_person_plan \
-  eval.test_persona_full_scale_limits \
-  eval.test_persona_allocation \
-  eval.test_persona_history_allocation \
-  eval.test_persona_structural_allocation \
-  eval.test_persona_event_manifest \
-  eval.test_persona_suite_event_manifest \
-  eval.test_persona_suite_event_streaming \
-  eval.test_persona_capacity \
   eval.test_persona_storage \
   eval.test_persona_streaming_storage \
   eval.test_persona_root_lock \
   eval.test_persona_kio_runner \
   eval.test_persona_prepare_receipt \
   eval.test_persona_history_attestation \
-  eval.test_persona_renderers \
-  eval.test_persona_manifest \
   eval.test_generate_persona_corpus \
   eval.test_eval_env
 

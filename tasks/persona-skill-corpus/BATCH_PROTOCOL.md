@@ -5,7 +5,7 @@
 The default first milestone is **200 final files per persona** (4,000 files
 across twenty personas). Because every authoritative percentage is an integer,
 the exact target for a format family is `percentage × 2`. This milestone is a
-production target, not the legacy renderer output: every DOCX/XLSX/PPTX/PDF/
+production target, not a historical renderer output: every DOCX/XLSX/PPTX/PDF/
 image file must be newly authored through the routed skill workflow.
 
 Do not attempt all 200 files in one agent turn. The parent chat first partitions
@@ -76,7 +76,7 @@ and scope-status updates in the same turn. An interrupted batch is not final.
    ```
 
    The parent retains the returned scope release token. It then spawns the
-   subagent with exactly that fixture-defined leaf folder, its scope-control ID,
+   subagent with exactly that plan-defined leaf folder, its scope-control ID,
    fixed assignment, and public worker-session ID—but never either release
    token. Two different scope leases in the same persona may be active
    concurrently; a duplicate scope claim fails.
@@ -97,7 +97,8 @@ and scope-status updates in the same turn. An interrupted batch is not final.
 ## Count and ownership rules
 
 - The authoritative family ratios and paths come only from
-  `eval/persona_fixture_spec.py`; the persona brief is an operational view.
+  an accepted Rust `kio-eval persona plan` artifact; the persona brief is an
+  operational, non-authoritative view.
 - At 200 files, every primary or secondary path must be represented according
   to the fixture allocation, every family count must equal `2 × ratio`, and
   variant counts/gate roles/dispositions must equal
@@ -109,7 +110,7 @@ and scope-status updates in the same turn. An interrupted batch is not final.
   production evidence unless the plan separately calls for a final image file.
 - One parent chat owns one complete persona. It is the only writer of
   persona-wide narrative, assignment planning, status, and aggregate journals.
-- One subagent assignment owns one fixture-defined leaf folder plus its matching
+- One subagent assignment owns one plan-defined leaf folder plus its matching
   scope-control directory. Never split one leaf folder between active workers.
 - Distinct leaf folders are disjoint and may run concurrently. A worker must
   finish/checkpoint before it can receive another folder assignment; the parent

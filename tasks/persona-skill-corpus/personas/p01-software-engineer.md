@@ -12,7 +12,7 @@ macOS 開発ラップトップ（ja-JP、ja/en）。架空組織 **Aster Loop �
 
 `documents/work/product-alpha/architecture`; `documents/work/product-alpha/api-contracts`; `documents/work/product-alpha/release-notes`; `documents/work/product-beta/architecture`; `documents/work/product-beta/api-contracts`; `repos/product-alpha/docs`; `repos/product-beta/docs`; `work-items/decision-records`; `work-items/code-reviews`; `meetings/engineering`; `vendor-docs/platforms`; `operations/migration-notes`。
 
-secondary は共通の `SECONDARY_PATHS`（`eval/persona_fixture_spec.py`）だけを参照し、ここで別の正式パスを創設しない。
+secondary は accepted Rust plan の共通 secondary paths だけを参照し、ここで別の正式パスを創設しない。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

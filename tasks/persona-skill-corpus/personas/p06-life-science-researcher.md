@@ -12,7 +12,7 @@ Windows 実験室ワークステーション（en-US、en）。架空の **Orchi
 
 `lab/lab-notebooks`; `lab/protocols`; `programs/study-alpha/2026/cohort-a/raw-exports`; `programs/study-alpha/2026/cohort-a/analysis`; `programs/study-beta/2026/cohort-b/raw-exports`; `programs/study-beta/2026/cohort-b/analysis`; `instruments/calibration`; `samples/manifests`; `literature/papers`; `grants/applications`; `figures/manuscript`; `meetings/lab`。
 
-secondary は共通 `SECONDARY_PATHS`（`eval/persona_fixture_spec.py`）参照のみ。
+secondary は accepted Rust plan の共通 secondary paths 参照のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

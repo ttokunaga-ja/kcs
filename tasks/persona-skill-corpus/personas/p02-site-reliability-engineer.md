@@ -12,7 +12,7 @@ Ubuntu の SRE ワークステーション（en-US、en）。架空組織 **Nort
 
 `documents/operations/runbooks`; `documents/operations/postmortems`; `infrastructure/kubernetes`; `infrastructure/terraform`; `services/checkout/prod/oncall/operations`; `services/identity/prod/oncall/operations`; `observability/alerts`; `observability/dashboards`; `observability/log-exports`; `changes/deployments`; `capacity/reports`; `meetings/operations`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` を参照し、独自の正式 path は追加しない。
+secondary は accepted Rust plan の共通 secondary paths を参照し、独自の正式 path は追加しない。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

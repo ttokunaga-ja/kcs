@@ -1,8 +1,9 @@
 # 20人の独立persona-PC評価環境案
 
-Status: W0 tiny、W1-W5 contributor/structural allocator、root-independent planned
-event manifest、persona fidelity仮説metadata、bounded suite streaming planningを実装済み。
-W0 history prepare/replay、fidelityのrenderer反映、formal pilot/full物理生成は未実装または未承認。
+Status: historical design record, non-normative. Its former Python allocation,
+event-manifest, renderer, and CLI descriptions have been superseded by the
+Rust-only contract in `persona-pc-eval-contract.md`. It must not be used as an
+executable instruction or a compatibility specification.
 
 2026-07-14の人物別topology、semantic filename、extension/domain variant、容量lane、
 create-edit-replay-validate順序の改訂案は
@@ -469,27 +470,9 @@ raw-only variantとして追加する。persona manifestにはdata-age/retention
 duplicate/conflict率、naming disorder/Unicode、hidden/empty/noise counts、byte分布、
 permission/unreadable、sync-stateも持たせる。
 
-## 8. 現在使えるW0コマンド
+## 8. Historical command note
 
-生成物はGit外、既存しないplain parent配下へ置く。
-
-```bash
-python3 eval/generate_persona_corpus.py plan \
-  --profile tiny \
-  --plan-out /private/tmp/kio-persona-tiny-plan.json
-
-mkdir -p /private/tmp/kio-persona-runs
-python3 eval/generate_persona_corpus.py generate \
-  --plan /private/tmp/kio-persona-tiny-plan.json \
-  --out /private/tmp/kio-persona-runs/replay-01 \
-  --replay-id replay-01
-
-python3 eval/generate_persona_corpus.py verify \
-  --plan /private/tmp/kio-persona-tiny-plan.json \
-  --root /private/tmp/kio-persona-runs/replay-01 \
-  --replay-id replay-01
-```
-
-macOSの`/tmp`はsymlinkなので安全境界が拒否する。`/private/tmp`または
-`Path(tempdir).resolve()`を使う。`pilot`/`full`はplan生成のみ可能で、物理writeは
-streaming/RSS/pilot capacity gateが入るまで明示的にblockedである。
+The old Python commands previously shown here were removed deliberately. Current
+plan, render, and schedule artifacts are created only through the Rust commands
+documented in `persona-pc-eval-contract.md`; publication and runtime operations
+remain separately blocked until their retained boundary contracts are updated.

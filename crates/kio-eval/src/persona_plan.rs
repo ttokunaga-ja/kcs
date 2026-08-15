@@ -1,6 +1,6 @@
 //! Rust-owned, compact and environment-free persona corpus plan.
 use kio_core::cas::{canonical_json_bytes, hash_bytes};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
 use std::collections::{BTreeSet, VecDeque};
 use thiserror::Error;
 
@@ -9,6 +9,8 @@ pub const FIXTURE_ID: &str = "kio-persona-pc-v2";
 pub const SEED: u64 = 20_260_713;
 pub const PERSONA_COUNT: usize = 20;
 pub const SCOPES_PER_PERSON: usize = 20;
+/// Frozen plans are below this bound; it limits untrusted CLI plan input.
+pub const MAX_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
 pub const TINY_PLAN_HASH: &str =
     "sha256:48cfa9f79e30dece121e58190e99994cfe03e1cd838d558e230d6d7100d864c9";
 pub const PILOT_PLAN_HASH: &str =
@@ -302,6 +304,7 @@ pub struct PersonaPlan {
     pub fixture_id: String,
     pub seed: u64,
     pub profile: PersonaProfile,
+    #[serde(deserialize_with = "bounded_20")]
     pub personas: Vec<PersonPlan>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,11 +314,17 @@ pub struct PersonPlan {
     pub role: String,
     pub raw_files: u32,
     pub current_chunks: u32,
+    #[serde(deserialize_with = "bounded_15")]
     pub formats: Vec<FamilyPlan>,
+    #[serde(deserialize_with = "bounded_25")]
     pub variants: Vec<VariantPlan>,
+    #[serde(deserialize_with = "bounded_20")]
     pub scopes: Vec<ScopePlan>,
+    #[serde(deserialize_with = "bounded_5")]
     pub cohorts: Vec<CohortPlan>,
+    #[serde(deserialize_with = "bounded_30")]
     pub structural: Vec<StructuralPlan>,
+    #[serde(deserialize_with = "bounded_6")]
     pub waves: Vec<WavePlan>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +372,7 @@ pub struct StructuralPlan {
     pub source_scope_id: Option<String>,
     pub destination_scope_id: Option<String>,
     pub child_variant: Option<FormatVariant>,
+    #[serde(deserialize_with = "bounded_16")]
     pub depends_on: Vec<String>,
     pub paired_event_id: Option<String>,
     pub history_neutral: bool,
@@ -374,7 +384,9 @@ pub struct StructuralPlan {
 pub struct WavePlan {
     pub wave: Wave,
     pub purpose: WavePurpose,
+    #[serde(deserialize_with = "bounded_16")]
     pub operations: Vec<Operation>,
+    #[serde(deserialize_with = "bounded_16")]
     pub boundaries: Vec<Boundary>,
     pub history_chunks: u32,
 }
@@ -2255,6 +2267,7 @@ impl PersonaPlan {
         Ok(hash_bytes(&self.canonical_bytes()?))
     }
     pub fn parse_canonical(b: &[u8]) -> Result<Self, PersonaPlanError> {
+        preflight_json(b)?;
         let p: Self =
             serde_json::from_slice(b).map_err(|e| PersonaPlanError::Json(e.to_string()))?;
         if p.canonical_bytes()? != b {
@@ -2262,6 +2275,115 @@ impl PersonaPlan {
         }
         Ok(p)
     }
+}
+
+fn bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T, const MAX: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const MAX: usize> Visitor<'de> for Bounded<T, MAX> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {MAX} entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX));
+            while let Some(value) = seq.next_element()? {
+                if out.len() == MAX {
+                    return Err(serde::de::Error::custom("array capacity"));
+                }
+                out.push(value);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(Bounded::<T, MAX>(std::marker::PhantomData))
+}
+fn bounded_5<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 5>(d)
+}
+fn bounded_6<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 6>(d)
+}
+fn bounded_15<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 15>(d)
+}
+fn bounded_16<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 16>(d)
+}
+fn bounded_20<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 20>(d)
+}
+fn bounded_25<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 25>(d)
+}
+fn bounded_30<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec::<D, T, 30>(d)
+}
+
+fn preflight_json(bytes: &[u8]) -> Result<(), PersonaPlanError> {
+    if bytes.len() > MAX_CANONICAL_BYTES {
+        return Err(PersonaPlanError::Invalid("plan byte bound".into()));
+    }
+    let (mut depth, mut strings, mut escaped, mut in_string, mut tokens) =
+        (0usize, 0usize, false, false, 0usize);
+    for &byte in bytes {
+        if in_string {
+            strings = strings
+                .checked_add(1)
+                .ok_or_else(|| PersonaPlanError::Invalid("plan string".into()))?;
+            if strings > 8192 {
+                return Err(PersonaPlanError::Invalid("plan string bound".into()));
+            }
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                strings = 0;
+            }
+            b'{' | b'[' => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| PersonaPlanError::Invalid("plan depth".into()))?;
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or_else(|| PersonaPlanError::Invalid("plan token".into()))?;
+            }
+            b'}' | b']' | b',' | b':' => {
+                tokens = tokens
+                    .checked_add(1)
+                    .ok_or_else(|| PersonaPlanError::Invalid("plan token".into()))?;
+                depth = if matches!(byte, b'}' | b']') {
+                    depth
+                        .checked_sub(1)
+                        .ok_or_else(|| PersonaPlanError::Invalid("plan structure".into()))?
+                } else {
+                    depth
+                };
+            }
+            _ => {}
+        }
+        if depth > 64 || tokens > 100_000 {
+            return Err(PersonaPlanError::Invalid("plan lexical bound".into()));
+        }
+    }
+    if in_string || depth != 0 {
+        return Err(PersonaPlanError::Invalid("plan structure".into()));
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -2602,5 +2724,18 @@ mod tests {
         let text = std::str::from_utf8(&b).unwrap();
         let duplicate_key = text.replacen('{', "{\"schema\":\"kio.persona.plan/v2\",", 1);
         assert!(PersonaPlan::parse_canonical(duplicate_key.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn parser_preflight_and_bounded_vectors_reject_floods() {
+        let escaped = format!("\"{}\"", "\\\\".repeat(8192));
+        assert!(preflight_json(escaped.as_bytes()).is_err());
+        let plan = frozen_plan(PersonaProfile::Tiny);
+        let mut value = serde_json::to_value(plan).unwrap();
+        let people = value["personas"].as_array_mut().unwrap();
+        let duplicate = people[0].clone();
+        people.push(duplicate);
+        assert!(serde_json::from_value::<PersonaPlan>(value).is_err());
+        assert!(PersonaPlan::parse_canonical(&vec![b' '; MAX_CANONICAL_BYTES + 1]).is_err());
     }
 }

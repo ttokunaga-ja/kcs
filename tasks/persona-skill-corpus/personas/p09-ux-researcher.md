@@ -12,7 +12,7 @@ macOS フィールド調査ラップトップ（en-US、en/ja）。架空の **B
 
 `research/study-alpha/plans`; `research/study-alpha/transcripts`; `research/study-alpha/findings`; `research/study-beta/plans`; `research/study-beta/transcripts`; `research/study-beta/findings`; `surveys/results`; `design/prototype-specs`; `design/figma-exports`; `personas/journey-maps`; `recordings/transcript-sidecars`; `consent/synthetic-records`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` のみ。
+secondary は accepted Rust plan の共通 secondary paths のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

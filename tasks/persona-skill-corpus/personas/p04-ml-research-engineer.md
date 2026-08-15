@@ -12,7 +12,7 @@ Ubuntu GPU 研究ワークステーション（en-US、en）。架空の **Helix
 
 `research/papers`; `research/literature-notes`; `research/programs/model-alpha/experiments/configs`; `research/programs/model-alpha/experiments/results`; `research/programs/model-beta/experiments/configs`; `research/programs/model-beta/experiments/results`; `notebooks/exports`; `datasets/cards`; `models/model-cards`; `evaluations/benchmarks`; `presentations/lab-meetings`; `repos/ml-project/docs`。
 
-secondary は `eval/persona_fixture_spec.py` の共通 `SECONDARY_PATHS` のみ。
+secondary は accepted Rust plan の共通 secondary paths のみ。
 
 ## 初回制作バッチ（比率達成そのものではない）
 

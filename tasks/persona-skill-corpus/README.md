@@ -2,22 +2,24 @@
 
 This directory is the operating runbook for producing a high-fidelity, synthetic
 20-persona corpus across multiple Codex sessions. The executable authority for
-persona IDs, roles, format ratios, scope paths, weights, and count profiles is
-[`eval/persona_fixture_spec.py`](../../eval/persona_fixture_spec.py); these
+persona IDs, roles, format ratios, scope paths, weights, source identities, and
+count profiles is an accepted Rust `kio-eval persona plan` artifact; these
 documents do not replace it.
 
 Start with [COMMON_RULES.md](COMMON_RULES.md), choose work from the
 [persona index](PERSONA_INDEX.md), and follow [BATCH_PROTOCOL.md](BATCH_PROTOCOL.md).
-Then scaffold exactly the layout in [PRODUCTION_LAYOUT.md](PRODUCTION_LAYOUT.md)
-with:
+The historic scaffold command below is non-normative and must not be used to
+derive topology or ratios. A retained filesystem boundary may consume an
+accepted Rust plan artifact when materialization is separately authorized.
 
-```bash
-python3 eval/scaffold_persona_skill_corpus.py --root "$(pwd)/persona-corpus"
+```text
+kio-eval persona plan --profile <tiny|pilot|full> --out <absolute>
 ```
 
-To resume an already owned scaffold without overwriting artifacts, add
-`--resume`. Use
-[SESSION_HANDOFF.md](SESSION_HANDOFF.md) to resume a stopped production.
+The legacy scaffold layout in [PRODUCTION_LAYOUT.md](PRODUCTION_LAYOUT.md) is
+historical reference only. Use [SESSION_HANDOFF.md](SESSION_HANDOFF.md) only
+after a retained boundary has accepted a Rust plan artifact for a separately
+authorized materialization.
 
 The production root is the repository root's `persona-corpus/` directory. It
 contains exactly twenty direct persona folders, `p01-...` through `p20-...`.
@@ -25,16 +27,16 @@ The corpus itself belongs only in `<pXX-role>/home/`. Production state,
 receipts, prompts, temporary renders, and QA evidence belong in that persona's
 `<pXX-role>/_production/` tree and must never be copied into `home/`.
 
-Each persona is an independent synthetic PC. Produce its twelve fixture-defined
-primary scopes plus the eight shared secondary scopes; retain the fixture's
-75/25 primary/secondary weighting and all format percentages exactly.
+Each persona is an independent synthetic PC. Produce only the twelve primary
+scopes plus eight shared secondary scopes specified by the accepted plan; retain
+its frozen 75/25 primary/secondary weighting and format percentages exactly.
 
 Ownership has two levels:
 
 - One parent chat session coordinates exactly one complete persona folder and
   holds that persona's parent lease.
 - Inside that chat, each artifact-producing subagent is assigned exactly one of
-  the persona's twenty fixture-defined leaf folders. It writes only the fixed
+  the persona's twenty plan-defined leaf folders. It writes only the fixed
   files in that folder and that folder's matching production-control area.
 
 Different folder assignments inside the same persona may run concurrently.
