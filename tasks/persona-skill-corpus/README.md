@@ -38,7 +38,6 @@ The remaining Python utilities have deliberately opaque, bounded roles only:
 - `eval.persona_history_attestation` observes filesystem bytes and binds that
   observation to the exact `persona-materialization.json` digest. Its claims
   explicitly leave Kio evidence and history readiness false.
-- Generic streaming storage remains non-formal artifact storage.
 
 They do not parse Rust persona artifacts, reconstruct allocation or topology,
 materialize files, prepare/replay Kio, or make search/history claims.

@@ -34,8 +34,6 @@ jobs:
           eval.test_build_macos_comparator_runtime
           eval.test_eval_env
           eval.test_u7_same_space
-          eval.test_persona_storage
-          eval.test_persona_streaming_storage
           eval.test_persona_skill_corpus_lease
           eval.test_persona_history_attestation
           eval.test_persona_skill_corpus_docs

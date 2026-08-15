@@ -63,7 +63,7 @@ retained filesystem/runtime boundaries and experimental ML lanes:
 ```bash
 cargo test -p kio-eval --all-targets --locked
 # Run the relevant explicit Python modules; CI lists its complete set in ci.yml.
-python3 -m unittest eval.test_eval_env eval.test_persona_storage
+python3 -m unittest eval.test_eval_env
 ```
 
 For a local persona-boundary smoke, create canonical artifacts only through the

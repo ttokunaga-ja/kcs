@@ -485,10 +485,10 @@ publishes workspace topology and `persona-workspace-owner.json`. A plan profile
 is planning/materialization evidence only: it is not Kio prepare/index/replay,
 chunk, history-readiness, or performance evidence.
 
-The only retained Python persona boundaries are generic streaming storage, an
-opaque owner-record-bound lease, and a materialization-record-bound filesystem
-observer. Lease calls require the exact owner-record digest and scope calls use
-the Rust scope ID, never a home path:
+The only retained Python persona boundaries are an opaque owner-record-bound
+lease and a materialization-record-bound filesystem observer. Lease calls
+require the exact owner-record digest and scope calls use the Rust scope ID,
+never a home path:
 
 ```bash
 python3 -m eval.persona_skill_corpus_lease scope-claim \
@@ -505,7 +505,6 @@ nor establishes replay/search success.
 
 ```bash
 python3 -m unittest \
-  eval.test_persona_streaming_storage \
   eval.test_persona_history_attestation \
   eval.test_persona_skill_corpus_lease \
   eval.test_persona_skill_corpus_docs \

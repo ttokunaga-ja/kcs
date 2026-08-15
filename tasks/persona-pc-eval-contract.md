@@ -4,7 +4,7 @@ Status: Phase 4 milestone 5 remains in progress. The executable persona contract
 
 ## Authority and invocation
 
-`kio-eval` is the sole authority for the closed persona topology, allocation, rendering, physical/logical/search expectation ledgers, W0--W5 event schedule, canonical bundle materialization, and workspace scaffold. Python is retained only for generic streaming storage, opaque owner-record lease coordination, and materialization-record-bound filesystem-byte observation; it cannot rebuild, validate, or substitute a semantic persona contract.
+`kio-eval` is the sole authority for the closed persona topology, allocation, rendering, physical/logical/search expectation ledgers, W0--W5 event schedule, canonical bundle materialization, and workspace scaffold. Python is retained temporarily only for opaque owner-record lease coordination and materialization-record-bound filesystem-byte observation; it cannot rebuild, validate, or substitute a semantic persona contract.
 
 ```bash
 kio-eval persona plan --profile tiny --out /absolute/path/persona-plan.json
@@ -34,4 +34,4 @@ Suite construction processes one person at a time and retains only compact proje
 
 The plan, render, manifest, and schedule artifacts are pure planning evidence. Rust materialization proves only exact artifact bytes, identity, create-only publication, and explicit false claims (`sources_materialized=false`, `actual_kio_evidence=false`, `history_ready=false`). Rust scaffold proves only the exact plan-derived workspace topology and owner record. Neither proves source generation, Kio prepare/index behavior, chunk counts, history readiness, or performance. The retained Python history observer reports bounded filesystem bytes with the same Kio/history claims false; the opaque lease is duplicate-writer coordination, not semantic or Kio evidence. A historical Python proposal or artifact is non-normative and must not be executed as a current contract.
 
-Rust tests in `crates/kio-eval` directly test the canonical plan, render, manifest, schedule, artifact consumer, materializer, and scaffold contracts. Python CI retains only generic storage/streaming storage, opaque owner-digest lease, materialization-digest history observation, and their filesystem-boundary tests.
+Rust tests in `crates/kio-eval` directly test the canonical plan, render, manifest, schedule, artifact consumer, materializer, and scaffold contracts. Python CI temporarily retains only opaque owner-digest lease, materialization-digest history observation, and their filesystem-boundary tests.
