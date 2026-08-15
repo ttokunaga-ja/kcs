@@ -50,7 +50,7 @@ pub struct Scaffold {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Owner {
+pub(crate) struct Owner {
     schema: String,
     layout_id: String,
     fixture_id: String,
@@ -64,6 +64,253 @@ struct Parent {
     metadata: fs::Metadata,
     public: PathBuf,
     leaf: String,
+}
+
+/// Descriptor-bound, verified authority for an already-published workspace.
+/// This deliberately stays crate-private: consumers must not be able to
+/// manufacture an owner digest or bypass the scaffold topology verifier.
+pub(crate) struct WorkspaceAuthority {
+    pub root: fs::File,
+    pub root_meta: cap_fs::Metadata,
+    pub owner: fs::File,
+    pub owner_meta: cap_fs::Metadata,
+    pub plan_file: fs::File,
+    pub plan_meta: cap_fs::Metadata,
+    pub control: fs::File,
+    pub control_meta: cap_fs::Metadata,
+    pub plan: PersonaPlan,
+    pub root_path: PathBuf,
+    owner_bytes: Vec<u8>,
+    plan_bytes: Vec<u8>,
+}
+
+impl WorkspaceAuthority {
+    pub(crate) fn recheck(&mut self) -> Result<(), PersonaScaffoldError> {
+        let rebound = bind_workspace(&self.root_path)?;
+        if !same_cap(&self.root_meta, &cap_fs::Metadata::from_file(&self.root)?)
+            || !same_cap(&self.owner_meta, &cap_fs::Metadata::from_file(&self.owner)?)
+            || !same_cap(
+                &self.plan_meta,
+                &cap_fs::Metadata::from_file(&self.plan_file)?,
+            )
+            || !same_cap(
+                &self.control_meta,
+                &cap_fs::Metadata::from_file(&self.control)?,
+            )
+            || !same_cap(&self.root_meta, &rebound.root_meta)
+            || !same_cap(&self.owner_meta, &rebound.owner_meta)
+            || !same_cap(&self.plan_meta, &rebound.plan_meta)
+            || !same_cap(&self.control_meta, &rebound.control_meta)
+            || self.owner_bytes != rebound.owner_bytes
+            || self.plan_bytes != rebound.plan_bytes
+        {
+            return bad("workspace authority changed during lease operation");
+        }
+        Ok(())
+    }
+    pub(crate) fn persona(&self, id: &str) -> bool {
+        self.plan.personas.iter().any(|p| p.id.as_str() == id)
+    }
+    pub(crate) fn scope(&self, persona: &str, scope: &str) -> bool {
+        self.plan
+            .personas
+            .iter()
+            .find(|p| p.id.as_str() == persona)
+            .is_some_and(|p| p.scopes.iter().any(|s| s.id == scope))
+    }
+}
+
+pub(crate) fn bind_workspace(root: &Path) -> Result<WorkspaceAuthority, PersonaScaffoldError> {
+    preflight()?;
+    // bind_parent performs the absolute, normalized and Darwin alias checks;
+    // opening the root through its retained parent prevents path re-resolution.
+    let parent = bind_parent(root)?;
+    let root_path = parent.public.join(&parent.leaf);
+    let root = cap_fs::open_dir_nofollow(&parent.handle, Path::new(&parent.leaf))?;
+    let root_meta = cap_fs::Metadata::from_file(&root)?;
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink() {
+        return bad("workspace root is not a directory");
+    }
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        if root_meta.mode() & 0o777 != 0o700 || root_meta.uid() != unsafe { libc::geteuid() } {
+            return bad("workspace root mode or owner invalid");
+        }
+    }
+    let plan_bytes = read_bounded_file(&root, "persona-plan.json", MAX_CANONICAL_BYTES)?;
+    let plan = PersonaPlan::parse_canonical(&plan_bytes)?;
+    let owner_bytes = read_bounded_file(&root, "persona-workspace-owner.json", MAX_OWNER_BYTES)?;
+    let owner = parse_owner(&owner_bytes)?;
+    if owner.plan_digest != plan.digest()?
+        || owner.plan_sha256 != hash_bytes(&plan_bytes)
+        || owner.plan_bytes != plan_bytes.len() as u64
+        || owner.fixture_id != plan.fixture_id
+        || owner.profile != plan.profile
+    {
+        return bad("workspace owner does not bind exact canonical plan");
+    }
+    let plan_file = open_regular(&root, "persona-plan.json", plan_bytes.len())?;
+    let owner_file = open_regular(&root, "persona-workspace-owner.json", owner_bytes.len())?;
+    let control = cap_fs::open_dir_nofollow(&root, Path::new("_control"))?;
+    let control_meta = cap_fs::Metadata::from_file(&control)?;
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        if control_meta.mode() & 0o777 != 0o500 || control_meta.uid() != unsafe { libc::geteuid() }
+        {
+            return bad("workspace control mode invalid");
+        }
+    }
+    verify_runtime_tree(&root, &plan, &plan_bytes, &owner_bytes)?;
+    Ok(WorkspaceAuthority {
+        root,
+        root_meta,
+        owner: owner_file.0,
+        owner_meta: owner_file.1,
+        plan_file: plan_file.0,
+        plan_meta: plan_file.1,
+        control,
+        control_meta,
+        plan,
+        root_path,
+        owner_bytes,
+        plan_bytes,
+    })
+}
+
+// Publication is exact-pristine.  Runtime binding additionally permits only
+// the three closed lease protocol files in plan-derived writable leaves.
+fn verify_runtime_tree(
+    root: &fs::File,
+    plan: &PersonaPlan,
+    plan_bytes: &[u8],
+    owner_bytes: &[u8],
+) -> Result<(), PersonaScaffoldError> {
+    let expected = expected_tree(plan)?;
+    let mut actual = BTreeSet::new();
+    collect_tree(root, Path::new(""), &mut actual)?;
+    if expected.difference(&actual).next().is_some() {
+        return bad("workspace runtime topology is incomplete");
+    }
+    for extra in actual.difference(&expected) {
+        let parts: Vec<_> = extra.components().map(|c| c.as_os_str().to_str()).collect();
+        let allowed = match parts.as_slice() {
+            [
+                Some("_control"),
+                Some("personas"),
+                Some(persona),
+                Some(name),
+            ] => {
+                plan.personas.iter().any(|p| p.id.as_str() == *persona)
+                    && matches!(*name, ".lease.lock" | "lease.json" | "lease-recovery.jsonl")
+            }
+            [
+                Some("_control"),
+                Some("scopes"),
+                Some(persona),
+                Some(scope),
+                Some(name),
+            ] => {
+                plan.personas
+                    .iter()
+                    .find(|p| p.id.as_str() == *persona)
+                    .is_some_and(|p| p.scopes.iter().any(|s| s.id == *scope))
+                    && matches!(*name, ".lease.lock" | "lease.json" | "lease-recovery.jsonl")
+            }
+            _ => false,
+        };
+        if !allowed {
+            return bad("workspace runtime topology contains unknown entry");
+        }
+        let parent = extra
+            .parent()
+            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime file lacks parent".into()))?;
+        let mut dir = root.try_clone()?;
+        for c in parent.components() {
+            let Component::Normal(c) = c else {
+                return bad("runtime path invalid");
+            };
+            dir = cap_fs::open_dir_nofollow(&dir, Path::new(c))?;
+        }
+        let name = extra
+            .file_name()
+            .and_then(|x| x.to_str())
+            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime name invalid".into()))?;
+        let meta = cap_fs::stat(&dir, Path::new(name), cap_fs::FollowSymlinks::No)?;
+        #[cfg(unix)]
+        {
+            use cap_fs::MetadataExt;
+            let max = match name {
+                ".lease.lock" => 0,
+                "lease.json" => 16 * 1024,
+                "lease-recovery.jsonl" => 64 * 1024,
+                _ => unreachable!("allowlist above is closed"),
+            };
+            if !meta.file_type().is_file()
+                || meta.file_type().is_symlink()
+                || meta.nlink() != 1
+                || meta.mode() & 0o777 != 0o600
+                || meta.uid() != unsafe { libc::geteuid() }
+                || meta.len() as usize > max
+            {
+                return bad("runtime file is not private single-link regular");
+            }
+        }
+    }
+    verify_file(root, "persona-plan.json", plan_bytes)?;
+    let owner = read_exact(root, "persona-workspace-owner.json", owner_bytes)?;
+    if parse_owner(&owner)?.plan_digest != plan.digest()? {
+        return bad("runtime owner no longer binds plan");
+    }
+    Ok(())
+}
+
+fn read_bounded_file(
+    parent: &fs::File,
+    name: &str,
+    maximum: usize,
+) -> Result<Vec<u8>, PersonaScaffoldError> {
+    let before = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)?;
+    if !before.file_type().is_file()
+        || before.file_type().is_symlink()
+        || links(&before) != 1
+        || before.len() as usize > maximum
+    {
+        return bad("workspace authority file invalid");
+    }
+    let mut o = cap_fs::OpenOptions::new();
+    o.read(true)._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut f = cap_fs::open(parent, Path::new(name), &o)?;
+    let opened = cap_fs::Metadata::from_file(&f)?;
+    if !same_cap(&before, &opened) {
+        return bad("workspace authority file changed while opening");
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut f).take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+    let after = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)?;
+    if bytes.len() > maximum || !same_cap(&opened, &after) {
+        return bad("workspace authority file changed while reading");
+    }
+    Ok(bytes)
+}
+fn open_regular(
+    parent: &fs::File,
+    name: &str,
+    len: usize,
+) -> Result<(fs::File, cap_fs::Metadata), PersonaScaffoldError> {
+    let before = cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No)?;
+    if !regular(&before, len) {
+        return bad("workspace authority file invalid");
+    }
+    let mut o = cap_fs::OpenOptions::new();
+    o.read(true)._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let f = cap_fs::open(parent, Path::new(name), &o)?;
+    let opened = cap_fs::Metadata::from_file(&f)?;
+    if !regular(&opened, len) || !same_cap(&before, &opened) {
+        return bad("workspace authority file changed while opening");
+    }
+    Ok((f, opened))
 }
 
 pub fn scaffold(plan_path: &Path, root: &Path) -> Result<Scaffold, PersonaScaffoldError> {
@@ -286,7 +533,16 @@ fn read_exact(
 #[cfg(unix)]
 fn same_cap(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
     use cap_fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.len() == b.len()
+        && a.nlink() == b.nlink()
+        && a.mode() == b.mode()
+        && a.uid() == b.uid()
+        && a.mtime() == b.mtime()
+        && a.mtime_nsec() == b.mtime_nsec()
+        && a.ctime() == b.ctime()
+        && a.ctime_nsec() == b.ctime_nsec()
 }
 #[cfg(not(unix))]
 fn same_cap(_: &cap_fs::Metadata, _: &cap_fs::Metadata) -> bool {
@@ -318,7 +574,13 @@ fn set_mode(directory: &fs::File, mode: u32) -> Result<(), PersonaScaffoldError>
         writable.set_permissions(fs::Permissions::from_mode(mode))?;
         let metadata = cap_fs::Metadata::from_file(&writable)?;
         use cap_fs::MetadataExt;
-        if !same_cap(&expected, &metadata) || metadata.mode() & 0o777 != mode {
+        // chmod intentionally changes the full metadata snapshot; retain the
+        // object identity check here rather than treating that expected change
+        // as a substitution.
+        if expected.dev() != metadata.dev()
+            || expected.ino() != metadata.ino()
+            || metadata.mode() & 0o777 != mode
+        {
             return bad("directory mode changed unexpectedly");
         }
         Ok(())
@@ -373,7 +635,7 @@ fn verify_file(parent: &fs::File, name: &str, expected: &[u8]) -> Result<(), Per
     #[cfg(unix)]
     {
         use cap_fs::MetadataExt;
-        if before.mode() & 0o777 != 0o600 {
+        if before.mode() & 0o777 != 0o600 || before.uid() != unsafe { libc::geteuid() } {
             return bad("tree file mode is not private");
         }
     }
@@ -468,7 +730,9 @@ fn collect_tree(
             #[cfg(unix)]
             {
                 use cap_fs::MetadataExt;
-                if opened.mode() & 0o777 != expected_directory_mode(&path) {
+                if opened.mode() & 0o777 != expected_directory_mode(&path)
+                    || opened.uid() != unsafe { libc::geteuid() }
+                {
                     return bad("tree directory mode is not private");
                 }
             }
@@ -553,7 +817,13 @@ fn verify_published(
     recheck_parent(parent)?;
     let root = cap_fs::open_dir_nofollow(&parent.handle, Path::new(&parent.leaf))?;
     let metadata = cap_fs::Metadata::from_file(&root)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || !same_cap(staged, &metadata) {
+    #[cfg(unix)]
+    use cap_fs::MetadataExt;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || staged.dev() != metadata.dev()
+        || staged.ino() != metadata.ino()
+    {
         return bad("published root identity invalid");
     }
     recheck_named_directory(parent, &parent.leaf, staged)?;
@@ -637,8 +907,14 @@ fn recheck_named_directory(
     name: &str,
     expected: &cap_fs::Metadata,
 ) -> Result<(), PersonaScaffoldError> {
+    #[cfg(unix)]
+    use cap_fs::MetadataExt;
     let named = cap_fs::stat(&parent.handle, Path::new(name), cap_fs::FollowSymlinks::No)?;
-    if !named.is_dir() || named.file_type().is_symlink() || !same_cap(expected, &named) {
+    if !named.is_dir()
+        || named.file_type().is_symlink()
+        || expected.dev() != named.dev()
+        || expected.ino() != named.ino()
+    {
         return bad("named directory identity changed");
     }
     Ok(())
@@ -678,6 +954,17 @@ fn regular(metadata: &cap_fs::Metadata, bytes: usize) -> bool {
         && !metadata.file_type().is_symlink()
         && metadata.len() == bytes as u64
         && links(metadata) == 1
+        && {
+            #[cfg(unix)]
+            {
+                use cap_fs::MetadataExt;
+                metadata.mode() & 0o777 == 0o600 && metadata.uid() == unsafe { libc::geteuid() }
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
 }
 fn valid_hash(value: &str) -> bool {
     value.len() == 71

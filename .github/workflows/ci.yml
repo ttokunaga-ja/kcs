@@ -34,7 +34,6 @@ jobs:
           eval.test_build_macos_comparator_runtime
           eval.test_eval_env
           eval.test_u7_same_space
-          eval.test_persona_skill_corpus_lease
           eval.test_persona_history_attestation
           eval.test_persona_skill_corpus_docs
 
@@ -85,37 +84,46 @@ jobs:
           target/debug/kio-eval persona scaffold
           --plan /tmp/kio-persona-plan.json
           --root /tmp/kio-persona-workspaces
-      - name: Bind real Rust artifacts through retained Python boundaries
+      - name: Coordinate the Rust workspace through Rust leases
+        run: |
+          target/debug/kio-eval persona lease claim \
+            --root /tmp/kio-persona-workspaces \
+            --persona p01 --session ci-parent --label ci \
+            > /tmp/kio-persona-parent-lease.json
+          target/debug/kio-eval persona lease scope claim \
+            --root /tmp/kio-persona-workspaces \
+            --persona p01 --scope-id p01-primary-01 \
+            --parent-session ci-parent --worker-session ci-worker --label ci \
+            > /tmp/kio-persona-scope-lease.json
+          target/debug/kio-eval persona lease scope release \
+            --root /tmp/kio-persona-workspaces \
+            --persona p01 --scope-id p01-primary-01 \
+            --parent-session ci-parent \
+            --release-token "$(jq -er .release_token /tmp/kio-persona-scope-lease.json)" \
+            > /tmp/kio-persona-scope-release.json
+          target/debug/kio-eval persona lease release \
+            --root /tmp/kio-persona-workspaces \
+            --persona p01 \
+            --release-token "$(jq -er .release_token /tmp/kio-persona-parent-lease.json)" \
+            > /tmp/kio-persona-parent-release.json
+      - name: Attest the Rust materialization through the retained Python boundary
         run: |
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
 
           from eval import persona_history_attestation as history
-          from eval import persona_skill_corpus_lease as leases
 
-          artifacts = Path("/tmp/kio-persona-artifacts")
-          workspace = Path("/tmp/kio-persona-workspaces")
-          owner_digest = "sha256:" + hashlib.sha256(
-              (workspace / "persona-workspace-owner.json").read_bytes()
+          root = Path("/tmp/kio-persona-artifacts")
+          digest = "sha256:" + hashlib.sha256(
+              (root / "persona-materialization.json").read_bytes()
           ).hexdigest()
-          materialization_digest = "sha256:" + hashlib.sha256(
-              (artifacts / "persona-materialization.json").read_bytes()
-          ).hexdigest()
-          parent = leases.claim(workspace, "p01", owner_digest, "ci-parent", "ci")
-          scope = leases.scope_claim(
-              workspace, "p01", "p01-primary-01", owner_digest,
-              "ci-parent", "ci-worker", "ci",
-          )
-          leases.scope_release(
-              workspace, "p01", "p01-primary-01", owner_digest,
-              "ci-parent", scope["release_token"],
-          )
-          leases.release(workspace, "p01", owner_digest, parent["release_token"])
           evidence = history.build_filesystem_attestation(
-              directory=artifacts, materialization_sha256=materialization_digest,
+              directory=root, materialization_sha256=digest,
           )
-          assert evidence["claims"] == {"actual_kio_evidence": False, "history_ready": False}
+          assert evidence["claims"] == {
+              "actual_kio_evidence": False, "history_ready": False,
+          }
           PY
 
   synthetic-history-eval:
@@ -190,10 +198,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --workspace --all-targets --locked
-      - run: >-
-          python3 -m unittest
-          eval.test_persona_skill_corpus_lease
-          eval.test_persona_history_attestation
+      - run: python3 -m unittest eval.test_persona_history_attestation
 
   windows-security-r23:
     runs-on: windows-latest

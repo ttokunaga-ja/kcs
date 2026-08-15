@@ -8,6 +8,7 @@ pub mod generator;
 pub mod manifest;
 pub mod persona_artifact;
 pub mod persona_consumer;
+pub mod persona_lease;
 pub mod persona_manifest;
 pub mod persona_materialize;
 pub mod persona_plan;

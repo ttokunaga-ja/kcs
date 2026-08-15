@@ -191,6 +191,114 @@ enum PersonaCommands {
         #[arg(long)]
         root: PathBuf,
     },
+    /// Coordinate plan-bound persona and scope writers.
+    Lease {
+        #[command(subcommand)]
+        command: PersonaLeaseCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PersonaLeaseCommands {
+    /// Acquire one persona writer lease.
+    Claim {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Show the current persona writer lease without its release token.
+    Show {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+    },
+    /// Release one persona writer lease.
+    Release {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        release_token: String,
+    },
+    /// Force-recover one persona writer lease for the exact session.
+    Recover {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Coordinate writers for one plan-owned scope.
+    Scope {
+        #[command(subcommand)]
+        command: PersonaScopeLeaseCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PersonaScopeLeaseCommands {
+    /// Acquire one scope writer lease under an active persona session.
+    Claim {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        scope_id: String,
+        #[arg(long)]
+        parent_session: String,
+        #[arg(long)]
+        worker_session: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Show the current scope writer lease without its release token.
+    Show {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        scope_id: String,
+    },
+    /// Release one scope writer lease.
+    Release {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        scope_id: String,
+        #[arg(long)]
+        parent_session: String,
+        #[arg(long)]
+        release_token: String,
+    },
+    /// Force-recover one scope writer lease for the exact sessions.
+    Recover {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        persona: String,
+        #[arg(long)]
+        scope_id: String,
+        #[arg(long)]
+        parent_session: String,
+        #[arg(long)]
+        worker_session: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -329,6 +437,8 @@ pub enum AppError {
     PersonaMaterialize(#[from] kio_eval::persona_materialize::PersonaMaterializeError),
     #[error(transparent)]
     PersonaScaffold(#[from] kio_eval::persona_scaffold::PersonaScaffoldError),
+    #[error(transparent)]
+    PersonaLease(#[from] kio_eval::persona_lease::PersonaLeaseError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -1286,8 +1396,100 @@ fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
         PersonaCommands::Scaffold { plan, root } => {
             kio_eval::persona_scaffold::scaffold(plan, root)?;
         }
+        PersonaCommands::Lease { command } => return run_persona_lease(command),
     }
     Ok(ExitCode::Success)
+}
+
+fn run_persona_lease(command: &PersonaLeaseCommands) -> Result<ExitCode, AppError> {
+    use kio_eval::persona_lease;
+    match command {
+        PersonaLeaseCommands::Claim {
+            root,
+            persona,
+            session,
+            label,
+        } => emit_persona_json(&persona_lease::claim(
+            root,
+            persona,
+            session,
+            label.as_deref(),
+        )?)?,
+        PersonaLeaseCommands::Show { root, persona } => {
+            emit_persona_json(&persona_lease::show(root, persona)?)?
+        }
+        PersonaLeaseCommands::Release {
+            root,
+            persona,
+            release_token,
+        } => emit_persona_json(&persona_lease::release(root, persona, release_token)?)?,
+        PersonaLeaseCommands::Recover {
+            root,
+            persona,
+            session,
+            reason,
+        } => emit_persona_json(&persona_lease::recover(root, persona, session, reason)?)?,
+        PersonaLeaseCommands::Scope { command } => match command {
+            PersonaScopeLeaseCommands::Claim {
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                worker_session,
+                label,
+            } => emit_persona_json(&persona_lease::scope_claim(
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                worker_session,
+                label.as_deref(),
+            )?)?,
+            PersonaScopeLeaseCommands::Show {
+                root,
+                persona,
+                scope_id,
+            } => emit_persona_json(&persona_lease::scope_show(root, persona, scope_id)?)?,
+            PersonaScopeLeaseCommands::Release {
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                release_token,
+            } => emit_persona_json(&persona_lease::scope_release(
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                release_token,
+            )?)?,
+            PersonaScopeLeaseCommands::Recover {
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                worker_session,
+                reason,
+            } => emit_persona_json(&persona_lease::scope_recover(
+                root,
+                persona,
+                scope_id,
+                parent_session,
+                worker_session,
+                reason,
+            )?)?,
+        },
+    }
+    Ok(ExitCode::Success)
+}
+
+fn emit_persona_json(value: &impl serde::Serialize) -> Result<(), AppError> {
+    let value = serde_json::to_value(value).map_err(|error| AppError::Input(error.to_string()))?;
+    let mut bytes = kio_core::cas::canonical_json_bytes(&value)
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    bytes.push(b'\n');
+    std::io::Write::write_all(&mut std::io::stdout(), &bytes)
+        .map_err(|error| AppError::Input(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1328,6 +1530,69 @@ mod tests {
                 "/tmp/kio",
             ])
             .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "lease",
+                "claim",
+                "--root",
+                "/tmp/workspace",
+                "--persona",
+                "p01",
+                "--session",
+                "parent-01",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "lease",
+                "scope",
+                "claim",
+                "--root",
+                "/tmp/workspace",
+                "--persona",
+                "p01",
+                "--scope-id",
+                "p01-primary-01",
+                "--parent-session",
+                "parent-01",
+                "--worker-session",
+                "worker-01",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "lease",
+                "claim",
+                "--root",
+                "/tmp/workspace",
+                "--persona",
+                "p01",
+                "--session",
+                "parent-01",
+                "--owner-digest",
+                "sha256:deadbeef",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "persona",
+                "lease",
+                "scope-claim",
+                "--root",
+                "/tmp/workspace",
+            ])
+            .is_err()
         );
         assert!(
             Args::try_parse_from(["kio-eval", "replay-history", "--corpus", "/tmp/corpus"])
