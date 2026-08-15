@@ -56,9 +56,9 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --
 ```
 
 The canonical evaluator, cross-scope supplement, offline rerank scorer, scale
-fixture lifecycle, and persona plan/render/manifest/schedule contracts are Rust
-(`kio-eval`) and are covered by the workspace tests. Python remains only for
-retained filesystem/runtime boundaries and experimental ML lanes:
+fixture lifecycle, and the entire persona lifecycle are Rust (`kio-eval`) and
+are covered by the workspace tests. Python remains only for experimental ML
+lanes:
 
 ```bash
 cargo test -p kio-eval --all-targets --locked
@@ -66,12 +66,11 @@ cargo test -p kio-eval --all-targets --locked
 python3 -m unittest eval.test_eval_env
 ```
 
-For a local persona-boundary smoke, create canonical artifacts only through the
-Rust CLI: `kio-eval persona materialize --plan ABS --schedule ABS --render ABS
---destination ABS --replay-id ID`, and create its separate workspace with
-`kio-eval persona scaffold --plan ABS --root ABS`. The retained Python lease and
-history modules consume those opaque Rust-owned records; they do not generate,
-parse, or reconstruct persona artifacts.
+For a local persona-boundary smoke, use the nested Rust lifecycle: `kio-eval
+persona plan`, `schedule`, `render`, `materialize`, `scaffold`, `lease claim`,
+`lease scope claim`, `lease scope release`, `lease release`, then `attest`.
+All outputs are Rust-owned, create-only records; no Python persona runtime,
+schema, or CLI participates.
 
 Development, CI, and the workspace contract all use Rust `1.97.1` with
 Edition 2024 (see `rust-toolchain.toml` and the workspace `Cargo.toml`). Kio is

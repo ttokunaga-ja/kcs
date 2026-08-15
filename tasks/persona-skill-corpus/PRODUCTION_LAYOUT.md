@@ -2,7 +2,7 @@
 
 `kio-eval persona scaffold --plan <absolute-plan> --root <absolute-root>` is
 the only producer of this workspace. It accepts an absolute, new root and
-publishes an exact create-only tree. Runbooks and Python do not create,
+publishes an exact create-only tree. Runbooks and no other runtime create,
 complete, or reinterpret it.
 
 ```text
@@ -29,7 +29,7 @@ records and must not be edited.
 `_control/`, `_control/personas/`, `_control/scopes/`, and each
 `_control/scopes/<persona-id>/` are sealed routing directories. The direct
 persona and scope leaf directories beneath them are mutable only for the
-opaque lease implementation. No additional operator-managed record hierarchy
+Rust lease implementation. No additional operator-managed record hierarchy
 is created by the scaffold or required for production.
 
 For a plan row, final content belongs only in the corresponding
@@ -37,13 +37,12 @@ For a plan row, final content belongs only in the corresponding
 is selected by its separate Rust scope ID:
 
 ```bash
-python3 -m eval.persona_skill_corpus_lease scope-claim \
+kio-eval persona lease scope claim \
   --root <workspace-root> --persona <persona-id> \
   --scope-id <rust-scope-id> \
-  --owner-digest sha256:<lowercase-hash-of-owner-bytes> \
   --parent-session <parent-session> --worker-session <worker-session>
 ```
 
 The lease is duplicate-writer coordination, not a semantic plan parser or
-authorization for Kio replay. Filesystem attestation is separately bound to
-the exact `persona-materialization.json` digest and makes no Kio/history claim.
+authorization for Kio replay. Rust `persona attest` separately observes the
+exact materialized artifacts and makes no Kio/history claim.

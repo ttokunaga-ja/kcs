@@ -5,6 +5,7 @@
 
 use crate::{
     boundary::sync_retained_directory,
+    persona_artifact,
     persona_consumer::{CanonicalPersonaBundle, CanonicalPersonaBundleError},
     persona_plan::{FIXTURE_ID, PersonaProfile},
     scale_fixture::rename_noreplace,
@@ -119,7 +120,9 @@ impl PersonaMaterializationRecord {
             || record.destination_root.is_empty()
             || record.destination_root.len() > 16 * 1024
             || !valid_record_destination(&record.destination_root)
-            || normalize_alias(record_destination)? != record_destination
+            || persona_artifact::normalize_persona_path(record_destination)
+                .map_err(|error| PersonaMaterializeError::Unsafe(error.to_string()))?
+                != record_destination
             || record.plan.digest != record.plan.sha256
             || !valid_hash(&record.plan.digest)
             || !valid_hash(&record.plan.sha256)
@@ -418,7 +421,8 @@ fn bind_parent(destination: &Path) -> Result<Parent, PersonaMaterializeError> {
     {
         return bad("destination must be absolute and lexically normalized");
     }
-    let destination = normalize_alias(destination)?;
+    let destination = persona_artifact::normalize_persona_path(destination)
+        .map_err(|error| PersonaMaterializeError::Unsafe(error.to_string()))?;
     if destination
         .components()
         .any(|c| matches!(c, Component::Normal(p) if p.len() > MAX_COMPONENT_BYTES))
@@ -550,7 +554,7 @@ type BeforeRenameHook = Box<dyn FnOnce() + Send>;
 static BEFORE_RENAME_HOOK: OnceLock<Mutex<BTreeMap<PathBuf, BeforeRenameHook>>> = OnceLock::new();
 #[cfg(test)]
 fn install_before_rename_hook(destination: PathBuf, hook: BeforeRenameHook) {
-    let destination = normalize_alias(&destination)
+    let destination = persona_artifact::normalize_persona_path(&destination)
         .expect("before-rename test hook destination must be valid UTF-8");
     let previous = BEFORE_RENAME_HOOK
         .get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -632,24 +636,6 @@ fn same_cap(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn same_cap(_: &cap_fs::Metadata, _: &cap_fs::Metadata) -> bool {
     false
-}
-#[cfg(target_os = "macos")]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaMaterializeError> {
-    let s = path
-        .to_str()
-        .ok_or_else(|| PersonaMaterializeError::Unsafe("destination is not UTF-8".into()))?;
-    if s == "/tmp" || s.starts_with("/tmp/") || s == "/var" || s.starts_with("/var/") {
-        Ok(PathBuf::from(format!("/private{s}")))
-    } else {
-        Ok(path.to_owned())
-    }
-}
-#[cfg(not(target_os = "macos"))]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaMaterializeError> {
-    if path.to_str().is_none() {
-        return bad("destination is not UTF-8");
-    }
-    Ok(path.to_owned())
 }
 fn bad<T>(message: impl Into<String>) -> Result<T, PersonaMaterializeError> {
     Err(PersonaMaterializeError::Unsafe(message.into()))

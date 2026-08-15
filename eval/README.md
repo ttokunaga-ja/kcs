@@ -485,28 +485,26 @@ publishes workspace topology and `persona-workspace-owner.json`. A plan profile
 is planning/materialization evidence only: it is not Kio prepare/index/replay,
 chunk, history-readiness, or performance evidence.
 
-The only retained Python persona boundaries are an opaque owner-record-bound
-lease and a materialization-record-bound filesystem observer. Lease calls
-require the exact owner-record digest and scope calls use the Rust scope ID,
-never a home path:
+Writer coordination and filesystem observation are Rust-only. Acquire the
+parent lease, acquire and release each plan-owned scope lease, release the
+parent lease, then publish a create-only attestation. Scope calls use the Rust
+scope ID, never a home path; the CLI derives all record bindings itself and
+accepts no caller-supplied owner or materialization digest:
 
 ```bash
-python3 -m eval.persona_skill_corpus_lease scope-claim \
+kio-eval persona lease scope claim \
   --root /private/tmp/kio-persona-workspaces --persona p01 \
   --scope-id <rust-scope-id> \
-  --owner-digest sha256:<lowercase-hash-of-owner-bytes> \
   --parent-session parent-01 --worker-session worker-01
+kio-eval persona attest \
+  --root /private/tmp/kio-persona-artifacts \
+  --out /private/tmp/kio-persona-attestation.json
 ```
 
-`eval.persona_history_attestation` is a bounded bytes-only observation bound to
-the exact digest of `persona-materialization.json`. It explicitly reports no
-actual Kio evidence and no history readiness. It neither parses the artifacts
-nor establishes replay/search success.
+`persona attest` is a bounded Rust filesystem observation of the exact
+materialized artifacts. It explicitly reports no actual Kio evidence and no
+history readiness; it neither establishes replay nor search success.
 
 ```bash
-python3 -m unittest \
-  eval.test_persona_history_attestation \
-  eval.test_persona_skill_corpus_lease \
-  eval.test_persona_skill_corpus_docs \
-  eval.test_eval_env
+python3 -m unittest eval.test_eval_env
 ```

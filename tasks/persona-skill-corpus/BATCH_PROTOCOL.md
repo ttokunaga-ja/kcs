@@ -12,8 +12,8 @@ allocation. The final-output directory is exactly:
 ```
 
 Never use a home path as a lease identifier and never derive an ID from it. The
-opaque Python lease interface takes only `--scope-id <Rust scope id>` plus the
-exact `--owner-digest sha256:<hex>` of `persona-workspace-owner.json`.
+Rust lease interface takes `--scope-id <Rust scope id>` and derives all
+workspace-owner binding itself; it accepts no caller-supplied record digest.
 
 ## Batch lifecycle
 
@@ -23,18 +23,17 @@ exact `--owner-digest sha256:<hex>` of `persona-workspace-owner.json`.
 2. The parent obtains one persona coordination lease:
 
    ```bash
-   python3 -m eval.persona_skill_corpus_lease claim \
+   kio-eval persona lease claim \
      --root <workspace-root> --persona p01 \
-     --owner-digest <sha256:workspace-owner> --session <parent-session>
+     --session <parent-session>
    ```
 
 3. Immediately before assigning a worker, the parent claims the exact Rust
    scope ID. The returned token remains with the parent.
 
    ```bash
-   python3 -m eval.persona_skill_corpus_lease scope-claim \
+   kio-eval persona lease scope claim \
      --root <workspace-root> --persona p01 --scope-id <rust-scope-id> \
-     --owner-digest <sha256:workspace-owner> \
      --parent-session <parent-session> --worker-session <worker-session>
    ```
 
@@ -44,20 +43,23 @@ exact `--owner-digest sha256:<hex>` of `persona-workspace-owner.json`.
    release token. Route DOCX/XLSX/PPTX/PDF/image creation through the matching
    skill and inspect the final artifact before reporting it.
 5. The parent validates the work against the plan row, records any operational
-   checkpoint in its own process, then releases the scope using the exact same
-   owner digest and Rust scope ID:
+   checkpoint in its own process, then releases the scope using its Rust scope
+   ID and returned token:
 
    ```bash
-   python3 -m eval.persona_skill_corpus_lease scope-release \
+   kio-eval persona lease scope release \
      --root <workspace-root> --persona p01 --scope-id <rust-scope-id> \
-     --owner-digest <sha256:workspace-owner> \
-     --parent-session <parent-session> --token <scope-release-token>
+     --parent-session <parent-session> --release-token <scope-release-token>
    ```
 
-6. Release the parent lease only after all child scope leases are absent.
-   Interrupted work is inspected with `show` / `scope-show` using the same
-   owner digest. `recover` / `scope-recover` are explicit trusted-coordinator
-   actions after confirmation that the named writer stopped.
+6. Release the parent lease only after all child scope leases are absent:
+   `kio-eval persona lease release --root <workspace-root> --persona p01
+   --release-token <parent-release-token>`. Interrupted work is inspected with
+   `lease show` / `lease scope show`. `lease recover` / `lease scope recover`
+   are explicit trusted-coordinator actions after confirmation that the named
+   writer stopped. After the lifecycle, `kio-eval persona attest --root
+   <materialized-root> --out <new-report>` may publish a create-only bounded
+   observation; its Kio/history claims remain false.
 
 Lease state is a duplicate-writer coordination aid, not a privilege boundary
 against another process under the same OS account. It is not evidence of Kio

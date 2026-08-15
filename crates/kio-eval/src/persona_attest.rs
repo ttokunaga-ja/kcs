@@ -218,26 +218,18 @@ pub fn attest(root: &Path, out: &Path) -> Result<PersonaFilesystemAttestation, P
     if bytes.len() > MAX_REPORT_BYTES {
         return bad("attestation report exceeds bound");
     }
-    let published =
-        persona_artifact::publish_create_only_after(&output, &bytes, MAX_REPORT_BYTES, || {
-            run_before_publish_hook();
-            recheck_bundle(
-                &bound,
-                &record_source,
-                &plan_source,
-                &schedule_source,
-                &render_source,
-                &before_root,
-            )
-            .map_err(|error| PersonaArtifactError::Unsafe(error.to_string()))
-        })
-        .map_err(|error| match error {
-            PersonaArtifactError::AlreadyExists(path) => PersonaAttestError::AlreadyExists(path),
-            PersonaArtifactError::Indeterminate(message) => {
-                PersonaAttestError::Indeterminate(message)
-            }
-            other => PersonaAttestError::Artifact(other),
-        })?;
+    let prepared = persona_artifact::prepare_create_only(&output, &bytes, MAX_REPORT_BYTES)
+        .map_err(publication_error)?;
+    run_before_publish_hook();
+    recheck_bundle(
+        &bound,
+        &record_source,
+        &plan_source,
+        &schedule_source,
+        &render_source,
+        &before_root,
+    )?;
+    let published = prepared.publish().map_err(publication_error)?;
     if published != output {
         return bad("published report path identity differs");
     }
@@ -559,6 +551,14 @@ fn bad<T>(message: impl Into<String>) -> Result<T, PersonaAttestError> {
     Err(PersonaAttestError::Unsafe(message.into()))
 }
 
+fn publication_error(error: PersonaArtifactError) -> PersonaAttestError {
+    match error {
+        PersonaArtifactError::AlreadyExists(path) => PersonaAttestError::AlreadyExists(path),
+        PersonaArtifactError::Indeterminate(message) => PersonaAttestError::Indeterminate(message),
+        other => PersonaAttestError::Artifact(other),
+    }
+}
+
 // This seam is deliberately test-only. It proves that once the no-replace
 // rename has succeeded, any later input recheck error is reported as
 // indeterminate and the visible report is not removed or overwritten.
@@ -715,10 +715,7 @@ mod tests {
             fs::rename(&plan, plan.with_extension("old")).unwrap();
             fs::rename(&replacement, &plan).unwrap();
         }));
-        assert!(matches!(
-            attest(&root, &out),
-            Err(PersonaAttestError::Artifact(_))
-        ));
+        assert!(attest(&root, &out).is_err());
         assert!(!out.exists(), "barrier fails before no-replace publication");
     }
     #[cfg(unix)]
@@ -731,10 +728,7 @@ mod tests {
             fs::rename(&public_root, public_root.with_extension("old")).unwrap();
             fs::create_dir(&public_root).unwrap();
         }));
-        assert!(matches!(
-            attest(&root, &out),
-            Err(PersonaAttestError::Artifact(_))
-        ));
+        assert!(attest(&root, &out).is_err());
         assert!(!out.exists());
 
         let (_temp, root) = bundle();
@@ -746,10 +740,7 @@ mod tests {
             fs::rename(&record, record.with_extension("old")).unwrap();
             fs::rename(&replacement, &record).unwrap();
         }));
-        assert!(matches!(
-            attest(&root, &out),
-            Err(PersonaAttestError::Artifact(_))
-        ));
+        assert!(attest(&root, &out).is_err());
         assert!(!out.exists());
     }
     #[cfg(unix)]

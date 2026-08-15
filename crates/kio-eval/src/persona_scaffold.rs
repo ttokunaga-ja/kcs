@@ -851,7 +851,7 @@ fn bind_parent(root: &Path) -> Result<Parent, PersonaScaffoldError> {
     {
         return bad("root must be absolute UTF-8 and normalized");
     }
-    let root = normalize_alias(root)?;
+    let root = persona_artifact::normalize_persona_path(root)?;
     if root
         .components()
         .any(|c| matches!(c, Component::Normal(p) if p.len() > MAX_COMPONENT_BYTES))
@@ -992,29 +992,6 @@ fn preflight() -> Result<(), PersonaScaffoldError> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(PersonaScaffoldError::Unsupported)
-    }
-}
-#[cfg(target_os = "macos")]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaScaffoldError> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| PersonaScaffoldError::Unsafe("root must be UTF-8".into()))?;
-    if value == "/tmp"
-        || value.starts_with("/tmp/")
-        || value == "/var"
-        || value.starts_with("/var/")
-    {
-        Ok(PathBuf::from(format!("/private{value}")))
-    } else {
-        Ok(path.to_owned())
-    }
-}
-#[cfg(not(target_os = "macos"))]
-fn normalize_alias(path: &Path) -> Result<PathBuf, PersonaScaffoldError> {
-    if path.to_str().is_none() {
-        bad("root must be UTF-8")
-    } else {
-        Ok(path.to_owned())
     }
 }
 #[cfg(test)]

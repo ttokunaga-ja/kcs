@@ -28,10 +28,10 @@
    not establish Kio prepare/index/replay, chunks, search correctness, history
    readiness, or latency.
 8. One parent chat coordinates one persona at a time. Before assigning a
-   worker, it obtains the opaque lease with the exact
-   `--owner-digest sha256:<hex>` of `persona-workspace-owner.json`. A worker
-   owns one Rust scope ID at a time; the parent alone retains release tokens.
-   Scope lease commands use `--scope-id <Rust scope id>`, never a home path.
+   worker, it obtains the Rust parent lease. A worker owns one Rust scope ID at
+   a time; the parent alone retains release tokens. Scope lease commands use
+   `--scope-id <Rust scope id>`, never a home path. The CLI derives owner
+   bindings itself; callers do not supply a record digest.
 9. Workers may create only the planned final files in their assigned home path.
    They must not write `_control/`, replace the Rust plan/owner/materialization
    records, or alter lease, lock, or recovery files. The parent verifies planned
@@ -40,4 +40,7 @@
     cooperating sessions. They are not security boundaries against processes
     with direct write access as the same OS user. Forced recovery is a trusted
     parent/user action and must never be delegated to an artifact-producing
-    worker.
+   worker.
+11. After all leases are released, use Rust `kio-eval persona attest` for a
+    create-only bounded observation of the materialized root. Its Kio evidence
+    and history readiness claims remain false.

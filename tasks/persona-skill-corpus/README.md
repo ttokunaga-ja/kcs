@@ -31,16 +31,15 @@ The scaffolded content path for a given plan row is
 path: it accepts the distinct Rust `scope_id`, and writes coordination state
 only beneath `_control/`. Do not derive a scope ID from a path.
 
-The remaining Python utilities have deliberately opaque, bounded roles only:
-
-- `eval.persona_skill_corpus_lease` coordinates writers against the exact bytes
-  of `persona-workspace-owner.json`, supplied as `--owner-digest sha256:<hex>`.
-- `eval.persona_history_attestation` observes filesystem bytes and binds that
-  observation to the exact `persona-materialization.json` digest. Its claims
-  explicitly leave Kio evidence and history readiness false.
-
-They do not parse Rust persona artifacts, reconstruct allocation or topology,
-materialize files, prepare/replay Kio, or make search/history claims.
+Rust also owns bounded duplicate-writer coordination and filesystem
+attestation. Use `persona lease claim`, `persona lease scope claim`, `persona
+lease scope release`, and `persona lease release` against the plan-derived
+workspace; use `persona attest` against the materialized root. These commands
+derive record bindings internally: they accept neither caller-supplied owner
+nor materialization digests. Attestation keeps Kio evidence and history
+readiness claims false. They accept no second caller-provided plan, do not
+reconstruct topology outside the stored canonical Rust plan, do not
+prepare/replay Kio, and make no search/history claim.
 
 Production work is plan-authoritative. A parent owns one persona lease; a
 worker owns one plan-defined leaf scope at a time. Worker output belongs only

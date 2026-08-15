@@ -193,32 +193,36 @@ pub fn publish_create_only(
     bytes: &[u8],
     maximum: usize,
 ) -> Result<PathBuf, PersonaArtifactError> {
-    publish_create_only_after(path, bytes, maximum, || Ok(()))
+    prepare_create_only(path, bytes, maximum)?.publish()
 }
 
-/// Stage and fsync canonical bytes, run `barrier` immediately before the
-/// atomic no-replace rename, then verify the published bytes.  The barrier is
-/// for a producer which retains authority over other input descriptors and
-/// must prove they still match at the last safe point before publication.
-///
-/// If the barrier fails no destination rename has been attempted. The private
-/// temporary is removed only when it still has the exact retained identity.
-pub(crate) fn publish_create_only_after<F>(
-    path: &Path,
-    bytes: &[u8],
+/// A staged, fsynced artifact whose no-replace publication has not begun.
+/// Dropping it removes only the exact retained temporary inode.
+pub(crate) struct PreparedArtifact<'a> {
+    parent: BoundParent,
+    temp: TempArtifact,
+    staged: Observation,
+    path: PathBuf,
+    bytes: &'a [u8],
     maximum: usize,
-    barrier: F,
-) -> Result<PathBuf, PersonaArtifactError>
-where
-    F: FnOnce() -> Result<(), PersonaArtifactError>,
-{
+}
+
+/// Prepare a create-only artifact without making the destination visible.
+/// Security boundaries which retain other input descriptors may perform their
+/// final input rechecks after this returns and call [`PreparedArtifact::publish`]
+/// only when those checks still succeed.
+pub(crate) fn prepare_create_only<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+    maximum: usize,
+) -> Result<PreparedArtifact<'a>, PersonaArtifactError> {
     if bytes.len() > maximum {
         return unsafe_state("artifact exceeds byte limit");
     }
     let parent = bind_parent(path)?;
     recheck_parent(&parent)?;
     validate_publication_parent(&parent)?;
-    absent(&parent.handle, &parent.leaf)?;
+    absent(&parent)?;
 
     let mut temp = TempArtifact::create(&parent)?;
     temp.file.write_all(bytes)?;
@@ -228,44 +232,67 @@ where
         return unsafe_state("staged artifact differs from requested bytes");
     }
     recheck_parent(&parent)?;
-    barrier()?;
-    recheck_parent(&parent)?;
-    crate::scale_fixture::rename_noreplace(
-        &parent.handle,
-        &temp.name,
-        &parent.handle,
-        &parent.leaf,
-    )
-    .map_err(|error| {
-        match cap_fs::stat(
-            &parent.handle,
-            Path::new(&parent.leaf),
-            cap_fs::FollowSymlinks::No,
-        ) {
-            Ok(_) => PersonaArtifactError::AlreadyExists(parent.public.join(&parent.leaf)),
-            Err(check) if check.kind() == std::io::ErrorKind::NotFound => {
-                PersonaArtifactError::Indeterminate(error.to_string())
-            }
-            Err(_) => PersonaArtifactError::Indeterminate(error.to_string()),
-        }
-    })?;
-    temp.published = true;
+    Ok(PreparedArtifact {
+        parent,
+        temp,
+        staged,
+        path: path.to_owned(),
+        bytes,
+        maximum,
+    })
+}
 
-    let verification = (|| {
-        sync_parent(&parent)?;
-        let (_, readback, published) =
-            observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
-        if !same_across_rename(&staged, &published) || readback != bytes {
-            return unsafe_state("published artifact differs from staged artifact");
-        }
-        recheck_parent(&parent)?;
-        let (_, again, repeated) = observe_regular(&parent.handle, &parent.leaf, maximum, path)?;
-        if repeated != published || again != readback {
-            return unsafe_state("published artifact changed after readback");
-        }
-        Ok(parent.public.join(&parent.leaf))
-    })();
-    verification.map_err(|error| PersonaArtifactError::Indeterminate(error.to_string()))
+impl PreparedArtifact<'_> {
+    pub(crate) fn publish(mut self) -> Result<PathBuf, PersonaArtifactError> {
+        recheck_parent(&self.parent)?;
+        crate::scale_fixture::rename_noreplace(
+            &self.parent.handle,
+            &self.temp.name,
+            &self.parent.handle,
+            &self.parent.leaf,
+        )
+        .map_err(|error| {
+            match cap_fs::stat(
+                &self.parent.handle,
+                Path::new(&self.parent.leaf),
+                cap_fs::FollowSymlinks::No,
+            ) {
+                Ok(_) => {
+                    PersonaArtifactError::AlreadyExists(self.parent.public.join(&self.parent.leaf))
+                }
+                Err(check) if check.kind() == std::io::ErrorKind::NotFound => {
+                    PersonaArtifactError::Indeterminate(error.to_string())
+                }
+                Err(_) => PersonaArtifactError::Indeterminate(error.to_string()),
+            }
+        })?;
+        self.temp.published = true;
+
+        let verification = (|| {
+            sync_parent(&self.parent)?;
+            let (_, readback, published) = observe_regular(
+                &self.parent.handle,
+                &self.parent.leaf,
+                self.maximum,
+                &self.path,
+            )?;
+            if !same_across_rename(&self.staged, &published) || readback != self.bytes {
+                return unsafe_state("published artifact differs from staged artifact");
+            }
+            recheck_parent(&self.parent)?;
+            let (_, again, repeated) = observe_regular(
+                &self.parent.handle,
+                &self.parent.leaf,
+                self.maximum,
+                &self.path,
+            )?;
+            if repeated != published || again != readback {
+                return unsafe_state("published artifact changed after readback");
+            }
+            Ok(self.parent.public.join(&self.parent.leaf))
+        })();
+        verification.map_err(|error| PersonaArtifactError::Indeterminate(error.to_string()))
+    }
 }
 
 #[derive(Debug)]
@@ -420,10 +447,16 @@ fn recheck_parent(parent: &BoundParent) -> Result<(), PersonaArtifactError> {
     Ok(())
 }
 
-fn absent(parent: &fs::File, leaf: &str) -> Result<(), PersonaArtifactError> {
-    match cap_fs::stat(parent, Path::new(leaf), cap_fs::FollowSymlinks::No) {
+fn absent(parent: &BoundParent) -> Result<(), PersonaArtifactError> {
+    match cap_fs::stat(
+        &parent.handle,
+        Path::new(&parent.leaf),
+        cap_fs::FollowSymlinks::No,
+    ) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => unsafe_state("artifact output already exists; never overwrite"),
+        Ok(_) => Err(PersonaArtifactError::AlreadyExists(
+            parent.public.join(&parent.leaf),
+        )),
         Err(error) => Err(error.into()),
     }
 }
@@ -608,7 +641,11 @@ pub(crate) fn normalize_persona_path(path: &Path) -> Result<PathBuf, PersonaArti
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn normalize_persona_path(path: &Path) -> Result<PathBuf, PersonaArtifactError> {
-    Ok(path.to_owned())
+    if path.to_str().is_none() {
+        unsafe_state("path is not UTF-8")
+    } else {
+        Ok(path.to_owned())
+    }
 }
 
 fn unsafe_state<T>(message: impl Into<String>) -> Result<T, PersonaArtifactError> {
