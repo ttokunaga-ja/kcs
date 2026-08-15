@@ -11,44 +11,31 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import errno
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import sys
 import tempfile
 from typing import Callable, Mapping
 
-try:  # Support both ``python -m unittest eval...`` and direct eval imports.
-    from . import persona_fixture_spec as fixture_spec
-except ImportError:  # pragma: no cover - exercised by the repository test style
-    import persona_fixture_spec as fixture_spec
-
-
 OWNER_MARKER_NAME = ".kio-persona-owner.json"
 STAGING_OWNER_MARKER_NAME = ".kio-persona-staging-owner.json"
 NOREPLACE_PROBE_SOURCE = ".kio-persona-noreplace-source"
 NOREPLACE_PROBE_DESTINATION = ".kio-persona-noreplace-destination"
-OWNER_ID = "eval/persona_storage.py"
-OWNER_SCHEMA_VERSION = 1
+OWNER_ID = "kio.persona.storage-owner/v2"
+OWNER_SCHEMA_VERSION = 2
+FIXTURE_ID = "kio-persona-pc-v2"
 MAX_OWNER_BYTES = 64 * 1024
 WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400
 _RENAME_NOREPLACE = 1
 _RENAME_EXCL = 0x00000004
 
-MAX_FILE_BYTES = 512 * 1024 * 1024
-MAX_SCOPE_BYTES = 4 * 1024 * 1024 * 1024
-MAX_DIRECT_FILES_PER_SCOPE = fixture_spec.MAX_DIRECT_FILES_PER_SCOPE
-
 _PROFILES = frozenset(("tiny", "pilot", "full"))
 _OWNER_STATES = frozenset(("building", "ready"))
-_REPLAY_IDS = frozenset(
-    f"replay-{index:02d}" for index in range(1, fixture_spec.REPLAY_COUNT + 1)
-)
-_HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+REPLAY_IDS = frozenset(("replay-01", "replay-02", "replay-03"))
+_HEX_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class PersonaStorageError(RuntimeError):
@@ -141,6 +128,11 @@ def _json_bytes(value: Mapping[str, object]) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_json_bytes(value: Mapping[str, object]) -> bytes:
+    """One deterministic JSON+LF encoding for Python boundary metadata."""
+    return _json_bytes(value)
+
+
 def _reject_duplicate_keys(pairs):
     value = {}
     for key, item in pairs:
@@ -155,67 +147,57 @@ def _read_plain_file(path: Path, maximum: int, label: str) -> bytes:
         before = path.lstat()
     except FileNotFoundError as exc:
         raise PersonaStorageError(f"{label} is missing: {path}") from exc
-    if not _is_plain_regular_file(before):
-        raise PersonaStorageError(f"{label} must be a plain regular file: {path}")
+    if not _is_plain_regular_file(before) or before.st_nlink != 1:
+        raise PersonaStorageError(
+            f"{label} must be a single-link plain regular file: {path}"
+        )
     if before.st_size > maximum:
         raise PersonaStorageError(f"{label} exceeds {maximum} bytes: {path}")
     try:
         with path.open("rb") as handle:
             opened = os.fstat(handle.fileno())
-            if not _is_plain_regular_file(opened) or (
-                opened.st_dev,
-                opened.st_ino,
-            ) != (before.st_dev, before.st_ino):
+            if (
+                not _is_plain_regular_file(opened)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino)
+                != (before.st_dev, before.st_ino)
+            ):
                 raise PersonaStorageError(f"{label} changed while opening: {path}")
             raw = handle.read(maximum + 1)
     except OSError as exc:
         raise PersonaStorageError(f"cannot read {label}: {path}") from exc
     after = path.lstat()
-    if not _is_plain_regular_file(after) or (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-    ) != (opened.st_dev, opened.st_ino, opened.st_size):
+    if (
+        not _is_plain_regular_file(after)
+        or after.st_nlink != 1
+        or (after.st_dev, after.st_ino, after.st_size, after.st_nlink)
+        != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_nlink)
+    ):
         raise PersonaStorageError(f"{label} changed while reading: {path}")
     if len(raw) > maximum:
         raise PersonaStorageError(f"{label} exceeds {maximum} bytes: {path}")
     return raw
 
 
-def make_owner_marker(
-    *,
-    profile: str,
-    replay_id: str,
-    state: str,
-    plan_sha256: str,
-    manifest_sha256: str | None = None,
-) -> dict[str, object]:
+def make_owner_marker(*, profile: str, replay_id: str, state: str,
+                      artifact_bundle_sha256: str, root_binding_sha256: str) -> dict[str, object]:
     """Build and validate the exact marker stored in one replay output root."""
     if not isinstance(profile, str) or profile not in _PROFILES:
         raise PersonaStorageError(f"unknown persona profile: {profile!r}")
-    if not isinstance(replay_id, str) or replay_id not in _REPLAY_IDS:
+    if not isinstance(replay_id, str) or replay_id not in REPLAY_IDS:
         raise PersonaStorageError(f"invalid replay id: {replay_id!r}")
     if not isinstance(state, str) or state not in _OWNER_STATES:
         raise PersonaStorageError(f"invalid owner state: {state!r}")
     marker: dict[str, object] = {
         "schema_version": OWNER_SCHEMA_VERSION,
         "owner": OWNER_ID,
-        "fixture_id": fixture_spec.FIXTURE_ID,
+        "fixture_id": FIXTURE_ID,
         "profile": profile,
         "replay_id": replay_id,
         "state": state,
-        "plan_sha256": _validate_digest(plan_sha256, "plan_sha256"),
+        "artifact_bundle_sha256": _validate_digest(artifact_bundle_sha256, "artifact_bundle_sha256"),
+        "root_binding_sha256": _validate_digest(root_binding_sha256, "root_binding_sha256"),
     }
-    if state == "ready":
-        if manifest_sha256 is None:
-            raise PersonaStorageError("ready owner marker requires manifest_sha256")
-        marker["manifest_sha256"] = _validate_digest(
-            manifest_sha256, "manifest_sha256"
-        )
-    elif manifest_sha256 is not None:
-        raise PersonaStorageError(
-            "building owner marker must not contain manifest_sha256"
-        )
     return marker
 
 
@@ -229,10 +211,9 @@ def validate_owner_marker(value: object) -> dict[str, object]:
         "profile",
         "replay_id",
         "state",
-        "plan_sha256",
+        "artifact_bundle_sha256", "root_binding_sha256",
     }
-    allowed = required | {"manifest_sha256"}
-    if set(value) - allowed or not required.issubset(value):
+    if set(value) != required:
         raise PersonaStorageError("persona owner marker has an invalid field set")
     if (
         isinstance(value["schema_version"], bool)
@@ -240,31 +221,30 @@ def validate_owner_marker(value: object) -> dict[str, object]:
         or value["schema_version"] != OWNER_SCHEMA_VERSION
     ):
         raise PersonaStorageError("persona owner marker schema mismatch")
-    if value["owner"] != OWNER_ID or value["fixture_id"] != fixture_spec.FIXTURE_ID:
+    if value["owner"] != OWNER_ID or value["fixture_id"] != FIXTURE_ID:
         raise PersonaStorageError("output root is not owned by this generator")
     # Reconstructing applies all state-dependent and digest validation.
     expected = make_owner_marker(
         profile=value["profile"],
         replay_id=value["replay_id"],
         state=value["state"],
-        plan_sha256=value["plan_sha256"],
-        manifest_sha256=value.get("manifest_sha256"),
+        artifact_bundle_sha256=value["artifact_bundle_sha256"],
+        root_binding_sha256=value["root_binding_sha256"],
     )
     if value != expected:
         raise PersonaStorageError("persona owner marker is not canonical")
     return dict(value)
 
 
-def make_staging_owner_marker(
-    *, profile: str, replay_id: str, plan_sha256: str, manifest_sha256: str
-) -> dict[str, object]:
+def make_staging_owner_marker(*, profile: str, replay_id: str,
+                              artifact_bundle_sha256: str, root_binding_sha256: str) -> dict[str, object]:
     """Build the immutable receipt retained before and after root publication."""
     ready = make_owner_marker(
         profile=profile,
         replay_id=replay_id,
         state="ready",
-        plan_sha256=plan_sha256,
-        manifest_sha256=manifest_sha256,
+        artifact_bundle_sha256=artifact_bundle_sha256,
+        root_binding_sha256=root_binding_sha256,
     )
     ready["state"] = "staging_bound"
     return ready
@@ -315,16 +295,16 @@ def require_owned_root(
     *,
     profile: str,
     replay_id: str,
-    plan_sha256: str,
+    artifact_bundle_sha256: str,
     state: str | None = None,
-    manifest_sha256: str | None = None,
+    root_binding_sha256: str | None = None,
 ) -> dict[str, object]:
     """Validate an existing root for safe generator resume or ready reuse."""
     inspected = preflight_destination(
         root,
         expected_profile=profile,
         expected_replay_id=replay_id,
-        expected_plan_sha256=plan_sha256,
+        expected_artifact_bundle_sha256=artifact_bundle_sha256,
     )
     if inspected.disposition != "owned" or inspected.owner is None:
         raise PersonaStorageError(f"persona output root is not owned: {inspected.root}")
@@ -333,10 +313,10 @@ def require_owned_root(
         raise PersonaStorageError(
             f"persona owner state is {owner['state']!r}, not {state!r}"
         )
-    if manifest_sha256 is not None:
-        _validate_digest(manifest_sha256, "manifest_sha256")
-        if owner.get("manifest_sha256") != manifest_sha256:
-            raise PersonaStorageError("persona owner manifest binding mismatch")
+    if root_binding_sha256 is not None:
+        _validate_digest(root_binding_sha256, "root_binding_sha256")
+        if owner["root_binding_sha256"] != root_binding_sha256:
+            raise PersonaStorageError("persona owner root binding mismatch")
     return dict(owner)
 
 
@@ -345,17 +325,17 @@ def require_ready_owned_root(
     *,
     profile: str,
     replay_id: str,
-    plan_sha256: str,
-    manifest_sha256: str,
+    artifact_bundle_sha256: str,
+    root_binding_sha256: str,
 ) -> dict[str, object]:
     """Strict primitive for generator-side reuse of a completed replay root."""
     return require_owned_root(
         root,
         profile=profile,
         replay_id=replay_id,
-        plan_sha256=plan_sha256,
+        artifact_bundle_sha256=artifact_bundle_sha256,
         state="ready",
-        manifest_sha256=manifest_sha256,
+        root_binding_sha256=root_binding_sha256,
     )
 
 
@@ -373,7 +353,7 @@ def preflight_destination(
     repo_root: os.PathLike[str] | str | None = None,
     expected_profile: str | None = None,
     expected_replay_id: str | None = None,
-    expected_plan_sha256: str | None = None,
+    expected_artifact_bundle_sha256: str | None = None,
 ) -> DestinationInspection:
     """Inspect a proposed root without creating or modifying any path.
 
@@ -420,10 +400,10 @@ def preflight_destination(
             raise PersonaStorageError("persona owner profile mismatch")
         if expected_replay_id is not None and owner["replay_id"] != expected_replay_id:
             raise PersonaStorageError("persona owner replay binding mismatch")
-        if expected_plan_sha256 is not None:
-            _validate_digest(expected_plan_sha256, "expected_plan_sha256")
-            if owner["plan_sha256"] != expected_plan_sha256:
-                raise PersonaStorageError("persona owner plan binding mismatch")
+        if expected_artifact_bundle_sha256 is not None:
+            _validate_digest(expected_artifact_bundle_sha256, "expected_artifact_bundle_sha256")
+            if owner["artifact_bundle_sha256"] != expected_artifact_bundle_sha256:
+                raise PersonaStorageError("persona owner artifact bundle binding mismatch")
         return DestinationInspection(root, "owned", owner)
 
     # Read no more than one entry from an arbitrary unowned directory.
@@ -836,8 +816,8 @@ def atomic_publish_owned_root(
     *,
     profile: str,
     replay_id: str,
-    plan_sha256: str,
-    manifest_sha256: str,
+    artifact_bundle_sha256: str,
+    root_binding_sha256: str,
     populate: Callable[[Path], None],
     validate: Callable[[Path], None],
     plan_only: bool = False,
@@ -856,14 +836,14 @@ def atomic_publish_owned_root(
         profile=profile,
         replay_id=replay_id,
         state="ready",
-        plan_sha256=plan_sha256,
-        manifest_sha256=manifest_sha256,
+        artifact_bundle_sha256=artifact_bundle_sha256,
+        root_binding_sha256=root_binding_sha256,
     )
     staging_owner = make_staging_owner_marker(
         profile=profile,
         replay_id=replay_id,
-        plan_sha256=plan_sha256,
-        manifest_sha256=manifest_sha256,
+        artifact_bundle_sha256=artifact_bundle_sha256,
+        root_binding_sha256=root_binding_sha256,
     )
     inspected = preflight_destination(
         destination,
@@ -871,7 +851,7 @@ def atomic_publish_owned_root(
         repo_root=repo_root,
         expected_profile=profile,
         expected_replay_id=replay_id,
-        expected_plan_sha256=plan_sha256,
+        expected_artifact_bundle_sha256=artifact_bundle_sha256,
     )
     _require_noreplace_directory_support()
     if inspected.disposition != "missing":
@@ -977,316 +957,3 @@ def atomic_publish_owned_root(
     finally:
         if parent_descriptor >= 0:
             os.close(parent_descriptor)
-
-
-def _nonnegative_integer(value: int, label: str, *, positive: bool = False) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise PersonaStorageError(f"{label} must be an integer")
-    minimum = 1 if positive else 0
-    if value < minimum:
-        comparator = "positive" if positive else "non-negative"
-        raise PersonaStorageError(f"{label} must be {comparator}")
-    return value
-
-
-@dataclass(frozen=True)
-class CapacityInputs:
-    physical_files: int
-    logical_members: int
-    current_chunks: int
-    history_only_chunks: int
-    raw_bytes: int
-    cas_bytes: int
-    index_bytes: int
-    inodes: int
-    staging_peak_bytes: int
-    staging_peak_inodes: int
-    filesystem_allocation_unit_bytes: int
-    allocation_overhead_bytes: int
-    replay_count: int = fixture_spec.REPLAY_COUNT
-    profile: str = "full"
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "physical_files",
-            "logical_members",
-            "current_chunks",
-            "history_only_chunks",
-            "raw_bytes",
-            "cas_bytes",
-            "index_bytes",
-            "inodes",
-            "staging_peak_bytes",
-            "staging_peak_inodes",
-            "filesystem_allocation_unit_bytes",
-            "allocation_overhead_bytes",
-        ):
-            _nonnegative_integer(getattr(self, field_name), field_name)
-        _nonnegative_integer(self.replay_count, "replay_count", positive=True)
-        if not isinstance(self.profile, str) or self.profile not in _PROFILES:
-            raise PersonaStorageError(f"unknown capacity profile: {self.profile!r}")
-        if self.replay_count > fixture_spec.REPLAY_COUNT:
-            raise PersonaStorageError(
-                f"replay_count exceeds v1 replay matrix: {self.replay_count}"
-            )
-        if self.profile == "full" and self.replay_count != fixture_spec.REPLAY_COUNT:
-            raise PersonaStorageError(
-                f"formal full capacity requires {fixture_spec.REPLAY_COUNT} replays"
-            )
-        if self.logical_members < self.physical_files:
-            raise PersonaStorageError("logical_members must cover every physical file")
-        if self.inodes < self.physical_files:
-            raise PersonaStorageError("inodes must cover every physical file")
-        if self.filesystem_allocation_unit_bytes <= 0:
-            raise PersonaStorageError("filesystem allocation unit must be positive")
-        if self.allocation_overhead_bytes < (
-            self.inodes * self.filesystem_allocation_unit_bytes
-        ):
-            raise PersonaStorageError(
-                "allocation overhead must cover one filesystem unit per inode"
-            )
-
-
-@dataclass(frozen=True)
-class CapacityPlan:
-    inputs: CapacityInputs
-
-    @property
-    def retained_bytes_per_replay(self) -> int:
-        return (
-            self.inputs.raw_bytes
-            + self.inputs.cas_bytes
-            + self.inputs.index_bytes
-            + self.inputs.allocation_overhead_bytes
-        )
-
-    @property
-    def projected_retained_bytes(self) -> int:
-        return self.retained_bytes_per_replay * self.inputs.replay_count
-
-    @property
-    def required_peak_bytes(self) -> int:
-        # Replays are built sequentially.  The final replay's staging area can
-        # coexist with all replay outputs, so one staging peak remains additive.
-        return self.projected_retained_bytes + self.inputs.staging_peak_bytes
-
-    @property
-    def projected_retained_inodes(self) -> int:
-        return self.inputs.inodes * self.inputs.replay_count
-
-    @property
-    def required_peak_inodes(self) -> int:
-        return self.projected_retained_inodes + self.inputs.staging_peak_inodes
-
-    @property
-    def projected_physical_files(self) -> int:
-        return self.inputs.physical_files * self.inputs.replay_count
-
-    def as_dict(self) -> dict[str, object]:
-        one = self.inputs
-        return {
-            "schema_version": 1,
-            "profile": one.profile,
-            "replay_count": one.replay_count,
-            "per_replay": {
-                "physical_files": one.physical_files,
-                "logical_members": one.logical_members,
-                "current_chunks": one.current_chunks,
-                "history_only_chunks": one.history_only_chunks,
-                "current_plus_history_chunks": (
-                    one.current_chunks + one.history_only_chunks
-                ),
-                "raw_bytes": one.raw_bytes,
-                "cas_bytes": one.cas_bytes,
-                "index_bytes": one.index_bytes,
-                "filesystem_allocation_unit_bytes": (
-                    one.filesystem_allocation_unit_bytes
-                ),
-                "allocation_overhead_bytes": one.allocation_overhead_bytes,
-                "retained_bytes": self.retained_bytes_per_replay,
-                "inodes": one.inodes,
-                "staging_peak_bytes": one.staging_peak_bytes,
-                "staging_peak_inodes": one.staging_peak_inodes,
-            },
-            "all_replays": {
-                "physical_files": self.projected_physical_files,
-                "logical_members": one.logical_members * one.replay_count,
-                "current_chunks": one.current_chunks * one.replay_count,
-                "history_only_chunks": one.history_only_chunks * one.replay_count,
-                "current_plus_history_chunks": (
-                    (one.current_chunks + one.history_only_chunks)
-                    * one.replay_count
-                ),
-                "raw_bytes": one.raw_bytes * one.replay_count,
-                "cas_bytes": one.cas_bytes * one.replay_count,
-                "index_bytes": one.index_bytes * one.replay_count,
-                "allocation_overhead_bytes": (
-                    one.allocation_overhead_bytes * one.replay_count
-                ),
-                "retained_bytes": self.projected_retained_bytes,
-                "inodes": self.projected_retained_inodes,
-            },
-            "required_peak": {
-                "bytes": self.required_peak_bytes,
-                "inodes": self.required_peak_inodes,
-                "sequential_staging_replays": 1,
-            },
-        }
-
-
-def project_capacity(inputs: CapacityInputs) -> CapacityPlan:
-    return CapacityPlan(inputs)
-
-
-def capacity_plan_sha256(plan: CapacityPlan) -> str:
-    """Return the canonical digest suitable for the owner marker binding."""
-    raw = json.dumps(
-        plan.as_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
-
-@dataclass(frozen=True)
-class CapacityLimits:
-    byte_cap: int
-    inode_cap: int
-    reserve_bytes: int
-    reserve_inodes: int
-
-    def __post_init__(self) -> None:
-        _nonnegative_integer(self.byte_cap, "byte_cap", positive=True)
-        _nonnegative_integer(self.inode_cap, "inode_cap", positive=True)
-        _nonnegative_integer(self.reserve_bytes, "reserve_bytes")
-        _nonnegative_integer(self.reserve_inodes, "reserve_inodes")
-
-
-@dataclass(frozen=True)
-class AvailableCapacity:
-    free_bytes: int
-    free_inodes: int
-    probe_path: Path | None = None
-    inode_source: str = "explicit"
-
-    def __post_init__(self) -> None:
-        _nonnegative_integer(self.free_bytes, "free_bytes")
-        _nonnegative_integer(self.free_inodes, "free_inodes")
-
-
-@dataclass(frozen=True)
-class CapacityCheck:
-    required_peak_bytes: int
-    required_peak_inodes: int
-    free_bytes_after: int
-    free_inodes_after: int
-    reserve_bytes: int
-    reserve_inodes: int
-
-    def as_dict(self) -> dict[str, int | bool]:
-        return {
-            "passed": True,
-            "required_peak_bytes": self.required_peak_bytes,
-            "required_peak_inodes": self.required_peak_inodes,
-            "free_bytes_after": self.free_bytes_after,
-            "free_inodes_after": self.free_inodes_after,
-            "reserve_bytes": self.reserve_bytes,
-            "reserve_inodes": self.reserve_inodes,
-        }
-
-
-def check_capacity(
-    plan: CapacityPlan,
-    availability: AvailableCapacity,
-    limits: CapacityLimits,
-) -> CapacityCheck:
-    """Apply explicit full-run caps and post-run free-space reserves."""
-    problems = []
-    if plan.required_peak_bytes > limits.byte_cap:
-        problems.append(
-            f"required peak bytes {plan.required_peak_bytes} exceed cap {limits.byte_cap}"
-        )
-    if plan.required_peak_inodes > limits.inode_cap:
-        problems.append(
-            f"required peak inodes {plan.required_peak_inodes} exceed cap {limits.inode_cap}"
-        )
-    free_bytes_after = availability.free_bytes - plan.required_peak_bytes
-    free_inodes_after = availability.free_inodes - plan.required_peak_inodes
-    if free_bytes_after < limits.reserve_bytes:
-        problems.append(
-            f"free-byte reserve would be {free_bytes_after}, below {limits.reserve_bytes}"
-        )
-    if free_inodes_after < limits.reserve_inodes:
-        problems.append(
-            f"free-inode reserve would be {free_inodes_after}, below {limits.reserve_inodes}"
-        )
-    if problems:
-        raise PersonaStorageError("capacity preflight failed: " + "; ".join(problems))
-    return CapacityCheck(
-        required_peak_bytes=plan.required_peak_bytes,
-        required_peak_inodes=plan.required_peak_inodes,
-        free_bytes_after=free_bytes_after,
-        free_inodes_after=free_inodes_after,
-        reserve_bytes=limits.reserve_bytes,
-        reserve_inodes=limits.reserve_inodes,
-    )
-
-
-def probe_available_capacity(
-    destination: os.PathLike[str] | str,
-    *,
-    explicit_free_inodes: int | None = None,
-) -> AvailableCapacity:
-    """Measure free bytes/inodes at the nearest existing plain ancestor."""
-    target = _absolute_lexical(destination)
-    _validate_existing_directory_chain(target)
-    probe = target
-    while _optional_lstat(probe) is None:
-        probe = probe.parent
-    metadata = probe.lstat()
-    if not _is_plain_directory(metadata):
-        raise PersonaStorageError(f"capacity probe path is unsafe: {probe}")
-    usage = shutil.disk_usage(probe)
-    if explicit_free_inodes is not None:
-        _nonnegative_integer(
-            explicit_free_inodes, "explicit_free_inodes", positive=True
-        )
-    try:
-        filesystem = os.statvfs(probe)
-        measured_inodes = int(filesystem.f_favail)
-    except (AttributeError, OSError):
-        measured_inodes = 0
-    if measured_inodes > 0 and explicit_free_inodes is not None:
-        free_inodes = min(measured_inodes, explicit_free_inodes)
-        inode_source = "statvfs_capped_by_explicit"
-    elif measured_inodes > 0:
-        free_inodes = measured_inodes
-        inode_source = "statvfs"
-    elif explicit_free_inodes is not None:
-        free_inodes = explicit_free_inodes
-        inode_source = "explicit_no_statvfs"
-    else:
-        raise PersonaStorageError(
-            "filesystem does not expose inode availability; "
-            "an explicit_free_inodes safety budget is required"
-        )
-    if free_inodes <= 0:
-        raise PersonaStorageError("filesystem reports no usable inode availability")
-    return AvailableCapacity(int(usage.free), free_inodes, probe, inode_source)
-
-
-def check_scope_limits(file_sizes: list[int] | tuple[int, ...]) -> dict[str, int]:
-    """Preflight the contract's per-file, per-scope, and direct-file limits."""
-    if len(file_sizes) > MAX_DIRECT_FILES_PER_SCOPE:
-        raise PersonaStorageError(
-            f"scope has {len(file_sizes)} files; limit is {MAX_DIRECT_FILES_PER_SCOPE}"
-        )
-    total = 0
-    for index, size in enumerate(file_sizes):
-        _nonnegative_integer(size, f"file_sizes[{index}]")
-        if size > MAX_FILE_BYTES:
-            raise PersonaStorageError(
-                f"file_sizes[{index}] exceeds {MAX_FILE_BYTES} bytes"
-            )
-        total += size
-    if total > MAX_SCOPE_BYTES:
-        raise PersonaStorageError(f"scope bytes {total} exceed {MAX_SCOPE_BYTES}")
-    return {"direct_files": len(file_sizes), "scope_bytes": total}

@@ -17,15 +17,10 @@ import stat
 import sys
 from pathlib import Path, PurePosixPath
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.fspath(Path(__file__).resolve().parents[1]))
-
-from eval import persona_fixture_spec as spec
-
-
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 OWNER_FILE = ".kio-persona-skill-corpus-owner.json"
 WORKSPACE_FILE = "WORKSPACE.md"
+MAX_CONTROL_FILE_BYTES = 4 * 1024 * 1024
 PRODUCTION_DIRS = (
     "prompts",
     "temp",
@@ -54,12 +49,22 @@ SCOPE_PRODUCTION_DIRS = (
     "evidence/pptx",
     "evidence/image",
 )
-_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-_FILE_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", None)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", None)
+_DIRECTORY_FLAGS = os.O_RDONLY | (_O_DIRECTORY or 0) | (_O_NOFOLLOW or 0)
+_FILE_NOFOLLOW = _O_NOFOLLOW or 0
 
 
 class ScaffoldError(RuntimeError):
     """Raised when a target cannot safely host this corpus layout."""
+
+
+def _require_descriptor_capabilities() -> None:
+    """Fail closed when the platform cannot enforce descriptor no-follow walks."""
+    if not isinstance(_O_DIRECTORY, int) or _O_DIRECTORY == 0:
+        raise ScaffoldError("required descriptor flag O_DIRECTORY is unavailable")
+    if not isinstance(_O_NOFOLLOW, int) or _O_NOFOLLOW == 0:
+        raise ScaffoldError("required descriptor flag O_NOFOLLOW is unavailable")
 
 
 def _absolute_lexical(path: Path) -> Path:
@@ -89,6 +94,7 @@ def _validate_owned_directory(descriptor: int, label: str) -> None:
 
 
 def _open_absolute_directory(path: Path) -> int:
+    _require_descriptor_capabilities()
     if not path.is_absolute():
         raise ScaffoldError(f"path must be absolute: {path}")
     descriptor = os.open(path.anchor, _DIRECTORY_FLAGS)
@@ -214,17 +220,38 @@ def _read_text_at(
     except OSError as error:
         raise ScaffoldError(f"cannot open control file {label}: {error}") from error
     try:
+        opened = os.fstat(descriptor)
         _validate_regular_file(
-            os.fstat(descriptor),
-            label,
-            allow_read_only_public=allow_read_only_public,
+            opened, label, allow_read_only_public=allow_read_only_public
         )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-            descriptor = -1
-            return stream.read()
+        if opened.st_size < 0 or opened.st_size > MAX_CONTROL_FILE_BYTES:
+            raise ScaffoldError(f"control file exceeds byte bound: {label}")
+        raw = bytearray()
+        while len(raw) <= MAX_CONTROL_FILE_BYTES:
+            block = os.read(
+                descriptor,
+                min(64 * 1024, MAX_CONTROL_FILE_BYTES + 1 - len(raw)),
+            )
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            len(raw) > MAX_CONTROL_FILE_BYTES
+            or len(raw) != opened.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_nlink)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_nlink)
+            or (named.st_dev, named.st_ino, named.st_size, named.st_nlink)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_nlink)
+        ):
+            raise ScaffoldError(f"control file changed while reading: {label}")
+        try:
+            return bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ScaffoldError(f"control file is not UTF-8: {label}") from error
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
 
 
 def _write_new_json_at(directory: int, name: str, payload: object, label: str) -> None:
@@ -264,449 +291,254 @@ def _validate_existing_control_file(
         except ValueError as error:
             raise ScaffoldError(f"invalid JSON control file: {label}") from error
     return True
+LEASE_FILE = "lease.json"
+LOCK_FILE = ".lease.lock"
+RECOVERY_LOG = "lease-recovery.jsonl"
+PLAN_FILE = "persona-plan.json"
 
 
-def _owner_payload(version: int = SCHEMA_VERSION) -> dict[str, object]:
+def _json_text(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _digest(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def scope_control_id(relative_path: str) -> str:
+    try:
+        parts = _normal_components(relative_path)
+    except ScaffoldError:
+        raise
+    return "scope-" + hashlib.sha256("/".join(parts).encode("utf-8")).hexdigest()
+
+
+def _plan(root_plan: Path):
+    from .persona_artifacts import (
+        MAX_PLAN_BYTES,
+        PersonaArtifactError,
+        load_plan_topology,
+        read_exact_artifact,
+    )
+    try:
+        root_plan = Path(root_plan)
+        fixture, profile, digest, people = load_plan_topology(root_plan)
+        raw, repeated = read_exact_artifact(root_plan, "plan artifact", MAX_PLAN_BYTES)
+    except PersonaArtifactError as error:
+        raise ScaffoldError(str(error)) from error
+    if digest != repeated:
+        raise ScaffoldError("plan digest changed while binding")
+    return fixture, profile, digest, people, raw
+
+
+def _owner_payload(fixture: str, profile: str, plan_sha256: str) -> dict[str, object]:
     return {
-        "schema_version": version,
-        "kind": "kio-persona-skill-corpus",
-        "source_spec": "eval/persona_fixture_spec.py",
-        "personas": [f"{row['id']}-{row['role']}" for row in spec.PERSONAS],
+        "schema": "kio.persona.skill-corpus/v4",
+        "fixture_id": fixture,
+        "profile": profile,
+        "plan_sha256": plan_sha256,
     }
 
 
 def _read_owner(root_descriptor: int, root: Path) -> dict[str, object]:
-    label = os.fspath(root / OWNER_FILE)
     try:
-        actual = json.loads(
-            _read_text_at(
-                root_descriptor,
-                OWNER_FILE,
-                label,
-                allow_read_only_public=True,
-            )
-        )
+        value = json.loads(_read_text_at(root_descriptor, OWNER_FILE, os.fspath(root / OWNER_FILE), allow_read_only_public=True))
     except ValueError as error:
-        raise ScaffoldError(f"invalid owner marker: {label}") from error
-    return actual
+        raise ScaffoldError("invalid owner marker") from error
+    if not isinstance(value, dict):
+        raise ScaffoldError("invalid owner marker")
+    return value
 
 
-def _validate_owner(root_descriptor: int, root: Path) -> int:
-    actual = _read_owner(root_descriptor, root)
-    if actual == _owner_payload():
-        return SCHEMA_VERSION
-    if actual == _owner_payload(2):
-        return 2
-    raise ScaffoldError(f"owner marker does not match this scaffold version: {root / OWNER_FILE}")
+def _validate_owner(root_descriptor: int, root: Path, expected: dict[str, object]) -> None:
+    if _read_owner(root_descriptor, root) != expected:
+        raise ScaffoldError("owner marker does not match exact Rust plan artifact")
 
 
-def _open_existing_root(root: Path) -> int:
-    root = _absolute_lexical(root)
-    try:
-        parent_descriptor = _open_absolute_directory(root.parent)
-    except FileNotFoundError as error:
-        raise ScaffoldError(f"corpus root does not exist: {root}") from error
-    try:
-        root_descriptor = _open_directory_at(
-            parent_descriptor, root.name, os.fspath(root)
-        )
-    except BaseException:
-        os.close(parent_descriptor)
-        raise
-    os.close(parent_descriptor)
-    try:
-        _validate_owner(root_descriptor, root)
-        return root_descriptor
-    except BaseException:
-        os.close(root_descriptor)
-        raise
-
-
-def _bind_root(root: Path, *, resume: bool) -> tuple[int, int]:
+def _bind_root(root: Path, *, resume: bool, owner: dict[str, object], plan_raw: bytes) -> int:
     if not root.name or root.name in (".", ".."):
         raise ScaffoldError(f"unsafe corpus root: {root}")
     try:
-        parent_descriptor = _open_absolute_directory(root.parent)
+        parent = _open_absolute_directory(root.parent)
     except FileNotFoundError as error:
         raise ScaffoldError(f"target parent must already exist: {root.parent}") from error
     try:
         created = False
         try:
-            os.mkdir(root.name, 0o700, dir_fd=parent_descriptor)
-            os.fsync(parent_descriptor)
+            os.mkdir(root.name, 0o700, dir_fd=parent)
+            os.fsync(parent)
             created = True
         except FileExistsError:
             if not resume:
-                raise ScaffoldError(
-                    f"target already exists; use --resume for an owned root: {root}"
-                )
-        root_descriptor = _open_directory_at(parent_descriptor, root.name, os.fspath(root))
+                raise ScaffoldError(f"target already exists; use --resume for an owned root: {root}")
+        descriptor = _open_directory_at(parent, root.name, os.fspath(root))
     finally:
-        os.close(parent_descriptor)
-    if created:
-        _write_new_json_at(
-            root_descriptor, OWNER_FILE, _owner_payload(), os.fspath(root / OWNER_FILE)
-        )
-    else:
-        existing_version = _validate_owner(root_descriptor, root)
-    return root_descriptor, (SCHEMA_VERSION if created else existing_version)
-
-
-def _persona_initial_files(persona: dict[str, object], *, version: int = SCHEMA_VERSION) -> dict[str, object]:
-    return {
-        "status.json": {
-            "persona_id": persona["id"],
-            "role": persona["role"],
-            "owner_session": None,
-            "state": "scaffolded",
-            "current_batch": None,
-            "completed_artifacts": 0,
-            "last_verified_inventory_line": 0,
-            "next_action": "claim an exclusive persona lease",
-            "blocking_issue": None,
-            "updated_at": None,
-        },
-        "manifest.json": {
-            "schema_version": version,
-            "persona_id": persona["id"],
-            "role": persona["role"],
-            "source_spec": "eval/persona_fixture_spec.py",
-            "full_raw_files": persona["full_raw_files"],
-            "format_percentages": persona["format_percentages"],
-            "format_variant_counts_200": spec.format_variant_counts(persona, "tiny"),
-            "primary_paths": list(persona["primary_paths"]),
-            "secondary_paths": list(spec.SECONDARY_PATHS),
-            "inventory": "inventory.jsonl",
-            "provenance": "provenance.jsonl",
-            "qa": "qa.jsonl",
-            "artifact_join_key": "artifact_id",
-        },
-        "narrative.json": {
-            "schema_version": version,
-            "persona_id": persona["id"],
-            "fictional_entities": [],
-            "timeline": [],
-            "terminology": {},
-            "numeric_anchors": {},
-        },
-    }
-
-
-def _workspace_text(persona: dict[str, object]) -> str:
-    slug = f"{persona['id']}-{persona['role']}"
-    return (
-        f"# {slug} workspace\n\n"
-        f"The parent chat session exclusively owns the `{slug}/` persona folder.\n"
-        "The parent holds each scope lease and assigns one authoritative `home/` leaf "
-        "folder to each subagent. A subagent creates only the fixed files listed for "
-        "that folder and updates only its permitted scope-local production records.\n\n"
-        "Read the production rules before working:\n\n"
-        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
-        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
-        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
-    )
-
-
-def _validate_workspace_file(directory: int, persona: dict[str, object], label: str, *, previous_version: int | None) -> None:
-    if not _validate_existing_control_file(
-        directory,
-        WORKSPACE_FILE,
-        label,
-        expect_json=False,
-        allow_read_only_public=True,
-    ):
-        _write_new_text_at(directory, WORKSPACE_FILE, _workspace_text(persona), label)
-        return
-    actual = _read_text_at(
-        directory,
-        WORKSPACE_FILE,
-        label,
-        allow_read_only_public=True,
-    )
-    if actual == _workspace_text(persona):
-        return
-    if actual in (_workspace_text_v2(persona), _workspace_text_v3_initial(persona)):
-        _replace_text_at(
-            directory,
-            WORKSPACE_FILE,
-            _workspace_text(persona),
-            label,
-            allow_read_only_public=True,
-        )
-        return
-    else:
-        raise ScaffoldError(f"workspace file does not match this scaffold version: {label}")
-
-
-def _workspace_text_v2(persona: dict[str, object]) -> str:
-    slug = f"{persona['id']}-{persona['role']}"
-    return (
-        f"# {slug} workspace\n\n"
-        f"This session owns only the `{slug}/` persona folder.\n\n"
-        "Read the production rules before working:\n\n"
-        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
-        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
-        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
-    )
-
-
-def _workspace_text_v3_initial(persona: dict[str, object]) -> str:
-    """Return the exact first v3 text so resume can converge tracked scaffolds."""
-    slug = f"{persona['id']}-{persona['role']}"
-    return (
-        f"# {slug} workspace\n\n"
-        f"The parent chat session exclusively owns the `{slug}/` persona folder.\n"
-        "Each subagent claims one assigned authoritative `home/` scope and may write "
-        "only that folder plus its matching `_production/scopes/` control folder.\n\n"
-        "Read the production rules before working:\n\n"
-        "- `../../tasks/persona-skill-corpus/COMMON_RULES.md`\n"
-        "- `../../tasks/persona-skill-corpus/BATCH_PROTOCOL.md`\n"
-        f"- `../../tasks/persona-skill-corpus/personas/{slug}.md`\n"
-    )
-
-
-def scope_control_id(relative_path: str) -> str:
-    """Return the stable, safe on-disk ID for one authoritative scope path."""
+        os.close(parent)
     try:
-        spec.validate_relative_scope(relative_path)
-    except ValueError as error:
-        raise ScaffoldError(f"invalid scope path: {relative_path}") from error
-    return "scope-" + hashlib.sha256(relative_path.encode("ascii")).hexdigest()
+        if created:
+            _write_new_text_at(descriptor, OWNER_FILE, _json_text(owner), os.fspath(root / OWNER_FILE))
+            _write_new_text_at(descriptor, PLAN_FILE, plan_raw.decode("utf-8"), os.fspath(root / PLAN_FILE))
+        else:
+            _validate_owner(descriptor, root, owner)
+            existing = _read_text_at(descriptor, PLAN_FILE, os.fspath(root / PLAN_FILE))
+            if existing.encode("utf-8") != plan_raw:
+                raise ScaffoldError("stored plan artifact does not exactly match requested plan")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
-def _scope_initial_files(persona: dict[str, object], relative_path: str) -> dict[str, object]:
-    return {
-        "status.json": {"schema_version": 1, "persona_id": persona["id"], "scope_path": relative_path, "state": "scaffolded", "completed_artifacts": 0},
-        "manifest.json": {"schema_version": 1, "persona_id": persona["id"], "scope_path": relative_path, "scope_id": scope_control_id(relative_path), "artifact_join_key": "artifact_id"},
-        "assignment.json": {
-            "schema_version": 1,
-            "persona_id": persona["id"],
-            "scope_path": relative_path,
-            "scope_id": scope_control_id(relative_path),
-            "assigned_parent_session": None,
-            "assigned_worker_session": None,
-            "state": "unassigned",
-            "files": [],
-        },
-    }
+def _ensure_json(directory: int, name: str, payload: object, label: str) -> None:
+    expected = _json_text(payload)
+    if _validate_existing_control_file(directory, name, label, expect_json=True):
+        if _read_text_at(directory, name, label) != expected:
+            raise ScaffoldError(f"control file does not match exact v4 scaffold: {label}")
+    else:
+        _write_new_text_at(directory, name, expected, label)
 
 
-def _upgrade_v2_persona_payload(
-    persona: dict[str, object], name: str, actual: object, current: dict[str, object]
-) -> dict[str, object] | None:
-    """Upgrade v2 shared JSON without discarding parent-authored metadata."""
-    if name == "status.json":
-        return None  # v2 status intentionally had no schema_version field.
-    if not isinstance(actual, dict):
-        raise ScaffoldError(f"v2 {name} is not an object for {persona['id']}")
-    if actual.get("persona_id") != persona["id"]:
-        raise ScaffoldError(f"v2 {name} has the wrong persona identity for {persona['id']}")
-    if name == "manifest.json" and actual.get("role") != persona["role"]:
-        raise ScaffoldError(f"v2 manifest has the wrong role identity for {persona['id']}")
-    version = actual.get("schema_version")
-    if version == SCHEMA_VERSION:
-        return None
-    if version != 2:
-        raise ScaffoldError(f"unsupported shared control schema in {name} for {persona['id']}")
-    upgraded = dict(actual)
-    for key, value in current.items():
-        upgraded.setdefault(key, value)
-    upgraded["schema_version"] = SCHEMA_VERSION
-    return upgraded
+def _ensure_text(directory: int, name: str, text: str, label: str) -> None:
+    if _validate_existing_control_file(directory, name, label, expect_json=False):
+        if _read_text_at(directory, name, label) != text:
+            raise ScaffoldError(f"control file does not match exact v4 scaffold: {label}")
+    else:
+        _write_new_text_at(directory, name, text, label)
 
 
-def _scope_workspace_text(persona: dict[str, object], relative_path: str) -> str:
-    slug = f"{persona['id']}-{persona['role']}"
-    return (
-        f"# {slug} scope worker workspace\n\n"
-        f"Assigned home scope: `../../../home/{relative_path}/`\n\n"
-        "The parent chat owns persona-level shared metadata and this scope's immutable "
-        "`WORKSPACE.md`, `manifest.json`, `assignment.json`, and lease controls. Read "
-        "`assignment.json` before work. This worker may create only its listed final "
-        "files in the assigned home scope and may update only scope-local status, "
-        "inventory, provenance, QA, prompts, temp, renders, and evidence.\n"
-    )
+def _persona_slug(person) -> str:
+    return f"{person.persona_id}-{person.role}"
 
 
-def _scope_workspace_text_initial(persona: dict[str, object], relative_path: str) -> str:
-    slug = f"{persona['id']}-{persona['role']}"
-    return (
-        f"# {slug} scope worker workspace\n\n"
-        f"Assigned home scope: `../../../home/{relative_path}/`\n\n"
-        "The parent chat owns persona-level shared metadata. This worker may write only "
-        "the assigned home scope and this `_production/scopes/` directory.\n"
-    )
+def _persona_workspace(slug: str) -> str:
+    return f"# {slug} workspace\n\nThis workspace is bound to a Rust persona plan artifact. Claim the exclusive persona lease before assigning exact plan scopes.\n"
 
 
-def _validate_scope_workspace_file(scope_control: int, persona: dict[str, object], relative_path: str, label: str) -> None:
-    expected = _scope_workspace_text(persona, relative_path)
-    if not _validate_existing_control_file(scope_control, WORKSPACE_FILE, label, expect_json=False, allow_read_only_public=True):
-        _write_new_text_at(scope_control, WORKSPACE_FILE, expected, label)
-        return
-    actual = _read_text_at(
-        scope_control, WORKSPACE_FILE, label, allow_read_only_public=True
-    )
-    if actual == expected:
-        return
-    if actual == _scope_workspace_text_initial(persona, relative_path):
-        _replace_text_at(
-            scope_control,
-            WORKSPACE_FILE,
-            expected,
-            label,
-            allow_read_only_public=True,
-        )
-        return
-    raise ScaffoldError(f"scope workspace file does not match authoritative scope: {label}")
+def _scope_workspace(slug: str, scope_path: str) -> str:
+    return f"# {slug} scope workspace\n\nAssigned Rust-plan scope: `{scope_path}`.\n"
 
 
-def scaffold(root: Path, *, resume: bool = False) -> Path:
+def _create_control_files(control: int, slug: str, persona_id: str) -> None:
+    _ensure_json(control, "status.json", {"schema": "kio.persona.skill-corpus/v4", "persona_id": persona_id, "state": "scaffolded"}, f"{slug}/_production/status.json")
+    for name, value in (("inventory.jsonl", ""), ("provenance.jsonl", ""), ("qa.jsonl", ""), (LOCK_FILE, "\0"), (RECOVERY_LOG, "")):
+        _ensure_text(control, name, value, f"{slug}/_production/{name}")
+    _validate_existing_control_file(control, LEASE_FILE, f"{slug}/_production/{LEASE_FILE}", expect_json=True)
+
+
+def scaffold(root: Path, *, plan: Path, resume: bool = False) -> Path:
+    _require_descriptor_capabilities()
     root = _absolute_lexical(root)
-    root_descriptor, previous_version = _bind_root(root, resume=resume)
+    fixture, profile, digest, people, raw = _plan(Path(plan))
+    owner = _owner_payload(fixture, profile, digest)
+    root_descriptor = _bind_root(root, resume=resume, owner=owner, plan_raw=raw)
     try:
-        for persona in spec.PERSONAS:
-            slug = f"{persona['id']}-{persona['role']}"
-            persona_root = _ensure_directory_at(root_descriptor, slug, os.fspath(root / slug))
+        for person in people:
+            slug = _persona_slug(person)
+            persona = _ensure_directory_at(root_descriptor, slug, os.fspath(root / slug))
             try:
-                _validate_workspace_file(
-                    persona_root, persona, os.fspath(root / slug / WORKSPACE_FILE), previous_version=previous_version
-                )
-                home = _ensure_directory_at(
-                    persona_root, "home", os.fspath(root / slug / "home")
-                )
-                control = _ensure_directory_at(
-                    persona_root, "_production", os.fspath(root / slug / "_production")
-                )
+                _ensure_text(persona, WORKSPACE_FILE, _persona_workspace(slug), os.fspath(root / slug / WORKSPACE_FILE))
+                home = _ensure_directory_at(persona, "home", f"{slug}/home")
+                control = _ensure_directory_at(persona, "_production", f"{slug}/_production")
                 try:
-                    for relative_path in spec.all_scope_paths(persona):
-                        descriptor = _ensure_directory_at(home, relative_path, relative_path)
-                        os.close(descriptor)
-                    for relative_path in PRODUCTION_DIRS:
-                        descriptor = _ensure_directory_at(control, relative_path, relative_path)
-                        os.close(descriptor)
-
+                    _create_control_files(control, slug, person.persona_id)
                     scopes = _ensure_directory_at(control, "scopes", f"{slug}/_production/scopes")
                     try:
-                        for relative_path in spec.all_scope_paths(persona):
-                            scope_id = scope_control_id(relative_path)
+                        for scope in person.scopes:
+                            home_scope = _ensure_directory_at(home, scope.path, f"{slug}/home/{scope.path}")
+                            os.close(home_scope)
+                            scope_id = scope_control_id(scope.path)
                             scope_control = _ensure_directory_at(scopes, scope_id, f"{slug}/_production/scopes/{scope_id}")
                             try:
-                                _validate_scope_workspace_file(
-                                    scope_control,
-                                    persona,
-                                    relative_path,
-                                    f"{slug}/_production/scopes/{scope_id}/{WORKSPACE_FILE}",
-                                )
-                                for scope_dir in SCOPE_PRODUCTION_DIRS:
-                                    descriptor = _ensure_directory_at(scope_control, scope_dir, scope_dir)
-                                    os.close(descriptor)
-                                for name, payload in _scope_initial_files(persona, relative_path).items():
-                                    label = f"{slug}/_production/scopes/{scope_id}/{name}"
-                                    exists = _validate_existing_control_file(
-                                        scope_control, name, label, expect_json=True
-                                    )
-                                    if not exists:
-                                        _write_new_json_at(scope_control, name, payload, label)
-                                    elif name == "assignment.json":
-                                        actual = json.loads(
-                                            _read_text_at(scope_control, name, label)
-                                        )
-                                        legacy = {
-                                            key: value
-                                            for key, value in payload.items()
-                                            if key not in ("state", "files")
-                                        }
-                                        if actual == legacy:
-                                            _replace_text_at(
-                                                scope_control,
-                                                name,
-                                                json.dumps(
-                                                    payload,
-                                                    ensure_ascii=False,
-                                                    indent=2,
-                                                    sort_keys=True,
-                                                )
-                                                + "\n",
-                                                label,
-                                            )
-                                for name, initial in (("inventory.jsonl", ""), ("provenance.jsonl", ""), ("qa.jsonl", ""), (".lease.lock", "\0"), ("lease-recovery.jsonl", "")):
-                                    label = f"{slug}/_production/scopes/{scope_id}/{name}"
-                                    if not _validate_existing_control_file(scope_control, name, label, expect_json=False):
-                                        _write_new_text_at(scope_control, name, initial, label)
-                                _validate_existing_control_file(scope_control, "lease.json", f"{slug}/_production/scopes/{scope_id}/lease.json", expect_json=True)
+                                _ensure_text(scope_control, WORKSPACE_FILE, _scope_workspace(slug, scope.path), f"{slug}/_production/scopes/{scope_id}/{WORKSPACE_FILE}")
+                                _ensure_json(scope_control, "assignment.json", {"schema": "kio.persona.skill-corpus/v4", "persona_id": person.persona_id, "scope_id": scope.scope_id, "scope_path": scope.path, "scope_control_id": scope_id, "state": "unassigned"}, f"{slug}/_production/scopes/{scope_id}/assignment.json")
+                                for name, value in ((LOCK_FILE, "\0"), (RECOVERY_LOG, ""), ("inventory.jsonl", ""), ("provenance.jsonl", ""), ("qa.jsonl", "")):
+                                    _ensure_text(scope_control, name, value, f"{slug}/_production/scopes/{scope_id}/{name}")
+                                _validate_existing_control_file(scope_control, LEASE_FILE, f"{slug}/_production/scopes/{scope_id}/{LEASE_FILE}", expect_json=True)
                             finally:
                                 os.close(scope_control)
                     finally:
                         os.close(scopes)
-
-                    for name, payload in _persona_initial_files(persona).items():
-                        label = os.fspath(root / slug / "_production" / name)
-                        exists = _validate_existing_control_file(
-                            control, name, label, expect_json=True
-                        )
-                        if not exists:
-                            _write_new_json_at(control, name, payload, label)
-                        elif previous_version == 2:
-                            actual = json.loads(_read_text_at(control, name, label))
-                            upgraded = _upgrade_v2_persona_payload(persona, name, actual, payload)
-                            if upgraded is not None:
-                                _replace_text_at(control, name, json.dumps(upgraded, ensure_ascii=False, indent=2, sort_keys=True) + "\n", label)
-                    for name in ("inventory.jsonl", "provenance.jsonl", "qa.jsonl"):
-                        label = os.fspath(root / slug / "_production" / name)
-                        if not _validate_existing_control_file(
-                            control, name, label, expect_json=False
-                        ):
-                            _write_new_text_at(control, name, "", label)
-                    for name, initial in (
-                        (".lease.lock", "\0"),
-                        ("lease-recovery.jsonl", ""),
-                    ):
-                        label = os.fspath(root / slug / "_production" / name)
-                        if not _validate_existing_control_file(
-                            control, name, label, expect_json=False
-                        ):
-                            _write_new_text_at(control, name, initial, label)
-                    _validate_existing_control_file(
-                        control,
-                        "lease.json",
-                        os.fspath(root / slug / "_production" / "lease.json"),
-                        expect_json=True,
-                    )
                 finally:
-                    os.close(home)
-                    os.close(control)
+                    os.close(home); os.close(control)
             finally:
-                os.close(persona_root)
-        if previous_version == 2:
-            _replace_text_at(
-                root_descriptor,
-                OWNER_FILE,
-                json.dumps(_owner_payload(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                os.fspath(root / OWNER_FILE),
-                allow_read_only_public=True,
-            )
+                os.close(persona)
     finally:
         os.close(root_descriptor)
     return root
 
 
+def _open_existing_root(root: Path) -> int:
+    """Open a v4 owned root without following any component or control file."""
+    _require_descriptor_capabilities()
+    root = _absolute_lexical(root)
+    try:
+        parent = _open_absolute_directory(root.parent)
+    except FileNotFoundError as error:
+        raise ScaffoldError(f"corpus root does not exist: {root}") from error
+    try:
+        descriptor = _open_directory_at(parent, root.name, os.fspath(root))
+    finally:
+        os.close(parent)
+    try:
+        # The plan is read descriptor-relatively so a replacement cannot redirect
+        # membership lookup outside the workspace binding.
+        raw = _read_text_at(descriptor, PLAN_FILE, os.fspath(root / PLAN_FILE)).encode("utf-8")
+        from .persona_artifacts import PersonaArtifactError, parse_plan_topology_bytes
+        try:
+            fixture, profile, people = parse_plan_topology_bytes(raw, "stored plan")
+        except PersonaArtifactError as error:
+            raise ScaffoldError(str(error)) from error
+        owner = _owner_payload(fixture, profile, _digest(raw))
+        _validate_owner(descriptor, root, owner)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def load_workspace_topology_at(root_descriptor: int, root: Path):
+    """Read authoritative topology from an already-bound workspace descriptor.
+
+    Callers that subsequently mutate the workspace must retain this descriptor;
+    resolving ``root`` again after this check could bind a replacement directory.
+    """
+    root = _absolute_lexical(root)
+    raw = _read_text_at(
+        root_descriptor, PLAN_FILE, os.fspath(root / PLAN_FILE)
+    ).encode("utf-8")
+    from .persona_artifacts import PersonaArtifactError, parse_plan_topology_bytes
+
+    try:
+        fixture, profile, people = parse_plan_topology_bytes(raw, "stored plan")
+    except PersonaArtifactError as error:
+        raise ScaffoldError(str(error)) from error
+    _validate_owner(
+        root_descriptor, root, _owner_payload(fixture, profile, _digest(raw))
+    )
+    return people
+
+
+def load_workspace_topology(root: Path):
+    """Return stored Rust-plan topology after validating the owner binding."""
+    descriptor = _open_existing_root(root)
+    try:
+        return load_workspace_topology_at(descriptor, root)
+    finally:
+        os.close(descriptor)
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Create the empty layout for the skill-authored 20-persona corpus."
-    )
+    parser = argparse.ArgumentParser(description="Create a Rust-plan-bound persona corpus workspace.")
     parser.add_argument("--root", required=True, type=Path)
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="fill missing directories in an exact, safe, owned scaffold",
-    )
+    parser.add_argument("--plan", required=True, type=Path)
+    parser.add_argument("--resume", action="store_true")
     return parser
 
 
-def main() -> int:
-    args = _parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     try:
-        root = scaffold(args.root, resume=args.resume)
+        root = scaffold(args.root, plan=args.plan, resume=args.resume)
     except (OSError, ScaffoldError) as error:
         print(f"[error] {error}", file=sys.stderr)
         return 1

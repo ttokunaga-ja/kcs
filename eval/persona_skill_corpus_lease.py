@@ -11,7 +11,6 @@ import json
 import os
 import re
 import secrets
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,20 +19,10 @@ if os.name == "nt":
 else:
     import fcntl
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.fspath(Path(__file__).resolve().parents[1]))
-
-from eval import persona_fixture_spec as spec
-from eval.scaffold_persona_skill_corpus import (
-    ScaffoldError,
-    _FILE_NOFOLLOW,
-    _absolute_lexical,
-    _open_directory_at,
-    _open_existing_root,
-    _read_text_at,
-    _validate_regular_file,
-    _write_new_json_at,
-    scope_control_id,
+from .scaffold_persona_skill_corpus import (
+    ScaffoldError, _FILE_NOFOLLOW, _absolute_lexical, _open_directory_at,
+    _open_existing_root, _read_text_at, _validate_regular_file,
+    _write_new_json_at, scope_control_id, load_workspace_topology_at,
 )
 
 
@@ -43,63 +32,56 @@ RECOVERY_LOG = "lease-recovery.jsonl"
 _SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
-def _persona_slug(persona_id: str) -> str:
-    for persona in spec.PERSONAS:
-        slug = f"{persona['id']}-{persona['role']}"
-        if persona_id in (persona["id"], slug):
-            return slug
-    raise ScaffoldError(f"unknown persona: {persona_id}")
+def _persona_slug(persona_id: str, people):
+    for person in people:
+        slug = f"{person.persona_id}-{person.role}"
+        if persona_id == person.persona_id or persona_id == slug:
+            return slug, tuple(scope.path for scope in person.scopes)
+    raise ScaffoldError(f"unknown persona in stored Rust plan: {persona_id}")
 
 
 def _validate_session(session: str) -> None:
     if not _SESSION.fullmatch(session):
-        raise ScaffoldError(
-            "session must be 1-128 ASCII letters, digits, dot, underscore, colon, or hyphen"
-        )
+        raise ScaffoldError("session must be 1-128 ASCII letters, digits, dot, underscore, colon, or hyphen")
 
 
-def _open_control(root: Path, persona_id: str) -> tuple[int, int, int, str]:
+def _open_control(root: Path, persona_id: str) -> tuple[int, int, int, str, tuple[str, ...]]:
     root = _absolute_lexical(root)
-    slug = _persona_slug(persona_id)
     root_descriptor = _open_existing_root(root)
     try:
+        # Keep this root descriptor live from topology/owner validation through
+        # control-directory opening. Re-resolving ``root`` here would permit a
+        # same-name workspace replacement to cross plan authority boundaries.
+        people = load_workspace_topology_at(root_descriptor, root)
+        slug, scopes = _persona_slug(persona_id, people)
         persona = _open_directory_at(root_descriptor, slug, slug)
         try:
             control = _open_directory_at(persona, "_production", f"{slug}/_production")
         except BaseException:
-            os.close(persona)
-            raise
+            os.close(persona); raise
     except BaseException:
-        os.close(root_descriptor)
-        raise
-    return root_descriptor, persona, control, slug
+        os.close(root_descriptor); raise
+    return root_descriptor, persona, control, slug, scopes
 
 
-def _scope_path(slug: str, scope_path: str) -> str:
-    persona = next(row for row in spec.PERSONAS if f"{row['id']}-{row['role']}" == slug)
-    if scope_path not in spec.all_scope_paths(persona):
+def _scope_path(slug: str, scope_path: str, scopes: tuple[str, ...]) -> str:
+    if scope_path not in scopes:
         raise ScaffoldError(f"scope is not authoritative for {slug}: {scope_path}")
     return scope_path
 
 
-def _open_scope_control(root: Path, persona_id: str, scope_path: str) -> tuple[int, int, int, int, str, str]:
-    root_descriptor, persona, control, slug = _open_control(root, persona_id)
+def _open_scope_control(root: Path, persona_id: str, scope_path: str):
+    root_descriptor, persona, control, slug, valid_scopes = _open_control(root, persona_id)
     try:
-        scope_path = _scope_path(slug, scope_path)
+        scope_path = _scope_path(slug, scope_path, valid_scopes)
         scopes = _open_directory_at(control, "scopes", f"{slug}/_production/scopes")
         try:
-            scope_id = scope_control_id(scope_path)
-            scope_control = _open_directory_at(scopes, scope_id, f"{slug}/_production/scopes/{scope_id}")
-        except BaseException:
+            scope_control = _open_directory_at(scopes, scope_control_id(scope_path), f"{slug}/_production/scopes/{scope_control_id(scope_path)}")
+        finally:
             os.close(scopes)
-            raise
-        os.close(scopes)
     except BaseException:
-        os.close(control)
-        os.close(persona)
-        os.close(root_descriptor)
-        raise
-    return root_descriptor, persona, control, scope_control, slug, scope_path
+        os.close(control); os.close(persona); os.close(root_descriptor); raise
+    return root_descriptor, persona, control, scope_control, slug, scope_path, valid_scopes
 
 
 @contextlib.contextmanager
@@ -161,13 +143,12 @@ def _require_parent_lease_locked(control: int, slug: str, parent_session: str) -
         raise ScaffoldError(f"active parent persona lease does not match for {slug}")
 
 
-def _active_scope_leases_locked(control: int, slug: str) -> list[str]:
+def _active_scope_leases_locked(control: int, slug: str, scope_paths: tuple[str, ...]) -> list[str]:
     """Return authoritative scopes still assigned under a parent lease guard."""
-    persona = next(row for row in spec.PERSONAS if f"{row['id']}-{row['role']}" == slug)
     scopes = _open_directory_at(control, "scopes", f"{slug}/_production/scopes")
     try:
         active: list[str] = []
-        for scope_path in spec.all_scope_paths(persona):
+        for scope_path in scope_paths:
             scope_id = scope_control_id(scope_path)
             scope_control = _open_directory_at(scopes, scope_id, f"{slug}/_production/scopes/{scope_id}")
             try:
@@ -227,7 +208,7 @@ def _append_scope_recovery_locked(scope_control: int, slug: str, scope_path: str
 
 def claim(root: Path, persona_id: str, session: str, owner: str | None) -> dict[str, object]:
     _validate_session(session)
-    root_descriptor, persona, control, slug = _open_control(root, persona_id)
+    root_descriptor, persona, control, slug, scope_paths = _open_control(root, persona_id)
     try:
         with _lease_guard(control, slug):
             release_token = secrets.token_urlsafe(32)
@@ -252,7 +233,7 @@ def claim(root: Path, persona_id: str, session: str, owner: str | None) -> dict[
 
 
 def read_lease(root: Path, persona_id: str) -> dict[str, object]:
-    root_descriptor, persona, control, slug = _open_control(root, persona_id)
+    root_descriptor, persona, control, slug, scope_paths = _open_control(root, persona_id)
     try:
         with _lease_guard(control, slug):
             return _public_lease(_read_lease_locked(control, slug))
@@ -265,7 +246,7 @@ def read_lease(root: Path, persona_id: str) -> dict[str, object]:
 def release(root: Path, persona_id: str, token: str) -> dict[str, object]:
     if not token:
         raise ScaffoldError("release token must not be empty")
-    root_descriptor, persona, control, slug = _open_control(root, persona_id)
+    root_descriptor, persona, control, slug, scope_paths = _open_control(root, persona_id)
     try:
         with _lease_guard(control, slug):
             payload = _read_lease_locked(control, slug)
@@ -273,7 +254,7 @@ def release(root: Path, persona_id: str, token: str) -> dict[str, object]:
                 payload["release_token_sha256"], _token_hash(token)
             ):
                 raise ScaffoldError(f"release token mismatch for {slug}")
-            active_scopes = _active_scope_leases_locked(control, slug)
+            active_scopes = _active_scope_leases_locked(control, slug, scope_paths)
             if active_scopes:
                 raise ScaffoldError(f"cannot release parent persona lease with active scopes: {active_scopes}")
             os.unlink(LEASE_FILE, dir_fd=control)
@@ -291,13 +272,13 @@ def recover(
     _validate_session(expected_session)
     if not reason.strip():
         raise ScaffoldError("recovery reason must not be empty")
-    root_descriptor, persona, control, slug = _open_control(root, persona_id)
+    root_descriptor, persona, control, slug, scope_paths = _open_control(root, persona_id)
     try:
         with _lease_guard(control, slug):
             payload = _read_lease_locked(control, slug)
             if payload.get("session") != expected_session:
                 raise ScaffoldError(f"lease session changed for {slug}; recovery refused")
-            active_scopes = _active_scope_leases_locked(control, slug)
+            active_scopes = _active_scope_leases_locked(control, slug, scope_paths)
             if active_scopes:
                 raise ScaffoldError(f"cannot recover parent persona lease with active scopes: {active_scopes}")
             receipt = {
@@ -326,7 +307,7 @@ def scope_claim(
     owner: str | None,
 ) -> dict[str, object]:
     _validate_session(worker_session)
-    root_descriptor, persona, control, scope_control, slug, scope_path = _open_scope_control(root, persona_id, scope_path)
+    root_descriptor, persona, control, scope_control, slug, scope_path, scope_paths = _open_scope_control(root, persona_id, scope_path)
     try:
         with _lease_guard(control, slug):
             _require_parent_lease_locked(control, slug, parent_session)
@@ -355,7 +336,7 @@ def scope_claim(
 
 
 def read_scope_lease(root: Path, persona_id: str, scope_path: str) -> dict[str, object]:
-    root_descriptor, persona, control, scope_control, slug, scope_path = _open_scope_control(root, persona_id, scope_path)
+    root_descriptor, persona, control, scope_control, slug, scope_path, scope_paths = _open_scope_control(root, persona_id, scope_path)
     try:
         with _lease_guard(scope_control, f"{slug}/{scope_path}"):
             return _public_lease(_read_scope_lease_locked(scope_control, slug, scope_path))
@@ -369,7 +350,7 @@ def read_scope_lease(root: Path, persona_id: str, scope_path: str) -> dict[str, 
 def scope_release(root: Path, persona_id: str, scope_path: str, parent_session: str, token: str) -> dict[str, object]:
     if not token:
         raise ScaffoldError("release token must not be empty")
-    root_descriptor, persona, control, scope_control, slug, scope_path = _open_scope_control(root, persona_id, scope_path)
+    root_descriptor, persona, control, scope_control, slug, scope_path, scope_paths = _open_scope_control(root, persona_id, scope_path)
     try:
         with _lease_guard(control, slug):
             _require_parent_lease_locked(control, slug, parent_session)
@@ -391,7 +372,7 @@ def scope_recover(root: Path, persona_id: str, scope_path: str, parent_session: 
     _validate_session(expected_worker_session)
     if not reason.strip():
         raise ScaffoldError("recovery reason must not be empty")
-    root_descriptor, persona, control, scope_control, slug, scope_path = _open_scope_control(root, persona_id, scope_path)
+    root_descriptor, persona, control, scope_control, slug, scope_path, scope_paths = _open_scope_control(root, persona_id, scope_path)
     try:
         with _lease_guard(control, slug):
             _require_parent_lease_locked(control, slug, parent_session)

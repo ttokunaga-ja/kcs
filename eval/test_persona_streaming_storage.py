@@ -8,10 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-try:
-    from . import persona_streaming_storage as streaming
-except ImportError:  # pragma: no cover
-    import persona_streaming_storage as streaming
+from . import persona_streaming_storage as streaming
 
 
 class _OneShotRows:

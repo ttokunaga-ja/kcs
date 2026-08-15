@@ -19,10 +19,12 @@ PERSONA_INDEX.md、PRODUCTION_LAYOUT.md、SESSION_HANDOFF.md と
 tasks/persona-pc-eval-contract.md を読み、accepted Rust plan を唯一の
 topology/ratio/path authority としてください。`kio-eval persona plan --profile ...
 --out <absolute>` で作成・検証済みの artifact を親が渡すまで、topology を導出したり
-filesystem を作成したりしてはいけません。production root は repository-root/persona-corpus
-とし、承認済みの retained filesystem boundary が全20人分の skeleton を作成した後、
+filesystem を作成したりしてはいけません。production root は repository外の別途承認された
+absolute v4 root とし、承認済みの retained filesystem boundary が accepted plan から skeleton を作成した後、
 各persona直下の home 外 `_production` に status/inventory/provenance/narrative/qa metadata を置いてください。
-まず eval/persona_skill_corpus_lease.py claim で `<PERSONA_ID>` の親leaseをこのチャット固有の
+新規rootの作成は `python3 -m eval.scaffold_persona_skill_corpus --plan <absolute-plan>
+--root <absolute-v4-root>` だけを使い、既存のchecked-in skeletonをadoptしないでください。
+まず `python3 -m eval.persona_skill_corpus_lease claim` で `<PERSONA_ID>` の親leaseをこのチャット固有の
 session IDに対して取得してください。claimが一度だけ返すrelease_tokenは親チャット内だけに保持し、
 production metadataやSubagent promptへ書かないでください。既存leaseは show で確認し、
 persona-wide statusと全scope status/inventory/tempを点検してください。中断した親writerが停止済みであることを
@@ -49,6 +51,6 @@ scan PDFはImageGen + PDF workflowを用います。完了または具体的bloc
 未完了の next_action から再開し、完了済み home file と evidence を上書き・削除しないでください。
 最初の物理 milestone は persona ごと200件で、各形式の件数は比率×2です。1 turnで全件を作らず、
 各leaf folder内の5〜20成果物batch単位で生成・visual QA・scope-local inventory/provenance/qa追記・status更新まで完結してください。
-200件時点では family比率だけでなく manifest.json の format_variant_counts_200 も厳密に満たしてください。
+200件時点では family/variant 件数を accepted Rust plan と厳密に一致させてください。
 この親チャットは1 persona、各Subagent assignmentはそのpersona内の1 leaf folderです。この二層境界を変更しないでください。
 ```

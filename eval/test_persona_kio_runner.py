@@ -15,10 +15,22 @@ from eval import persona_root_lock as root_lock
 from eval import persona_storage as storage
 
 
-PLAN_SHA = "a" * 64
-SUITE_SHA = "b" * 64
-CAPACITY_SHA = "c" * 64
-PERSONA_MANIFEST_SHA = "d" * 64
+PLAN_SHA = "sha256:" + "a" * 64
+SCHEDULE_SHA = "sha256:" + "b" * 64
+RENDER_SHA = "sha256:" + "c" * 64
+ARTIFACT_BUNDLE_SHA = "sha256:" + hashlib.sha256(
+    storage.canonical_json_bytes(
+        {
+            "schema": "kio.persona.artifact-bundle/v2",
+            "fixture_id": storage.FIXTURE_ID,
+            "profile": "tiny",
+            "plan_digest": PLAN_SHA,
+            "plan_sha256": PLAN_SHA,
+            "schedule_sha256": SCHEDULE_SHA,
+            "render_sha256": RENDER_SHA,
+        }
+    )
+).hexdigest()
 
 
 def _canonical_json(value):
@@ -139,28 +151,31 @@ class PersonaRunnerTestCase(unittest.TestCase):
         self.replay = self.base / "replay-root"
         self.replay.mkdir()
         binding = {
-            "schema": "kio.persona.w0.root-binding/v1",
-            "schema_version": 1,
-            "fixture_id": "kio-persona-pc-v1",
+            "schema": "kio.persona.storage-root-binding/v2",
+            "fixture_id": "kio-persona-pc-v2",
             "profile": "tiny",
             "replay_id": "replay-01",
             "destination_root": str(self.replay),
             "filesystem_device": self.replay.lstat().st_dev,
+            "plan_digest": PLAN_SHA,
             "plan_sha256": PLAN_SHA,
-            "suite_manifest_sha256": SUITE_SHA,
-            "capacity_receipt_sha256": CAPACITY_SHA,
-            "persona_manifest_root_sha256": PERSONA_MANIFEST_SHA,
+            "schedule_sha256": SCHEDULE_SHA,
+            "render_sha256": RENDER_SHA,
+            "artifact_bundle_sha256": ARTIFACT_BUNDLE_SHA,
+            "sources_materialized": False,
+            "actual_kio_evidence": False,
+            "history_ready": False,
         }
         binding_bytes = (
             json.dumps(binding, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        self.binding_sha = hashlib.sha256(binding_bytes).hexdigest()
+        self.binding_sha = "sha256:" + hashlib.sha256(binding_bytes).hexdigest()
         owner = storage.make_owner_marker(
             profile="tiny",
             replay_id="replay-01",
             state="ready",
-            plan_sha256=PLAN_SHA,
-            manifest_sha256=self.binding_sha,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=self.binding_sha,
         )
         (self.replay / storage.OWNER_MARKER_NAME).write_bytes(
             (
@@ -168,7 +183,7 @@ class PersonaRunnerTestCase(unittest.TestCase):
                 + "\n"
             ).encode("utf-8")
         )
-        (self.replay / "w0-root-binding.json").write_bytes(binding_bytes)
+        (self.replay / "persona-root-binding.json").write_bytes(binding_bytes)
         self.person = self.replay / "devices" / "person"
         self.home = self.person / "home"
         self.scope = self.home / "documents" / "scope-a"
@@ -202,7 +217,7 @@ class PersonaRunnerTestCase(unittest.TestCase):
             self.replay,
             expected_profile="tiny",
             expected_replay_id="replay-01",
-            expected_plan_sha256=PLAN_SHA,
+            expected_artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
             expected_root_binding_sha256=self.binding_sha,
         )
 

@@ -8,21 +8,25 @@ documents do not replace it.
 
 Start with [COMMON_RULES.md](COMMON_RULES.md), choose work from the
 [persona index](PERSONA_INDEX.md), and follow [BATCH_PROTOCOL.md](BATCH_PROTOCOL.md).
-The historic scaffold command below is non-normative and must not be used to
-derive topology or ratios. A retained filesystem boundary may consume an
-accepted Rust plan artifact when materialization is separately authorized.
+The retained scaffold may consume an accepted Rust plan only for safe directory
+topology when workspace creation is separately authorized. It does not derive
+ratios, validate semantic plan contents, or materialize rendered sources.
 
 ```text
 kio-eval persona plan --profile <tiny|pilot|full> --out <absolute>
+python3 -m eval.scaffold_persona_skill_corpus \
+  --plan <absolute-plan> --root <absolute-new-root>
 ```
 
-The legacy scaffold layout in [PRODUCTION_LAYOUT.md](PRODUCTION_LAYOUT.md) is
-historical reference only. Use [SESSION_HANDOFF.md](SESSION_HANDOFF.md) only
-after a retained boundary has accepted a Rust plan artifact for a separately
-authorized materialization.
+The checked-in `persona-corpus/` skeleton predates this Rust-only authority and
+is historical evidence; this milestone does not adopt or mutate it. Create any
+new v4 scaffold outside the repository. The legacy layout in
+[PRODUCTION_LAYOUT.md](PRODUCTION_LAYOUT.md) is historical reference only. Use
+[SESSION_HANDOFF.md](SESSION_HANDOFF.md) only after the retained boundary has
+stored the exact accepted Rust plan in a separately authorized new workspace.
 
-The production root is the repository root's `persona-corpus/` directory. It
-contains exactly twenty direct persona folders, `p01-...` through `p20-...`.
+An authorized v4 production root contains exactly twenty direct persona folders,
+`p01-...` through `p20-...`, as supplied by the accepted Rust plan.
 The corpus itself belongs only in `<pXX-role>/home/`. Production state,
 receipts, prompts, temporary renders, and QA evidence belong in that persona's
 `<pXX-role>/_production/` tree and must never be copied into `home/`.

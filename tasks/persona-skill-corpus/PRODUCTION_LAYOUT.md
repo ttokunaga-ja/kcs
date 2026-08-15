@@ -1,9 +1,13 @@
 # Production layout and checkpoint metadata
 
-The production root is repository-root `persona-corpus/`. It has exactly twenty direct persona directories, with no central `devices/` or `_production/` directory:
+This file records the legacy directory shape only; it is not an executable
+topology authority. A current v4 root must be a separately authorized location
+outside the repository and must be scaffolded from an accepted Rust plan. The
+current plan has exactly twenty projected persona directories, with no central
+device or production-state directory:
 
 ```text
-persona-corpus/
+<authorized-v4-root>/
   p01-software-engineer/
     WORKSPACE.md                       # parent-chat guidance
     home/
@@ -52,10 +56,10 @@ the persona by plan-defined leaf folder. Each subagent owns one
 ancestor/descendant overlap and may run concurrently; never assign the same
 leaf folder twice.
 
-The authoritative primary paths are `persona["primary_paths"]`; the shared
-secondary paths are `SECONDARY_PATHS`. Build all twenty paths by calling the
-fixture's scope helpers or by reading their output—do not maintain a duplicate
-path table here. `_production/` is outside its persona's `home/` tree, so it
+The authoritative primary and shared-secondary paths come only from the
+accepted Rust plan artifact. The scaffold consumes their safe path projection;
+runbooks and Python control files do not maintain a duplicate path table.
+`_production/` is outside its persona's `home/` tree, so it
 cannot enter corpus format ratios or evaluation scopes.
 
 Create the complete directory skeleton before content production. The

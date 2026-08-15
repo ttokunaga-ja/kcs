@@ -36,10 +36,7 @@ import re
 import tempfile
 from typing import Iterable, Iterator
 
-try:  # Support both package imports and the repository's direct-import style.
-    from . import persona_storage as storage
-except ImportError:  # pragma: no cover
-    import persona_storage as storage
+from . import persona_storage as storage
 
 
 STORAGE_ENVELOPE_SCHEMA = "kio.persona.streaming-jsonl-storage-envelope/v1"

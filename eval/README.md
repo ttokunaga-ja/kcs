@@ -468,9 +468,9 @@ W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks�
 - non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
 - read-only replay-root lease primitive: `eval/persona_root_lock.py`
 - fail-closed Kio command/result boundary: `eval/persona_kio_runner.py`
-- canonical non-executing 20-person prepare-receipt composer:
+- canonical non-executing artifact-bound prepare-receipt composer:
   `eval/persona_prepare_receipt.py`
-- partial filesystem/content/quota semantic attestor:
+- bounded filesystem-byte observer with explicit false Kio/history claims:
   `eval/persona_history_attestation.py`
 - retained Python boundary tests: `eval/test_persona_storage.py`,
   `eval/test_persona_streaming_storage.py`, `eval/test_persona_root_lock.py`,
@@ -519,8 +519,9 @@ contract smoke only; a pilot or full plan is not permission to write a corpus,
 nor evidence of filesystem capacity, Kio chunks, history readiness, or latency.
 
 The retained Python code has a deliberately narrow role: bounded artifact
-storage, root locking, command/runtime handling, prepare receipts, and partial
-filesystem/content attestation. It must consume accepted Rust artifacts rather
+storage, topology-only workspace scaffolding, root locking, command/runtime
+handling, prepare receipts, and opaque filesystem-byte attestation. It must
+consume accepted Rust artifacts rather
 than reconstruct persona topology, render bytes, allocation, ledgers, or event
 schedules. Its security boundaries remain non-authorizing: none of them makes
 physical publication, mutation/replay, actual chunk counts, history readiness,
@@ -535,7 +536,24 @@ target/release/kio-eval persona render \
 target/release/kio-eval persona schedule \
   --plan /private/tmp/kio-persona-tiny-plan.json \
   --out /private/tmp/kio-persona-tiny-schedule.json
+
+python3 -m eval.generate_persona_corpus materialize \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --schedule /private/tmp/kio-persona-tiny-schedule.json \
+  --render /private/tmp/kio-persona-tiny-render.json \
+  --destination /private/tmp/kio-persona-artifacts \
+  --replay-id replay-01
+
+python3 -m eval.scaffold_persona_skill_corpus \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --root /private/tmp/kio-persona-workspaces
 ```
+
+`materialize` copies the three exact Rust artifacts and publishes only their
+identity envelope. Its root binding fixes `sources_materialized=false`,
+`actual_kio_evidence=false`, and `history_ready=false`. The scaffold consumes
+only safe persona/scope path topology and does not validate or recreate the
+plan's allocation, manifest, renderer, or schedule semantics.
 
 ```bash
 python3 -m unittest \
@@ -546,8 +564,7 @@ python3 -m unittest \
   eval.test_persona_prepare_receipt \
   eval.test_persona_history_attestation \
   eval.test_generate_persona_corpus \
+  eval.test_scaffold_persona_skill_corpus \
+  eval.test_persona_skill_corpus_lease \
   eval.test_eval_env
-
-KIO_RUN_PERSONA_FS_INTEGRATION=1 \
-  python3 -m unittest eval.test_generate_persona_corpus
 ```

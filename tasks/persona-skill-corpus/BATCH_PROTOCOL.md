@@ -23,7 +23,7 @@ and scope-status updates in the same turn. An interrupted batch is not final.
    brief. Before planning or creating artifacts it atomically claims the persona:
 
    ```bash
-   python3 eval/persona_skill_corpus_lease.py claim \
+   python3 -m eval.persona_skill_corpus_lease claim \
      --root <production-root> --persona p01 --session <unique-session-id>
    ```
 
@@ -68,7 +68,7 @@ and scope-status updates in the same turn. An interrupted batch is not final.
    scope on that worker's behalf, bound to the active parent persona session:
 
    ```bash
-   python3 eval/persona_skill_corpus_lease.py scope-claim \
+   python3 -m eval.persona_skill_corpus_lease scope-claim \
      --root <production-root> --persona p01 \
      --scope documents/work/product-alpha/architecture \
      --parent-session <parent-chat-session-id> \
@@ -99,11 +99,9 @@ and scope-status updates in the same turn. An interrupted batch is not final.
 - The authoritative family ratios and paths come only from
   an accepted Rust `kio-eval persona plan` artifact; the persona brief is an
   operational, non-authoritative view.
-- At 200 files, every primary or secondary path must be represented according
-  to the fixture allocation, every family count must equal `2 × ratio`, and
-  variant counts/gate roles/dispositions must equal
-  `format_variant_counts(persona, "tiny")`. The scaffold copies this oracle
-  into each `manifest.json` as `format_variant_counts_200`.
+- At 200 files, every primary or secondary path and every family/variant count
+  must match the accepted `kio-eval persona plan --profile tiny` artifact.
+  Python control files and this runbook do not reconstruct that allocation.
 - Embedded images do not count as independent `image` files. Only a standalone
   file below `home/` contributes one inventory item.
 - A `pdf_scan` counts as one PDF artifact; its intermediate ImageGen source is
@@ -128,7 +126,7 @@ The parent releases the persona lease only after every child scope lease is gone
 and the persona-wide checkpoint has been rebuilt:
 
 ```bash
-python3 eval/persona_skill_corpus_lease.py release \
+python3 -m eval.persona_skill_corpus_lease release \
   --root <production-root> --persona p01 --token <claim-release-token>
 ```
 
@@ -136,7 +134,7 @@ The parent releases each finished folder assignment with its separate one-time
 scope token:
 
 ```bash
-python3 eval/persona_skill_corpus_lease.py scope-release \
+python3 -m eval.persona_skill_corpus_lease scope-release \
   --root <production-root> --persona p01 \
   --scope documents/work/product-alpha/architecture \
   --parent-session <parent-chat-session-id> \
@@ -154,7 +152,7 @@ is no longer running. Only then use the corresponding explicit recovery
 authority, which records a durable receipt:
 
 ```bash
-python3 eval/persona_skill_corpus_lease.py recover \
+python3 -m eval.persona_skill_corpus_lease recover \
   --root <production-root> --persona p01 \
   --expected-session <session-from-show> --reason "user confirmed writer stopped"
 ```
@@ -162,7 +160,7 @@ python3 eval/persona_skill_corpus_lease.py recover \
 For one interrupted folder assignment, use:
 
 ```bash
-python3 eval/persona_skill_corpus_lease.py scope-recover \
+python3 -m eval.persona_skill_corpus_lease scope-recover \
   --root <production-root> --persona p01 \
   --scope documents/work/product-alpha/architecture \
   --parent-session <parent-chat-session-id> \

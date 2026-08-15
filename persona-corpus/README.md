@@ -1,9 +1,14 @@
 # Persona corpus workspaces
 
+This checked-in skeleton is legacy, non-authoritative evidence and is not
+adopted or mutated by the Rust-only persona milestone. New v4 workspaces must be
+created outside the repository from an accepted Rust plan artifact through the
+retained scaffold boundary.
+
 This directory contains twenty independent persona workspaces. Each parent
 production chat owns exactly one direct persona folder, including that
 persona's `home/` and `_production/` trees. Inside that chat, artifact-producing
-subagents divide the persona by its twenty fixture-defined leaf folders: one
+subagents divide the persona by its twenty Rust-plan-defined leaf folders: one
 subagent assignment owns one leaf folder plus its matching scope-control area.
 Never assign two active workers to the same leaf folder.
 

@@ -67,5 +67,7 @@ python3 eval/v3/v3_mrl.py \
 | 抽出日 | 2026-07-28 |
 | 再生成 | `python3 eval/v3/extract_normalized_corpus.py --fixture <index 済み fixture> --out <dir>` |
 
-内容は合成である (`eval/generate_persona_corpus.py` 系が生成した persona corpus を
-OCR したもの)。実在の人物・組織の情報は含まない。
+内容は、現在は廃止され Git history にのみ残る旧 persona generator で作成した
+合成 corpus を OCR した履歴成果物である。現行の
+`eval.generate_persona_corpus` は Rust artifact の storage 境界であり、この corpus
+の再生成 authority ではない。実在の人物・組織の情報は含まない。

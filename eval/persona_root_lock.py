@@ -19,13 +19,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import threading
 from typing import Iterator
 
-try:  # Package and direct ``eval`` import compatibility.
-    from . import persona_storage as storage
-except ImportError:  # pragma: no cover - repository direct-import style.
-    import persona_storage as storage
+from . import persona_artifacts
+from . import persona_storage as storage
 
 
 class PersonaRootLockError(RuntimeError):
@@ -39,7 +38,7 @@ class ReplayRootLease:
     root: Path
     profile: str
     replay_id: str
-    plan_sha256: str
+    artifact_bundle_sha256: str
     root_binding_sha256: str
     root_device: int
     root_inode: int
@@ -64,21 +63,24 @@ class _LeaseState:
 
 _PROCESS_GUARD = threading.Lock()
 _ACTIVE_ROOT_IDENTITIES: set[tuple[int, int]] = set()
-_ROOT_BINDING_FILE_NAME = "w0-root-binding.json"
-_ROOT_BINDING_SCHEMA = "kio.persona.w0.root-binding/v1"
+_ROOT_BINDING_FILE_NAME = "persona-root-binding.json"
+_ROOT_BINDING_SCHEMA = "kio.persona.storage-root-binding/v2"
 _MAX_ROOT_BINDING_BYTES = 64 * 1024
 _ROOT_BINDING_FIELDS = {
     "schema",
-    "schema_version",
     "fixture_id",
     "profile",
     "replay_id",
+    "plan_digest",
+    "artifact_bundle_sha256",
+    "plan_sha256",
+    "schedule_sha256",
+    "render_sha256",
     "destination_root",
     "filesystem_device",
-    "plan_sha256",
-    "suite_manifest_sha256",
-    "capacity_receipt_sha256",
-    "persona_manifest_root_sha256",
+    "sources_materialized",
+    "actual_kio_evidence",
+    "history_ready",
 }
 
 
@@ -93,9 +95,7 @@ if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX capability.
 
 
 def _canonical_owner_bytes(owner: dict[str, object]) -> bytes:
-    return (
-        json.dumps(owner, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    return storage.canonical_json_bytes(owner)
 
 
 def _open_flags(*, directory: bool) -> int:
@@ -192,7 +192,7 @@ def _read_bound_root_binding(
         or (before.st_dev, before.st_ino, before.st_size)
         != (after.st_dev, after.st_ino, after.st_size)
         or len(raw) != before.st_size
-        or hashlib.sha256(raw).hexdigest() != expected_sha256
+        or "sha256:" + hashlib.sha256(raw).hexdigest() != expected_sha256
         or (expected_bytes is not None and raw != expected_bytes)
     ):
         raise PersonaRootLockError("root binding bytes or identity changed")
@@ -200,29 +200,42 @@ def _read_bound_root_binding(
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PersonaRootLockError("root binding is invalid JSON") from error
-    if type(value) is not dict or _canonical_owner_bytes(value) != raw:
+    if type(value) is not dict or storage.canonical_json_bytes(value) != raw:
         raise PersonaRootLockError("root binding is not canonical JSON")
     if (
         set(value) != _ROOT_BINDING_FIELDS
         or value.get("schema") != _ROOT_BINDING_SCHEMA
-        or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
-        or value.get("fixture_id") != storage.fixture_spec.FIXTURE_ID
+        or value.get("fixture_id") != storage.FIXTURE_ID
     ):
         raise PersonaRootLockError("root binding schema or fields differ")
     for field in (
+        "plan_digest",
+        "artifact_bundle_sha256",
         "plan_sha256",
-        "suite_manifest_sha256",
-        "capacity_receipt_sha256",
-        "persona_manifest_root_sha256",
+        "schedule_sha256",
+        "render_sha256",
     ):
         digest = value.get(field)
         if (
             type(digest) is not str
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
         ):
             raise PersonaRootLockError(f"root binding {field} is invalid")
+    if value["plan_digest"] != value["plan_sha256"]:
+        raise PersonaRootLockError("root binding plan digest differs from plan bytes")
+    expected_artifact = persona_artifacts.artifact_bundle_record(
+        fixture_id=value["fixture_id"],
+        profile=value.get("profile"),
+        plan_digest=value["plan_digest"],
+        plan_sha256=value["plan_sha256"],
+        schedule_sha256=value["schedule_sha256"],
+        render_sha256=value["render_sha256"],
+    )
+    expected_artifact_sha256 = "sha256:" + hashlib.sha256(
+        storage.canonical_json_bytes(expected_artifact)
+    ).hexdigest()
+    if value["artifact_bundle_sha256"] != expected_artifact_sha256:
+        raise PersonaRootLockError("root binding artifact bundle digest differs")
     return after, raw, value
 
 
@@ -286,12 +299,14 @@ def _validate_bound_namespace(lease: ReplayRootLease) -> None:
         or apparent_binding.st_nlink != 1
         or (opened_binding.st_dev, opened_binding.st_ino) != expected_binding
         or (apparent_binding.st_dev, apparent_binding.st_ino) != expected_binding
-        or binding.get("destination_root") != str(lease.root)
-        or type(binding.get("filesystem_device")) is not int
-        or binding.get("filesystem_device") != lease.root_device
         or binding.get("profile") != lease.profile
         or binding.get("replay_id") != lease.replay_id
-        or binding.get("plan_sha256") != lease.plan_sha256
+        or binding.get("artifact_bundle_sha256") != lease.artifact_bundle_sha256
+        or binding.get("destination_root") != str(lease.root)
+        or binding.get("filesystem_device") != lease.root_device
+        or binding.get("sources_materialized") is not False
+        or binding.get("actual_kio_evidence") is not False
+        or binding.get("history_ready") is not False
     ):
         raise PersonaRootLockError("root binding namespace or semantics changed")
 
@@ -578,7 +593,7 @@ def replay_root_lock(
     *,
     expected_profile: str,
     expected_replay_id: str,
-    expected_plan_sha256: str,
+    expected_artifact_bundle_sha256: str,
     expected_root_binding_sha256: str,
 ) -> Iterator[ReplayRootLease]:
     """Hold a nonblocking exclusive lock on one ready-owned replay root.
@@ -601,8 +616,8 @@ def replay_root_lock(
             profile=expected_profile,
             replay_id=expected_replay_id,
             state="ready",
-            plan_sha256=expected_plan_sha256,
-            manifest_sha256=expected_root_binding_sha256,
+            artifact_bundle_sha256=expected_artifact_bundle_sha256,
+            root_binding_sha256=expected_root_binding_sha256,
         )
     except storage.PersonaStorageError as error:
         raise PersonaRootLockError(str(error)) from error
@@ -619,8 +634,8 @@ def replay_root_lock(
             root_path,
             profile=expected_profile,
             replay_id=expected_replay_id,
-            plan_sha256=expected_plan_sha256,
-            manifest_sha256=expected_root_binding_sha256,
+            artifact_bundle_sha256=expected_artifact_bundle_sha256,
+            root_binding_sha256=expected_root_binding_sha256,
         )
     except storage.PersonaStorageError as error:
         raise PersonaRootLockError(str(error)) from error
@@ -700,12 +715,14 @@ def replay_root_lock(
             or apparent_binding.st_nlink != 1
             or (opened_binding.st_dev, opened_binding.st_ino)
             != (apparent_binding.st_dev, apparent_binding.st_ino)
-            or root_binding.get("destination_root") != str(root_path)
-            or type(root_binding.get("filesystem_device")) is not int
-            or root_binding.get("filesystem_device") != opened_root.st_dev
             or root_binding.get("profile") != expected_profile
             or root_binding.get("replay_id") != expected_replay_id
-            or root_binding.get("plan_sha256") != expected_plan_sha256
+            or root_binding.get("artifact_bundle_sha256") != expected_artifact_bundle_sha256
+            or root_binding.get("destination_root") != str(root_path)
+            or root_binding.get("filesystem_device") != opened_root.st_dev
+            or root_binding.get("sources_materialized") is not False
+            or root_binding.get("actual_kio_evidence") is not False
+            or root_binding.get("history_ready") is not False
         ):
             raise PersonaRootLockError("root binding does not bind this root")
 
@@ -744,7 +761,7 @@ def replay_root_lock(
             root=root_path,
             profile=expected_profile,
             replay_id=expected_replay_id,
-            plan_sha256=expected_plan_sha256,
+            artifact_bundle_sha256=expected_artifact_bundle_sha256,
             root_binding_sha256=expected_root_binding_sha256,
             root_device=opened_root.st_dev,
             root_inode=opened_root.st_ino,

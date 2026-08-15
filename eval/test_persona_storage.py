@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import persona_storage as storage  # noqa: E402
 
 
-PLAN_SHA = "1" * 64
-MANIFEST_SHA = "2" * 64
+ARTIFACT_BUNDLE_SHA = "sha256:" + "1" * 64
+ROOT_BINDING_SHA = "sha256:" + "2" * 64
 
 
 class StorageTestCase(unittest.TestCase):
@@ -47,8 +47,8 @@ class StorageTestCase(unittest.TestCase):
             self.output if path is None else path,
             profile="tiny",
             replay_id="replay-01",
-            plan_sha256=PLAN_SHA,
-            manifest_sha256=MANIFEST_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
             populate=default_populate if populate is None else populate,
             validate=default_validate if validate is None else validate,
             home=self.home,
@@ -63,7 +63,8 @@ class TestOwnerMarker(StorageTestCase):
             profile="tiny",
             replay_id="replay-01",
             state="building",
-            plan_sha256=PLAN_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
         )
         self.assertEqual(
             set(building),
@@ -74,20 +75,21 @@ class TestOwnerMarker(StorageTestCase):
                 "profile",
                 "replay_id",
                 "state",
-                "plan_sha256",
+                "artifact_bundle_sha256",
+                "root_binding_sha256",
             },
         )
-        self.assertEqual(building["fixture_id"], "kio-persona-pc-v1")
+        self.assertEqual(building["fixture_id"], "kio-persona-pc-v2")
         self.assertEqual(building["state"], "building")
 
         ready = storage.make_owner_marker(
             profile="full",
             replay_id="replay-03",
             state="ready",
-            plan_sha256=PLAN_SHA,
-            manifest_sha256=MANIFEST_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
         )
-        self.assertEqual(ready["manifest_sha256"], MANIFEST_SHA)
+        self.assertEqual(ready["root_binding_sha256"], ROOT_BINDING_SHA)
         self.assertEqual(storage.validate_owner_marker(ready), ready)
 
     def test_marker_validation_rejects_unknown_values_and_noncanonical_fields(self):
@@ -98,17 +100,15 @@ class TestOwnerMarker(StorageTestCase):
         )
         for values in cases:
             with self.subTest(values=values), self.assertRaises(storage.PersonaStorageError):
-                storage.make_owner_marker(plan_sha256=PLAN_SHA, **values)
-        with self.assertRaisesRegex(storage.PersonaStorageError, "requires manifest"):
-            storage.make_owner_marker(
-                profile="tiny",
-                replay_id="replay-01",
-                state="ready",
-                plan_sha256=PLAN_SHA,
-            )
+                storage.make_owner_marker(
+                    artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+                    root_binding_sha256=ROOT_BINDING_SHA,
+                    **values,
+                )
         invalid = storage.make_owner_marker(
             profile="tiny", replay_id="replay-01", state="building",
-            plan_sha256=PLAN_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
         )
         invalid["surprise"] = True
         with self.assertRaisesRegex(storage.PersonaStorageError, "field set"):
@@ -116,7 +116,8 @@ class TestOwnerMarker(StorageTestCase):
         for invalid_profile in ([], 3):
             invalid = storage.make_owner_marker(
                 profile="tiny", replay_id="replay-01", state="building",
-                plan_sha256=PLAN_SHA,
+                artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+                root_binding_sha256=ROOT_BINDING_SHA,
             )
             invalid["profile"] = invalid_profile
             with self.subTest(invalid_profile=invalid_profile), self.assertRaises(
@@ -125,9 +126,22 @@ class TestOwnerMarker(StorageTestCase):
                 storage.validate_owner_marker(invalid)
         invalid = storage.make_owner_marker(
             profile="tiny", replay_id="replay-01", state="building",
-            plan_sha256=PLAN_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
         )
         invalid["schema_version"] = True
+        with self.assertRaisesRegex(storage.PersonaStorageError, "schema"):
+            storage.validate_owner_marker(invalid)
+        invalid = storage.make_owner_marker(
+            profile="tiny", replay_id="replay-01", state="ready",
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
+        )
+        invalid["owner"] = "kio.persona.storage-owner/v1"
+        with self.assertRaisesRegex(storage.PersonaStorageError, "not owned"):
+            storage.validate_owner_marker(invalid)
+        invalid["owner"] = storage.OWNER_ID
+        invalid["schema_version"] = 1
         with self.assertRaisesRegex(storage.PersonaStorageError, "schema"):
             storage.validate_owner_marker(invalid)
 
@@ -200,6 +214,19 @@ class TestDestinationSafety(StorageTestCase):
             self.preflight(self.output)
         self.assertTrue(marker.is_symlink())
         self.assertEqual(outside.read_text(encoding="utf-8"), "user bytes")
+
+    def test_hardlinked_owner_marker_is_rejected(self):
+        self.output.parent.mkdir(parents=True)
+        self.publish()
+        marker = self.output / storage.OWNER_MARKER_NAME
+        alias = self.home / "owner-marker-alias.json"
+        try:
+            os.link(marker, alias)
+        except OSError as exc:  # pragma: no cover - platform policy
+            self.skipTest(f"hard links unavailable: {exc}")
+        with self.assertRaisesRegex(storage.PersonaStorageError, "single-link"):
+            storage.load_owner_marker(self.output)
+        self.assertEqual(alias.read_bytes(), marker.read_bytes())
 
     def test_direct_owner_load_rejects_a_symlink_root(self):
         self.output.parent.mkdir(parents=True)
@@ -275,21 +302,21 @@ class TestDestinationSafety(StorageTestCase):
             self.output,
             profile="tiny",
             replay_id="replay-01",
-            plan_sha256=PLAN_SHA,
-            manifest_sha256=MANIFEST_SHA,
+            artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+            root_binding_sha256=ROOT_BINDING_SHA,
         )
         self.assertEqual(loaded["state"], "ready")
         self.assertEqual(marker_path.stat().st_mtime_ns, before_time)
         with self.assertRaisesRegex(storage.PersonaStorageError, "requires a missing"):
             self.publish()
         self.assertEqual(marker_path.stat().st_mtime_ns, before_time)
-        with self.assertRaisesRegex(storage.PersonaStorageError, "manifest binding"):
+        with self.assertRaisesRegex(storage.PersonaStorageError, "root binding"):
             storage.require_ready_owned_root(
                 self.output,
                 profile="tiny",
                 replay_id="replay-01",
-                plan_sha256=PLAN_SHA,
-                manifest_sha256="3" * 64,
+                artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+                root_binding_sha256="sha256:" + "3" * 64,
             )
 
     def test_marker_mismatch_never_reuses_or_replaces_existing_ready_root(self):
@@ -297,13 +324,13 @@ class TestDestinationSafety(StorageTestCase):
         self.publish()
         marker = self.output / storage.OWNER_MARKER_NAME
         before = marker.read_bytes()
-        with self.assertRaisesRegex(storage.PersonaStorageError, "plan binding"):
+        with self.assertRaisesRegex(storage.PersonaStorageError, "artifact bundle binding"):
             storage.require_ready_owned_root(
                 self.output,
                 profile="tiny",
                 replay_id="replay-01",
-                plan_sha256="3" * 64,
-                manifest_sha256=MANIFEST_SHA,
+                artifact_bundle_sha256="sha256:" + "3" * 64,
+                root_binding_sha256=ROOT_BINDING_SHA,
             )
         self.assertEqual(marker.read_bytes(), before)
 
@@ -405,8 +432,8 @@ class TestDestinationSafety(StorageTestCase):
                 self.output,
                 profile="tiny",
                 replay_id="replay-01",
-                plan_sha256=PLAN_SHA,
-                manifest_sha256=MANIFEST_SHA,
+                artifact_bundle_sha256=ARTIFACT_BUNDLE_SHA,
+                root_binding_sha256=ROOT_BINDING_SHA,
             )["state"],
             "ready",
         )
@@ -498,162 +525,6 @@ class TestAtomicHelpers(StorageTestCase):
         self.assertFalse(hasattr(storage, "reset_owned_root"))
         self.assertFalse(hasattr(storage, "delete_owned_root"))
         self.assertFalse(hasattr(storage, "cleanup_unknown_root"))
-
-
-class TestCapacityPlanning(unittest.TestCase):
-    def inputs(self, **changes):
-        values = {
-            "physical_files": 195_000,
-            "logical_members": 210_000,
-            "current_chunks": 2_400_000,
-            "history_only_chunks": 1_200_000,
-            "raw_bytes": 100,
-            "cas_bytes": 50,
-            "index_bytes": 25,
-            "inodes": 250_000,
-            "staging_peak_bytes": 10,
-            "staging_peak_inodes": 20,
-            "filesystem_allocation_unit_bytes": 1,
-            "allocation_overhead_bytes": 250_000,
-            "replay_count": 3,
-        }
-        values.update(changes)
-        return storage.CapacityInputs(**values)
-
-    def test_projection_multiplies_every_retained_replay_and_adds_one_staging_peak(self):
-        plan = storage.project_capacity(self.inputs())
-        self.assertEqual(plan.projected_physical_files, 585_000)
-        self.assertEqual(plan.retained_bytes_per_replay, 250_175)
-        self.assertEqual(plan.projected_retained_bytes, 750_525)
-        self.assertEqual(plan.required_peak_bytes, 750_535)
-        self.assertEqual(plan.projected_retained_inodes, 750_000)
-        self.assertEqual(plan.required_peak_inodes, 750_020)
-        rendered = plan.as_dict()
-        self.assertEqual(rendered["replay_count"], 3)
-        self.assertEqual(rendered["all_replays"]["current_chunks"], 7_200_000)
-        self.assertEqual(
-            rendered["all_replays"]["current_plus_history_chunks"], 10_800_000
-        )
-        self.assertEqual(rendered["required_peak"]["sequential_staging_replays"], 1)
-        digest = storage.capacity_plan_sha256(plan)
-        self.assertRegex(digest, r"^[0-9a-f]{64}$")
-        changed = storage.project_capacity(self.inputs(raw_bytes=101))
-        self.assertNotEqual(digest, storage.capacity_plan_sha256(changed))
-
-    def test_projection_rejects_negative_boolean_and_incomplete_cardinalities(self):
-        cases = (
-            {"raw_bytes": -1},
-            {"physical_files": True},
-            {"logical_members": 194_999},
-            {"inodes": 194_999},
-            {"replay_count": 0},
-            {"replay_count": 1},
-            {"replay_count": 2},
-            {"replay_count": 4},
-        )
-        for changes in cases:
-            with self.subTest(changes=changes), self.assertRaises(storage.PersonaStorageError):
-                self.inputs(**changes)
-
-        tiny_partial = self.inputs(profile="tiny", replay_count=2)
-        self.assertEqual(tiny_partial.replay_count, 2)
-
-    def test_capacity_caps_and_reserves_pass_at_exact_boundary(self):
-        plan = storage.project_capacity(self.inputs())
-        availability = storage.AvailableCapacity(
-            free_bytes=750_635, free_inodes=750_220
-        )
-        limits = storage.CapacityLimits(
-            byte_cap=750_535,
-            inode_cap=750_020,
-            reserve_bytes=100,
-            reserve_inodes=200,
-        )
-        result = storage.check_capacity(plan, availability, limits)
-        self.assertEqual(result.free_bytes_after, 100)
-        self.assertEqual(result.free_inodes_after, 200)
-        self.assertTrue(result.as_dict()["passed"])
-
-    def test_capacity_rejects_each_cap_and_reserve_shortfall(self):
-        plan = storage.project_capacity(self.inputs())
-        failures = (
-            (
-                storage.AvailableCapacity(10_000_000, 10_000_000),
-                storage.CapacityLimits(750_534, 1_000_000, 0, 0),
-                "peak bytes",
-            ),
-            (
-                storage.AvailableCapacity(10_000_000, 10_000_000),
-                storage.CapacityLimits(1_000_000, 750_019, 0, 0),
-                "peak inodes",
-            ),
-            (
-                storage.AvailableCapacity(750_635, 1_000_000),
-                storage.CapacityLimits(1_000_000, 1_000_000, 101, 0),
-                "free-byte reserve",
-            ),
-            (
-                storage.AvailableCapacity(10_000_000, 750_220),
-                storage.CapacityLimits(1_000_000, 1_000_000, 0, 201),
-                "free-inode reserve",
-            ),
-        )
-        for availability, limits, message in failures:
-            with self.subTest(message=message), self.assertRaisesRegex(
-                storage.PersonaStorageError, message
-            ):
-                storage.check_capacity(plan, availability, limits)
-
-    def test_probe_uses_nearest_existing_plain_ancestor(self):
-        with tempfile.TemporaryDirectory(prefix="kio-persona-probe-") as temporary:
-            existing = Path(temporary).resolve()
-            destination = existing / "not-yet" / "replay-01"
-            statvfs = SimpleNamespace(f_favail=456)
-            with mock.patch.object(
-                storage.shutil, "disk_usage", return_value=SimpleNamespace(free=123)
-            ) as disk_usage, mock.patch.object(
-                storage.os, "statvfs", return_value=statvfs, create=True
-            ) as statvfs_call:
-                measured = storage.probe_available_capacity(destination)
-            self.assertEqual(measured.free_bytes, 123)
-            self.assertEqual(measured.free_inodes, 456)
-            self.assertEqual(measured.probe_path, existing)
-            self.assertEqual(measured.inode_source, "statvfs")
-            disk_usage.assert_called_once_with(existing)
-            statvfs_call.assert_called_once_with(existing)
-
-    def test_explicit_inode_budget_supports_platforms_without_statvfs(self):
-        with tempfile.TemporaryDirectory(prefix="kio-persona-probe-") as temporary:
-            destination = Path(temporary).resolve() / "replay-01"
-            with mock.patch.object(
-                storage.shutil, "disk_usage", return_value=SimpleNamespace(free=123)
-            ), mock.patch.object(
-                storage.os,
-                "statvfs",
-                side_effect=AttributeError("unavailable"),
-                create=True,
-            ):
-                with self.assertRaisesRegex(
-                    storage.PersonaStorageError, "explicit_free_inodes"
-                ):
-                    storage.probe_available_capacity(destination)
-                measured = storage.probe_available_capacity(
-                    destination, explicit_free_inodes=456
-                )
-            self.assertEqual(measured.free_inodes, 456)
-            self.assertEqual(measured.inode_source, "explicit_no_statvfs")
-
-    def test_scope_limits_match_file_scope_and_direct_child_contract(self):
-        exact = storage.check_scope_limits([storage.MAX_FILE_BYTES] * 8)
-        self.assertEqual(exact["scope_bytes"], storage.MAX_SCOPE_BYTES)
-        with self.assertRaisesRegex(storage.PersonaStorageError, r"file_sizes\[0\]"):
-            storage.check_scope_limits([storage.MAX_FILE_BYTES + 1])
-        with self.assertRaisesRegex(storage.PersonaStorageError, "scope bytes"):
-            storage.check_scope_limits([storage.MAX_FILE_BYTES] * 9)
-        with self.assertRaisesRegex(storage.PersonaStorageError, "limit"):
-            storage.check_scope_limits(
-                [0] * (storage.MAX_DIRECT_FILES_PER_SCOPE + 1)
-            )
 
 
 if __name__ == "__main__":
