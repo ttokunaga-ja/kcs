@@ -265,6 +265,8 @@ pub enum AppError {
     #[error(transparent)]
     ScaleAttest(#[from] kio_eval::scale_attest::AttestError),
     #[error(transparent)]
+    ScaleBenchmark(#[from] kio_eval::scale_benchmark::ScaleBenchmarkError),
+    #[error(transparent)]
     Crossscope(#[from] kio_eval::crossscope::CrossscopeError),
     #[error(transparent)]
     Rerank(#[from] kio_eval::rerank::RerankDumpError),
@@ -768,12 +770,16 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     warmups,
                     samples,
                     out,
-                } => Err(AppError::Input(format!(
-                    "kio-eval scale benchmark v2 is not implemented yet (corpus={}, bin={}, warmups={warmups}, samples={samples}, out={})",
-                    corpus.display(),
-                    bin.display(),
-                    out.display()
-                ))),
+                } => {
+                    let summary =
+                        kio_eval::scale_benchmark::benchmark(corpus, bin, *warmups, *samples, out)?;
+                    println!("[ok] scale benchmark: {}", summary.report.display());
+                    Ok(if summary.acceptance_failed {
+                        ExitCode::Failure
+                    } else {
+                        ExitCode::Success
+                    })
+                }
             },
             Commands::Benchmark { command } => match command {
                 BenchmarkCommands::BaselineAttest {

@@ -28,12 +28,10 @@
 | `kio-eval benchmark qhard` | attest済み外部fixtureとsynthetic M3-1を同一実行で再測定する唯一のQ_hard判定経路 |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
 | `kio-eval benchmark baseline` | attest済みfixture-BをSpotlight/rgaと比較する唯一のbaseline判定経路 |
-| `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
-| `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
-| `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
-| `attest_scale_corpus.py` | HEAD・現行 chunk config・FTS coverage を照合し、検索可能 chunk の正確な総数を証明 |
-| `run_scale_eval.py` | Python scale generator/prepare/attestと密結合したfixture契約test用。CI consumerがあるため4モジュール同時移行まで保持し、新規の性能判定はRust `benchmark scale`だけが行う |
-| `test_scale_*.py`, `test_run_scale_eval.py` | 性能 fixture の形、所有権、排他、bounded read、registry 復旧、計測契約の単体テスト |
+| `kio-eval scale generate` | Rust v2 の決定論的性能 fixture 正本。20 scope と tiny/full の形を固定し、owner marker を含めて materialize する |
+| `kio-eval scale prepare` | 各 leaf scope を `init → offline index` し、隔離 registry と Rust prepare report を公開する |
+| `kio-eval scale attest` | manifest・HEAD・現行 chunk config・SQLite/FTS・registry binding を独立に照合し、create-only attestation を公開する |
+| `kio-eval scale benchmark` | attestation 済み v2 fixture だけを測定し、manifest/prepare/attestation/binary と実測前後の状態を report に束縛する |
 
 ## 使い方
 
@@ -380,29 +378,33 @@ full は時間・ディスクを使う明示実行専用であり、通常 CI �
 
 ```bash
 # 軽量 smoke (20 scopes / 60 chunks)
-python3 eval/generate_scale_corpus.py \
+target/release/kio-eval scale generate \
   --out /tmp/kio-scale-tiny --profile tiny
-python3 eval/prepare_scale_corpus.py \
+target/release/kio-eval scale prepare \
   --corpus /tmp/kio-scale-tiny --bin target/release/kio
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-tiny
+target/release/kio-eval scale benchmark \
+  --corpus /tmp/kio-scale-tiny --bin target/release/kio \
+  --warmups 1 --samples 1 --out /tmp/kio-scale-tiny.benchmark.json
 
 # 本番規模 (20 scopes / 4,000 files / 120,000 chunks): 手動性能計測時のみ
-python3 eval/generate_scale_corpus.py \
+target/release/kio-eval scale generate \
   --out /tmp/kio-scale-full --profile full
-python3 eval/prepare_scale_corpus.py \
+target/release/kio-eval scale prepare \
   --corpus /tmp/kio-scale-full --bin target/release/kio
 
 # 任意時点で再検証 (read-only SQLite attestation)
-python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-full
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-full
 
 # Rust measurement lane: full だけが acceptance eligible。5 warmup + 100 samples
 # の M3-1 `search.latency_ms` p95 を判定に使う。--out は corpus 外の既存実体
 # directory にだけ原子的に書き出せる。
-cargo run -p kio-eval -- benchmark scale \
+cargo run -p kio-eval -- scale benchmark \
   --corpus /tmp/kio-scale-full --bin target/release/kio \
   --warmups 5 --samples 100 --out /tmp/kio-scale-full.latency.json
 ```
 
-`prepare_scale_corpus.py` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
+`kio-eval scale prepare` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
 HEAD tree projection を公開するので、その直後に別の `kio snapshot create` を追加してはならない。
 device state は corpus 内の `.kio-eval-device` に隔離され、開発者の実 registry や API key を使わない。
 
@@ -418,10 +420,10 @@ query契約を版管理する `query_workload_id=exact-reference-v1`、
 - 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける。
   これは高選択性queryのlatency probeであり、広いqueryのmulti-scope ranking性能は証明しない
 
-Rust の `kio-eval benchmark scale` は release binary・manifest・保存済みと実測前後の live attestation・platformをreportへ束縛し、
+Rust の `kio-eval scale benchmark` は release binary・manifest・保存済みと実測前後の live attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
-主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
+主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、独立した上限guardはrunner計測のprocess wall timeで、
 両方の生標本とp50/p95/p99を保存する。full の acceptance は M3-1 の `< 5秒` と
 M3-2/M3-3 の `< 7秒` を全て判定する（tiny は pass fields を出さない）。M3-1の `< 5秒` 判定は
 **high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
@@ -448,11 +450,7 @@ M3-2/M3-3 の `< 7秒` を全て判定する（tiny は pass fields を出さな
 entry があれば削除前に停止する。ready corpus の再生成と再 prepare は no-op になる。
 
 ```bash
-python3 -m unittest \
-  eval.test_scale_corpus \
-  eval.test_scale_attest_bounds \
-  eval.test_scale_prepare \
-  eval.test_run_scale_eval
+cargo test -p kio-eval --all-targets --locked
 ```
 
 ## 20人の独立persona-PC fixture（設計契約）

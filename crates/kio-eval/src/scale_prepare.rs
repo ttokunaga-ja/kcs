@@ -233,6 +233,40 @@ pub struct PrepareSummary {
     pub report: PathBuf,
 }
 
+/// Read-only descriptor view of the private device created by `prepare`.
+/// It deliberately exposes handles rather than paths so benchmark subprocesses
+/// retain the same pathname-replacement boundary as preparation.
+pub(crate) struct BenchmarkDevice {
+    boundary: DeviceBoundary,
+}
+impl BenchmarkDevice {
+    pub(crate) fn bind(
+        fixture: &crate::scale_fixture::ValidatedFixture,
+    ) -> Result<Self, ScalePrepareError> {
+        Ok(Self {
+            boundary: DeviceBoundary::bind_existing(&fixture.try_clone_root()?, fixture.root())?,
+        })
+    }
+    pub(crate) fn environment(&self) -> Result<Vec<(&'static str, &fs::File)>, ScalePrepareError> {
+        Ok(vec![
+            ("HOME", self.boundary.dir("home")?),
+            ("XDG_CONFIG_HOME", self.boundary.dir("config")?),
+            ("XDG_CACHE_HOME", self.boundary.dir("cache")?),
+            ("XDG_DATA_HOME", self.boundary.dir("data")?),
+            ("XDG_STATE_HOME", self.boundary.dir("state")?),
+            ("XDG_RUNTIME_DIR", self.boundary.dir("runtime")?),
+        ])
+    }
+    pub(crate) fn recheck(&self, corpus: &Path) -> Result<(), ScalePrepareError> {
+        self.boundary.recheck(corpus)
+    }
+
+    pub(crate) fn metrics_directory(&self, corpus: &Path) -> Result<fs::File, ScalePrepareError> {
+        let kio = open_dir(self.boundary.dir("data")?, "kio", corpus)?;
+        open_dir(&kio, "logs", corpus)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrepareReport {
@@ -340,7 +374,7 @@ struct AutoCommitStatsWire {
 pub fn prepare(corpus: &Path, bin: &Path) -> Result<PrepareSummary, ScalePrepareError> {
     DescriptorExecutable::preflight_platform().map_err(process_error)?;
     let bin = absolutize_binary(bin)?;
-    let executable = DescriptorExecutable::bind(&bin).map_err(process_error)?;
+    let executable = DescriptorExecutable::bind_build_artifact(&bin).map_err(process_error)?;
     let fixture = bind_ready(corpus)?;
     let _lock = fixture.lock()?;
     fixture.recheck()?;
@@ -1102,6 +1136,21 @@ fn verify_exact_report(bytes: &[u8], expected: &PrepareReport) -> Result<(), Sca
         ));
     }
     Ok(())
+}
+
+/// Reuse the preparer's own exact receipt validator for a benchmark consumer.
+/// Generic JSON parsing is deliberately not an alternative authority here.
+pub(crate) fn validate_benchmark_prepare_report(
+    fixture: &crate::scale_fixture::ValidatedFixture,
+    executable: &DescriptorExecutable,
+    scopes: &[crate::scale_attest::ScopeEvidence],
+    registry_rows: usize,
+) -> Result<Vec<u8>, ScalePrepareError> {
+    let root = fixture.try_clone_root()?;
+    let expected = expected_report(fixture, executable, scopes, registry_rows)?;
+    let bytes = read_existing_report(&root)?;
+    verify_exact_report(&bytes, &expected)?;
+    Ok(bytes)
 }
 
 fn read_existing_report(root: &fs::File) -> Result<Vec<u8>, ScalePrepareError> {

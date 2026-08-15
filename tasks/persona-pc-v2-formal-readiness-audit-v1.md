@@ -48,10 +48,9 @@ filesystem object, capacity allocation, or latency measurement exists.
 
 ## 3. Non-substitution rules
 
-The older independent scale fixture
-[`scale_fixture_spec.py`](../eval/scale_fixture_spec.py) has one root containing
-20 scopes and 120,000 expected Markdown chunks.  It is useful for a narrow
-single-machine performance gate, but it is **not** evidence for this objective:
+The Rust-only `kio-eval scale` v2 fixture has one root containing 20 scopes and
+120,000 expected Markdown chunks. It is useful for a narrow single-machine
+performance gate, but it is **not** evidence for this objective:
 
 - its 20 scopes are not 20 independent people;
 - it does not provide 20 persona-specific folder trees, file-format mixes, or

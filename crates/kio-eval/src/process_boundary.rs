@@ -63,6 +63,7 @@ pub(crate) struct DescriptorExecutable {
     diagnostic_path: PathBuf,
     parent: fs::File,
     name: String,
+    link_policy: LinkPolicy,
     observation: SourceObservation,
     immutable_binding: ExecutableBinding,
     #[cfg(target_os = "linux")]
@@ -94,6 +95,24 @@ impl DescriptorExecutable {
     }
 
     pub(crate) fn bind(source: &Path) -> ProcessBoundaryResult<Self> {
+        Self::bind_with_link_policy(source, LinkPolicy::ExactlyOne)
+    }
+
+    /// Bind a release-build artifact used only by the scale fixture commands.
+    ///
+    /// Cargo may retain a second hard link from `target/release/deps/` to the
+    /// canonical `target/release/kio` binary.  Unlike `bind`, this permits the
+    /// one-link or Cargo two-link build-artifact shapes, but retains and rechecks the exact link
+    /// count together with the inode, length, mode, and digest before every
+    /// execution.  Do not use this for replay inputs.
+    pub(crate) fn bind_build_artifact(source: &Path) -> ProcessBoundaryResult<Self> {
+        Self::bind_with_link_policy(source, LinkPolicy::OneOrTwo)
+    }
+
+    fn bind_with_link_policy(
+        source: &Path,
+        link_policy: LinkPolicy,
+    ) -> ProcessBoundaryResult<Self> {
         if !source.is_absolute() {
             return Err(ProcessBoundaryError::unsafe_(
                 source,
@@ -108,13 +127,15 @@ impl DescriptorExecutable {
             .ok_or_else(|| ProcessBoundaryError::unsafe_(source, "binary filename is not UTF-8"))?;
         single_component(leaf, "binary filename")?;
         let parent = open_lexical_directory(parent_path)?;
-        let observed = observe_executable(&parent, leaf, source, MAX_EXECUTABLE_BYTES)?;
+        let observed =
+            observe_executable(&parent, leaf, source, MAX_EXECUTABLE_BYTES, link_policy)?;
         #[cfg(target_os = "linux")]
         let sealed = sealed_memfd(&observed.bytes)?;
         let result = Self {
             diagnostic_path: source.to_owned(),
             parent,
             name: leaf.to_owned(),
+            link_policy,
             observation: observed.observation(),
             immutable_binding: observed.immutable_binding(),
             #[cfg(target_os = "linux")]
@@ -135,6 +156,7 @@ impl DescriptorExecutable {
             &self.name,
             &self.diagnostic_path,
             MAX_EXECUTABLE_BYTES,
+            self.link_policy,
         )?;
         if observed.observation() != self.observation
             || &observed.immutable_binding() != self.immutable_binding()
@@ -350,6 +372,15 @@ struct SourceObservation {
     links: u64,
 }
 
+/// The ordinary evaluator/replay contract binds a one-link input.  Only the
+/// scale command accepts Cargo's canonical release artifact, which has either
+/// one link or a single retained hard-link alias in `target/release/deps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkPolicy {
+    ExactlyOne,
+    OneOrTwo,
+}
+
 #[derive(Debug)]
 struct ObservedExecutable {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -372,6 +403,7 @@ fn observe_executable(
     name: &str,
     diagnostic: &Path,
     max: u64,
+    link_policy: LinkPolicy,
 ) -> ProcessBoundaryResult<ObservedExecutable> {
     let mut opts = cap_fs::OpenOptions::new();
     opts.read(true)
@@ -389,10 +421,19 @@ fn observe_executable(
     #[cfg(unix)]
     {
         use cap_fs::MetadataExt;
-        if before.nlink() != 1 {
+        let valid_links = match link_policy {
+            LinkPolicy::ExactlyOne => before.nlink() == 1,
+            LinkPolicy::OneOrTwo => (1..=2).contains(&before.nlink()),
+        };
+        if !valid_links {
             return Err(ProcessBoundaryError::unsafe_(
                 diagnostic,
-                "executable must have exactly one link",
+                match link_policy {
+                    LinkPolicy::ExactlyOne => "executable must have exactly one link",
+                    LinkPolicy::OneOrTwo => {
+                        "scale build artifact must have one link or Cargo's two-link shape"
+                    }
+                },
             ));
         }
     }
@@ -632,5 +673,44 @@ mod executable_binding_tests {
         assert_eq!(immutable.sha256, sha256(expected));
         fs::remove_file(&path).unwrap();
         assert_eq!(bound.immutable_binding(), immutable);
+    }
+
+    #[test]
+    fn build_artifact_accepts_cargo_like_hardlink_but_default_rejects_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = executable(&temp);
+        assert!(DescriptorExecutable::bind_build_artifact(&path).is_ok());
+        let alias = temp.path().join("deps-kio-under-test");
+        fs::hard_link(&path, &alias).unwrap();
+
+        assert!(DescriptorExecutable::bind(&path).is_err());
+        let bound = DescriptorExecutable::bind_build_artifact(&path).unwrap();
+        assert!(bound.recheck_original().is_ok());
+
+        fs::remove_file(&alias).unwrap();
+        assert!(bound.recheck_original().is_err());
+    }
+
+    #[test]
+    fn build_artifact_rejects_more_than_cargo_two_link_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = executable(&temp);
+        fs::hard_link(&path, temp.path().join("deps-kio-under-test")).unwrap();
+        fs::hard_link(&path, temp.path().join("unexpected-extra-alias")).unwrap();
+
+        assert!(DescriptorExecutable::bind_build_artifact(&path).is_err());
+    }
+
+    #[test]
+    fn build_artifact_rejects_in_place_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = executable(&temp);
+        let alias = temp.path().join("deps-kio-under-test");
+        fs::hard_link(&path, &alias).unwrap();
+        let bound = DescriptorExecutable::bind_build_artifact(&path).unwrap();
+
+        fs::write(&alias, b"#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(bound.recheck_original().is_err());
     }
 }

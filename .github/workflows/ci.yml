@@ -51,10 +51,6 @@ jobs:
           eval.test_persona_renderers
           eval.test_persona_manifest
           eval.test_generate_persona_corpus
-          eval.test_scale_corpus
-          eval.test_scale_attest_bounds
-          eval.test_scale_prepare
-          eval.test_run_scale_eval
 
   persona-w0-integration:
     runs-on: ubuntu-latest
@@ -75,14 +71,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       # Optional ranking features must take this same eval path; `--all-features`
       # prevents a default-off ranking lane from bypassing the only Recall gate.
-      - run: cargo build --release --locked --all-features
-      - run: python3 eval/generate_scale_corpus.py --out /tmp/kio-scale-tiny --profile tiny
-      - run: python3 eval/prepare_scale_corpus.py --corpus /tmp/kio-scale-tiny --bin target/release/kio
-      - run: python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-tiny
+      - run: >-
+          cargo build --release --locked --all-features
+          -p kio-cli -p kio-eval --bins
+      # This lane has no fixture/product network dependency. The Rust v2
+      # commands create an isolated device under the temporary corpus.
+      - run: >-
+          target/release/kio-eval scale generate
+          --out /tmp/kio-scale-tiny --profile tiny
+      - run: >-
+          target/release/kio-eval scale prepare
+          --corpus /tmp/kio-scale-tiny --bin target/release/kio
+      - run: >-
+          target/release/kio-eval scale attest
+          --corpus /tmp/kio-scale-tiny
       # This is a contract smoke only: tiny fixtures are deliberately not
       # performance-acceptance eligible.
       - run: >-
-          target/release/kio-eval benchmark scale
+          target/release/kio-eval scale benchmark
           --corpus /tmp/kio-scale-tiny --bin target/release/kio
           --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
       - run: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus

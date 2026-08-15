@@ -1910,6 +1910,36 @@ fn verify_report(bytes: &[u8], expected: &AttestationReport) -> Result<(), Attes
     Ok(())
 }
 
+/// Reuse the attestor's retained-root receipt verification for consumers that
+/// require the already-published canonical report to match fresh evidence.
+pub(crate) fn validate_benchmark_attestation(
+    fixture: &ValidatedFixture,
+    evidence: &CorpusEvidence,
+) -> Result<Vec<u8>, AttestError> {
+    let expected = AttestationReport {
+        schema_version: scale_spec::SCHEMA_VERSION,
+        attestor: scale_spec::ATTESTOR_ID.to_owned(),
+        fixture_id: scale_spec::FIXTURE_ID.to_owned(),
+        profile: fixture.profile(),
+        manifest_hash: scale_spec::manifest_hash(fixture.manifest())
+            .map_err(|e| unsafe_state(format!("cannot bind manifest: {e}")))?,
+        content_root_hash: fixture.manifest().content_root_hash.clone(),
+        corpus: fixture.root().to_string_lossy().into_owned(),
+        scopes: evidence.scopes.clone(),
+        registry_rows: evidence.registry_rows,
+        current_chunks: evidence.current_chunks,
+    };
+    let root = fixture.try_clone_root()?;
+    let (bytes, _) = observed_regular(
+        &root,
+        scale_spec::ATTESTATION_NAME,
+        MAX_REPORT_BYTES as u64,
+        "attestation",
+    )?;
+    verify_report(&bytes, &expected)?;
+    Ok(bytes)
+}
+
 fn exact_clean_path(path: &Path, official: &Path) -> Result<bool, AttestError> {
     let absolute = absolute_clean(path)?;
     Ok(absolute == absolute_clean(official)?)
@@ -2052,6 +2082,17 @@ fn publish_external(
         bytes,
     )?;
     Ok(retained_path.join(name))
+}
+
+/// Shared strict external artifact publication for scale v2 consumers.  The
+/// caller supplies canonical bytes; this routine owns all nofollow/alias and
+/// create-only publication checks.
+pub(crate) fn publish_external_artifact(
+    path: &Path,
+    fixture: &ValidatedFixture,
+    bytes: &[u8],
+) -> Result<PathBuf, AttestError> {
+    publish_external(path, fixture, bytes)
 }
 
 #[allow(clippy::too_many_arguments)]

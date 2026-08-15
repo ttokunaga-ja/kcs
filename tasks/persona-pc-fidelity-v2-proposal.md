@@ -220,7 +220,7 @@ recursive topologyとformat/extension mixはいずれも境界を広く踏むaut
 
 各人は12個の職種固有primary scopeと8個の個人PC secondary scopeを持つ。現行v1の
 共通secondary pathは廃止し、機能slotだけを揃えて物理pathを人物別にする。balancedな比較対照は
-既存`scale_fixture_spec.py`が担うため、persona suiteでは20個のscope load vectorも人物別にする。
+Rust-only `kio-eval scale` v2 toolchain が担うため、persona suiteでは20個のscope load vectorも人物別にする。
 
 - primary合計は人物別に70-90%、secondary合計は10-30%
 - 20 scopesすべてに正のfile数と正のcontributor quota

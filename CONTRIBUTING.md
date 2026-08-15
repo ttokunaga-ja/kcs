@@ -55,14 +55,15 @@ The full check that CI runs:
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --all-targets --locked
 ```
 
-The canonical evaluator, cross-scope supplement, and offline rerank scorer are
-Rust (`kio-eval`) and are covered by the workspace tests. Python remains only
-for fixture generation/replay, persona, scale preparation, and experimental
-ML lanes that do not yet have a Rust replacement:
+The canonical evaluator, cross-scope supplement, offline rerank scorer, and
+scale fixture lifecycle are Rust (`kio-eval`) and are covered by the workspace
+tests. Python remains only for persona and experimental ML lanes that do not
+yet have a Rust replacement:
 
 ```bash
 cargo test -p kio-eval --all-targets --locked
-python3 -m unittest discover -s eval -t .
+# Run the relevant explicit Python modules; CI lists its complete set in ci.yml.
+python3 -m unittest eval.test_eval_env eval.test_persona_fixture
 ```
 
 Development, CI, and the workspace contract all use Rust `1.97.1` with

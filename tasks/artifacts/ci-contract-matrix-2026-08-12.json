@@ -335,10 +335,10 @@
     },
     {
       "component": "Recall at k and nearest-rank percentile",
-      "python": ["eval/run_eval.py:599", "eval/run_eval.py:845", "eval/run_scale_eval.py:84"],
-      "rust": [],
-      "decision": "Implement once in an internal Rust evaluation binary and retain only a minimal Python cross-check.",
-      "risk": "Preserve distinct evidence identity and duplicate-result semantics exactly."
+      "python": ["eval/run_eval.py:599", "eval/run_eval.py:845"],
+      "rust": ["crates/kio-eval/src/scale_spec.rs", "crates/kio-eval/src/scale_attest.rs"],
+      "decision": "Scale fixture generation, preparation, independent attestation, and benchmarking are Rust-only v2. Retain Python only for the separate Recall evaluator cross-check.",
+      "risk": "Preserve distinct evidence identity and duplicate-result semantics exactly in the Rust evaluator."
     },
     {
       "component": "outcome, exit, manifest, and report classification",

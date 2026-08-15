@@ -627,8 +627,8 @@ mod tests {
         let mut bad = ready;
         bad.manifest_hash = None;
         assert_eq!(validate_owner(&bad), Err(ScaleSpecError::OwnerMismatch));
-        let legacy = br#"{"fixture_id":"kio-scale-120k-v1","generator":"eval/generate_scale_corpus.py","manifest_hash":"sha256:00","profile":"tiny","schema_version":1,"state":"ready"}
+        let wrong_version = br#"{"fixture_id":"kio-scale-v2","generator":"kio-eval scale generate/v2","manifest_hash":"sha256:00","profile":"tiny","schema_version":1,"state":"ready"}
 "#;
-        assert!(parse_owner(legacy).is_err());
+        assert!(parse_owner(wrong_version).is_err());
     }
 }

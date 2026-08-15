@@ -25,9 +25,9 @@ tag operation belongs to this suite.
 
 - `eval/golden-queries.jsonl`, `eval/corpus-fixture.json`, and
   `eval/history-plan.json` remain the frozen Recall/history inputs.
-- `eval/scale_fixture_spec.py` remains the balanced one-device current-text
-  control.  Persona-PC results never relabel its current-only M3-2/M3-3 numbers
-  as formal history latency.
+- Rust `kio-eval scale generate|prepare|attest|benchmark` is the balanced
+  one-device current-text control. Persona-PC results never relabel its
+  current-only M3-2/M3-3 numbers as formal history latency.
 - A tiny or pilot profile is progress and CI coverage, not evidence for the
   full 100k-plus gate.
 - Raw Office, scan, image, container, and domain binary files never count as

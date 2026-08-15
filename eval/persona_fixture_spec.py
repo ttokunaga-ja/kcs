@@ -1,6 +1,7 @@
 """Deterministic specification for twenty independent synthetic PC owners.
 
-This is intentionally separate from ``scale_fixture_spec``.  One row here is
+This is intentionally separate from the Rust-only ``kio-eval scale`` fixture.
+One row here is
 one person, one PC umbrella, one isolated registry, and twenty direct-file Kio
 scopes.  Ratios count W0 physical files; searchable chunk targets are a
 separate contract.

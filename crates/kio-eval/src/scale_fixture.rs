@@ -111,6 +111,14 @@ impl ValidatedFixture {
     pub(crate) fn try_clone_root(&self) -> Result<fs::File, ScaleFixtureError> {
         Ok(self.root_handle.try_clone()?)
     }
+    /// Retain one declared scope for descriptor-bound consumers.  Callers
+    /// cannot turn this into authority for an undeclared path.
+    pub(crate) fn try_clone_scope(&self, name: &str) -> Result<fs::File, ScaleFixtureError> {
+        if !self.manifest.scopes.iter().any(|scope| scope.name == name) {
+            return bad("benchmark scope is not declared by the fixture manifest");
+        }
+        open_dir(&self.root_handle, name, &self.root)
+    }
     pub fn recheck(&self) -> Result<(), ScaleFixtureError> {
         let visible_parent = bind_parent(&self.root)?;
         if visible_parent.public != self.parent_public
