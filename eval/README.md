@@ -154,9 +154,9 @@ credential の**環境変数名だけ**を `forwarded_credential_names` とし�
 
 正式 baseline 用 runtime は既存の Homebrew tree を変更せず、専用 read-only image として一度だけ構築する。
 管理者実行前に script digest を照合する。この revision の digest は
-`9d0fa461919c9435994e0283798d56376212cc91a16e9564bb1d58105dd7dd07` である。
+`d1413269957a3cad2836f4d159fbc47fb3bbd4224fee1dbb72b29400bc1efe85` である。
 
-builder は固定された `/usr/local/bin/kio-eval` を root-owned、かつ group/other 非 writable として要求する。
+builder は固定された `/usr/local/bin/kio-eval` を root-owned、group/other 非 writable、かつ extended ACL なしとして要求する。
 先に監査済み release binary をこの場所へ provision してから、checkout の script を root-private copy にして
 一度だけ実行する。`build` / `verify` 引数は存在しない。
 

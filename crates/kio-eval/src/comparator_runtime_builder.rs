@@ -250,6 +250,20 @@ fn image_xattr_names_allowed(names: &BTreeSet<String>, permit_attach_cache: bool
 fn runtime_root_matches_preimage(runtime_root: &Path, preimage: &Preimage) -> bool {
     runtime_root == Path::new(&preimage.runtime_root)
 }
+fn insert_macho_alias<'a>(
+    aliases: &mut BTreeMap<String, &'a str>,
+    alias: &str,
+    pin: &'a str,
+) -> Result<(), QhardError> {
+    match aliases.entry(alias.to_owned()) {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(pin);
+            Ok(())
+        }
+        std::collections::btree_map::Entry::Occupied(slot) if *slot.get() == pin => Ok(()),
+        std::collections::btree_map::Entry::Occupied(_) => Err(err("ambiguous LC_ID_DYLIB alias")),
+    }
+}
 fn digest(path: &Path, maximum: u64) -> Result<(String, u64), QhardError> {
     let meta = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
     if !meta.file_type().is_file() || meta.len() > maximum {
@@ -662,9 +676,7 @@ mod macos {
             .into_iter()
             .flatten()
             {
-                if aliases.insert(a.to_owned(), pin.path).is_some() {
-                    return Err(err("ambiguous LC_ID_DYLIB alias"));
-                }
+                insert_macho_alias(&mut aliases, a, pin.path)?;
             }
         }
         let mut closure = BTreeSet::new();
@@ -935,6 +947,14 @@ mod tests {
             &BTreeSet::from(["com.apple.quarantine".to_owned()]),
             true
         ));
+    }
+    #[test]
+    fn macho_aliases_allow_one_pin_to_repeat_its_own_basename_only() {
+        let mut aliases = BTreeMap::new();
+        insert_macho_alias(&mut aliases, "libfontconfig.1.dylib", "/pin/fontconfig").unwrap();
+        insert_macho_alias(&mut aliases, "libfontconfig.1.dylib", "/pin/fontconfig").unwrap();
+        assert_eq!(aliases["libfontconfig.1.dylib"], "/pin/fontconfig");
+        assert!(insert_macho_alias(&mut aliases, "libfontconfig.1.dylib", "/pin/other").is_err());
     }
     #[test]
     fn malformed_preimage_fails_closed() {

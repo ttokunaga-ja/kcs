@@ -19,6 +19,8 @@ die() { print -u2 -- "error: $*"; exit 1; }
 kio_eval_stat=$(/usr/bin/stat -f '%u:%p' "$KIO_EVAL")
 [[ $kio_eval_stat == 0:* ]] || die "kio-eval must be root-owned"
 [[ $(( 8#${kio_eval_stat##*:} & 8#022 )) -eq 0 ]] || die "kio-eval must not be group/other writable"
+kio_eval_mode=$(/bin/ls -lde "$KIO_EVAL" | /usr/bin/head -n 1)
+[[ ${kio_eval_mode%% *} != *+* ]] || die "kio-eval must not have an extended ACL"
 for target in "$MANAGED_ROOT" "$RUNTIME_ROOT" "$IMAGE" "$MANIFEST" "$BUILD_ROOT"; do
   [[ ! -e $target && ! -L $target ]] || die "create-only target already exists: $target"
 done
@@ -40,11 +42,13 @@ trap rollback EXIT
 /bin/mkdir -m 0755 "$MANAGED_ROOT"; made_root=1
 /bin/mkdir -m 0755 "$RUNTIME_ROOT"; made_mount=1
 made_build=1
-"$KIO_EVAL" benchmark comparator-runtime prepare --build-root "$BUILD_ROOT"
+/usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC \
+  "$KIO_EVAL" benchmark comparator-runtime prepare --build-root "$BUILD_ROOT"
 /usr/bin/hdiutil create -srcfolder "$BUILD_ROOT/payload" -format UDRO -fs "Case-sensitive APFS" -volname "$VOLUME_NAME" -srcowners on -noanyowners "$IMAGE"; made_image=1
 /bin/chmod 0444 "$IMAGE"
 /usr/bin/hdiutil attach -readonly -owners on -nobrowse -noautoopen -mountpoint "$RUNTIME_ROOT" "$IMAGE" >/dev/null; mounted=1
-"$KIO_EVAL" benchmark comparator-runtime finalize --runtime-root "$RUNTIME_ROOT" --preimage "$BUILD_ROOT/manifest-preimage.json" --image "$IMAGE" --out "$MANIFEST"
+/usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC \
+  "$KIO_EVAL" benchmark comparator-runtime finalize --runtime-root "$RUNTIME_ROOT" --preimage "$BUILD_ROOT/manifest-preimage.json" --image "$IMAGE" --out "$MANIFEST"
 /bin/chmod 0444 "$MANIFEST"
 /bin/rm -rf "$BUILD_ROOT"
 trap - EXIT

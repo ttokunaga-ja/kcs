@@ -1508,12 +1508,21 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                                         .into(),
                                 ));
                             }
+                            let gemini_api_key = env::var_os("GEMINI_API_KEY")
+                                .filter(|value| !value.is_empty())
+                                .ok_or_else(|| {
+                                    AppError::Input(
+                                        "rerank dump --dataset fixture-b requires GEMINI_API_KEY for query embeddings"
+                                            .into(),
+                                    )
+                                })?;
                             kio_eval::rerank::run_fixture_b(FixtureRerankDumpOptions {
                                 root: corpus.clone(),
                                 golden: golden[0].clone(),
                                 bin: bin.clone(),
                                 limit: *limit,
                                 out: out.clone(),
+                                gemini_api_key,
                             })?
                         }
                     };

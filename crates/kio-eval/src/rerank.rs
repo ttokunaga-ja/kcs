@@ -82,6 +82,9 @@ pub struct FixtureRerankDumpOptions {
     pub bin: PathBuf,
     pub limit: usize,
     pub out: PathBuf,
+    /// Explicit query-embedding credential. The subprocess environment is
+    /// otherwise cleared, so no unrelated caller credential is inherited.
+    pub gemini_api_key: OsString,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -559,6 +562,11 @@ pub fn run_fixture_b(
             "fixture-B rerank limit must be exactly {MAX_RERANK_LIMIT}"
         )));
     }
+    if options.gemini_api_key.is_empty() {
+        return Err(RerankDumpError::Input(
+            "fixture-B requires GEMINI_API_KEY to preserve the vector candidate pool".into(),
+        ));
+    }
     let root = fs::canonicalize(&options.root)
         .map_err(|e| RerankDumpError::Input(format!("cannot open fixture root: {e}")))?;
     let tree = root.join("tree");
@@ -573,7 +581,7 @@ pub fn run_fixture_b(
         return Err(RerankDumpError::Input("kio binary unavailable".into()));
     }
     let scope = first_fixture_scope(&tree)?;
-    let environment = [
+    let mut environment = [
         ("HOME", root.join("h")),
         ("XDG_CONFIG_HOME", root.join("c")),
         ("XDG_DATA_HOME", root.join("d")),
@@ -582,6 +590,7 @@ pub fn run_fixture_b(
     .into_iter()
     .map(|(k, v)| (OsString::from(k), v.into_os_string()))
     .collect::<Vec<_>>();
+    environment.push((OsString::from("GEMINI_API_KEY"), options.gemini_api_key));
     let golden = kio_core::cas::read_bounded_regular_file(&options.golden, MAX_RERANK_INPUT_BYTES)
         .map_err(|e| RerankDumpError::Input(format!("cannot read fixture golden: {e}")))?;
     let lines = std::str::from_utf8(&golden)
@@ -1410,7 +1419,7 @@ mod tests {
         let golden = temp.path().join("golden.jsonl");
         fs::write(&golden, r#"{"query_id":"q1","class":"hard","query":"needle","expected":[{"path":"x/doc.pdf"}]}"#).unwrap();
         let bin = temp.path().join("mock-kio.sh");
-        fs::write(&bin, "#!/bin/sh\nset -eu\nh=sha256:0000000000000000000000000000000000000000000000000000000000000000\nprintf '{\\\"results\\\":['\ni=0\nwhile test \"$i\" -lt 100; do\n test \"$i\" -eq 0 || printf ','\n printf '{\\\"title\\\":\\\"doc.pdf.md\\\",\\\"evidence_pointer\\\":{\\\"schema_version\\\":1,\\\"commit\\\":\\\"%s\\\",\\\"raw_hash\\\":\\\"%s\\\",\\\"tool_profile_hash\\\":\\\"%s\\\",\\\"chunk_hash\\\":\\\"%s\\\",\\\"path_at_commit\\\":\\\"doc.pdf.md\\\",\\\"byte_start\\\":0,\\\"byte_end\\\":4,\\\"scope_id\\\":\\\"scope\\\",\\\"scope_path\\\":\\\"%s/.kio\\\"}}' \"$h\" \"$h\" \"$h\" \"$h\" \"$PWD\"\n i=$((i+1))\ndone\nprintf ']}'\n").unwrap();
+        fs::write(&bin, "#!/bin/sh\nset -eu\ntest \"${GEMINI_API_KEY:-}\" = test-fixture-key\ntest -z \"${MISTRAL_API_KEY:-}\"\nh=sha256:0000000000000000000000000000000000000000000000000000000000000000\nprintf '{\\\"results\\\":['\ni=0\nwhile test \"$i\" -lt 100; do\n test \"$i\" -eq 0 || printf ','\n printf '{\\\"title\\\":\\\"doc.pdf.md\\\",\\\"evidence_pointer\\\":{\\\"schema_version\\\":1,\\\"commit\\\":\\\"%s\\\",\\\"raw_hash\\\":\\\"%s\\\",\\\"tool_profile_hash\\\":\\\"%s\\\",\\\"chunk_hash\\\":\\\"%s\\\",\\\"path_at_commit\\\":\\\"doc.pdf.md\\\",\\\"byte_start\\\":0,\\\"byte_end\\\":4,\\\"scope_id\\\":\\\"scope\\\",\\\"scope_path\\\":\\\"%s/.kio\\\"}}' \"$h\" \"$h\" \"$h\" \"$h\" \"$PWD\"\n i=$((i+1))\ndone\nprintf ']}'\n").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
         let out = temp.path().join("outside.json");
         let options = FixtureRerankDumpOptions {
@@ -1419,7 +1428,13 @@ mod tests {
             bin,
             limit: 100,
             out: out.clone(),
+            gemini_api_key: OsString::from("test-fixture-key"),
         };
+        let mut missing_key = options.clone();
+        missing_key.gemini_api_key = OsString::new();
+        missing_key.out = temp.path().join("missing-key.json");
+        assert!(run_fixture_b(missing_key).is_err());
+        assert!(!temp.path().join("missing-key.json").exists());
         let summary = run_fixture_b(options.clone()).unwrap();
         assert_eq!(summary.dumped_queries, 1);
         assert_eq!(summary.candidates, 100);
