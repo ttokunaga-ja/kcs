@@ -44,7 +44,7 @@ pub enum PersonaScaffoldError {
     #[error("atomic directory no-replace publication is unsupported")]
     Unsupported,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scaffold {
     pub root: PathBuf,
 }
@@ -53,6 +53,7 @@ pub struct Scaffold {
 pub(crate) struct Owner {
     schema: String,
     layout_id: String,
+    workspace_root: String,
     fixture_id: String,
     profile: crate::persona_plan::PersonaProfile,
     plan_digest: String,
@@ -147,6 +148,7 @@ pub(crate) fn bind_workspace(root: &Path) -> Result<WorkspaceAuthority, PersonaS
         || owner.plan_bytes != plan_bytes.len() as u64
         || owner.fixture_id != plan.fixture_id
         || owner.profile != plan.profile
+        || Path::new(&owner.workspace_root) != root_path
     {
         return bad("workspace owner does not bind exact canonical plan");
     }
@@ -318,8 +320,9 @@ pub fn scaffold(plan_path: &Path, root: &Path) -> Result<Scaffold, PersonaScaffo
     let plan_source = persona_artifact::bind_strict(plan_path, MAX_CANONICAL_BYTES)?;
     let plan = PersonaPlan::parse_canonical(plan_source.bytes())?;
     let parent = bind_parent(root)?;
+    let canonical_root = parent.public.join(&parent.leaf);
     absent(&parent, &parent.leaf)?;
-    let (stage_name, stage) = create_stage(&parent, root)?;
+    let (stage_name, stage) = create_stage(&parent, &canonical_root)?;
     let stage_cap_meta = cap_fs::Metadata::from_file(&stage)?;
     let stage_meta = stage.metadata()?;
     if !stage_cap_meta.is_dir() || stage_cap_meta.file_type().is_symlink() {
@@ -337,6 +340,10 @@ pub fn scaffold(plan_path: &Path, root: &Path) -> Result<Scaffold, PersonaScaffo
         let owner = Owner {
             schema: "kio.persona.workspace-owner/v1".into(),
             layout_id: LAYOUT_ID.into(),
+            workspace_root: canonical_root
+                .to_str()
+                .ok_or_else(|| PersonaScaffoldError::Unsafe("workspace root is not UTF-8".into()))?
+                .to_owned(),
             fixture_id: plan.fixture_id.clone(),
             profile: plan.profile,
             plan_digest: digest,
@@ -398,7 +405,7 @@ pub fn scaffold(plan_path: &Path, root: &Path) -> Result<Scaffold, PersonaScaffo
         sync_retained_directory(&stage, &stage_meta, &parent.public.join(&stage_name))
             .map_err(|e| PersonaScaffoldError::Unsafe(e.to_string()))?;
         plan_source.recheck()?;
-        run_before_rename_hook(root);
+        run_before_rename_hook(&canonical_root);
         plan_source.recheck()?;
         verify_tree(&stage, &plan, plan_source.bytes(), &owner_bytes)?;
         recheck_parent(&parent)?;
@@ -416,7 +423,7 @@ pub fn scaffold(plan_path: &Path, root: &Path) -> Result<Scaffold, PersonaScaffo
         )
         .map_err(|e| PersonaScaffoldError::Indeterminate(e.to_string()))?;
         Ok(Scaffold {
-            root: root.to_owned(),
+            root: canonical_root,
         })
     })()
 }
@@ -609,6 +616,9 @@ fn parse_owner(bytes: &[u8]) -> Result<Owner, PersonaScaffoldError> {
         serde_json::from_slice(bytes).map_err(|e| PersonaScaffoldError::Unsafe(e.to_string()))?;
     if owner.schema != "kio.persona.workspace-owner/v1"
         || owner.layout_id != LAYOUT_ID
+        || !Path::new(&owner.workspace_root).is_absolute()
+        || persona_artifact::normalize_persona_path(Path::new(&owner.workspace_root))?
+            != PathBuf::from(&owner.workspace_root)
         || owner.fixture_id != crate::persona_plan::FIXTURE_ID
         || !valid_hash(&owner.plan_digest)
         || owner.plan_digest != owner.plan_sha256
@@ -1060,6 +1070,45 @@ mod tests {
                 parse_owner(&owner).unwrap().plan_digest,
                 plan.digest().unwrap()
             );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_aliases_return_publish_and_bind_one_canonical_workspace_identity() {
+        use tempfile::tempdir_in;
+
+        let input_root = tempdir().unwrap();
+        let input_root = fs::canonicalize(input_root.path()).unwrap();
+        let plan = plan_file(&input_root, PersonaProfile::Tiny);
+
+        for alias_base in [Path::new("/tmp"), Path::new("/var/tmp")] {
+            let output_root = tempdir_in(alias_base).unwrap();
+            let alias_root = alias_base.join(output_root.path().file_name().unwrap());
+            let requested = alias_root.join("workspace");
+            let canonical = PathBuf::from("/private").join(
+                requested
+                    .strip_prefix("/")
+                    .expect("Darwin alias test path is absolute"),
+            );
+
+            let created = scaffold(&plan, &requested).unwrap();
+            assert_eq!(created.root, canonical);
+            assert!(requested.is_dir());
+
+            let owner_bytes = fs::read(canonical.join("persona-workspace-owner.json")).unwrap();
+            let owner = parse_owner(&owner_bytes).unwrap();
+            assert_eq!(owner.workspace_root, canonical.to_str().unwrap());
+
+            let rebound = bind_workspace(&canonical).unwrap();
+            assert_eq!(rebound.root_path, canonical);
+            let output = serde_json::to_value(&created).unwrap();
+            assert_eq!(output["root"], canonical.to_str().unwrap());
+
+            assert!(matches!(
+                scaffold(&plan, &canonical),
+                Err(PersonaScaffoldError::AlreadyExists(path)) if path == canonical
+            ));
         }
     }
 

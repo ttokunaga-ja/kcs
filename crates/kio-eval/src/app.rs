@@ -1403,7 +1403,7 @@ fn run_persona(command: &PersonaCommands) -> Result<ExitCode, AppError> {
             })?;
         }
         PersonaCommands::Scaffold { plan, root } => {
-            kio_eval::persona_scaffold::scaffold(plan, root)?;
+            emit_persona_json(&kio_eval::persona_scaffold::scaffold(plan, root)?)?;
         }
         PersonaCommands::Attest { root, out } => {
             kio_eval::persona_attest::attest(root, out)?;
