@@ -6,13 +6,14 @@
 //! metric.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     ffi::OsString,
     fs,
     io::Read,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use cap_primitives::fs as cap_fs;
@@ -22,16 +23,21 @@ use kio_core::{
     cas::{MAX_RAW_OBJECT_BYTES, hash_bytes, read_bounded_regular_file},
 };
 use kio_eval::{
+    artifact::CreateOnlyArtifact,
     attestation::{MAX_POINTER_ATTESTATIONS_PER_QUERY, PointerAttestor},
     boundary::{BoundCorpus, BoundScope},
     crossscope::CrossscopeOptions,
+    fixture_register::{FixtureMode, FixtureRegisterOptions},
     manifest::{
         HistoryOperation, SCOPES, Scenario, frozen_history_plan, load_corpus_manifest,
         load_golden_queries, load_history_manifest,
     },
     persona_plan::PersonaProfile,
     qhard::{self, BaselineAttestOptions, BaselineOptions, QhardOptions},
-    rerank::{RerankApplyOptions, RerankApplySummary, RerankDumpOptions, RerankDumpSummary},
+    rerank::{
+        FixtureRerankDumpOptions, RerankApplyOptions, RerankApplySummary, RerankDataset,
+        RerankDumpOptions, RerankDumpSummary,
+    },
     resolver::{CorpusModel, Resolver, validate_query},
     runner::{
         BoundedProcessOptions, ResolvedQuery, ScoredRecord, assess_history_coverage,
@@ -39,8 +45,18 @@ use kio_eval::{
         write_results,
     },
     scale_spec::ScaleProfile,
+    u7::{self, AdapterCommand, AdapterLimits, Modality},
 };
 use thiserror::Error;
+
+const MAX_U7_TEXTS: usize = 32;
+const MAX_U7_IMAGES: usize = 32;
+const MAX_U7_TEXT_BYTES: usize = 16 * 1024;
+const MAX_U7_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_U7_TOTAL_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_U7_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const U7_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+const U7_REPORT_MAX_BYTES: usize = 64 * 1024;
 
 const DEFAULT_BIN: &str = "target/release/kio";
 
@@ -94,33 +110,48 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Freeze attested current-tree candidate pools for offline reranking.
-    RerankDump {
-        /// Golden query file; repeat to combine suites. Defaults to the full
-        /// and short frozen query sets.
+    /// Register an external fixture with a Rust-owned control plane.
+    Fixture {
+        #[command(subcommand)]
+        command: FixtureCommands,
+    },
+    /// Freeze or score reranker measurements.
+    Rerank {
+        #[command(subcommand)]
+        command: RerankCommands,
+    },
+    /// Compare a served multimodal embedding endpoint to an explicit reference adapter.
+    U7 {
+        /// OpenAI-compatible serving endpoint root, for example http://127.0.0.1:8000.
         #[arg(long)]
-        golden: Vec<PathBuf>,
+        base_url: String,
         #[arg(long)]
-        corpus: PathBuf,
-        #[arg(long, default_value = DEFAULT_BIN)]
-        bin: PathBuf,
-        #[arg(long, default_value_t = 100, value_parser = parse_rerank_limit)]
-        limit: usize,
-        /// New output file. Existing files are never overwritten.
+        model: String,
+        /// Python-native reference adapter path. Rust owns all HTTP and verdict logic.
+        #[arg(long)]
+        reference_adapter: PathBuf,
+        /// Absolute Python interpreter containing the reference runtime.
+        #[arg(long)]
+        reference_python: PathBuf,
+        /// Canonical local model directory passed as the adapter's sole argument.
+        #[arg(long)]
+        reference_model: PathBuf,
+        /// Text control. Repeat for additional bounded controls.
+        #[arg(long)]
+        text: Vec<String>,
+        /// Image fixture. Repeat for additional bounded observations.
+        #[arg(long)]
+        image: Vec<PathBuf>,
+        #[arg(long, default_value_t = u7::DEFAULT_THRESHOLD, value_parser = parse_u7_threshold)]
+        threshold: f64,
+        /// New report file. Existing reports are never overwritten.
         #[arg(long)]
         out: PathBuf,
     },
-    /// Apply a GPU reranker ordering to a frozen rerank dump and score it.
-    RerankApply {
-        /// Output from a current canonical synthetic or fixture-B dump producer.
-        #[arg(long)]
-        input: PathBuf,
-        /// GPU reranker JSON containing the model identity and rankings.
-        #[arg(long)]
-        output: PathBuf,
-        /// Optional new report file. Existing files are never overwritten.
-        #[arg(long)]
-        report: Option<PathBuf>,
+    /// Rust-owned OCR metric evaluation over a normalized provider response.
+    Ocr {
+        #[command(subcommand)]
+        command: OcrCommands,
     },
     /// Materialize the frozen synthetic evaluation corpus.
     GenerateCorpus {
@@ -145,6 +176,111 @@ enum Commands {
     Benchmark {
         #[command(subcommand)]
         command: BenchmarkCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FixtureCommands {
+    /// Copy, initialize, index, and attest one absolute external fixture root.
+    Register {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long, value_parser = parse_fixture_mode)]
+        mode: FixtureMode,
+        /// Restrict registration to named corpus personas.
+        #[arg(long)]
+        persona: Vec<String>,
+        #[arg(long, default_value_t = 8, value_parser = parse_drain_rounds)]
+        drain_rounds: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RerankCommands {
+    /// Freeze a closed synthetic or fixture-B candidate pool for offline reranking.
+    Dump {
+        #[arg(long, value_parser = parse_rerank_dataset)]
+        dataset: RerankDataset,
+        /// Golden query file; repeat to combine suites. Defaults to the full
+        /// and short frozen query sets for the synthetic dataset.
+        #[arg(long)]
+        golden: Vec<PathBuf>,
+        /// Synthetic corpus or fixture-B registration root, depending on --dataset.
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, default_value = DEFAULT_BIN)]
+        bin: PathBuf,
+        #[arg(long, default_value_t = 100, value_parser = parse_rerank_limit)]
+        limit: usize,
+        /// New output file. Existing files are never overwritten.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Apply a GPU reranker ordering to a frozen rerank dump and score it.
+    Apply {
+        /// Output from a current canonical synthetic or fixture-B dump producer.
+        #[arg(long)]
+        input: PathBuf,
+        /// GPU reranker JSON containing the model identity and rankings.
+        #[arg(long)]
+        output: PathBuf,
+        /// Optional new report file. Existing files are never overwritten.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OcrCommands {
+    /// Invoke the official Mistral adapter and publish one normalized Rust response.
+    Provider {
+        /// Absolute Python interpreter containing the official SDK.
+        #[arg(long)]
+        python: PathBuf,
+        /// Absolute path to the checked-in provider adapter.
+        #[arg(long)]
+        adapter: PathBuf,
+        #[arg(long)]
+        document: PathBuf,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        include_image_base64: bool,
+        /// New normalized response file. Existing files are never overwritten.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Render explicit images through the Pillow/reportlab adapter.
+    Render {
+        /// Absolute Python interpreter containing Pillow and reportlab.
+        #[arg(long)]
+        python: PathBuf,
+        /// Absolute path to the checked-in renderer adapter.
+        #[arg(long)]
+        adapter: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        /// Explicit image input. Repeat for additional pages.
+        #[arg(long)]
+        image: Vec<PathBuf>,
+        /// New PDF file. Its parent directory must already exist.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Evaluate one versioned ground truth and normalized OCR response into a create-only report.
+    Evaluate {
+        #[arg(long)]
+        ground_truth: PathBuf,
+        #[arg(long)]
+        response: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -310,6 +446,11 @@ enum PersonaScopeLeaseCommands {
 
 #[derive(Debug, Subcommand)]
 enum BenchmarkCommands {
+    /// Build and seal the macOS comparator runtime manifest around a privileged image build.
+    ComparatorRuntime {
+        #[command(subcommand)]
+        command: ComparatorRuntimeCommands,
+    },
     /// Attest matching indexed and pristine fixture-B trees before measurement.
     BaselineAttest {
         #[arg(long, default_value = "eval/golden-queries-fixture-b.jsonl")]
@@ -368,6 +509,26 @@ enum BenchmarkCommands {
         /// Generated synthetic corpus measured in this same evaluator invocation.
         #[arg(long)]
         synthetic_corpus: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ComparatorRuntimeCommands {
+    /// Emit the deterministic runtime closure preimage in an empty private build root.
+    Prepare {
+        #[arg(long)]
+        build_root: PathBuf,
+    },
+    /// Verify the mounted read-only image and publish the final runtime manifest.
+    Finalize {
+        #[arg(long)]
+        runtime_root: PathBuf,
+        #[arg(long)]
+        preimage: PathBuf,
+        #[arg(long)]
+        image: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -439,6 +600,12 @@ pub enum AppError {
     #[error(transparent)]
     RerankApply(#[from] kio_eval::rerank::RerankApplyError),
     #[error(transparent)]
+    FixtureRegister(#[from] kio_eval::fixture_register::FixtureRegisterError),
+    #[error(transparent)]
+    U7(#[from] kio_eval::u7::U7Error),
+    #[error(transparent)]
+    Ocr(#[from] kio_eval::ocr_eval::OcrEvalError),
+    #[error(transparent)]
     Replay(#[from] kio_eval::replay::ReplayError),
     #[error(transparent)]
     PersonaMaterialize(#[from] kio_eval::persona_materialize::PersonaMaterializeError),
@@ -486,6 +653,32 @@ fn parse_rerank_limit(value: &str) -> Result<usize, String> {
         Ok(value)
     } else {
         Err("must be in 1..=100".to_owned())
+    }
+}
+
+fn parse_rerank_dataset(value: &str) -> Result<RerankDataset, String> {
+    value.parse()
+}
+
+fn parse_fixture_mode(value: &str) -> Result<FixtureMode, String> {
+    value.parse()
+}
+
+fn parse_drain_rounds(value: &str) -> Result<usize, String> {
+    let value: usize = value.parse().map_err(|_| "must be an integer".to_owned())?;
+    if (1..=64).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be in 1..=64".to_owned())
+    }
+}
+
+fn parse_u7_threshold(value: &str) -> Result<f64, String> {
+    let value: f64 = value.parse().map_err(|_| "must be a number".to_owned())?;
+    if value.is_finite() && (0.0 < value && value <= 1.0) {
+        Ok(value)
+    } else {
+        Err("must be finite and in (0, 1]".to_owned())
     }
 }
 
@@ -548,6 +741,417 @@ fn output_is_within_input_root(output: &Path, root: &Path) -> Result<bool, AppEr
     let root = fs::canonicalize(root)
         .map_err(|e| AppError::Input(format!("cannot canonicalize synthetic corpus: {e}")))?;
     Ok(parent.starts_with(root))
+}
+
+fn u7_image_mime(path: &Path) -> Result<&'static str, AppError> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Ok("image/png"),
+        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+        Some("webp") => Ok("image/webp"),
+        _ => Err(AppError::Input(format!(
+            "U7 image must have a .png, .jpg, .jpeg, or .webp extension: {}",
+            path.display()
+        ))),
+    }
+}
+
+fn u7_served_vector(
+    agent: &ureq::Agent,
+    base_url: &str,
+    request: &u7::ServedRequest,
+) -> Result<Vec<f64>, AppError> {
+    let url = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
+    let mut response = agent
+        .post(&url)
+        .send_json(&request.body)
+        .map_err(|error| AppError::Input(format!("U7 served request failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Input(format!(
+            "U7 served endpoint returned HTTP {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_U7_RESPONSE_BYTES as u64)
+        .read_to_vec()
+        .map_err(|error| AppError::Input(format!("U7 served response exceeds bounds: {error}")))?;
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| AppError::Input(format!("U7 served response is not JSON: {error}")))?;
+    Ok(u7::parse_served_embedding(&value)?)
+}
+
+fn canonical_explicit_path(
+    path: &Path,
+    boundary: &str,
+    label: &str,
+    directory: bool,
+) -> Result<PathBuf, AppError> {
+    if !path.is_absolute() {
+        return Err(AppError::Input(format!(
+            "{boundary} {label} must be absolute"
+        )));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| AppError::Input(format!("cannot inspect {boundary} {label}: {error}")))?;
+    let expected_type = if directory {
+        metadata.file_type().is_dir()
+    } else {
+        metadata.file_type().is_file()
+    };
+    if !expected_type {
+        return Err(AppError::Input(format!(
+            "{boundary} {label} must be a real {}",
+            if directory {
+                "directory"
+            } else {
+                "regular file"
+            }
+        )));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        AppError::Input(format!("cannot canonicalize {boundary} {label}: {error}"))
+    })?;
+    if canonical != path {
+        return Err(AppError::Input(format!(
+            "{boundary} {label} must use its canonical path spelling"
+        )));
+    }
+    Ok(canonical)
+}
+
+fn u7_adapter_environment() -> BTreeMap<OsString, OsString> {
+    let mut environment = BTreeMap::from([
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (OsString::from("TZ"), OsString::from("UTC")),
+        (
+            OsString::from("PYTHONDONTWRITEBYTECODE"),
+            OsString::from("1"),
+        ),
+        (OsString::from("PYTHONNOUSERSITE"), OsString::from("1")),
+        (OsString::from("PYTHONSAFEPATH"), OsString::from("1")),
+        (
+            OsString::from("HF_HUB_DISABLE_TELEMETRY"),
+            OsString::from("1"),
+        ),
+        (OsString::from("HF_HUB_OFFLINE"), OsString::from("1")),
+        (OsString::from("TRANSFORMERS_OFFLINE"), OsString::from("1")),
+        (
+            OsString::from("TOKENIZERS_PARALLELISM"),
+            OsString::from("false"),
+        ),
+    ]);
+    for name in [
+        "CUDA_VISIBLE_DEVICES",
+        "HF_HOME",
+        "TORCH_HOME",
+        "TRANSFORMERS_CACHE",
+        "XDG_CACHE_HOME",
+    ] {
+        if let Some(value) = env::var_os(name) {
+            environment.insert(OsString::from(name), value);
+        }
+    }
+    environment
+}
+
+struct U7RunOptions<'a> {
+    base_url: &'a str,
+    model: &'a str,
+    reference_adapter: &'a Path,
+    reference_python: &'a Path,
+    reference_model: &'a Path,
+    texts: &'a [String],
+    images: &'a [PathBuf],
+    threshold: f64,
+    out: &'a Path,
+}
+
+fn run_u7(options: U7RunOptions<'_>) -> Result<ExitCode, AppError> {
+    let U7RunOptions {
+        base_url,
+        model,
+        reference_adapter,
+        reference_python,
+        reference_model,
+        texts,
+        images,
+        threshold,
+        out,
+    } = options;
+    if texts.is_empty() {
+        return Err(AppError::Input(
+            "U7 requires at least one --text control".into(),
+        ));
+    }
+    if texts.len() > MAX_U7_TEXTS || images.len() > MAX_U7_IMAGES {
+        return Err(AppError::Input(
+            "U7 sample count exceeds its fixed bound".into(),
+        ));
+    }
+    let adapter = canonical_explicit_path(reference_adapter, "U7", "reference adapter", false)?;
+    let python = canonical_explicit_path(reference_python, "U7", "reference Python", false)?;
+    let reference_model = canonical_explicit_path(reference_model, "U7", "reference model", true)?;
+    let text_bytes = texts.iter().try_fold(0_usize, |total, text| {
+        if text.len() > MAX_U7_TEXT_BYTES {
+            Err(AppError::Input("U7 text control exceeds byte bound".into()))
+        } else {
+            total
+                .checked_add(text.len())
+                .filter(|total| *total <= MAX_U7_TOTAL_INPUT_BYTES)
+                .ok_or_else(|| AppError::Input("U7 inputs exceed byte bound".into()))
+        }
+    })?;
+    let mut input_bytes = text_bytes;
+    let mut image_bytes = Vec::with_capacity(images.len());
+    for image in images {
+        let bytes =
+            read_bounded_regular_file(image, MAX_U7_IMAGE_BYTES as u64).map_err(|error| {
+                AppError::Input(format!("cannot read U7 image {}: {error}", image.display()))
+            })?;
+        input_bytes = input_bytes
+            .checked_add(bytes.len())
+            .filter(|total| *total <= MAX_U7_TOTAL_INPUT_BYTES)
+            .ok_or_else(|| AppError::Input("U7 inputs exceed byte bound".into()))?;
+        image_bytes.push(bytes);
+    }
+
+    let mut reference_requests = Vec::with_capacity(texts.len() + images.len());
+    for (index, text) in texts.iter().enumerate() {
+        reference_requests.push(u7::reference_text_request(format!("text-{index}"), text));
+    }
+    for (index, (path, bytes)) in images.iter().zip(&image_bytes).enumerate() {
+        let mime = u7_image_mime(path)?;
+        reference_requests.push(u7::reference_image_request(
+            format!("image-{index}"),
+            mime,
+            bytes,
+        ));
+    }
+    u7::validate_adapter_requests(&reference_requests)?;
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_global(Some(U7_HTTP_TIMEOUT))
+        .build()
+        .into();
+    let mut served = Vec::with_capacity(texts.len() + images.len());
+    for text in texts {
+        let vector = u7_served_vector(&agent, base_url, &u7::served_text_request(model, text))?;
+        served.push(vector);
+    }
+    for (path, bytes) in images.iter().zip(&image_bytes) {
+        let mime = u7_image_mime(path)?;
+        let vector = u7_served_vector(
+            &agent,
+            base_url,
+            &u7::served_image_request(model, mime, bytes),
+        )?;
+        served.push(vector);
+    }
+    let dimensions = served
+        .first()
+        .map(Vec::len)
+        .ok_or_else(|| AppError::Input("U7 has no samples".into()))?;
+    if served.iter().any(|vector| vector.len() != dimensions) {
+        return Err(AppError::Input(
+            "U7 served responses do not share one native dimension".into(),
+        ));
+    }
+    let requests = reference_requests
+        .into_iter()
+        .zip(served.iter().map(Vec::len))
+        .collect::<Vec<_>>();
+    let adapter_vectors = u7::run_adapter(
+        &AdapterCommand {
+            program: python,
+            args: vec![
+                adapter.to_string_lossy().into_owned(),
+                reference_model.to_string_lossy().into_owned(),
+            ],
+            environment: u7_adapter_environment(),
+        },
+        &requests,
+        &AdapterLimits::default(),
+    )?;
+    let mut text_scores = Vec::new();
+    let mut image_scores = Vec::new();
+    for ((request, _), (served, reference)) in
+        requests.iter().zip(served.iter().zip(adapter_vectors))
+    {
+        let score = u7::cosine(served, &reference)?;
+        match request.identity.modality {
+            Modality::Text => text_scores.push(score),
+            Modality::Image => image_scores.push(score),
+        }
+    }
+    let report = u7::report(
+        model,
+        reference_model.display().to_string(),
+        dimensions,
+        &text_scores,
+        &image_scores,
+        threshold,
+    )?;
+    let input_root = env::current_dir()
+        .map_err(|error| AppError::Input(format!("cannot resolve U7 input root: {error}")))?;
+    let artifact = CreateOnlyArtifact::bind(out, &input_root, "U7 report")
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    let mut report_bytes = serde_jcs::to_vec(&report)
+        .map_err(|error| AppError::Input(format!("cannot canonicalize U7 report: {error}")))?;
+    report_bytes.push(b'\n');
+    artifact
+        .publish(&report_bytes, U7_REPORT_MAX_BYTES)
+        .map_err(|error| AppError::Input(error.to_string()))?;
+    println!("report : {}", artifact.public_path().display());
+    println!("verdict: {:?}", report.verdict.reason);
+    Ok(if report.verdict.adoptable {
+        ExitCode::Success
+    } else {
+        ExitCode::Failure
+    })
+}
+
+fn run_ocr_evaluate(
+    ground_truth: &Path,
+    response: &Path,
+    out: &Path,
+) -> Result<ExitCode, AppError> {
+    let truth_bytes =
+        read_bounded_regular_file(ground_truth, kio_eval::ocr_eval::MAX_JSON_BYTES as u64)
+            .map_err(|error| AppError::Input(format!("cannot read OCR ground truth: {error}")))?;
+    let response_bytes =
+        read_bounded_regular_file(response, kio_eval::ocr_eval::MAX_JSON_BYTES as u64)
+            .map_err(|error| AppError::Input(format!("cannot read OCR response: {error}")))?;
+    let truth = kio_eval::ocr_eval::parse_ground_truth(&truth_bytes)?;
+    let response = kio_eval::ocr_eval::parse_response(&response_bytes)?;
+    let report = kio_eval::ocr_eval::evaluate(&truth, &response)?;
+    kio_eval::ocr_eval::write_report_create_only(out, &report)?;
+    println!("report : {}", out.display());
+    println!("verdict: {:?}", report.verdict);
+    Ok(
+        if matches!(report.verdict, kio_eval::ocr_eval::Verdict::Passed) {
+            ExitCode::Success
+        } else {
+            ExitCode::Failure
+        },
+    )
+}
+
+fn canonical_new_output(path: &Path, boundary: &str) -> Result<PathBuf, AppError> {
+    if !path.is_absolute() {
+        return Err(AppError::Input(format!(
+            "{boundary} output must be absolute"
+        )));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Input(format!("{boundary} output has no parent")))?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        AppError::Input(format!(
+            "cannot canonicalize {boundary} output parent: {error}"
+        ))
+    })?;
+    if canonical_parent != parent {
+        return Err(AppError::Input(format!(
+            "{boundary} output parent must use its canonical path spelling"
+        )));
+    }
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| AppError::Input(format!("{boundary} output has no filename")))?;
+    let mut components = Path::new(leaf).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(AppError::Input(format!(
+            "{boundary} output filename is unsafe"
+        )));
+    }
+    Ok(canonical_parent.join(leaf))
+}
+
+fn run_ocr_provider(
+    python: &Path,
+    adapter: &Path,
+    document: &Path,
+    model: &str,
+    request_id: &str,
+    include_image_base64: bool,
+    out: &Path,
+) -> Result<ExitCode, AppError> {
+    let python = canonical_explicit_path(python, "OCR", "provider Python", false)?;
+    let adapter = canonical_explicit_path(adapter, "OCR", "provider adapter", false)?;
+    let document = canonical_explicit_path(document, "OCR", "document", false)?;
+    let out = canonical_new_output(out, "OCR provider")?;
+    let api_key = env::var_os("MISTRAL_API_KEY")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Input("OCR provider requires MISTRAL_API_KEY".into()))?;
+    let request = kio_eval::ocr_eval::provider_request_from_document(
+        request_id.to_owned(),
+        model.to_owned(),
+        &document,
+        include_image_base64,
+    )?;
+    let response = kio_eval::ocr_eval::invoke_provider(
+        &kio_eval::ocr_eval::AdapterCommand {
+            python,
+            adapter,
+            environment: BTreeMap::from([(OsString::from("MISTRAL_API_KEY"), api_key)]),
+        },
+        &request,
+        &kio_eval::ocr_eval::AdapterLimits::default(),
+    )?;
+    let normalized = kio_eval::ocr_eval::normalize_provider_response(&response)?;
+    kio_eval::ocr_eval::write_response_create_only(&out, &normalized)?;
+    println!("response: {}", out.display());
+    Ok(ExitCode::Success)
+}
+
+fn run_ocr_renderer(
+    python: &Path,
+    adapter: &Path,
+    request_id: &str,
+    images: &[PathBuf],
+    out: &Path,
+) -> Result<ExitCode, AppError> {
+    let python = canonical_explicit_path(python, "OCR", "renderer Python", false)?;
+    let adapter = canonical_explicit_path(adapter, "OCR", "renderer adapter", false)?;
+    let out = canonical_new_output(out, "OCR renderer")?;
+    let images = images
+        .iter()
+        .map(|path| canonical_explicit_path(path, "OCR", "renderer image", false))
+        .collect::<Result<Vec<_>, _>>()?;
+    let request = kio_eval::ocr_eval::RenderRequest {
+        schema: kio_eval::ocr_eval::RENDER_REQUEST_SCHEMA.into(),
+        request_id: request_id.to_owned(),
+        output_pdf: out.to_string_lossy().into_owned(),
+        input_images: images
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    };
+    let response = kio_eval::ocr_eval::invoke_renderer(
+        &kio_eval::ocr_eval::AdapterCommand {
+            python,
+            adapter,
+            environment: BTreeMap::new(),
+        },
+        &request,
+        &kio_eval::ocr_eval::AdapterLimits::default(),
+    )?;
+    println!("rendered: {}", out.display());
+    println!("sha256 : {}", response.output_sha256);
+    Ok(ExitCode::Success)
 }
 
 fn scenario_name(value: Scenario) -> &'static str {
@@ -839,6 +1443,154 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
     if let Some(command) = args.command.as_ref() {
         return match command {
             Commands::Persona { command } => run_persona(command),
+            Commands::Fixture { command } => match command {
+                FixtureCommands::Register {
+                    corpus,
+                    out,
+                    bin,
+                    mode,
+                    persona,
+                    drain_rounds,
+                } => {
+                    let summary = kio_eval::fixture_register::register(FixtureRegisterOptions {
+                        corpus: corpus.clone(),
+                        out: out.clone(),
+                        bin: bin.clone(),
+                        mode: *mode,
+                        personas: persona.clone(),
+                        drain_rounds: *drain_rounds,
+                    })?;
+                    println!(
+                        "fixture: {} scopes, {} indexed, {} pending",
+                        summary.scopes, summary.indexed, summary.pending
+                    );
+                    println!("report : {}", summary.report.display());
+                    Ok(
+                        if summary.indexed == summary.scopes && summary.pending == 0 {
+                            ExitCode::Success
+                        } else {
+                            ExitCode::Failure
+                        },
+                    )
+                }
+            },
+            Commands::Rerank { command } => match command {
+                RerankCommands::Dump {
+                    dataset,
+                    golden,
+                    corpus,
+                    bin,
+                    limit,
+                    out,
+                } => {
+                    let summary = match dataset {
+                        RerankDataset::Synthetic => {
+                            let golden = if golden.is_empty() {
+                                vec![
+                                    bundled_eval_path("golden-queries.jsonl"),
+                                    bundled_eval_path("golden-queries-short.jsonl"),
+                                ]
+                            } else {
+                                golden.clone()
+                            };
+                            kio_eval::rerank::run(RerankDumpOptions {
+                                golden,
+                                corpus: corpus.clone(),
+                                bin: bin.clone(),
+                                limit: *limit,
+                                out: out.clone(),
+                            })?
+                        }
+                        RerankDataset::FixtureB => {
+                            if golden.len() != 1 {
+                                return Err(AppError::Input(
+                                    "rerank dump --dataset fixture-b requires exactly one --golden"
+                                        .into(),
+                                ));
+                            }
+                            kio_eval::rerank::run_fixture_b(FixtureRerankDumpOptions {
+                                root: corpus.clone(),
+                                golden: golden[0].clone(),
+                                bin: bin.clone(),
+                                limit: *limit,
+                                out: out.clone(),
+                            })?
+                        }
+                    };
+                    print_rerank_summary(&summary);
+                    Ok(ExitCode::Success)
+                }
+                RerankCommands::Apply {
+                    input,
+                    output,
+                    report,
+                } => {
+                    let summary = kio_eval::rerank::apply(RerankApplyOptions {
+                        input: input.clone(),
+                        output: output.clone(),
+                        report: report.clone(),
+                    })?;
+                    let succeeded = summary.ranked_queries > 0 && summary.problems.is_empty();
+                    print_rerank_apply_summary(&summary);
+                    Ok(if succeeded {
+                        ExitCode::Success
+                    } else {
+                        ExitCode::Failure
+                    })
+                }
+            },
+            Commands::U7 {
+                base_url,
+                model,
+                reference_adapter,
+                reference_python,
+                reference_model,
+                text,
+                image,
+                threshold,
+                out,
+            } => run_u7(U7RunOptions {
+                base_url,
+                model,
+                reference_adapter,
+                reference_python,
+                reference_model,
+                texts: text,
+                images: image,
+                threshold: *threshold,
+                out,
+            }),
+            Commands::Ocr { command } => match command {
+                OcrCommands::Provider {
+                    python,
+                    adapter,
+                    document,
+                    model,
+                    request_id,
+                    include_image_base64,
+                    out,
+                } => run_ocr_provider(
+                    python,
+                    adapter,
+                    document,
+                    model,
+                    request_id,
+                    *include_image_base64,
+                    out,
+                ),
+                OcrCommands::Render {
+                    python,
+                    adapter,
+                    request_id,
+                    image,
+                    out,
+                } => run_ocr_renderer(python, adapter, request_id, image, out),
+                OcrCommands::Evaluate {
+                    ground_truth,
+                    response,
+                    out,
+                } => run_ocr_evaluate(ground_truth, response, out),
+            },
             Commands::Crossscope {
                 golden,
                 corpus,
@@ -854,49 +1606,6 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     dry_run: *dry_run,
                 })?;
                 Ok(code)
-            }
-            Commands::RerankDump {
-                golden,
-                corpus,
-                bin,
-                limit,
-                out,
-            } => {
-                let golden = if golden.is_empty() {
-                    vec![
-                        bundled_eval_path("golden-queries.jsonl"),
-                        bundled_eval_path("golden-queries-short.jsonl"),
-                    ]
-                } else {
-                    golden.clone()
-                };
-                let summary = kio_eval::rerank::run(RerankDumpOptions {
-                    golden,
-                    corpus: corpus.clone(),
-                    bin: bin.clone(),
-                    limit: *limit,
-                    out: out.clone(),
-                })?;
-                print_rerank_summary(&summary);
-                Ok(ExitCode::Success)
-            }
-            Commands::RerankApply {
-                input,
-                output,
-                report,
-            } => {
-                let summary = kio_eval::rerank::apply(RerankApplyOptions {
-                    input: input.clone(),
-                    output: output.clone(),
-                    report: report.clone(),
-                })?;
-                let succeeded = summary.ranked_queries > 0 && summary.problems.is_empty();
-                print_rerank_apply_summary(&summary);
-                Ok(if succeeded {
-                    ExitCode::Success
-                } else {
-                    ExitCode::Failure
-                })
             }
             Commands::GenerateCorpus { out, force } => generate_corpus(out.clone(), *force),
             Commands::ReplayHistory { corpus, bin } => {
@@ -957,6 +1666,32 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                 }
             },
             Commands::Benchmark { command } => match command {
+                BenchmarkCommands::ComparatorRuntime { command } => match command {
+                    ComparatorRuntimeCommands::Prepare { build_root } => {
+                        qhard::prepare_comparator_runtime(qhard::ComparatorRuntimePrepareOptions {
+                            build_root: build_root.clone(),
+                        })
+                        .map_err(|error| AppError::Input(error.to_string()))?;
+                        Ok(ExitCode::Success)
+                    }
+                    ComparatorRuntimeCommands::Finalize {
+                        runtime_root,
+                        preimage,
+                        image,
+                        out,
+                    } => {
+                        qhard::finalize_comparator_runtime(
+                            qhard::ComparatorRuntimeFinalizeOptions {
+                                runtime_root: runtime_root.clone(),
+                                preimage: preimage.clone(),
+                                image: image.clone(),
+                                out: out.clone(),
+                            },
+                        )
+                        .map_err(|error| AppError::Input(error.to_string()))?;
+                        Ok(ExitCode::Success)
+                    }
+                },
                 BenchmarkCommands::BaselineAttest {
                     golden,
                     fixture_root,
@@ -1514,8 +2249,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Args, Commands, PersonaCommands, bundled_eval_path, output_is_within_input_root,
-        parse_recall, parse_rerank_limit, parse_scenario, run,
+        Args, Commands, PersonaCommands, RerankCommands, bundled_eval_path,
+        output_is_within_input_root, parse_drain_rounds, parse_fixture_mode, parse_recall,
+        parse_rerank_dataset, parse_rerank_limit, parse_scenario, parse_u7_threshold, run,
     };
 
     #[test]
@@ -1528,6 +2264,182 @@ mod tests {
         assert_eq!(parse_rerank_limit("100").unwrap(), 100);
         assert!(parse_rerank_limit("0").is_err());
         assert!(parse_rerank_limit("101").is_err());
+        assert!(parse_rerank_dataset("fixture-b").is_ok());
+        assert!(parse_rerank_dataset("fixture_b").is_err());
+        assert!(parse_fixture_mode("offline").is_ok());
+        assert!(parse_fixture_mode("batch").is_err());
+        assert_eq!(parse_drain_rounds("8").unwrap(), 8);
+        assert!(parse_drain_rounds("0").is_err());
+        assert_eq!(parse_u7_threshold("0.999").unwrap(), 0.999);
+        assert!(parse_u7_threshold("NaN").is_err());
+    }
+
+    #[test]
+    fn cutover_commands_have_one_nested_canonical_surface() {
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "fixture",
+                "register",
+                "--corpus",
+                "/tmp/corpus",
+                "--out",
+                "/tmp/fixture",
+                "--bin",
+                "/tmp/kio",
+                "--mode",
+                "offline",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "ocr",
+                "provider",
+                "--python",
+                "/tmp/python3",
+                "--adapter",
+                "/tmp/provider_mistral.py",
+                "--document",
+                "/tmp/input.pdf",
+                "--model",
+                "mistral-ocr-latest",
+                "--request-id",
+                "manual-1",
+                "--out",
+                "/tmp/response.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "ocr",
+                "render",
+                "--python",
+                "/tmp/python3",
+                "--adapter",
+                "/tmp/render_native.py",
+                "--request-id",
+                "render-1",
+                "--image",
+                "/tmp/input.png",
+                "--out",
+                "/tmp/rendered.pdf",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "ocr",
+                "evaluate",
+                "--ground-truth",
+                "/tmp/truth.json",
+                "--response",
+                "/tmp/response.json",
+                "--out",
+                "/tmp/report.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "rerank",
+                "dump",
+                "--dataset",
+                "synthetic",
+                "--corpus",
+                "/tmp/corpus",
+                "--out",
+                "/tmp/dump.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "rerank",
+                "dump",
+                "--dataset",
+                "fixture-b",
+                "--corpus",
+                "/tmp/fixture",
+                "--golden",
+                "/tmp/golden.jsonl",
+                "--out",
+                "/tmp/dump.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "rerank",
+                "apply",
+                "--input",
+                "/tmp/dump.json",
+                "--output",
+                "/tmp/output.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "u7",
+                "--base-url",
+                "http://127.0.0.1:8000",
+                "--model",
+                "model",
+                "--reference-adapter",
+                "/tmp/reference_adapter.py",
+                "--reference-python",
+                "/tmp/python3",
+                "--reference-model",
+                "model",
+                "--text",
+                "control",
+                "--out",
+                "/tmp/u7.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "benchmark",
+                "comparator-runtime",
+                "prepare",
+                "--build-root",
+                "/tmp/build",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "rerank-dump",
+                "--corpus",
+                "/tmp/corpus",
+                "--out",
+                "/tmp/dump.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "rerank-apply",
+                "--input",
+                "/tmp/dump.json",
+                "--output",
+                "/tmp/output.json",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2103,7 +3015,7 @@ mod tests {
         fs::write(
             &input,
             serde_json::to_vec(&json!({
-                "note": "pass 1 of the reranker differential; generated by kio-eval rerank-dump",
+                "note": "pass 1 of the reranker differential; generated by kio-eval rerank dump --dataset synthetic",
                 "limit": 1,
                 "queries": [{
                     "id": "golden#0", "scenario": "M3-1", "query": "needle",
@@ -2122,10 +3034,12 @@ mod tests {
         )
         .unwrap();
         let code = run(Args {
-            command: Some(Commands::RerankApply {
-                input,
-                output,
-                report: None,
+            command: Some(Commands::Rerank {
+                command: RerankCommands::Apply {
+                    input,
+                    output,
+                    report: None,
+                },
             }),
             golden: None,
             corpus: None,

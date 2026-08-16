@@ -463,6 +463,7 @@ mod tests {
             pointer_value: json!({}),
             current_paths: None,
             current_path: None,
+            title: None,
         }
     }
 

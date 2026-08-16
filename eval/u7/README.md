@@ -24,18 +24,27 @@ identity を持ち first-instance-wins で永続化されるので、**誤った
 # 対象の serving 経路を起動しておく (例: vLLM)
 vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling
 
-python3 eval/u7/u7_same_space.py \
+kio-eval u7 \
   --base-url http://127.0.0.1:8000 \
   --model Qwen/Qwen3-VL-Embedding-2B \
-  --out eval/u7/results/u7-same-space.json
+  --reference-python /absolute/path/to/the/reference/venv/bin/python3 \
+  --reference-adapter /absolute/path/to/kio/eval/u7/reference_adapter.py \
+  --reference-model /absolute/path/to/a/pinned-local-Qwen3-VL-Embedding-2B \
+  --text "same-space text control" \
+  --image /absolute/path/to/control-image.png \
+  --out /absolute/path/to/u7-same-space-report.json
 ```
 
-参照側に `torch` と `transformers` が要る (serving 側は stdlib のみ)。
-画像は既定で `experiments/ocr-verification/fixtures/generated-images` の 15 枚を使う。
-**追加費用はゼロ** — 追跡下にある合成画像である。
-
-配線だけ確かめたいときは `--served-only`。**判定は出ない** (`reason:
-reference-not-run`)。
+`kio-eval u7` が HTTP wire、comparison、verdict、および report を所有する。参照側だけは
+`torch` と `transformers` を使う JSONL adapter で、HTTP、判定、report、filesystem探索を
+持たない。interpreter は暗黙の `PATH` 探索をせず、依存を導入した venv の絶対 path を
+`--reference-python` で明示する。reference modelもremote repository IDではなく、
+事前にreviewしたlocal directoryのcanonical absolute pathを明示する。adapterは
+`local_files_only`でロードする。Rust は child environment を clear し、cache/GPU の
+非credential設定だけを allowlist する。
+text control は最低 1 件必須で、画像は `--image` を繰り返して明示する。追跡済みの
+`experiments/ocr-verification/fixtures/generated-images` を使えば追加費用はないが、
+Rust runner が暗黙に directory 探索することはない。report は create-only である。
 
 ## 結論の読み方 — text は対照群である
 
@@ -57,9 +66,7 @@ V4 は `/tokenize` の `add_generation_prompt` 既定で実際にこの種のず
 ## 合算しない
 
 判定はモダリティごとに、しかも**最小値**で行う。平均を採ると探している欠陥
-(片方だけずれる) を計器が自分で消す。この性質は
-[`eval/test_u7_same_space.py`](../test_u7_same_space.py) の
-`test_a_good_text_score_must_not_average_away_a_bad_image_score` が固定しており、
+(片方だけずれる) を計器が自分で消す。この性質は Rust の vector test が固定しており、
 合算する実装に変えると落ちる。モダリティ内で最小を採るのも同じ理由で、1 枚でも
 別空間なら**その 1 枚のベクトルが凍結される**。
 
@@ -81,8 +88,7 @@ Kio は 768 へ切り詰めて再正規化するが、本検査は native 次元
 
 ## 現状
 
-**未実行。** 判定ロジックと wire の形は
-[`eval/test_u7_same_space.py`](../test_u7_same_space.py) (14 件) が CI の `rust`
-ジョブで守っているが、**数値一致そのものは GPU 実機でしか測れない**。
+**未実行。** 判定ロジックと wire の形は Rust の vector test が守るが、
+**数値一致そのものは GPU 実機でしか測れない**。
 vLLM 経路は公式サポートなので急がない。**llama.cpp 経路を検討する時点で、
 その採用可否を決める前にこれを回すこと。**

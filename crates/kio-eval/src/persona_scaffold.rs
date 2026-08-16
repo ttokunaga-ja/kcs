@@ -617,8 +617,8 @@ fn parse_owner(bytes: &[u8]) -> Result<Owner, PersonaScaffoldError> {
     if owner.schema != "kio.persona.workspace-owner/v1"
         || owner.layout_id != LAYOUT_ID
         || !Path::new(&owner.workspace_root).is_absolute()
-        || persona_artifact::normalize_persona_path(Path::new(&owner.workspace_root))?
-            != PathBuf::from(&owner.workspace_root)
+        || persona_artifact::normalize_persona_path(Path::new(&owner.workspace_root))?.as_path()
+            != Path::new(&owner.workspace_root)
         || owner.fixture_id != crate::persona_plan::FIXTURE_ID
         || !valid_hash(&owner.plan_digest)
         || owner.plan_digest != owner.plan_sha256

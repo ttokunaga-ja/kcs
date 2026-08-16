@@ -1,0 +1,1011 @@
+//! Rust-owned construction contract for the sealed macOS comparator runtime.
+//!
+//! The administrator shell only creates/attaches the disk image.  Pin
+//! authentication, Mach-O closure rewriting, payload re-walking and manifest
+//! publication are deliberately here, next to the runtime admission verifier.
+use super::QhardError;
+use kio_core::cas::hash_bytes;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+};
+
+const CONFIG_BYTES: &[u8] = br#"{"custom_adapters":[]}"#;
+const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PREIMAGE_BYTES: usize = 2 * 1024 * 1024;
+const SYSTEM_PREFIXES: [&str; 2] = ["/usr/lib/", "/System/Library/"];
+
+#[derive(Debug, Clone)]
+pub struct ComparatorRuntimePrepareOptions {
+    pub build_root: PathBuf,
+}
+#[derive(Debug, Clone)]
+pub struct ComparatorRuntimeFinalizeOptions {
+    pub runtime_root: PathBuf,
+    pub preimage: PathBuf,
+    pub image: PathBuf,
+    pub out: PathBuf,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedPin {
+    pub path: &'static str,
+    /// Lowercase digest body used only in this compiled reviewed table.
+    pub sha256_hex: &'static str,
+    pub bytes: u64,
+}
+
+// Closed, reviewed input set.  Any version change requires an explicit repin.
+const REVIEWED_PINS: &[ReviewedPin] = &[
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/fontconfig/2.17.1/lib/libfontconfig.1.dylib",
+        sha256_hex: "0a960b13c03e85926cc2fecdd73ea89b352f3a90ce4792b2c2612f224fe7ed48",
+        bytes: 304544,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/freetype/2.14.1_2/lib/libfreetype.6.dylib",
+        sha256_hex: "9de156e3493b53e42060e91d15627926b1b55e7b854bf1800fecee8ede469d0d",
+        bytes: 638192,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/gettext/1.0/lib/libintl.8.dylib",
+        sha256_hex: "0c6d618e75fea85cc3d631e164a71766fba9341d19ce1f723300c52e63037c51",
+        bytes: 228800,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/gmp/6.3.0/lib/libgmp.10.dylib",
+        sha256_hex: "14123464af436d67ef69114810aa9e1e74de50e4097166fe8c110397b3ba6961",
+        bytes: 452352,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/gpgme/2.0.1/lib/libgpgme.45.dylib",
+        sha256_hex: "69c0e16bee0d16d0ccb68cad0143fef4dbcb47395921d03f89ed611636d07544",
+        bytes: 345392,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/gpgmepp/2.0.0/lib/libgpgmepp.7.0.0.dylib",
+        sha256_hex: "403f6cd87b492dbdfcea5665b3136734449b596d6b3b045a3cc4cc62388aade3",
+        bytes: 414640,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/jpeg-turbo/3.1.3/lib/libjpeg.8.3.2.dylib",
+        sha256_hex: "b61e868fffc3c13501417e78d70fafadb4daccad593590f9e96e59f4cefdd20b",
+        bytes: 486672,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/libassuan/3.0.2/lib/libassuan.9.dylib",
+        sha256_hex: "1c45b3dd61f6f07249149723358e4d8448af5ced1a6b279a99ddbd7a906d1ff6",
+        bytes: 116320,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/libgpg-error/1.59/lib/libgpg-error.0.dylib",
+        sha256_hex: "a6dded3a14c1adc1465b65b517640bab484012ae37071d87c20fdf87c2262495",
+        bytes: 198720,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/libpng/1.6.55/lib/libpng16.16.dylib",
+        sha256_hex: "a665b05d0a9fc37b96e6f6651cf1ba182db93bcf7992e73f5e8d5cdbb4700ee6",
+        bytes: 208272,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/libtiff/4.7.1_1/lib/libtiff.6.dylib",
+        sha256_hex: "f65bfa09fe4b3710e308d53707d081644eede6e57f06df6c376ad7f5bc6ffcb2",
+        bytes: 539248,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/little-cms2/2.18/lib/liblcms2.2.dylib",
+        sha256_hex: "2b01b3d4983f379da0c7a433b926144340a5210390019f9aaf15c3b3ede6abfa",
+        bytes: 372080,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nspr/4.38.2/lib/libnspr4.dylib",
+        sha256_hex: "7f85b5d639f28836895dd93717685cf891def04f1f91d41b6a6f9543297ade6f",
+        bytes: 238752,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nspr/4.38.2/lib/libplc4.dylib",
+        sha256_hex: "8945b7af3ae90a3fa1d49482be01ff78f0a1380ca4bb685b59454abb4aae4fe8",
+        bytes: 70768,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nspr/4.38.2/lib/libplds4.dylib",
+        sha256_hex: "24627ef67deda78448f7cab363f554b857fae595f3d0cdba86ec97f1bfff1418",
+        bytes: 69632,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nss/3.121/lib/libnss3.dylib",
+        sha256_hex: "2bd3c828466d9b6aeb985b62d45e6a77c0dfd4e9177bb72530e80dfcc19f4794",
+        bytes: 1174848,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nss/3.121/lib/libnssutil3.dylib",
+        sha256_hex: "7891381b35027b011965293667987ddeef5a2e58cfbab9a589bf09c1a28422cd",
+        bytes: 222048,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nss/3.121/lib/libsmime3.dylib",
+        sha256_hex: "ea59d0432a835d3c8a9e8e31b4b3584e26336d2b104c0b7464a3f37caaa21091",
+        bytes: 218912,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/nss/3.121/lib/libssl3.dylib",
+        sha256_hex: "090acb80d058254c9f9e44c5836334a401d86744991804c3bdf441a9cf4cffb7",
+        bytes: 383520,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/openjpeg/2.5.4/lib/libopenjp2.2.5.4.dylib",
+        sha256_hex: "3b46324a48881d5ef030a096a5c242d0641299f85576895611ff0deb1505cbca",
+        bytes: 324160,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/pandoc/3.10.1/bin/pandoc",
+        sha256_hex: "61574e53a089110eae07817b91510ff150e826807ac020aa744e0ade23025e0d",
+        bytes: 277080112,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/pcre2/10.47_1/lib/libpcre2-8.0.dylib",
+        sha256_hex: "fc0491cc252c2938b6c37d1b6b4d7bfedffb9edb2519c47cef577637eddb73d5",
+        bytes: 588224,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/poppler/26.02.0_1/bin/pdftotext",
+        sha256_hex: "e75be019b2ab471970560493262458a3b4be1b9f9584d004bb8a624d5487c9b6",
+        bytes: 82456,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/poppler/26.02.0_1/lib/libpoppler.157.0.0.dylib",
+        sha256_hex: "688a66fbad757086fc64ae2262585953d13a2868f49a7cfadf7f5857297ba371",
+        bytes: 3419584,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/ripgrep/15.1.0/bin/rg",
+        sha256_hex: "2fb61b6e5b3e2d89b115fe6c18fd8805670fdf4bdfde85954d40855a76830e5f",
+        bytes: 6154240,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga",
+        sha256_hex: "279d3f49b1ebf9db88d6f2ab58906bf43182be51df63a3555ade27ba611a9a5c",
+        bytes: 7700968,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga-preproc",
+        sha256_hex: "4f583ec9b9edbe5956ad82fd40d3df6876e2d1b084935a44e87a1cc999964196",
+        bytes: 9177616,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/xz/5.8.3/lib/liblzma.5.dylib",
+        sha256_hex: "3d5bfa2f097c31463642b1daab5e662b44368bb4da368f85e412e7f9adcbaa10",
+        bytes: 184512,
+    },
+    ReviewedPin {
+        path: "/opt/homebrew/Cellar/zstd/1.5.7_1/lib/libzstd.1.5.7.dylib",
+        sha256_hex: "e2847c4613b386683c234913ae3b7b04299254096caf7616e3b3cd9bb97a39ab",
+        bytes: 649648,
+    },
+];
+pub fn reviewed_pins() -> &'static [ReviewedPin] {
+    REVIEWED_PINS
+}
+
+/// Every externally recorded digest uses the repository-wide tagged form.
+fn reviewed_hash(pin: ReviewedPin) -> String {
+    format!("sha256:{}", pin.sha256_hex)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileDigest {
+    path: String,
+    sha256: String,
+    bytes: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct Preimage {
+    schema_version: u8,
+    runtime_root: String,
+    config_sha256: String,
+    sources_before: Vec<FileDigest>,
+    payload_files: Vec<FileDigest>,
+    closure_images: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+struct Manifest {
+    #[serde(flatten)]
+    preimage: Preimage,
+    image_sha256: String,
+    sources_after: Vec<FileDigest>,
+    image_xattr_policy: String,
+    image_allowed_xattrs: Vec<String>,
+    image_attach_cache_policy: String,
+    runtime_xattr_policy: String,
+    runtime_allowed_xattrs: Vec<XattrObservation>,
+    manifest_xattr_policy: String,
+    manifest_allowed_xattrs: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct XattrObservation {
+    path: String,
+    names: Vec<String>,
+}
+fn err(message: impl Into<String>) -> QhardError {
+    QhardError::Input(message.into())
+}
+fn is_relative(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+fn image_xattr_names_allowed(names: &BTreeSet<String>, permit_attach_cache: bool) -> bool {
+    let mut allowed = BTreeSet::from([
+        "com.apple.FinderInfo".to_owned(),
+        "com.apple.provenance".to_owned(),
+    ]);
+    if permit_attach_cache {
+        allowed.insert("com.apple.diskimages.recentcksum".to_owned());
+    }
+    names.is_subset(&allowed)
+}
+fn runtime_root_matches_preimage(runtime_root: &Path, preimage: &Preimage) -> bool {
+    runtime_root == Path::new(&preimage.runtime_root)
+}
+fn digest(path: &Path, maximum: u64) -> Result<(String, u64), QhardError> {
+    let meta = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
+    if !meta.file_type().is_file() || meta.len() > maximum {
+        return Err(err(format!("unsafe runtime file: {}", path.display())));
+    }
+    let mut f = fs::File::open(path).map_err(|e| err(e.to_string()))?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    f.read_to_end(&mut bytes).map_err(|e| err(e.to_string()))?;
+    if bytes.len() as u64 != meta.len() {
+        return Err(err("file changed while hashing"));
+    }
+    Ok((hash_bytes(&bytes), meta.len()))
+}
+fn validate(pre: &Preimage) -> Result<(), QhardError> {
+    if pre.schema_version != 1
+        || pre.runtime_root != "/Library/KioComparatorRuntime/v1"
+        || pre.config_sha256 != hash_bytes(CONFIG_BYTES)
+    {
+        return Err(err("invalid runtime preimage header"));
+    }
+    let want = REVIEWED_PINS
+        .iter()
+        .map(|p| (p.path, reviewed_hash(*p), p.bytes))
+        .collect::<BTreeSet<_>>();
+    let got = pre
+        .sources_before
+        .iter()
+        .map(|p| (p.path.as_str(), p.sha256.clone(), p.bytes))
+        .collect::<BTreeSet<_>>();
+    if want != got
+        || pre.payload_files.is_empty()
+        || pre.payload_files.len() > 128
+        || pre.closure_images.len() != REVIEWED_PINS.len()
+    {
+        return Err(err("preimage pin or cardinality mismatch"));
+    }
+    let mut paths = BTreeSet::new();
+    for p in &pre.payload_files {
+        if !is_relative(&p.path)
+            || p.bytes > MAX_FILE_BYTES
+            || p.sha256.len() != 71
+            || !p.sha256.starts_with("sha256:")
+            || !p.sha256[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !paths.insert(&p.path)
+        {
+            return Err(err("invalid preimage payload entry"));
+        }
+    }
+    let closure = pre.closure_images.iter().collect::<BTreeSet<_>>();
+    if closure.len() != pre.closure_images.len()
+        || pre.closure_images.iter().any(|p| !is_relative(p))
+        || pre.closure_images.iter().any(|p| !paths.contains(p))
+    {
+        return Err(err("invalid closure image path"));
+    }
+    Ok(())
+}
+
+pub fn prepare_comparator_runtime(
+    options: ComparatorRuntimePrepareOptions,
+) -> Result<(), QhardError> {
+    if !options.build_root.is_absolute() || fs::symlink_metadata(&options.build_root).is_ok() {
+        return Err(err(
+            "comparator runtime build root must be an absent absolute path",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::prepare(options)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = options;
+        Err(err("comparator runtime preparation requires macOS"))
+    }
+}
+pub fn finalize_comparator_runtime(
+    options: ComparatorRuntimeFinalizeOptions,
+) -> Result<(), QhardError> {
+    if [
+        &options.runtime_root,
+        &options.preimage,
+        &options.image,
+        &options.out,
+    ]
+    .iter()
+    .any(|p| !p.is_absolute())
+        || fs::symlink_metadata(&options.out).is_ok()
+    {
+        return Err(err(
+            "comparator runtime finalization requires absolute create-only paths",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::finalize(options)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = options;
+        Err(err("comparator runtime finalization requires macOS"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use std::{
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        process::Command,
+    };
+    const SEEDS: [(&str, &str); 5] = [
+        ("rga", "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga"),
+        (
+            "rga-preproc",
+            "/opt/homebrew/Cellar/ripgrep-all/0.10.10/bin/rga-preproc",
+        ),
+        ("pandoc", "/opt/homebrew/Cellar/pandoc/3.10.1/bin/pandoc"),
+        (
+            "pdftotext",
+            "/opt/homebrew/Cellar/poppler/26.02.0_1/bin/pdftotext",
+        ),
+        ("rg", "/opt/homebrew/Cellar/ripgrep/15.1.0/bin/rg"),
+    ];
+    #[derive(Default)]
+    pub(super) struct Macho {
+        pub(super) loads: Vec<String>,
+        pub(super) rpaths: Vec<String>,
+        ids: Vec<String>,
+        loaders: Vec<String>,
+        environment: bool,
+    }
+    fn command(bin: &str, args: &[&str]) -> Result<Vec<u8>, QhardError> {
+        let o = Command::new(bin)
+            .args(args)
+            .output()
+            .map_err(|e| err(format!("cannot run {bin}: {e}")))?;
+        if !o.status.success() || o.stdout.len() > 524288 {
+            return Err(err(format!("{bin} failed or emitted excessive output")));
+        }
+        Ok(o.stdout)
+    }
+    pub(super) fn parse_otool(bytes: &[u8]) -> Result<Macho, QhardError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| err("non-UTF8 otool output"))?;
+        let mut m = Macho::default();
+        let mut current = "";
+        for line in text.lines() {
+            let l = line.trim();
+            if let Some(v) = l.strip_prefix("cmd ") {
+                current = v;
+                if v == "LC_DYLD_ENVIRONMENT" {
+                    m.environment = true
+                }
+                continue;
+            }
+            let value = if current == "LC_RPATH" {
+                l.strip_prefix("path ")
+            } else {
+                l.strip_prefix("name ")
+            };
+            let Some(v) = value.and_then(|x| x.split(" (offset ").next()) else {
+                continue;
+            };
+            match current {
+                "LC_LOAD_DYLIB"
+                | "LC_LOAD_WEAK_DYLIB"
+                | "LC_REEXPORT_DYLIB"
+                | "LC_LOAD_UPWARD_DYLIB"
+                | "LC_LAZY_LOAD_DYLIB" => m.loads.push(v.into()),
+                "LC_ID_DYLIB" => m.ids.push(v.into()),
+                "LC_LOAD_DYLINKER" => m.loaders.push(v.into()),
+                "LC_RPATH" => m.rpaths.push(v.into()),
+                _ => {}
+            }
+        }
+        if m.loads.len() > 256 || m.rpaths.len() > 64 || m.ids.len() > 1 || m.loaders.len() > 1 {
+            return Err(err("malformed Mach-O metadata"));
+        }
+        Ok(m)
+    }
+    fn macho(p: &Path) -> Result<Macho, QhardError> {
+        parse_otool(&command(
+            "/usr/bin/otool",
+            &["-arch", "arm64", "-l", &p.to_string_lossy()],
+        )?)
+    }
+    fn base(p: &str) -> Result<&str, QhardError> {
+        Path::new(p)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .filter(|x| !x.is_empty())
+            .ok_or_else(|| err("invalid Mach-O basename"))
+    }
+    fn system(p: &str) -> bool {
+        p == "/usr/lib/dyld" || SYSTEM_PREFIXES.iter().any(|x| p.starts_with(x))
+    }
+    fn policy(m: &Macho, seed: bool) -> Result<(), QhardError> {
+        if m.environment
+            || m.ids.len() > 1
+            || (seed && m.loaders != ["/usr/lib/dyld"])
+            || (!seed && !m.loaders.is_empty())
+        {
+            Err(err("unsafe Mach-O loader metadata"))
+        } else {
+            Ok(())
+        }
+    }
+    fn stage(pin: ReviewedPin, to: &Path) -> Result<(), QhardError> {
+        let source = Path::new(pin.path);
+        if fs::canonicalize(source).map_err(|e| err(e.to_string()))? != source {
+            return Err(err("reviewed pin is not canonical"));
+        }
+        let mut input = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(source)
+            .map_err(|e| err(e.to_string()))?;
+        let before = input.metadata().map_err(|e| err(e.to_string()))?;
+        if !before.is_file() || before.len() != pin.bytes {
+            return Err(err("reviewed pin type/size changed"));
+        }
+        let mut bytes = Vec::with_capacity(pin.bytes as usize);
+        input
+            .read_to_end(&mut bytes)
+            .map_err(|e| err(e.to_string()))?;
+        let after = input.metadata().map_err(|e| err(e.to_string()))?;
+        let named = fs::symlink_metadata(source).map_err(|e| err(e.to_string()))?;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.dev() != named.dev()
+            || before.ino() != named.ino()
+            || bytes.len() as u64 != pin.bytes
+            || hash_bytes(&bytes) != reviewed_hash(pin)
+        {
+            return Err(err("reviewed pin changed during nofollow copy"));
+        }
+        let mut out = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(to)
+            .map_err(|e| err(e.to_string()))?;
+        out.write_all(&bytes)
+            .and_then(|_| out.sync_all())
+            .map_err(|e| err(e.to_string()))?;
+        Ok(())
+    }
+    fn files(root: &Path) -> Result<Vec<PathBuf>, QhardError> {
+        let mut stack = vec![root.to_owned()];
+        let mut answer = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let mut entries = fs::read_dir(dir)
+                .map_err(|e| err(e.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| err(e.to_string()))?;
+            entries.sort_by_key(|x| x.file_name());
+            for e in entries {
+                let p = e.path();
+                let t = fs::symlink_metadata(&p)
+                    .map_err(|e| err(e.to_string()))?
+                    .file_type();
+                if t.is_symlink() {
+                    return Err(err("symlink in payload"));
+                }
+                if t.is_dir() {
+                    stack.push(p)
+                } else if t.is_file() {
+                    answer.push(p)
+                } else {
+                    return Err(err("nonregular payload entry"));
+                }
+            }
+        }
+        answer.sort();
+        Ok(answer)
+    }
+    fn rewalk(root: &Path, expected: &BTreeSet<String>) -> Result<Vec<FileDigest>, QhardError> {
+        let mut names = BTreeMap::new();
+        let mut result = Vec::new();
+        for f in files(root)? {
+            let rel = f
+                .strip_prefix(root)
+                .map_err(|_| err("payload escape"))?
+                .to_string_lossy()
+                .to_string();
+            let (x, n) = digest(&f, MAX_FILE_BYTES)?;
+            result.push(FileDigest {
+                path: rel.clone(),
+                sha256: x,
+                bytes: n,
+            });
+            if (rel.starts_with("bin/") || rel.starts_with("lib/"))
+                && names.insert(base(&rel)?.to_owned(), rel).is_some()
+            {
+                return Err(err("payload basename collision"));
+            }
+        }
+        if names.values().cloned().collect::<BTreeSet<_>>() != *expected
+            || fs::read(root.join("config/rga-config.json")).map_err(|e| err(e.to_string()))?
+                != CONFIG_BYTES
+        {
+            return Err(err("payload differs from sealed construction contract"));
+        }
+        for rel in names.values() {
+            let m = macho(&root.join(rel))?;
+            let is_bin = rel.starts_with("bin/");
+            policy(&m, is_bin)?;
+            if m.rpaths
+                != [if is_bin {
+                    "@loader_path/../lib"
+                } else {
+                    "@loader_path"
+                }]
+            {
+                return Err(err("unexpected payload rpath"));
+            }
+            for load in m.loads {
+                if system(&load) {
+                    continue;
+                }
+                let name = load
+                    .strip_prefix("@rpath/")
+                    .filter(|x| !x.contains('/'))
+                    .ok_or_else(|| err("unsealed payload dependency"))?;
+                if !names.get(name).is_some_and(|p| p.starts_with("lib/")) {
+                    return Err(err("unresolved payload dependency"));
+                }
+            }
+        }
+        result.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(result)
+    }
+    fn image_xattrs(image: &Path) -> Result<Vec<String>, QhardError> {
+        super::super::require_no_extended_acl(image, "comparator runtime image")?;
+        let mut names = super::super::macos_xattr::list(image, false)?;
+        if names.contains("com.apple.diskimages.recentcksum") {
+            if !image_xattr_names_allowed(&names, true) {
+                return Err(err("runtime image has forbidden extended attributes"));
+            }
+            super::super::macos_xattr::remove_named(image, "com.apple.diskimages.recentcksum")?;
+            names = super::super::macos_xattr::list(image, false)?;
+        }
+        if !image_xattr_names_allowed(&names, false) {
+            return Err(err("runtime image has forbidden extended attributes"));
+        }
+        Ok(names.into_iter().collect())
+    }
+    fn runtime_xattrs(root: &Path) -> Result<Vec<XattrObservation>, QhardError> {
+        let mut paths = vec![root.to_path_buf()];
+        paths.extend(files(root)?);
+        let mut observed = Vec::new();
+        for path in paths {
+            let names = super::super::macos_xattr::list(&path, false)?;
+            if !super::super::runtime_xattr_names_allowed(&names) {
+                return Err(err("mounted runtime has forbidden extended attributes"));
+            }
+            if !names.is_empty() {
+                observed.push(XattrObservation {
+                    path: path
+                        .strip_prefix(root)
+                        .ok()
+                        .and_then(|p| {
+                            (!p.as_os_str().is_empty()).then(|| p.to_string_lossy().to_string())
+                        })
+                        .unwrap_or_else(|| ".".into()),
+                    names: names.into_iter().collect(),
+                });
+            }
+        }
+        observed.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(observed)
+    }
+    fn manifest_xattrs(path: &Path) -> Result<Vec<String>, QhardError> {
+        super::super::require_no_extended_acl(path, "comparator runtime manifest")?;
+        let names = super::super::macos_xattr::list(path, false)?;
+        if !super::super::runtime_xattr_names_allowed(&names) {
+            return Err(err("runtime manifest has forbidden extended attributes"));
+        }
+        Ok(names.into_iter().collect())
+    }
+    pub(super) fn prepare(o: ComparatorRuntimePrepareOptions) -> Result<(), QhardError> {
+        fs::create_dir(&o.build_root).map_err(|e| err(e.to_string()))?;
+        let staged = o.build_root.join("reviewed-sources");
+        let payload = o.build_root.join("payload");
+        for d in [
+            &staged,
+            &payload,
+            &payload.join("bin"),
+            &payload.join("lib"),
+            &payload.join("config"),
+        ] {
+            fs::create_dir(d).map_err(|e| err(e.to_string()))?
+        }
+        let mut sources = BTreeMap::new();
+        for pin in REVIEWED_PINS {
+            let dst = staged.join(hash_bytes(pin.path.as_bytes()));
+            stage(*pin, &dst)?;
+            sources.insert(pin.path, dst);
+        }
+        let mut aliases = BTreeMap::new();
+        for pin in REVIEWED_PINS {
+            let image = macho(&sources[pin.path])?;
+            policy(&image, SEEDS.iter().any(|(_, p)| *p == pin.path))?;
+            for a in [
+                Some(base(pin.path)?),
+                image.ids.first().map(|x| base(x)).transpose()?,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if aliases.insert(a.to_owned(), pin.path).is_some() {
+                    return Err(err("ambiguous LC_ID_DYLIB alias"));
+                }
+            }
+        }
+        let mut closure = BTreeSet::new();
+        let mut todo = SEEDS.iter().map(|(_, p)| *p).collect::<Vec<_>>();
+        while let Some(src) = todo.pop() {
+            if !closure.insert(src) {
+                continue;
+            }
+            for load in macho(&sources[src])?.loads {
+                if !system(&load) {
+                    todo.push(
+                        *aliases
+                            .get(base(&load)?)
+                            .ok_or_else(|| err("dependency absent from reviewed pins"))?,
+                    )
+                }
+            }
+        }
+        if closure != REVIEWED_PINS.iter().map(|p| p.path).collect() {
+            return Err(err("Mach-O closure does not equal reviewed pin set"));
+        }
+        let mut dest = BTreeMap::new();
+        for src in &closure {
+            let entry = SEEDS.iter().find_map(|(n, p)| (*p == *src).then_some(*n));
+            let d = payload
+                .join(if entry.is_some() { "bin" } else { "lib" })
+                .join(entry.unwrap_or(base(src)?));
+            if dest.values().any(|x: &PathBuf| x == &d) {
+                return Err(err("payload basename collision"));
+            }
+            fs::copy(&sources[src], &d).map_err(|e| err(e.to_string()))?;
+            dest.insert(*src, d);
+        }
+        for src in &closure {
+            let m = macho(&sources[src])?;
+            let d = &dest[src];
+            for load in m.loads {
+                if !system(&load) {
+                    let dep = aliases
+                        .get(base(&load)?)
+                        .ok_or_else(|| err("unreviewed dependency"))?;
+                    command(
+                        "/usr/bin/install_name_tool",
+                        &[
+                            "-change",
+                            &load,
+                            &format!("@rpath/{}", base(&dest[dep].to_string_lossy())?),
+                            &d.to_string_lossy(),
+                        ],
+                    )?;
+                }
+            }
+            for r in m.rpaths {
+                command(
+                    "/usr/bin/install_name_tool",
+                    &["-delete_rpath", &r, &d.to_string_lossy()],
+                )?;
+            }
+            if SEEDS.iter().any(|(_, p)| *p == *src) {
+                command(
+                    "/usr/bin/install_name_tool",
+                    &["-add_rpath", "@loader_path/../lib", &d.to_string_lossy()],
+                )?;
+            } else {
+                command(
+                    "/usr/bin/install_name_tool",
+                    &[
+                        "-id",
+                        &format!("@rpath/{}", base(&d.to_string_lossy())?),
+                        &d.to_string_lossy(),
+                    ],
+                )?;
+                command(
+                    "/usr/bin/install_name_tool",
+                    &["-add_rpath", "@loader_path", &d.to_string_lossy()],
+                )?;
+            }
+            command(
+                "/usr/bin/codesign",
+                &[
+                    "--force",
+                    "--sign",
+                    "-",
+                    "--timestamp=none",
+                    &d.to_string_lossy(),
+                ],
+            )?;
+            command(
+                "/usr/bin/codesign",
+                &["--verify", "--strict", &d.to_string_lossy()],
+            )?;
+        }
+        fs::write(payload.join("config/rga-config.json"), CONFIG_BYTES)
+            .map_err(|e| err(e.to_string()))?;
+        let images = dest
+            .values()
+            .map(|p| {
+                p.strip_prefix(&payload)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        let payload_files = rewalk(&payload, &images)?;
+        for f in files(&payload)? {
+            let mut p = fs::metadata(&f)
+                .map_err(|e| err(e.to_string()))?
+                .permissions();
+            p.set_mode(if f.starts_with(payload.join("bin")) {
+                0o555
+            } else {
+                0o444
+            });
+            fs::set_permissions(f, p).map_err(|e| err(e.to_string()))?
+        }
+        let pre = Preimage {
+            schema_version: 1,
+            runtime_root: "/Library/KioComparatorRuntime/v1".into(),
+            config_sha256: hash_bytes(CONFIG_BYTES),
+            sources_before: REVIEWED_PINS
+                .iter()
+                .map(|p| FileDigest {
+                    path: p.path.into(),
+                    sha256: reviewed_hash(*p),
+                    bytes: p.bytes,
+                })
+                .collect(),
+            payload_files,
+            closure_images: images.into_iter().collect(),
+        };
+        validate(&pre)?;
+        let b = serde_jcs::to_vec(&pre).map_err(|e| err(e.to_string()))?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(o.build_root.join("manifest-preimage.json"))
+            .and_then(|mut f| f.write_all(&b))
+            .map_err(|e| err(e.to_string()))?;
+        Ok(())
+    }
+    pub(super) fn finalize(o: ComparatorRuntimeFinalizeOptions) -> Result<(), QhardError> {
+        let raw = fs::read(&o.preimage).map_err(|e| err(e.to_string()))?;
+        if raw.len() > MAX_PREIMAGE_BYTES {
+            return Err(err("preimage too large"));
+        }
+        let pre: Preimage = serde_json::from_slice(&raw).map_err(|e| err(e.to_string()))?;
+        validate(&pre)?;
+        if !runtime_root_matches_preimage(&o.runtime_root, &pre) {
+            return Err(err("runtime root does not match preimage binding"));
+        }
+        let _ = super::super::ComparatorRuntime::bind(&o.runtime_root)?;
+        let runtime_allowed_xattrs = runtime_xattrs(&o.runtime_root)?;
+        let actual = rewalk(
+            &o.runtime_root,
+            &pre.closure_images.iter().cloned().collect(),
+        )?;
+        if actual != pre.payload_files {
+            return Err(err("mounted runtime differs from preimage"));
+        }
+        let mut after = Vec::new();
+        for pin in REVIEWED_PINS {
+            let (s, b) = digest(Path::new(pin.path), pin.bytes)?;
+            if s != reviewed_hash(*pin) || b != pin.bytes {
+                return Err(err("reviewed source changed before publication"));
+            }
+            after.push(FileDigest {
+                path: pin.path.into(),
+                sha256: s,
+                bytes: b,
+            })
+        }
+        if fs::canonicalize(&o.image).map_err(|e| err(e.to_string()))? != o.image {
+            return Err(err("runtime image path is not canonical"));
+        }
+        let image_metadata = fs::symlink_metadata(&o.image).map_err(|e| err(e.to_string()))?;
+        if image_metadata.file_type().is_symlink()
+            || !image_metadata.file_type().is_file()
+            || image_metadata.uid() != 0
+            || image_metadata.gid() != 0
+            || image_metadata.mode() & 0o022 != 0
+        {
+            return Err(err("runtime image ownership or mode is unsafe"));
+        }
+        let image_allowed_xattrs = image_xattrs(&o.image)?;
+        let (image_sha256, _) = digest(&o.image, MAX_FILE_BYTES)?;
+        let bytes = serde_jcs::to_vec(&Manifest {
+            preimage: pre,
+            image_sha256,
+            sources_after: after,
+            image_xattr_policy: "subset:com.apple.FinderInfo,com.apple.provenance".into(),
+            image_allowed_xattrs,
+            image_attach_cache_policy: "delete:com.apple.diskimages.recentcksum".into(),
+            runtime_xattr_policy: "only-com.apple.provenance".into(),
+            runtime_allowed_xattrs,
+            manifest_xattr_policy: "only-com.apple.provenance".into(),
+            // This field is necessarily empty: allowing an xattr to appear
+            // after serialization would make the manifest self-attestation
+            // circular, so publication rejects such a mutation below.
+            manifest_allowed_xattrs: Vec::new(),
+        })
+        .map_err(|e| err(e.to_string()))?;
+        let mut out = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .open(&o.out)
+            .map_err(|e| err(e.to_string()))?;
+        out.write_all(&bytes)
+            .and_then(|_| out.write_all(b"\n"))
+            .and_then(|_| out.sync_all())
+            .map_err(|e| err(e.to_string()))?;
+        // A macOS provenance marker is permitted but never interpreted.  The
+        // payload/image observations above are serialized; the manifest's own
+        // marker is only an OS annotation and cannot be made self-describing
+        // without a circular digest dependency.
+        let _ = manifest_xattrs(&o.out)?;
+        let mut expected = bytes;
+        expected.push(b'\n');
+        if fs::read(&o.out).map_err(|e| err(e.to_string()))? != expected {
+            return Err(err("published manifest readback differs"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pins_are_closed() {
+        assert_eq!(reviewed_pins().len(), 29);
+        assert_eq!(
+            reviewed_pins().iter().map(|p| p.bytes).sum::<u64>(),
+            312_045_232
+        );
+        assert!(reviewed_pins().iter().all(|p| {
+            p.path.starts_with("/opt/homebrew/Cellar/")
+                && p.sha256_hex.len() == 64
+                && p.sha256_hex
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }))
+    }
+    #[test]
+    fn externally_recorded_hashes_are_lowercase_tagged_sha256() {
+        let hash = reviewed_hash(reviewed_pins()[0]);
+        assert!(hash.starts_with("sha256:"));
+        assert_eq!(hash.len(), 71);
+        assert!(
+            hash[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+    }
+    #[test]
+    fn image_xattr_contract_only_permits_the_attach_cache_transiently() {
+        let cache = BTreeSet::from(["com.apple.diskimages.recentcksum".to_owned()]);
+        assert!(image_xattr_names_allowed(&cache, true));
+        assert!(!image_xattr_names_allowed(&cache, false));
+        assert!(image_xattr_names_allowed(
+            &BTreeSet::from([
+                "com.apple.FinderInfo".to_owned(),
+                "com.apple.provenance".to_owned()
+            ]),
+            false
+        ));
+        assert!(!image_xattr_names_allowed(
+            &BTreeSet::from(["com.apple.quarantine".to_owned()]),
+            true
+        ));
+    }
+    #[test]
+    fn malformed_preimage_fails_closed() {
+        let mut p = Preimage {
+            schema_version: 1,
+            runtime_root: "/Library/KioComparatorRuntime/v1".into(),
+            config_sha256: hash_bytes(CONFIG_BYTES),
+            sources_before: reviewed_pins()
+                .iter()
+                .map(|x| FileDigest {
+                    path: x.path.into(),
+                    sha256: reviewed_hash(*x),
+                    bytes: x.bytes,
+                })
+                .collect(),
+            payload_files: (0..reviewed_pins().len())
+                .map(|index| FileDigest {
+                    path: format!("lib/{index}"),
+                    sha256: format!("sha256:{}", "a".repeat(64)),
+                    bytes: 1,
+                })
+                .collect(),
+            closure_images: (0..reviewed_pins().len())
+                .map(|index| format!("lib/{index}"))
+                .collect(),
+        };
+        assert!(validate(&p).is_ok());
+        assert!(runtime_root_matches_preimage(
+            Path::new("/Library/KioComparatorRuntime/v1"),
+            &p
+        ));
+        assert!(!runtime_root_matches_preimage(
+            Path::new("/tmp/runtime"),
+            &p
+        ));
+        p.payload_files[0].path = "../rga".into();
+        assert!(validate(&p).is_err());
+    }
+    #[test]
+    fn options_need_absolute_create_only_paths() {
+        assert!(
+            prepare_comparator_runtime(ComparatorRuntimePrepareOptions {
+                build_root: "relative".into()
+            })
+            .is_err()
+        );
+        assert!(
+            finalize_comparator_runtime(ComparatorRuntimeFinalizeOptions {
+                runtime_root: "/x".into(),
+                preimage: "/y".into(),
+                image: "/z".into(),
+                out: "relative".into()
+            })
+            .is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn malformed_macho_metadata_vectors_fail_closed() {
+        assert!(
+            macos::parse_otool(
+                b" cmd LC_ID_DYLIB\n name a (offset 1)\n cmd LC_ID_DYLIB\n name b (offset 1)\n"
+            )
+            .is_err()
+        );
+        let parsed = macos::parse_otool(
+            b" cmd LC_LOAD_DYLIB\n name @rpath/libx.dylib (offset 1)\n cmd LC_RPATH\n path @loader_path (offset 1)\n",
+        )
+        .expect("well formed bounded vector");
+        assert_eq!(parsed.loads, ["@rpath/libx.dylib"]);
+        assert_eq!(parsed.rpaths, ["@loader_path"]);
+    }
+}

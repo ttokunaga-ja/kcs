@@ -523,6 +523,9 @@ pub struct SearchHit {
     pub pointer_value: Value,
     pub current_paths: Option<Vec<String>>,
     pub current_path: Option<String>,
+    /// Product-provided display title. Fixture-B scores this separately from
+    /// the normalized on-disk path.
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -684,6 +687,7 @@ fn parse_response(value: Value) -> Result<SearchResponse, String> {
                     .clone(),
                 current_paths,
                 current_path: optional_string(object.get("current_path"), "current_path")?,
+                title: optional_string(object.get("title"), "title")?,
             })
         })
         .collect::<Result<Vec<_>, _>>()

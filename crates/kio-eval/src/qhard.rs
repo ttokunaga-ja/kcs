@@ -38,6 +38,13 @@ use crate::{
     runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command},
 };
 
+#[path = "comparator_runtime_builder.rs"]
+pub mod comparator_runtime_builder;
+pub use comparator_runtime_builder::{
+    ComparatorRuntimeFinalizeOptions, ComparatorRuntimePrepareOptions, finalize_comparator_runtime,
+    prepare_comparator_runtime,
+};
+
 pub const FROZEN_GOLDEN_SHA256: &str =
     "sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163";
 pub const FROZEN_SYNTHETIC_M3_1_GOLDEN_SHA256: &str =
@@ -2592,9 +2599,10 @@ mod macos_xattr {
             size: usize,
             options: c_int,
         ) -> libc::ssize_t;
+        fn removexattr(path: *const c_char, name: *const c_char, options: c_int) -> c_int;
     }
 
-    fn list(path: &Path, nofollow: bool) -> Result<BTreeSet<String>, QhardError> {
+    pub(super) fn list(path: &Path, nofollow: bool) -> Result<BTreeSet<String>, QhardError> {
         let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
             QhardError::Input("comparator runtime path contains an interior NUL".into())
         })?;
@@ -2675,6 +2683,25 @@ mod macos_xattr {
             "comparator runtime has forbidden extended attributes: {}",
             names.into_iter().collect::<Vec<_>>().join(", ")
         )))
+    }
+
+    pub(super) fn remove_named(path: &Path, name: &str) -> Result<(), QhardError> {
+        use std::os::unix::ffi::OsStrExt;
+        let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            QhardError::Input("comparator runtime path contains an interior NUL".into())
+        })?;
+        let name = CString::new(name).map_err(|_| {
+            QhardError::Input("comparator runtime xattr name contains an interior NUL".into())
+        })?;
+        // SAFETY: both strings are NUL terminated; options zero intentionally
+        // applies only to a regular DMG container, never a symlink.
+        if unsafe { removexattr(encoded.as_ptr(), name.as_ptr(), 0) } != 0 {
+            return Err(QhardError::Input(format!(
+                "cannot remove comparator runtime xattr: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -5480,6 +5507,26 @@ mod tests {
         )
         .unwrap();
         assert!(environment);
+    }
+
+    /// These are deliberately parser-level contract vectors so Linux checks
+    /// exercise the same fail-closed Mach-O admission boundary as macOS. They
+    /// replace source-shape assertions about the runtime builder.
+    #[test]
+    fn comparator_runtime_rejects_untrusted_macho_metadata_vectors() {
+        for output in [
+            "Load command 1\n  cmd LC_LOAD_DYLIB\n  name /tmp/evil\r.dylib (offset 12)\n",
+            "Load command 1\n  cmd LC_LOAD_DYLINKER\n  name /usr/lib/dyld (offset 12)\nLoad command 2\n  cmd LC_LOAD_DYLINKER\n  name /usr/lib/dyld (offset 12)\n",
+            "Load command 1\n  cmd LC_LOAD_DYLIB\n  name @rpath/lib\0evil.dylib (offset 12)\n",
+        ] {
+            assert!(parse_otool_load_commands(output).is_err(), "{output:?}");
+        }
+        for output in [
+            "cmd LC_RPATH\n  path @loader_path\r (offset 12)\n",
+            "cmd LC_RPATH\n  path @loader_path\0/../outside (offset 12)\n",
+        ] {
+            assert!(parse_otool_rpaths(output).is_err(), "{output:?}");
+        }
     }
 
     fn test_dyld_info_binding() -> FileBinding {

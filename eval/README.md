@@ -4,8 +4,9 @@
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
 (`docs/09-mvp-scope.md` §5.5、**Step 3 着手前ゲート**) の成果物。
 
-- 残る Python fixture 補助スクリプトの依存: **Python3 標準ライブラリのみ**
-  (追加インストール不要)。合成コーパスの生成・履歴 replay・検索評価の正本は Rust。
+- Push/PR 評価経路は **Rust-only**。残る Python は
+  `eval/python-exceptions.toml` と exact-match する manual な
+  Python-native ML/SDK/render adapter だけであり、この synthetic lane では実行しない。
 - 決定論: 凍結済み `corpus-fixture.json` を Rust generator が materialize する。2 回実行で byte 同一。
 - 通常評価は Rust の `kio-eval` と評価対象の `kio` を使う。
   `cargo build --release --locked --all-features` 済み前提。
@@ -23,7 +24,7 @@
 | `kio-eval crossscope` | 横断増補のRust専用ランナー。full evaluatorのセット全体ゲートを部分集合へ誤適用せず、Recall/latency/Evidenceと診断値`worst_expected_rank`を検証する |
 | `crossscope-results.json` | 現行の replica 単独経路で再生成した横断評価結果。per-query の `aggregator` や `aggregator_applied` は出力せず、`counts` に `worst_expected_rank_mean/max` を記録する |
 | `crossscope-results-no-replica-2026-07-26.json` | 2026-07-26 の比較対照を保存した**履歴成果物**。移行前 schema の `aggregator_applied` を意図的に含むが、現行 runner の出力や入力には用いない |
-| `kio-eval rerank-dump` | current-tree queryの候補順・3要素key・検証済みChunk CAS textをcreate-only JSONへ固定するRust経路。offline GPU差分のpass 1 |
+| `kio-eval rerank dump --dataset synthetic` | current-tree queryの候補順・3要素key・検証済みChunk CAS textをcreate-only JSONへ固定するRust経路。offline GPU差分のpass 1 |
 | `golden-queries-qhard.jsonl` | 実データの raster PDF / 図表・画像を正解担体にする、凍結済み Q_hard 8 問。digest も Rust runner が固定照合する |
 | `kio-eval benchmark qhard` | attest済み外部fixtureとsynthetic M3-1を同一実行で再測定する唯一のQ_hard判定経路 |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
@@ -65,11 +66,12 @@ target/release/kio-eval --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin targ
 
 # 4. offline rerankerへ渡すcurrent-tree候補を、検証済みChunk CASから固定する。
 #    --outは既存fileを上書きしない。
-target/release/kio-eval rerank-dump --corpus /tmp/kio-eval-corpus \
+target/release/kio-eval rerank dump --dataset synthetic \
+  --corpus /tmp/kio-eval-corpus \
   --bin target/release/kio --out /tmp/rerank-input.json
 
 # 5. GPU が返した JSON を固定dumpへ適用する。--report もcreate-only。
-target/release/kio-eval rerank-apply --input /tmp/rerank-input.json \
+target/release/kio-eval rerank apply --input /tmp/rerank-input.json \
   --output /tmp/rerank-output.json --report /tmp/rerank-report.json
 ```
 
@@ -80,7 +82,7 @@ fail-closed にする。`--bin` はsingle-link regular executableに限定し、
 `target/release/kio`を`deps/`とhardlinkした環境では、`install -m 0755`で`/tmp`へ
 single-link copyを作ってそのpathを渡す。pathname fallbackやhardlink例外は設けない。
 
-`crossscope` と `rerank-dump` の出力は measured corpus 外の既存directoryに置き、
+`crossscope` と `rerank dump` の出力は measured corpus 外の既存directoryに置き、
 既存fileを上書きしない。再測定は新しい出力名を使い、比較後に採用するartifactだけを
 明示的に更新する。
 
@@ -150,76 +152,30 @@ credential の**環境変数名だけ**を `forwarded_credential_names` とし�
 
 ### macOS 比較器 runtime の管理者構築
 
-正式 baseline 用の runtime は、既存の Homebrew tree を変更せず、専用の read-only image として
-構築する。checkout 内の script を直接 root 実行してはならない。通常ユーザーがまず commit/worktree の
-hash を記録し、管理者が同じ値を独立に照合してから、root-owned 固定コピーを install する。スクリプト
-自身は `sudo` を呼ばず、パスワードを読まない。下の SHA-256 はこの revision の script 用であり、更新時は
-必ず再記録・再照合する。
+正式 baseline 用 runtime は既存の Homebrew tree を変更せず、専用 read-only image として一度だけ構築する。
+管理者実行前に script digest を照合する。この revision の digest は
+`9d0fa461919c9435994e0283798d56376212cc91a16e9564bb1d58105dd7dd07` である。
+
+builder は固定された `/usr/local/bin/kio-eval` を root-owned、かつ group/other 非 writable として要求する。
+先に監査済み release binary をこの場所へ provision してから、checkout の script を root-private copy にして
+一度だけ実行する。`build` / `verify` 引数は存在しない。
 
 ```bash
-/usr/bin/shasum -a 256 /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh
-# Expected for this revision: 7a7261a84e61bb1305cfb8a643f8055ec6469a21ef3ff4777c6d2248e5437ff5
+sudo /usr/bin/install -o root -g wheel -m 0755 target/release/kio-eval /usr/local/bin/kio-eval
 readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
 sudo /bin/chmod 0700 "$admin_dir"
 sudo /usr/bin/install -o root -g wheel -m 0500 \
   /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh "$admin_dir/build-script"
-sudo /bin/chmod -N "$admin_dir" "$admin_dir/build-script"
-sudo /usr/bin/env -i HOME=/var/root PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-  /bin/zsh -fc 'readonly admin_dir="$1" script="$1/build-script"
-    cleanup() { /bin/rm -f "$script"; /bin/rmdir "$admin_dir"; }
-    trap cleanup EXIT
-    readonly expected=7a7261a84e61bb1305cfb8a643f8055ec6469a21ef3ff4777c6d2248e5437ff5
-    readonly actual=$(/usr/bin/shasum -a 256 "$script")
-    [[ "$actual" == "$expected  $script" ]] || { print -u2 -- "fixed script digest mismatch"; exit 1; }
-    /bin/zsh -f "$script" build
-    exit $?' build-runtime "$admin_dir" &&
-/absolute/path/to/kio/eval/build_macos_comparator_runtime.sh verify
+sudo /bin/zsh -f "$admin_dir/build-script"
 ```
 
-過去のbuilder失敗で`/Library/KioComparatorRuntime`だけが残った場合、builderは既存targetを
-上書きしない。`v1`、image、manifestが存在せず、管理rootが空でroot所有であることを読み取り確認した後に限り、
-`sudo /bin/rmdir /Library/KioComparatorRuntime`で空ディレクトリだけを除去して再実行する。
-再帰削除は使わない。
+Rust が reviewed pin の nofollow copy、Mach-O closure/rewrite、payload re-walk、固定 config、mount admission、
+DMG/manifest ACL・xattr policy、digest と create-only manifest publication を fail-closed で行う。DMG は
+`FinderInfo`/`provenance` だけを許容し、attach が生成する `com.apple.diskimages.recentcksum` だけを削除してから
+hash へ束縛する。runtime/manifest は `provenance` 以外の xattr と extended ACL を拒否する。
 
-macOS は通常ユーザーの checkout から `install` した固定コピーや新規作成物へ、SIP下で除去できない
-`com.apple.provenance` を付与することがある。SIPや他のsecurity controlは変更しない。builderと正式 evaluatorは
-xattr列挙失敗をfail-closedとし、管理者固定コピー、staging、manifest、mounted runtimeの全treeでは、属性が無い場合
-または名前が正確に`com.apple.provenance`だけの場合に限り受理する。値は実行・path解決に使わず、その他のxattr
-（`com.apple.quarantine`を含む）は拒否する。
-
-`hdiutil`が生成するread-only DMG containerだけは別境界であり、属性なし、または名前が
-`com.apple.FinderInfo`と`com.apple.provenance`の部分集合である場合に限り受理する。この例外は
-DMG containerにだけ適用し、mounted runtime、payload、manifestには拡張しない。FinderInfoの値は読み取らず、
-image SHA-256は引き続きDMG本体のbytesを束縛する。builder manifestはimage/runtime両方のpolicyと観測した
-許可xattr名を記録し、正式evaluator reportはmounted runtimeの厳しいpolicyを記録する。
-`hdiutil attach`が`com.apple.diskimages.recentcksum`を生成した場合、builderはattach直後にその名前だけを
-確認して削除し、削除後にDMGの厳しいpolicyを再検証する。このchecksum cacheの値はKioのtrust inputにせず、
-manifestには削除policyだけを記録する。削除不能または他の属性が混在する場合はfail-closedとする。
-ACLは上の`chmod -N`でroot-private固定コピーだけを正規化し、checkoutやHomebrew sourceには触れない。
-build script自身はownership、mode、ACL、xattr policy、およびSHA-256を再検証し、不一致なら実行前に停止する。
-
-対象は `/Library/KioComparatorRuntime/v1`、image は
-`/Library/KioComparatorRuntime/v1.dmg`、一時 build directory は
-`/private/tmp/kio-comparator-runtime-v1-build` に固定される。いずれかが既に存在すれば上書きせず停止する。
-`/opt/homebrew` は読み取り専用の入力としてだけ利用し、`rga`、`rga-preproc`、`pandoc`、`pdftotext`、
-`rg` と再帰的な非 system Mach-O closure を staging へ複製する。load command は
-runtime 内の `@rpath` と `@loader_path` に再束縛され、解決不能、外部 escape、basename collision、
-runtime 外 rpath は fail-closed
-である。UDRO case-sensitive APFS image を read-only mount してから、canonical path、root ownership、
-mode、ACL、限定xattr policy、symlink 不在、payload/source digest、固定 config bytes を静的検証し、
-`/Library/KioComparatorRuntime/v1.manifest.json` に記録する。
-
-失敗時は、その invocation が作成した固定 target だけを rollback する。成功後に version を廃止する
-場合の手順は script が表示する `hdiutil detach`、image/manifest の削除、空の mountpoint/managed root の
-`rmdir` に限定する。既存の `v1` を上書きして更新することはない。
-
-構築後の tool smoke は root で実行してはならない。上の `&&` により、管理者 build が成功した場合だけ
-通常ユーザーの `verify` へ進む。`verify` 自身も runtime の必須 file、固定 config、canonical mount point、
-retained descriptor と一致する mount identity、および `MNT_RDONLY` を tool 起動前に検証する。これは限定的な
-smoke であり、5 executable と PDF/DOCX adapter の helper lookup を sealed runtime の `bin/` だけで
-実行する。rga 0.10.10 の PDF adapter は `--rga-no-cache` では失敗するため、verify と正式 evaluator は
-ambient cache ではなく evaluator 所有の一時 0700 cache を明示する。smoke は baseline evaluator の
-authoritative preflight を置き換えない。
+対象の `/Library/KioComparatorRuntime/v1`、image、manifest、一時 build root のいずれかが既に存在すれば停止する。
+成功後に廃止する場合も、detach、image/manifest の削除、空ディレクトリの `rmdir` に限定する。
 
 比較器プロセスは retained descriptor に束縛した pristine persona directory を CWD とし、相対 `.` を
 入力に使うため、可変な public corpus path を再オープンしない。`kio` は検査済み regular executable
@@ -505,6 +461,5 @@ kio-eval persona attest \
 materialized artifacts. It explicitly reports no actual Kio evidence and no
 history readiness; it neither establishes replay nor search success.
 
-```bash
-python3 -m unittest eval.test_eval_env
-```
+Push/PR CI は Python を起動しない。tracked Python の閉包は Rust の例外台帳 test が
+検証し、manual adapter 自身はネットワーク・GPU・課金なしの通常 CI から除外する。

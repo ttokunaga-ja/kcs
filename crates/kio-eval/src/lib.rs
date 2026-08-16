@@ -4,8 +4,10 @@ pub mod artifact;
 pub mod attestation;
 pub mod boundary;
 pub mod crossscope;
+pub mod fixture_register;
 pub mod generator;
 pub mod manifest;
+pub mod ocr_eval;
 pub mod persona_artifact;
 pub mod persona_attest;
 pub mod persona_consumer;
@@ -29,6 +31,7 @@ pub mod scale_benchmark;
 pub mod scale_fixture;
 pub mod scale_prepare;
 pub mod scale_spec;
+pub mod u7;
 
 use std::collections::HashSet;
 

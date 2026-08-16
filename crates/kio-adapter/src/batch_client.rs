@@ -208,8 +208,7 @@ const BATCH_LIST_MAX_PAGES: usize = 50;
 /// `MISTRAL_API_BASE` honored only when no `[markdown]` adapter is declared,
 /// `authenticated_agent` (redirects(0), strict timeouts), forced identity
 /// encoding, and bounded reads. Request/response shapes are the 2026-07-03
-/// live-verification record (`experiments/ocr-verification/run_ocr.py` +
-/// `out-batch/`, 07 §5.2 末尾).
+/// archived 2026-07-03 live-verification record (07 §5.2 末尾).
 #[derive(Debug, Clone, Default)]
 pub struct EnvMistralBatchClient {
     base_url: Option<String>,
