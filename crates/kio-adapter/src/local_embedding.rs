@@ -84,10 +84,18 @@ pub const LOCAL_EMBEDDING_MODEL_VERSION_PIN: &str =
 
 /// 07 §5.3 (1): `sha256(JCS({"chat_template": P(T), "instruction": P(I)}))`
 /// over the model's shipped `chat_template.jinja` with `instruction = ""`.
-/// Reproduce with `eval/v4/v4_finalize.py`; the inputs and the ruling are in
-/// `eval/v4/results/README.md`.
+/// The accepted inputs and digest are frozen in `eval/v4/results/v4-profile.json`
+/// and checked by the Rust profile identity vectors below.  The former Python
+/// producer was a completed non-authorizing experiment and has been removed.
 pub const LOCAL_EMBEDDING_PROMPT_TEMPLATE_HASH: &str =
     "sha256:7b7f47224b2e5c3fee914cb56bf6c701202dfe2693e4b1160291a81a44389e8b";
+
+/// Byte identity of the archived accepted V4 profile.  The executable
+/// experiment is retired; this frozen Rust witness is the reproduction
+/// boundary for the adopted profile.
+#[cfg(test)]
+const LOCAL_EMBEDDING_V4_RESULT_DIGEST: &str =
+    "sha256:b5ff0d6fa325c48a4e6143d4e975b96380dd602d5b63e1700e2a14821cb4bb8a";
 
 /// Kio's own name for that template, per 03 §5.1's `prompt_template_id`.
 pub const LOCAL_EMBEDDING_PROMPT_TEMPLATE_ID: &str = "kio-local-embedding-v1";
@@ -534,6 +542,16 @@ impl<C: LocalEmbeddingClient> EmbeddingAdapter for LocalEmbeddingAdapter<C> {
 mod tests {
     use super::*;
     use crate::types::{EmbeddingInputType, EmbeddingItem};
+    use sha2::{Digest, Sha256};
+
+    fn sha256(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("sha256:{hex}")
+    }
 
     fn request(texts: &[&str]) -> EmbeddingRequest {
         EmbeddingRequest {
@@ -913,6 +931,10 @@ mod tests {
     /// stored under the old identity is being orphaned (03 §7).
     #[test]
     fn the_real_profile_matches_the_identity_v4_settled() {
+        assert_eq!(
+            sha256(include_bytes!("../../../eval/v4/results/v4-profile.json")),
+            LOCAL_EMBEDDING_V4_RESULT_DIGEST
+        );
         let profile = profile_value_for(LocalEmbeddingExecution::Real);
         assert_eq!(
             profile["model_version_pin"],

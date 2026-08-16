@@ -1,73 +1,24 @@
-# 正規化済みコーパス — 支払い済み OCR の恒久化
+# Normalized corpus archive
 
-24 問ベースライン (`eval/golden-queries-fixture-b.jsonl`) が指す 1,015 文書の
-**正規化済み本文**。`eval/v3/extract_normalized_corpus.py` が index 済み fixture
-から取り出したもの。
+This directory is a non-authorizing archive of 1,015 normalized Markdown
+documents recovered from a paid OCR fixture in July 2026. It is retained to
+explain historical V3/V4 result artifacts and to avoid paying to recover the
+same text again.
 
-## なぜ repo に置くのか
+The executable V3/V4 Python experiments and their extraction command have been
+retired. This corpus is not a current producer input, is not a reproducible Kio
+fixture, and must not establish product Recall, embedding, or persona evidence.
+Current external-fixture registration and rerank dumps are Rust-owned
+`kio-eval fixture register` and `kio-eval rerank dump` operations; they bind
+their own explicit inputs and reports.
 
-golden query の正解は 24 問中 **20 問が `.pdf` / `.docx` / `.pptx` / `.png`** で、
-本文を得るには Markdownize (OCR) を通す必要がある。それは実費 **$1.21** を伴う。
+Archive layout:
 
-この費用は**既に 2 回払われている** — 2026-07-24 と 2026-07-27。2 回目を払った
-理由は、1 回目の成果物の在り処が記録から失われたためで、実際には失われて
-いなかった (計画書が index 済み store の場所を誤記していた)。
-
-本文だけなら **1.5 MB のテキスト**である。置いておけば
-
-- V3b (MRL 768 の recall 実測) が **GPU だけで、無料で**回る
-- 将来の再測定も無料になる
-- 3 度目の支払いが構造的に起こり得なくなる
-
-元の index (1.9 GB、`~/kio-dogfood/corpus-v1/corpus`) は `.kio` の object store と
-sqlite に依存し、可搬でも commit 可能でもない。ここに要るのは本文だけである。
-
-## 形
-
-    corpus/<persona>/<scope path>/<元のファイル名>.md
-
-元の拡張子を**残したまま** `.md` を足してある。golden query の
-`expected[].path` (`corpus/p01/home/.../latency-review.docx`) と部分一致で
-突き合わせるため — 拡張子を置き換えると当たらなくなる。
-
-同一文書の chunk は `byte_start` 昇順で連結し、`gen` は最新のみを採っている
-(複数世代を連結すると本文が重複する)。
-
-## 使い方
-
-```bash
-python3 eval/v3/v3_mrl.py \
-  --corpus eval/fixtures/normalized-corpus \
-  --queries eval/golden-queries-fixture-b.jsonl \
-  --limit 1013 \
-  --out v3b-mrl.json
+```text
+corpus/<persona>/<scope path>/<original filename>.md
 ```
 
-**`--limit` は必ず渡すこと。** 既定は 400 で、`collect_passages` は
-`sorted()` 順に 400 件で打ち切る。このコーパスは persona 順に並ぶので
-**p09〜p20 の 12 persona が丸ごと落ち**、answerable が 24 問中 **9 問**まで下がる。
-`recall_at_k` の足切りは「過半が引けなければ測らない」なので 9 < 12 で発火し、
-`measured: false` だけが返る — GPU セッションを 1 回無駄にする。
-
-そのとき返る注記は「index 済み fixture から取り出した Markdown を渡すこと」だが、
-**この状況ではその注記は原因を指していない**。コーパスは正しく、足りないのは
-`--limit` である。全件 1,013 passage (文書 1,015 のうち 2 本は 40 文字未満で
-`collect_passages` が除外する) を渡せば **24/24 が answerable** になる。
-
-このコーパスなら **24/24 の query が正解を引ける**ので、`v3_mrl.py` の recall
-ガードは発火せず、実際の recall@10 が両幅で出る。生のコーパス
-(`~/kio-baseline-corpus`) では 0/24 になり、ガードが `measured: false` を返す。
-
-## 出所
-
-| | |
-|---|---|
-| 抽出元 | `~/kio-dogfood/corpus-v1/corpus` (420 scope) |
-| 文書数 | 1,015 (原本のファイル数と一致) |
-| 抽出日 | 2026-07-28 |
-| 再生成 | `python3 eval/v3/extract_normalized_corpus.py --fixture <index 済み fixture> --out <dir>` |
-
-内容は、現在は廃止され Git history にのみ残る旧 persona generator で作成した
-合成 corpus を OCR した履歴成果物である。現行の persona artifact の生成・
-materialize・workspace scaffold authority は Rust `kio-eval` であり、この corpus
-の再生成 authority ではない。実在の人物・組織の情報は含まない。
+The original extension is intentionally retained before `.md` because the
+historical fixture-B expected paths named the pre-normalized file. No current
+regeneration command is provided. Git history preserves the retired procedure
+if historical investigation is ever necessary.
