@@ -1,4 +1,7 @@
-# 発注書 (Codex APP 向け): OCR 境界調査用の曖昧画像 fixture 生成
+# Archive: OCR 境界調査用の曖昧画像 fixture 生成
+
+> この作業は完了済みの履歴であり、現在の実行手順ではない。生成済み画像と
+> ground truth は non-authorizing archive で、Rust evaluator が暗黙に探索しない。
 
 ## 目的
 
@@ -20,7 +23,7 @@ ImageGeneration で作成する。合成描画 (PIL) では作れない「実態
 ## 必須要件
 
 1. **既知トークンの埋め込み**: 各画像の描画テキスト内に一意トークンを必ず含める —
-   形式 `G<系統>-<連番>-TOKEN-<4桁>` (例: `G2-01-TOKEN-7315`)。後段の evaluate.py が
+   形式 `G<系統>-<連番>-TOKEN-<4桁>` (例: `G2-01-TOKEN-7315`)。後段の Rust evaluator が
    「このトークンが OCR 結果の markdown に出たか」で判定するため、**画像内に視認可能な文字として**
    描かれていること (プロンプトに明記して生成後に目視確認)
 2. **ground truth の記録**: `experiments/ocr-verification/fixtures/generated-images/ground-truth.json` に

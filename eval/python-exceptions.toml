@@ -1,0 +1,46 @@
+version = 1
+
+[[exception]]
+path = "eval/u7/reference_adapter.py"
+reason = "PyTorch, Transformers, and Pillow provide the official Python-native multimodal reference model runtime"
+python_runtime = "CPython 3.12"
+packages = ["torch", "transformers", "pillow"]
+input_schema = "kio.u7.reference-embedding-request/v1"
+output_schema = "kio.u7.reference-embedding-response/v1"
+lane = "manual-u7-reference"
+network = false
+gpu = true
+credentials = false
+reevaluate_when = "A supported Rust model runtime or accepted frozen vectors replace live reference inference"
+owner = "eval"
+status = "active-manual"
+
+[[exception]]
+path = "experiments/ocr-verification/provider_mistral.py"
+reason = "The official Mistral Python SDK is the Python-native provider boundary for this manual OCR experiment"
+python_runtime = "CPython 3.12"
+packages = ["mistralai"]
+input_schema = "kio.ocr.provider-request/v1"
+output_schema = "kio.ocr.provider-response/v1"
+lane = "manual-ocr-provider"
+network = true
+gpu = false
+credentials = true
+reevaluate_when = "A stable supported Rust SDK satisfies the pinned Mistral OCR provider contract"
+owner = "eval"
+status = "active-manual"
+
+[[exception]]
+path = "experiments/ocr-verification/fixtures/render_native.py"
+reason = "Pillow and reportlab are the mature Python-native raster and PDF rendering boundary for explicit fixture inputs"
+python_runtime = "CPython 3.12"
+packages = ["pillow", "reportlab"]
+input_schema = "kio.ocr.fixture-render.request/v1"
+output_schema = "kio.ocr.fixture-render.response/v1"
+lane = "manual-ocr-fixture-render"
+network = false
+gpu = false
+credentials = false
+reevaluate_when = "A Rust renderer provides equivalent deterministic CJK raster and PDF invariants"
+owner = "eval"
+status = "active-manual"

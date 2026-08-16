@@ -29,11 +29,6 @@ jobs:
       # This directly exercises the Rust-owned persona plan, renderer, manifest,
       # and schedule contracts alongside their public CLI/binary targets.
       - run: cargo test --workspace --all-targets --locked
-      - run: >-
-          python3 -m unittest
-          eval.test_build_macos_comparator_runtime
-          eval.test_eval_env
-          eval.test_u7_same_space
 
   persona-w0-integration:
     runs-on: ubuntu-latest
@@ -158,14 +153,14 @@ jobs:
           --corpus /tmp/kio-eval-corpus --bin target/release/kio
           --out /tmp/kio-crossscope-results.json
       - run: >-
-          target/release/kio-eval rerank-dump
+          target/release/kio-eval rerank dump --dataset synthetic
           --golden eval/golden-queries-short.jsonl
           --corpus /tmp/kio-eval-corpus --bin target/release/kio
           --limit 10 --out /tmp/kio-rerank-input.json
       - run: gzip -dc eval/rerank/rerank-input-fixture.json.gz > /tmp/kio-rerank-fixture-input.json
       - run: gzip -dc eval/rerank/rerank-output-bge-reranker-v2-m3.json.gz > /tmp/kio-rerank-fixture-output.json
       - run: >-
-          target/release/kio-eval rerank-apply
+          target/release/kio-eval rerank apply
           --input /tmp/kio-rerank-fixture-input.json
           --output /tmp/kio-rerank-fixture-output.json
           --report /tmp/kio-rerank-fixture-report.json

@@ -767,8 +767,9 @@ transformers。画像は既存の合成 fixture 15 枚を使うので**追加費
 V4 が `/tokenize` の `add_generation_prompt` で踏んだのと同種のずれで、取り違えると
 健全な経路を捨てるか壊れた経路を通すことになる。
 
-判定と wire の形は `eval/test_u7_same_space.py` (14 件) が CI の `rust` ジョブで
-守っている。**数値一致そのものは未測定** — GPU 実機が要る。
+判定・wire・malformed/timeout 境界は Rust `kio-eval::u7` の vector test が
+push CI で守る。Python は PyTorch/Transformers の薄い manual adapter だけであり、
+CI では起動しない。**数値一致そのものは未測定** — GPU 実機が要る。
 
 #### U8 `image_object_hashes` の writer / reader [P1]
 現在 3 構造体に宣言のみ ([07 §5.1](../docs/07-adapter-spec.md) が明記)。
@@ -1594,7 +1595,8 @@ RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
 
 **V3b (24 問 recall)** — ✅ **2026-08-01 実施。これが V3 の結論を出した。**
 `eval/fixtures/normalized-corpus` の 1013 passages (persona 20 本すべて) に対し、
-`answerable` 24/24 で測れた。手順は [eval/v3/V3B-PROMPT.md](../eval/v3/V3B-PROMPT.md)。
+`answerable` 24/24 で測れた。実行手順は廃止済みで、結果は
+[eval/v3/results/](../eval/v3/results/README.md) に非authorizing archiveとして残す。
 
 | 幅 | recall@10 |
 |---|---:|
@@ -1606,12 +1608,12 @@ RTX 4070 / vLLM 0.26.0 / `Qwen/Qwen3-VL-Embedding-2B` rev `9f2f7e71`。
 > **この 0.5417 を、下の品質計器の表にある Rust baseline の 0.9167 と比べないこと。**
 > 同じ 24 問 fixture を使うが**計器が違う**。`kio-eval benchmark baseline` は実際の `kio` バイナリを
 > `kio --json search <query> --all-scopes` で回すので、chunk 分割・hybrid・集約まで
-> 通った Kio の実力である。`v3_mrl.py` は Kio を一切通さず、**1 ファイル = 1 passage**
+> 通った Kio の実力である。退役した V3 計器は Kio を一切通さず、**1 ファイル = 1 passage**
 > (分割なし・先頭 4000 文字) の素の cosine しか見ない。
 >
 > 粗い計器をあえて使っているのは、**V3 が比べるのは同じベクトルの 2 つの幅**であり、
 > 分割規則も入力構築も instruction も両側で相殺されるからである
-> (`v3_mrl.py` の docstring)。**絶対値は Kio の検索品質ではなく、差だけが意味を持つ。**
+> という粗い射影だった。**絶対値は Kio の検索品質ではなく、差だけが意味を持つ。**
 > 0.5417 は 0.9167 からの劣化ではない。
 正しい読みは「768 が recall を落とすという証拠は出なかった」であり、
 それが移行しない理由として十分である — 2048 は `chunk_vec` の DDL 改訂と
@@ -1741,8 +1743,7 @@ adapter を 1 つしか持たず、query も `EmbeddingInputType::Query` とし�
 (b) はゲートの意味そのものを変える大改訂なので、(a) の実測なしに入らないこと。
 
 > **(a) の実測 (2026-08-01・V3b と同じセッション)** — 全文は
-> [eval/v3/results/](../eval/v3/results/README.md)。`v3_mrl.py` に
-> `--query-instruction` を足し、passage は素のまま query にだけ
+> [eval/v3/results/](../eval/v3/results/README.md)。退役した実験で passage は素のまま query にだけ
 > `Instruct: …\nQuery: ` を前置して同じ 24 問を回した。
 >
 > | 条件 | recall@10 (2048) | recall@10 (768) |
@@ -1826,9 +1827,8 @@ qhard の 24 ファイルは `/tmp` にしか無かったため `~/kio-baseline-
 > V3b はこの正規化済み Markdown を `--corpus` に渡せば成立する。5.0 MB のテキストなので
 > **commit して恒久化できる規模**であり、そうすれば以後の再測定は無料になる。
 
-`register_fixture.py` は**削除されたのではなく、一度も commit されていなかった**
-(`git log --all --diff-filter=D` が何も返さない)。生き残った fixture から仕様を採取して
-再実装した (`eval/register_fixture.py`) — scope の規則は「`<persona>/home` 配下で
+旧 fixture 登録経路から仕様を採取し、現在は Rust `kio-eval fixture register` に
+一本化した。scope の規則は「`<persona>/home` 配下で
 ファイルを直接含むディレクトリ」で、p01〜p20 すべて 20 個ちょうど、
 `scope-registry.sqlite` と当時の `registration-report.json` に一致する。
 

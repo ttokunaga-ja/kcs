@@ -71,7 +71,7 @@ Non-negotiable. Any behavior that only holds for a shortcut is rejected.
    the resulting scopes (optionally against a planted query set, §6).
 
 The existing synthetic fixture already followed phases 1-2 correctly (Codex wrote
-plain files; `register_fixture.py` ran real `kio index`; no `.kio` was
+plain files; the now-retired registration experiment ran real `kio index`; no `.kio` was
 hand-authored). This round (a) makes the phase-1 content **realistic** and (b) adds
 phase 3 (**real mutation history**), which the synthetic fixture never exercised.
 
@@ -188,7 +188,7 @@ The existing synthetic fixture was **583 OCR units ≈ $1.17 Batch** (270 PDF pa
 150 docx pages + 98 slides + 65 images). A realistic corpus of similar size lands
 in the same order (**~$1–2**). **Budget scales with the count of Office+image+scan
 files** — pick a per-persona OCR-file count and multiply. Recommend a hard ceiling
-(e.g. $3) and the existing `ocr_batch_driver.py` ceiling guard when generating.
+(e.g. $3) and the product cost-ledger ceiling guard when generating.
 
 ---
 
@@ -300,7 +300,7 @@ content or shortcuts.
 - `kio init` + `kio index --approve --online` over each persona root; Kio makes the
   `.kio` child scopes, converts Office→PDF, OCRs (Batch), embeds, indexes.
 - Cost: keep total OCR pages under the agreed ceiling; run via a spend-guarded
-  driver (pattern: `ocr_batch_driver.py`). → commit #1 per scope.
+  Rust-owned registration/orchestration boundary. → commit #1 per scope.
 
 ### Phase 3 — Evolve (Codex mutates plain files → real history)
 Codex performs **realistic mutation rounds** on the ordinary files; the operator

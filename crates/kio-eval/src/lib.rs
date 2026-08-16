@@ -20,6 +20,7 @@ pub mod persona_render_artifact;
 pub mod persona_scaffold;
 pub mod persona_schedule;
 pub(crate) mod process_boundary;
+pub mod python_exceptions;
 pub mod qhard;
 pub mod replay;
 pub mod replay_boundary;

@@ -23,16 +23,16 @@
 そこで**測定を 2 つに割り、git で繋ぐ**:
 
 ```
-kio-eval rerank-dump  (Mac)     search      -> rerank-input.json
+kio-eval rerank dump  (Mac)     search      -> rerank-input.json
 tasks/... のブリーフ  (GPU 機)   rerank      -> rerank-output.json
-kio-eval rerank-apply (Mac)     並べ替え適用 -> Recall@10 before/after
+kio-eval rerank apply (Mac)     並べ替え適用 -> Recall@10 before/after
 ```
 
 Mac 側は候補を **text lane が返した順のまま**記録し、evidence pointerが束縛する
 検証済みChunk CASから**索引が持っているのと同じ文字**を取得する (03 §8.1)。
 baseline の Recall@10 も Mac 側で計算するので、**後半を信用する必要が無い**。
 
-`kio-eval rerank-dump` がこのpassをRustで実行する。
+`kio-eval rerank dump --dataset synthetic` がこのpassをRustで実行する。
 
 ---
 
@@ -60,7 +60,7 @@ reranker が並べ替える対象が存在しない。reranker は
 
 ## 2.1 リポジトリは既に同じことを知っていた
 
-`eval/register_fixture.py` の docstring:
+現在 Rust が所有する `kio-eval fixture register` へ移した fixture 契約の記録:
 
 > 合成 Rust `kio-eval` は 1.0/1.0/1.0 で目標 0.8 に対し天井に張り付いており、
 > 劣化を測れない。24 問の fixture-B は直近 0.9167 (hard3 は 6/8) で、
@@ -125,7 +125,7 @@ FTS が MATCH した分がすべてになる。FTS の MATCH は本質的に疎�
 ## 費用の見積り
 
 fixture-B の全 chunk は **3,004 件** (420 scope 合計、実測)。
-1 chunk 400 字とすると約 60 万トークン。`register_fixture.py` が記録している
+1 chunk 400 字とすると約 60 万トークン。旧測定記録にある
 **$1.07 は OCR 1,112 行**のぶんで、こちらは OCR 不要 (正規化済みを使うため)、
 **embedding だけ**なので桁がひとつ以上小さい。
 
@@ -207,7 +207,8 @@ GPU 側の報告で判明: `candidates[].text` に**空白のみが 36 件**あ�
 - **索引そのものに、内容の無い chunk が 20 件ある** (3,004 chunk 中)。
   すべて `byte_start=0, byte_end=3` の `'\n\n\n'` で、**空行で始まるファイル**の
   先頭 chunk である
-- `rerank_dump_fixture.py` はそれを**忠実に写しているだけ**で、バグではない。
+- 現行 Rust `kio-eval rerank dump --dataset fixture-b` はそれを
+  **忠実に写しているだけ**で、バグではない。
   落とす方が実際の検索結果から乖離する
 
 したがって直す先があるとすれば **chunker** である。内容の無い chunk は
@@ -230,14 +231,14 @@ GPU 側の報告で判明: `candidates[].text` に**空白のみが 36 件**あ�
 
 手順:
 
-1. `eval/register_fixture.py` で fixture 環境を作る
+1. `kio-eval fixture register` で fixture 環境を作る
 2. **候補密度を先に確認する。**fixture-B で 1 問あたり何件返るかを数え、
    10 件を超えることを確かめてから先へ進む。ここが 10 件以下なら、
    reranker はこの器でも測れない
-3. fixture-B固有経路は `rerank_dump_fixture.py`、synthetic経路はRust
-   `kio-eval rerank-dump` を使う
+3. fixture-B は `kio-eval rerank dump --dataset fixture-b`、synthetic は
+   `kio-eval rerank dump --dataset synthetic` を使う
 4. GPU 機のブリーフを書く (入力 JSON の形は dump が出したものそのまま)
-5. `kio-eval rerank-apply` で並べ替えを適用して採点する
+5. `kio-eval rerank apply` で並べ替えを適用して採点する
 
 **2 を飛ばさないこと。**§2 は「測る前に器を確かめなかった」ことで
 1 往復ぶん無駄にした記録である。
@@ -247,7 +248,7 @@ GPU 側の報告で判明: `candidates[].text` に**空白のみが 36 件**あ�
 03 §253 は **scope 直下のファイルだけ**を管理対象とし、サブフォルダは
 明示的に含めない (横断は scope_registry + aggregator の仕事、05 §1.8)。
 fixture corpus は深く入れ子なので、**1 ディレクトリ 1 scope** で登録する
-必要がある。`register_fixture.py` はそのために在る。
+必要がある。Rust fixture registration はこの規則を closed contract として固定する。
 
 （この挙動を欠陥と誤認して 1 度調べ直した。仕様どおりである。）
 

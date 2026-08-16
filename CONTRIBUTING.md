@@ -57,13 +57,12 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked --
 
 The canonical evaluator, cross-scope supplement, offline rerank scorer, scale
 fixture lifecycle, and the entire persona lifecycle are Rust (`kio-eval`) and
-are covered by the workspace tests. Python remains only for experimental ML
-lanes:
+are covered by the workspace tests. Push and pull-request CI executes no
+Python. The Rust exception-ledger test requires every tracked `.py` file to be
+an explicit manual Python-native ML/SDK/render adapter:
 
 ```bash
 cargo test -p kio-eval --all-targets --locked
-# Run the relevant explicit Python modules; CI lists its complete set in ci.yml.
-python3 -m unittest eval.test_eval_env
 ```
 
 For a local persona-boundary smoke, use the nested Rust lifecycle: `kio-eval

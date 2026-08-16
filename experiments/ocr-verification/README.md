@@ -12,7 +12,7 @@ The two Python files are deliberately narrow native-runtime boundaries:
   `kio.ocr.provider-response/v1` record on stdout. It has no verdict,
   reporting, fixture selection, output discovery, or dry-run mode.
 - `fixtures/render_native.py` uses Pillow and reportlab to render explicitly
-  named image inputs to one explicitly named create-only PDF. Its request and
+  named PNG inputs to one explicitly named create-only PDF. Its request and
   response schemas are `kio.ocr.fixture-render.request/v1` and
   `kio.ocr.fixture-render.response/v1`; its response binds the final PDF's
   byte count and SHA-256. Its parent directory must already exist and output
@@ -54,7 +54,11 @@ kio-eval ocr render \
 
 All three outputs are create-only. The provider child receives only
 `MISTRAL_API_KEY`; the renderer receives no credentials. Rust owns the
-normalized OCR response, threshold verdict, and report schemas.
+normalized OCR response, threshold verdict, and report schemas. Before the
+renderer starts, Rust descriptor-binds every PNG and copies its exact bytes to
+a private snapshot directory; the adapter never reopens caller-controlled
+input names. Per-image, aggregate-byte, aggregate-pixel, and 64 MiB output
+bounds are enforced on both sides of the JSONL boundary.
 
 Existing PDFs, PNGs, and `out*/` response/report files are retained as
 non-authorizing archive artifacts. They are neither fixture-discovery inputs

@@ -457,22 +457,24 @@ kio search "<PDF 中の語>"
 
 ```bash
 vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling
-python3 eval/u7/u7_same_space.py \
-  --base-url http://127.0.0.1:8000 \
+kio-eval u7 --base-url http://127.0.0.1:8000 \
   --model Qwen/Qwen3-VL-Embedding-2B \
-  --out eval/u7/results/u7-same-space.json
+  --reference-python /absolute/path/to/reference-venv/bin/python3 \
+  --reference-adapter /absolute/path/to/kio/eval/u7/reference_adapter.py \
+  --reference-model /absolute/path/to/pinned-local-Qwen3-VL-Embedding-2B \
+  --text "same-space text control" \
+  --image /absolute/path/to/control-image.png \
+  --out /absolute/path/to/u7-same-space.json
 ```
 
 **llama.cpp 経路を採るなら必須。**vLLM は公式サポートなので優先度は下がる。
 判定は**モダリティごと・最小値**で出る。`reason: harness-suspect` が出たら
 image の数字は読まないこと (参照側の問題である)。
 
-## V3b の 2 回目 JSON
+## V3b archive
 
-`eval/v3/V3B-PROMPT.md` の手順で V3b を 2 回走らせ、**2 回目の JSON を必ず保存する**
-(成果物は `eval/v3/results/`)。
-前回は出力先が消えて記録が残らず、決定性の主張が記録されていない stdout に
-依存している。
+V3b の executable experiment は退役した。既存 `eval/v3/results/` は
+non-authorizing archive であり、新しい product 合格判定や再実行手順を提供しない。
 
 ---
 
