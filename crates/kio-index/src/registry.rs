@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::Result;
 
@@ -48,6 +48,40 @@ pub fn default_registry_path() -> Result<PathBuf> {
 }
 
 impl RegistryDb {
+    /// Open the registry as a strictly read-only cache. Evidence operations use
+    /// this path so an absent registry never creates directories, a database,
+    /// WAL sidecars, or schema state.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let leaf = path.file_name().ok_or_else(|| {
+            crate::IndexError::Schema(format!(
+                "scope registry path has no file name: {}",
+                path.display()
+            ))
+        })?;
+        // SQLite's NOFOLLOW flag rejects a symlink in *any* pathname
+        // component on macOS. Resolve the existing parent first so ordinary
+        // OS-owned aliases such as /var -> /private/var remain usable, while
+        // still passing the untrusted final registry leaf to NOFOLLOW.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent = parent.canonicalize().map_err(|error| {
+            crate::IndexError::Schema(format!(
+                "resolve scope registry parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let path = parent.join(leaf);
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.busy_timeout(Duration::from_millis(5000))?;
+        Ok(Self { conn })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)
@@ -89,6 +123,10 @@ impl RegistryDb {
 
     pub fn open_default() -> Result<Self> {
         Self::open(default_registry_path()?)
+    }
+
+    pub fn open_default_read_only() -> Result<Self> {
+        Self::open_read_only(default_registry_path()?)
     }
 
     /// R15-3: retire every registration for `kio_path` whose `scope_id` differs
@@ -259,6 +297,23 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    #[test]
+    fn read_only_open_never_creates_a_missing_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("scope-registry.sqlite");
+        assert!(RegistryDb::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn read_only_open_reads_existing_registry_without_schema_changes() {
+        let (dir, db) = open_temp();
+        db.upsert(&entry("scope_a", "/tmp/a", true, true)).unwrap();
+        let db = RegistryDb::open_read_only(dir.path().join("scope-registry.sqlite")).unwrap();
+        assert_eq!(db.lookup_scope_id("scope_a").unwrap().len(), 1);
     }
 
     #[test]

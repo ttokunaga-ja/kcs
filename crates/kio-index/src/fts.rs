@@ -72,6 +72,30 @@ pub struct SourceIndexConnection {
     conn: Connection,
     _source: BoundSourceIndex,
 }
+
+/// One exact, derived-index candidate for Evidence retargeting.
+///
+/// This is deliberately only a row from the disposable SQLite projection.
+/// Callers must authenticate every returned value against the target
+/// manifest/chunk CAS before it can become Evidence output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetargetCandidate {
+    pub chunk_id: String,
+}
+
+/// Bounded result of an exact Evidence retarget candidate lookup.
+///
+/// `Overflow` means SQLite produced more than [`RETARGET_CANDIDATE_LIMIT`]
+/// exact rows. It is intentionally distinct from an empty or ambiguous row
+/// set so the command surface can return its dedicated bounded-query error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetargetCandidates {
+    Candidates(Vec<RetargetCandidate>),
+    Overflow,
+}
+
+/// Maximum exact candidate rows Evidence retargeting may inspect.
+pub const RETARGET_CANDIDATE_LIMIT: usize = 4096;
 impl std::ops::Deref for SourceIndexConnection {
     type Target = Connection;
     fn deref(&self) -> &Self::Target {
@@ -87,6 +111,50 @@ impl std::fmt::Debug for SourceIndexConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceIndexConnection")
             .finish_non_exhaustive()
+    }
+}
+
+impl SourceIndexConnection {
+    /// Recheck that the retained SQLite descriptor is still the file denoted
+    /// by its capability-relative public leaf. This catches a replacement
+    /// after the connection has opened; callers must treat failure as fatal.
+    pub fn recheck_source_identity(&self) -> Result<()> {
+        validate_bound_source_name_identity(&self._source)
+    }
+
+    /// Select only exact target-instance candidates from the derived index.
+    ///
+    /// There is no FTS, similarity, ranking, prefix, or normalization path
+    /// here. The SQLite database merely supplies bounded candidates for a
+    /// later CAS-authenticated reconstruction.
+    pub fn exact_retarget_candidates(
+        &self,
+        raw_hash: &str,
+        tool_profile_hash: &str,
+        r#gen: u64,
+    ) -> Result<RetargetCandidates> {
+        let limit_plus_one = i64::try_from(RETARGET_CANDIDATE_LIMIT + 1)
+            .expect("retarget candidate limit fits SQLite integer");
+        let mut statement = self.conn.prepare(
+            "SELECT chunk_id
+             FROM chunks
+             WHERE raw_hash = ?1 AND tool_profile_hash = ?2 AND gen = ?3
+             ORDER BY chunk_id
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![raw_hash, tool_profile_hash, r#gen, limit_plus_one],
+            |row| {
+                Ok(RetargetCandidate {
+                    chunk_id: row.get(0)?,
+                })
+            },
+        )?;
+        let candidates = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        if candidates.len() > RETARGET_CANDIDATE_LIMIT {
+            return Ok(RetargetCandidates::Overflow);
+        }
+        Ok(RetargetCandidates::Candidates(candidates))
     }
 }
 
@@ -3717,6 +3785,133 @@ mod tests {
         .expect_err("helper must never create a missing source index");
         assert!(error.to_string().contains("inspect source index"));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn exact_retarget_candidates_are_exact_bounded_and_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        let mut index = SqliteFtsIndex::open(&path, config.clone()).unwrap();
+        let mut first = row("retarget-a", "first");
+        first.raw_hash =
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
+        first.raw_path = "docs/a.md".to_owned();
+        first.heading_path = Some(vec!["A".to_owned(), "B".to_owned()]);
+        first.r#gen = 7;
+        first.unit_key = "doc:target-a".to_owned();
+        index.index_chunk(&first).unwrap();
+        let mut second = first.clone();
+        second.chunk_id = "retarget-b".to_owned();
+        second.unit_key = "doc:target-b".to_owned();
+        index.index_chunk(&second).unwrap();
+        let mut other = first.clone();
+        other.chunk_id = "retarget-other".to_owned();
+        other.raw_path = "docs/other.md".to_owned();
+        other.heading_path = Some(vec!["Other heading".to_owned()]);
+        index.index_chunk(&other).unwrap();
+        drop(index);
+        let before = std::fs::read(&path).unwrap();
+
+        let source = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .unwrap();
+        let exact = source
+            .exact_retarget_candidates(&first.raw_hash, &first.tool_profile_hash, first.r#gen)
+            .unwrap();
+        let RetargetCandidates::Candidates(rows) = exact else {
+            panic!("exact rows must not overflow");
+        };
+        // The query deliberately does not trust a historical path or heading
+        // from SQLite. All three same-instance rows are candidates, including
+        // the one with different derived path/heading.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].chunk_id, "retarget-a");
+        assert_eq!(rows[1].chunk_id, "retarget-b");
+        assert_eq!(rows[2].chunk_id, "retarget-other");
+        assert!(matches!(
+            source
+                .exact_retarget_candidates(
+                    &first.raw_hash,
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    first.r#gen,
+                )
+                .unwrap(),
+            RetargetCandidates::Candidates(rows) if rows.is_empty()
+        ));
+        source.recheck_source_identity().unwrap();
+        drop(source);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn exact_retarget_candidates_classify_overflow() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        let mut index = SqliteFtsIndex::open(&path, config.clone()).unwrap();
+        let mut candidate = row("retarget-00000", "candidate");
+        candidate.raw_hash =
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        candidate.raw_path = "docs/overflow.md".to_owned();
+        candidate.heading_path = Some(vec!["Overflow".to_owned()]);
+        for number in 0..=RETARGET_CANDIDATE_LIMIT {
+            candidate.chunk_id = format!("retarget-{number:05}");
+            candidate.unit_key = format!("doc:{number}");
+            index.index_chunk(&candidate).unwrap();
+        }
+        drop(index);
+
+        let source = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            source
+                .exact_retarget_candidates(
+                    &candidate.raw_hash,
+                    &candidate.tool_profile_hash,
+                    candidate.r#gen,
+                )
+                .unwrap(),
+            RetargetCandidates::Overflow
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_connection_recheck_rejects_named_leaf_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        let replacement = directory.path().join("replacement.sqlite");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        drop(SqliteFtsIndex::open(&replacement, config.clone()).unwrap());
+        let source = open_existing_source_index_connection(
+            &path,
+            ExistingSourceIndexOpenMode::ReadOnly,
+            &config,
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let error = source
+            .recheck_source_identity()
+            .expect_err("replacement must invalidate retained source identity");
+        assert!(
+            error.to_string().contains("hard link")
+                || error.to_string().contains("name changed while operating")
+        );
     }
 
     #[test]

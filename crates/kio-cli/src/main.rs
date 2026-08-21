@@ -519,6 +519,8 @@ struct EvidenceArgs {
 #[derive(Debug, Subcommand)]
 enum EvidenceCommand {
     Verify(EvidenceVerifyArgs),
+    /// Reissue one Evidence Pointer against one exact later commit.
+    Retarget(EvidenceRetargetArgs),
 }
 
 #[derive(Debug, Args)]
@@ -541,6 +543,16 @@ struct EvidenceVerifyArgs {
     /// Fail on any degraded resolution instead of reporting it.
     #[arg(long)]
     strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct EvidenceRetargetArgs {
+    /// Evidence Pointer URI, inline JSON, or `-` to read from stdin.
+    #[arg(value_name = "POINTER")]
+    pointer: String,
+    /// Exact canonical target commit object hash.
+    #[arg(long, value_name = "COMMIT")]
+    at: String,
 }
 
 /// `kio repair` (10 §7.5).
@@ -12843,6 +12855,11 @@ fn read_pointer_input(args: Vec<String>) -> Result<String> {
             .map_err(|_| KioError::invalid_usage("pointer stdin must be UTF-8"))?;
         return Ok(input.trim().to_owned());
     }
+    if pointer.len() as u64 > MAX_POINTER_INPUT_BYTES {
+        return Err(KioError::invalid_usage(
+            "pointer argument exceeds the 64 KiB limit",
+        ));
+    }
     Ok(pointer)
 }
 
@@ -13099,31 +13116,43 @@ enum PointInTimeAttribution {
 fn verify_point_in_time_attribution(
     target: &ScopeTarget,
     repo: &Repository,
-    raw_hash: &str,
+    pointer: &EvidencePointer,
     normalize: &NormalizeRef,
-    chunk_hash: &str,
     chunk: &ChunkObject,
-    pointer_commit: &str,
+    association_connection: Option<&Connection>,
 ) -> Result<PointInTimeAttribution> {
     let manifest_hash = &normalize.manifest_hash;
     let store = ObjectStore::new(&target.kio_dir);
     let manifest_path = store.content_path(ContentObjectKind::Manifest, manifest_hash)?;
     if !path_entry_exists(&manifest_path)? {
-        return resolve_manifest_missing(target, repo, raw_hash, chunk_hash, pointer_commit);
+        return resolve_manifest_missing(
+            target,
+            repo,
+            &pointer.raw_hash,
+            &pointer.chunk_hash,
+            &pointer.commit,
+            association_connection,
+        );
     }
     // The tree's manifest hash is the point-in-time authority. Reuse the
     // historical-reindex loader rather than inspecting only a manifest entry:
     // it verifies the manifest CAS digest, canonical/schema/identity tuple,
     // and every Done entry's immutable normalized-unit CAS object. A mutable
     // normalized-unit cache therefore cannot make this pointer appear Alive.
-    let done_units = pinned_done_units(&target.kio_dir, raw_hash, normalize)?;
+    let done_units = pinned_done_units(&target.kio_dir, &pointer.raw_hash, normalize)?;
     if !done_units.iter().any(|unit| {
         unit.unit_key == chunk.unit_key
             && hash_bytes(unit.markdown.as_bytes()) == chunk.unit_content_hash
     }) {
         return Ok(PointInTimeAttribution::NotFound);
     }
-    match check_publication_and_association(target, repo, chunk_hash, pointer_commit)? {
+    match check_publication_and_association_for_verifier(
+        target,
+        repo,
+        association_connection,
+        &pointer.chunk_hash,
+        &pointer.commit,
+    )? {
         AssociationCheck::Ok => Ok(PointInTimeAttribution::Alive),
         AssociationCheck::NotFound => Ok(PointInTimeAttribution::NotFound),
         AssociationCheck::IndexRebuilding => Ok(PointInTimeAttribution::IndexRebuilding),
@@ -13140,6 +13169,7 @@ fn resolve_manifest_missing(
     raw_hash: &str,
     chunk_hash: &str,
     pointer_commit: &str,
+    association_connection: Option<&Connection>,
 ) -> Result<PointInTimeAttribution> {
     let purge = PurgeState::new(&target.kio_dir);
     let tombstone = purge.read_tombstone(raw_hash)?;
@@ -13180,7 +13210,13 @@ fn resolve_manifest_missing(
 
     // Direct resolution: pointer_commit is still the ancestry basis for 6a's
     // publication/association checks.
-    match check_publication_and_association(target, repo, chunk_hash, pointer_commit)? {
+    match check_publication_and_association_for_verifier(
+        target,
+        repo,
+        association_connection,
+        chunk_hash,
+        pointer_commit,
+    )? {
         AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
         AssociationCheck::IndexRebuilding => return Ok(PointInTimeAttribution::IndexRebuilding),
         AssociationCheck::NotFound => {}
@@ -13192,7 +13228,13 @@ fn resolve_manifest_missing(
     if canonical.event.kind == EventKind::Retired
         && let Some(link_commit) = &canonical.event.resurrection_commit
     {
-        match check_publication_and_association(target, repo, chunk_hash, link_commit)? {
+        match check_publication_and_association_for_verifier(
+            target,
+            repo,
+            association_connection,
+            chunk_hash,
+            link_commit,
+        )? {
             AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
             AssociationCheck::IndexRebuilding => {
                 return Ok(PointInTimeAttribution::IndexRebuilding);
@@ -13231,8 +13273,41 @@ fn check_publication_and_association(
     )
     .map_err(index_to_kio)?;
 
+    check_publication_and_association_on_connection(&conn, repo, chunk_hash, basis_commit)
+}
+
+/// Evidence verification supplies the source-index descriptor retained by its
+/// scope binding. Other pointer consumers keep their established lazy opener.
+/// Both routes execute the same authoritative association core.
+fn check_publication_and_association_for_verifier(
+    target: &ScopeTarget,
+    repo: &Repository,
+    connection: Option<&Connection>,
+    chunk_hash: &str,
+    basis_commit: &str,
+) -> Result<AssociationCheck> {
+    match connection {
+        Some(connection) => check_publication_and_association_on_connection(
+            connection,
+            repo,
+            chunk_hash,
+            basis_commit,
+        ),
+        None => check_publication_and_association(target, repo, chunk_hash, basis_commit),
+    }
+}
+
+/// The authoritative publication/config-association judgment.  Retarget keeps
+/// the source-index descriptor it bound at command start and calls this core
+/// directly; ordinary pointer resolution uses the opener wrapper above.
+fn check_publication_and_association_on_connection(
+    conn: &Connection,
+    repo: &Repository,
+    chunk_hash: &str,
+    basis_commit: &str,
+) -> Result<AssociationCheck> {
     let introductions =
-        kio_index::fts::chunk_publication_introductions(&conn, chunk_hash).map_err(index_to_kio)?;
+        kio_index::fts::chunk_publication_introductions(conn, chunk_hash).map_err(index_to_kio)?;
     let mut publication_ok = false;
     for introduction in &introductions {
         if is_ancestor_or_equal(repo, introduction, basis_commit)? {
@@ -13245,7 +13320,7 @@ fn check_publication_and_association(
     }
 
     let live = read_chunking_config(repo)?.chunking_config_hash;
-    let Some(resolved_config) = resolve_reaching_chunking_config(&conn, repo, &live, basis_commit)?
+    let Some(resolved_config) = resolve_reaching_chunking_config(conn, repo, &live, basis_commit)?
     else {
         return Ok(AssociationCheck::NotFound);
     };
@@ -13628,15 +13703,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // (PB50).
     let mut manifest_missing = false;
     if !commit_shallow && let Some(normalize) = &entry_normalize {
-        match verify_point_in_time_attribution(
-            &target,
-            &repo,
-            &pointer.raw_hash,
-            normalize,
-            &pointer.chunk_hash,
-            &chunk,
-            &pointer.commit,
-        )? {
+        match verify_point_in_time_attribution(&target, &repo, pointer, normalize, &chunk, None)? {
             PointInTimeAttribution::Alive => {}
             PointInTimeAttribution::ManifestMissing => manifest_missing = true,
             PointInTimeAttribution::NotFound => {
@@ -13711,7 +13778,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
 /// `resolve_cursor_exec_scopes` (search cursor) so a `.kio`-copy collision is
 /// detected identically on both paths (O7).
 fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
-    resolve_scope_id_in_registry_with_hint(scope_id, None)
+    resolve_scope_id_in_registry_with_hint(scope_id, None, ScopeResolutionMode::Normal)
 }
 
 /// QA67 (step4b-contract-tests-p3a.md §T, PB24, 10 §3 L297-299): fail-closed
@@ -13739,14 +13806,15 @@ fn registry_duplicate_guard(scope_id: &str) -> Result<()> {
 fn resolve_scope_id_in_registry_with_hint(
     scope_id: &str,
     extra_live: Option<ScopeTarget>,
+    mode: ScopeResolutionMode,
 ) -> Result<Option<ScopeTarget>> {
     let mut live = Vec::<ScopeTarget>::new();
     live.extend(extra_live);
-    match RegistryDb::open_default() {
+    match open_registry_for_scope_resolution(mode) {
         Ok(registry) => {
             if let Ok(entries) = registry.lookup_scope_id(scope_id) {
                 for entry in &entries {
-                    if let Some(target) = open_scope_from_hint(&entry.root_path)
+                    if let Some(target) = open_scope_from_hint_with_mode(&entry.root_path, mode)
                         && target.scope_id == scope_id
                     {
                         live.push(target);
@@ -13758,12 +13826,16 @@ fn resolve_scope_id_in_registry_with_hint(
         // caller still falls back to the scope_path hint) instead of silently
         // conflating it with a genuine registry miss; WAL + busy_timeout makes the
         // transient case rare, and a real failure is now observable.
-        Err(_) => {
+        Err(_) if matches!(mode, ScopeResolutionMode::Normal) => {
             eprintln!(
                 "warning: scope registry unavailable (search cache); \
                  resolving evidence scope via the scope_path hint only"
             );
         }
+        // A missing device registry is the normal first-run state for the
+        // strict read-only Evidence path.  It remains a non-authoritative cache
+        // miss and must not prefix the command's structured JSON stream.
+        Err(_) => {}
     }
     if live.is_empty() {
         return Ok(None);
@@ -13781,22 +13853,53 @@ fn resolve_scope_id_in_registry_with_hint(
 }
 
 fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result<ScopeTarget> {
+    resolve_scope_target_with_mode(scope_id, scope_path_hint, ScopeResolutionMode::Normal)
+}
+
+/// Evidence must use the exact same candidate, duplicate, and incompatible-format
+/// resolution rules as ordinary Evidence consumers, but it must not repair HEAD.
+/// The mode-specific opener is the sole difference; registry entries and hints are
+/// still non-authoritative candidates.
+pub(crate) fn resolve_evidence_scope_target(
+    scope_id: &str,
+    scope_path_hint: Option<&str>,
+) -> Result<ScopeTarget> {
+    resolve_scope_target_with_mode(
+        scope_id,
+        scope_path_hint,
+        ScopeResolutionMode::EvidenceReadOnly,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ScopeResolutionMode {
+    /// Existing search/open behavior, including the established HEAD self-heal.
+    Normal,
+    /// Evidence verify/retarget behavior: no HEAD repair and no registry mutation.
+    EvidenceReadOnly,
+}
+
+fn resolve_scope_target_with_mode(
+    scope_id: &str,
+    scope_path_hint: Option<&str>,
+    mode: ScopeResolutionMode,
+) -> Result<ScopeTarget> {
     // PB23: a scope_path hint that itself resolves live to this scope_id is
     // folded into the registry-duplicate candidate pool below rather than
     // short-circuiting before that check ever runs (the old 1a/1b ordering
     // let a valid hint bypass duplicate detection entirely).
     let hinted = scope_path_hint
-        .and_then(open_scope_from_hint)
+        .and_then(|hint| open_scope_from_hint_with_mode(hint, mode))
         .filter(|target| target.scope_id == scope_id);
-    if let Some(target) = resolve_scope_id_in_registry_with_hint(scope_id, hinted)? {
+    if let Some(target) = resolve_scope_id_in_registry_with_hint(scope_id, hinted, mode)? {
         return Ok(target);
     }
     // Pragmatic fallback: the current working directory when it *is* the scope.
     // Object URIs carry no scope_path hint, and a freshly-created scope may not
     // yet be listed in the registry. Still gated on scope_id equality.
-    if let Ok(repo) = Repository::open_current()
-        && let Ok(target) = scope_target(repo.root())
-        && target.scope_id == scope_id
+    if let Some(target) = current_scope_target_with_mode(mode)
+        .ok()
+        .filter(|target| target.scope_id == scope_id)
     {
         return Ok(target);
     }
@@ -13817,7 +13920,7 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
     if let Some(hint) = scope_path_hint {
         candidate_roots.push(PathBuf::from(hint));
     }
-    if let Ok(registry) = RegistryDb::open_default()
+    if let Ok(registry) = open_registry_for_scope_resolution(mode)
         && let Ok(entries) = registry.lookup_scope_id(scope_id)
     {
         candidate_roots.extend(
@@ -13835,6 +13938,51 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
         }
     }
     Err(scope_unreachable_error(scope_id))
+}
+
+fn scope_target_with_mode(root: &Path, mode: ScopeResolutionMode) -> Result<ScopeTarget> {
+    match mode {
+        ScopeResolutionMode::Normal => scope_target(root),
+        ScopeResolutionMode::EvidenceReadOnly => {
+            let repo = Repository::open_for_search_without_head_repair(root)?;
+            Ok(ScopeTarget {
+                repo_root: repo.root().to_path_buf(),
+                kio_dir: repo.kio_dir().to_path_buf(),
+                scope_id: scope_id(repo.kio_dir())?,
+            })
+        }
+    }
+}
+
+fn current_scope_target_with_mode(mode: ScopeResolutionMode) -> Result<ScopeTarget> {
+    match mode {
+        ScopeResolutionMode::Normal => {
+            let repo = Repository::open_current()?;
+            scope_target(repo.root())
+        }
+        ScopeResolutionMode::EvidenceReadOnly => {
+            let cwd =
+                std::env::current_dir().map_err(|error| KioError::io(error.to_string(), "."))?;
+            scope_target_with_mode(&cwd, mode)
+        }
+    }
+}
+
+fn open_registry_for_scope_resolution(mode: ScopeResolutionMode) -> kio_index::Result<RegistryDb> {
+    match mode {
+        ScopeResolutionMode::Normal => RegistryDb::open_default(),
+        ScopeResolutionMode::EvidenceReadOnly => RegistryDb::open_default_read_only(),
+    }
+}
+
+fn open_scope_from_hint_with_mode(hint: &str, mode: ScopeResolutionMode) -> Option<ScopeTarget> {
+    let path = Path::new(hint);
+    scope_target_with_mode(path, mode).ok().or_else(|| {
+        (path.file_name() == Some(std::ffi::OsStr::new(".kio")))
+            .then(|| path.parent())
+            .flatten()
+            .and_then(|parent| scope_target_with_mode(parent, mode).ok())
+    })
 }
 
 /// QB6: reads `scope.json` directly (no `Repository::open*` — deliberately
@@ -13869,23 +14017,6 @@ fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Op
     // value all take the same version-specific fail-closed path before current
     // schema validation.
     (version != kio_core::scope::KIO_FORMAT_VERSION).then_some(version)
-}
-
-/// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kio`
-/// directory (08 §2.2 permits scope_path to name either). `None` if neither
-/// resolves to a valid scope.
-fn open_scope_from_hint(hint: &str) -> Option<ScopeTarget> {
-    let path = Path::new(hint);
-    if let Ok(target) = scope_target(path) {
-        return Some(target);
-    }
-    if path.file_name() == Some(std::ffi::OsStr::new(".kio"))
-        && let Some(parent) = path.parent()
-        && let Ok(target) = scope_target(parent)
-    {
-        return Some(target);
-    }
-    None
 }
 
 /// Working tree first (rename-tolerant), else a read-only expansion of the CAS

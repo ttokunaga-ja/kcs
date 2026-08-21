@@ -510,6 +510,25 @@ impl Repository {
         Ok(repo)
     }
 
+    /// The read-only counterpart to [`Self::open_for_search`]. It validates the
+    /// same immutable store and scope state but never repairs HEAD or refs.
+    pub fn open_for_search_without_head_repair(path: impl AsRef<Path>) -> Result<Self> {
+        let root = path.as_ref().canonicalize().kio_io(path.as_ref())?;
+        let kio_dir = root.join(".kio");
+        validate_store_directory(&kio_dir)?;
+        let repo = Self {
+            canonical_root: root.clone(),
+            root,
+            kio_dir: kio_dir.clone(),
+            store: ObjectStore::new(kio_dir),
+            bound_root: None,
+            bound_kio: None,
+        };
+        repo.validate_config()?;
+        repo.validate_scope()?;
+        Ok(repo)
+    }
+
     pub fn open_current_for_search() -> Result<Self> {
         let cwd = std::env::current_dir().map_err(|err| KioError::io(err.to_string(), "."))?;
         Self::open_for_search(cwd)
