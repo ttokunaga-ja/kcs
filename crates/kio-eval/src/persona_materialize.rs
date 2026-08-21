@@ -650,7 +650,9 @@ mod tests {
         persona_schedule::build_suite_schedule,
     };
     use std::fs;
-    use tempfile::{tempdir, tempdir_in};
+    use tempfile::tempdir;
+    #[cfg(target_os = "macos")]
+    use tempfile::tempdir_in;
 
     fn inputs(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let plan = frozen_plan(PersonaProfile::Tiny);

@@ -3,26 +3,42 @@
 //! The administrator-only Rust command owns the complete transaction: pin
 //! authentication, image creation/attachment, Mach-O closure rewriting,
 //! payload re-walking, and manifest publication.
-use super::{QhardError, RuntimeMountIdentity, observe_runtime_mount};
+use super::QhardError;
+#[cfg(target_os = "macos")]
+use super::{RuntimeMountIdentity, observe_runtime_mount};
+#[cfg(target_os = "macos")]
 use kio_core::cas::hash_bytes;
+#[cfg(target_os = "macos")]
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
 
+#[cfg(target_os = "macos")]
 const MANAGED_ROOT: &str = "/Library/KioComparatorRuntime";
+#[cfg(target_os = "macos")]
 const RUNTIME_ROOT: &str = "/Library/KioComparatorRuntime/v1";
+#[cfg(target_os = "macos")]
 const IMAGE_PATH: &str = "/Library/KioComparatorRuntime/v1.dmg";
+#[cfg(target_os = "macos")]
 const MANIFEST_PATH: &str = "/Library/KioComparatorRuntime/v1.manifest.json";
+#[cfg(target_os = "macos")]
 const BUILD_PARENT: &str = "/private/tmp";
+#[cfg(target_os = "macos")]
 const VOLUME_NAME: &str = "KioComparatorRuntime-v1";
+#[cfg(target_os = "macos")]
 const CANONICAL_EVALUATOR: &str = "/usr/local/bin/kio-eval";
 
+#[cfg(target_os = "macos")]
 const CONFIG_BYTES: &[u8] = br#"{"custom_adapters":[]}"#;
+#[cfg(target_os = "macos")]
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "macos")]
 const SYSTEM_PREFIXES: [&str; 2] = ["/usr/lib/", "/System/Library/"];
 
 /// The only public result of the administrator-owned installer.  All paths
@@ -194,16 +210,19 @@ pub fn reviewed_pins() -> &'static [ReviewedPin] {
 }
 
 /// Every externally recorded digest uses the repository-wide tagged form.
+#[cfg(target_os = "macos")]
 fn reviewed_hash(pin: ReviewedPin) -> String {
     format!("sha256:{}", pin.sha256_hex)
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileDigest {
     path: String,
     sha256: String,
     bytes: u64,
 }
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Preimage {
     schema_version: u8,
@@ -213,6 +232,7 @@ struct Preimage {
     payload_files: Vec<FileDigest>,
     closure_images: Vec<String>,
 }
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Serialize)]
 struct Manifest {
     #[serde(flatten)]
@@ -227,6 +247,7 @@ struct Manifest {
     manifest_xattr_policy: String,
     manifest_allowed_xattrs: Vec<String>,
 }
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct XattrObservation {
     path: String,
@@ -235,12 +256,14 @@ struct XattrObservation {
 fn err(message: impl Into<String>) -> QhardError {
     QhardError::Input(message.into())
 }
+#[cfg(target_os = "macos")]
 fn is_relative(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)
             .components()
             .all(|c| matches!(c, Component::Normal(_)))
 }
+#[cfg(target_os = "macos")]
 fn image_xattr_names_allowed(names: &BTreeSet<String>, permit_attach_cache: bool) -> bool {
     let mut allowed = BTreeSet::from([
         "com.apple.FinderInfo".to_owned(),
@@ -251,9 +274,11 @@ fn image_xattr_names_allowed(names: &BTreeSet<String>, permit_attach_cache: bool
     }
     names.is_subset(&allowed)
 }
+#[cfg(target_os = "macos")]
 fn runtime_root_matches_preimage(runtime_root: &Path, preimage: &Preimage) -> bool {
     runtime_root == Path::new(&preimage.runtime_root)
 }
+#[cfg(target_os = "macos")]
 fn insert_macho_alias<'a>(
     aliases: &mut BTreeMap<String, &'a str>,
     alias: &str,
@@ -268,6 +293,7 @@ fn insert_macho_alias<'a>(
         std::collections::btree_map::Entry::Occupied(_) => Err(err("ambiguous LC_ID_DYLIB alias")),
     }
 }
+#[cfg(target_os = "macos")]
 fn digest(path: &Path, maximum: u64) -> Result<(String, u64), QhardError> {
     let meta = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
     if !meta.file_type().is_file() || meta.len() > maximum {
@@ -281,6 +307,7 @@ fn digest(path: &Path, maximum: u64) -> Result<(String, u64), QhardError> {
     }
     Ok((hash_bytes(&bytes), meta.len()))
 }
+#[cfg(target_os = "macos")]
 fn validate(pre: &Preimage) -> Result<(), QhardError> {
     if pre.schema_version != 1
         || pre.runtime_root != "/Library/KioComparatorRuntime/v1"
@@ -1627,7 +1654,7 @@ mod macos {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -1822,13 +1849,6 @@ mod tests {
         assert!(validate(&p).is_err());
     }
     #[test]
-    fn install_is_the_only_public_comparator_construction_operation() {
-        #[cfg(not(target_os = "macos"))]
-        assert!(install_comparator_runtime().is_err());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
     fn malformed_macho_metadata_vectors_fail_closed() {
         assert!(
             macos::parse_otool(
@@ -1842,5 +1862,15 @@ mod tests {
         .expect("well formed bounded vector");
         assert_eq!(parsed.loads, ["@rpath/libx.dylib"]);
         assert_eq!(parsed.rpaths, ["@loader_path"]);
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod non_macos_tests {
+    use super::*;
+
+    #[test]
+    fn installation_fails_closed_off_macos() {
+        assert!(install_comparator_runtime().is_err());
     }
 }

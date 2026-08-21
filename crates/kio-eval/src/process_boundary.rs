@@ -584,7 +584,7 @@ fn verify_sealed_memfd(file: &fs::File) -> ProcessBoundaryResult<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn env_is_allowlisted_and_descriptor_backed() {
         let temp = tempfile::tempdir().unwrap();
