@@ -68,6 +68,56 @@ fn run(dir: &TempDir, args: &[&str]) -> (i32, Value) {
     (code, serde_json::from_slice(stream).unwrap())
 }
 
+fn batch_file(dir: &TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn batch_output(dir: &TempDir, path: &Path, strict: bool) -> std::process::Output {
+    let mut command = kio(
+        dir,
+        &["evidence", "verify", "--batch", path.to_str().unwrap()],
+    );
+    if strict {
+        command.arg("--strict");
+    }
+    command.arg("--json").output().unwrap()
+}
+
+/// The batch row must be the single verify status object verbatim, including
+/// statuses whose process exit is non-zero but whose JSON belongs on stdout.
+fn assert_single_batch_parity(
+    dir: &TempDir,
+    pointer: &Value,
+    strict: bool,
+    expected_exit: i32,
+) -> Value {
+    let pointer_json = serde_json::to_string(pointer).unwrap();
+    let mut single = kio(dir, &["evidence", "verify", &pointer_json]);
+    if strict {
+        single.arg("--strict");
+    }
+    let single = single.arg("--json").output().unwrap();
+    assert_eq!(single.status.code(), Some(expected_exit), "{single:?}");
+    let single_result: Value = serde_json::from_slice(&single.stdout).unwrap();
+
+    let path = batch_file(
+        dir,
+        if strict {
+            "single-parity-strict.jsonl"
+        } else {
+            "single-parity.jsonl"
+        },
+        format!("{pointer_json}\n").as_bytes(),
+    );
+    let batch = batch_output(dir, &path, strict);
+    assert_eq!(batch.status.code(), Some(expected_exit), "{batch:?}");
+    let batch_result: Value = serde_json::from_slice(&batch.stdout).unwrap();
+    assert_eq!(batch_result["results"][0]["result"], single_result);
+    batch_result["results"][0]["result"].clone()
+}
+
 fn registry_path(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join(".test-data/kio/scope-registry.sqlite")
 }
@@ -984,6 +1034,19 @@ fn pb21_pb22_live_duplicate_fails_closed_even_without_a_last_seen_tie() {
     );
     assert_eq!(output["status"], "registry_duplicate", "{output}");
     assert_eq!(output["error_code"], "KIO-E-REGISTRY-DUP-001", "{output}");
+
+    let batch = batch_file(
+        &dir_a,
+        "registry-duplicate.jsonl",
+        format!("{pointer_json}\n").as_bytes(),
+    );
+    let batch_output = batch_output(&dir_a, &batch, false);
+    assert_eq!(batch_output.status.code(), Some(3));
+    let batch: Value = serde_json::from_slice(&batch_output.stdout).unwrap();
+    assert_eq!(
+        batch["results"][0]["result"]["status"],
+        "registry_duplicate"
+    );
 }
 
 /// PB25: `kio repair registry-prune` deletes only registry rows whose
@@ -1338,6 +1401,16 @@ fn pb57_sqlite_unavailable_is_command_level_retryable_error() {
             "{output}"
         );
     }
+    let batch = batch_file(
+        &dir,
+        "index-rebuilding.jsonl",
+        format!("{pointer_json}\n").as_bytes(),
+    );
+    let output = batch_output(&dir, &batch, false);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty(), "no partial batch may publish");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-INDEX-REBUILDING-001");
 }
 
 /// PB56: the reason-based exit table — `alive` is 0, `not_found` is 4 (a
@@ -1407,16 +1480,354 @@ fn pb58_regression_active_journal_blocks_verify_for_unrelated_raw_hash() {
         output["error_code"], "KIO-E-PURGE-JOURNAL-ACTIVE-001",
         "{output}"
     );
+    let batch = batch_file(
+        &dir,
+        "active-purge.jsonl",
+        format!("{pointer_json}\n").as_bytes(),
+    );
+    let batch_output = batch_output(&dir, &batch, false);
+    assert_eq!(batch_output.status.code(), Some(3));
+    assert!(
+        batch_output.stdout.is_empty(),
+        "no partial batch may publish"
+    );
+    let error: Value = serde_json::from_slice(&batch_output.stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-PURGE-JOURNAL-ACTIVE-001");
 }
 
-/// PB62 [regression-lock]: `--batch` stays outside the MVP (exit 2).
+/// PB62: the typed `evidence verify` leaf has exactly one input form.
 #[test]
-fn pb62_regression_batch_flag_rejected() {
-    let (dir, ..) = fixture();
-    kio(&dir, &["evidence", "verify", "--batch", "pointers.jsonl"])
-        .arg("--json")
+fn pb62_batch_and_single_are_clap_exactly_one() {
+    let (dir, pointer, _) = fixture();
+    kio(&dir, &["evidence", "verify", "--json"])
         .assert()
         .code(2);
+
+    let path = batch_file(&dir, "one.jsonl", format!("{pointer}\n").as_bytes());
+    kio(
+        &dir,
+        &[
+            "evidence",
+            "verify",
+            pointer.to_string().as_str(),
+            "--batch",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+    )
+    .assert()
+    .code(2);
+}
+
+/// PB62: malformed JSONL is rejected before any pointer is evaluated, hence
+/// a failing batch never leaks a partial result array to stdout.
+#[test]
+fn pb62_batch_jsonl_validation_and_limits_are_fail_closed() {
+    let (dir, pointer, _) = fixture();
+    let valid = serde_json::to_string(&pointer).unwrap();
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("empty", vec![]),
+        ("blank", b"\n".to_vec()),
+        ("whitespace", b"  \t\n".to_vec()),
+        ("malformed", b"{not-json}\n".to_vec()),
+        ("nonobject", b"[]\n".to_vec()),
+        (
+            "unknown",
+            format!(
+                "{}\n",
+                valid.trim_end_matches('}').to_owned() + ",\"unknown\":true}"
+            )
+            .into_bytes(),
+        ),
+        ("invalid-utf8", vec![b'{', 0xff, b'}', b'\n']),
+        ("line-limit", vec![b'x'; 64 * 1024 + 1]),
+    ];
+    for (name, bytes) in cases {
+        let path = batch_file(&dir, &format!("{name}.jsonl"), &bytes);
+        let output = batch_output(&dir, &path, false);
+        assert_eq!(output.status.code(), Some(2), "{name}: {output:?}");
+        assert!(output.stdout.is_empty(), "{name} published partial stdout");
+    }
+
+    let too_many = format!("{valid}\n").repeat(4097);
+    let path = batch_file(&dir, "count-limit.jsonl", too_many.as_bytes());
+    let output = batch_output(&dir, &path, false);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+
+    // The exact-file cap includes all delimiters. A syntactically invalid body
+    // above the cap must still be reported as an input limit, before parsing.
+    let path = batch_file(&dir, "file-limit.jsonl", &vec![b'x'; 16 * 1024 * 1024 + 1]);
+    let output = batch_output(&dir, &path, false);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+
+    let mut many_scopes = String::new();
+    for i in 0..257 {
+        let mut row = pointer.clone();
+        row["scope_id"] = serde_json::json!(format!("scope_batch_limit_{i:03}"));
+        many_scopes.push_str(&serde_json::to_string(&row).unwrap());
+        many_scopes.push('\n');
+    }
+    let path = batch_file(&dir, "scope-limit.jsonl", many_scopes.as_bytes());
+    let output = batch_output(&dir, &path, false);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn pb62_batch_input_must_be_a_single_link_regular_file() {
+    use std::os::unix::fs::symlink;
+
+    let (dir, pointer, _) = fixture();
+    let original = batch_file(&dir, "real.jsonl", format!("{pointer}\n").as_bytes());
+    let symlink_path = dir.path().join("link.jsonl");
+    symlink(&original, &symlink_path).unwrap();
+    let symlink_output = batch_output(&dir, &symlink_path, false);
+    assert_eq!(symlink_output.status.code(), Some(4));
+    assert!(symlink_output.stdout.is_empty());
+
+    let hardlink_path = dir.path().join("hardlink.jsonl");
+    fs::hard_link(&original, &hardlink_path).unwrap();
+    let hardlink_output = batch_output(&dir, &original, false);
+    assert_eq!(hardlink_output.status.code(), Some(4));
+    assert!(hardlink_output.stdout.is_empty());
+}
+
+/// PB62: batch results retain order and duplicates, embed the exact single
+/// wire object, and have deterministic bytes for identical input bytes.
+#[test]
+fn pb62_batch_success_is_versioned_deterministic_and_single_parity() {
+    let (dir, alive, _) = fixture();
+    let alive_json = serde_json::to_string(&alive).unwrap();
+    let single_alive = success(&dir, &["evidence", "verify", &alive_json]);
+    let single_alive_bytes = kio(&dir, &["evidence", "verify", &alive_json])
+        .arg("--json")
+        .output()
+        .unwrap()
+        .stdout;
+    let mut unreachable = alive.clone();
+    unreachable["scope_id"] = serde_json::json!("scope_batch_unreachable");
+    unreachable["scope_path"] = serde_json::json!("/definitely/not/a/kio");
+    let unreachable_json = serde_json::to_string(&unreachable).unwrap();
+    let (_, single_unreachable) = run(&dir, &["evidence", "verify", &unreachable_json]);
+
+    let bytes = format!("{alive_json}\n{unreachable_json}\n{alive_json}\n").into_bytes();
+    let path = batch_file(&dir, "ordered.jsonl", &bytes);
+    let first = batch_output(&dir, &path, false);
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    let second = batch_output(&dir, &path, false);
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(
+        first.stdout, second.stdout,
+        "batch JSON must be deterministic"
+    );
+    let output: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(output["schema"], "kio.evidence.batch-verify");
+    assert_eq!(output["schema_version"], 1);
+    assert_eq!(output["input_sha256"], hash_bytes(&bytes));
+    assert_eq!(output["strict"], false);
+    assert_eq!(output["results"].as_array().unwrap().len(), 3);
+    assert_eq!(output["results"][0]["line"], 1);
+    assert_eq!(output["results"][1]["line"], 2);
+    assert_eq!(output["results"][2]["line"], 3);
+    assert_eq!(output["results"][0]["result"], single_alive);
+    assert_eq!(output["results"][1]["result"], single_unreachable);
+    assert_eq!(output["results"][2]["result"], single_alive);
+    assert_eq!(output["summary"]["total"], 3);
+    for status in [
+        "alive",
+        "tombstoned",
+        "not_found",
+        "scope_unreachable",
+        "unverifiable",
+        "registry_duplicate",
+    ] {
+        assert!(output["summary"]["status_counts"].get(status).is_some());
+    }
+    assert_eq!(output["summary"]["status_counts"]["alive"], 2);
+    assert_eq!(output["summary"]["status_counts"]["scope_unreachable"], 1);
+    assert_eq!(output["verified_count"], 3);
+    assert_eq!(
+        single_alive_bytes
+            .strip_suffix(b"\n")
+            .unwrap_or(&single_alive_bytes),
+        serde_json::to_vec(&output["results"][0]["result"]).unwrap(),
+        "the nested batch result is the exact single JSON wire object"
+    );
+}
+
+/// Distinct, directly validated scope paths remain separate bindings while a
+/// single batch preserves the original cross-scope row order.
+#[test]
+fn pb62_batch_verifies_multiple_scopes_in_input_order() {
+    let (dir_a, pointer_a, _) = fixture();
+    let (_dir_b, pointer_b, _) = fixture();
+    let bytes = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&pointer_a).unwrap(),
+        serde_json::to_string(&pointer_b).unwrap()
+    );
+    let path = batch_file(&dir_a, "multi-scope.jsonl", bytes.as_bytes());
+    let output = batch_output(&dir_a, &path, false);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["results"][0]["result"]["status"], "alive");
+    assert_eq!(body["results"][1]["result"]["status"], "alive");
+    assert_eq!(
+        body["results"][0]["result"]["details"]["scope_id"],
+        pointer_a["scope_id"]
+    );
+    assert_eq!(
+        body["results"][1]["result"]["details"]["scope_id"],
+        pointer_b["scope_id"]
+    );
+}
+
+/// Strict aggregate status chooses permanent failures over retryable ones.
+#[test]
+fn pb62_batch_strict_exit_priority_is_permanent_then_retryable() {
+    let (dir, shallow, _) = fixture();
+    make_pointer_commit_final_shallow(&dir, &shallow);
+    let shallow_json = serde_json::to_string(&shallow).unwrap();
+    let retryable = batch_file(
+        &dir,
+        "retryable.jsonl",
+        format!("{shallow_json}\n").as_bytes(),
+    );
+    let output = batch_output(&dir, &retryable, true);
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let retryable_body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        retryable_body["results"][0]["result"]["details"]["reason"],
+        "commit_shallow"
+    );
+
+    let (permanent_dir, permanent, _) = fixture();
+    let mut not_found = permanent.clone();
+    not_found["commit"] = Value::String(successor_with_failed_pinned_manifest(
+        &permanent_dir,
+        &permanent,
+    ));
+    let mut unreachable = permanent;
+    unreachable["scope_id"] = serde_json::json!("scope_batch_priority_unreachable");
+    unreachable["scope_path"] = serde_json::json!("/definitely/not/a/kio");
+    let bytes = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&unreachable).unwrap(),
+        serde_json::to_string(&not_found).unwrap()
+    );
+    let mixed = batch_file(&permanent_dir, "mixed.jsonl", bytes.as_bytes());
+    let output = batch_output(&permanent_dir, &mixed, true);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    let mixed_body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(mixed_body["results"][1]["result"]["status"], "not_found");
+}
+
+/// Each member of the closed six-status union has exactly the same wire result
+/// and process-exit semantics when carried as a one-row batch.
+#[test]
+fn pb62_batch_complete_single_status_and_exit_parity() {
+    let (alive_dir, alive, _) = fixture();
+    assert_eq!(
+        assert_single_batch_parity(&alive_dir, &alive, false, 0)["status"],
+        "alive"
+    );
+
+    let mut unreachable = alive.clone();
+    unreachable["scope_id"] = serde_json::json!("scope_batch_parity_unreachable");
+    unreachable["scope_path"] = serde_json::json!("/definitely/not/a/kio");
+    assert_eq!(
+        assert_single_batch_parity(&alive_dir, &unreachable, false, 0)["status"],
+        "scope_unreachable"
+    );
+    assert_eq!(
+        assert_single_batch_parity(&alive_dir, &unreachable, true, 3)["status"],
+        "scope_unreachable"
+    );
+
+    let (tombstone_dir, tombstone_pointer, _) = fixture();
+    let raw_hash = tombstone_pointer["raw_hash"].as_str().unwrap().to_owned();
+    success(
+        &tombstone_dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &raw_hash,
+            "--reason",
+            "legal",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        assert_single_batch_parity(&tombstone_dir, &tombstone_pointer, false, 0)["status"],
+        "tombstoned"
+    );
+    assert_eq!(
+        assert_single_batch_parity(&tombstone_dir, &tombstone_pointer, true, 4)["status"],
+        "tombstoned"
+    );
+
+    let (not_found_dir, mut not_found, _) = fixture();
+    not_found["commit"] = Value::String(successor_with_failed_pinned_manifest(
+        &not_found_dir,
+        &not_found,
+    ));
+    assert_eq!(
+        assert_single_batch_parity(&not_found_dir, &not_found, false, 0)["status"],
+        "not_found"
+    );
+    assert_eq!(
+        assert_single_batch_parity(&not_found_dir, &not_found, true, 4)["status"],
+        "not_found"
+    );
+
+    let (shallow_dir, shallow, _) = fixture();
+    make_pointer_commit_final_shallow(&shallow_dir, &shallow);
+    let shallow_result = assert_single_batch_parity(&shallow_dir, &shallow, true, 3);
+    assert_eq!(shallow_result["status"], "unverifiable");
+    assert_eq!(shallow_result["details"]["reason"], "commit_shallow");
+
+    let (registry_dir, mut duplicate, _) = fixture();
+    let duplicate_scope = duplicate["scope_id"].as_str().unwrap().to_owned();
+    let clone = tempfile::tempdir().unwrap();
+    success(&clone, &["init"]);
+    let scope_path = clone.path().join(".kio/scope.json");
+    let mut scope: Value = serde_json::from_slice(&fs::read(&scope_path).unwrap()).unwrap();
+    scope["scope_id"] = serde_json::json!(duplicate_scope);
+    fs::write(&scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+    let registry = RegistryDb::open(registry_path(&registry_dir)).unwrap();
+    registry
+        .upsert(&RegistryEntry {
+            scope_id: duplicate_scope.clone(),
+            kio_path: kio_dir(&registry_dir).display().to_string(),
+            root_path: registry_dir.path().display().to_string(),
+            participates_in_global_search: true,
+            indexed: true,
+            last_seen_at: "2020-01-01T00:00:00Z".to_owned(),
+        })
+        .unwrap();
+    registry
+        .upsert(&RegistryEntry {
+            scope_id: duplicate_scope,
+            kio_path: clone.path().join(".kio").display().to_string(),
+            root_path: clone.path().display().to_string(),
+            participates_in_global_search: true,
+            indexed: true,
+            last_seen_at: "2099-01-01T00:00:00Z".to_owned(),
+        })
+        .unwrap();
+    duplicate["scope_path"] =
+        serde_json::json!(registry_dir.path().join("gone/.kio").display().to_string());
+    assert_eq!(
+        assert_single_batch_parity(&registry_dir, &duplicate, false, 3)["status"],
+        "registry_duplicate"
+    );
+    assert_eq!(
+        assert_single_batch_parity(&registry_dir, &duplicate, true, 3)["status"],
+        "registry_duplicate"
+    );
 }
 
 // ===========================================================================
@@ -1528,6 +1939,20 @@ fn pb65_lc14_unmarked_missing_raw_is_store_corrupt() {
     let (code, output) = run(&dir, &["evidence", "verify", &pointer_json]);
     assert_eq!(code, 4, "{output}");
     assert_eq!(output["error_code"], "KIO-E-STORE-CORRUPT-001", "{output}");
+
+    let batch = batch_file(
+        &dir,
+        "corrupt.jsonl",
+        format!("{pointer_json}\n").as_bytes(),
+    );
+    let batch_output = batch_output(&dir, &batch, false);
+    assert_eq!(batch_output.status.code(), Some(4));
+    assert!(
+        batch_output.stdout.is_empty(),
+        "no partial batch may publish"
+    );
+    let error: Value = serde_json::from_slice(&batch_output.stderr).unwrap();
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001");
 }
 
 /// PB67 [regression-lock]: a structurally malformed tombstone record is
@@ -1661,6 +2086,15 @@ fn pb48_pb49_manifest_missing_resolves_via_resurrection_link_after_reingest() {
     // canonical event `retired` below.
     let purged = success(&dir, &["evidence", "verify", &old_pointer_json]);
     assert_eq!(purged["status"], "tombstoned", "{purged}");
+    let tombstoned_batch = batch_file(
+        &dir,
+        "tombstoned.jsonl",
+        format!("{old_pointer_json}\n").as_bytes(),
+    );
+    let tombstoned_output = batch_output(&dir, &tombstoned_batch, false);
+    assert_eq!(tombstoned_output.status.code(), Some(0));
+    let tombstoned: Value = serde_json::from_slice(&tombstoned_output.stdout).unwrap();
+    assert_eq!(tombstoned["results"][0]["result"]["status"], "tombstoned");
 
     // Kio never deletes the working-tree original (05 §3.5), so the exact
     // same bytes are still sitting in evidence.md -- the next `kio index`
@@ -1690,6 +2124,28 @@ fn pb48_pb49_manifest_missing_resolves_via_resurrection_link_after_reingest() {
             assert_eq!(output["commit_shallow"], false, "{output}");
         }
     }
+
+    let batch = batch_file(
+        &dir,
+        "resurrection-manifest-missing.jsonl",
+        format!("{old_pointer_json}\n").as_bytes(),
+    );
+    let strict_single = kio(&dir, &["evidence", "verify", &old_pointer_json])
+        .arg("--strict")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(strict_single.status.code(), Some(4));
+    let strict_single: Value = serde_json::from_slice(&strict_single.stdout).unwrap();
+    let batch_output = batch_output(&dir, &batch, true);
+    assert_eq!(batch_output.status.code(), Some(4));
+    let batch: Value = serde_json::from_slice(&batch_output.stdout).unwrap();
+    assert_eq!(batch["results"][0]["result"], strict_single);
+    assert_eq!(batch["results"][0]["result"]["status"], "unverifiable");
+    assert_eq!(
+        batch["results"][0]["result"]["details"]["reason"],
+        "manifest_missing"
+    );
 }
 
 // ===========================================================================

@@ -485,6 +485,12 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kio evidence verify --batch <pointers.jsonl>   一括 verify。入力の構造・filesystem・integrity error は
                                command-level であり partial result を publish しない（08 §4.3）。
+                               malformed/UTF-8/blank は KIO-E-EVIDENCE-BATCH-INPUT-001 (2)、
+                               file/line/record/scope 上限は KIO-E-EVIDENCE-BATCH-LIMIT-001 (2)、
+                               aggregate 認証済み CAS bytes 上限は
+                               KIO-E-STORE-VERIFIED-BYTES-LIMIT-001 (4)、検査中の authority /
+                               registry/index generation drift は
+                               KIO-E-EVIDENCE-BATCH-CHANGED-001 (3)。
                                --strict 時は permanent (tombstoned / not_found / manifest_missing) を
                                1件でも含めば 4、retryable (scope_unreachable / registry_duplicate /
                                commit_shallow) を含むが permanent がなければ 3、全 alive なら 0。

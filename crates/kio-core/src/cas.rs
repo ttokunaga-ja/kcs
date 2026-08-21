@@ -1,5 +1,6 @@
 //! Content-addressed storage primitives.
 
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,106 @@ pub const MAX_EMBEDDING_OBJECT_BYTES: u64 = 1024 * 1024;
 /// and fsck from hashing a pathologically large object before the semantic
 /// manifest reader can apply its own bound.
 pub const MAX_MANIFEST_OBJECT_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct VerifiedCasReadBudget {
+    max_bytes: u64,
+    consumed_bytes: u64,
+}
+
+thread_local! {
+    /// Evidence verification is synchronous, so a thread-scoped budget binds all
+    /// of its canonical CAS reads without changing every store API. It is only
+    /// active inside [`with_verified_cas_read_budget`].
+    static VERIFIED_CAS_READ_BUDGET: RefCell<Option<VerifiedCasReadBudget>> = const { RefCell::new(None) };
+}
+
+struct VerifiedCasReadBudgetGuard;
+
+impl Drop for VerifiedCasReadBudgetGuard {
+    fn drop(&mut self) {
+        VERIFIED_CAS_READ_BUDGET.with(|budget| *budget.borrow_mut() = None);
+    }
+}
+
+/// Bound aggregate bytes physically read from CAS during one synchronous
+/// verification operation. Repeated reads are charged repeatedly.
+///
+/// Nesting is rejected so an inner caller cannot obscure the outer authority's
+/// accounting. The scope is removed even when `operation` returns an error or
+/// unwinds.
+pub fn with_verified_cas_read_budget<T>(
+    max_bytes: u64,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<(T, u64)> {
+    VERIFIED_CAS_READ_BUDGET.with(|budget| {
+        let mut budget = budget.borrow_mut();
+        if budget.is_some() {
+            return Err(KioError::new(
+                "KIO-E-STORE-VERIFIED-BYTES-LIMIT-001",
+                "verified CAS read budget cannot be nested",
+                serde_json::json!({ "max_bytes": max_bytes }),
+                crate::ExitCode::PermanentFailure,
+            ));
+        }
+        *budget = Some(VerifiedCasReadBudget {
+            max_bytes,
+            consumed_bytes: 0,
+        });
+        Ok(())
+    })?;
+    let _guard = VerifiedCasReadBudgetGuard;
+    let value = operation()?;
+    let consumed_bytes = VERIFIED_CAS_READ_BUDGET.with(|budget| {
+        budget
+            .borrow()
+            .as_ref()
+            .map(|budget| budget.consumed_bytes)
+            .ok_or_else(|| {
+                KioError::new(
+                    "KIO-E-STORE-VERIFIED-BYTES-LIMIT-001",
+                    "verified CAS read budget unexpectedly unavailable",
+                    serde_json::json!({ "max_bytes": max_bytes }),
+                    crate::ExitCode::PermanentFailure,
+                )
+            })
+    })?;
+    Ok((value, consumed_bytes))
+}
+
+fn charge_verified_cas_read(bytes: u64) -> Result<()> {
+    VERIFIED_CAS_READ_BUDGET.with(|budget| {
+        let mut budget = budget.borrow_mut();
+        let Some(budget) = budget.as_mut() else {
+            return Ok(());
+        };
+        let attempted = budget.consumed_bytes.checked_add(bytes).ok_or_else(|| {
+            verified_cas_read_budget_error(budget.max_bytes, u64::MAX, budget.consumed_bytes)
+        })?;
+        if attempted > budget.max_bytes {
+            return Err(verified_cas_read_budget_error(
+                budget.max_bytes,
+                attempted,
+                budget.consumed_bytes,
+            ));
+        }
+        budget.consumed_bytes = attempted;
+        Ok(())
+    })
+}
+
+fn verified_cas_read_budget_error(max_bytes: u64, attempted: u64, consumed: u64) -> KioError {
+    KioError::new(
+        "KIO-E-STORE-VERIFIED-BYTES-LIMIT-001",
+        "verified CAS reads exceed the aggregate byte limit",
+        serde_json::json!({
+            "max_bytes": max_bytes,
+            "attempted_bytes": attempted,
+            "consumed_bytes": consumed,
+        }),
+        crate::ExitCode::PermanentFailure,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentObjectKind {
@@ -1364,7 +1465,7 @@ impl ObjectStore {
         let Some(path) = self.existing_content_path(kind, hash)? else {
             return Err(KioError::not_found(hash));
         };
-        read_bounded_regular_file(&path, max_bytes)
+        read_bounded_regular_file_inner(&path, max_bytes, true)
     }
 
     /// Read and verify a hash from one required CAS namespace. Unlike
@@ -2072,7 +2173,28 @@ fn bound_read_regular(parent: &File, leaf: &str, max: u64) -> Result<(u64, Vec<u
         ));
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut bytes).kio_io(Path::new(leaf))?;
+    let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+    loop {
+        let remaining = max.saturating_add(1).saturating_sub(bytes.len() as u64);
+        if remaining == 0 {
+            break;
+        }
+        let read_cap = remaining.min(CAS_STREAM_BUFFER_BYTES as u64) as usize;
+        let count = file.read(&mut buffer[..read_cap]).kio_io(Path::new(leaf))?;
+        if count == 0 {
+            break;
+        }
+        charge_verified_cas_read(count as u64)?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    if bytes.len() as u64 > max {
+        return Err(KioError::new(
+            "KIO-E-STORE-OBJECT-OVERSIZED-001",
+            "CAS object exceeds its byte limit",
+            serde_json::json!({"max_bytes": max, "actual_bytes": bytes.len()}),
+            crate::ExitCode::PermanentFailure,
+        ));
+    }
     if bytes.len() as u64 != meta.len() {
         return Err(corrupt_object_error(
             Path::new(leaf),
@@ -2283,6 +2405,7 @@ fn read_verified_object_accounted(
             consumed = consumed
                 .checked_add(count as u64)
                 .ok_or_else(|| object_size_error(kind, limit, u64::MAX))?;
+            charge_verified_cas_read(count as u64)?;
             if consumed > limit {
                 return Err(object_size_error(kind, limit, consumed));
             }
@@ -2338,6 +2461,7 @@ fn verify_content_object_path_accounted(
                 break;
             }
             consumed = consumed.saturating_add(count as u64);
+            charge_verified_cas_read(count as u64)?;
             if consumed > limit {
                 return Err(KioError::new(
                     "KIO-E-STORE-OBJECT-OVERSIZED-001",
@@ -2745,15 +2869,29 @@ fn read_chunk_path_accounted(
 ) -> (Result<(ChunkObject, Vec<u8>)>, u64) {
     let mut consumed = 0_u64;
     let result = (|| -> Result<(ChunkObject, Vec<u8>)> {
-        let file = open_regular_nofollow(path)?;
+        let mut file = open_regular_nofollow(path)?;
         let metadata = file.metadata().kio_io(path)?;
         if metadata.len() > MAX_CHUNK_OBJECT_BYTES {
             return Err(chunk_size_error(metadata.len()));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CHUNK_OBJECT_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .kio_io(path)?;
+        let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+        loop {
+            let remaining = MAX_CHUNK_OBJECT_BYTES
+                .saturating_add(1)
+                .saturating_sub(bytes.len() as u64);
+            if remaining == 0 {
+                break;
+            }
+            let read_cap = remaining.min(CAS_STREAM_BUFFER_BYTES as u64) as usize;
+            let count = file.read(&mut buffer[..read_cap]).kio_io(path)?;
+            if count == 0 {
+                break;
+            }
+            consumed = consumed.saturating_add(count as u64);
+            charge_verified_cas_read(count as u64)?;
+            bytes.extend_from_slice(&buffer[..count]);
+        }
         consumed = bytes.len() as u64;
         if consumed > MAX_CHUNK_OBJECT_BYTES {
             return Err(chunk_size_error(consumed));
@@ -2844,10 +2982,16 @@ pub fn open_regular_nofollow(path: &Path) -> Result<File> {
     if !before.file_type().is_file() || before.file_type().is_symlink() {
         return Err(non_regular_object_error(path));
     }
+    #[cfg(unix)]
+    if !is_single_link_regular_metadata(&before) {
+        return Err(non_regular_object_error(path));
+    }
 
     let mut options = OpenOptions::new();
     options.read(true);
     configure_no_follow(&mut options);
+    #[cfg(windows)]
+    let before_handle = options.open(path).kio_io(path)?;
     let file = options.open(path).kio_io(path)?;
     let opened = file.metadata().kio_io(path)?;
     let after = fs::symlink_metadata(path).kio_io(path)?;
@@ -2858,10 +3002,10 @@ pub fn open_regular_nofollow(path: &Path) -> Result<File> {
         configure_no_follow(&mut verification_options);
         let verification = verification_options.open(path).kio_io(path)?;
         verification.metadata().kio_io(path)?.is_file()
-            && same_windows_cas_file(&file, &verification)
+            && same_windows_cas_file_triplet(&before_handle, &file, &verification)
     };
     #[cfg(not(windows))]
-    let same_identity = same_file_identity(&opened, &after);
+    let same_identity = same_file_identity(&before, &opened) && same_file_identity(&opened, &after);
     if !opened.is_file()
         || !after.file_type().is_file()
         || after.file_type().is_symlink()
@@ -2871,8 +3015,7 @@ pub fn open_regular_nofollow(path: &Path) -> Result<File> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        if opened.nlink() != 1 {
+        if !is_single_link_regular_metadata(&opened) || !is_single_link_regular_metadata(&after) {
             return Err(non_regular_object_error(path));
         }
     }
@@ -2886,12 +3029,21 @@ pub fn open_regular_nofollow_read_write(path: &Path) -> Result<File> {
     if !before.file_type().is_file() || before.file_type().is_symlink() {
         return Err(non_regular_object_error(path));
     }
+    #[cfg(unix)]
+    if !is_single_link_regular_metadata(&before) {
+        return Err(non_regular_object_error(path));
+    }
 
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     configure_no_follow(&mut options);
+    #[cfg(windows)]
+    let before_handle = open_windows_regular_nofollow_observation(path)?;
     let file = options.open(path).kio_io(path)?;
-    validate_open_regular_nofollow(path, &file)?;
+    #[cfg(windows)]
+    validate_open_regular_nofollow_with_windows_before(path, &file, &before_handle)?;
+    #[cfg(not(windows))]
+    validate_open_regular_nofollow_with_before(path, &file, &before)?;
     Ok(file)
 }
 
@@ -2905,11 +3057,20 @@ pub fn open_or_create_regular_nofollow_append(path: &Path) -> Result<File> {
                 if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
                     return Err(non_regular_object_error(path));
                 }
+                #[cfg(unix)]
+                if !is_single_link_regular_metadata(&metadata) {
+                    return Err(non_regular_object_error(path));
+                }
                 let mut options = OpenOptions::new();
                 options.append(true);
                 configure_no_follow(&mut options);
+                #[cfg(windows)]
+                let before_handle = open_windows_regular_nofollow_observation(path)?;
                 let file = options.open(path).kio_io(path)?;
-                validate_open_regular_nofollow(path, &file)?;
+                #[cfg(windows)]
+                validate_open_regular_nofollow_with_windows_before(path, &file, &before_handle)?;
+                #[cfg(not(windows))]
+                validate_open_regular_nofollow_with_before(path, &file, &metadata)?;
                 return Ok(file);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2957,12 +3118,64 @@ fn validate_open_regular_nofollow(path: &Path, file: &File) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        if opened.nlink() != 1 {
+        if !is_single_link_regular_metadata(&opened) || !is_single_link_regular_metadata(&after) {
             return Err(non_regular_object_error(path));
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_open_regular_nofollow_with_before(
+    path: &Path,
+    file: &File,
+    before: &fs::Metadata,
+) -> Result<()> {
+    let opened = file.metadata().kio_io(path)?;
+    if !same_file_identity(before, &opened) {
+        return Err(non_regular_object_error(path));
+    }
+    #[cfg(unix)]
+    if !is_single_link_regular_metadata(before) || !is_single_link_regular_metadata(&opened) {
+        return Err(non_regular_object_error(path));
+    }
+    validate_open_regular_nofollow(path, file)
+}
+
+#[cfg(unix)]
+fn is_single_link_regular_metadata(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_file() && metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn open_windows_regular_nofollow_observation(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).kio_io(path)?;
+    if !windows_file_information(&file)
+        .is_some_and(|information| information.is_regular_file() && information.is_single_link())
+    {
+        return Err(non_regular_object_error(path));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn validate_open_regular_nofollow_with_windows_before(
+    path: &Path,
+    file: &File,
+    before: &File,
+) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let after = options.open(path).kio_io(path)?;
+    if !same_windows_cas_file_triplet(before, file, &after) {
+        return Err(non_regular_object_error(path));
+    }
+    validate_open_regular_nofollow(path, file)
 }
 
 #[cfg(unix)]
@@ -3126,6 +3339,11 @@ fn same_windows_cas_file(opened: &File, path: &File) -> bool {
     )
 }
 
+#[cfg(windows)]
+fn same_windows_cas_file_triplet(before: &File, opened: &File, after: &File) -> bool {
+    same_windows_cas_file(before, opened) && same_windows_cas_file(opened, after)
+}
+
 #[cfg(any(test, windows))]
 fn same_windows_cas_file_components(
     left: Option<WindowsFileInformation>,
@@ -3140,6 +3358,16 @@ fn same_windows_cas_file_components(
                 && left.is_single_link()
                 && right.is_single_link()
     )
+}
+
+#[cfg(test)]
+fn same_windows_cas_file_triplet_components(
+    before: Option<WindowsFileInformation>,
+    opened: Option<WindowsFileInformation>,
+    after: Option<WindowsFileInformation>,
+) -> bool {
+    same_windows_cas_file_components(before, opened)
+        && same_windows_cas_file_components(opened, after)
 }
 
 #[cfg(any(test, windows))]
@@ -3472,8 +3700,20 @@ pub fn fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {
 /// Read a non-CAS metadata record through the same no-follow/single-link boundary
 /// as CAS objects while enforcing a caller-selected byte limit.
 pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let file = open_regular_nofollow(path)?;
+    read_bounded_regular_file_inner(path, max_bytes, false)
+}
+
+/// Shared implementation for bounded metadata records and bounded CAS content
+/// records. CAS callers charge each physical buffer before continuing; general
+/// metadata reads deliberately do not participate in the CAS-only budget.
+fn read_bounded_regular_file_inner(
+    path: &Path,
+    max_bytes: u64,
+    charge_cas_reads: bool,
+) -> Result<Vec<u8>> {
+    let mut file = open_regular_nofollow(path)?;
     let metadata = file.metadata().kio_io(path)?;
+    let initial_stability = observe_regular_file_stability(&metadata, path)?;
     if metadata.len() > max_bytes {
         return Err(KioError::new(
             "KIO-E-STORE-OBJECT-OVERSIZED-001",
@@ -3487,9 +3727,24 @@ pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>>
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .kio_io(path)?;
+    let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+    loop {
+        let remaining = max_bytes
+            .saturating_add(1)
+            .saturating_sub(bytes.len() as u64);
+        if remaining == 0 {
+            break;
+        }
+        let read_cap = remaining.min(CAS_STREAM_BUFFER_BYTES as u64) as usize;
+        let count = file.read(&mut buffer[..read_cap]).kio_io(path)?;
+        if count == 0 {
+            break;
+        }
+        if charge_cas_reads {
+            charge_verified_cas_read(count as u64)?;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
     if bytes.len() as u64 > max_bytes {
         return Err(KioError::new(
             "KIO-E-STORE-OBJECT-OVERSIZED-001",
@@ -3498,7 +3753,49 @@ pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>>
             crate::ExitCode::PermanentFailure,
         ));
     }
+    // The opened descriptor remains the authority for the bytes we consumed.
+    // Rebind it to the path only after the read, then reject a replacement or
+    // in-place length change before returning any parsed metadata to a caller.
+    validate_open_regular_nofollow(path, &file)?;
+    let final_metadata = file.metadata().kio_io(path)?;
+    let final_stability = observe_regular_file_stability(&final_metadata, path)?;
+    if final_stability != initial_stability || final_metadata.len() != bytes.len() as u64 {
+        return Err(KioError::new(
+            "KIO-E-STORE-CORRUPT-001",
+            "metadata record changed while reading",
+            serde_json::json!({
+                "path": path,
+                "initial_bytes": metadata.len(),
+                "final_bytes": final_metadata.len(),
+                "read_bytes": bytes.len(),
+            }),
+            crate::ExitCode::PermanentFailure,
+        ));
+    }
     Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegularFileStability {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+fn observe_regular_file_stability(
+    metadata: &fs::Metadata,
+    path: &Path,
+) -> Result<RegularFileStability> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(RegularFileStability {
+        len: metadata.len(),
+        modified: metadata.modified().kio_io(path)?,
+        #[cfg(unix)]
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
 }
 
 /// `Some(path)` when the CAS slot is occupied by anything at all — a symlink or
@@ -3628,6 +3925,79 @@ mod tests {
             context: Some("recovery window".to_owned()),
             vector,
         }
+    }
+
+    #[test]
+    fn verified_cas_read_budget_limits_actual_reads_and_cleans_up_after_error() {
+        let (_dir, store) = object_store();
+        let bytes = vec![b'b'; CAS_STREAM_BUFFER_BYTES + 2];
+        let hash = store.write_raw(&bytes).unwrap();
+
+        let error = with_verified_cas_read_budget(CAS_STREAM_BUFFER_BYTES as u64, || {
+            store.inspect_object(ObjectKind::Raw, &hash).map(|_| ())
+        })
+        .unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-STORE-VERIFIED-BYTES-LIMIT-001");
+        assert_eq!(error.exit_code(), crate::ExitCode::PermanentFailure);
+        assert_eq!(error.context()["max_bytes"], CAS_STREAM_BUFFER_BYTES as u64);
+        assert_eq!(error.context()["attempted_bytes"], bytes.len() as u64);
+        assert_eq!(
+            error.context()["consumed_bytes"],
+            CAS_STREAM_BUFFER_BYTES as u64
+        );
+
+        // The failed scope must not leak into the next independent operation.
+        let ((), consumed) = with_verified_cas_read_budget(bytes.len() as u64, || {
+            store.inspect_object(ObjectKind::Raw, &hash).map(|_| ())
+        })
+        .unwrap();
+        assert_eq!(consumed, bytes.len() as u64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_regular_file_rejects_links_and_detects_stability_drift() {
+        use std::io::Write as _;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::write(&source, b"stable").unwrap();
+
+        let hard_link = dir.path().join("hard-link");
+        fs::hard_link(&source, &hard_link).unwrap();
+        assert!(read_bounded_regular_file(&hard_link, 64).is_err());
+
+        let symlink_path = dir.path().join("symlink");
+        symlink(&source, &symlink_path).unwrap();
+        assert!(read_bounded_regular_file(&symlink_path, 64).is_err());
+
+        fs::remove_file(&hard_link).unwrap();
+        let before =
+            observe_regular_file_stability(&fs::metadata(&source).unwrap(), &source).unwrap();
+        let mut rewrite = OpenOptions::new().write(true).open(&source).unwrap();
+        rewrite.write_all(b"mutate").unwrap();
+        rewrite.sync_all().unwrap();
+        let after =
+            observe_regular_file_stability(&fs::metadata(&source).unwrap(), &source).unwrap();
+        assert_ne!(
+            before, after,
+            "same-length in-place rewrite escaped observation"
+        );
+
+        let before_replacement = fs::symlink_metadata(&source).unwrap();
+        let replacement = dir.path().join("replacement");
+        fs::write(&replacement, b"new file").unwrap();
+        fs::rename(&replacement, &source).unwrap();
+        let replacement_handle = File::open(&source).unwrap();
+        assert!(
+            validate_open_regular_nofollow_with_before(
+                &source,
+                &replacement_handle,
+                &before_replacement,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3804,6 +4174,16 @@ mod tests {
             Some(reparse_point)
         ));
         assert!(!same_windows_cas_file_components(Some(single_link), None));
+        assert!(same_windows_cas_file_triplet_components(
+            Some(single_link),
+            Some(single_link),
+            Some(single_link),
+        ));
+        assert!(!same_windows_cas_file_triplet_components(
+            Some(single_link),
+            Some(single_link),
+            Some(WindowsFileInformation::new(7, 12, 1, 0)),
+        ));
         assert!(same_windows_repair_quarantine_file_components(
             Some(hard_linked),
             Some(hard_linked)

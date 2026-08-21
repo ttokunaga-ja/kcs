@@ -474,13 +474,13 @@
 - 統合要約: 意味ベース対応付け (semantic_fingerprint) をPhase 4+で導入する際の互換性分類を明確化する。match_methodはretarget response限りのfieldでresolver入力ではないため、旧実装は未知フィールド無視則と同様に未知値を無視でき、pointer schema本体へのMAJOR相当のfield追加ではなくMINOR相当として扱ってよいと初めて明記する。
 
 - **実装状態: [未実装]** match_method/semantic_fingerprint は grep 0件 (spec自体がPhase 4+スコープと明記)。
-### U61 kio evidence verify --batch フラグ新設 [P1]
+### U61 kio evidence verify --batch フラグ新設 [P1・Phase 4 milestone 6 で解消]
 - 出典: gap-07-06 G38
 - spec §: 06-cli-spec.md コマンド一覧
 - 種別: 新規機能
-- 統合要約: `kio evidence verify --batch <pointers.jsonl> [--strict]` を新設する (Phase 4+)。`<pointer>`と`--batch`は相互排他とする。
+- 統合要約: `kio evidence verify --batch <pointers.jsonl> [--strict]` を新設する。`<pointer>`と`--batch`は相互排他とする。
 
-- **実装状態: [未実装]** evidence verify --batch は "outside the MVP" として明示的に拒否 (verify_objects.rs:67-71) — spec自身のPhase 4+スコープ規定と整合した意図的未実装。
+- **実装状態: [実装済み]** Phase 4 milestone 6 で typed Clap leaf、bounded strict JSONL、versioned all-or-nothing output として実装。正本契約は 06 §7 / 08 §4.3 / 09 §3.1 を参照する。本ファイルは当時の gap 分析記録であり実行可能な仕様ではない。
 ### U62 path_at_commit の legacy tree 例外 [P1]
 - 出典: gap-rest G15
 - spec §: 08-evidence-pointer-spec.md §2 (導入部)

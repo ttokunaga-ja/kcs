@@ -508,15 +508,36 @@ struct PointerArgs {
     pointer: Option<String>,
 }
 
-/// `kio evidence verify <pointer> [--strict]` (08 §4).
+/// Typed Evidence commands; verify accepts exactly one single pointer or batch
+/// JSONL input (08 §4.3).
 #[derive(Debug, Args)]
 struct EvidenceArgs {
-    /// Sub-command. Only `verify` exists today.
-    #[arg(value_name = "SUBCOMMAND")]
-    subcommand: Option<String>,
+    #[command(subcommand)]
+    command: EvidenceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum EvidenceCommand {
+    Verify(EvidenceVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+struct EvidenceVerifyArgs {
     /// Evidence Pointer URI, inline JSON, or `-` to read from stdin.
-    #[arg(value_name = "POINTER")]
+    #[arg(
+        value_name = "POINTER",
+        required_unless_present = "batch",
+        conflicts_with = "batch"
+    )]
     pointer: Option<String>,
+    /// A bounded UTF-8 JSONL file of Evidence Pointer objects.
+    #[arg(
+        long,
+        value_name = "POINTERS_JSONL",
+        required_unless_present = "pointer",
+        conflicts_with = "pointer"
+    )]
+    batch: Option<PathBuf>,
     /// Fail on any degraded resolution instead of reporting it.
     #[arg(long)]
     strict: bool,

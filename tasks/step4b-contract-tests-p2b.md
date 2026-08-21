@@ -999,13 +999,16 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ## V. `kio evidence verify --batch` (U61)
 
-### PB62 [regression-lock] --batch は明示的に Phase 4+ 対象外として拒否される [P1]
-- 正本: 08 §4.3 L391『`--batch` の実装は Phase 4+ (09-mvp-scope.md §3.1)。単発 verify は Step 4』
-- 前提: 現行実装 `parse_evidence_verify_args` (`verify_objects.rs` L70-74) は `"--batch"` を
-  無条件で `KioError::invalid_usage("evidence verify --batch is outside the MVP")` として拒否する。
-- 操作: `kio evidence verify --batch pointers.jsonl` を実行する。
-- 期待: exit 2 (invalid usage) で拒否され、`<pointer>` と `--batch` の相互排他が保たれる —
-  regression-lock (spec 自身の Phase 4+ スコープ規定と現行実装が既に整合している)。
+### PB62 [Phase 4 milestone 6 で置換済み] typed batch verify contract [P1]
+- 正本: 08 §4.3 の bounded JSONL / versioned output / all-or-nothing / final barrier 契約。
+- 前提: `EvidenceArgs` は typed nested Clap subcommand であり、pointer positional と `--batch` は
+  exactly-one / 相互排他である。手書き parser や予約拒否経路は存在しない。
+- 操作: single / batch の exactly-one、malformed/blank/unknown/nonobject/invalid UTF-8、全上限、
+  全 status、strict priority、command-level error、duplicate/order、multi-scope、unsafe link、
+  deterministic output、cache final recheck、single parity を Rust integration/unit test で検査する。
+- 期待: `crates/kio-cli/tests/step4b_p2b_contract.rs` の PB62 群と production helper の unit test が
+  canonical contract を直接固定する。本節は旧予約拒否の static-source regression lock を置換した
+  非実行の受け入れ記録である。
 
 ---
 

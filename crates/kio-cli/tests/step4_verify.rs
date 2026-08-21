@@ -178,7 +178,6 @@ fn ct4_verify_rejects_non_pointer_and_ambiguous_cli_forms() {
     let valid = serde_json::to_string(&pointer).unwrap();
     for args in [
         vec!["evidence", "verify", valid.as_str(), "extra"],
-        vec!["evidence", "verify", "--batch", valid.as_str()],
         vec![
             "evidence",
             "verify",

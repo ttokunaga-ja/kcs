@@ -22,6 +22,7 @@ use kio_pipeline::markdownize::{
     load_validated_normalized_units_from_manifest, validate_normalized_instance,
 };
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::*;
 
@@ -66,19 +67,78 @@ fn exact_pinned_content_unit_for_chunk<'a>(
         .ok_or(ChunkPinnedUnitError::IdentityMismatch)
 }
 
-pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
-    // B (2026-07-24): operand shape and `--strict` are declared on
-    // `EvidenceArgs`; only the sub-command name is checked here because
-    // `verify` is the sole one that exists (08 §4.3's `--batch` form is
-    // Phase 4+).
-    if args.subcommand.as_deref() != Some("verify") {
-        return Err(KioError::invalid_usage(
-            "evidence currently supports `evidence verify <pointer> [--strict]`",
-        ));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceStatus {
+    Alive,
+    Tombstoned,
+    NotFound,
+    ScopeUnreachable,
+    Unverifiable,
+    RegistryDuplicate,
+}
+
+impl EvidenceStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Tombstoned => "tombstoned",
+            Self::NotFound => "not_found",
+            Self::ScopeUnreachable => "scope_unreachable",
+            Self::Unverifiable => "unverifiable",
+            Self::RegistryDuplicate => "registry_duplicate",
+        }
     }
-    let Some(pointer_operand) = args.pointer else {
-        return Err(KioError::invalid_usage("pointer argument is required"));
-    };
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EvidenceVerifyResult {
+    status: EvidenceStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    details: Value,
+}
+
+#[derive(Debug, Clone)]
+struct EvidenceVerification {
+    result: EvidenceVerifyResult,
+    exit: ExitCode,
+}
+
+impl EvidenceVerification {
+    fn new(
+        status: EvidenceStatus,
+        error_code: Option<&str>,
+        details: Value,
+        exit: ExitCode,
+    ) -> Self {
+        Self {
+            result: EvidenceVerifyResult {
+                status,
+                error_code: error_code.map(str::to_owned),
+                details,
+            },
+            exit,
+        }
+    }
+
+    fn value(&self) -> Result<Value> {
+        serde_json::to_value(&self.result).map_err(|error| KioError::schema(error.to_string()))
+    }
+}
+
+const MAX_BATCH_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_BATCH_LINE_BYTES: usize = 64 * 1024;
+const MAX_BATCH_RECORDS: usize = 4096;
+const MAX_BATCH_SCOPES: usize = 256;
+const MAX_BATCH_VERIFIED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
+    let EvidenceCommand::Verify(args) = args.command;
+    if let Some(batch) = args.batch {
+        return run_evidence_batch(&batch, args.strict);
+    }
+    let pointer_operand = args.pointer.expect("clap requires pointer or --batch");
     let strict = args.strict;
     let raw = read_pointer_input(vec![pointer_operand])?;
     if raw.starts_with("sha256:") || parse_object_uri(&raw)?.is_some() {
@@ -87,7 +147,235 @@ pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
         ));
     }
     let pointer = parse_pointer_text(&raw)?;
-    verify_pointer_for_cli(&pointer, strict)
+    let verification = verify_pointer_for_cli(&pointer, strict)?;
+    let mut output = verification.value()?;
+    if verification.exit != ExitCode::Success {
+        set_exit_override(&mut output, verification.exit);
+    }
+    Ok(output)
+}
+
+fn run_evidence_batch(path: &Path, strict: bool) -> Result<Value> {
+    let bytes = read_bounded_regular_file(path, MAX_BATCH_INPUT_BYTES).map_err(|error| {
+        if matches!(
+            error.error_code(),
+            "KIO-E-STORE-OBJECT-TOO-LARGE-001" | "KIO-E-STORE-OBJECT-OVERSIZED-001"
+        ) {
+            batch_limit_error(0, "file_bytes", MAX_BATCH_INPUT_BYTES as usize)
+        } else {
+            error
+        }
+    })?;
+    let pointers = parse_batch_pointers(&bytes)?;
+    let input_sha256 = hash_bytes(&bytes);
+
+    let (verifications, _) =
+        kio_core::cas::with_verified_cas_read_budget(MAX_BATCH_VERIFIED_BYTES, || {
+            let bindings = bind_batch_scopes(&pointers, strict)?;
+            let mut cache = BTreeMap::<Vec<u8>, EvidenceVerification>::new();
+            let verifications = pointers
+                .iter()
+                .map(|pointer| verify_batch_row(pointer, strict, &bindings, &mut cache))
+                .collect::<Result<Vec<_>>>()?;
+            for binding in &bindings {
+                binding.recheck()?;
+            }
+            Ok(verifications)
+        })?;
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for key in [
+        "alive",
+        "tombstoned",
+        "not_found",
+        "scope_unreachable",
+        "unverifiable",
+        "registry_duplicate",
+    ] {
+        counts.insert(key, 0);
+    }
+    let mut permanent = false;
+    let mut retryable = false;
+    let results = verifications
+        .iter()
+        .enumerate()
+        .map(|(index, verification)| {
+            let status = verification.result.status.as_str();
+            *counts.get_mut(status).expect("closed status set") += 1;
+            if strict {
+                match verification.exit {
+                    ExitCode::PermanentFailure => permanent = true,
+                    ExitCode::PartialFailure => retryable = true,
+                    _ => {}
+                }
+            } else if verification.exit == ExitCode::PartialFailure {
+                retryable = true;
+            }
+            json!({"line": index + 1, "result": verification.result})
+        })
+        .collect::<Vec<_>>();
+    let mut output = json!({
+        "schema": "kio.evidence.batch-verify",
+        "schema_version": 1,
+        "input_sha256": input_sha256,
+        "strict": strict,
+        "results": results,
+        "summary": {"total": pointers.len(), "status_counts": counts},
+        "verified_count": pointers.len(),
+    });
+    let exit = if strict && permanent {
+        ExitCode::PermanentFailure
+    } else if retryable {
+        ExitCode::PartialFailure
+    } else {
+        ExitCode::Success
+    };
+    if exit != ExitCode::Success {
+        set_exit_override(&mut output, exit);
+    }
+    Ok(output)
+}
+
+fn verify_batch_row(
+    pointer: &EvidencePointer,
+    strict: bool,
+    bindings: &[EvidenceScopeBinding],
+    cache: &mut BTreeMap<Vec<u8>, EvidenceVerification>,
+) -> Result<EvidenceVerification> {
+    let key = evidence_pointer_cache_key(pointer)?;
+    let binding = bindings
+        .iter()
+        .find(|binding| {
+            binding.scope_id == pointer.scope_id && binding.scope_path == pointer.scope_path
+        })
+        .ok_or_else(batch_changed_error)?;
+    let cached = cache.get(&key).cloned();
+    let verification = match cached {
+        Some(verification) => verification,
+        None => match &binding.state {
+            EvidenceScopeState::Unavailable(result) => result.clone(),
+            EvidenceScopeState::Ready {
+                target,
+                repo,
+                checkpoint,
+                ..
+            } => verify_pointer_in_scope(pointer, strict, target, repo, checkpoint)?,
+        },
+    };
+    // Cache entries only avoid repeated object traversal. Every row, including
+    // a duplicate cache hit, crosses the live scope/registry/index/read barrier.
+    binding.recheck()?;
+    cache.entry(key).or_insert_with(|| verification.clone());
+    Ok(verification)
+}
+
+fn evidence_pointer_cache_key(pointer: &EvidencePointer) -> Result<Vec<u8>> {
+    let value =
+        serde_json::to_value(pointer).map_err(|error| KioError::schema(error.to_string()))?;
+    canonical_json_bytes(&value)
+}
+
+fn bind_batch_scopes(
+    pointers: &[EvidencePointer],
+    strict: bool,
+) -> Result<Vec<EvidenceScopeBinding>> {
+    let mut bindings = Vec::new();
+    let mut seen = BTreeSet::new();
+    for pointer in pointers {
+        let key = (pointer.scope_id.clone(), pointer.scope_path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        bindings.push(bind_evidence_scope(pointer, strict)?);
+    }
+    Ok(bindings)
+}
+
+fn batch_changed_error() -> KioError {
+    KioError::new(
+        "KIO-E-EVIDENCE-BATCH-CHANGED-001",
+        "evidence scope authority changed while verifying batch; retry",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+fn index_generation_for_evidence(kio_dir: &Path) -> Result<Option<String>> {
+    let path = sqlite_path(kio_dir);
+    if !path.exists() {
+        return Err(index_rebuilding_error());
+    }
+    let conn = open_existing_source_index_connection(
+        &path,
+        ExistingSourceIndexOpenMode::ReadOnly,
+        &FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kio)?;
+    Ok(kio_index::fts::read_index_metadata(&conn)
+        .map_err(index_to_kio)?
+        .map(|metadata| metadata.index_generation))
+}
+
+fn parse_batch_pointers(bytes: &[u8]) -> Result<Vec<EvidencePointer>> {
+    let records = if bytes.last() == Some(&b'\n') {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    };
+    if records.is_empty() {
+        return Err(batch_input_error(None, "empty"));
+    }
+    let mut pointers = Vec::new();
+    let mut scopes = BTreeSet::new();
+    for (index, line) in records.split(|byte| *byte == b'\n').enumerate() {
+        let line_no = index + 1;
+        if line.len() > MAX_BATCH_LINE_BYTES {
+            return Err(batch_limit_error(
+                line_no,
+                "line_bytes",
+                MAX_BATCH_LINE_BYTES,
+            ));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return Err(batch_input_error(Some(line_no), "blank"));
+        }
+        let _: &str =
+            std::str::from_utf8(line).map_err(|_| batch_input_error(Some(line_no), "utf8"))?;
+        let pointer = serde_json::from_slice::<EvidencePointer>(line)
+            .map_err(|_| batch_input_error(Some(line_no), "json"))?;
+        scopes.insert(pointer.scope_id.clone());
+        if scopes.len() > MAX_BATCH_SCOPES {
+            return Err(batch_limit_error(line_no, "scope_count", MAX_BATCH_SCOPES));
+        }
+        pointers.push(pointer);
+        if pointers.len() > MAX_BATCH_RECORDS {
+            return Err(batch_limit_error(
+                line_no,
+                "record_count",
+                MAX_BATCH_RECORDS,
+            ));
+        }
+    }
+    Ok(pointers)
+}
+
+fn batch_input_error(line: Option<usize>, reason: &str) -> KioError {
+    KioError::new(
+        "KIO-E-EVIDENCE-BATCH-INPUT-001",
+        "invalid evidence batch input",
+        json!({"line": line, "reason": reason}),
+        ExitCode::InvalidUsage,
+    )
+}
+
+fn batch_limit_error(line: usize, limit: &str, maximum: usize) -> KioError {
+    KioError::new(
+        "KIO-E-EVIDENCE-BATCH-LIMIT-001",
+        "evidence batch exceeds a limit",
+        json!({"line": line, "limit": limit, "maximum": maximum}),
+        ExitCode::InvalidUsage,
+    )
 }
 
 /// Read-only, content-free Evidence liveness check (08 §4.3). This deliberately
@@ -106,7 +394,7 @@ pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
 ///
 /// PB53-57 (§S): returns the full 6-value `status` union
 /// (`alive|tombstoned|not_found|scope_unreachable|unverifiable|registry_duplicate`)
-/// as a structured `Ok(Value)` wherever 08§4.3 specifies one. Only genuine
+/// as a typed structured result wherever 08§4.3 specifies one. Only genuine
 /// command-level conditions — sqlite.db unavailable (PB57), an active purge
 /// journal (PB58, unchanged), and genuine store corruption (LC13/LC14 via the
 /// shared canonical dispatch) — still propagate as a raw `KioError`.
@@ -118,31 +406,133 @@ pub(super) fn run_evidence(args: EvidenceArgs) -> Result<Value> {
 /// downgrade (with resurrection-link fallback) all flow through the same
 /// judgment `resolve_pointer_for_cli` (open/view/restore) uses — PB66's
 /// structural requirement.
-fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Value> {
+fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<EvidenceVerification> {
+    let binding = bind_evidence_scope(pointer, strict)?;
+    match &binding.state {
+        EvidenceScopeState::Unavailable(result) => Ok(result.clone()),
+        EvidenceScopeState::Ready {
+            target,
+            repo,
+            checkpoint,
+            ..
+        } => verify_pointer_in_scope(pointer, strict, target, repo, checkpoint),
+    }
+}
+
+enum EvidenceScopeState {
+    Ready {
+        target: ScopeTarget,
+        repo: Box<Repository>,
+        checkpoint: ReadBarrierCheckpoint,
+        index_generation: Option<String>,
+    },
+    Unavailable(EvidenceVerification),
+}
+
+struct EvidenceScopeBinding {
+    scope_id: String,
+    scope_path: Option<String>,
+    state: EvidenceScopeState,
+}
+
+impl EvidenceScopeBinding {
+    fn recheck(&self) -> Result<()> {
+        match &self.state {
+            EvidenceScopeState::Ready {
+                target,
+                checkpoint,
+                index_generation,
+                ..
+            } => {
+                let current = resolve_scope_target(&self.scope_id, self.scope_path.as_deref())
+                    .map_err(|_| batch_changed_error())?;
+                if current.repo_root != target.repo_root || current.kio_dir != target.kio_dir {
+                    return Err(batch_changed_error());
+                }
+                checkpoint.recheck()?;
+                check_index_generation_current(&target.kio_dir)?;
+                if index_generation_for_evidence(&target.kio_dir)? != *index_generation {
+                    return Err(batch_changed_error());
+                }
+            }
+            EvidenceScopeState::Unavailable(expected) => {
+                let current = unavailable_evidence_result(
+                    &self.scope_id,
+                    self.scope_path.as_deref(),
+                    expected.exit,
+                )?;
+                if current.result != expected.result || current.exit != expected.exit {
+                    return Err(batch_changed_error());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn unavailable_evidence_result(
+    scope_id: &str,
+    scope_path: Option<&str>,
+    strict_exit: ExitCode,
+) -> Result<EvidenceVerification> {
+    match resolve_scope_target(scope_id, scope_path) {
+        Err(error) if error.error_code() == "KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001" => {
+            Ok(EvidenceVerification::new(
+                EvidenceStatus::ScopeUnreachable,
+                Some(error.error_code()),
+                error.context().clone(),
+                if strict_exit == ExitCode::Success {
+                    ExitCode::Success
+                } else {
+                    ExitCode::PartialFailure
+                },
+            ))
+        }
+        Err(error) if error.error_code() == "KIO-E-REGISTRY-DUP-001" => {
+            Ok(EvidenceVerification::new(
+                EvidenceStatus::RegistryDuplicate,
+                Some(error.error_code()),
+                error.context().clone(),
+                ExitCode::PartialFailure,
+            ))
+        }
+        _ => Err(batch_changed_error()),
+    }
+}
+
+fn bind_evidence_scope(pointer: &EvidencePointer, strict: bool) -> Result<EvidenceScopeBinding> {
     let target = match resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref()) {
         Ok(target) => target,
         // PB53: a structured `status`, not a raw command failure — exit 0
         // unless `--strict` (PB56 promotes it to 3).
         Err(error) if error.error_code() == "KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001" => {
-            return Ok(verify_exit_override(
-                json!({
-                    "status": "scope_unreachable",
-                    "error_code": error.error_code(),
-                    "details": error.context().clone(),
-                }),
-                if strict { 3 } else { 0 },
-            ));
+            return Ok(EvidenceScopeBinding {
+                scope_id: pointer.scope_id.clone(),
+                scope_path: pointer.scope_path.clone(),
+                state: EvidenceScopeState::Unavailable(EvidenceVerification::new(
+                    EvidenceStatus::ScopeUnreachable,
+                    Some(error.error_code()),
+                    error.context().clone(),
+                    if strict {
+                        ExitCode::PartialFailure
+                    } else {
+                        ExitCode::Success
+                    },
+                )),
+            });
         }
         // PB54: live registry duplicate — exit 3 regardless of --strict.
         Err(error) if error.error_code() == "KIO-E-REGISTRY-DUP-001" => {
-            return Ok(verify_exit_override(
-                json!({
-                    "status": "registry_duplicate",
-                    "error_code": error.error_code(),
-                    "details": error.context().clone(),
-                }),
-                3,
-            ));
+            return Ok(EvidenceScopeBinding {
+                scope_id: pointer.scope_id.clone(),
+                scope_path: pointer.scope_path.clone(),
+                state: EvidenceScopeState::Unavailable(EvidenceVerification::new(
+                    EvidenceStatus::RegistryDuplicate,
+                    Some(error.error_code()),
+                    error.context().clone(),
+                    ExitCode::PartialFailure,
+                )),
+            });
         }
         Err(error) => return Err(error),
     };
@@ -163,6 +553,26 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     // so checkpoint 2 below (LC54/LC55) gates every return point, not only a
     // single "success" path.
     let checkpoint = preflight_barrier_and_index(&target.kio_dir)?;
+    let index_generation = index_generation_for_evidence(&target.kio_dir)?;
+    Ok(EvidenceScopeBinding {
+        scope_id: pointer.scope_id.clone(),
+        scope_path: pointer.scope_path.clone(),
+        state: EvidenceScopeState::Ready {
+            target,
+            repo: Box::new(repo),
+            checkpoint,
+            index_generation,
+        },
+    })
+}
+
+fn verify_pointer_in_scope(
+    pointer: &EvidencePointer,
+    strict: bool,
+    target: &ScopeTarget,
+    repo: &Repository,
+    checkpoint: &ReadBarrierCheckpoint,
+) -> Result<EvidenceVerification> {
     let commit = match repo.read_commit(&pointer.commit) {
         Ok(commit) => commit,
         Err(error) if is_store_not_found(&error) => {
@@ -221,11 +631,11 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
         Err(error) => return Err(error),
     };
     if let Err(marker_error) =
-        enforce_canonical_marker_barrier(&target, &pointer.raw_hash, raw_present)
+        enforce_canonical_marker_barrier(target, &pointer.raw_hash, raw_present)
     {
         return dispatch_marker_barrier_error(
-            &checkpoint,
-            &target,
+            checkpoint,
+            target,
             &pointer.raw_hash,
             marker_error,
             strict,
@@ -263,8 +673,8 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     let mut manifest_missing = false;
     if !commit_shallow && let Some(normalize) = &entry_normalize {
         match verify_point_in_time_attribution(
-            &target,
-            &repo,
+            target,
+            repo,
             &pointer.raw_hash,
             normalize,
             &pointer.chunk_hash,
@@ -274,9 +684,15 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
             PointInTimeAttribution::Alive => {}
             PointInTimeAttribution::ManifestMissing => manifest_missing = true,
             PointInTimeAttribution::NotFound => {
-                return checkpoint.finish(verify_exit_override(
-                    not_found_verify_output(&target, &pointer.raw_hash),
-                    if strict { 4 } else { 0 },
+                return checkpoint.finish(EvidenceVerification::new(
+                    EvidenceStatus::NotFound,
+                    Some("KIO-E-PURGE-NOT-FOUND-001"),
+                    not_found_verify_details(target, &pointer.raw_hash),
+                    if strict {
+                        ExitCode::PermanentFailure
+                    } else {
+                        ExitCode::Success
+                    },
                 ));
             }
             PointInTimeAttribution::StoreCorrupt => {
@@ -289,10 +705,10 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     // Defense-in-depth: re-run the identical canonical dispatch after the
     // chunk read, in case a purge raced the resolution above (mirrors the
     // pre-existing double-check this function has always performed).
-    if let Err(marker_error) = enforce_canonical_marker_barrier(&target, &pointer.raw_hash, true) {
+    if let Err(marker_error) = enforce_canonical_marker_barrier(target, &pointer.raw_hash, true) {
         return dispatch_marker_barrier_error(
-            &checkpoint,
-            &target,
+            checkpoint,
+            target,
             &pointer.raw_hash,
             marker_error,
             strict,
@@ -308,27 +724,31 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
         };
         // PB41/56: `commit_shallow` alone is retryable (unshallow may
         // resolve it, exit 3); `manifest_missing` is permanent (exit 4).
-        let exit = if manifest_missing { 4 } else { 3 };
-        return checkpoint.finish(verify_exit_override(
+        let exit = if manifest_missing {
+            ExitCode::PermanentFailure
+        } else {
+            ExitCode::PartialFailure
+        };
+        return checkpoint.finish(EvidenceVerification::new(
+            EvidenceStatus::Unverifiable,
+            None,
             json!({
-                "status": "unverifiable",
-                "details": {
-                    "scope_id": pointer.scope_id,
-                    "scope_path": target.kio_dir.display().to_string(),
-                    "commit": pointer.commit,
-                    "raw_hash": pointer.raw_hash,
-                    "tool_profile_hash": pointer.tool_profile_hash,
-                    "chunk_hash": pointer.chunk_hash,
-                    "reason": reason,
-                },
+                "scope_id": pointer.scope_id,
+                "scope_path": target.kio_dir.display().to_string(),
+                "commit": pointer.commit,
+                "raw_hash": pointer.raw_hash,
+                "tool_profile_hash": pointer.tool_profile_hash,
+                "chunk_hash": pointer.chunk_hash,
+                "reason": reason,
             }),
             exit,
         ));
     }
 
-    checkpoint.finish(json!({
-        "status": "alive",
-        "details": {
+    checkpoint.finish(EvidenceVerification::new(
+        EvidenceStatus::Alive,
+        None,
+        json!({
             "scope_id": pointer.scope_id,
             "scope_path": target.kio_dir.display().to_string(),
             "commit": pointer.commit,
@@ -337,8 +757,9 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
             "chunk_hash": pointer.chunk_hash,
             "commit_shallow": commit_shallow,
             "manifest_missing": manifest_missing,
-        }
-    }))
+        }),
+        ExitCode::Success,
+    ))
 }
 
 /// PB64-68: translate an `enforce_canonical_marker_barrier` `Err` into the
@@ -355,36 +776,31 @@ fn dispatch_marker_barrier_error(
     raw_hash: &str,
     error: KioError,
     strict: bool,
-) -> Result<Value> {
+) -> Result<EvidenceVerification> {
     // PB56 (§S/§N exit table): under `--strict`, `tombstoned`/`not_found`
     // are permanent (exit 4) — both are `KIO-E-PURGE-*-001` error-code
     // marker states, never transient. Non-strict always stays exit 0 (a
     // structured status, not a command failure).
-    let exit = if strict { 4 } else { 0 };
+    let exit = if strict {
+        ExitCode::PermanentFailure
+    } else {
+        ExitCode::Success
+    };
     match error.error_code() {
-        "KIO-E-PURGE-TOMBSTONED-001" => checkpoint.finish(verify_exit_override(
-            tombstoned_verify_output(error.context().clone()),
+        "KIO-E-PURGE-TOMBSTONED-001" => checkpoint.finish(EvidenceVerification::new(
+            EvidenceStatus::Tombstoned,
+            Some("KIO-E-PURGE-TOMBSTONED-001"),
+            tombstoned_verify_details(error.context().clone()),
             exit,
         )),
-        "KIO-E-PURGE-NOT-FOUND-001" => checkpoint.finish(verify_exit_override(
-            not_found_verify_output(target, raw_hash),
+        "KIO-E-PURGE-NOT-FOUND-001" => checkpoint.finish(EvidenceVerification::new(
+            EvidenceStatus::NotFound,
+            Some("KIO-E-PURGE-NOT-FOUND-001"),
+            not_found_verify_details(target, raw_hash),
             exit,
         )),
         _ => Err(error),
     }
-}
-
-/// PB53/54/56: embed the private `__exit_code` marker `main()` strips before
-/// printing (matching the existing convention `run_repair`/search partial
-/// failure already use) so a structured status response can still request a
-/// non-zero exit.
-fn verify_exit_override(mut value: Value, exit: u64) -> Value {
-    if exit != 0
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("__exit_code".to_owned(), json!(exit));
-    }
-    value
 }
 
 /// PB57: sqlite.db is missing/unavailable — the same retryable code
@@ -419,25 +835,17 @@ fn store_corrupt_pointer_entry_missing_error(pointer: &EvidencePointer) -> KioEr
     )
 }
 
-fn tombstoned_verify_output(mut tombstone: Value) -> Value {
+fn tombstoned_verify_details(mut tombstone: Value) -> Value {
     if let Some(object) = tombstone.as_object_mut() {
         object.remove("status");
     }
-    json!({
-        "status": "tombstoned",
-        "error_code": "KIO-E-PURGE-TOMBSTONED-001",
-        "details": tombstone,
-    })
+    tombstone
 }
 
-fn not_found_verify_output(target: &ScopeTarget, raw_hash: &str) -> Value {
+fn not_found_verify_details(target: &ScopeTarget, raw_hash: &str) -> Value {
     json!({
-        "status": "not_found",
-        "error_code": "KIO-E-PURGE-NOT-FOUND-001",
-        "details": {
-            "raw_hash": raw_hash,
-            "scope_path": target.kio_dir.display().to_string(),
-        }
+        "raw_hash": raw_hash,
+        "scope_path": target.kio_dir.display().to_string(),
     })
 }
 
@@ -3409,6 +3817,46 @@ mod tests {
 
     fn hash(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    #[test]
+    fn batch_cache_hit_still_rechecks_scope_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let pointer = EvidencePointer {
+            schema_version: 1,
+            commit: hash('a'),
+            tree: None,
+            raw_hash: hash('b'),
+            tool_profile_hash: hash('c'),
+            chunk_hash: hash('d'),
+            path_at_commit: None,
+            heading_path: None,
+            section_id: None,
+            byte_start: None,
+            byte_end: None,
+            scope_id: "batch-cache-final-recheck-unreachable".to_owned(),
+            scope_path: Some(dir.path().join("missing-scope").display().to_string()),
+        };
+        let mut bindings = bind_batch_scopes(std::slice::from_ref(&pointer), false).unwrap();
+        let original = match &bindings[0].state {
+            EvidenceScopeState::Unavailable(result) => result.clone(),
+            EvidenceScopeState::Ready { .. } => panic!("fixture scope must be unreachable"),
+        };
+        let key = evidence_pointer_cache_key(&pointer).unwrap();
+        let mut cache = BTreeMap::from([(key, original)]);
+
+        let EvidenceScopeState::Unavailable(expected) = &mut bindings[0].state else {
+            unreachable!("fixture scope must remain unreachable");
+        };
+        expected
+            .result
+            .details
+            .as_object_mut()
+            .unwrap()
+            .insert("changed_after_cache_fill".to_owned(), json!(true));
+
+        let error = verify_batch_row(&pointer, false, &bindings, &mut cache).unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-EVIDENCE-BATCH-CHANGED-001");
     }
 
     fn commit(kind: CommitType, created_at: &str) -> CommitObject {

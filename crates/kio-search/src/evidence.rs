@@ -124,6 +124,7 @@ pub struct EvidencePointer {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UncheckedEvidencePointer {
     schema_version: u64,
     commit: String,
@@ -458,6 +459,13 @@ mod tests {
         assert!(decoded.tree.is_none());
         assert!(decoded.path_at_commit.is_none());
         assert!(decoded.scope_path.is_none());
+    }
+
+    #[test]
+    fn evidence_pointer_rejects_unknown_json_fields() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<EvidencePointer>(value).is_err());
     }
 
     #[test]

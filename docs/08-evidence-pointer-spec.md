@@ -388,7 +388,7 @@ kio evidence verify --batch <pointers.jsonl> [--strict]
 pointer JSON object とし、terminal newline は許容するが blank / whitespace-only line は許容しない。
 1 logical record の UTF-8 byte 長は delimiter を除き 64 KiB 以下、入力ファイルの exact bytes
 （delimiter と terminal newline を含む）は 16 MiB 以下である。行順・重複行は保持する。入力は
-regular file・single link (`nlink == 1`) に限り、全 path component を nofollow で開く。pre-open /
+regular file・single link (`nlink == 1`) に限り、最終 path entry を nofollow で開く。pre-open /
 open / post-open の retained descriptor identity が一致しなければ拒否する。batch 全体で distinct
 `scope_id` は 256 以下、認証済み CAS bytes の aggregate は 4 GiB 以下である。
 
@@ -414,6 +414,13 @@ output publication is all-or-nothing: structural input error, integrity/rebuild/
 command-level error publishes no partial `results`. Internal cache は許容するが output authority にはならない。
 各行の final status 前に scope authority、registry/index generation、active purge/read barrier を再検査する。
 従って batch の duplicate row も cache hit だけで返してはならず、各 row の最終 authority check を通す。
+
+batch 固有の command-level error は、malformed JSONL / invalid UTF-8 / blank line を
+`KIO-E-EVIDENCE-BATCH-INPUT-001` (exit 2)、file / line / record / distinct scope limit を
+`KIO-E-EVIDENCE-BATCH-LIMIT-001` (exit 2)、aggregate 認証済み CAS byte limit を
+`KIO-E-STORE-VERIFIED-BYTES-LIMIT-001` (exit 4)、検査中の scope authority / registry /
+index generation drift を `KIO-E-EVIDENCE-BATCH-CHANGED-001` (exit 3) とする。unsafe link・
+pre/open/post identity 不一致は store integrity error (exit 4) であり、いずれも partial output を返さない。
 
 strict batch の exit priority は permanent 4 > retryable 3 > success 0 である。permanent は
 `tombstoned` / `not_found` / `manifest_missing`、retryable は `scope_unreachable` /
