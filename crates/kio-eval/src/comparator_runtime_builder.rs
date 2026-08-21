@@ -295,14 +295,34 @@ fn insert_macho_alias<'a>(
 }
 #[cfg(target_os = "macos")]
 fn digest(path: &Path, maximum: u64) -> Result<(String, u64), QhardError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let meta = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
     if !meta.file_type().is_file() || meta.len() > maximum {
         return Err(err(format!("unsafe runtime file: {}", path.display())));
     }
-    let mut f = fs::File::open(path).map_err(|e| err(e.to_string()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| err(e.to_string()))?;
+    let opened = f.metadata().map_err(|e| err(e.to_string()))?;
+    if !opened.is_file()
+        || opened.dev() != meta.dev()
+        || opened.ino() != meta.ino()
+        || opened.len() != meta.len()
+    {
+        return Err(err("runtime file changed while opening for hashing"));
+    }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     f.read_to_end(&mut bytes).map_err(|e| err(e.to_string()))?;
-    if bytes.len() as u64 != meta.len() {
+    let after = f.metadata().map_err(|e| err(e.to_string()))?;
+    let named = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
+    if bytes.len() as u64 != meta.len()
+        || after.dev() != opened.dev()
+        || after.ino() != opened.ino()
+        || named.dev() != opened.dev()
+        || named.ino() != opened.ino()
+    {
         return Err(err("file changed while hashing"));
     }
     Ok((hash_bytes(&bytes), meta.len()))
@@ -371,7 +391,9 @@ mod macos {
     use super::*;
     use crate::runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command};
     use std::{
+        ffi::CString,
         os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        os::unix::io::{AsRawFd, FromRawFd},
         os::unix::process::CommandExt,
         process::Command,
     };
@@ -806,16 +828,139 @@ mod macos {
                     component.path.display()
                 )));
             }
+            super::super::require_no_extended_acl(&component.path, label)?;
         }
         Ok(())
     }
-    fn sync_parent(path: &Path) -> Result<(), QhardError> {
-        fs::File::open(
-            path.parent()
-                .ok_or_else(|| err("missing publication parent"))?,
-        )
-        .and_then(|directory| directory.sync_all())
-        .map_err(|e| err(e.to_string()))
+    /// Create a directory only through a descriptor for its already-bound
+    /// parent.  The named path is used solely to prove that the object opened
+    /// through that descriptor is the object visible to subsequent fixed-path
+    /// system tools; a replacement at either point is indeterminate.
+    fn mkdirat_bound(
+        parent: &RetainedAuthority,
+        name: &str,
+        path: &Path,
+        _expected_uid: u32,
+        _expected_gid: u32,
+        label: &str,
+    ) -> Result<RetainedAuthority, QhardError> {
+        if name.is_empty() || name.bytes().any(|byte| byte == 0 || byte == b'/') {
+            return Err(err("invalid capability-relative directory name"));
+        }
+        if identity_metadata(
+            &parent
+                .descriptor
+                .metadata()
+                .map_err(|e| err(e.to_string()))?,
+        ) != parent.identity
+            || !unchanged(&parent.path, parent.identity)
+        {
+            return Err(QhardError::Indeterminate(format!(
+                "{label} parent changed before mkdirat"
+            )));
+        }
+        // ACLs are not represented in stat identity.  Check them immediately
+        // before this capability-relative mutation so an inheritable ACL
+        // cannot be used after the parent was initially bound.
+        super::super::require_no_extended_acl(&parent.path, label)?;
+        let name = CString::new(name).map_err(|_| err("invalid directory name"))?;
+        // SAFETY: `name` is NUL-free and the retained descriptor refers to a
+        // directory that was opened with O_NOFOLLOW.
+        if unsafe { libc::mkdirat(parent.descriptor.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
+            return Err(err(format!(
+                "cannot create {label}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: this opens the just-created child relative to the retained
+        // parent descriptor.  `name` is NUL-free and no pathname traversal is
+        // involved.  `File` takes ownership of the successful descriptor.
+        let raw = unsafe {
+            libc::openat(
+                parent.descriptor.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            let open_error = std::io::Error::last_os_error();
+            // Even though mkdirat returned success, no child identity was
+            // retained.  A replacement cannot be excluded, so preserve the
+            // fixed name instead of guessing that it is ours to unlink.
+            return Err(QhardError::Indeterminate(format!(
+                "cannot retain created {label}; preserving unowned name: {}",
+                open_error
+            )));
+        }
+        // SAFETY: `raw` is a newly returned owned descriptor above.
+        let descriptor = unsafe { fs::File::from_raw_fd(raw) };
+        let named = identity(path)?;
+        let opened = identity_metadata(&descriptor.metadata().map_err(|e| err(e.to_string()))?);
+        if opened != named {
+            return Err(QhardError::Indeterminate(format!(
+                "created {label} changed while binding"
+            )));
+        }
+        if identity_metadata(
+            &parent
+                .descriptor
+                .metadata()
+                .map_err(|e| err(e.to_string()))?,
+        ) != parent.identity
+            || !unchanged(&parent.path, parent.identity)
+            || !unchanged(path, named)
+        {
+            return Err(QhardError::Indeterminate(format!(
+                "{label} changed after mkdirat"
+            )));
+        }
+        Ok(RetainedAuthority {
+            path: path.to_owned(),
+            identity: named,
+            descriptor,
+        })
+    }
+    fn recheck_created(component: &RetainedAuthority, label: &str) -> Result<(), QhardError> {
+        let descriptor = identity_metadata(
+            &component
+                .descriptor
+                .metadata()
+                .map_err(|e| err(e.to_string()))?,
+        );
+        if descriptor != component.identity || !unchanged(&component.path, component.identity) {
+            return Err(QhardError::Indeterminate(format!(
+                "{label} changed after creation"
+            )));
+        }
+        super::super::require_no_extended_acl(&component.path, label)?;
+        let xattrs = super::super::macos_xattr::list(&component.path, false)?;
+        // macOS may add provenance while creating a directory.  It is the
+        // sole permitted annotation; any inherited/user-controlled name is a
+        // hard failure and is rechecked at every transaction boundary.
+        if !super::super::runtime_xattr_names_allowed(&xattrs) {
+            return Err(QhardError::Indeterminate(format!(
+                "{label} acquired forbidden extended attributes"
+            )));
+        }
+        Ok(())
+    }
+    fn validate_created(
+        component: &RetainedAuthority,
+        expected_uid: u32,
+        expected_gid: u32,
+        label: &str,
+    ) -> Result<(), QhardError> {
+        let metadata = fs::symlink_metadata(&component.path).map_err(|e| err(e.to_string()))?;
+        if !metadata.is_dir()
+            || metadata.uid() != expected_uid
+            || metadata.gid() != expected_gid
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(QhardError::Indeterminate(format!(
+                "created {label} has unsafe ownership or mode"
+            )));
+        }
+        recheck_created(component, label)
     }
     fn sync_retained_parent(parent: &(Identity, fs::File)) -> Result<(), QhardError> {
         if identity_metadata(&parent.1.metadata().map_err(|e| err(e.to_string()))?) != parent.0 {
@@ -901,20 +1046,42 @@ mod macos {
         }
         Err(err("could not allocate unique comparator build root"))
     }
-    fn reconcile_created_image(journal: &mut Journal) -> Result<(), QhardError> {
-        match fs::symlink_metadata(IMAGE_PATH) {
+    fn reconcile_created_file(
+        path: &Path,
+        recorded: &mut Option<Identity>,
+        operation_succeeded: bool,
+        label: &str,
+    ) -> Result<(), QhardError> {
+        match fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // A failed operation may leave a path, but it is not possible to
+            // distinguish that partial effect from an intervening foreign
+            // publication.  Never journal or delete an unprovable effect.
+            Ok(_) if !operation_succeeded => Err(QhardError::Indeterminate(format!(
+                "{label} appeared after failed operation; ownership is unknown"
+            ))),
             Ok(metadata) if metadata.file_type().is_file() => {
-                journal.image = Some(identity(Path::new(IMAGE_PATH))?);
+                *recorded = Some(identity(path)?);
                 Ok(())
             }
-            Ok(_) => Err(QhardError::Indeterminate(
-                "hdiutil create left a non-file image target".into(),
-            )),
+            Ok(_) => Err(QhardError::Indeterminate(format!(
+                "operation left a non-file {label} target"
+            ))),
             Err(error) => Err(QhardError::Indeterminate(format!(
-                "cannot reconcile image effect: {error}"
+                "cannot reconcile {label} effect: {error}"
             ))),
         }
+    }
+    fn reconcile_created_image(
+        journal: &mut Journal,
+        create_succeeded: bool,
+    ) -> Result<(), QhardError> {
+        reconcile_created_file(
+            Path::new(IMAGE_PATH),
+            &mut journal.image,
+            create_succeeded,
+            "runtime image",
+        )
     }
     fn require_private_unpublished_image() -> Result<(), QhardError> {
         let metadata = fs::symlink_metadata(IMAGE_PATH).map_err(|e| err(e.to_string()))?;
@@ -958,36 +1125,48 @@ mod macos {
         (actual != baseline && actual.mount_point == RUNTIME_ROOT).then(|| actual.clone())
     }
 
-    fn reconcile_attached_mount(journal: &mut Journal) -> Result<(), QhardError> {
+    fn reconcile_attached_mount(
+        journal: &mut Journal,
+        attach_succeeded: bool,
+    ) -> Result<(), QhardError> {
         let baseline = journal.mount_baseline.as_ref().ok_or_else(|| {
             QhardError::Indeterminate("missing mount observation baseline".into())
         })?;
         let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
             QhardError::Indeterminate(format!("cannot reconcile mount effect: {error}"))
         })?;
-        // Retain the exact observed effect before applying policy.  A failed
-        // attach may still have mounted a writable/otherwise-invalid volume;
-        // rollback must know that it owns an effect to detach it safely.
+        if !attach_succeeded {
+            if &actual != baseline {
+                return Err(QhardError::Indeterminate(
+                    "mount changed after failed hdiutil attach; ownership is unknown".into(),
+                ));
+            }
+            return Ok(());
+        }
+        // Only a successful invocation may be attributed to this process.
+        // A concurrent foreign mount after an attach error is never detached.
         journal.mount = rollback_owned_mount_effect(baseline, &actual);
         mounted_effect(baseline, actual)?;
         Ok(())
     }
-    fn reconcile_created_manifest(journal: &mut Journal) -> Result<(), QhardError> {
-        match fs::symlink_metadata(MANIFEST_PATH) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Ok(metadata) if metadata.file_type().is_file() => {
-                journal.manifest = Some(identity(Path::new(MANIFEST_PATH))?);
-                Ok(())
-            }
-            Ok(_) => Err(QhardError::Indeterminate(
-                "finalize left a non-file manifest target".into(),
-            )),
-            Err(error) => Err(QhardError::Indeterminate(format!(
-                "cannot reconcile manifest effect: {error}"
-            ))),
-        }
+    fn reconcile_created_manifest(
+        journal: &mut Journal,
+        finalize_succeeded: bool,
+    ) -> Result<(), QhardError> {
+        reconcile_created_file(
+            Path::new(MANIFEST_PATH),
+            &mut journal.manifest,
+            finalize_succeeded,
+            "runtime manifest",
+        )
     }
     struct Journal {
+        /// `/` and `/Library` are retained for the lifetime of the
+        /// transaction.  No mutation below is authorised by a merely named
+        /// `/Library` path.
+        library_authority: Vec<RetainedAuthority>,
+        managed_binding: Option<RetainedAuthority>,
+        runtime_binding: Option<RetainedAuthority>,
         managed_root: Option<Identity>,
         runtime_root: Option<Identity>,
         build_root: Option<(PathBuf, Identity)>,
@@ -1003,8 +1182,58 @@ mod macos {
         mount: Option<RuntimeMountIdentity>,
         publication_parent: Option<(Identity, fs::File)>,
     }
+    fn recheck_transaction(
+        executable_authority: &[RetainedAuthority],
+        journal: &Journal,
+    ) -> Result<(), QhardError> {
+        recheck_authority(executable_authority, "kio-eval")?;
+        recheck_authority(&journal.library_authority, "/Library")?;
+        if let Some(managed) = &journal.managed_binding {
+            recheck_created(managed, "managed runtime root")?;
+        }
+        if let Some(mount) = &journal.mount {
+            let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
+                QhardError::Indeterminate(format!("cannot recheck mounted runtime: {error}"))
+            })?;
+            if &actual != mount {
+                return Err(QhardError::Indeterminate(
+                    "mounted runtime changed during transaction".into(),
+                ));
+            }
+        } else if let Some(runtime) = &journal.runtime_binding {
+            recheck_created(runtime, "runtime mountpoint")?;
+        }
+        if let Some(parent) = &journal.publication_parent {
+            sync_retained_parent(parent)?;
+        }
+        for (path, expected, label) in [
+            (IMAGE_PATH, journal.image, "runtime image"),
+            (MANIFEST_PATH, journal.manifest, "runtime manifest"),
+        ] {
+            if let Some(expected) = expected {
+                if !unchanged(Path::new(path), expected) {
+                    return Err(QhardError::Indeterminate(format!(
+                        "{label} changed during transaction"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
     impl Journal {
         fn rollback(&mut self) -> Result<(), QhardError> {
+            // A namespace replacement means the remaining fixed names may be
+            // foreign.  Preserve them all rather than attempting best-effort
+            // cleanup through a changed parent.
+            recheck_authority(&self.library_authority, "/Library")?;
+            if let Some(managed) = &self.managed_binding {
+                recheck_created(managed, "managed runtime root")?;
+            }
+            if self.mount.is_none() {
+                if let Some(runtime) = &self.runtime_binding {
+                    recheck_created(runtime, "runtime mountpoint")?;
+                }
+            }
             if let Some(mount) = self.mount.take() {
                 let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
                     QhardError::Indeterminate(format!(
@@ -1032,6 +1261,9 @@ mod macos {
                         "detach did not restore exact mount observation".into(),
                     ));
                 }
+                if let Some(runtime) = &self.runtime_binding {
+                    recheck_created(runtime, "runtime mountpoint")?;
+                }
             }
             if let Some(identity) = self.manifest.take() {
                 remove_if_owned(Path::new(MANIFEST_PATH), identity, false)?;
@@ -1039,13 +1271,18 @@ mod macos {
             if let Some(identity) = self.image.take() {
                 remove_if_owned(Path::new(IMAGE_PATH), identity, false)?;
             }
-            if let Some((path, identity)) = self.build_root.take()
-                && self
+            if let Some((path, identity)) = self.build_root.take() {
+                if self
                     .build_entries
                     .first()
                     .is_some_and(|(root, retained, _)| root == &path && *retained == identity)
-            {
-                remove_build_root(&self.build_entries)?;
+                {
+                    remove_build_root(&self.build_entries)?;
+                } else {
+                    return Err(QhardError::Indeterminate(
+                        "cannot prove private build tree ownership for rollback".into(),
+                    ));
+                }
             }
             if let Some(identity) = self.runtime_root.take() {
                 remove_if_owned(Path::new(RUNTIME_ROOT), identity, true)?;
@@ -1082,30 +1319,56 @@ mod macos {
             ));
         }
         let authority = require_root_authority(&executable, "kio-eval")?;
+        journal.library_authority = require_root_authority(Path::new("/Library"), "/Library")?;
         for path in [MANAGED_ROOT, RUNTIME_ROOT, IMAGE_PATH, MANIFEST_PATH] {
             if fs::symlink_metadata(path).is_ok() {
                 return Err(err(format!("create-only target already exists: {path}")));
             }
         }
-        let mut root_builder = fs::DirBuilder::new();
-        root_builder.mode(0o755);
-        root_builder
-            .create(MANAGED_ROOT)
-            .map_err(|e| err(e.to_string()))?;
-        journal.managed_root = Some(identity(Path::new(MANAGED_ROOT))?);
-        sync_parent(Path::new(MANAGED_ROOT))?;
-        let parent_descriptor = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-            .open(MANAGED_ROOT)
-            .map_err(|e| err(e.to_string()))?;
-        journal.publication_parent = Some((identity(Path::new(MANAGED_ROOT))?, parent_descriptor));
-        let mut mount_builder = fs::DirBuilder::new();
-        mount_builder.mode(0o755);
-        mount_builder
-            .create(RUNTIME_ROOT)
-            .map_err(|e| err(e.to_string()))?;
-        journal.runtime_root = Some(identity(Path::new(RUNTIME_ROOT))?);
+        let library = journal
+            .library_authority
+            .last()
+            .ok_or_else(|| err("missing /Library authority binding"))?;
+        let managed = mkdirat_bound(
+            library,
+            "KioComparatorRuntime",
+            Path::new(MANAGED_ROOT),
+            0,
+            0,
+            "managed runtime root",
+        )?;
+        journal.managed_root = Some(managed.identity);
+        journal.managed_binding = Some(managed);
+        validate_created(
+            journal.managed_binding.as_ref().expect("just retained"),
+            0,
+            0,
+            "managed runtime root",
+        )?;
+        let managed = journal.managed_binding.as_ref().expect("just retained");
+        journal.publication_parent = Some((
+            managed.identity,
+            managed
+                .descriptor
+                .try_clone()
+                .map_err(|e| err(e.to_string()))?,
+        ));
+        let runtime = mkdirat_bound(
+            managed,
+            "v1",
+            Path::new(RUNTIME_ROOT),
+            0,
+            0,
+            "runtime mountpoint",
+        )?;
+        journal.runtime_root = Some(runtime.identity);
+        journal.runtime_binding = Some(runtime);
+        validate_created(
+            journal.runtime_binding.as_ref().expect("just retained"),
+            0,
+            0,
+            "runtime mountpoint",
+        )?;
         journal.mount_baseline = Some(observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(
             |error| {
                 QhardError::Indeterminate(format!(
@@ -1113,7 +1376,7 @@ mod macos {
                 ))
             },
         )?);
-        sync_parent(Path::new(RUNTIME_ROOT))?;
+        recheck_transaction(&authority, journal)?;
         let build_root = create_private_build_root()?;
         let build_identity = identity(&build_root)?;
         journal.build_root = Some((build_root.clone(), build_identity));
@@ -1128,7 +1391,7 @@ mod macos {
             }
         };
         journal.build_entries = snapshot_build_tree(&build_root)?;
-        recheck_authority(&authority, "kio-eval")?;
+        recheck_transaction(&authority, journal)?;
         let payload = build_root.join("payload");
         let payload = payload.to_str().ok_or_else(|| err("non-UTF8 build path"))?;
         let create = command(
@@ -1150,23 +1413,19 @@ mod macos {
             ],
         );
         if let Err(create_error) = create {
-            reconcile_created_image(journal)?;
+            reconcile_created_image(journal, false)?;
+            recheck_transaction(&authority, journal)?;
             return Err(create_error);
         }
-        reconcile_created_image(journal)?;
+        reconcile_created_image(journal, true)?;
+        recheck_transaction(&authority, journal)?;
         require_private_unpublished_image()?;
         fs::set_permissions(IMAGE_PATH, fs::Permissions::from_mode(0o444))
             .map_err(|e| err(e.to_string()))?;
         // chmod mutates the identity contract (mode is part of it), so the
         // rollback journal must retain the post-chmod observation.
         journal.image = Some(identity(Path::new(IMAGE_PATH))?);
-        sync_retained_parent(
-            journal
-                .publication_parent
-                .as_ref()
-                .ok_or_else(|| err("missing publication parent"))?,
-        )?;
-        recheck_authority(&authority, "kio-eval")?;
+        recheck_transaction(&authority, journal)?;
         let attach = command(
             "/usr/bin/hdiutil",
             &[
@@ -1181,29 +1440,25 @@ mod macos {
                 IMAGE_PATH,
             ],
         );
-        reconcile_attached_mount(journal)?;
+        reconcile_attached_mount(journal, attach.is_ok())?;
+        recheck_transaction(&authority, journal)?;
         if attach.is_ok() && journal.mount.is_none() {
             return Err(QhardError::Indeterminate(
                 "hdiutil attach reported success without a mounted filesystem effect".into(),
             ));
         }
         attach?;
-        recheck_authority(&authority, "kio-eval")?;
+        recheck_transaction(&authority, journal)?;
         let finalized = finalize(
             Path::new(RUNTIME_ROOT),
             preimage,
             Path::new(IMAGE_PATH),
             Path::new(MANIFEST_PATH),
         );
-        reconcile_created_manifest(journal)?;
+        reconcile_created_manifest(journal, finalized.is_ok())?;
+        recheck_transaction(&authority, journal)?;
         finalized?;
-        sync_retained_parent(
-            journal
-                .publication_parent
-                .as_ref()
-                .ok_or_else(|| err("missing publication parent"))?,
-        )?;
-        recheck_authority(&authority, "kio-eval")?;
+        recheck_transaction(&authority, journal)?;
         let (_, build_identity) = journal
             .build_root
             .as_ref()
@@ -1223,6 +1478,7 @@ mod macos {
         }
         journal.build_root = None;
         journal.build_entries.clear();
+        recheck_transaction(&authority, journal)?;
         Ok(ComparatorRuntimeInstallSummary {
             runtime_root: RUNTIME_ROOT.into(),
             image: IMAGE_PATH.into(),
@@ -1235,6 +1491,9 @@ mod macos {
             runtime_root: None,
             build_root: None,
             build_entries: Vec::new(),
+            library_authority: Vec::new(),
+            managed_binding: None,
+            runtime_binding: None,
             image: None,
             manifest: None,
             mount_baseline: None,
@@ -1599,6 +1858,72 @@ mod macos {
             fs::write(&leaf, b"sealed evaluator").unwrap();
             fs::set_permissions(&leaf, fs::Permissions::from_mode(0o600)).unwrap();
             assert!(recheck_authority(&retained, "test evaluator").is_err());
+        }
+
+        #[test]
+        fn capability_relative_creation_binds_and_detects_replacement() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let retained = require_authority_from(&anchor, &leaf, uid, gid, "test parent").unwrap();
+            let parent = &retained[retained.len() - 2];
+            let created_path = parent.path.join("created");
+            let created = mkdirat_bound(
+                parent,
+                "created",
+                &created_path,
+                uid,
+                gid,
+                "test created root",
+            )
+            .unwrap();
+            validate_created(&created, uid, gid, "test created root").unwrap();
+            recheck_created(&created, "test created root").unwrap();
+            fs::remove_dir(&created_path).unwrap();
+            fs::create_dir(&created_path).unwrap();
+            fs::set_permissions(&created_path, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(recheck_created(&created, "test created root").is_err());
+        }
+
+        #[test]
+        fn created_directory_rejects_an_inherited_acl() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let retained = require_authority_from(&anchor, &leaf, uid, gid, "test parent").unwrap();
+            let parent = &retained[retained.len() - 2];
+            let user = std::env::var("USER").unwrap();
+            let acl = Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    &format!("user:{user} allow read,write,file_inherit,directory_inherit"),
+                    &parent.path.display().to_string(),
+                ])
+                .output()
+                .unwrap();
+            assert!(acl.status.success(), "chmod +a did not add inherited ACL");
+            let path = parent.path.join("created-acl");
+            assert!(
+                mkdirat_bound(parent, "created-acl", &path, uid, gid, "test created root").is_err()
+            );
+            assert!(!path.exists());
+            let cleanup = Command::new("/bin/chmod")
+                .args(["-a#", "0", &parent.path.display().to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                cleanup.status.success(),
+                "chmod -a# did not remove test ACL"
+            );
+        }
+
+        #[test]
+        fn failed_file_effect_is_not_journalled_or_removed() {
+            let temporary = tempfile::tempdir().unwrap();
+            for name in ["runtime.dmg", "runtime.manifest.json"] {
+                let path = temporary.path().join(name);
+                fs::write(&path, b"foreign").unwrap();
+                let mut recorded = None;
+                assert!(reconcile_created_file(&path, &mut recorded, false, name).is_err());
+                assert!(recorded.is_none());
+                assert_eq!(fs::read(&path).unwrap(), b"foreign");
+            }
         }
 
         #[test]
