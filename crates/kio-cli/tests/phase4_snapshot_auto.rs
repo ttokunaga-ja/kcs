@@ -543,9 +543,9 @@ fn tool_lock_only_change_waits_for_interval_then_creates_auto_commit() {
     let lock_path = dir.path().join(".kio/tool-lock.json");
     let mut lock: Value = serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
     lock.as_object_mut().unwrap().insert(
-        "summary".to_owned(),
+        "prepare".to_owned(),
         serde_json::json!({
-            "tool_id": "scheduled-test-summary",
+            "tool_id": "scheduled-test-prepare",
             "profile_hash": format!("sha256:{}", "a".repeat(64)),
         }),
     );
@@ -584,9 +584,9 @@ fn tool_lock_change_at_checkpoint_boundary_cannot_be_reported_as_noop() {
     let lock_path = dir.path().join(".kio/tool-lock.json");
     let mut lock: Value = serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
     lock.as_object_mut().unwrap().insert(
-        "summary".to_owned(),
+        "prepare".to_owned(),
         serde_json::json!({
-            "tool_id": "scheduled-race-summary",
+            "tool_id": "scheduled-race-prepare",
             "profile_hash": format!("sha256:{}", "b".repeat(64)),
         }),
     );

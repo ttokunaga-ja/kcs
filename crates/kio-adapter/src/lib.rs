@@ -56,14 +56,10 @@ pub enum AdapterError {
     /// alongside, letting `adapter_to_kio` surface it structurally instead of
     /// re-reading it out of the message text.
     ///
-    /// Codes are declared in [06-cli-spec.md §8] / [10-operations.md §12.1] and
+    /// Codes are declared in [06-cli-spec.md §8] / [10-operations.md §11.1] and
     /// all resolve to exit 2.
     #[error("{code}: {message}")]
     ConfigSchemaCoded { code: &'static str, message: String },
-    /// R13-2: a documented-but-unimplemented capability (currently `keychain:`
-    /// auth resolution) surfaced LOUDLY rather than silently ignored.
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
     #[error("io error at {path}: {message}")]
     Io { path: String, message: String },
 }
@@ -99,9 +95,6 @@ impl AdapterError {
             Self::ContractViolation(_) | Self::ConfigSchema(_) | Self::ConfigSchemaCoded { .. } => {
                 "KIO-E-ADAPTER-CONTRACT-001"
             }
-            // R13-2: mirrors `task_failure_from_adapter`'s NotImplemented ->
-            // InvalidInput mapping (a permanent config gap, never retried).
-            Self::NotImplemented(_) => "KIO-E-BATCH-INPUT-001",
         }
     }
 
@@ -116,9 +109,8 @@ impl AdapterError {
         use crate::types::ErrorCategory;
         match self {
             Self::RateLimit { .. } => ErrorCategory::RateLimit,
-            // Non-retryable in 04 §5.3's table (auth_error/invalid_input both
-            // have max_attempts=0).
-            Self::Auth(_) | Self::NotImplemented(_) => ErrorCategory::Permanent,
+            // Non-retryable in 04 §5.3's table (auth_error has max_attempts=0).
+            Self::Auth(_) => ErrorCategory::Permanent,
             // Retryable in 04 §5.3's table (network_error/quota_exceeded/
             // contract_violation all have max_attempts >= 1).
             Self::QuotaExceeded(_)
@@ -211,11 +203,6 @@ mod adapter_error_tests {
                 AdapterError::ConfigSchema("x".to_owned()),
                 "KIO-E-ADAPTER-CONTRACT-001",
                 ErrorCategory::Transient,
-            ),
-            (
-                AdapterError::NotImplemented("x".to_owned()),
-                "KIO-E-BATCH-INPUT-001",
-                ErrorCategory::Permanent,
             ),
         ];
         for (error, expected_code, expected_category) in cases {

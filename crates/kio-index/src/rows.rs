@@ -44,8 +44,6 @@ pub struct ChunkRow {
 pub enum EmbeddingTargetType {
     Chunk,
     Image,
-    Node,
-    QueryCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

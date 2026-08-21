@@ -396,6 +396,19 @@ fn ct2_profile_010_tool_lock_schema_validation() {
 }
 
 #[test]
+fn ct2_profile_010_tool_lock_rejects_unknown_inner_fields() {
+    let dir = scope();
+    fs::write(
+        dir.path().join(".kio/tool-lock.json"),
+        br#"{"spec_version":1,"markdown":{"tool_id":"mistral_ocr_markdownize","profile_hash":"sha256:test","auth":"plain:shared-secret"}}"#,
+    )
+    .unwrap();
+    let error = json_failure(&dir, ["status"], 2);
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
+    assert!(error["message"].as_str().unwrap().contains("markdown.auth"));
+}
+
+#[test]
 fn ct2_unit_001_unit_ref_vectors() {
     assert_eq!(unit_ref("page:12"), "3c2fa650872d5484");
     assert_eq!(unit_ref("page:1"), "00f081779b832543");

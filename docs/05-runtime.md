@@ -567,8 +567,8 @@ up-to-date 判定が外れてリネームだけで**再 OCR が走り**、(b) `c
   リンク (`[text](uri)`) や地の文に現れた URI は対象にしない
 - **`image_uri` は本文の字面をそのまま返す。** 正規化しない
   ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) — object URI は opaque に扱い
-  `scope_id` の大文字小文字を保存する)。fork 複製由来の旧 `scope_id` もそのまま返し、
-  自 store での解決は `kio open` 側の既存規則 (hash が identity) に委ねる
+  `scope_id` の大文字小文字を保存する)。`kio open` は URI が宣言する scope authority だけを解決し、
+  別 scope に同一 hash の bytes があっても差し替えない
 - **同一 URI が複数回出現する場合は最初の 1 件に畳む。** `order` は畳んだ後の
   出現順 (0 始まり) — 同じ画像を 2 回返しても Agent には情報が増えず `kio open` が
   重複するだけであるため
@@ -866,7 +866,7 @@ aggregate 上の bounded `instr` レーンを用い、FTS5 の trigram 下限に
    異なる folder 値の統合は定義しない。cursor が bind する実効値 (§1.5) もこの解決に従う —
    **ただし fail_behavior は挙動方針であり確定順序に影響しないため bind / query_hash preimage の
    対象外**)
-6. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--mode vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope の source SQLite には一切書き込まない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+6. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--mode vector` 明示時は fallback しない** — profile 不一致の scope を KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kio_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope の source SQLite には一切書き込まない — [10-operations.md §11.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KIO-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 ### replica の候補経路と cursor
 
@@ -1005,7 +1005,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 }
 ```
 
-`snapshot_at` は scope ごとの検索時点 snapshot (commit_hash, [03-data-model.md §8.1](03-data-model.md))。単一 scope 検索 (`--scope .`) でも同形式 (要素 1 個の配列) を返す。これは [06-cli-spec.md §9](06-cli-spec.md) の Agent API 保証 (searched_scopes / excluded_scopes / fallback_reason) と同一の契約である。
+`snapshot_at` は scope ごとの検索時点 snapshot (commit_hash, [03-data-model.md §8.1](03-data-model.md))。単一 scope 検索 (`--scope .`) でも同形式 (要素 1 個の配列) を返す。これは [06-cli-spec.md §9](06-cli-spec.md) の JSON output 契約 (searched_scopes / excluded_scopes / fallback_reason) と同一である。
 
 ### cursor の multi-scope binding
 
@@ -1076,52 +1076,36 @@ filter の解決、および候補に現れた scope の purge barrier に限ら
 `--scope` / `--descendants` と `participates_in_global_search = false` は対象範囲を定義する。絞り込みは返却行と
 candidate-scope barrier の対象を狭めるが、BM25 統計は一貫して device-level collection のままである。
 
-## 1.9 権限の横断管理 (未実装)
-
-承認の**正本は各 `.kio`** (`approvals.jsonl` / `scope.json`) であり、この位置づけは変えない
-([01-positioning.md](01-positioning.md) 「データ・所有権・権限の正本は各フォルダ直下の `.kio` に閉じる」)。
-aggregator の `agg_approvals` は**読み取り専用の投影**であり、用途は横断的な可視化と一括操作の入口に限る。
-
-- 一覧: device 横断で「どの scope が、どの tool を、どの `tool_profile_hash` で承認しているか」を返す
-- 一括操作: 各 `.kio` へ write-through してから当該 scope を refresh する。
-  **aggregator を先に書いて `.kio` を後で追随させる実装は禁止** ([03-data-model.md §4](03-data-model.md) 不変条件 1)
-- 送信 gate (§1.1) の判定は従来どおり `.kio` を読む (不変条件 8)。
-  したがって **aggregator が古くても「未承認なのに送信される」は起こらない**
-
 # 2. Commit / Snapshot
 
-## 2.1 commit_type 永続 enum
+## 2.1 commit_type enum
 
-`commit_type` は **永久に変更しない契約**。commit は CAS JSON object であり SQLite に commit 表は
-存在しないため ([04-pipeline.md §4.4](04-pipeline.md))、**enum の強制点は commit object の schema
+commit は CAS JSON object であり SQLite に commit 表は存在しないため
+([04-pipeline.md §4.4](04-pipeline.md))、**enum の強制点は commit object の schema
 検証 (publication 時の loader)** である。値域 (JSON Schema enum 相当):
 
 ```text
-commit_type ∈ { 'manual', 'auto', 'imported', 'repaired', 'merged', 'purged' }
+commit_type ∈ { 'manual', 'auto', 'repaired', 'purged' }
 ```
 
 | type | 用途 | protected | GC policy |
 | --- | --- | --- | --- |
 | manual | 明示 commit | true | none |
 | auto | 自動 snapshot (取り込み完了時 = MVP / 定期 = Phase 4、§8) | false | shallow (個数 / 時間で tree を減衰) |
-| imported | 外部 Kio から取り込んだ commit | true | none |
 | repaired | repair 操作の中間 commit | false | shallow |
-| merged | 共有版マージ (Phase 5+) | true | none |
 | purged | 法務・秘匿削除後の commit | true | none |
 
-`semver MAJOR でも値域 bump しない` 契約は release 後は他フィールドより強い保証である。Phase 3 受入前に廃止した enum を持つ store は current reader が拒否し、互換変換せず clean recreation する ([10-operations.md §12.5](10-operations.md))。
+current reader は上記以外を拒否し、legacy enum の読取りや変換を行わない。
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は bounded `after_index` hook、milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot、milestone 5 は同じ `kio snapshot auto` invocation 内だけで動く Rust-only `on_idle` GC である。Kio は daemon / scheduler installer を持たない。`--prune-unreachable` と CoW 並行 GC は未公開である。
+> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は bounded `after_index` hook、milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot、milestone 5 は同じ `kio snapshot auto` invocation 内だけで動く Rust-only `on_idle` GC である。Kio は daemon / scheduler installer を持たない。
 
 ```text
 gc_policy(commit_type):
   auto      → shallow   (tiered retention 満了で tree のみ破棄、commit object は残す)
   repaired  → shallow
   manual    → none
-  imported  → none
-  merged    → none
   purged    → none
 ```
 
@@ -1176,7 +1160,7 @@ idle_threshold_seconds = 300
 
 ## 2.4 Tiered Retention
 
-`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_repaired_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
+`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual` / `purged` は tree も常に残す)。`repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_repaired_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
 **ref tip 除外**: HEAD・branch・tag が指す commit の tree は、retention 満了でも **shallow 化の対象にしない** — 無変更 scope では auto snapshot が no-op を続け HEAD が古い auto commit に留まり続けるため、除外しないと現在状態の基点 (bare search / restore / cursor) を失う。物理削除の直前にも、ref tip 非該当と「非 shallow commit からの参照ゼロ」を同一 exclusive critical section で再検証する (§2.5):
 
 ```toml
@@ -1237,7 +1221,7 @@ keep_repaired_per_branch = 5
 
 ## 2.6 GC の削除対象 (規範)
 
-GC (tiered retention / `kio gc --prune-unreachable` を含む) が削除してよいもの:
+GC が削除してよいもの:
 
 ```text
 - tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
@@ -1263,9 +1247,9 @@ GC が削除してはならないもの:
   gc_policy: auto = tiered retention・repaired = `[gc.derived_retention]` — §2.4) に従う)
 ```
 
-raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
+raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
-なお on-demand tree-only shallow sweepはPhase 4 milestone 2、bounded `after_index` hookはmilestone 3、scheduled auto snapshotはmilestone 4、Rust-only `on_idle` GCはmilestone 5で実装済みである。defaultの自動有効化、prune、CoW並行GCは後続Phase 4+である ([09-mvp-scope.md](09-mvp-scope.md))。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
+on-demand tree-only shallow sweep は Phase 4 milestone 2、bounded `after_index` hook は milestone 3、scheduled auto snapshot は milestone 4、Rust-only `on_idle` GC は milestone 5 で実装済みである。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
 
 # 3. Purge (法務・秘匿・誤取り込み)
 
@@ -1304,7 +1288,7 @@ Kio は「原則として忘れない」が、**purge は「忘れる」ので�
 
 ## 3.3 Dead Evidence Pointer のセマンティクス
 
-「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。残未決 (bulk verify スループット — 1 件) は [09-mvp-scope.md §5.3](09-mvp-scope.md)。以下は採用済みセマンティクスの要約。
+「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。残未決 (bulk verify スループット — 1 件) は [09-mvp-scope.md §5.2](09-mvp-scope.md)。以下は採用済みセマンティクスの要約。
 
 ```text
 purge 後の pointer 解決:
@@ -1327,7 +1311,7 @@ kio evidence verify <pointer> [--strict]
 
 ## 3.4 purge スコープは `.kio` 単位
 
-横断 GC を持たないので、purge も **その `.kio` 内に閉じる**。別 `.kio` (= ユーザーが意図的に複数フォルダへ配置) に同一 raw_hash がある場合、それは別 purge 操作で消す必要がある。これは将来コスト低下/ローカル LLM 進展前提で容認 ([01-positioning.md](01-positioning.md))。
+横断 GC を持たないので、purge も **その `.kio` 内に閉じる**。別 `.kio` (= ユーザーが意図的に複数フォルダへ配置) に同一 raw_hash がある場合、それは別 purge 操作で消す必要がある。
 
 ## 3.5 purge の機構 (何を消し、何を残すか)
 
@@ -1473,7 +1457,7 @@ phase 順序    = prepared (closure 確定・記帳)
               コマンド — search / log / view / inspect / evidence verify / restore / diff / open) は、
               冒頭と「本文・存在情報を返す直前」の 2 点で検査する: 「active journal の不在 **かつ**
               `.kio/purge/epoch` (単調カウンタ) が開始時と不変」でなければ `KIO-E-PURGE-JOURNAL-ACTIVE-001`
-              ([10-operations.md §12.1](10-operations.md)) retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
+              ([10-operations.md §11.1](10-operations.md)) retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
               epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
               両検査をすり抜ける — ABA。**epoch ファイルの欠落・不正値も同様に拒否する (fail-closed)** —
               次の locked mutation が journal の target_epoch、journal も無ければ**全 lifecycle
@@ -1610,7 +1594,7 @@ resurrection link・同一 marker 自身の lifecycle 管理 (retired / 再 eras
 したがって Evidence verify の応答は従来どおり `not_found` で、同一 bytes の
 後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 当該 erased event が全 marker の canonical final event ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) であり、**canonical final event の** `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append する。canonical が別 marker の `purged` なら incomplete purge として exit 3 で報告する (append しない)。commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。
 
-**制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
+**制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は current purge の対応範囲外である。
 
 # 4. Restore / Time-travel
 
@@ -1688,7 +1672,7 @@ Kio は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 - interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から `kio snapshot auto` を起動する委譲方式とする (§8.2)
 - idle 検出 (`gc.mode="on_idle"`) も OS scheduler が起動する `kio snapshot auto` の都度に判定し、Kio 自身は常駐しない (§2.3, §8.2)
 - 同一 `.kio` に対する多重起動は `.kio/.lock` で防止する (§6)
-- **ローカルモデルサーバ (`execution_mode = "offline_api"`) の重み常駐は、サーバ側の責務であって Kio の責務ではない** (2026-07-26)。Kio はプロセスを起動も管理も常駐もせず、[07-adapter-spec.md §3](07-adapter-spec.md) が定める loopback url を呼ぶだけである — この点で online_api Adapter の呼出と何ら変わらない。モデルの遅延ロード・idle TTL による重み解放は当該サーバの設定であり、Kio の「常駐なし」原則と矛盾しない。サーバが起動していない場合の扱いは §1 の既存縮退に従う (embedding なら text fallback)。**`cmd` によるプロセス起動は将来仕様のままである** ([07-adapter-spec.md §7](07-adapter-spec.md)) — offline_api の導入はこれを前倒ししない
+- **ローカルモデルサーバ (`execution_mode = "offline_api"`) の重み常駐は、サーバ側の責務であって Kio の責務ではない** (2026-07-26)。Kio はプロセスを起動も管理も常駐もせず、[07-adapter-spec.md §3](07-adapter-spec.md) が定める loopback url を呼ぶだけである — この点で online_api Adapter の呼出と何ら変わらない。モデルの遅延ロード・idle TTL による重み解放は当該サーバの設定であり、Kio の「常駐なし」原則と矛盾しない。サーバが起動していない場合の扱いは §1 の既存縮退に従う (embedding なら text fallback)
 
 # 6. 並行性 / Locking
 
@@ -1701,7 +1685,7 @@ Kio は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 
 ```text
 kio index / kio snapshot create / kio snapshot auto / kio tag (refs/tags-v1 更新) / kio gc / kio purge /
-kio repair rebuild-db / kio repair verify-objects / kio move --accept /
+kio repair rebuild-db / kio repair verify-objects /
 kio batch resume / kio batch retry / kio batch abandon / kio reindex /
 kio adapter revoke
 ```
@@ -1719,7 +1703,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 規約:
 
 - 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容する。検索は `.kio/index/sqlite.db` の WAL snapshot を読まず、公開済み `aggregator.sqlite` の projection だけを読む。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
-- `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。Unixでは acquire/reclaim/release 全体を crash-release される directory `flock` でも直列化し、release はcheck-then-unlinkでなくdead canonical sentinelとのatomic exchangeを使う。このため非保持時にもdead sentinel leafが残り得るが、次writerが同じgate下で回収し、単なる`.lock`存在だけをlive判定に使わない。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
+- `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。Unixでは acquire/reclaim/release 全体を crash-release される directory `flock` でも直列化し、release はcheck-then-unlinkでなくdead canonical sentinelとのatomic exchangeを使う。このため非保持時にもdead sentinel leafが残り得るが、次writerが同じgate下で回収し、単なる`.lock`存在だけをlive判定に使わない。
 - refs (refs/heads/main, refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kio repair rebuild-db` 実行中の `kio search` は旧 `.kio/index/sqlite.db` を読まない。scope の replica header が `Rebuilding` または完全 projection を欠く間は `KIO-E-INDEX-REBUILDING-001` で fail-closed とし、writer が新しい projection を publish してから検索へ再参加させる。再構築本体は引き続き atomic rename (`sqlite.db.tmp → sqlite.db`) で切り替える
@@ -1735,12 +1719,12 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
   metrics.jsonl      数値メトリクス (デフォルト 1h 間隔の集計に加え、下記の per-search 記録)
   errors.jsonl       error_code 付きの全エラー
 .kio/logs/
-  access.jsonl       検索アクセスログ (redact_logs はデフォルト true、10-operations.md §12.6)
+  access.jsonl       検索アクセスログ (redact_logs はデフォルト true、10-operations.md §11.6)
 ```
 
 **検索 latency の per-search 記録** (2026-07-03 追記、step3a §C の解消。北極星 §4.1 の p50/p95/p99 計測の一次データ): `kio search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記する。行はログ共通 envelope (必須 `ts, level, code, component, message, context`) に従い、metric 固有フィールドを加える — `{ "ts": <UTC>, "level": "info", "code": "KIO-M-SEARCH-001", "component": "search", "message": "search completed", "metric": "search.latency_ms", "value": <実測 ms>, "context": { "mode": <実効 mode>, "scope_count": <検索した scope 数>, "result_count": <返却件数> } }`。redact_logs 既定 (クエリ本文・path は記録しない) に従う。1h 間隔の集計メトリクスはこの一次データから導出してよい。非エラー行の `code` は `KIO-M-<DOMAIN>-<NNN>` (metric) / `KIO-EV-<DOMAIN>-<NNN>` (event) の名前空間を使う — 形式は [06-cli-spec.md §8](06-cli-spec.md) の error_code と同じ規約 (`KIO-E-` は error 専用)。
 
-各行 JSON 必須フィールド: `ts, level, code, component, message, context`。詳細は [10-operations.md §12.6](10-operations.md)。
+各行 JSON 必須フィールド: `ts, level, code, component, message, context`。詳細は [10-operations.md §11.6](10-operations.md)。
 
 # 8. Auto Commit
 
@@ -1839,16 +1823,12 @@ launchd:        ProgramArguments = ["/absolute/path/kio", "snapshot", "auto", "-
                 WorkingDirectory = "/absolute/indexed/scope"
 systemd --user: WorkingDirectory=/absolute/indexed/scope
                 ExecStart=/absolute/path/kio snapshot auto --json
-Task Scheduler: Program=/absolute/path/kio.exe
-                Arguments="snapshot auto --json", Start in=<absolute indexed scope>
 ```
 
 現行のscheduled mutationはdescriptor-relative writer lockとatomic state exchangeを実装済みの
 macOS / Linuxだけで有効である。Windowsおよびその他のplatformでは、eligibleな実行を
 `.kio/.lock`・HEAD・scheduler stateへ触れる前に
-`KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001`でfail-closedする。上のTask Scheduler行は
-canonical CLIの起動形だけを示す将来用の設定例であり、現行Windows版の有効化やinstallを
-意味しない。
+`KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001`でfail-closedする。
 
 JSONは`operation,status,reason,publication_status,snapshot_status,eligibility_reason,eligible,change_count,next_eligible_at,
 commit_hash,tree_hash,stats,working_set_digest,idle_observed_since,idle_observed_seconds,

@@ -11,8 +11,6 @@ pub enum AdapterKind {
     Prepare,
     Markdownize,
     Embedding,
-    Summary,
-    Classification,
     Rerank,
 }
 
@@ -80,7 +78,7 @@ pub struct AdapterProfile {
     pub capability_flags: Vec<String>,
     pub allow_network: bool,
     /// QA18: required when this adapter declares a billable capability
-    /// (07 §5.7 condition 6) — the closed set of `usage.billable_units[].kind`
+    /// (07 §5.5 condition 6) — the closed set of `usage.billable_units[].kind`
     /// values it may report. Empty for a non-billable adapter. Output-inert
     /// (not part of `tool_profile_hash`, `identity::PROFILE_FIELDS`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -364,11 +362,11 @@ pub struct EmbeddingVector {
     pub vector: Vec<f32>,
 }
 
-/// One candidate offered to a Rerank Adapter (07 §5.6's `candidate_result_ids`
+/// One candidate offered to a Rerank Adapter (07 §5.4's `candidate_result_ids`
 /// paired with the `candidate_features` the model actually reads).
 ///
 /// `result_id` is opaque here on purpose: the adapter reorders identifiers it
-/// never interprets, which is what keeps 07 §5.6's "must not conceal
+/// never interprets, which is what keeps 07 §5.4's "must not conceal
 /// searched_scopes / fallback_reason" enforceable by the caller rather than
 /// trusted to the adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -410,7 +408,7 @@ pub struct RerankedCandidate {
 pub struct RerankResponse {
     /// Descending by [`RerankedCandidate::score`].
     pub ranking: Vec<RerankedCandidate>,
-    /// 07 §5.6's `profile_hash`: the adapter's `tool_profile_hash` at response
+    /// 07 §5.4's `profile_hash`: the adapter's `tool_profile_hash` at response
     /// time, so a caller can record which reranker produced an order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerank_profile_hash: Option<String>,

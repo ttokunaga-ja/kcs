@@ -172,13 +172,6 @@
       },
       "additionalProperties": false
     },
-    "logs": {
-      "type": "object",
-      "properties": {
-        "retention_days": { "type": "integer", "minimum": 1 }
-      },
-      "additionalProperties": false
-    },
     "observability": {
       "type": "object",
       "properties": {

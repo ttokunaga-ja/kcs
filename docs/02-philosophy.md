@@ -1,8 +1,6 @@
 # 02 Philosophy
 
 > **NOTE**: プロダクト位置づけ・ターゲット・MVP スコープ・競合分析は [01-positioning.md](01-positioning.md) を正本とする。本書は **理念の根拠** (なぜ Evidence Pointer か、なぜ Markdown 正規化か、なぜ消えない履歴か) のみを語る。
->
-> 本書には v2+ 構想 (共有版・修正提案・同期・GUI) を含む節がある。該当節には「⚠️ v2+ 構想」ラベルを付与している。ラベル付き記述は MVP の要件ではない。
 
 # 0. Kio は何か (一行で)
 
@@ -55,18 +53,11 @@ Kioが扱うもの:
 - 画像
 - 講義資料
 - 抽出Markdown
-- ノート
-- 注釈
-- タグ
-- リンク
-- 知識グラフ
 - RAG用チャンク
 - 出典情報
 - 時点情報
 - バージョン情報
 ```
-
-(このリストは Kio が対象とする知識の広がりを示す理念的な例示。知識グラフ・タグ・リンク・注釈は MVP スコープ外の v2+ 構想であり、MVP 実装範囲は [09-mvp-scope.md](09-mvp-scope.md) §1 を正本とする。)
 
 つまり、KioはGitのような「コードの履歴管理」ではなく、**知識の構造・出典・時点・版・文脈を管理する基盤**を目指しています。
 
@@ -103,40 +94,16 @@ conflict
 - 資料を入れる
 - 自動で検索可能になる
 - 過去の版と根拠 (Evidence Pointer) を辿れる
-
-ユーザーに見せたい体験 (v2+ 構想):
-- 自分のメモを追加する
-- 複数端末で同期される
-- 競合しても壊れない
-- 必要なら修正提案として確認できる
 ```
 
 ここにGit用語をそのまま持ち込むと、一般ユーザーには理解しにくくなります。
 
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
-
-そのためKioでは、Git用語を置き換えます。
-
-| Git的概念       | Kioでの表現     |
-| ------------ | ----------- |
-| branch       | 修正提案 / 変更案  |
-| merge        | 反映          |
-| commit       | 変更履歴 / 版    |
-| conflict     | 最新版と重なる編集   |
-| main         | 共有版         |
-| revert       | 以前の版に戻す     |
-| pull request | 修正提案        |
-| checkout     | 表示する版を切り替える |
-
-Kioは、Gitの強力な履歴管理思想を取り込みつつ、**Gitの用語や操作体系を上位レイヤーから隠す**設計にします。
-
-ただし重要な但し書き: **MVP のターゲットは開発者・研究者・技術者** ([01-positioning.md §2](01-positioning.md)) なので、CLI 上では `restore` と `snapshot` を許容します。履歴 object の名称は `commit` のままだが、CLI の作成入口は `kio snapshot create` だけであり、旧 `kio commit` alias は受理しません。一般ユーザー向け GUI で用語を翻訳するのは MVP より後のフェーズの仕事です。本書の用語置換テーブルは「将来 GUI を作るときの設計指針」であって、MVP CLI の責務ではありません。
+現在の CLI は `snapshot` と `restore` を公開し、履歴 object を `commit` と呼ぶ。作成入口は
+`kio snapshot create` だけで、旧 `kio commit` alias は受理しない。
 
 ---
 
 ## 2.2 Gitの競合は「作業停止」として現れる
-
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
 
 Gitでは、競合が起きると多くの場合、ユーザーが手動で解決しなければ作業が進みません。
 
@@ -151,24 +118,8 @@ Git的な競合:
 
 これは開発者向けには妥当ですが、一般向け知識管理では厳しいです。
 
-Kioでは、競合は作業停止ではなく、次のように扱います。
-
-```text
-Kio的な競合:
-- まず自動マージを試す
-- 自動マージできるなら共有版へ反映
-- できない場合は共有版を優先
-- ローカル変更は修正提案として保存 (v2+ の共有機能で提供予定)
-```
-
-つまり、Kioでは競合を「ユーザーに即時解決させるエラー」ではなく、**後から確認可能な提案データ**として扱います。
-
-この方向性は、JujutsuやPijulの改善思想にも近いです。
-
-Jujutsuは、多くのVCSと異なり、競合状態をコミット内に記録でき、競合が発生しても操作を成功させ、後から解決できる設計を持っています。([JJ VCS Docs][2])
-Pijulも、競合を「mergeの失敗」ではなく、通常の共同作業で起きる標準的な状態として扱うと説明しています。([Pijul][3])
-
-Kioも同様に、競合をエラーとして止めるのではなく、**修正提案として保持する**ことを中心にします。
+Kio の現在の CLI に同期・merge・競合解決 surface はない。未実装機能の名称は
+[09-mvp-scope.md](09-mvp-scope.md) の非承認 roadmap だけに置く。
 
 ---
 
@@ -217,7 +168,6 @@ Kioで必要な監査性:
 - どの版が最新だったか
 - どの抽出Markdownがどの原本版から生成されたか
 - どの tool_profile による Markdown 化が有効だったか
-- (v2+) 誰がどの修正提案を作り、何が反映・却下されたか
 ```
 
 そのためKioでは、Gitのような履歴改変を避けます。
@@ -261,7 +211,7 @@ purge の例外性は次のように担保します:
    `--reason <legal|privacy|misingest|copyright|other>` を必須引数とする (閉 enum — [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) §4.1 の purged_reason と同一)。
 ```
 
-つまり Kio は「忘れない」を理念としつつ、「忘れる必要があるときは、忘れたことを忘れない」かたちで purge を内包します。詳細手順は [05-runtime.md](05-runtime.md) §3 (Purge) と [06-cli-spec.md](06-cli-spec.md) §6 を正本とする。共有環境での purge 伝播は v2 検討事項 (経緯: 旧 research/synchronization.md — git 履歴)。
+つまり Kio は「忘れない」を理念としつつ、「忘れる必要があるときは、忘れたことを忘れない」かたちで purge を内包します。詳細手順は [05-runtime.md](05-runtime.md) §3 (Purge) と [06-cli-spec.md](06-cli-spec.md) §6 を正本とする。
 
 ---
 
@@ -269,26 +219,13 @@ purge の例外性は次のように担保します:
 
 ## 3.1 Jujutsu: 競合を後から解決できる状態として扱う
 
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
-
 Jujutsuは、Gitのように競合で操作を止めるのではなく、競合状態をコミットに記録し、後から解決できる設計を持っています。([JJ VCS Docs][2])
-
-Kioへの示唆は明確です。
 
 ```text
 Jujutsuから学ぶこと:
 - 競合を即時解決必須の失敗状態にしない
 - 競合状態をデータとして保存する
 - ユーザーは後から解決できる
-```
-
-Kioではこれを、次のように一般ユーザー向けに変換します。
-
-```text
-Kioでの実装:
-- 競合したローカル変更を修正提案として保存
-- 共有版は壊さない
-- 提案は後から反映・却下できる
 ```
 
 ---
@@ -309,7 +246,6 @@ Kioで重要な変更:
 - 原本ファイルの新しい版が登録された
 - 抽出Markdownが生成された
 - tool_profile が更新され再Markdownizeされた
-- (v2+) 修正提案が作られ、反映された
 ```
 
 ただし Kio の正本アーキテクチャは CAS + snapshot DAG (tree/commit) である ([03-data-model.md](03-data-model.md) §1)。Pijul から学ぶのは「意味的変更を追跡可能な単位として残す」姿勢であり、Kio ではこれを snapshot DAG の commit_type と observability ログ ([10-operations.md](10-operations.md)) で実現する。イベントログを正本にはしない。
@@ -339,7 +275,6 @@ Kioでの方針:
 - 内部構造 (CAS / DAG) の複雑さを CLI の少数コマンドに隠す
 - ユーザーがミスから復元しやすくする (snapshot / restore)
 - 大量資料でも検索・復元可能にする
-- (v2+) 修正提案としてレビュー可能にする
 ```
 
 ---
@@ -492,7 +427,7 @@ Kioでは、PDFやPPTXなどの原本ファイルを編集可能なテキスト�
 
 これにより、原本性が守られます。
 
-ただし、法務・秘匿・誤取り込みなどで「過去の履歴からも消す」必要がある場合は例外です。この場合は通常の削除やGCではなく、`purge` を明示的に実行し、**消す事実の記録 (tombstone) を先に耐久化したうえで**、対象ファイルに由来する raw / prepared / image / normalized / chunk / embedding / index の本文を全履歴にわたり物理削除します (共有され得る prepared / image / embedding は他文書からの live 参照が 0 の場合のみ — marker は既定 tombstone、`--erase-tombstone` は non-public receipt — 用途は [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) の列挙) (順序と対象の正本は [05-runtime.md](05-runtime.md) §3.5 — 記録が先でないと、クラッシュ時に「消えたのに痕跡が無い」状態になります) (commit / tree object 自体の履歴 DAG は書き換えません。詳細は [05-runtime.md](05-runtime.md) §3.5)。MVP では CLI (`kio purge <path|--raw-hash <h>> --reason <...>`、[06-cli-spec.md](06-cli-spec.md) §6) で提供する。ファイル名そのものの秘匿を要する完全な履歴書き換えは v2+ / Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md) §3.1)。GUI での提供は v2+ 構想。
+ただし、法務・秘匿・誤取り込みなどで「過去の履歴からも消す」必要がある場合は例外です。この場合は通常の削除やGCではなく、`purge` を明示的に実行し、**消す事実の記録 (tombstone) を先に耐久化したうえで**、対象ファイルに由来する raw / prepared / image / normalized / chunk / embedding / index の本文を全履歴にわたり物理削除します (共有され得る prepared / image / embedding は他文書からの live 参照が 0 の場合のみ — marker は既定 tombstone、`--erase-tombstone` は non-public receipt — 用途は [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) の列挙) (順序と対象の正本は [05-runtime.md](05-runtime.md) §3.5 — 記録が先でないと、クラッシュ時に「消えたのに痕跡が無い」状態になります) (commit / tree object 自体の履歴 DAG は書き換えません。詳細は [05-runtime.md](05-runtime.md) §3.5)。MVP では CLI (`kio purge <path|--raw-hash <h>> --reason <...>`、[06-cli-spec.md](06-cli-spec.md) §6) で提供する。
 
 ---
 
@@ -518,61 +453,9 @@ Kioでは、原本ファイルから抽出されたMarkdownを編集対象にし
 - tool_profile の更新 (Adapter / prompt / モデルの改訂) による再 Markdownize
   → identity (raw_hash, tool_profile_hash) が変わり、別 artifact として保存される
 - 同一 tool_profile での明示的な再実行 (kio reindex --regenerate)
-- Evidence Pointer の retarget (08-evidence-pointer-spec.md)
 ```
 
 で扱います。
-
----
-
-## 6.3 競合は修正提案にする
-
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
-
-Kioでは、競合した変更をユーザーにマージさせません。
-
-```text
-競合時:
-- 共有版を優先
-- 自動マージできるものは反映
-- 自動マージできないものは修正提案化
-```
-
-この修正提案は、GitのBranchやPull Requestに近い役割を持ちますが、ユーザーにはGit用語を出しません。
-
-```text
-ユーザーに見せる表現:
-- 修正提案
-- 反映
-- 却下
-- 共有版
-- 変更履歴
-```
-
----
-
-## 6.4 未反映提案はRAGに使わない
-
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
-
-Kioでは、未反映の修正提案を通常検索やRAGに入れません。
-
-```text
-RAG対象:
-- 共有版
-- active抽出Markdown
-- 承認済み注釈
-- 承認済みノート
-
-RAG対象外:
-- 未反映の修正提案
-- 未採用の抽出版
-- 却下された提案
-```
-
-これは、共有版に存在しない情報を根拠にAIが回答してしまうことを防ぐためです。
-
-なお MVP には修正提案が存在しないため、本節は v2+ で共有機能を導入する際の制約である。MVP の **default** 検索対象は folder-local `.kio` の active な artifact (履歴 flag `--at` / `--all-history` / `--include-deleted` は対応する snapshot binding を対象にする — [05-runtime.md](05-runtime.md) §1.6)。
 
 ---
 
@@ -604,14 +487,14 @@ Kioが扱いたいのは、
 | ------ | --------- | ------------------------- |
 | 主対象    | ソースコード    | 知識・資料・注釈・抽出結果             |
 | 正本     | リポジトリ履歴   | folder-local `.kio` (raw object + 派生 artifact + snapshot DAG) |
-| 競合     | 手動解決      | MVP は単一端末のため発生しない (v2+ で修正提案化を構想) |
-| Branch | 明示的に使う    | 表には出さず修正提案化               |
+| 競合     | 手動解決      | 現行範囲外 |
+| Branch | 明示的に使う    | 現行CLI surface には含めない |
 | 履歴     | 改変可能      | 監査性重視、原則append-only       |
 | バイナリ資料 | 苦手        | 版追加で扱う                    |
 | RAG連携  | 想定外       | 中核機能                      |
 | 出典管理   | ファイル単位中心  | ページ・抽出版・時点・文脈まで扱う         |
 | 時点指定   | Git履歴で間接的 | 知識座標として明示                 |
-| ユーザー層  | 開発者       | 開発者・研究者・技術者 (MVP)。拡大は v2+ |
+| ユーザー層  | 開発者       | 開発者・研究者・技術者 |
 
 ---
 
@@ -633,11 +516,6 @@ Kioが実現すること (MVP):
 4. 時点指定検索 (--at)
 5. 版差分の比較
 
-Kioが実現すること (v2+ 構想):
-6. 注釈・タグ・リンクの共有管理
-7. 競合時の修正提案化
-8. 未反映提案の検索除外
-9. 矛盾・古い情報・出典不明情報の検出
 ```
 
 ---
@@ -680,18 +558,8 @@ Commit
 HEAD
 ```
 
-をそのまま一般ユーザー向け知識管理に持ち込むべきではありません。
-
-Kioは、Gitの強みを内部に取り込みつつ、(v2+ の GUI では) UI 上は、
-
-```text
-共有版
-修正提案
-変更履歴
-以前の版に戻す
-```
-
-として見せます。
+をそのまま Kio の CLI surface に持ち込むべきではありません。現在の CLI は
+snapshot、restore、Evidence という必要な操作だけを公開します。
 
 ---
 
@@ -707,37 +575,8 @@ Kioは、Gitの強みを内部に取り込みつつ、(v2+ の GUI では) UI �
 
 として扱います。
 
-編集したい内容は、
-
-```text
-注釈
-ノート
-タグ
-リンク
-修正提案
-```
-
-として別レイヤーに置きます。
-
----
-
-## 主張4：競合はユーザーに解かせるのではなく、提案として保存する
-
-> ⚠️ **本節は v2+ 構想 (MVP 対象外)**。確定仕様ではなく将来の設計方向のメモ。MVP の正本スコープは [09-mvp-scope.md](09-mvp-scope.md) §1、truth 定義は [01-positioning.md](01-positioning.md) §7。
-
-Gitでは競合が作業停止になります。
-
-Kioでは (v2+ の共有機能において)、競合を共有版に混ぜず、修正提案として保存する構想である。
-
-```text
-共有版:
-  安定した正本
-
-修正提案:
-  反映されていない変更候補
-```
-
-この設計により、一般ユーザーにも扱いやすく、RAGの根拠も汚染されません。
+ユーザー編集を抽出 Markdown に混ぜず、誤抽出は tool profile を更新した再 Markdownize
+または明示的 reindex で扱います。
 
 ---
 
@@ -754,14 +593,10 @@ Kioの設計原則は、次のようにまとめられます。
 6. 抽出Markdownはimmutableにする
 7. 抽出Markdownの修正パッチは禁止する
 8. 誤抽出は tool_profile 更新による再 Markdownize または明示的 reindex で扱う
-9. folder-local .kio を正本とする (共有版・同期は v2+ 構想。[01-positioning.md](01-positioning.md) §7)
-10. (v2+) 自動マージできる変更は反映する
-11. (v2+) 自動マージできない変更は修正提案にする
-12. (v2+ GUI 指針) Branch という概念をユーザーに見せない
-13. (v2+) 未反映提案は通常の検索対象にしない
-14. すべての重要変更をイベントログとして残す
-15. 知識を意味・関係・時間・版・出典・文脈の座標で扱う
-16. 法務・秘匿要件では特定ファイルの本文を全履歴から明示的に完全削除できる (構造 metadata — path 文字列と raw_hash — は残る。§2.4)
+9. folder-local .kio を正本とする
+10. すべての重要変更をイベントログとして残す
+11. 知識を意味・関係・時間・版・出典・文脈の座標で扱う
+12. 法務・秘匿要件では特定ファイルの本文を全履歴から明示的に完全削除できる (構造 metadata — path 文字列と raw_hash — は残る。§2.4)
 ```
 
 ---
@@ -783,8 +618,6 @@ Gitは、ソフトウェア開発のための分散バージョン管理とし�
 
 を取り込みます。
 
-以下は将来 GUI (v2+) での方針であり、MVP CLI では Git 風用語を許容する (§2.1 但し書き)。
-
 一方で、Gitの一般ユーザーに不向きな部分である、
 
 ```text
@@ -803,7 +636,7 @@ Kioが目指すのは、最終的に次の状態です。
 
 ```text
 ユーザーには、資料を入れるだけで検索・引用・要約できるように見える。
-内部では、原本版・Markdown 化 artifact・出典・時点が厳密に管理されている (提案状態の管理は v2+)。
+内部では、原本版・Markdown 化 artifact・出典・時点が厳密に管理されている。
 AIは、どの知識をどの根拠で使っているかを明示できる。
 ```
 

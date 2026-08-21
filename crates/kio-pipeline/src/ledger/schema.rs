@@ -93,7 +93,7 @@ pub const CREATE_BATCH_REQUESTS_SQL: &str = "CREATE TABLE batch_requests (      
                typeof(estimated_usd) IN ('integer', 'real')),
                                          --   typeof 検査は cost_ledger.usd と同じ理由)
     error             TEXT,              -- 'submit_rejected' | 'expired' | 'abandoned' | ...
-                                         --  拒否課金 provider (07 §5.7 条件 6) の submit_rejected は
+                                         --  拒否課金 provider (07 §5.5 条件 6) の submit_rejected は
                                          --  terminal 化と同一 Tx で記帳 (Adapter 返却の usage
                                          --  (usd = 宣言請求額 | billable_units — 07 §4) が有効なら
                                          --  provider 値 (estimated=0)、無効・欠落は行の estimated_usd

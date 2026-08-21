@@ -33,9 +33,8 @@ raw / prepared / image / normalized_unit_object / chunk / embedding / manifest /
 .kio/
   HEAD
   config.toml         folder-scope の設定 (ignore, chunking, search, budget)
-  scope.json          scope_id (init 時採番の ULID、以後不変・export/import でも保持 — 例外 =
-                      kio import --as-new-scope の fork 複製が新 ULID を採番 [06-cli-spec.md §10]) と
-                      このフォルダ自身・子 .kio リンク (旧称 folder.json は廃止)
+  scope.json          scope_id (init 時採番の ULID、以後不変) とこのフォルダ自身・子 .kio リンク
+                      (旧称 folder.json は廃止)
   tool-lock.json      Adapter capability 記録 (cmd/url/auth は含めない)
   manifest.json       working/index state (永続的真実は tree/commit object)
   staging/            外部実行の streaming staging ([07-adapter-spec.md §8.3](07-adapter-spec.md))。
@@ -103,7 +102,6 @@ raw / prepared / image / normalized_unit_object / chunk / embedding / manifest /
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
   logs/
     access.jsonl
-  packs/              v2+ (delta compression, MVP 対象外)
 ```
 
 `<raw64>` / `<tool64>` / `<digest64>` 等は、対応する論理 hash
@@ -119,7 +117,7 @@ object identity と hash 算出規約は変わらない。
 
 tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
 leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
-NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要。**実装同梱の UCD 版で未割当の code point を含む tag 名は `KIO-E-CONFIG-USAGE-001` で拒否する** — 未割当→割当の版間遷移は folding を変え得るため、拒否により「割当済みのみ」の安定性前提を全域で成立させる)。正規化規則を変える場合は `kio_format_version` の非互換変更として扱う。未公開期間に旧規則の names.jsonl から ref を再導出する reader/migration は置かない。不一致は current store の corruption ではなく **incompatible format** として、store bytes を変更せず fail-closed で報告する ([10-operations.md §12.5](10-operations.md))。
+NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要。**実装同梱の UCD 版で未割当の code point を含む tag 名は `KIO-E-CONFIG-USAGE-001` で拒否する** — 未割当→割当の版間遷移は folding を変え得るため、拒否により「割当済みのみ」の安定性前提を全域で成立させる)。正規化規則を変える場合は `kio_format_version` の非互換変更として扱う。未公開期間に旧規則の names.jsonl から ref を再導出する reader/migration は置かない。不一致は current store の corruption ではなく **incompatible format** として、store bytes を変更せず fail-closed で報告する ([10-operations.md §11.5](10-operations.md))。
 `HEAD` の case variant は論理 tag 名として予約する。tag ref は `refs/tags-v1/tag-<digest64>` の
 1 表現のみであり、第二の tag namespace は存在しない。論理 tag 名と tree entry は current schema の
 portable-name 規則を満たす。対象 OS で物理化できない名前を例外的に読取専用で受理する旧 tree/path
@@ -131,7 +129,7 @@ portable-name 規則を満たす。対象 OS で物理化できない名前を�
 (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律。**torn tail は chunks.jsonl と同型** —
 末尾の不完全行のみ切り詰めて無視し ([05-runtime.md §8.1](05-runtime.md))、途中の malformed 行は
 corruption)。**書込順序 =
-names 行 append (fsync) → ref 作成** (逆順は crash で名前なし ref を作る)。列挙・表示・export は
+names 行 append (fsync) → ref 作成** (逆順は crash で名前なし ref を作る)。列挙・表示は
 names.jsonl で digest を解決する。対応行の無い canonical ref は fsck が corruption として報告する
 (fsck は全行の schema と digest ↔ logical_name の対応、canonical ref ↔ 最終有効行の対応も検査する —
 [10-operations.md §7.5.1](10-operations.md))。ref の無い names 行は tag 削除後の残存として正常
@@ -139,7 +137,7 @@ names.jsonl で digest を解決する。対応行の無い canonical ref は fs
 names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複数行は最終行を表示名とする
 (NFC + simple case folding が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
 
-**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kio.md) は `kio_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kio/scope.json` の必須 `kio_format_version` フィールド** (init 時に current version を記録する)。欠落・非 parseable・自己の対応下限未満の値は current schema ではなく **incompatible format** として、store bytes を変更せず fail-closed にする。**互換判定は scope.json の schema validation より先に評価する** — 自己の対応上限より新しい version の store だけは未知 key の schema error に入らず **read-only + 新版誘導** で縮退する (前方互換の定義された降着点。公開後の scope.schema.json への key 追加は MINOR bump を伴う — [10-operations.md §12.5](10-operations.md))。縮退の具体挙動 (コマンド別の許否・`KIO-E-STORE-VERSION-001`・exit 8) は [10-operations.md §12.5](10-operations.md) が正本。
+**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kio.md) は `kio_format_version` に統一。semver は [10-operations.md §11.5](10-operations.md) 参照。**保存場所 = `.kio/scope.json` の必須 `kio_format_version` フィールド** (init 時に current version を記録する)。欠落・非 parseable・自己の対応下限未満の値は current schema ではなく **incompatible format** として、store bytes を変更せず fail-closed にする。**互換判定は scope.json の schema validation より先に評価する** — 自己の対応上限より新しい version の store だけは未知 key の schema error に入らず **read-only + 新版誘導** で縮退する (前方互換の定義された降着点。公開後の scope.schema.json への key 追加は MINOR bump を伴う — [10-operations.md §11.5](10-operations.md))。縮退の具体挙動 (コマンド別の許否・`KIO-E-STORE-VERSION-001`・exit 8) は [10-operations.md §11.5](10-operations.md) が正本。
 
 ## 2.1 normalized instance と全文 view
 
@@ -224,7 +222,7 @@ full NormalizedUnitObject を JCS CAS として確定する (per-.kio 重複容�
 - path-named `<unit_ref>.json` は current loader がこの CAS object から再 materialize できる mutable working
   projection であり、履歴、`--at`、Evidence Pointer は決してこれや同 gen の「最新」body を読まない。
 - manifest の `units[].error_kind` は [04-pipeline.md §5.3](04-pipeline.md) の閉 enum (フリーテキストではない) —
-  unit 単位の retry 可否の機械判定に使う ([10-operations.md §12.1](10-operations.md) の明示例外)
+  unit 単位の retry 可否の機械判定に使う ([10-operations.md §11.1](10-operations.md) の明示例外)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
   done unit の差し替えは新 gen 作成のみ (`kio reindex --regenerate`、または prepared_hash 変化起因の
   自動 gen+1 — 下記 gen 段落の例外)
@@ -369,7 +367,7 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 | `.kio/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kio/tombstones/` + `.kio/purge/erase-receipts/` (erase receipt) | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kio/purge/journal` | file (単一 JSON、temp + rename — [04-pipeline.md §1.1](04-pipeline.md)) | **truth** (active purge の crash 回復正本 — 対象 closure と phase を耐久記録し各 phase を冪等再開する。完遂で削除 = 定常時は不在) | active purge 中の喪失は phase 再開情報の喪失 (closure の残骸・不整合は `kio repair verify-objects` が corruption として検出 — [10-operations.md §7.5.1](10-operations.md)) | [05-runtime.md §3.5](05-runtime.md) |
-| `.kio/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
+| `.kio/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §11.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kio/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kio/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch、journal も無ければ全 lifecycle event の `epoch` 最大値 + 1 (event 皆無なら 1) から回復して再作成 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
 | `.kio/tombstones/lifecycle-epoch` | 単調カウンタ (text) | **truth** (lifecycle 回転補完の検出源) | 欠落・不正・巻き戻りは max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値) + 1 で再作成 + 無条件 1 回転 (purge の `epoch` は参照しない — 別系統のカウンタ) ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
@@ -434,7 +432,7 @@ render_params         prepare 専用: {renderer_name, renderer_version, dpi, col
                       (バイト列決定性に影響する全レンダリング設定 — [04-pipeline.md §2.1](04-pipeline.md))
 bbox_annotation       markdownize 専用: boolean — folder config `[markdownize].bbox_annotation` の
                       実効値を採用時に畳み込む (値は出力に影響する — [07-adapter-spec.md §5.2](07-adapter-spec.md)、
-                      schema key は [10-operations.md §12.3](10-operations.md))
+                      schema key は [10-operations.md §11.3](10-operations.md))
 dimensions / distance / modality   embedding 専用
 runtime_kind          "cloud" | "local" (capability レベル)
 spec_version          この計算規約自体のバージョン
@@ -475,10 +473,7 @@ tool_lock_hash = "sha256:" + base16(sha256(JCS({
   spec_version: <int — 現在値 = 1>,
   prepare:        { tool_id, profile_hash },
   markdown:       { tool_id, profile_hash },
-  embedding:      { tool_id, profile_hash, dimensions, distance, modality },
-  summary:        { tool_id, profile_hash },         # optional
-  classification: { tool_id, profile_hash },         # optional
-  rerank:         { tool_id, profile_hash }          # optional
+  embedding:      { tool_id, profile_hash, dimensions, distance, modality }
 })))
 ```
 
@@ -510,7 +505,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する。**キー不変のまま境界を変える分割意味論の改訂 ([04-pipeline.md §4.1](04-pipeline.md) の決定規則の変更) も bump の対象** — hash 変化が §4.6 の再 chunk を発火する (2026-07 の決定規則明文化は実装・store 公開前の定義確定であり bump しない — 08 の schema_version 規約と同型)
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
-- `unicode_version` は **`kio init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨)。これを欠く config は schema error / fail-closed とし、同梱版で読み替えたり次回書込みで補完したりしない
+- `unicode_version` は **`kio init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §11.3](10-operations.md) の schema required も同旨)。これを欠く config は schema error / fail-closed とし、同梱版で読み替えたり次回書込みで補完したりしない
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
 - これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` とする。`unit_content_hash` は exact Markdown bytes の hash なので同一 gen の本文変更を分離しつつ、同一本文の再取り込みでは identity を維持する。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
@@ -591,7 +586,7 @@ adapter 登録の時点で `KIO-E-EMBED-MODALITY-001` (exit 2、[06-cli-spec.md 
 
 working state の実体は `.kio/manifest.json` の `files` 配列であり、**SQLite に `files` テーブルは
 作らない** (§4.1。2026-07-14 実装準拠へ更新 — 旧 `CREATE TABLE files` 定義は未実装のまま廃止)。
-schema は `kio-core/schemas/manifest.schema.json` (JSON Schema、[10-operations.md §12.3](10-operations.md))
+schema は `kio-core/schemas/manifest.schema.json` (JSON Schema、[10-operations.md §11.3](10-operations.md))
 で検証する:
 
 ```json
@@ -646,7 +641,7 @@ sha256 とする。
 
 ## 8.1 Object hash 算出規約
 
-object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を支えるプロダクト契約であり、`tool_profile_hash` (§5.1) と同じ厳密さで固定する。
+object hash は artifact identity と Evidence Pointer の永続性 (08 §5) を支えるプロダクト契約であり、`tool_profile_hash` (§5.1) と同じ厳密さで固定する。
 
 **共通規則**:
 
@@ -674,7 +669,7 @@ image_hash    = "sha256:" + base16(sha256(抽出画像のバイト列))
 - 種別誤認防止のため object 本体に `"object_type": "tree" | "commit"` を必須で含める (Git の object header 相当)。
 - tree の `entries` は `path` の UTF-8 バイト列昇順で一意にソートする。同一 `path` の重複 entry は禁止。
 - commit の `parents` は commit_hash の配列。第一要素は直前 HEAD (first parent)。
-- timestamp は UTC ISO8601 + `Z` ([06-cli-spec.md §12](06-cli-spec.md))。
+- timestamp は UTC ISO8601 + `Z` ([06-cli-spec.md §11](06-cli-spec.md))。
 - `HEAD` / `refs/heads/*` / `refs/tags-v1/tag-*` の値は commit_hash (`refs/tags-v1/names.jsonl` は ref ではなく論理名 ledger — この規則の対象外)。
 
 **manifest** — canonical JSON の content hash (§2.1):
@@ -752,7 +747,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
   "chunk_set_hash": "sha256:cs..."
 }
 // tree schema v2 (2026-07-18 確定 — 実装・store 公開前の schema 確定で MAJOR bump ではない、
-// [10-operations.md §12.5](10-operations.md)):
+// [10-operations.md §11.5](10-operations.md)):
 //  - entry.normalize.manifest_hash = 当該 normalized instance manifest の canonical hash
 //    (JCS bytes の sha256 — §2.1)。unit の failed → done 遷移で変わるため、**derived 成果の変化が
 //    tree_hash を変える** = same-gen partial retry の finalize も通常の auto snapshot を生む
@@ -795,21 +790,21 @@ JCS ではキー順は canonical 化時に自動決定されるため、上記�
 
 tree entry の `normalize` ブロックは **optional**。normalized instance が存在しないファイル (未 Markdownize) の
 entry では `normalize` を**省略**する (省略 = 当該ファイルの normalized / chunk は存在しない。`null` は書かない —
-§5.1 の「省略と null を識別しない」に従う)。Step 1 (pipeline 未実装) では全 entry が `normalize` 省略形になり、
-Step 2 で Markdownize されたファイルから順に `normalize` 付き entry へ移行する。
+§5.1 の「省略と null を識別しない」に従う)。Markdownize されていない entry は省略形、
+完了済み entry は `normalize` 付きである。
 
 `normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1) であり必須である。欠落は schema violation として拒否する。`kio reindex --regenerate` 後も過去 commit の tree entry はその記録済み gen を
 指し続けるため、`kio view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
-不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は、gen ではなく
+不変性保証 ([08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md)) は、gen ではなく
 `manifest_hash → unit_object_hash` の immutable CAS closure により成立する。
 
 `commit_type` は固定 enum (詳細は [05-runtime.md §2](05-runtime.md)):
 
 ```
-manual | auto | imported | repaired | merged | purged
+manual | auto | repaired | purged
 ```
 
-commit object の schema 検証 (publication 時の loader — [05-runtime.md §2.1](05-runtime.md)。commit は CAS JSON object であり SQLite に commit 表は無い) で固定し、release 後は**この値域を永久に変更しない契約** (semver MAJOR でも bump しない) とする。Phase 3 受入前の廃止 enum を持つ store は互換 reader や in-place 変換の対象ではなく、[10-operations.md §12.5](10-operations.md) に従って clean recreation する。
+commit object の schema 検証 (publication 時の loader — [05-runtime.md §2.1](05-runtime.md)。commit は CAS JSON object であり SQLite に commit 表は無い) でこの値域だけを受理する。未知値は schema violation として拒否し、legacy reader や値変換は持たない。
 
 ## 8.2 tree のスケール前提 (flat entries)
 
@@ -827,7 +822,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 
 - 1 scope の直下ファイル数の想定上限は 10,000 (soft limit)。超過時 `kio index` は警告を表示し、サブフォルダへの分割または ignore を提案する (処理自体は継続する)
 - snapshot 時に tree_hash が現在の HEAD の tree と一致する場合、auto snapshot は commit を作らない (no-op。**例外 = resurrection finalize と tool_lock_hash の変化** — no-op 判定は tree_hash と commit の tool_lock_hash の両方を比較する。正本 [05-runtime.md §8.1](05-runtime.md))。tree は CAS object なので、内容不変なら新規 object も生成されない (tree_hash は保存バイト列の content hash、§8.1)
-- 1 ファイルの変更で tree 全体 (上表のサイズ) が新 object として書かれるのは仕様どおりの挙動である。pack/delta 圧縮 (§2, v2+) の導入判断は、この見積りの実測値で再評価する
+- 1 ファイルの変更で tree 全体 (上表のサイズ) が新 object として書かれるのは仕様どおりの挙動である。
 
 ## chunk
 
@@ -865,25 +860,22 @@ cross-.kio dedup       = not guaranteed
 cross-.kio GC scope    = none (各 .kio に閉じる)
 ```
 
-per-`.kio` の prepared/normalized/embedding 重複と purge の `.kio` 単位スコープは、将来 LLM コスト低下/ローカル LLM 進展前提で **容認** ([01-positioning.md](01-positioning.md))。
+per-`.kio` の prepared/normalized/embedding 重複と purge の `.kio` 単位スコープは、
+local-first の分離コストとして受け入れる。
 
 # 10. 書き込み主体マトリクス
 
 ```
-レイヤー                       | User | Kio  | Agent (提案) | Agent (自動適用)
------------------------------- | ---- | ---- | ------------ | ----------------
-原本 (raw)                     | yes  | no*  | propose      | no
-原本の移動 (file system mv)     | yes  | yes* | propose      | user 承認後のみ
-normalized markdown            | no   | yes  | no           | no
-image objects (抽出画像)        | no   | yes  | no           | no
-chunks / embeddings            | no   | yes  | no           | no
-annotations / tags / notes     | yes  | no   | yes          | yes
-nodes / edges (Phase 5)        | yes  | no   | yes          | yes
-commits / refs (履歴)           | no   | yes  | no           | yes (auto commit)
-extraction issues              | yes  | yes  | yes          | yes
+レイヤー                       | User | Kio
+------------------------------ | ---- | ---
+原本 (raw)                     | yes  | no
+原本の移動 (file system mv)     | yes  | no
+normalized markdown            | no   | yes
+image objects (抽出画像)        | no   | yes
+chunks / embeddings            | no   | yes
+commits / refs (履歴)           | no   | yes
+extraction issues              | yes  | yes
 ```
-
-`*` 「原本の移動」は `kio move --accept` 経由でのみ Kio が原本を mv する。原本の **内容** は不変なので write ではなく移動。Agent が `kio move --accept` を直接呼ぶことは禁止 (`--propose` 経由のみ)。
 
 normalized (unit object および全文 view) は **read-only artifact**。全文 view の生成時に付与する
 Markdown ヘッダ template (Source の filename も comment-safe に挿入する — `--` を含む名前は
@@ -926,7 +918,7 @@ pages = 0.004                                # unit kind → USD 単価。換算
 tokens_in = 0.00000015
 ```
 
-現行版の認証付き Markdownize / Embedding adapter は Kio 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。
+現行版の認証付き Markdownize / Embedding adapter は Kio 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理しない。
 
 `.kio/config.toml`:
 
@@ -957,7 +949,7 @@ max_runtime_seconds = 60         # 1..86400
 idle_threshold_seconds = 300     # 1..31536000
 ```
 
-すべての設定は JSON Schema/TOML Schema で validate ([10-operations.md §12.3](10-operations.md))。
+すべての設定は JSON Schema/TOML Schema で validate ([10-operations.md §11.3](10-operations.md))。
 `[gc]` を置かない場合だけ `manual_only` が既定となる。`[gc]` がある場合は `mode` が必須で、
 `manual_only` は `idle_threshold_seconds` と `max_runtime_seconds` を禁止、`after_index` は
 `max_runtime_seconds` を必須・`idle_threshold_seconds` を禁止、`on_idle` は両方を必須とする。

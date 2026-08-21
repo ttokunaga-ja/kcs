@@ -1264,7 +1264,7 @@ fn bump_format_version(dir: &std::path::Path) {
     fs::write(&scope_json, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
-/// PC53/PC54 (05 §1.8 L390-391 / 10 §12.5): a single scope whose
+/// PC53/PC54 (05 §1.8 L390-391 / 10 §11.5): a single scope whose
 /// `kio_format_version` is newer than this build's supported ceiling excludes
 /// with `KIO-E-STORE-VERSION-001` (not a generic `unreachable`), and — being
 /// the only searched scope — promotes to the command-level

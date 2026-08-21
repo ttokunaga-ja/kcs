@@ -9,7 +9,21 @@ use crate::identity::jcs_hash;
 use crate::types::ExecutionMode;
 use crate::{AdapterError, Result};
 
+const TOOL_LOCK_ROLES: &[&str] = &["prepare", "markdown", "embedding"];
+const PREPARE_LOCK_FIELDS: &[&str] = &["tool_id", "profile_hash", "kind"];
+const MARKDOWN_LOCK_FIELDS: &[&str] = &["tool_id", "profile_hash", "kind", "capabilities"];
+const EMBEDDING_LOCK_FIELDS: &[&str] = &[
+    "tool_id",
+    "dimensions",
+    "distance",
+    "modality",
+    "profile_hash",
+    "kind",
+    "mode",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolLock {
     pub spec_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -21,6 +35,7 @@ pub struct ToolLock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareToolLockEntry {
     pub tool_id: String,
     pub profile_hash: String,
@@ -29,6 +44,7 @@ pub struct PrepareToolLockEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarkdownToolLockEntry {
     pub tool_id: String,
     pub profile_hash: String,
@@ -39,6 +55,7 @@ pub struct MarkdownToolLockEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbeddingToolLockEntry {
     pub tool_id: String,
     pub dimensions: u32,
@@ -70,6 +87,7 @@ pub fn tool_lock_hash(value: &Value) -> Result<String> {
 }
 
 pub fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
+    validate_tool_lock_value(value)?;
     let object = value
         .as_object()
         .ok_or_else(|| AdapterError::ConfigSchema("tool-lock.json must be an object".to_owned()))?;
@@ -86,7 +104,7 @@ pub fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
         )));
     }
     canonical.insert("spec_version".to_owned(), Value::from(spec_version));
-    for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
+    for key in ["prepare", "markdown"] {
         if let Some(entry) = canonical_simple_entry(object, key)? {
             canonical.insert(key.to_owned(), entry);
         }
@@ -108,14 +126,7 @@ pub fn validate_tools_toml(bytes: &[u8]) -> Result<()> {
 /// R13-2: the adapter-role sections `tools.toml` may declare (docs/03 §11 +
 /// docs/07 §1/§6). Symmetric with `tool-lock.json` and `config.toml`, an unknown
 /// top-level section is rejected (exit 2, `KIO-E-CONFIG-SCHEMA-001`).
-const TOOLS_ADAPTER_ROLES: &[&str] = &[
-    "prepare",
-    "markdown",
-    "embedding",
-    "summary",
-    "classification",
-    "rerank",
-];
+const TOOLS_ADAPTER_ROLES: &[&str] = &["prepare", "markdown", "embedding"];
 
 /// R13-2: the documented per-adapter fields (docs/03 §11 + docs/07 §1/§6). Any
 /// other field in an adapter entry is a typo/unknown key → rejected. `dimensions`
@@ -138,7 +149,7 @@ const TOOLS_ENTRY_FIELDS: &[&str] = &[
     "pricing",
 ];
 
-/// QA19 (step4b-contract-tests-p3a.md §F, 10 §12.3 L952): the closed
+/// QA19 (step4b-contract-tests-p3a.md §F, 10 §11.3 L952): the closed
 /// `billable_units[].kind` enum a `[pricing]` table's keys must be drawn from
 /// — identical to `kio_pipeline::ledger::ops::BILLABLE_UNIT_KINDS` and
 /// `types::BillableUnitKind`'s serialized variants (kio-adapter cannot depend
@@ -147,7 +158,7 @@ const TOOLS_ENTRY_FIELDS: &[&str] = &[
 /// `types::BillableUnitKind`).
 const PRICING_KIND_ENUM: &[&str] = &["pages", "tokens_in", "tokens_out"];
 
-/// R13-2: typed validation of `tools.toml`. docs/06 §11 and docs/10 §12.3 promise
+/// R13-2: typed validation of `tools.toml`. docs/06 §10 and docs/10 §11.3 promise
 /// a schema-driven check that never existed — the previous validator only walked
 /// `auth` prefixes. Before this, a `tools.toml` `[markdown] totally_bogus_key="x"`
 /// plus `cmd = 12345` (type-mismatched) were accepted at exit 0 while `config.toml`
@@ -646,14 +657,14 @@ fn validate_tools_entry_field(context: &str, key: &str, val: &toml::Value) -> Re
             }
         }
         "auth" => {
-            // R13-2(e): the `keychain:`/`env:`/`plain:` prefix check is scoped to the
+            // The `env:`/`plain:` prefix check is scoped to the
             // Credential reference prefixes are meaningful only on `auth`.
             let Some(auth) = val.as_str() else {
                 return Err(field_type_error(context, key, "a string"));
             };
             if !valid_auth_value(auth) {
                 return Err(AdapterError::ConfigSchema(
-                    "auth must start with keychain:, env:, or plain:".to_owned(),
+                    "auth must start with env: or plain:".to_owned(),
                 ));
             }
         }
@@ -671,7 +682,7 @@ fn validate_tools_entry_field(context: &str, key: &str, val: &toml::Value) -> Re
             }
         }
         // QA19: `[<context>.pricing]` — key = billable_units kind closed enum,
-        // value = finite non-negative USD unit price (10 §12.3 L952).
+        // value = finite non-negative USD unit price (10 §11.3 L952).
         "pricing" => validate_pricing_table(context, val)?,
         _ => unreachable!("caller restricted `key` to TOOLS_ENTRY_FIELDS"),
     }
@@ -679,7 +690,7 @@ fn validate_tools_entry_field(context: &str, key: &str, val: &toml::Value) -> Re
 }
 
 /// QA19: validate a `[<role>.<tool_id>.pricing]` table (03 §11 L832-837 /
-/// 10 §12.3 L952). Every key must be a member of the closed
+/// 10 §11.3 L952). Every key must be a member of the closed
 /// `billable_units[].kind` enum (unknown key = schema error, matching the
 /// crate-wide strict-schema posture — R13-2); every value must be a finite,
 /// non-negative REAL (an integer TOML value is accepted too — `0` and `4`
@@ -735,7 +746,15 @@ fn validate_tool_lock_value(value: &Value) -> Result<()> {
             "unsupported tool-lock spec_version: {spec_version}"
         )));
     }
-    for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
+    for key in object.keys() {
+        if key != "spec_version" && !TOOL_LOCK_ROLES.contains(&key.as_str()) {
+            return Err(AdapterError::ConfigSchema(format!(
+                "unknown tool-lock.json role `{key}` (expected one of: {})",
+                TOOL_LOCK_ROLES.join(", ")
+            )));
+        }
+    }
+    for key in ["prepare", "markdown"] {
         if let Some(entry) = object.get(key) {
             validate_simple_entry(key, entry)?;
         }
@@ -809,6 +828,12 @@ fn validate_simple_entry(key: &str, value: &Value) -> Result<()> {
     let object = value
         .as_object()
         .ok_or_else(|| AdapterError::ConfigSchema(format!("{key} entry must be an object")))?;
+    let allowed_fields = match key {
+        "prepare" => PREPARE_LOCK_FIELDS,
+        "markdown" => MARKDOWN_LOCK_FIELDS,
+        _ => unreachable!("simple tool-lock entry is prepare or markdown"),
+    };
+    validate_lock_entry_fields(key, object, allowed_fields)?;
     required_string(object, key, "tool_id")?;
     required_string(object, key, "profile_hash")?;
     Ok(())
@@ -821,6 +846,7 @@ fn validate_embedding_entry(value: &Value) -> Result<()> {
     let object = value.as_object().ok_or_else(|| {
         AdapterError::ConfigSchema("embedding entry must be an object".to_owned())
     })?;
+    validate_lock_entry_fields("embedding", object, EMBEDDING_LOCK_FIELDS)?;
     required_string(object, "embedding", "tool_id")?;
     required_string(object, "embedding", "profile_hash")?;
     required_u64(object, "embedding", "dimensions")?;
@@ -836,6 +862,21 @@ fn validate_embedding_entry(value: &Value) -> Result<()> {
                  non-multimodal embedding profiles are not adoptable"
             ),
         });
+    }
+    Ok(())
+}
+
+fn validate_lock_entry_fields(
+    entry: &str,
+    object: &Map<String, Value>,
+    allowed_fields: &[&str],
+) -> Result<()> {
+    for field in object.keys() {
+        if !allowed_fields.contains(&field.as_str()) {
+            return Err(AdapterError::ConfigSchema(format!(
+                "unknown field `{entry}.{field}` in tool-lock.json"
+            )));
+        }
     }
     Ok(())
 }
@@ -857,7 +898,7 @@ fn required_u64(object: &Map<String, Value>, entry: &str, field: &str) -> Result
 }
 
 fn valid_auth_value(value: &str) -> bool {
-    ["keychain:", "env:", "plain:"]
+    ["env:", "plain:"]
         .iter()
         .any(|prefix| value.starts_with(prefix) && value.len() > prefix.len())
 }
@@ -1000,12 +1041,9 @@ fn optional_string_array(table: &toml::value::Table, field: &str) -> Vec<String>
 /// R13-2: process-global registry of the declared adapters from the user
 /// `tools.toml`, keyed by role. The CLI parses `tools.toml` once at startup and
 /// registers it here so the online clients can lazily resolve the declared
-/// `auth`/`model` at execution time — rather than the previous hard-coded
-/// `MISTRAL_API_KEY`/`GEMINI_API_KEY`/`"…-latest"` — without threading the config
-/// path (unknown to this crate) through every call site. Empty by default, so the
-/// hermetic unit tests and any un-registered process keep the legacy env-var
-/// behavior. Lazy resolution keeps a `keychain:` declaration from erroring
-/// commands that never touch the adapter.
+/// `auth`/`model` at execution time without threading the config path (unknown
+/// to this crate) through every call site. An unregistered role
+/// has no credential authority and therefore remains inactive.
 static DECLARED_ADAPTERS: std::sync::OnceLock<std::collections::HashMap<String, DeclaredAdapter>> =
     std::sync::OnceLock::new();
 
@@ -1081,17 +1119,14 @@ pub fn registered_execution_timeout(execution_mode: &str) -> Option<u64> {
 }
 
 /// R13-2: resolve the API key for an online adapter `role` — the declared
-/// `tools.toml` `auth` when present (env/plain/keychain via [`resolve_auth`],
-/// keychain being a loud error), else the legacy `fallback_env` variable. `None`
-/// means no credential is available (adapter inactive). This is the single seam
-/// the `Env*` clients call so a declared `auth = "env:MY_KEY"` is honored instead
-/// of the previous hard-coded variable.
-pub fn resolve_role_api_key(role: &str, fallback_env: &str) -> Result<Option<String>> {
-    let declared = registered_declared_adapter(role);
-    if let Some(declared) = declared.as_ref() {
-        validate_declared_runtime_target(role, declared)?;
-    }
-    resolve_declared_or_env_api_key(declared.as_ref(), fallback_env)
+/// `tools.toml` `auth` (env/plain via [`resolve_auth`]). `None` means the role
+/// is undeclared, has no auth, or its declared environment variable is unset.
+pub fn resolve_role_api_key(role: &str) -> Result<Option<String>> {
+    let Some(declared) = registered_declared_adapter(role) else {
+        return Ok(None);
+    };
+    validate_declared_runtime_target(role, &declared)?;
+    declared.auth.as_deref().map_or(Ok(None), resolve_auth)
 }
 
 pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) -> Result<()> {
@@ -1182,42 +1217,22 @@ pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) 
     Ok(())
 }
 
-/// R13-2: pure core of [`resolve_role_api_key`] (unit-testable without the
-/// process-global registry). A declared `auth` wins (env/plain/keychain via
-/// [`resolve_auth`]); otherwise the legacy `fallback_env` variable is read.
-pub fn resolve_declared_or_env_api_key(
-    declared: Option<&DeclaredAdapter>,
-    fallback_env: &str,
-) -> Result<Option<String>> {
-    if let Some(auth) = declared.and_then(|declared| declared.auth.as_deref()) {
-        return resolve_auth(auth);
-    }
-    Ok(std::env::var(fallback_env).ok())
-}
-
 /// R13-2: resolve a `tools.toml` `auth` reference to a concrete API key
-/// (docs/07 §1). `env:<NAME>` reads `$NAME`; `plain:<key>` is the literal key;
-/// `keychain:<service>` is a LOUD `KIO-E-NOT-IMPLEMENTED-001` (never a silent
-/// noop — the previous code ignored the whole declared surface). Returns `None`
-/// only when `env:<NAME>` names an unset variable, so the caller can fall back to
-/// its legacy hard-coded env var. Adding a `keyring` dependency is out of scope
-/// (deferred to a later ruling); explicit "unimplemented" is the safe MVP.
+/// (docs/07 §1). `env:<NAME>` reads `$NAME`; `plain:<key>` is the literal key.
+/// Returns `None` only when `env:<NAME>` names an unset variable.
 pub fn resolve_auth(auth: &str) -> Result<Option<String>> {
+    if !valid_auth_value(auth) {
+        return Err(AdapterError::ConfigSchema(
+            "auth must start with env: or plain:".to_owned(),
+        ));
+    }
     if let Some(name) = auth.strip_prefix("env:") {
         return Ok(std::env::var(name).ok());
     }
     if let Some(key) = auth.strip_prefix("plain:") {
         return Ok(Some(key.to_owned()));
     }
-    if let Some(service) = auth.strip_prefix("keychain:") {
-        return Err(AdapterError::NotImplemented(format!(
-            "keychain auth (`keychain:{service}`) is not implemented; \
-             use `env:<VAR>` or `plain:<key>` in tools.toml"
-        )));
-    }
-    Err(AdapterError::ConfigSchema(
-        "auth must start with keychain:, env:, or plain:".to_owned(),
-    ))
+    unreachable!("valid_auth_value accepts only env: and plain:")
 }
 
 #[cfg(test)]
@@ -1256,6 +1271,21 @@ mod tests {
     }
 
     #[test]
+    fn reserved_tool_lock_roles_are_rejected() {
+        for role in ["summary", "classification", "rerank"] {
+            let mut value = json!({ "spec_version": 1 });
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert(role.to_owned(), Value::Null);
+            let error = validate_tool_lock_value(&value).unwrap_err();
+            assert!(error.to_string().contains("unknown tool-lock.json role"));
+            let error = canonical_tool_lock_value(&value).unwrap_err();
+            assert!(error.to_string().contains("unknown tool-lock.json role"));
+        }
+    }
+
+    #[test]
     fn placeholder_tool_lock_serializes_spec_version() {
         let lock = ToolLock {
             spec_version: 1,
@@ -1281,8 +1311,7 @@ mod tests {
                 "tool_id": "mistral_ocr_markdownize",
                 "profile_hash": "sha256:393d7b062ec1fd573c0a061455bef3f3ee16367378ca4122a0684045178e974c",
                 "kind": "online_api",
-                "capabilities": ["ocr"],
-                "url": "https://ignored.example"
+                "capabilities": ["ocr"]
             },
             "embedding": {
                 "tool_id": "gemini_multimodal_embedding",
@@ -1292,10 +1321,7 @@ mod tests {
                 "modality": "multimodal",
                 "kind": "online_api",
                 "mode": "ignored"
-            },
-            "summary": null,
-            "classification": null,
-            "rerank": null
+            }
         });
 
         assert_eq!(
@@ -1638,10 +1664,10 @@ auth = "env:MISTRAL_API_KEY"
         );
     }
 
-    // R13-2(2)/(e): auth resolution — env resolves, plain is literal, keychain is a
-    // LOUD not-implemented error (never a silent noop).
+    // Auth resolution: env resolves and plain is literal; all other forms are
+    // schema errors.
     #[test]
-    fn r13_2_resolve_auth_env_plain_and_keychain() {
+    fn resolve_auth_accepts_only_env_and_plain() {
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("KIO_TEST_R13_2_AUTH", "resolved-key") };
         assert_eq!(
@@ -1657,52 +1683,38 @@ auth = "env:MISTRAL_API_KEY"
         );
         assert!(matches!(
             resolve_auth("keychain:login"),
-            Err(AdapterError::NotImplemented(_))
+            Err(AdapterError::ConfigSchema(_))
+        ));
+        assert!(matches!(
+            resolve_auth("env:"),
+            Err(AdapterError::ConfigSchema(_))
+        ));
+        assert!(matches!(
+            resolve_auth("plain:"),
+            Err(AdapterError::ConfigSchema(_))
         ));
     }
 
-    // R13-2(d): a declared `auth = "env:MY_KEY"` with MY_KEY set is honored (the
-    // finding: it used to be ignored in favour of the hard-coded GEMINI_API_KEY).
-    // (e): a declared `keychain:` is a LOUD not-implemented error, never a silent
-    // noop. Absent a declaration, the legacy fallback env var is used.
     #[test]
-    fn r13_2_resolve_declared_or_env_api_key_honors_declaration() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("KIO_TEST_R13_2_DECLARED", "declared-key") };
-        let declared = DeclaredAdapter {
-            tool_id: Some("gemini".to_owned()),
-            model: None,
-            auth: Some("env:KIO_TEST_R13_2_DECLARED".to_owned()),
-            ..DeclaredAdapter::default()
-        };
-        assert_eq!(
-            resolve_declared_or_env_api_key(Some(&declared), "GEMINI_API_KEY").unwrap(),
-            Some("declared-key".to_owned())
-        );
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("KIO_TEST_R13_2_DECLARED") };
-
-        // keychain → loud NotImplemented (e).
-        let keychain = DeclaredAdapter {
-            tool_id: None,
-            model: None,
-            auth: Some("keychain:login".to_owned()),
-            ..DeclaredAdapter::default()
-        };
-        assert!(matches!(
-            resolve_declared_or_env_api_key(Some(&keychain), "GEMINI_API_KEY"),
-            Err(AdapterError::NotImplemented(_))
-        ));
-
-        // No declaration → the legacy env fallback.
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("KIO_TEST_R13_2_FALLBACK", "fallback-key") };
-        assert_eq!(
-            resolve_declared_or_env_api_key(None, "KIO_TEST_R13_2_FALLBACK").unwrap(),
-            Some("fallback-key".to_owned())
-        );
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("KIO_TEST_R13_2_FALLBACK") };
+    fn tool_lock_entry_rejects_unknown_fields_before_canonicalization() {
+        for role in ["prepare", "markdown", "embedding"] {
+            let mut value = json!({
+                "spec_version": 1,
+                "prepare": { "tool_id": "prepare", "profile_hash": "sha256:test" },
+                "markdown": { "tool_id": "markdown", "profile_hash": "sha256:test" },
+                "embedding": {
+                    "tool_id": "embedding",
+                    "profile_hash": "sha256:test",
+                    "dimensions": 1,
+                    "distance": "cosine",
+                    "modality": "multimodal"
+                }
+            });
+            value[role]["auth"] = json!("plain:shared-secret");
+            let error = canonical_tool_lock_value(&value).unwrap_err();
+            assert!(error.to_string().contains(&format!("{role}.auth")));
+            assert!(load_tool_lock(serde_json::to_vec(&value).unwrap().as_slice()).is_err());
+        }
     }
 
     #[test]
@@ -1837,7 +1849,7 @@ pages = 0.004
         // an error/panic.
         let none: toml::Value = toml::from_str("[markdown.mistral_ocr_markdownize]\n").unwrap();
         assert!(declared_pricing_for_role(&none, "markdown").is_empty());
-        assert!(declared_pricing_for_role(&none, "summary").is_empty());
+        assert!(declared_pricing_for_role(&none, "embedding").is_empty());
     }
 
     #[test]

@@ -882,8 +882,6 @@ fn target_type_name(value: EmbeddingTargetType) -> &'static str {
     match value {
         EmbeddingTargetType::Chunk => "chunk",
         EmbeddingTargetType::Image => "image",
-        EmbeddingTargetType::Node => "node",
-        EmbeddingTargetType::QueryCache => "query_cache",
     }
 }
 

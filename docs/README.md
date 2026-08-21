@@ -66,10 +66,10 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 | **03** | [03-data-model.md](03-data-model.md) | **★契約**: CAS / `.kio` layout / object 種別 / identity / `tool_profile_hash` / 書き込み境界 / dedup スコープ |
 | **04** | [04-pipeline.md](04-pipeline.md) | **★契約**: ingest → prepare → markdownize (incremental) → chunk → embed → index / SQLite schema / batch (retry / budget) |
 | **05** | [05-runtime.md](05-runtime.md) | **★契約**: 検索 (paging / MMR / `--at`) / commit_type / GC / purge / restore / time-travel / 並行性 |
-| **06** | [06-cli-spec.md](06-cli-spec.md) | CLI 全コマンド / exit code / error code namespace / agent API / observability / GUI 用語翻訳 (Phase 4+) |
+| **06** | [06-cli-spec.md](06-cli-spec.md) | CLI 全コマンド / exit code / error code namespace / JSON output / observability |
 | **07** | [07-adapter-spec.md](07-adapter-spec.md) | Adapter trait (Prepare / Markdownize / Embedding / etc.) / 実行形態 / **incremental Markdownize プロンプト規約** |
-| **08** | [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) | Evidence Pointer schema / 解決手順 / **Dead Pointer (purge) のセマンティクス** / retarget / 外部 Agent 相互運用 |
-| **09** | [09-mvp-scope.md](09-mvp-scope.md) | MVP scope / Phase 1-5 / Step 1-4 + ripgrep 規模上限 / 北極星シナリオ 3 / 設計宿題 4 / 凍結ゲート |
+| **08** | [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) | Evidence Pointer schema / 解決手順 / **Dead Pointer (purge) のセマンティクス** / 外部 Agent 相互運用 |
+| **09** | [09-mvp-scope.md](09-mvp-scope.md) | MVP scope / non-authorizing roadmap / Step 1-4 + 規模上限 / 北極星シナリオ / 凍結ゲート |
 | **10** | [10-operations.md](10-operations.md) | 横断規約 (semver / 観測ログ / 命名リネーム表 / 初回スキャン承認 / Adapter セキュリティ) |
 | ~~**11**~~ | [~~11-requirements.md~~](11-requirements.md) | **⚠️ DEPRECATED** — 古い統合要件ドラフト。`normalized_hash` / `offline-first` 等の旧表現を含む。新規読者は読まないこと。冒頭に DEPRECATED 注記あり。過去経緯参照のためだけに残す |
 
@@ -90,8 +90,6 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 Phase 1: Evidence 基盤    raw / normalized / chunk / Evidence Pointer
 Phase 2: 検索             FTS5 / sqlite-vec / hybrid (paging / MMR)
 Phase 3: 履歴             tree / commit / restore / --at / time-travel
-Phase 4: 自動化           定期 auto snapshot (取り込み完了時の auto snapshot は MVP — 05 §8.1) / Downloads watch / inbox
-Phase 5: Agent            agent API / navigation / neighbors / node / edge
 ```
 
 Step 計画 (Phase 1-3 を実装):
@@ -119,16 +117,16 @@ M3-2: 「リネーム済みファイルの過去版を含めて検索」
 M3-3: 「削除したはずの資料から特定の数字を再発見」
 ```
 
-実装中の機能追加は「3 シナリオのどれに resp するか」で判断。該当しないなら Phase 4-5 へ送る。
+実装中の機能追加は「3 シナリオのどれに resp するか」で判断する。
 
 ---
 
 # 4. 設計上の宿題 (4 論点)
 
-**status・期限の正本は [09-mvp-scope.md §5.5](09-mvp-scope.md)** — 本書には転記しない (転記は陳腐化して
+**status・期限の正本は [09-mvp-scope.md §5.4](09-mvp-scope.md)** — 本書には転記しない (転記は陳腐化して
 「draft なら着手しない」規則を誤発動させた実績があるため、一覧・現在の status は必ず正本を見る)。
 
-未確定 (draft) のままステップに到達したら **そのステップを着手しない** (該当判定も 09 §5.5 の status で行う)。
+未確定 (draft) のままステップに到達したら **そのステップを着手しない** (該当判定も 09 §5.4 の status で行う)。
 
 ---
 

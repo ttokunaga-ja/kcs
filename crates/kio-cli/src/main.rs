@@ -31,13 +31,13 @@ use kio_adapter::batch_client::{
     configured_mistral_batch_client, ocr_batch_body,
 };
 use kio_adapter::catalog::{
-    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, EmbeddingExecution,
-    StandardOnlineMarkdownizeRequest, active_embedding_execution, active_local_ocr_execution,
-    adopted_embedding_profile, builtin_offline_markdownize_adapter, builtin_prepare_profile,
-    convert_office_to_pdf, declared_embedding_profile_for, effective_prepared_unit_hints,
-    embedding_adapter_profile, embedding_preferred_request_kind, local_ocr_handles_media_type,
-    local_ocr_markdownize_adapter, resolve_standard_online_markdownize_profile_with_bbox,
-    run_embedding, run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
+    DeclaredEmbeddingProfile, EmbeddingExecution, StandardOnlineMarkdownizeRequest,
+    active_embedding_execution, active_local_ocr_execution, adopted_embedding_profile,
+    builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
+    declared_embedding_profile_for, effective_prepared_unit_hints, embedding_adapter_profile,
+    embedding_preferred_request_kind, local_ocr_handles_media_type, local_ocr_markdownize_adapter,
+    resolve_standard_online_markdownize_profile_with_bbox, run_embedding,
+    run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
     standard_online_markdownize_profile_with_bbox,
 };
 use kio_adapter::identity::tool_profile_hash;
@@ -6986,7 +6986,7 @@ const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
 /// `INDEX_REBUILDING_REASON`'s all-scopes promotion below).
 const PURGE_JOURNAL_ACTIVE_REASON: &str = "purge_journal_active";
 
-/// PC53/PC54/PC55(a) (05 §1.8 / 10 §12.5): this scope's `kio_format_version`
+/// PC53/PC54/PC55(a) (05 §1.8 / 10 §11.5): this scope's `kio_format_version`
 /// is newer than this build's supported ceiling. Surfaced as
 /// `KIO-E-STORE-VERSION-001` / exit 8 when it is the sole failure mode across
 /// every searched scope (promoted ahead of the generic SCOPE-ALL-FAILED, like
@@ -12345,8 +12345,8 @@ fn search_mode_json(mode: SearchMode) -> &'static str {
 
 /// PC24/PC25 (05 §1.5): `sha256(canonical query vector bytes)` — the same
 /// little-endian float32 canonical form `chunk_vec` stores vectors in
-/// (`f32_to_le_bytes`), so this digest is stable and comparable with a future
-/// `embeddings(target_type='query_cache')` row's own `target_id`.
+/// (`f32_to_le_bytes`), so this digest is stable across device-local cache
+/// reads.
 fn query_vector_digest_hex(vector: &[f32]) -> String {
     let bytes = f32_to_le_bytes(vector);
     let digest = Sha256::digest(&bytes);
@@ -12360,13 +12360,10 @@ fn query_vector_digest_hex(vector: &[f32]) -> String {
 /// R23-01 (05 §1.5 L234 "vector / hybrid の replay は page 1 の query vector
 /// を再利用する — query の再 embedding は行わない"): the device-local cache
 /// directory for page-1 query vectors, keyed by [`query_vector_digest_hex`]'s
-/// digest. A pragmatic device-local-file stand-in for this session's fix wave
-/// (spec's literal mechanism is a per-scope `embeddings(target_type=
-/// 'query_cache')` row, 05 §1.5) — same contract the spec text requires
-/// (digest-keyed, digest reverified on every read, missing/corrupt fails
-/// closed to `KIO-E-SEARCH-CURSOR-001`, never falls back to re-embedding),
-/// simpler storage that stays entirely within the search/CLI surface instead
-/// of touching the per-scope `sqlite.db` schema.
+/// digest. It is digest-keyed and reverified on every read; a missing or
+/// corrupt entry fails closed to `KIO-E-SEARCH-CURSOR-001` rather than
+/// falling back to re-embedding. The device-local cache does not touch a
+/// scope's `sqlite.db` schema.
 fn query_vector_cache_path(digest: &str) -> PathBuf {
     cache_home()
         .join("kio/search-query-cache")
@@ -12743,20 +12740,20 @@ fn read_incremental_tuning(path: &Path) -> Result<(Option<bool>, Option<f64>, Op
 
 /// R13-3: the observability logs (metrics device-global, access scope-local) go
 /// through the shared rotating writer so they get the documented daily rotation +
-/// retention prune (docs/06 §13 / docs/10 §12.6), same as events/errors. Rotation
+/// retention prune (docs/06 §12 / docs/10 §11.6), same as events/errors. Rotation
 /// is best-effort; only the final append can fail (R12-5).
 fn append_jsonl_cli(path: &Path, value: &Value, retention_days: u32) -> Result<()> {
     kio_core::scope::append_jsonl_rotating(path, value, retention_days)
 }
 
-/// R13-3: `[logs] retention_days` for the device-global logs (metrics), read from
+/// `[observability] retention_days` for the device-global logs (metrics), read from
 /// the user config, default 30.
 fn device_logs_retention_days() -> u32 {
     kio_core::scope::read_logs_retention_days(&user_config_toml_path())
         .unwrap_or(kio_core::scope::DEFAULT_LOG_RETENTION_DAYS)
 }
 
-/// R13-3: `[logs] retention_days` for the scope-local `access.jsonl` — the scope
+/// `[observability] retention_days` for the scope-local `access.jsonl` — the scope
 /// config wins over the user config (the log lives in `.kio/`), then the 30-day
 /// default. Mirrors `access_log_redact`'s precedence.
 fn scope_logs_retention_days(repo: &Repository) -> u32 {
@@ -13594,7 +13591,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         Err(error) if is_store_not_found(&error) => {
             return Err(KioError::new(
                 "KIO-E-EVIDENCE-RETARGET-REQUIRED-001",
-                "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
+                "chunk not materialized for this tool_profile_hash; retarget required",
                 json!({
                     "chunk_hash": pointer.chunk_hash,
                     "tool_profile_hash": pointer.tool_profile_hash,
@@ -14505,7 +14502,7 @@ fn preflight_barrier_and_index(kio_dir: &Path) -> Result<ReadBarrierCheckpoint> 
     Ok(checkpoint)
 }
 
-/// 05-runtime.md §3.5 / 10-operations.md §12.1: retryable (exit 3) rejection
+/// 05-runtime.md §3.5 / 10-operations.md §11.1: retryable (exit 3) rejection
 /// for either §I checkpoint. Carries no context beyond the error itself — the
 /// violation is about scope-wide purge-transaction state, not about any one
 /// object, so there is nothing object-specific to disclose (unlike
@@ -14721,7 +14718,7 @@ fn unresolvable_commit_pointer_error(pointer: &EvidencePointer) -> KioError {
 }
 
 /// 08 §3.2 — scope `.kio` unreachable (scope_path unreachable and scope_id not
-/// registered). QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §12.2
+/// registered). QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §11.2
 /// L931): dead pointers (tombstoned / not_found) are exit 4, but
 /// scope_unreachable alone is retryable (the scope may simply be unmounted) —
 /// exit 3 (`PartialFailure`), not 4. This is the single shared helper behind
@@ -14842,29 +14839,7 @@ fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
 /// This is a distinct path from Evidence Pointer resolution.
 fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     let status = if as_view { "viewed" } else { "opened" };
-    // PA02 (§A, U22): a fork-duplicate (`kio import --as-new-scope`) can carry
-    // an OLD `scope_id` in a copied-forward image object URI that no longer
-    // resolves via either the scope_path hint or the registry — hash is the
-    // sole identity that matters for a CAS object (08 §2), so when the
-    // scope_id itself is entirely unreachable, fall back to the CURRENT
-    // (self) store: if it shares the same `image_hash`, resolve there rather
-    // than surfacing `scope_unreachable`. Only for `image` — the type this
-    // URI kind is scoped to (PA01) — and only when scope_id resolution fails
-    // outright (a resolvable-but-wrong scope_id must still resolve normally
-    // and is never silently redirected).
-    let target = match resolve_scope_target(&object.scope_id, None) {
-        Ok(target) => target,
-        Err(error)
-            if object.object_type == "image"
-                && error.error_code() == "KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001" =>
-        {
-            match Repository::open_current().and_then(|repo| scope_target(repo.root())) {
-                Ok(fallback) => fallback,
-                Err(_) => return Err(error),
-            }
-        }
-        Err(error) => return Err(error),
-    };
+    let target = resolve_scope_target(&object.scope_id, None)?;
     // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
     // kio_format_version compatibility, checked before (1)/(3) below. This
     // object-URI path previously never opened a `Repository` at all — every
@@ -15380,7 +15355,7 @@ fn run_ledger_reconcile() -> Result<Value> {
     // step c: existing local rows -> does the provider have this job?) and
     // the orphan/unknown-attribution walk (steps d+e: provider jobs/uploads
     // -> is there a local row for this?) — fetched once, shared by both.
-    // Batch send lane (07 §5.7 / 10 §7.5.2): `configured_inventories` itself
+    // Batch send lane (07 §5.5 / 10 §7.5.2): `configured_inventories` itself
     // consults the configured Batch client (mock seam or the real Mistral
     // lane) and maps job metadata's 5-key contract onto these attribution
     // records — no CLI-side merge needed.
@@ -16431,7 +16406,7 @@ fn execute_pending_markdownize_tasks(
         })
         .collect::<Vec<_>>();
     let mut counts = ExecOutcome::default();
-    // Batch send lane (04 §5.8 / 07 §5.7): resolved once per pass — `Some`
+    // Batch send lane (04 §5.8 / 07 §5.5): resolved once per pass — `Some`
     // exactly when this pass can drive upload → job-create against a
     // configured (mock or real) Batch client.
     let batch_client = batch_markdownize_lane_client()?;
@@ -16541,7 +16516,7 @@ fn execute_pending_markdownize_tasks(
         // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
         // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
         let bypass_cap_denial = override_budget || !budget_caps.hard_stop;
-        // Lane selection (04 §5.8 / 07 §5.7): decided BEFORE the reservation so
+        // Lane selection (04 §5.8 / 07 §5.5): decided BEFORE the reservation so
         // phase 1 records the matching `request_kind` ('batch' rows are what the
         // §5.8 recovery/poll machinery keys on).
         let existing_row = get_batch_request(ledger.connection(), &key).map_err(pipeline_to_kio)?;
@@ -18373,9 +18348,6 @@ fn task_failure_from_adapter(error: kio_adapter::AdapterError) -> TaskExecutionF
         kio_adapter::AdapterError::ContractViolation(_)
         | kio_adapter::AdapterError::ConfigSchema(_)
         | kio_adapter::AdapterError::ConfigSchemaCoded { .. } => RetryErrorKind::ContractViolation,
-        // R13-2: a `keychain:` not-implemented auth is a permanent config gap, not a
-        // transient — never retry/re-bill it.
-        kio_adapter::AdapterError::NotImplemented(_) => RetryErrorKind::InvalidInput,
     };
     TaskExecutionFailure {
         retry_kind,
@@ -18397,18 +18369,7 @@ const EMBEDDING_ADAPTER_KIND: &str = "embedding";
 const EMBEDDING_BATCH_SIZE: usize = 32;
 
 fn embedding_execution() -> Option<EmbeddingExecution> {
-    let execution = active_embedding_execution();
-    // R13-2(4): a Real activation with no tools.toml `[embedding]` declaration is
-    // env-only drift (GEMINI_API_KEY alone). Record it once per run. Test seams
-    // (Mock/AuthError/…) are not Real, so hermetic tests never trip this.
-    // The offline adapter cannot drift this way: it activates only FROM a
-    // declaration, never from a stray env key.
-    if execution == Some(EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real))
-        && kio_adapter::tool_lock::registered_declared_adapter("embedding").is_none()
-    {
-        warn_undeclared_adapter_once("embedding");
-    }
-    execution
+    active_embedding_execution()
 }
 
 fn declared_embedding_profile(execution: EmbeddingExecution) -> DeclaredEmbeddingProfile {
@@ -18436,39 +18397,8 @@ fn run_embedding_adapter(
     // `kio_adapter::types::EmbeddingRequest::idempotency_token`'s doc.
     idempotency_token: Option<String>,
 ) -> std::result::Result<kio_adapter::catalog::AdoptedEmbeddingOutcome, TaskExecutionFailure> {
-    run_embedding(execution, items, input_type, idempotency_token).map_err(|error| {
-        // R13-2(e): a `keychain:` (not-implemented) auth must be LOUD — the query
-        // path degrades to text fallback and the index path only counts a failed
-        // task, so without this the specific misconfig never reaches any log. Record
-        // it to errors.jsonl (once per run) so it is never silently swallowed.
-        if matches!(error, kio_adapter::AdapterError::NotImplemented(_)) {
-            log_embedding_not_implemented_once(&adapter_to_kio(clone_adapter_error(&error)));
-        }
-        task_failure_from_adapter(error)
-    })
-}
-
-/// R13-2(e): record a `keychain:` not-implemented embedding auth to errors.jsonl,
-/// deduped to once per run (the same misconfig fails every batch).
-fn log_embedding_not_implemented_once(error: &KioError) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    if LOGGED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    let _ = append_error_log(error);
-}
-
-/// Clone the subset of `AdapterError` this path can see (only `NotImplemented`
-/// reaches [`log_embedding_not_implemented_once`]; other variants keep their
-/// message via `to_string`).
-fn clone_adapter_error(error: &kio_adapter::AdapterError) -> kio_adapter::AdapterError {
-    match error {
-        kio_adapter::AdapterError::NotImplemented(message) => {
-            kio_adapter::AdapterError::NotImplemented(message.clone())
-        }
-        other => kio_adapter::AdapterError::ContractViolation(other.to_string()),
-    }
+    run_embedding(execution, items, input_type, idempotency_token)
+        .map_err(task_failure_from_adapter)
 }
 
 /// The `fallback_reason`s [`compute_query_embedding_page1`] can report through
@@ -19329,7 +19259,7 @@ fn run_embedding_enrichment_for_instances(
         // provider reported for THIS row. `:batchEmbedContents` bills and
         // reports per CALL, so any call spanning several rows can only be split
         // by guesswork; the Batch lane avoids that by making the job the task
-        // (07 §5.7), and the sync lane avoids it by making the call the row.
+        // (07 §5.5), and the sync lane avoids it by making the call the row.
         // The realtime lane is opt-in and never the default (2026-07-25
         // ruling), so its extra round trips buy exact per-row billing at a cost
         // no default path pays.
@@ -19732,7 +19662,7 @@ fn link_reused_chunks(
 /// `:batchEmbedContents` reports a single `promptTokenCount` per CALL, so a
 /// call spanning several ledger rows can only be divided among them by
 /// guesswork. Both lanes now keep the billing unit and the accounting unit the
-/// same object — the Batch lane by making the job the task (07 §5.7), this one
+/// same object — the Batch lane by making the job the task (07 §5.5), this one
 /// by making the call the row. The realtime lane is opt-in and never the
 /// default (2026-07-25 ruling), so the round trips it costs are never on a
 /// default path.
@@ -19877,7 +19807,7 @@ fn persist_group_vector(
 // INLINE, so there is no upload phase (相 2a) and no provider residue to
 // sweep — see `kio_adapter::gemini_batch_client`.
 //
-// **1 job = 1 task** (07 §5.7's v1 contract) is preserved by making the JOB
+// **1 job = 1 task** (07 §5.5's v1 contract) is preserved by making the JOB
 // itself the task: the batch row's `input_hash` is a digest of the job's
 // member set. Embedding's natural task granularity is the dedup group, and a
 // realistic scope has thousands of them (2,321 in the dogfood fixture), so
@@ -20021,11 +19951,8 @@ fn submit_embedding_batch_jobs(
     replica: &mut kio_index::aggregator::ScopeDelta,
 ) -> Result<Option<ExecOutcome>> {
     let mut outcome = ExecOutcome::default();
-    // Lane availability probing must never be what REPORTS an auth misconfig
-    // (e.g. R13-2's loud `keychain:` not-implemented): an unresolvable
-    // credential means the lane is unusable, not that the command should fail.
-    // The synchronous send path hits the same credential and surfaces it
-    // through the established R13-2(e) path.
+    // Lane availability probing treats an unresolvable credential as an
+    // unavailable lane; the synchronous send path reports execution errors.
     let Some(client) = kio_adapter::gemini_batch_client::resolve_gemini_batch_client()
         .ok()
         .flatten()
@@ -20250,7 +20177,7 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
     let Some(execution) = embedding_execution() else {
         return Ok(outcome);
     };
-    // 07 §5.7: the lane is a property of the adapter. An `offline_api` adapter
+    // 07 §5.5: the lane is a property of the adapter. An `offline_api` adapter
     // prefers Sync because a local server has no provider job queue to submit
     // to, and the half-price rationale that puts Gemini on Batch does not
     // exist for it. There can be no in-flight rows to poll.
@@ -20260,11 +20187,8 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
         return Ok(outcome);
     }
     let profile = declared_embedding_profile(execution);
-    // Lane availability probing must never be what REPORTS an auth misconfig
-    // (e.g. R13-2's loud `keychain:` not-implemented): an unresolvable
-    // credential means the lane is unusable, not that the command should fail.
-    // The synchronous send path hits the same credential and surfaces it
-    // through the established R13-2(e) path.
+    // Lane availability probing treats an unresolvable credential as an
+    // unavailable lane; the synchronous send path reports execution errors.
     let Some(client) = kio_adapter::gemini_batch_client::resolve_gemini_batch_client()
         .ok()
         .flatten()
@@ -24239,7 +24163,7 @@ fn declared_billable_kind_strings(profile: &AdapterProfile) -> std::collections:
 /// (`resolve_billing_from_reported_usage` itself, unconditionally) — this
 /// only makes the pricing gap observable instead of a silent under/over-bill.
 /// Deduped per `(adapter_kind, sorted kinds)` for the whole process, mirroring
-/// `warn_undeclared_adapter_once`. A no-op for an empty `kinds` (the common
+/// the adapter-activation warning path. A no-op for an empty `kinds` (the common
 /// case: fully-covered or no billable_units report at all).
 fn warn_uncovered_pricing_kinds_once(adapter_kind: &str, kinds: &[String]) {
     if kinds.is_empty() {
@@ -24380,7 +24304,7 @@ fn release_task_charge_if_open(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Mistral OCR Batch lane (04 §5.8 / 07 §5.7): submit + poll/collect
+// Mistral OCR Batch lane (04 §5.8 / 07 §5.5): submit + poll/collect
 // ---------------------------------------------------------------------------
 
 /// Poll cadence for an in-flight batch job (task `next_retry_at` extension per
@@ -24400,7 +24324,7 @@ const BATCH_SUBMITTED_REASON: &str = "batch_submitted";
 /// The configured Batch client, if the Batch lane is available at all.
 ///
 /// Lane availability deliberately equals "`configured_mistral_batch_client()`
-/// returned a client". 07 §5.7 frames the lane choice as the adapter's
+/// returned a client". 07 §5.5 frames the lane choice as the adapter's
 /// `preferred_request_kind()` declaration AND a configured client, but the
 /// concrete `MistralOcrMarkdownizeAdapter` type is module-private to
 /// `kio-adapter` (no catalog constructor returns it as a `dyn
@@ -24461,7 +24385,7 @@ fn markdownize_send_lane(
 }
 
 /// The model string a batch job is created with (`create_job`'s second
-/// argument — the model rides the JOB, not the input line, 07 §5.7).
+/// argument — the model rides the JOB, not the input line, 07 §5.5).
 fn batch_job_model() -> String {
     let declared = kio_adapter::tool_lock::registered_declared_adapter("markdown")
         .and_then(|declared| declared.model)
@@ -24666,7 +24590,7 @@ struct BatchOcrPage {
 }
 
 /// Bounded parse of a batch output line's `body` (the same OCR response JSON
-/// the sync lane receives — 07 §5.7 verified shape). Byte/count ceilings
+/// the sync lane receives — 07 §5.5 verified shape). Byte/count ceilings
 /// mirror the sync client's response policy. The sync lane's full parser
 /// (image decode, bbox annotation, placeholder rewrite) is module-private to
 /// `kio-adapter`, so this lane parses markdown text + page indices only:
@@ -26771,7 +26695,7 @@ fn read_existing_approval_keys(path: &Path) -> BTreeSet<String> {
 /// R13-2: parse the (already schema-validated) user `tools.toml` and publish its
 /// declared adapters to the process-global registry so the online clients honor a
 /// declared `auth`/`model`. Best-effort: a missing/unreadable file registers an
-/// empty map (legacy env-var behavior preserved).
+/// empty map, leaving every online adapter inactive.
 fn register_declared_adapters_from_tools_config() {
     use kio_adapter::tool_lock::{declared_adapter_for_role, register_declared_adapters};
     let mut map = std::collections::HashMap::new();
@@ -26779,14 +26703,7 @@ fn register_declared_adapters_from_tools_config() {
         && let Ok(text) = fs::read_to_string(&path)
         && let Ok(value) = toml::from_str::<toml::Value>(&text)
     {
-        for role in [
-            "prepare",
-            "markdown",
-            "embedding",
-            "summary",
-            "classification",
-            "rerank",
-        ] {
+        for role in ["prepare", "markdown", "embedding"] {
             if let Some(declared) = declared_adapter_for_role(&value, role) {
                 map.insert(role.to_owned(), declared);
             }
@@ -26841,14 +26758,7 @@ fn register_declared_pricing_from_tools_config() {
         && let Ok(text) = fs::read_to_string(&path)
         && let Ok(value) = toml::from_str::<toml::Value>(&text)
     {
-        for role in [
-            "prepare",
-            "markdown",
-            "embedding",
-            "summary",
-            "classification",
-            "rerank",
-        ] {
+        for role in ["prepare", "markdown", "embedding"] {
             let pricing = declared_pricing_for_role(&value, role);
             if !pricing.is_empty() {
                 map.insert(role.to_owned(), pricing);
@@ -26856,28 +26766,6 @@ fn register_declared_pricing_from_tools_config() {
         }
     }
     register_declared_pricing(map);
-}
-
-/// R13-2(4): record a one-per-run `level=warn` to errors.jsonl when an online
-/// adapter activates via the legacy env var with NO `tools.toml` declaration
-/// (docs/07 §7.1 drift made visible). Deduped per role for the whole process so it
-/// is 1 execution / 1 record, never per task.
-fn warn_undeclared_adapter_once(role: &str) {
-    use std::sync::{Mutex, OnceLock};
-    static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
-    let warned = WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
-    let mut guard = warned
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !guard.insert(role.to_owned()) {
-        return;
-    }
-    drop(guard);
-    let _ = append_warn_log(
-        "KIO-W-ADAPTER-UNDECLARED-001",
-        "online adapter active via env var without a tools.toml declaration (undeclared-adapter)",
-        json!({ "adapter_role": role }),
-    );
 }
 
 fn validate_user_tools_config() -> Result<()> {
@@ -26937,7 +26825,7 @@ fn toml_value_has_plain_auth(value: &toml::Value) -> bool {
 }
 
 /// M8: validate the user (device) `config.toml` against `config.schema.json`
-/// before dispatch (10 §12 / 06 §11). The folder `.kio/config.toml` is already
+/// before dispatch (10 §11 / 06 §10). The folder `.kio/config.toml` is already
 /// validated on `Repository::open` (scope.rs `validate_config`); the user config
 /// took no such path, so a negative budget cap etc. slipped through. Schema
 /// failures are `KIO-E-CONFIG-SCHEMA-001` (exit 2).
@@ -27186,15 +27074,6 @@ fn hash_and_write_manifest_object(
 
 fn adapter_to_kio(error: kio_adapter::AdapterError) -> KioError {
     match error {
-        // R13-2: `keychain:` auth is a LOUD not-implemented error (never a silent
-        // noop), surfaced with its own code + a non-zero exit rather than folded
-        // into the generic schema error.
-        kio_adapter::AdapterError::NotImplemented(message) => KioError::new(
-            "KIO-E-NOT-IMPLEMENTED-001",
-            message,
-            json!({}),
-            ExitCode::Failure,
-        ),
         // A config violation that named its own operator-facing code (06 §8).
         // `AdapterError::error_code()` cannot carry it — that one is pinned to
         // the retry-policy table — so the code travels on the variant and is

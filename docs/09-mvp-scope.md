@@ -2,7 +2,7 @@
 
 統合元: 旧 `north-star-scenarios.md` + 旧 `design-homework.md` + 旧 `consolidation-plan.md` の Phase plan + `01-positioning.md` から MVP/Phase 部分の抜粋 (research 検討メモは 2026-07-18 に撤去 — git 履歴で参照可)。
 
-> 本書は **実装着手前に確定する論点** を一所に集める。Step 1 着手前に §1-§4 を確定する。§5 の各宿題の確定期日と現在の status は **§5.5 の表が正本** (本行に期日を再掲しない — 転記の陳腐化が gate を誤発動させるため)。
+> 本書は **実装着手前に確定する論点** を一所に集める。Step 1 着手前に §1-§4 を確定する。§5 の各宿題の確定期日と現在の status は **§5.4 の表が正本** (本行に期日を再掲しない — 転記の陳腐化が gate を誤発動させるため)。
 
 ---
 
@@ -29,41 +29,29 @@
 - kio evidence verify <pointer> / kio evidence verify --batch <pointers.jsonl> (Phase 4 milestone 6 の implemented target/current)
 ```
 
-## 1.2 MVP で捨てる (v2 以降に倒す)
+# 2. 将来ロードマップ（非規範・非承認）
 
-```
-- 完全な Knowledge Graph (node/edge 自動生成)
-- 複雑な Agent navigation (neighbors, beam search)
+以下は実装を許可せず、CLI syntax、schema、error code、default、互換性を定めない名称だけの記録である。
+
+- export / import
+- Evidence retarget
+- prune-unreachable
+- non-tree CAS reclamation
+- CoW GC
+- move tracking
+- external Agent API / MCP
+- Knowledge Graph / Agent navigation
+- multi-device sync / cloud sharing
+- Adapter sandboxing / distribution signing
+- pack / delta compression
+- full-history purge rewriting
 - GUI
-- クラウド共有・修正提案・workspace 概念
-- pack/delta 圧縮
-- 高度な分類器の自動移動 (auto_organize は提案表示のみ)
-- 多デバイス同期 (synchronization は v2+)
-- Adapter の OS サンドボックス強制・第三者 Adapter の配布/署名 (07-adapter-spec.md §7.1)
-- GC の実行系のうち、receipt先行・crash recovery付きの on-demand tree-only shallow sweep は Phase 4 milestone 2、同じexecutorをmonotonic runtime budgetで安全に分割する明示opt-inの`after_index` hookはmilestone 3として [06-cli-spec.md §6.1](06-cli-spec.md) に限定して公開する。OS schedulerから呼ぶRust scheduled auto snapshotはmilestone 4、同じ `kio snapshot auto` invocation だけで動くRust-only `on_idle` GCはmilestone 5として公開する。`manual_only`が現行defaultであり、`--prune-unreachable`、default自動有効化、CoW 並行 GCは未公開である
-- purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース。05-runtime.md §3.5)
-- export / import (.kioz bundle)
-- kio evidence retarget の実装
-- agent API の外部公開・発見導線 (外部 Agent は MVP では kio search --json 等の CLI 契約を使う)
-```
+- cross-scope permissions
+- large-scale search backend
+- semantic diff / perceptual reuse
+- Summary / Classification adapters
 
-これらは **MVP の旗印にしない** だけで、設計検討は続けてよい。Phase 4-5 ラベルを付けて archive。
-
----
-
-# 2. Phase Plan
-
-```
-Phase 1: Evidence 基盤   raw / normalized / chunk / Evidence Pointer
-Phase 2: 検索            FTS5 / sqlite-vec / hybrid (paging / MMR)
-Phase 3: 履歴            tree / commit / restore / --at
-Phase 4: 自動化          auto snapshot / Downloads watch / inbox / classification 提案
-Phase 5: Agent           agent API / navigation / neighbors / node / edge
-```
-
-各 Phase は前 Phase に依存。Phase 1 が動かないうちに Phase 4-5 は深掘りしない。**今書いた Phase 5 設計はほぼ確実に書き直しになる前提**。MVP における Agent 導線は CLI + `--json` のみ ([06-cli-spec.md §9](06-cli-spec.md))。MCP server 等の Agent 統合導線は Phase 5 論点として登録済み (設計は Phase 5 着手時)。
-
-Phase 4 milestone 6 の batch verify は implemented target/current だが、これを Phase 4 全体の実装済み表明にはしない。retarget を含む他の Phase 4+ non-goal は引き続き未実装である。
+`tasks/` は過去の受入記録であり、現在の契約や将来実装を承認する文書ではない。
 
 ---
 
@@ -103,7 +91,7 @@ Step 別の目安 (テスト除く):
                                  総額上限 16,000 に切られる — 全 Step 同時に上限へ達する配分は取らない)
 ```
 
-これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kio repair verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
+これを超えるなら設計肥大化の兆候。テスト除き 16,000 LOC を超えたら削減先を検討する。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。
 
 ## 3.1 機能 × Step 割当表
 
@@ -114,8 +102,8 @@ Step 別の目安 (テスト除く):
 | CAS raw object store + snapshot DAG (tree / commit) | [03-data-model.md](03-data-model.md) | Step 1 |
 | `init` / `status` / `snapshot create` / `snapshot auto` / `log` / `diff` / `inspect` / `tag` | [06-cli-spec.md §1](06-cli-spec.md) | Step 1 + Phase 4 milestones 4–5 |
 | `gc_policy` × `commit_type` 対応の schema 遵守 (GC 実行はしない) | [05-runtime.md §2.2](05-runtime.md) | Step 1 |
-| JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加) | [06-cli-spec.md §11](06-cli-spec.md) | Step 1〜 |
-| 観測ログ `events.jsonl` / `errors.jsonl` | [06-cli-spec.md §13](06-cli-spec.md) | Step 1 |
+| JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加) | [06-cli-spec.md §10](06-cli-spec.md) | Step 1〜 |
+| 観測ログ `events.jsonl` / `errors.jsonl` | [06-cli-spec.md §12](06-cli-spec.md) | Step 1 |
 | 初回スキャン preview + 明示承認 / `.kioignore` | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | preview のコスト概算・budget 超過警告 | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | Prepare / Markdownize (full + incremental) / Adapter 実行 | [07-adapter-spec.md](07-adapter-spec.md) / [04-pipeline.md §3](04-pipeline.md) | Step 2 |
@@ -132,35 +120,26 @@ Step 別の目安 (テスト除く):
 | Evidence Pointer 発行・解決 / `kio open` / `kio view` | [08-evidence-pointer-spec.md §2-3](08-evidence-pointer-spec.md) | Step 3 |
 | `kio search --json` (外部 Agent 向け最小契約) + `index_status` | [05-runtime.md §1.7](05-runtime.md) | Step 3 |
 | `kio reindex` (gen+1 の再 Markdownize / 再 index) | [07-adapter-spec.md §9](07-adapter-spec.md) / [09-mvp-scope.md §5.1](09-mvp-scope.md) | Step 3 |
-| 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §13](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
+| 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §12](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
 | `restore --to` / `--at` / `--all-history` / `--include-deleted` | [05-runtime.md §4](05-runtime.md) | Step 4 |
 | purge 最小形 (tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ [10-operations.md §7](10-operations.md)) | [05-runtime.md §3](05-runtime.md) / [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) | Step 4 |
 | `kio repair rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
 | `kio repair verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
-| purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
 | retention shallow 候補の read-only planner (`kio gc --dry-run`) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.2-2.4](05-runtime.md) | Phase 4 milestone 1 |
 | receipt先行・crash recovery付きの on-demand tree-only shallow sweep (`kio gc [--yes]`) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4 milestone 2 |
 | 明示opt-inのbounded tiered retention hook (`gc.mode="after_index"`、successful index/manual snapshot後) | [06-cli-spec.md §6.1](06-cli-spec.md) / [05-runtime.md §2.3-2.5](05-runtime.md) | Phase 4 milestone 3 |
-| `--prune-unreachable` GC 実行系 | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ (未公開) |
-| `after_index` のdefault自動有効化 | [05-runtime.md §2.3](05-runtime.md) | Phase 4+ (未決定・未公開) |
-| CoW 並行 GC | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) | Phase 4 milestone 4 |
 | Rust-only on_idle GC (OS scheduler が起動する `kio snapshot auto` に限定、常駐なし) | [05-runtime.md §2.3](05-runtime.md) | Phase 4 milestone 5 |
-| export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4 milestone 6 (implemented target/current) |
-| `kio evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
-| scope 内移動の明示追跡 | [05-runtime.md §6](05-runtime.md) | Phase 4+ (CLI は未公開) |
-| agent API の外部公開・発見導線 / navigation | [06-cli-spec.md §9](06-cli-spec.md) | Phase 5 |
-| GUI 用語翻訳マッピング | [06-cli-spec.md §14](06-cli-spec.md) | Phase 4+ |
 
-注: 定期 auto snapshotは09 §2のPhase plan (Phase 4: 自動化) に従いmilestone 4、Rust-only `on_idle` GCはmilestone 5で公開した。後者はOS schedulerが呼ぶ `kio snapshot auto` に限定し、daemon / scheduler installer は追加しない。
+注: milestone 1–5 は各 current spec の実装済み契約、milestone 6 の batch verify は implemented target/current である。これらは Phase 4 全体の実装済み表明ではない。
 
 ## 3.2 Step 1 着手ゲート
 
-Step N の着手条件は「§5.5 で期日が『Step N 着手前』の行がすべて decided」という機械的チェックとする。**期日 cell に未完注記 (「〜を除き充足」等の but 書き) が残る行は decided 扱いしない** — #5 は M3-1 の増補完了時に件数と query set digest (凍結済み `eval/golden-queries.jsonl` の raw UTF-8 bytes の sha256 — `sha256:<lowercase-hex>` 表記) を当該行へ追記して注記を除去する (= 再凍結の機械記録。それまで Step 3 の着手条件を満たさない)。主観判定 (「だいたい固まった」) は用いない。
+Step N の着手条件は「§5.4 で期日が『Step N 着手前』の行がすべて decided」という機械的チェックとする。**期日 cell に未完注記 (「〜を除き充足」等の but 書き) が残る行は decided 扱いしない** — #5 は M3-1 の増補完了時に件数と query set digest (凍結済み `eval/golden-queries.jsonl` の raw UTF-8 bytes の sha256 — `sha256:<lowercase-hex>` 表記) を当該行へ追記して注記を除去する (= 再凍結の機械記録。それまで Step 3 の着手条件を満たさない)。主観判定 (「だいたい固まった」) は用いない。
 
-Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロッカーは #1 / #4 で、いずれも decided 済み (§5.5) のため、上記日付までに残る作業は本改訂のドキュメント反映のみ。開始日を過ぎても着手しない場合、その理由を本節に追記する (理由なき延期の可視化)。
+Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロッカーは #1 / #4 で、いずれも decided 済み (§5.4) のため、上記日付までに残る作業は本改訂のドキュメント反映のみ。開始日を過ぎても着手しない場合、その理由を本節に追記する (理由なき延期の可視化)。
 
 ---
 
@@ -312,37 +291,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 Status: decided (Step 1 着手前確定)
 ```
 
-## 5.2 remarkdownize の CLI セマンティクス
-
-```
-問題: 別 LLM で再変換すると tool_profile_hash が変わり chunk が別物。
-      既存 Evidence Pointer は古い chunk_hash を指し続ける (これは設計として正しい)。
-未決: 「最新 Markdown へ pointer を切り替える」操作 (cherry-pick 相当)。
-
-設計案:
-  kio evidence retarget <pointer> [--latest|--at <commit>]
-  - 同一 raw_hash 配下で最新の Markdownize 結果を取得
-  - heading_path の一致 (exact → fuzzy + span 重なり率 — fuzzy は text alignment 成立領域のみ、08 §5) で対応付け
-  - 意味ベースの対応付け (semantic_fingerprint) は MVP から除外 (Phase 4+ の optional 拡張)
-  - 対応が見つかれば新 chunk_hash 返却。曖昧なら候補リスト
-  - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す
-
-決定済み:
-  - CLI 形: kio evidence retarget <pointer> [--latest|--at <commit>] (正本 08 §5)
-  - 対応なし (曖昧) 時のエラーコード: KIO-E-EVIDENCE-RETARGET-AMBIG-001 (正本 08 §5)
-  - AI Agent からの API 形: 06-cli-spec.md §4 の --json 契約に従う (正本 08 §5)
-  - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す (正本 08 §5)
-
-残未決:
-  - --latest のデフォルト挙動 (auto retarget か proposal か)
-  - (Phase 4+) chunk レベル semantic_fingerprint の実体
-    (embedding 再利用か専用 fingerprint か、embedding profile 非互換時の縮退)
-
-正本: 08-evidence-pointer-spec.md §5
-Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手前)
-```
-
-## 5.3 Dead Evidence Pointer のセマンティクス
+## 5.2 Dead Evidence Pointer のセマンティクス
 
 ```
 問題: 「Evidence Pointer の不変性」と「法務 purge」の緊張領域。purge 後の pointer 挙動が未定義。
@@ -371,10 +320,10 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
    規則。解決は 08 §3.1 手順 5 の canonical final event に正本化してから評価する — 正本 05 §3.5)
 
 正本: 08-evidence-pointer-spec.md §4 / 05-runtime.md §3
-Status: decided。batch verify は Phase 4 milestone 6 の implemented target/current。retarget は引き続き Phase 4+ non-goal
+Status: decided。batch verify は Phase 4 milestone 6 の implemented target/current。
 ```
 
-## 5.4 Incremental Markdownize のプロンプト規約
+## 5.3 Incremental Markdownize のプロンプト規約
 
 ```
 問題: 「旧 raw + 旧 Markdown + 新 raw を Adapter に渡して差分更新」の挙動を Adapter 任せにすると揺れる。
@@ -394,20 +343,19 @@ Status: decided。batch verify は Phase 4 milestone 6 の implemented target/cu
   - fallback_to_full の閾値 hint 衝突時は Kio 側を優先 (正本 07 §8.1)
   - ストリーミング応答: 許容。staging に保持し全体検査後に一括公開、中断は failed (retryable) — pending 状態は無い (正本 07 §8.3)
   - spec_version 不一致は Adapter が invalid_input として失敗、当該 Adapter は failed permanent (full fallback は incremental capability 非互換のみ — 正本 07 §8.1)
-  - spec_version の bump 規約 (正本 10 §12.5)
+  - spec_version の bump 規約 (正本 10 §11.5)
 
 残未決: なし
 
-正本: 07-adapter-spec.md §8 / 04-pipeline.md §3.1 / 10-operations.md §12.5
+正本: 07-adapter-spec.md §8 / 04-pipeline.md §3.1 / 10-operations.md §11.5
 Status: decided
 ```
 
-## 5.5 進行状況テーブル
+## 5.4 進行状況テーブル
 
 | # | 項目 | Status | 残未決 | 期日 |
 | --- | --- | --- | --- | --- |
 | 1 | Markdown 非決定性 = first-instance-wins | decided | なし | Step 1 着手前 (充足済み) |
-| 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided | なし（batch verify は Phase 4 milestone 6 の implemented target/current） | 充足済み |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
 | 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 Q_hard 増補は 2026-07-23 完了・再凍結** (§4.2 の一回限り例外の完遂 — 本追記は §6.2 凍結対象外の完遂手続き): 「Step 3 着手前」の期日は失効していたため同日のユーザー裁定で失効後実行。増補 8 問 (hard1 ×4 + hard3 ×4、全問を結果測定前に投入 = 事前コミット) は実データ fixture (raster PDF / PPTX 図表・画像) を正解担体とするため合成コーパスに載らず、**別ファイル方式**で再凍結する: 既存 `eval/golden-queries.jsonl` は 50 件のまま不変 (digest sha256:b7183fa3586383883ec522256696268eab8e607c1a032020e09223158a5bf08d)、増補分は `eval/golden-queries-qhard.jsonl` 8 件 (digest sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163、Rust runner `kio-eval benchmark qhard`)。M3-1 の Done 判定は以後**合算 26 問で Recall@10 >= 0.8 (= 21 問以上)**)。**横断増補は 2026-07-26 完了・再凍結** (§4.2 の別ファイル方式を再適用): 既存 50 問は
@@ -427,7 +375,7 @@ Rust専用ランナーである理由は `HISTORY_QUERY_COUNT`(=16 厳密一致)
 **replica が辞退する履歴 8 問は 5.38 → 5.38 で完全同値** (時間選択子ガードにより replica が触れないことの裏付け)。**[2026-08-11] この計測手法は再現不能になった** — (1) `time_selector` ガードを撤回し replica が履歴も採点するようになったため「辞退する 8 問」が存在しない、(2) scatter-gather 経路を廃止したため「replica を無効化する」比較対象が無い ([05-runtime.md §1.8](05-runtime.md))。**[2026-08-12 replica 単独経路の再測定]** 同一の 7 scope / 16 問で Recall@10 は全シナリオ 1.000 を維持した。移行前は `worst_expected_rank` が **mean 3.69 / max 10**（M3-1 2.00、M3-2 5.75、M3-3 5.00）、移行後は **mean 2.50 / max 4**（M3-1 2.00、M3-2 3.50、M3-3 2.50）。履歴 8 問も per-scope 順位での融合ではなく collection 内順位となり、期待どおり改善した。短語 24 問も Recall@10 **0.9167 (22/24)** を維持し、同一環境で記録した p95 は 171.27ms → 166.98ms だった（latency は実行ごとに変動する） | 充足 (2026-07-23 増補完了 — 窓失効後実行の裁定含め本行が機械記録) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |
 
-Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2 の残未決は retarget の Phase 4+ non-goal にのみ関わるため、Step 1-4 をブロックしない。
+Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。
 
 ---
 
@@ -445,9 +393,9 @@ docs/
   03-data-model.md             ★契約: CAS / identity / 書き込み境界
   04-pipeline.md               ★契約: パイプライン / SQLite / batch
   05-runtime.md                ★契約: 検索 / commit / GC / purge / restore
-  06-cli-spec.md               CLI / exit code / error / agent API
+  06-cli-spec.md               CLI / exit code / error / JSON output
   07-adapter-spec.md           Adapter / incremental プロンプト規約
-  08-evidence-pointer-spec.md  Evidence Pointer / Dead Pointer / retarget
+  08-evidence-pointer-spec.md  Evidence Pointer / Dead Pointer
   09-mvp-scope.md              本書
   10-operations.md             横断規約 (semver / 観測 / リネーム表)
   11-requirements.md           既存要件ドラフト (ARCHIVED — 現行正本ではない。読む順に含めない、README §1)

@@ -2819,7 +2819,7 @@ impl Repository {
         self.validated_scope_id().map(|_| ())
     }
 
-    /// QB8 (step4b-contract-tests-p3b.md §A, 03 §2 L154 / 10 §12.3 L948): the
+    /// QB8 (step4b-contract-tests-p3b.md §A, 03 §2 L154 / 10 §11.3 L948): the
     /// `kio_format_version` compatibility judgment runs BEFORE JSON Schema
     /// validation, not after. A store from a newer MINOR version may add
     /// schema keys this build does not know about; reading the version first
@@ -3435,9 +3435,16 @@ fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
             "unsupported tool-lock spec_version: {spec_version}"
         )));
     }
+    for key in object.keys() {
+        if key != "spec_version" && !["prepare", "markdown", "embedding"].contains(&key.as_str()) {
+            return Err(KioError::schema(format!(
+                "unknown tool-lock.json role `{key}`"
+            )));
+        }
+    }
     let mut canonical = Map::new();
     canonical.insert("spec_version".to_owned(), Value::from(spec_version));
-    for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
+    for key in ["prepare", "markdown"] {
         if let Some(entry) = canonical_tool_entry(object, key, false)? {
             canonical.insert(key.to_owned(), entry);
         }
@@ -3462,6 +3469,27 @@ fn canonical_tool_entry(
     let entry = entry
         .as_object()
         .ok_or_else(|| KioError::schema(format!("{key} must be an object")))?;
+    let allowed_fields: &[&str] = match key {
+        "prepare" => &["tool_id", "profile_hash", "kind"],
+        "markdown" => &["tool_id", "profile_hash", "kind", "capabilities"],
+        "embedding" => &[
+            "tool_id",
+            "dimensions",
+            "distance",
+            "modality",
+            "profile_hash",
+            "kind",
+            "mode",
+        ],
+        _ => unreachable!("tool-lock entry role was validated"),
+    };
+    for field in entry.keys() {
+        if !allowed_fields.contains(&field.as_str()) {
+            return Err(KioError::schema(format!(
+                "unknown field `{key}.{field}` in tool-lock.json"
+            )));
+        }
+    }
     let mut canonical = Map::new();
     if embedding {
         canonical.insert(
@@ -3549,26 +3577,25 @@ pub fn empty_head_recovery_hash(kio_dir: &Path) -> Result<Option<String>> {
     }
 }
 
-/// R13-3: default log retention when `[logs] retention_days` is unset (docs/06
-/// §13 / docs/10 §12.6: "保持 30 日 (config 上書き可)").
+/// Default log retention when `[observability] retention_days` is unset
+/// (docs/06 §12 / docs/10 §11.6: "保持 30 日 (config 上書き可)").
 pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 30;
 
-/// R13-3: read `[logs] retention_days` (integer ≥ 1) from a `config.toml`.
+/// Read `[observability] retention_days` (integer 1..=3650) from a
+/// `config.toml`.
 /// `None` when the file/key is absent or malformed, so the caller applies the
 /// 30-day default. The key is schema-validated (`config.schema.json`) at startup,
 /// so a bad value would already have been rejected; this read is defensive.
 #[must_use]
-/// QB18 (step4b-contract-tests-p3b.md §B, 10 §12.3 L954): the canonical key
-/// is `[observability] retention_days` — checked first. `[logs]
-/// retention_days` (the pre-QB18 key) is still read as a fallback when
-/// `[observability]` is absent, so an existing config that only sets `[logs]`
-/// keeps working unchanged; a config that sets both prefers
-/// `[observability]`.
 pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
     let text = fs::read_to_string(config_toml_path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
-    retention_days_from_section(&value, "observability")
-        .or_else(|| retention_days_from_section(&value, "logs"))
+    value
+        .get("observability")
+        .and_then(|section| section.get("retention_days"))
+        .and_then(toml::Value::as_integer)
+        .and_then(|days| u32::try_from(days).ok())
+        .filter(|days| (1..=3650).contains(days))
 }
 
 /// `[adapter] lane` — the online send lane this config prefers, as a raw
@@ -3591,17 +3618,8 @@ pub fn read_adapter_lane(config_toml_path: &Path) -> Option<String> {
         .filter(|lane| lane == "batch" || lane == "realtime")
 }
 
-fn retention_days_from_section(value: &toml::Value, section: &str) -> Option<u32> {
-    value
-        .get(section)
-        .and_then(|section| section.get("retention_days"))
-        .and_then(toml::Value::as_integer)
-        .and_then(|days| u32::try_from(days).ok())
-        .filter(|days| *days >= 1)
-}
-
 /// R13-3: append `value` to the fixed-name JSONL at `path`, first performing a
-/// best-effort daily rotation + retention prune (docs/06 §13 / docs/10 §12.6:
+/// best-effort daily rotation + retention prune (docs/06 §12 / docs/10 §11.6:
 /// "日次ローテーション、保持 30 日 (config 上書き可)"). logrotate style: when the
 /// live file's last-written day differs from today it is renamed to
 /// `<stem>-YYYY-MM-DD.jsonl` and a fresh fixed-name file starts, so the documented
@@ -3807,7 +3825,7 @@ fn append_observation(
     if !log_dir.is_absolute() {
         return Ok(());
     }
-    // N3: honor `redact_logs` (06 §8 / 10 §12.6, default true) before writing. The
+    // N3: honor `redact_logs` (06 §8 / 10 §11.6, default true) before writing. The
     // KioError context routinely carries a `path` (and search/adapter contexts a
     // `query`/`prompt`); writing them verbatim both violates the redaction policy
     // and defeats purge, whose scrubber assumes "path is never recorded". Mask the
@@ -3820,7 +3838,7 @@ fn append_observation(
     // P4: several error Displays embed an absolute path in their *message*
     // (`io error at {path}`, `corrupt store file at {path}`), which N3's
     // context-only masking missed — the path then landed verbatim in
-    // errors.jsonl, breaking the "path is never recorded" premise (10 §12.6) and,
+    // errors.jsonl, breaking the "path is never recorded" premise (10 §11.6) and,
     // combined with a group-readable errors.jsonl, leaking scope paths to other
     // local users. Mask absolute-path tokens in the message too under redact_logs.
     let message: Value = if redact {
@@ -3830,7 +3848,7 @@ fn append_observation(
     };
     let path = log_dir.join(file_name);
     // R13-3: the device-global logs (events/errors/metrics) are governed by the
-    // device-level `[logs] retention_days` (default 30). Rotation/prune is
+    // device-level `[observability] retention_days` (default 30). Rotation/prune is
     // best-effort inside `append_jsonl_rotating`.
     let retention = read_logs_retention_days(&config_home().join("kio/config.toml"))
         .unwrap_or(DEFAULT_LOG_RETENTION_DAYS);
@@ -6398,7 +6416,7 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
     {
         return None;
     }
-    // R23-16 (06 §12 L513, "正: 2026-04-25T12:00:00.123456Z"): byte 19 is
+    // R23-16 (06 §11 L513, "正: 2026-04-25T12:00:00.123456Z"): byte 19 is
     // either the terminating `Z` (the original fixed 20-byte shape, already
     // confirmed by the trailing-byte check above) or the start of `.` + >=1
     // ASCII digit + the same trailing `Z`. A parser that rejected the
@@ -6431,7 +6449,7 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 
 // ===========================================================================
 // QA21/22/23/24/25/26/27 (step4b-contract-tests-p3a.md §G/§H, 07-adapter-spec.md
-// §3 L85-249, 10-operations.md §12.3): the adapter-level network opt-in gate's
+// §3 L85-249, 10-operations.md §11.3): the adapter-level network opt-in gate's
 // persistent storage — `.kio/scope.json`'s `approvals[]` / `approval_pending` /
 // `approvals_initialized`. This is the sole persistent source of truth the
 // send gate reads (QA22 — device-global `consents.jsonl` is untouched by this
@@ -6482,7 +6500,7 @@ fn overwrite_scope_json_value(kio_dir: &Path, value: &Value) -> Result<()> {
 }
 
 /// Current `.kio/scope.json` `approvals[]` rows. Empty when the key is
-/// absent — no adapter has ever been approved for this scope (10 §12.3).
+/// absent — no adapter has ever been approved for this scope (10 §11.3).
 pub fn read_network_approvals(kio_dir: &Path) -> Result<Vec<Value>> {
     Ok(read_scope_json_value(kio_dir)?
         .get("approvals")
@@ -7485,7 +7503,7 @@ mod tests {
         assert_eq!(parse_utc_seconds("not-a-timestamp"), None);
     }
 
-    /// R23-16 (06 §12 L513): a fractional-seconds suffix is a valid persisted
+    /// R23-16 (06 §11 L513): a fractional-seconds suffix is a valid persisted
     /// timestamp shape ("正: 2026-04-25T12:00:00.123456Z") that the parser
     /// used to reject outright (exact 20-byte match only) -- silently
     /// excluding any record whose `created_at` carried sub-second precision
@@ -7611,13 +7629,16 @@ mod tests {
     }
 
     #[test]
-    fn r13_3_read_logs_retention_days_parses_and_rejects_out_of_range() {
+    fn read_logs_retention_days_uses_only_observability_key() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
-        fs::write(&cfg, "[logs]\nretention_days = 7\n").unwrap();
+        fs::write(&cfg, "[observability]\nretention_days = 7\n").unwrap();
         assert_eq!(read_logs_retention_days(&cfg), Some(7));
-        // < 1 is rejected by the schema too; the reader falls back to the default.
-        fs::write(&cfg, "[logs]\nretention_days = 0\n").unwrap();
+        fs::write(&cfg, "[observability]\nretention_days = 0\n").unwrap();
+        assert_eq!(read_logs_retention_days(&cfg), None);
+        fs::write(&cfg, "[observability]\nretention_days = 3651\n").unwrap();
+        assert_eq!(read_logs_retention_days(&cfg), None);
+        fs::write(&cfg, "[logs]\nretention_days = 7\n").unwrap();
         assert_eq!(read_logs_retention_days(&cfg), None);
         assert_eq!(
             read_logs_retention_days(&dir.path().join("missing.toml")),
@@ -8382,5 +8403,19 @@ mod tests {
         assert_eq!(read_adapter_lane(&path), None);
         std::fs::write(&path, "[adapter]\nlane = 3\n").unwrap();
         assert_eq!(read_adapter_lane(&path), None);
+    }
+
+    #[test]
+    fn tool_lock_canonicalization_rejects_unknown_inner_fields() {
+        let value = serde_json::json!({
+            "spec_version": 1,
+            "markdown": {
+                "tool_id": "mistral_ocr_markdownize",
+                "profile_hash": "sha256:test",
+                "auth": "plain:shared-secret"
+            }
+        });
+        let error = super::canonical_tool_lock_value(&value).unwrap_err();
+        assert!(error.to_string().contains("markdown.auth"));
     }
 }

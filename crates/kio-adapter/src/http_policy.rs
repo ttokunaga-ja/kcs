@@ -112,7 +112,7 @@ fn effective_overall_timeout(policy: HttpPolicy) -> Duration {
 /// Read a response body under `max_bytes` with the shared identity-encoding
 /// posture (reject any transparent decompression, precheck `Content-Length`,
 /// hard-stop the wire read at the ceiling). Returns the raw bytes for
-/// non-JSON payloads (e.g. the Batch output-file JSONL, 07 §5.7);
+/// non-JSON payloads (e.g. the Batch output-file JSONL, 07 §5.5);
 /// [`read_json_bounded`] layers JSON parsing on top for everything else.
 pub(crate) fn read_bytes_bounded(
     mut response: HttpResponse,
@@ -172,7 +172,7 @@ pub(crate) fn read_json_bounded(
 
 /// QA16 (step4b-contract-tests-p3a.md §F, 07 §4 L290): parse an HTTP
 /// `Retry-After` header value into milliseconds. Only the numeric
-/// delay-seconds form (RFC 9110 §10.2.3) is supported — the rarer HTTP-date
+/// delay-seconds form (RFC 9110 §9.2.3) is supported — the rarer HTTP-date
 /// form is not parsed and degrades to `None`, same as a missing header
 /// (`AdapterRun.retry_after_ms` is documented `optional`; callers already
 /// fall back to the existing exponential backoff when it is absent).

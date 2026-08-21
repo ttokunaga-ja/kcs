@@ -17,7 +17,7 @@ pub trait MarkdownizeAdapter {
 
     fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse>;
 
-    /// Which request lane this adapter's online sends should take (07 §5.7).
+    /// Which request lane this adapter's online sends should take (07 §5.5).
     /// Default = Sync (single request/response round trip). The built-in
     /// Mistral OCR adapter overrides this to Batch: the 2026-07-23 user
     /// ruling permits OCR spending on the Batch lane only ($2/1,000 pages),
@@ -29,7 +29,7 @@ pub trait MarkdownizeAdapter {
     }
 }
 
-/// Online send lane selector (07 §5.7; ledger `batch_requests.request_kind`).
+/// Online send lane selector (07 §5.5; ledger `batch_requests.request_kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferredRequestKind {
     Sync,
@@ -55,7 +55,7 @@ pub trait EmbeddingAdapter {
     }
 }
 
-/// 07 §5.6 (optional). Reorders search results and nothing else.
+/// 07 §5.4 (optional). Reorders search results and nothing else.
 ///
 /// There is no batch method and no lane selector, because the unit of work is
 /// already a batch: one query against one candidate pool. Splitting a pool
@@ -66,7 +66,7 @@ pub trait RerankAdapter {
 
     /// Returns the candidates in descending relevance.
     ///
-    /// **Reordering only.** 07 §5.6 forbids a reranker from concealing
+    /// **Reordering only.** 07 §5.4 forbids a reranker from concealing
     /// `searched_scopes` / `fallback_reason`, and the trait keeps that
     /// enforceable by never handing those fields to the adapter: it sees
     /// opaque `result_id`s, so it has nothing to conceal them with. A caller

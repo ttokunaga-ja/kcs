@@ -125,25 +125,15 @@ impl EnvMistralOcrClient {
     fn base_url(&self) -> String {
         self.base_url
             .clone()
-            .or_else(|| {
-                crate::tool_lock::registered_declared_adapter("markdown")
-                    .is_none()
-                    .then(|| std::env::var("MISTRAL_API_BASE").ok())
-                    .flatten()
-            })
             .unwrap_or_else(|| MISTRAL_API_ORIGIN.to_owned())
             .trim_end_matches('/')
             .to_owned()
     }
 
     fn api_key() -> Result<String> {
-        // R13-2: honor a declared `tools.toml` `[markdown] auth` (env:/plain:, with
-        // keychain: a loud not-implemented error) instead of the previous hard-coded
-        // `MISTRAL_API_KEY`; fall back to that env var when nothing is declared.
-        crate::tool_lock::resolve_role_api_key("markdown", "MISTRAL_API_KEY")?.ok_or_else(|| {
+        crate::tool_lock::resolve_role_api_key("markdown")?.ok_or_else(|| {
             AdapterError::Auth(
-                "no Mistral OCR API key: set MISTRAL_API_KEY or a tools.toml `[markdown] auth`"
-                    .to_owned(),
+                "no Mistral OCR API key: declare tools.toml `[markdown] auth`".to_owned(),
             )
         })
     }
@@ -1337,7 +1327,7 @@ fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeM
 /// Shared Mistral HTTP error mapping (401/403 → Auth, 429 → RateLimit with a
 /// real `Retry-After` parse, 402 → QuotaExceeded, other statuses → Network,
 /// transport faults → Network). `pub(crate)` because the Batch lane client
-/// (`batch_client::EnvMistralBatchClient`, 07 §5.7) reuses the exact same
+/// (`batch_client::EnvMistralBatchClient`, 07 §5.5) reuses the exact same
 /// mapping for its own requests.
 pub(crate) fn http_error(error: ureq::Error) -> AdapterError {
     AdapterError::Network(error.to_string())
@@ -1772,7 +1762,7 @@ mod tests {
         );
     }
 
-    /// 2026-07-23 ユーザー裁定 (07 §5.7): the built-in Mistral OCR adapter's
+    /// 2026-07-23 ユーザー裁定 (07 §5.5): the built-in Mistral OCR adapter's
     /// production sends take the Batch lane only ($2/1,000 pages); the
     /// offline deterministic adapter keeps the trait default (Sync). The
     /// lane declaration must not perturb adapter identity.

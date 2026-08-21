@@ -66,8 +66,9 @@ impl<'a> ObjectUri<'a> {
 /// Parses an object reference URI.
 ///
 /// The input is treated as opaque (08 §2.3): the `scope_id` is returned with its
-/// case preserved and is never normalized, so a fork copy carrying the original
-/// scope's id round-trips unchanged and stays resolvable by hash.
+/// case preserved and is never normalized. Consumers must resolve that declared
+/// scope identity canonically; matching local object bytes are not authority to
+/// redirect the reference to another scope.
 pub fn parse_object_uri(uri: &str) -> Result<ObjectUri<'_>> {
     let rest = uri
         .strip_prefix("kio://")

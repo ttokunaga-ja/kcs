@@ -57,7 +57,7 @@ opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adap
 - AI 検索を試したいが、クラウド丸投げは嫌
 ```
 
-**MVP では一般ユーザー向けではない**。GUI も MVP では持たない (CLI + 構造化出力 `--json` のみ。外部 Agent 向け API は Phase 5 — [09-mvp-scope.md §3.1](09-mvp-scope.md))。広げるのは、上記層で確実に動いてから。
+**MVP では一般ユーザー向けではない**。現在の操作面は CLI + 構造化出力 `--json` だけである。
 
 ---
 
@@ -150,34 +150,11 @@ Kio が同じ轍を踏まないための行動原則:
 | 領域 | 重なる相手 | Kio のスタンス |
 | --- | --- | --- |
 | 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、Kio は vault + Documents + Downloads + コードを横断 |
-| AI チャット UX | Khoj, AnythingLLM | **競合しない**。Kio は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
+| AI チャット UX | Khoj, AnythingLLM | **競合しない**。Kio は CLI の構造化 JSON を提供する |
 | 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。Kio は知識検索と Evidence。両立可能 |
 | 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
 | OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
 | 文書アーカイブ | Zotero, Paperless-ngx | **置き換えない**。Zotero ライブラリ等を含む親フォルダに `.kio` を置き、専用アーカイブの外にあるファイルも含めて横断する |
-
-## 4.7 将来のプロダクト目標: 共有フォルダを根拠付きハイブリッド検索で質問できるようにする
-
-クラウド共有が一般化するにつれ、共有されたプロジェクト・顧客・研究・チームのフォルダを、メンバーが「このフォルダの資料だけを根拠に質問する」需要は増える。Kio は将来、**共有フォルダを、その時点の共有内容とアクセス権に閉じた知識スコープとして扱い、既定のハイブリッド検索で AI と人間が質問・探索でき、回答には必ず検証可能なソースを添えられるようにする**ことを追加のプロダクト目標とする。
-
-ここでいうハイブリッド検索は、語彙に強い全文検索と、言い換え・内容理解に強いベクトル検索を融合するものとする。Embedding が利用可能で承認されている通常経路では hybrid を既定とし、送信未承認などで vector を使えない場合にも text 検索へ安全に縮退する。文書本文と画像は単一のマルチモーダルベクトル空間で扱うため、文章への質問から関連する図・スキャン・埋め込み画像にも到達できる。
-
-目指す体験は、単にファイルをクラウドへアップロードしてチャットすることではない。**回答文そのものより、回答を裏づけるソースを提示し、原本・版・該当箇所を後から検証できることを主眼とする。**
-
-```text
-共有フォルダを選ぶ
-  → そのフォルダの許可済み・確定済み内容を検索対象にする
-  → 全文検索 + ベクトル検索で本文・図を同じ探索面から探す
-  → 「最新の合意事項は何か」「この設計の根拠はどこか」と質問する
-  → 回答ごとに検証可能なソース、原本・版・該当箇所へ戻れる
-  → 権限変更・更新・削除後も、誰に何が見えたかを一貫して扱う
-```
-
-これは現在の local-first を捨てる方針ではない。**folder-local `.kio` を truth とする境界を、将来は共有・同期・権限評価の単位にもする**という拡張である。クラウドは共有と到達性のための transport / collaboration layer とし、Kio の差別化である Evidence Pointer、版・時点、原本回帰を維持する。
-
-この目標は v2+ の方向性であり、MVP のクラウド共有・同期・workspace を前倒ししない。実装着手時には少なくとも、フォルダ単位の ACL と回答時の再検証、共有版と未承認提案の分離、削除・purge の伝播、外部 AI 送信に対する共有者ごとの同意・監査を先に仕様化する。
-
----
 
 # 5. MVP スコープ (絞り込み)
 
@@ -198,18 +175,8 @@ restore
 time-travel search (--at)
 ```
 
-### 5.2 MVP で捨てる (v2 以降に倒す)
-
-```text
-完全な Knowledge Graph (node/edge 自動生成)
-複雑な Agent navigation (neighbors, beam search 等)
-GUI
-クラウド共有・修正提案・workspace 概念
-pack/delta 圧縮
-高度な分類器の自動移動 (auto_organize は提案表示のみ)
-```
-
-これらが「設計に存在しない」のではなく、**MVP の旗印にしない**ということ。設計検討の経緯は git history で辿り、将来仕様は正本 spec 内で Phase 4-5 のラベルを付けて扱う (旧 research ドキュメントは 2026-07-18 に撤去 — README §5)。
+未実装機能の名称は [09-mvp-scope.md §2](09-mvp-scope.md) の非規範・非承認 roadmap
+だけに置く。
 
 ---
 
@@ -233,20 +200,7 @@ Phase 3: 履歴
   - restore
   - --at / --all-history
 
-Phase 4: 自動化
-  - 定期 auto snapshot (取り込み完了時の auto snapshot は MVP — 05-runtime.md §8.1)
-  - Downloads watch
-  - inbox
-  - classification suggestion (提案のみ)
-
-Phase 5: Agent
-  - agent API
-  - navigation
-  - neighbors
-  - node / edge
 ```
-
-各 Phase は前 Phase に依存する。Phase 1 が動かないうちに Phase 4-5 を深掘りしない。
 
 ---
 
@@ -257,7 +211,7 @@ Phase 5: Agent
 ```
 truth = folder-local .kio
   - raw object / normalized / chunks / commits / refs
-  - 権限境界 / partial sync / purge / export の単位
+  - purge の単位
 
 cache = scope_registry
   - 検索の探索対象一覧 / stale 検出

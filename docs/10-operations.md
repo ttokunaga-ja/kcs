@@ -95,7 +95,7 @@ Sensitive candidates (Tier B, 取り込み予定・要確認):
 非対話環境では、承認済み scope または `--yes` / `--approve` のような明示オプションがない限り、`kio index` は失敗させる。
 
 承認記録には、少なくとも次を残す (**保存先 = `.kio/scope.json` の `scan_approval` key** — schema 検証
-対象 §12.3。adapter 単位の network opt-in 承認 `approvals[]` ([07-adapter-spec.md §3](07-adapter-spec.md))
+対象 §11.3。adapter 単位の network opt-in 承認 `approvals[]` ([07-adapter-spec.md §3](07-adapter-spec.md))
 とは別 key)。
 
 ```text
@@ -238,7 +238,7 @@ Kio は **二層構造** をとる。データ・所有権・権限の **正本�
 ```
 truth = folder-local .kio
   raw object / normalized / chunks / commits / refs
-  権限境界 / partial sync / purge / export の単位
+  purge の単位
 
 cache = scope_registry
   検索の探索対象一覧、stale 検出
@@ -287,8 +287,7 @@ CREATE TABLE scopes (
   同一 scope_id の複数 live path は clone 併存であり、**fail-closed で扱う**: global search は当該
   scope_id を skip して `excluded_scopes` に `KIO-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は
   候補一覧 error とする ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) — purge 状態の
-  異なる clone へ黙って解決しない)。どちらを残すかはユーザーの dedupe に委ねる (複製へ新 scope_id を
-  発行する fork は Phase 4+ 予約) —
+  異なる clone へ黙って解決しない)。どちらを残すかはユーザーの dedupe に委ねる —
   stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
   になり、その行経由の Evidence Pointer は `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
   理由。**再 init・再発見のどちらも起こらない恒久消滅** (ドライブ撤去・`.kio` ごとの削除等) の
@@ -301,8 +300,8 @@ CREATE TABLE scopes (
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
   ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
   **複合状態の優先順位 (全コマンド共通の preflight 順序)**: **(0) `kio_format_version` 互換判定
-  (§12.5 — 自己より新しい store は read-only 縮退・書き込み系は KIO-E-STORE-VERSION-001。
-  §12.3 の「schema validation より先」と同じ原則で、他のすべての検査に先行する)** →
+  (§11.5 — 自己より新しい store は read-only 縮退・書き込み系は KIO-E-STORE-VERSION-001。
+  §11.3 の「schema validation より先」と同じ原則で、他のすべての検査に先行する)** →
   (1) purge journal / epoch 検査
   ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KIO-E-REGISTRY-DUP-001) →
   (3) index 可用性 (KIO-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
@@ -324,9 +323,6 @@ CREATE TABLE scopes (
 - device data dir (`~/.local/share/kio/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
 
-`approved_at` / `effective_ignore_hash` / `permission_status` は permission 系 (Phase 4+) の予約であり、
-**MVP の schema には含めない** (旧 spec の保存情報リストから 2026-07-14 に分離。追加時は §7.5.3 の
-schema 変更規約に従う)。
 
 ### 不変条件 (cache vs truth)
 
@@ -422,9 +418,8 @@ Evidence URI の identity は変更しない。物理 object は読み書きと�
 
 MVP の標準全文検索バックエンドは SQLite FTS5 とする。Vector は sqlite-vec を標準とする。
 
-Tantivy など他の BM25 / full-text backend は将来候補として扱い、採用する場合は本書を更新する (破壊的変更扱い)。
 
-> **リスク注記 (sqlite-vec)**: sqlite-vec は v0 系で API 未安定、ANN index を持たない全件 brute-force KNN であり、成熟度リスクがある。M3-1 の性能目標 (20 scopes / 合計 10 万 chunk で p95 < 5 秒、[09-mvp-scope.md §4.1](09-mvp-scope.md)) は brute-force で達成可能な規模であり、text fallback ([05-runtime.md §1.1](05-runtime.md)) と本節の Future 差し替え経路が設計済みのため、MVP では標準として維持する。Step 3 の最初のタスクとして (1) 使用する sqlite-vec のバージョンを pin し、(2) 合計 10 万 chunk 規模での brute-force レイテンシ計測 spike を行う。目標未達の場合も MVP では**バックエンドの差し替えでは**対応せず (query-path の通常の実装最適化は妨げない)、Future バックエンドの採用判断材料として記録する。
+> **リスク注記 (sqlite-vec)**: sqlite-vec は v0 系で API 未安定、ANN index を持たない全件 brute-force KNN である。M3-1 の性能目標 (20 scopes / 合計 10 万 chunk で p95 < 5 秒、[09-mvp-scope.md §4.1](09-mvp-scope.md)) は brute-force で達成可能な規模であり、text fallback ([05-runtime.md §1.1](05-runtime.md)) と合わせて現在の標準として維持する。
 
 ```text
 MVP:
@@ -432,11 +427,6 @@ MVP:
   TextSearchBackend = SQLite FTS5
   VectorSearchBackend = sqlite-vec
 
-Future:
-  Tantivy
-  LanceDB
-  Qdrant
-  PostgreSQL + pgvector
 ```
 
 ---
@@ -447,10 +437,9 @@ Future:
 および Kio 自身のログ (`.kio/logs/access.jsonl`、`~/.local/share/kio/logs/` の
 events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
 **snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
-履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md)。完全な履歴書き換えは v2+/Phase 4+ —
-[06-cli-spec.md §6](06-cli-spec.md))。
-ログについては、**当該 scope の scope_id を持ち**対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う (device-global log の**別 scope の同一 raw_hash 行には触れない** — per-.kio dedup により同一 bytes が独立 scope に併存し得るため。scope 由来の行は scope_id を必須 field とする — §12.6)。
-`redact_logs` デフォルト true (§12.6) の運用では query / path / prompt は元から記録されないため、
+履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md))。
+ログについては、**当該 scope の scope_id を持ち**対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う (device-global log の**別 scope の同一 raw_hash 行には触れない** — per-.kio dedup により同一 bytes が独立 scope に併存し得るため。scope 由来の行は scope_id を必須 field とする — §11.6)。
+`redact_logs` デフォルト true (§11.6) の運用では query / path / prompt は元から記録されないため、
 実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
 purge 自体の実行記録 (`commit_type=purged`、tombstone) は監査可能性のため残す ([05-runtime.md §3.2](05-runtime.md))。
 
@@ -589,7 +578,7 @@ ref 到達可能な再 publication commit が存在するなら、crash した r
 append して整合させる ([05-runtime.md §3.5](05-runtime.md) の補完規範と同一の因果条件)。**存在しなければ
 incomplete purge として exit 3 で報告する** (retired を append しない —
 purge 済み内容を fsck が復活させない。回復は同一対象への `kio purge --raw-hash` の再実行で冪等に
-完遂できる — [09-mvp-scope.md §5.3](09-mvp-scope.md) の再 purge 規範。報告にはこの誘導を含める) (**receipt は除去しない** — 除去すると旧 commit が参照する
+完遂できる — [09-mvp-scope.md §5.2](09-mvp-scope.md) の再 purge 規範。報告にはこの誘導を含める) (**receipt は除去しない** — 除去すると旧 commit が参照する
 manifest 欠落を説明するものが消える。**commit がまだ無い場合 — snapshot finalize 前の crash — は
 「未 finalize の進行状態」として incomplete (exit 3) とし、append しない** —
 [05-runtime.md §3.5](05-runtime.md) の因果条件と同型)。
@@ -627,7 +616,7 @@ terminal 化済み (done / failed permanent / abandoned / settled partial — [0
 ([03-data-model.md §2](03-data-model.md) — 帰属不明の crash 残骸、および
 [07-adapter-spec.md §8.3](07-adapter-spec.md) cleanup 失敗の残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
 purge closure と同一規則)。
-on-demand tree-only shallow sweepはPhase 4 milestone 2で実装済みだが、このorphan cleanupをGCへ統合する機能と`--prune-unreachable`は未実装である。ここでは引き続き**法務 purge の完結手段だけ**を扱う (purge 完了表示の注記から誘導)。
+ここでは**法務 purge の完結手段だけ**を扱う (purge 完了表示の注記から誘導)。
 **拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
 pending / running の task・**descriptor を持ち path と整合し、非 terminal (pending / running /
 partial / failed retryable) の task に対応する** staging (partial は**再投入可能な failed unit が
@@ -664,7 +653,7 @@ orphan image の削除時は対応する `~/.cache/kio/open/image/<image_hash di
 当該 scope の manifest 列挙による** — 他 scope で live な同一 image の cache を削除し得るが、
 cache は再生成可能な非 truth であり次回の open が再 materialize する = raw と同じ削除安全性)。
 
-MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
+MVP では手動実行のみとする。
 
 ## 7.5.2 バックアップ運用
 
@@ -707,12 +696,6 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      どちらも案内しない (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない
      (二重課金と orphan 課金の可視化)
 
-2. kio export <scope> --to <bundle.kioz>
-   - .kioz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・
-     登録 path 等の機微 metadata が含まれる — 共有は同一信頼境界内を想定、[06-cli-spec.md §10](06-cli-spec.md))
-   - export の実装は Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md))。MVP のバックアップは
-     lock 未取得確認 + ディレクトリコピー (手段 1) のみを提供する
-   - 復元は kio import (同じく Phase 4+)
 ```
 
 復元後は `kio repair verify-objects` で整合性を確認する。外部ドライブ・クラウド
@@ -746,7 +729,7 @@ current schema で作成する。この gate は最初の書込みより前に�
 
 # 8. commit_type の固定 enum について
 
-現在の正本では、`commit_type` を `manual / auto / imported / repaired / merged / purged` の6種に閉じる方針である。Phase 3 受入前の `migrated` を含む store は旧形式であり、current reader は受理・変換せず §12.5 の clean recreation を適用する。
+現在の正本では、`commit_type` を `manual / auto / repaired / purged` の4種に閉じる。`migrated` を含む store は current reader の受理対象ではない。
 
 この方針を採用する場合でも、実装では以下を守る。
 
@@ -757,39 +740,14 @@ metadata には schema_version を持たせる
 新 type が必要に見える場合は、まず既存 type + metadata で表現できないか確認する
 ```
 
-release 後の `commit_type` の値域は**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
+current reader は [05-runtime.md §2](05-runtime.md) の値域だけを受理し、legacy enum の読取りや変換を行わない。
 
 ---
 
-# 9. local-first と同期構想の分離
-
-MVP は単一端末・local-first を優先する。同期、共有版、Web修正提案、複数ユーザー権限は将来構想であり、MVP の CLI / core 仕様へ混ぜすぎない。
-
-推奨:
-
-```text
-MVP文書:
-  local object store
-  local snapshot
-  local search
-  local restore
-  local purge
-
-将来同期文書:
-  共有版
-  Web修正提案
-  権限
-  同期競合
-```
-
----
-
-# 10. Adapter セキュリティ
+# 9. Adapter セキュリティ
 
 R23 の Markdownize / Embedding Adapter は Kio 同梱の built-in target のみを実行し、
-任意コマンドや任意 URL への差し替えは受理しない。ローカルAPIや外部プロセスを扱う
-dispatcher は将来仕様であり、実装時には現行の入力・送信境界に加えて command 境界も
-明確にする。
+任意コマンドや任意 URL への差し替えは受理しない。
 
 最低限必要な制御:
 
@@ -804,9 +762,6 @@ store_response_body = false
 secret redaction
 ```
 
-将来の外部 Adapter dispatcher には、上記に加えて `command allowlist / confirmation` を
-必須とする。これは現行 built-in target に任意コマンド実行能力があることを意味しない。
-
 これらの policy の強制モデル (宣言 + 監査であって sandbox 保証ではないこと) は
 [07-adapter-spec.md §7.1](07-adapter-spec.md) を正本とする。
 
@@ -816,7 +771,7 @@ secret redaction
 
 ---
 
-# 10.5 Incremental Markdownize (要件)
+## 9.1 Incremental Markdownize (要件)
 
 ファイルが更新された場合、Markdownize (OCR を含む) Adapter には **新 raw だけでなく、旧 raw + 旧 normalized Markdown + 変更ヒント** をセットで渡し、変更が軽微なら Adapter が部分更新を返す方式を採用する。MVP〜v1 のプロダクト要件として確定する。
 
@@ -861,9 +816,7 @@ max_consecutive = 5
 
 ---
 
-# 11. 実装前に埋めるべき仕様
-
-> Phase 1〜3 ([01-positioning.md §6](01-positioning.md)) を着手する前に、少なくとも以下を具体化する。Phase 4-5 の仕様は MVP リリース後に着手する。
+# 10. 現行仕様の索引
 
 以下の仕様は既に正本 spec に統合済みである。着手前に該当節が凍結ゲート ([09-mvp-scope.md §6.2](09-mvp-scope.md)) を通過していることを確認する。
 
@@ -879,22 +832,13 @@ restore / resume-retry           → 05-runtime.md / 04-pipeline.md §5.7
 done criteria                    → 09-mvp-scope.md
 ```
 
-未統合で実装前に具体化が必要なもの:
-
-```text
-.kioignore spec                  → 03-data-model.md §11.1 に追記済み (2026-07-03)
-Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍結済み (2026-07-18)
-```
-
-特に object hash 算出、Evidence Pointer、Normalized Markdown の決定性、purge 後の到達不能性は、実装後に変えると互換性コストが高い。
-
 ---
 
-# 12. 横断規約 (cross-cutting contracts)
+# 11. 横断規約 (cross-cutting contracts)
 
 複数のドキュメントで部分的に触れられている規約事項を一元化する。各個別ドキュメントの記述はこの章を **正本** として参照する。
 
-## 12.1 エラーコード namespace
+## 11.1 エラーコード namespace
 
 すべての error は `KIO-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の **error_code** を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用で、機械判定には `error_code` を使う (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり、unit 単位の retry 可否判定に使う)。
 
@@ -907,9 +851,8 @@ DOMAIN:
   COMMIT   commit / snapshot / restore
   GC       garbage collection
   PURGE    purge 操作
-  EVIDENCE Evidence Pointer 解決 / verify / retarget
+  EVIDENCE Evidence Pointer 解決 / verify
   REGISTRY scope registry (live clone 重複・退役 — [§3])
-  SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
   EMBED    embedding profile / modality 検証 (KIO-E-EMBED-MODALITY-001 — [03-data-model.md §7](03-data-model.md))
   CONFIG   config / schema / 設定
@@ -917,7 +860,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-SEARCH-VEC-UNAVAIL-001`, `KIO-E-SEARCH-VEC-UNAUTHORIZED-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001`, `KIO-E-STORE-CORRUPT-001`, `KIO-E-STORE-VERSION-001` (§12.5 — 新しい `kio_format_version` の store への書き込み系実行・読解不能), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001`, `KIO-E-SEARCH-CURSOR-001`, `KIO-E-INDEX-REBUILDING-001`, `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KIO-E-EVIDENCE-RETARGET-AMBIG-001`, `KIO-E-ADAPTER-CONTRACT-001`、`KIO-E-PURGE-REPLICA-001` (purge 後の device replica 再射影に失敗 — 本文が cache root に読める状態で成功と報告しないための fail-closed 終端。exit 1、[05-runtime.md §3.5](05-runtime.md))、`KIO-E-CONFIG-OFFLINE-URL-001` (`execution_mode = "offline_api"` の Adapter に loopback リテラル (`127.0.0.1` / `localhost` / `[::1]` / UNIX domain socket) 以外の `url` が宣言されている — tool-lock materialize / adapter 登録時に検証。exit 2、[07-adapter-spec.md §3](07-adapter-spec.md))。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-SEARCH-VEC-UNAVAIL-001`, `KIO-E-SEARCH-VEC-UNAUTHORIZED-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001`, `KIO-E-STORE-CORRUPT-001`, `KIO-E-STORE-VERSION-001` (§11.5 — 新しい `kio_format_version` の store への書き込み系実行・読解不能), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001`, `KIO-E-SEARCH-CURSOR-001`, `KIO-E-INDEX-REBUILDING-001`, `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KIO-E-ADAPTER-CONTRACT-001`、`KIO-E-PURGE-REPLICA-001` (purge 後の device replica 再射影に失敗 — 本文が cache root に読める状態で成功と報告しないための fail-closed 終端。exit 1、[05-runtime.md §3.5](05-runtime.md))、`KIO-E-CONFIG-OFFLINE-URL-001` (`execution_mode = "offline_api"` の Adapter に loopback リテラル (`127.0.0.1` / `localhost` / `[::1]` / UNIX domain socket) 以外の `url` が宣言されている — tool-lock materialize / adapter 登録時に検証。exit 2、[07-adapter-spec.md §3](07-adapter-spec.md))。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 device-global repair の scope 集約 code は `KIO-E-REPAIR-PARTIAL-001` と
 `KIO-E-REPAIR-ALL-FAILED-001` とする ([06-cli-spec.md §7](06-cli-spec.md))。
@@ -926,7 +869,7 @@ registry 行が on-disk の scope identity / path と一致しない場合は
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
-## 12.2 CLI exit code
+## 11.2 CLI exit code
 
 Kio のすべての CLI コマンドは以下の exit code を返す。
 
@@ -948,7 +891,7 @@ Kio のすべての CLI コマンドは以下の exit code を返す。
 
 dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは retryable の `3`** (再接続・registry 再登録で回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md))、tool_profile 不一致による chunk 解決不能は `8` に割り当てる (詳細: [06-cli-spec.md §7](06-cli-spec.md))。
 
-## 12.3 設定ファイル schema validation
+## 11.3 設定ファイル schema validation
 
 すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は Kio 本体に同梱する。
 
@@ -961,17 +904,17 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 .kio/manifest.json (簡易管理時)    → schemas/manifest.schema.json
 ```
 
-validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理する。公開後の breaking change は release 計画で migration / old-version read-only を定義するが、未公開期間に旧 development store を読む migration branch は置かない (§12.5)。
+validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理する。公開後の breaking change は release 計画で migration / old-version read-only を定義するが、未公開期間に旧 development store を読む migration branch は置かない (§11.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kio` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kio/.lock` で直列化され並存しない)**。存在する場合の required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する))・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**`approval_pending` key 全体の不在は valid で pending intent 無しを表す。一方、存在する pending の required field 欠落・型不正は schema error / fail-closed** であり、self-heal、locked cleanup、監査値の補完の対象にしない。`approvals[]` が存在する場合の各行も同じく strict に検証し、`status` 欠落行は送信を許可しない (既定値で active と読む経路は持たない)。**未知 key は schema error** (fail-closed)。この検証は `kio_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kio_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。`approvals[]`・`approval_pending`・`approvals_initialized` の**全て**を欠く scope.json は valid であり、欠落 = 当該承認なしとして扱う。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kio` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kio/.lock` で直列化され並存しない)**。存在する場合の required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する))・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**`approval_pending` key 全体の不在は valid で pending intent 無しを表す。一方、存在する pending の required field 欠落・型不正は schema error / fail-closed** であり、self-heal、locked cleanup、監査値の補完の対象にしない。`approvals[]` が存在する場合の各行も同じく strict に検証し、`status` 欠落行は送信を許可しない (既定値で active と読む経路は持たない)。**未知 key は schema error** (fail-closed)。この検証は `kio_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kio_format_version` の MINOR bump を伴う (§11.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。`approvals[]`・`approval_pending`・`approvals_initialized` の**全て**を欠く scope.json は valid であり、欠落 = 当該承認なしとして扱う。
 
 `folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kio init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。これを欠く `.kio/config.toml` は schema error (exit 2) とする — required field に既定値の代替経路は持たない。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
-`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。billable 宣言 Adapter の profile required には `reject_billing` (閉 enum — [07-adapter-spec.md §4](07-adapter-spec.md)) も含める (**AdapterProfile の実行時受入規範であり、tools.schema.json の検証対象ではない** — 欠落は 07 §4 のとおり fail-closed "billable" として読む)。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
+`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.5](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。billable 宣言 Adapter の profile required には `reject_billing` (閉 enum — [07-adapter-spec.md §4](07-adapter-spec.md)) も含める (**AdapterProfile の実行時受入規範であり、tools.schema.json の検証対象ではない** — 欠落は 07 §4 のとおり fail-closed "billable" として読む)。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
 
-`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。**log 保持の正規 key = `[observability] retention_days`** (整数 1〜3650・既定 30 — §12.6 の「config 上書き可」の実体。device logs (events / metrics / errors) と scope-local `.kio/logs/access.jsonl` の双方に適用する)。
+`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。**log 保持の正規 key = `[observability] retention_days`** (整数 1〜3650・既定 30 — §11.6 の「config 上書き可」の実体。device logs (events / metrics / errors) と scope-local `.kio/logs/access.jsonl` の双方に適用する)。
 
-## 12.4 時刻・タイムゾーン
+## 11.4 時刻・タイムゾーン
 
 すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / stale_after_at / completed_at / created_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。**暦の演算も UTC で行う** — `cost_ledger.month` ('YYYY-MM') は `recorded_at` の UTC 暦月から導出し、[04-pipeline.md §5.4](04-pipeline.md) の剪定の「前月以前」判定も UTC 暦月の月初 epoch ms を境界とする (local TZ は UI 表示限定 — 下記)。
 
@@ -984,7 +927,7 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 ユーザー向け UI 表示時のみ local TZ に変換する。snapshot lineage の順序判定は UTC タイムスタンプを使い、Lamport/HLC 系の論理時計は v0 では採用しない (採用判断は v2 の同期設計で別途。経緯: 旧 research/synchronization.md — git 履歴)。
 
-## 12.5 semver / 互換性 promise
+## 11.5 semver / 互換性 promise
 
 ### 未公開の間は後方互換の分岐を書かない (2026-08-11 確定)
 
@@ -1061,21 +1004,20 @@ PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-**前方互換 (旧 reader × 新 store) の規約**: reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱う ([03-data-model.md §2](03-data-model.md)、schema validation より先)。**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
+**前方互換 (旧 reader × 新 store) の規約**: reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱う ([03-data-model.md §2](03-data-model.md)、schema validation より先)。**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§11.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§11.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
 
 **read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kio/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KIO-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — `kio search` は当該 scope の source SQLite を読み書きしない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error)。cursor replay は scope SQLite に依存せず、device-local query-vector cache が欠落・不一致なら `KIO-E-SEARCH-CURSOR-001` とし再検索を要求する。
 
 **tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した
 ([03-data-model.md §8](03-data-model.md)) — hash/identity 規約の変更だが、
-[08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md) の 2026-07 改訂と同じく
 **実装・store 公開前の schema 確定であり MAJOR bump ではない**。current tree ではこれらの field は必須であり、欠落は legacy semantics へ縮退せず corruption / incompatible format として fail-closed にする。Step 1-2 実装の tree hashing は v2/v3 対応の rework が必要 ([09-mvp-scope.md](09-mvp-scope.md))。
 
 **Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗する ([07-adapter-spec.md §8.1](07-adapter-spec.md))。**full fallback が有効なのは incremental capability だけが非互換な場合に限る** — spec_version 自体の非互換は full で呼び直しても同じ拒否を再生するため、当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) とし、同梱 deterministic Adapter のベースラインは影響なく継続する ([07-adapter-spec.md §8.1](07-adapter-spec.md) と同旨)。index 全体の停止を引き起こさないという保証は、このベースライン継続が担う。
 
-`commit_type` の値域 ([05-runtime.md §2](05-runtime.md)) のみは「永久に変更しない契約」として MAJOR bump も発動しない約束をしている。これは一般 semver 規約より強い保証である。
+current `commit_type` の値域は [05-runtime.md §2](05-runtime.md) を正本とする。
 
-## 12.6 観測 (observability)
+## 11.6 観測 (observability)
 
 `logs/access.jsonl` 以外に、以下の構造化ログを `~/.local/share/kio/logs/` に出す。
 
@@ -1088,7 +1030,7 @@ errors.jsonl       error_code 付きの全エラー
 各行 JSON で次のフィールドを必須とする:
 
 ```text
-ts        UTC ISO8601 (§12.4)
+ts        UTC ISO8601 (§11.4)
 level     debug | info | warn | error
 code      error_code (KIO-E-) / event_code (KIO-EV-) / metric_code (KIO-M- — [05-runtime.md §7](05-runtime.md))
 component batch | search | commit | gc | ...
@@ -1102,7 +1044,7 @@ context   必須 field (空 object 可) — 値は JSON object (tool_profile_has
           必要なら行を scope 別に分割する))
 ```
 
-ログのローテーションは日次、保持は 30 日 (config 上書き可 — 正規 key = `[observability] retention_days`、§12.3)。**scope-local の
+ログのローテーションは日次、保持は 30 日 (config 上書き可 — 正規 key = `[observability] retention_days`、§11.3)。**scope-local の
 `.kio/logs/access.jsonl` も同じ規範の対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 —
 無操作でも検索対象であり続ける scope の unbounded 成長を防ぐ。purge の scrub は**全保持世代**に
 適用する — rotation は scrub の対象範囲を狭めない。access_events の正本性は保持期間内の記録に
@@ -1112,7 +1054,7 @@ context   必須 field (空 object 可) — 値は JSON object (tool_profile_has
 `context` の `query`, `path`, `prompt` 等の機微フィールドを、nested な値も含めて同一 policy でマスクする (`message` は上記のとおり非機微テンプレート限定 — マスク対象の値を含めない)。
 false への変更は明示設定のみで行える。
 
-## 12.7 命名リネーム表 (旧 → 新)
+## 11.7 命名リネーム表 (旧 → 新)
 
 過去メモから現行設計への移行で発生した renaming を一覧化する。実装者はこの表を grep して旧称残置を排除する。
 (出所列の research/*.md は 2026-07-18 に docs から撤去済み — git 履歴で参照可)
@@ -1134,6 +1076,6 @@ output_hash (in normalization_runs) | (廃止)                            | rese
 cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (cost_ledger / batch_requests / schema_migrations の 3 表) | 04-pipeline.md §5.4
 ```
 
-## 12.8 推奨 Reading Path
+## 11.8 推奨 Reading Path
 
 Reading Path の正本は [README.md §1](README.md)。docs/ 直下のファイル名の数字プレフィックスがそのまま読む順番であり、本書で別の順序を定義しない。

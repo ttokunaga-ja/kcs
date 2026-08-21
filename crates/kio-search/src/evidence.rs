@@ -242,18 +242,14 @@ pub fn parse_evidence_pointer_uri(uri: &str) -> Result<EvidencePointer> {
         .strip_prefix("kio://")
         .ok_or_else(|| SearchError::Evidence("evidence URI must start with kio://".to_owned()))?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let schema_version = if query.is_empty() {
-        EVIDENCE_POINTER_SCHEMA_VERSION
-    } else {
-        let mut version = EVIDENCE_POINTER_SCHEMA_VERSION;
-        for part in query.split('&') {
-            if let Some(value) = part.strip_prefix("sv=") {
-                version = value.parse::<u64>().map_err(|_| {
-                    SearchError::Evidence("invalid evidence schema version".to_owned())
-                })?;
-            }
+    let schema_version = match query {
+        "" => EVIDENCE_POINTER_SCHEMA_VERSION,
+        "sv=1" => EVIDENCE_POINTER_SCHEMA_VERSION,
+        _ => {
+            return Err(SearchError::Evidence(
+                "evidence URI query must be empty or exactly sv=1".to_owned(),
+            ));
         }
-        version
     };
     if schema_version != EVIDENCE_POINTER_SCHEMA_VERSION {
         return Err(SearchError::Evidence(
@@ -370,10 +366,32 @@ mod tests {
     }
 
     #[test]
-    fn ct3_uri_004_sv_default_and_unknown_sv_rejected() {
+    fn ct3_uri_004_sv_query_grammar_is_exact() {
         let uri = evidence_pointer_to_uri(&pointer()).unwrap();
         assert_eq!(parse_evidence_pointer_uri(&uri).unwrap().schema_version, 1);
-        assert!(parse_evidence_pointer_uri(&(uri + "?sv=99")).is_err());
+        assert_eq!(
+            parse_evidence_pointer_uri(&(uri.clone() + "?sv=1"))
+                .unwrap()
+                .schema_version,
+            1
+        );
+        for query in [
+            "sv=99",
+            "sv=",
+            "foo=1",
+            "sv=1&sv=1",
+            "sv=1&",
+            "&sv=1",
+            "sv=1&foo=1",
+        ] {
+            let error = parse_evidence_pointer_uri(&format!("{uri}?{query}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("query must be empty or exactly sv=1"),
+                "{query}: {error}"
+            );
+        }
     }
 
     fn inline_pointer_with_raw_hash(raw_hash: &str) -> serde_json::Value {

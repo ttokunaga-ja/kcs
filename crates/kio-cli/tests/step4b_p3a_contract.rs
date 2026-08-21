@@ -1035,7 +1035,7 @@ fn qa21_initial_materialize_fires_once_then_and_gate_stays_closed_after_consumpt
     );
 }
 
-/// QA22 (step4b-contract-tests-p3a.md §G, 07 §3 L148-168, 10 §12.3): the
+/// QA22 (step4b-contract-tests-p3a.md §G, 07 §3 L148-168, 10 §11.3): the
 /// persistent approval record is stored in `.kio/scope.json`'s
 /// `approvals[]` — not a device-global file — with the full required-field
 /// row shape (scope_id / tool_id / execution_mode / tool_profile_hash /

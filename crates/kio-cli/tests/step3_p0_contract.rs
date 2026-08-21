@@ -994,7 +994,7 @@ fn view_degrades_view_fields_to_null_when_the_normalized_instance_is_unreadable(
 
 #[test]
 fn ct3_open_003_scope_unreachable_returns_exit_3() {
-    // QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §12.2 L931):
+    // QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §11.2 L931):
     // scope_unreachable is retryable (exit 3), distinct from a dead pointer
     // (tombstoned/not_found) within a reachable scope, which stays exit 4.
     let dir = indexed_scope();
@@ -4891,7 +4891,7 @@ fn ct3_evidence_004_resolves_through_pointer_commit_tree() {
 
 // 08 §3.2 step 6/7 failure contract: scope, commit, and raw_hash all resolve but
 // the pointer's chunk_hash has no materialized chunk row in this scope (a
-// different tool_profile_hash produced it) → retarget required (08 §5), exit 8
+// different tool_profile_hash produced it) → retarget required, exit 8
 // (06 §7), for BOTH view and open. Decision #33 (tasks/ws1c-decisions.md).
 #[test]
 fn ct3_evidence_004_missing_chunk_row_requires_retarget() {
@@ -8286,28 +8286,24 @@ fn r12_7_limit_zero_is_a_usage_error() {
     assert_eq!(big["paging"]["limit"], 100);
 }
 
-/// R13-3: `[logs] retention_days` is a real, schema-validated config key. Before
-/// the fix docs/06 §13 / docs/10 §12.6 documented "日次ローテ・保持 30 日 (config
-/// 上書き可)" but no such key existed, so pasting `[logs] retention_days = 7` into
-/// a config bricked EVERY command with exit 2 (additionalProperties:false). Both
-/// scope and user config must now accept it (exit 0).
+/// The pre-stable config has one retention authority. The old `[logs]` spelling
+/// is an unknown top-level key, not an alias for `[observability]`.
 #[test]
-fn r13_3_logs_retention_days_accepted_in_scope_config() {
+fn logs_retention_days_is_rejected_in_scope_config() {
     let dir = indexed_scope();
     write_scope_config(&dir, "[logs]\nretention_days = 7\n");
-    // A previously-bricking config now runs cleanly end-to-end.
-    json_success(&dir, &["status"]);
-    json_success(&dir, &["search", "トークン"]);
+    let error = json_failure(&dir, &["status"], 2);
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
 }
 
 #[test]
-fn r13_3_logs_retention_days_accepted_in_user_config() {
+fn logs_retention_days_is_rejected_in_user_config() {
     let dir = indexed_scope();
     let user_cfg = dir.path().join(".test-config/kio");
     fs::create_dir_all(&user_cfg).unwrap();
     fs::write(user_cfg.join("config.toml"), "[logs]\nretention_days = 7\n").unwrap();
-    json_success(&dir, &["status"]);
-    json_success(&dir, &["search", "トークン"]);
+    let error = json_failure(&dir, &["status"], 2);
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
 }
 
 /// R13-3 (d) / R12-5: a log write that cannot land (here the device metrics path is
@@ -8355,7 +8351,7 @@ fn r13_2_undeclared_env_only_embedding_activation_warns_once() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1/2 — the `offline_api` embedding adapter (07 §3 D9, 07 §5.3, 07 §5.7).
+// Stage 1/2 — the `offline_api` embedding adapter (07 §3 D9, 07 §5.3, 07 §5.5).
 //
 // The offline adapter runs a local model server, so CI can never exercise the
 // real one — there is no GPU runner and vLLM does not run on the macOS one
@@ -9076,38 +9072,17 @@ fn r13_2_cli_custom_url_is_rejected() {
     assert_eq!(err["error_code"], "KIO-E-CONFIG-SCHEMA-001");
 }
 
-/// R13-2(e): a declared `auth = "keychain:<svc>"` is not implemented — when the
-/// embedding adapter activates from it (the finding: a declared auth used to be a
-/// silent noop), the misconfig must be LOUD (recorded to errors.jsonl as
-/// KIO-E-NOT-IMPLEMENTED-001), never silently swallowed.
+/// Unsupported auth schemes fail at the configuration boundary rather than
+/// being accepted as a deferred adapter capability.
 #[test]
-fn r13_2_keychain_auth_is_loud_not_silent() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("note.md"),
-        "# 認証\n\nトークン TTL は 3600 秒。スコープは read write admin。\n",
-    )
-    .unwrap();
-    // Declare the embedding adapter with an (unimplemented) keychain auth BEFORE
-    // indexing, so `index` activates it and the enrichment pass resolves the auth.
+fn r13_2_keychain_auth_is_a_schema_error() {
+    let dir = indexed_scope();
     write_tools_toml(
         &dir,
         "[embedding.gemini_embedding_2]\nauth = \"keychain:login\"\n",
     );
-    kio(&dir, &["init"]).assert().success();
-    // The index itself still succeeds (the failed embedding is a counted task), but
-    // the keychain misconfig must be recorded loudly.
-    let out = json_success(&dir, &["index", "--approve"]);
-    assert!(
-        out["embedding_tasks_failed"].as_u64().unwrap_or(0) >= 1,
-        "the declared keychain adapter must ACTIVATE (fail visibly), not be ignored: {out}"
-    );
-    let errors =
-        fs::read_to_string(dir.path().join(".test-data/kio/logs/errors.jsonl")).unwrap_or_default();
-    assert!(
-        errors.contains("KIO-E-NOT-IMPLEMENTED-001"),
-        "keychain auth must be recorded loudly, not silently ignored: {errors}"
-    );
+    let error = json_failure(&dir, &["status"], 2);
+    assert_eq!(error["error_code"], "KIO-E-CONFIG-SCHEMA-001");
 }
 
 // ---------------------------------------------------------------------------

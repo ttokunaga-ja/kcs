@@ -1947,7 +1947,7 @@ fn ct4_timetravel_012_walks_full_parent_dag_and_chooses_canonical_introduction()
             "2026-07-10T00:00:00Z",
             "merge drops X",
             a1_object.tool_lock_hash,
-            CommitType::Merged,
+            CommitType::Manual,
         ),
     );
     fs::write(dir.path().join(".kio/HEAD"), format!("{merge}\n")).unwrap();

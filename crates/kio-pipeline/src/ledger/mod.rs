@@ -3,7 +3,7 @@
 //! module split:
 //!
 //! - [`schema`] — DDL-of-record, connection bootstrap, canonical shape self-heal
-//! - [`time`] — UTC epoch-ms calendar helpers (10 §12.4's one ISO8601 exception)
+//! - [`time`] — UTC epoch-ms calendar helpers (10 §11.4's one ISO8601 exception)
 //! - [`model`] — row/enum types
 //! - [`ops`] — the §5.8/§5.4 state machine: phase 1-3, idempotent recording,
 //!   outcome validation, crash recovery, sync degenerate 2-phase, the

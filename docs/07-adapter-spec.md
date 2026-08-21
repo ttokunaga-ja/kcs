@@ -1,42 +1,38 @@
 # 07 Adapter Spec
 
-Adapter (Prepare / Markdownize / Embedding / Summary / Classification / Rerank) の trait 契約 + 実行形態 + Markdown incremental プロンプト規約。
+Adapter (Prepare / Markdownize / Embedding / Rerank) の trait 契約 + 実行形態 + Markdown incremental プロンプト規約。
 
-> 関連: [03-data-model.md §5](03-data-model.md) (`tool_profile_hash` 計算規約) / [04-pipeline.md §3](04-pipeline.md) (incremental Markdownize) / [06-cli-spec.md §9](06-cli-spec.md) (Agent/Adapter API)
+> 関連: [03-data-model.md §5](03-data-model.md) (`tool_profile_hash` 計算規約) / [04-pipeline.md §3](04-pipeline.md) (incremental Markdownize) / [06-cli-spec.md §9](06-cli-spec.md) (JSON output / Adapter 境界)
 
 ---
 
 # 1. 基本方針
 
-Prepare / Markdownize / Embedding / Summary / Classification / Rerank は Kio core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
+Prepare / Markdownize / Embedding / Rerank は Kio core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
 
 ```
 Kio core:                 Adapter:
   object store              Prepare
   snapshot                  Markdownize (OCR は内部能力)
   restore                   Embedding (multimodal)
-  search                    Summary       optional
-  task state                Classification optional
-  common Kio API            Rerank        optional
+  search                    Rerank
 ```
 
-Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kio/` の共有対象に含めない**。各デバイスの `~/.config/kio/tools.toml` や OS keychain に保存する。`.kio/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
+Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kio/` の共有対象に含めない**。各デバイスの `~/.config/kio/tools.toml` に保存する。`.kio/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
 
 R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdownize` と
 `gemini_embedding_2` の built-in 実装に限定する。これらの role では `cmd` / `args` /
 `url` による実行先の差し替えを受理せず、宣言された model と built-in target の一致を
-起動時と実行直前に検証する。上記の実行設定フィールドは将来の外部 Adapter 契約用であり、
-現在の built-in role の設定方法ではない。
+起動時と実行直前に検証する。上記の実行設定フィールドは現在の built-in role では受理しない。
 
 認証情報の保存規約:
 
 ```text
-推奨 (優先順):
-1. OS keychain 参照:   auth = "keychain:<service_name>"
-2. 環境変数参照:       auth = "env:GEMINI_API_KEY"
+推奨:
+1. 環境変数参照:       auth = "env:GEMINI_API_KEY"
 
 許容 (非推奨):
-3. tools.toml 直書き:  auth = "plain:<api_key>"
+2. tools.toml 直書き:  auth = "plain:<api_key>"
    - tools.toml の permission が 0600 (owner read/write のみ) でない場合、
      Kio は起動時に warn を出す (errors.jsonl に level=warn で記録)
 
@@ -44,8 +40,8 @@ R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdown
    .kio/ 配下・tool-lock.json・tool_profile_hash の入力への認証情報の混入
 ```
 
-`tools.schema.json` は `auth` フィールドを `^(keychain|env|plain):` にマッチする文字列
-として規定する ([06-cli-spec.md §11](06-cli-spec.md))。
+`tools.schema.json` は `auth` フィールドを `^(env|plain):` にマッチする文字列
+として規定する ([06-cli-spec.md §10](06-cli-spec.md))。
 
 ---
 
@@ -162,23 +158,23 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         approved_at / approval_method を残す。送信前に現在の execution_mode / profile と照合し、
         不一致 = 失効 (再承認要求) — 保存しないと「変わった場合は失効」を永続状態から判定できない。
         **保存先 = `.kio/scope.json` の `approvals[]` 配列** (schema 検証対象
-        [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
+        [10-operations.md §11.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の **status=revoked + revoked_at への
         更新** (atomic rename) で行う (行は削除しない — 監査保全)。送信 gate は
         「`allow_network` の実効設定が true であり (**未設定・設定 key の喪失は gate 不成立** —
         active 行が現存する場合は config へ true を再設定するだけで回復し、再承認は不要)、**かつ**
         行の scope_id が当該 scope.json の scope_id と
         一致し、現在の execution_mode / tool_profile_hash に一致する `status=active` 行が存在する」の
-        両立とする (**scope_id 不一致の行は gate に使わない** — fork 複製由来の旧 scope 行の残存で
-        再承認を迂回させない。[06-cli-spec.md §10](06-cli-spec.md))。**`--online` の一時 opt-in は
+        両立とする (**scope_id 不一致の行は gate に使わない** — 再承認を迂回させない)。
+        **`--online` の一時 opt-in は
         この gate の唯一の例外** — 「優先関係」のとおり opt-in 未成立の既定閉鎖のみを上書きし
         (approvals[] 行は作らない)、consent 由来 `cli_online` として §7 の log に記録する。明示
         revoke (`allow_network = false`・行の revoked) は上書きしない。
         `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
         tool_profile_hash / approved_at / approval_method / **status (`active` | `revoked`)** —
-        status=revoked の行は **revoked_at** も必須 ([10-operations.md §12.3](10-operations.md) の
+        status=revoked の行は **revoked_at** も必須 ([10-operations.md §11.3](10-operations.md) の
         schema 定義と一致)。**status を持たない行は送信を許可しない** — 既定値で active と
-        読む経路は持たない (fail-closed、[10-operations.md §12.3](10-operations.md))。
+        読む経路は持たない (fail-closed、[10-operations.md §11.3](10-operations.md))。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
         (b) の config boolean は scope 内の全 online_api Adapter の**送信 gate 条件** (false で全停止)
@@ -189,7 +185,7 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         **materialize が発火するのは当該 scope の approvals[] に行が (tool_id を問わず) 一つも
         存在せず、かつ scope.json に `approvals_initialized` marker が無い初回、その最初の 1 tool に
         対してのみ**。初回承認 (materialize / --approve のいずれも) は行 publish と**同一 atomic
-        write** で `approvals_initialized: true` を記録する ([10-operations.md §12.3](10-operations.md) の
+        write** で `approvals_initialized: true` を記録する ([10-operations.md §11.3](10-operations.md) の
         optional key) — 以後 approvals[] が空になっても (手動編集・不整合 backup 復元等)、行ゼロ ×
         marker あり は真正初回と区別して **fail-closed (明示承認要求)** とする (行ゼロだけでは台帳
         喪失と初回を区別できない)。marker は行と同時に書かれるため、承認途中の crash 中間 (true ×
@@ -210,7 +206,7 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         (true × 行なし) は、次回実行の self-heal が **`approval_pending` と完全一致する場合に限り**
         行 publish を完遂する (pending 記録が無い・一致しない中間は自動生成せず明示承認 (対話 /
         --approve) を要求する)。`approval_pending` 全体の**不在**は有効であり pending intent 無しを表す。
-        ただし key が存在する場合は [10-operations.md §12.3](10-operations.md) の required field
+        ただし key が存在する場合は [10-operations.md §11.3](10-operations.md) の required field
         (`approved_at` / `approval_method` を含む) を全て満たさなければならない。present malformed
         pending は schema error / fail-closed とし、self-heal・自動 cleanup・監査値の補完の対象にしない。
         **scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
@@ -267,7 +263,7 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 > **判定はリテラル文字列に対して行い、ホスト名解決の結果を見ない** (解決結果を信用すると
 > DNS rebinding で loopback を名乗る外部ホストへ送信できてしまう)。違反は
 > `KIO-E-CONFIG-OFFLINE-URL-001` (exit 2、[06-cli-spec.md §8](06-cli-spec.md) /
-> [10-operations.md §12.1](10-operations.md))。検証点は tool-lock materialize /
+> [10-operations.md §11.1](10-operations.md))。検証点は tool-lock materialize /
 > adapter 登録時 — §2 が `offline_api` を「ネット送信なし」と**定義**している以上、
 > 定義に反する構成は実行前に拒否する。
 >
@@ -305,7 +301,7 @@ opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回ス�
 > **現行実装 (2026-08-02 更新)**: Embedding と Markdownize の**両方**で `url` が
 > 上記の条件下で**受理される** (Markdownize は 2026-08-02 に解禁。それ以前は
 > 一律 schema error だった)。**両者の `cmd` / `args` は引き続き一律 schema error**
-> — 将来の外部 dispatcher の領分である (§7)。
+> 。
 >
 > 緩和は **role 単位ではなく target 単位**である。`offline_api` を宣言できるのは
 > その kind を持つ tool_id だけで、cloud API の tool_id に `offline_api` を
@@ -365,13 +361,13 @@ AdapterProfile:
   tool_profile_hash     計算規約は 03-data-model.md §5.1
   version
   capability_flags      ["ocr", "layout_detection", "incremental_update", ...]
-  billable_kinds        billable を宣言する Adapter (§5.7 条件 6) は必須 — 報告し得る
+  billable_kinds        billable を宣言する Adapter (§5.5 条件 6) は必須 — 報告し得る
                         `billable_units.kind` の閉集合 (拒否課金の有無の宣言 = 下記 `reject_billing`)。
                         **実行時 usage の kind が宣言集合外の場合は課金 field の不良として
                         estimated 縮退 + warning ([04-pipeline.md §5.4](04-pipeline.md) — 応答の
                         受否・outcome・`contract_violation_count` は変えない)**。宣言集合の執行面は
-                        送信前の pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
-  reject_billing        billable を宣言する Adapter (§5.7 条件 6) は必須 — "billable" | "nonbillable"
+                        送信前の pricing 被覆検査の入力 ([10-operations.md §11.3](10-operations.md))
+  reject_billing        billable を宣言する Adapter (§5.5 条件 6) は必須 — "billable" | "nonbillable"
                         の閉 enum (投入拒否 (permanent 4xx) に課金する provider か否かの機械可読宣言。
                         billable_kinds と同じく出力非影響 = tool_profile_hash 非対象。欠落・未知値
                         は fail-closed = "billable" として扱う)。usage 欠落の permanent 4xx を
@@ -392,9 +388,9 @@ AdapterRun:
                         (集計用の粗分類 — auth / quota / invalid_input 等の細分は error_code が
                          担い、retry 対応は 04 §5.3 の表が error_code 基準で優先する)
   retry_after_ms        optional — provider の Retry-After を透過 (rate_limit 時)
-  usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.7)。
+  usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.5)。
                         usd = 有限・非負の実測額 (billable reject では provider が宣言する請求額を
-                        これに充てる — §5.7 条件 6。第三の field は設けない)。billable_units =
+                        これに充てる — §5.5 条件 6。第三の field は設けない)。billable_units =
                         **unique-kind の配列** `[{ kind, count }, ...]` (1 要素以上。kind = "pages" |
                         "tokens_in" | "tokens_out" の閉 enum — 拡張は spec 改訂。count = 非負整数。
                         **kind の重複は課金 field の不良 (estimated 縮退 + warning —
@@ -402,7 +398,7 @@ AdapterRun:
                         input/output token 両課金の provider を単一報告で表現する)。単価解決元 = tools.toml の
                         `[pricing]` 単価表 (kind → USD 単価 — [03-data-model.md §11](03-data-model.md)、
                         **単価の正本は tools.toml** — tool-lock ではない。schema 型と billable Adapter の
-                        kind 被覆必須は [10-operations.md §12.3](10-operations.md)、kind の単価が解決
+                        kind 被覆必須は [10-operations.md §11.3](10-operations.md)、kind の単価が解決
                         不能な場合の終端は estimated 縮退 — [04-pipeline.md §5.4](04-pipeline.md))。**換算は終端 Tx
                         時点の表で確定し、以後の単価変更で再計算しない** (台帳 UPDATE 禁止と整合)。
                         **billable な terminal 応答 (成功・billable reject・fetch_output・sync 応答・
@@ -443,7 +439,7 @@ renderer 版内で prepared_hash が安定し、renderer 更新による出力�
 同一 identity)。**renderer が環境に存在しない場合、当該 Office ファイルの online タスクは enqueue
 しない** (doomed task を作らない) — `index_status` ([05-runtime.md §1.7](05-runtime.md)) に理由付きで
 可視化する。実行時の変換失敗は contract_violation ([04-pipeline.md §5.3](04-pipeline.md) — 同一入力の
-再試行 1 回) に合流する。音声の変換機構は本追記の対象外 (未定義のまま — 将来ラウンド)。
+再試行 1 回) に合流する。音声の変換機構は現在の契約に含めない。
 
 **XLSX の unit 化 (実装フィードバック 2026-07-25 — 上の「対象外」を解除)**: XLSX は
 **変換 PDF を経由しない**。DOCX / PPTX が変換 PDF に載るのは page と slide が**それ自体で視覚的な
@@ -505,17 +501,16 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
 
 - 表は Markdown 本文に inline で保持する (`table_format=null` 相当)。独立 table object は作らない。
 - 文書内 embedded image は抽出して image object ([03-data-model.md §2](03-data-model.md)) として保存し、Markdown 内の参照は `kio://<scope_id>/object/image/<image_hash>` に置換する ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))。実装は Step 2 ([09-mvp-scope.md §3.1](09-mvp-scope.md))。
-- bbox / page / confidence score は unit metadata に記録する。**Evidence Pointer の必須 schema には含めない** (optional フィールドとしての露出は Phase 4+ 判断。forward compatibility は [08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md))。
+- bbox / page / confidence score は unit metadata に記録する。**Evidence Pointer schema には含めない**。
 - **図中テキストの検索可能性 — bbox_annotation を採用 (2026-07-04 実 API 境界調査で確定)**: 実測
   (`experiments/ocr-verification`、段階 fixture C0-C5 + 曖昧画像 15 枚) により、表は複雑・ラスタ化でも
   100% textize される一方、**チャート/グラフ内テキスト (軸ラベル・凡例・値) は 100% images[] へ消失**
   し (C3 が境界)、ホワイトボード写真風は ~55%、フロー図入りスライドは ~41% を失うことを確認。
   対策として Mistral の **bbox_annotation (+25% コスト) を既定 ON** とし、images[] として返る領域の
   説明+書き起こしを取得して unit metadata に記録し、chunk 化時に image 参照近傍へ検索可能テキスト
-  として取り込む (`.kio/config.toml` の `[markdownize] bbox_annotation = true` (既定) で制御 — folder-config schema の正式 key ([10-operations.md §12.3](10-operations.md))。**値は出力に影響するため tool_profile_hash に畳み込む** = 切替は世代判定に乗る)。Markdownize は文書 1 版につき 1 回のコストであり
+  として取り込む (`.kio/config.toml` の `[markdownize] bbox_annotation = true` (既定) で制御 — folder-config schema の正式 key ([10-operations.md §11.3](10-operations.md))。**値は出力に影響するため tool_profile_hash に畳み込む** = 切替は世代判定に乗る)。Markdownize は文書 1 版につき 1 回のコストであり
   incremental 再利用でさらに希釈されるため +25% は budget 内。生成 LLM (Gemini Vision) による二次
-  Markdownize fallback は annotation で不足する場合の Phase 4+ 保留のまま。実装は Step 4 (契約は
-  step4a で確定)。
+  追加の生成 LLM fallback は現在の契約に含めない。
   - wire は次の exact `bbox_annotation_format` JSON Schema 1 個を使い、説明/書き起こし指示は schema
     field description に固定する (bbox 専用 prompt parameter は使わない)。各 `pages[].images[]` の
     `image_annotation` は `short_description` / `transcribed_text` の厳密 JSON とする。JCS byte 列の
@@ -565,15 +560,15 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
     16 MiB、bbox coordinate 0..=1e9 かつ positive area。string/aggregate byte 上限は untrusted response
     decode 時と上記 canonical escape 後の両方で検査し、膨張後も超過を許さない。annotation
     policy/profile は task identity に含め、既存 annotation 無し Done task を default-on の完了扱いにしない
-- 生成 LLM (Gemini / Claude / GPT 等) は Markdownize の主処理ではなく、OCR 後の品質検証・図表解釈・summary (§5.4) に使う。
+- 生成 LLM (Gemini / Claude / GPT 等) は Markdownize の主処理ではなく、OCR 後の品質検証・図表解釈に使う。
 
-> **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。検証が崩れた場合の fallback (生成 LLM 系 §8.2 へ戻す) の設計は維持する。Batch trait の `list_uploads` / `provider_scope_id` / pagination の契約試験は未実施 — Step 3 実測に含める。
+> **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.4](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。
 
 ## 5.2.1 Normalized Markdown 形式 (最小凍結 — 2026-07-18)
 
 全 Markdownize Adapter の出力 (normalized unit の Markdown) は次の最小形式に従う。chunk span と
 Evidence Pointer のバイト位置は保存された bytes に対して定義されるため、**この形式は実装後に
-変えると互換性コストが高い** ([10-operations.md §11](10-operations.md)) — 以下を v1 として凍結する:
+変えると互換性コストが高い** ([10-operations.md §11.5](10-operations.md)) — 以下を v1 として凍結する:
 
 - **エンコーディング**: UTF-8 (BOM 禁止)、Unicode 正規化 NFC、改行 LF のみ、行末 trailing space 禁止、
   ファイル終端は LF 1 個
@@ -610,11 +605,11 @@ metadata:
   adapter_id, model_family, version, embedding_profile_hash
 ```
 
-**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。**変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を再検査する** (underflow の零 vector / overflow の Inf を index に入れない — 違反は同じ contract violation)、(5) 応答 metadata の `embedding_profile_hash`・`modality`・`distance` が期待 profile と一致する (同次元の別 vector space の混入を契約で拒否する — 不一致は同じ contract violation)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.8](04-pipeline.md)。再試行分類は [04-pipeline.md §5.3](04-pipeline.md))。`failed_units` 相当の部分失敗 field を持たない **all-or-nothing 契約は意図的**である (MVP は text chunk のみを embed し、失敗の粒度は request 再投入で足りる — Phase 4+ の multimodal 拡張で再検討)。
+**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。**変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を再検査する** (underflow の零 vector / overflow の Inf を index に入れない — 違反は同じ contract violation)、(5) 応答 metadata の `embedding_profile_hash`・`modality`・`distance` が期待 profile と一致する (同次元の別 vector space の混入を契約で拒否する — 不一致は同じ contract violation)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.8](04-pipeline.md)。再試行分類は [04-pipeline.md §5.3](04-pipeline.md))。`failed_units` 相当の部分失敗 field を持たない **all-or-nothing 契約**である。
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
-> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
+> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.5)。current enrichment は text chunk と chunk から参照される image object を同じ vector space に埋め込む。audio は現在の入力種別に含めない。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
 
 > **訂正 — Embedding にも Batch レーンがある (2026-07-24)**: 直前の段落が採用理由に挙げる
 > 「Vertex はバッチ推論非対応のため sync 呼出」は、**根拠と実装先が食い違っていた**。
@@ -625,7 +620,7 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 > Vertex AI Batch Prediction が `gemini-embedding-001` を除外している事実と混線したものである。
 > 単価は **標準 $0.20 / 1M tokens・Batch $0.10 / 1M tokens (50% off)** (text、`gemini-embedding-2`)。
 >
-> したがって Embedding Adapter も **`preferred_request_kind` を持つ** (§5.7 のレーン選択子を
+> したがって Embedding Adapter も **`preferred_request_kind` を持つ** (§5.5 のレーン選択子を
 > `MarkdownizeAdapter` 専用にしない)。Embedding の Batch レーンは次の形をとる。
 >
 > - 投入: `POST {base}/v1beta/models/{model}:asyncBatchEmbedContent`。
@@ -642,7 +637,7 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 > - 回収: `inlinedResponses[]` の `output.response.embedding.values` を `metadata` で入力へ対応づける。
 >   受入検査は本節の (1)〜(5) をそのまま適用する (id 全単射・次元・有限非ゼロ・正規化後再検査・profile 一致)。
 > - inline の上限 (20 MB) に収まるよう、1 job あたりの request 数を実装側で有界にする。
-> - **task 単位 = job (2026-07-25 確定)**: §5.7 の v1 契約「1 job = 1 task」を embedding でも
+> - **task 単位 = job (2026-07-25 確定)**: §5.5 の v1 契約「1 job = 1 task」を embedding でも
 >   保つため、**job そのものを 1 task として台帳に載せる**。`batch_requests.input_hash` は
 >   当該 job のメンバ (= 各 group の `embedding_hash`) を整列・連結した digest とする。
 >   embedding の自然な task 粒度は重複排除 group であり実規模で数千個 (dogfood fixture で
@@ -754,7 +749,7 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 >   **予約見積りは保守側ではない (2026-07-25 実測)**: 33 実ジョブで突き合わせた
 >   `estimate_embedding_tokens` の誤差は **-32% 〜 +52%**、**8/33 (24%) が過少**だった。
 >   確定記帳は実測へ移ったが、**budget cap の事前判定は依然この見積りを使う**ため、
->   過少なジョブは cap を素通りしうる ([tasks/step4b-backlog.md](../tasks/step4b-backlog.md) I10)。
+>   過少なジョブは cap を素通りしうる。
 >
 > - **単価はレーンで割る — 宣言値は標準 (sync) 単価 (2026-07-25 統一)**: 確定記帳の経路には
 >   レーン概念が無く、両 settle site が `registered_declared_pricing` を**生で**読んでいた。
@@ -817,9 +812,6 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 >   `embeddings.context_key` 列で chunk ごとに正しい行を選ぶ (単一候補は従来どおり素通り =
 >   pre-addendum ストア不変)。
 >
-> deferred: (1) context に heading path を併記する変種 (今回は stem のみが最良で不採用)、
-> (2) 純記号ファイル名や意味の薄いファイル名 (`IMG_1234`) での寄与低下の定量化。
-
 > **ローカル multimodal embedding の identity 規約 (2026-07-26 確定)**:
 > `execution_mode = "offline_api"` の Embedding Adapter (ローカル embedding server) を
 > 導入するための規約。**3 項目とも「同一 profile_hash を名乗る 2 つのベクトル空間」を
@@ -916,25 +908,7 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 > **規則**のみであり、検証手続きは別途とする。「テキストは一致・画像だけ乖離」という
 > 失敗モードは本節冒頭のとおり互換ゲートで検知できないため、これは形式的な注意ではない。
 
-## 5.4 Summary (optional)
-
-```
-input:   normalized_refs | chunk_hashes | search_result_ids
-output:  summary_hash
-metadata: profile_hash, source_hashes, summary_kind
-```
-
-`normalized_refs` は normalized instance への参照 `(raw_hash, tool_profile_hash, gen)` ([03-data-model.md §2.1](03-data-model.md))。normalized の content hash は存在しない ([03-data-model.md §5](03-data-model.md))。
-
-## 5.5 Classification (optional)
-
-```
-input:   raw_hashes | normalized_refs | chunk_hashes | image_object_hashes
-output:  labels, categories, confidence, routing_metadata
-metadata: profile_hash, label_schema_hash
-```
-
-## 5.6 Rerank (optional)
+## 5.4 Rerank (optional)
 
 ```
 input:   query, candidate_result_ids, candidate_features
@@ -944,7 +918,7 @@ metadata: profile_hash, searched_scopes, fallback_reason
 
 Rerank Adapter は Kio の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
 
-## 5.7 Batch 実行契約とプロバイダ採用条件
+## 5.5 Batch 実行契約とプロバイダ採用条件
 
 Batch モードを持つ online Adapter (Markdownize / Embedding) は、[04-pipeline.md §5.8](04-pipeline.md) の
 2 相プロトコルが要求する次の操作を trait として公開する:
@@ -1013,10 +987,7 @@ provider_scope_id()            下記の不変識別子を返す
 > 単価はコード内に per-page 定数の正本が無いため、tools.toml の `[pricing] pages = 0.002`
 > (batch 単価) 宣言を推奨する。終端の記帳: provider `TIMEOUT_EXCEEDED` は出力を読めず実費不明 =
 > `expired` として**予約額の estimated 記帳** (§5.8 と同じ over-count 安全側)、`FAILED`/`CANCELLED`
-> は未完了 entry 非課金の前提で 0 記帳。繰延 (backlog 記録): incremental Markdownize の batch 化
-> (v1 は Full 送信へ縮退)、batch 出力の埋め込み画像の CAS 保存、`provider_scope_id` /
-> `list_uploads` / pagination の実 API 契約試験 (§5.2 の未実施項目 — v1 は
-> `KIO_MISTRAL_WORKSPACE_ID` 上書き + 既定 `"mistral:default"`)。
+> は未完了 entry 非課金の前提で 0 記帳。
 
 ---
 
@@ -1100,11 +1071,7 @@ require_command_confirmation = true
 > 挙動は 1 ミリも変わらない**。`offline_api` の既定値は上記のとおり Stage 3 待ちで、
 > こちらで発明していない。
 
-任意コマンド/任意 URL を使う外部 Adapter dispatcher は将来仕様とする。実装する場合は
-**初回実行時** に command / URL / scope / network policy を preview し、ユーザー承認を
-得るほか、command allowlist、secret redaction、ログ本文禁止を前提にする。R23 の
-Markdownize / Embedding runtime にはこの dispatcher と承認経路はなく、`cmd` / `args` /
-`url` を設定しても実行せず schema error とする。
+R23 の Markdownize / Embedding runtime は同梱 target だけを実行し、任意コマンドの実行経路を持たない。
 
 ログに残してよいもの:
 
@@ -1141,31 +1108,21 @@ usage_validation (missing | invalid), billing_source (estimated)
 MVP における Adapter の脅威モデルを次のとおり確定する。
 
 ```text
-1. R23 で実行される Adapter は Kio 同梱の built-in target のみで、trusted code として
-   扱う。将来の外部 dispatcher を実装する場合も、ユーザーが明示的にインストールし
-   ~/.config/kio/tools.toml に設定した Adapter だけを trusted code として扱う。
+1. R23 で実行される Adapter は Kio 同梱の built-in target のみを trusted code として扱う。
 
 2. [adapter.policy] は「Kio 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
    - `max_input_bytes` は **AdapterRun 1 回の入力 (prepared input の canonical bytes 合計)** に
-     適用する (**AdapterRun = 1 回の Adapter 呼出 = 1 request / job** — §4・§5.7 の課金報告と同一
+     適用する (**AdapterRun = 1 回の Adapter 呼出 = 1 request / job** — §4・§5.5 の課金報告と同一
      単位。task 全体の総量上限ではない — 総量は budget cap 側が律する) — 超過は送信前に当該 task を
      terminal failed (invalid_input・非再試行) とし、送信しない (課金なし)
    - Kio は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
    - Kio は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
 
-3. 将来の外部 dispatcher における、悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
-   allow_network=false 下での無断送信) は MVP では防御しない。
-   OS レベルのサンドボックス強制は Phase 4+ の再設計論点とする。
-
-4. 第三者 Adapter の配布・署名・検証 (サプライチェーン) は v2 以降のスコープ外。
-   MVP で同梱・文書化するのは Kio 公式 Adapter のみ。
+3. Kio が実行・文書化するのは同梱 built-in Adapter だけである。
 ```
 
-将来の外部 dispatcher に初回実行時の承認 UI を追加する場合は、この前提を反映した
-文言にする (例: 「この Adapter はあなたの権限で実行されます。信頼できる提供元のもの
-だけをインストールしてください」)。
 
 ---
 
@@ -1192,7 +1149,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
 ```
 
-`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KIO-E-ADAPTER-SPECVER-001` (§8.1 手順 5 — invalid_input / 非再試行) として当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
+`spec_version` の bump 規約は [10-operations.md §11.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KIO-E-ADAPTER-SPECVER-001` (§8.1 手順 5 — invalid_input / 非再試行) として当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
 
 ## 8.2 推奨プロンプト構造 (frontier AI 系)
 

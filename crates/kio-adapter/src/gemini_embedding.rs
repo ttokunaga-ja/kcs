@@ -89,28 +89,15 @@ impl EnvGeminiEmbeddingClient {
     fn base_url(&self) -> String {
         self.base_url
             .clone()
-            .or_else(|| {
-                // A registered built-in declaration is origin-bound. The legacy
-                // environment override remains only for undeclared compatibility
-                // and hermetic tests.
-                crate::tool_lock::registered_declared_adapter("embedding")
-                    .is_none()
-                    .then(|| std::env::var("GEMINI_API_BASE").ok())
-                    .flatten()
-            })
             .unwrap_or_else(|| GEMINI_API_ORIGIN.to_owned())
             .trim_end_matches('/')
             .to_owned()
     }
 
     fn api_key() -> Result<String> {
-        // R13-2: honor a declared `tools.toml` `[embedding] auth` (env:/plain:, with
-        // keychain: a loud not-implemented error) instead of the previous hard-coded
-        // `GEMINI_API_KEY`; fall back to that env var when nothing is declared.
-        crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.ok_or_else(|| {
+        crate::tool_lock::resolve_role_api_key("embedding")?.ok_or_else(|| {
             AdapterError::Auth(
-                "no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth`"
-                    .to_owned(),
+                "no Gemini embedding API key: declare tools.toml `[embedding] auth`".to_owned(),
             )
         })
     }

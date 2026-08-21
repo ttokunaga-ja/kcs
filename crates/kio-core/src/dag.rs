@@ -335,8 +335,8 @@ pub fn commit_hash(commit: &CommitObject) -> Result<String> {
 }
 
 /// Strictly validate a `created_at` timestamp as `YYYY-MM-DDTHH:MM:SSZ`
-/// (UTC ISO8601, `06 §12`). An optional fractional-second suffix `.NNN…` before
-/// the trailing `Z` is accepted (`06 §12` permits microsecond precision). Checks
+/// (UTC ISO8601, `06 §11`). An optional fractional-second suffix `.NNN…` before
+/// the trailing `Z` is accepted (`06 §11` permits microsecond precision). Checks
 /// digit positions, separators, and calendar validity (month-aware day count
 /// including leap years). Leap seconds (`:60`) are rejected — Kio only emits
 /// second-precision timestamps derived from Unix time, which never produce
@@ -402,9 +402,7 @@ fn is_valid_created_at(value: &str) -> bool {
 pub enum CommitType {
     Manual,
     Auto,
-    Imported,
     Repaired,
-    Merged,
     Purged,
 }
 
@@ -415,9 +413,7 @@ impl FromStr for CommitType {
         match value {
             "manual" => Ok(Self::Manual),
             "auto" => Ok(Self::Auto),
-            "imported" => Ok(Self::Imported),
             "repaired" => Ok(Self::Repaired),
-            "merged" => Ok(Self::Merged),
             "purged" => Ok(Self::Purged),
             _ => Err(KioError::schema("invalid commit_type")),
         }
@@ -429,9 +425,7 @@ impl fmt::Display for CommitType {
         formatter.write_str(match self {
             Self::Manual => "manual",
             Self::Auto => "auto",
-            Self::Imported => "imported",
             Self::Repaired => "repaired",
-            Self::Merged => "merged",
             Self::Purged => "purged",
         })
     }
@@ -448,16 +442,14 @@ pub enum GcPolicy {
 pub const fn gc_policy(commit_type: CommitType) -> GcPolicy {
     match commit_type {
         CommitType::Auto | CommitType::Repaired => GcPolicy::Shallow,
-        CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => {
-            GcPolicy::None
-        }
+        CommitType::Manual | CommitType::Purged => GcPolicy::None,
     }
 }
 
 #[must_use]
 pub const fn protected(commit_type: CommitType) -> bool {
     match commit_type {
-        CommitType::Manual | CommitType::Imported | CommitType::Merged | CommitType::Purged => true,
+        CommitType::Manual | CommitType::Purged => true,
         CommitType::Auto | CommitType::Repaired => false,
     }
 }

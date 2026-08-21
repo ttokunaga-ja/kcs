@@ -98,13 +98,8 @@ pub fn hold_reason_for_reason(reason: &str) -> Option<HoldReason> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskType {
-    Prepare,
     Markdownize,
     Embedding,
-    Summary,
-    Classification,
-    Rerank,
-    Index,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1818,10 +1813,6 @@ mod tests {
                     message: "x".to_owned(),
                 },
                 RetryErrorKind::ContractViolation,
-            ),
-            (
-                AdapterError::NotImplemented("x".to_owned()),
-                RetryErrorKind::InvalidInput,
             ),
         ];
         for (error, retry_kind) in cases {

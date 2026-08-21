@@ -575,7 +575,7 @@ mod tests {
         let profile = LocalEmbeddingAdapter::mock().profile();
         assert_eq!(profile.execution_mode, ExecutionMode::OfflineApi);
         assert_eq!(profile.adapter_id, LOCAL_EMBEDDING_ADAPTER_ID);
-        // The three properties the offline forks key off (07 §3 / 07 §5.7).
+        // The three properties the offline forks key off (07 §3 / 07 §5.5).
         assert!(!profile.allow_network, "offline_api must not claim network");
         assert!(
             profile.billable_kinds.is_empty(),
@@ -693,7 +693,7 @@ mod tests {
         assert!(response.usage.is_none());
     }
 
-    /// 07 §5.7: no batch lane. A local server has no job queue to submit to,
+    /// 07 §5.5: no batch lane. A local server has no job queue to submit to,
     /// and the half-price rationale that puts Gemini on Batch does not exist.
     #[test]
     fn prefers_the_sync_lane() {

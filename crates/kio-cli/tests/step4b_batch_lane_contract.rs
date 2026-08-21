@@ -1,5 +1,5 @@
 //! Step4b Mistral OCR Batch lane contract tests (04-pipeline.md §5.8 /
-//! 07-adapter-spec.md §5.7): submit (phase 1 → 2a → 2b), poll/collect
+//! 07-adapter-spec.md §5.5): submit (phase 1 → 2a → 2b), poll/collect
 //! (phase 3), the create_job crash window + `kio ledger reconcile` found
 //! self-description, failed-job settlement, and the in-flight exit mapping.
 //!

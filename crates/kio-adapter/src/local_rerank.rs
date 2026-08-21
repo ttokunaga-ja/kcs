@@ -1,4 +1,4 @@
-//! The optional Rerank adapter (07 §5.6) — a local cross-encoder reached over
+//! The optional Rerank adapter (07 §5.4) — a local cross-encoder reached over
 //! loopback, same posture as [`crate::local_embedding`].
 //!
 //! # Written against a measured wire, not a guessed one
@@ -233,7 +233,7 @@ enum Backend<C> {
     Real(C),
 }
 
-/// The Rerank adapter (07 §5.6).
+/// The Rerank adapter (07 §5.4).
 #[derive(Debug, Clone)]
 pub struct LocalRerankAdapter<C = EnvLocalRerankClient> {
     backend: Backend<C>,
@@ -642,7 +642,7 @@ mod tests {
 
     /// Reordering only: every returned id must be one the caller supplied, so
     /// the caller can still own `searched_scopes` / `fallback_reason`
-    /// (07 §5.6).
+    /// (07 §5.4).
     #[test]
     fn the_mock_returns_only_ids_it_was_given() {
         let offered = candidates(&["a", "b", "c", "d"]);

@@ -5,7 +5,7 @@
 //! Historical note (§O): until the Batch send lane landed, no real Adapter
 //! "Batch client" existed — both built-in Adapters were single-shot
 //! synchronous integrations, so production correctly enumerated zero
-//! providers. Since `batch_client::EnvMistralBatchClient` (07 §5.7, the
+//! providers. Since `batch_client::EnvMistralBatchClient` (07 §5.5, the
 //! 2026-07-23 Batch-lane ruling), production enumerates the configured
 //! Mistral Batch client's own list-jobs / list-uploads calls — one
 //! [`ProviderInventory`] per configured client (0 to 2: the built-in Mistral
@@ -230,34 +230,14 @@ mod tests {
 
     /// `std::env::set_var`/`remove_var` are process-global, and `cargo test`
     /// runs a crate's `#[test]` functions on multiple threads by default.
-    /// This module's tests share `TEST_BATCH_INVENTORY_ENV` with each other
-    /// AND (since the production wiring) `KIO_TEST_MISTRAL_BATCH` /
-    /// `MISTRAL_API_KEY` with `batch_client`'s own tests — so the lock must
+    /// This module's tests share `TEST_BATCH_INVENTORY_ENV` and
+    /// `KIO_TEST_MISTRAL_BATCH` with `batch_client`'s own tests — so the lock must
     /// be the CRATE-wide one (`batch_client::test_env_lock`), not a
     /// module-local mutex a sibling module's tests would never contend on.
     /// Held for each test's full body so the env state one test observes
     /// cannot change out from under it mid-test.
     fn env_lock() -> &'static Mutex<()> {
         crate::batch_client::test_env_lock()
-    }
-
-    /// Production default (no seam, no Mistral credential): empty inventory,
-    /// not an error. Clears every activation path this walk consults —
-    /// the fixture seam, the inline batch mock, and the sync-path credential
-    /// condition (`MISTRAL_API_KEY`; no `tools.toml` adapter is registered in
-    /// this test binary) — so the assertion holds on machines with ambient
-    /// developer env too.
-    #[test]
-    fn production_default_is_empty_not_an_error() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
-        let inventories = configured_inventories().unwrap();
-        assert!(inventories.is_empty());
     }
 
     /// Production wiring (no fixture seam): one inventory per configured

@@ -2516,9 +2516,8 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             -- NULL for non-contextual (legacy / symbolic-name) chunk embeddings.
             context_key TEXT
         );
-        -- QB32 (step4b-contract-tests-p3b.md §C, 04 §4.3 L534-536): so the
-        -- query_cache 256-row prune/enumerate (once wired, QB33/34) does not
-        -- SCAN the full corpus-sized `embeddings` table to find its rows.
+        -- Keep target-type lookups bounded without scanning the corpus-sized
+        -- `embeddings` table.
         CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(target_type);
         CREATE TABLE IF NOT EXISTS tree_entries (
             commit_hash TEXT NOT NULL,

@@ -1752,7 +1752,7 @@ pub fn execute_bounded_sweep(
 // §I — budget cap check-then-reserve (CL56-CL61)
 // ---------------------------------------------------------------------------
 
-pub const PER_ADAPTER_KIND_ENUM: &[&str] = &["markdownize", "embedding", "summary"];
+pub const PER_ADAPTER_KIND_ENUM: &[&str] = &["markdownize", "embedding"];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BudgetCapConfig {
@@ -1852,8 +1852,8 @@ pub fn check_then_reserve(
 }
 
 /// CL61: `[budget.per_adapter]` keys are the same closed enum as
-/// `adapter_kind` (`markdownize` | `embedding` | `summary`); anything else is a
-/// config schema error.
+/// `adapter_kind` (`markdownize` | `embedding`); anything else is a config
+/// schema error.
 #[must_use]
 pub fn is_valid_per_adapter_key(key: &str) -> bool {
     PER_ADAPTER_KIND_ENUM.contains(&key)
@@ -2439,7 +2439,7 @@ mod tests {
     fn cl61_per_adapter_key_enum_is_closed() {
         assert!(is_valid_per_adapter_key("markdownize"));
         assert!(is_valid_per_adapter_key("embedding"));
-        assert!(is_valid_per_adapter_key("summary"));
+        assert!(!is_valid_per_adapter_key("summary"));
         assert!(!is_valid_per_adapter_key("markdown"));
         assert!(!is_valid_per_adapter_key("unknown_kind"));
     }

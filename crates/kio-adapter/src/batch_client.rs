@@ -1,4 +1,4 @@
-//! Mistral OCR Batch client contract (07 §5.7) and its hermetic mock seam.
+//! Mistral OCR Batch client contract (07 §5.5) and its hermetic mock seam.
 //!
 //! The ledger state machine for batch submissions (04 §5.8 — phase 1 intent,
 //! phase 2a upload, phase 2b job-create, phase 3 collect, sweep/recovery)
@@ -75,7 +75,7 @@ pub struct BatchJobRecord {
     pub status: BatchJobStatus,
     /// Provider file id of the result JSONL once `status` is `Success`.
     pub output_file_id: Option<String>,
-    /// Job metadata exactly as the provider returns it (07 §5.7: create_job
+    /// Job metadata exactly as the provider returns it (07 §5.5: create_job
     /// metadata must round-trip完全・不変 — the intent_token and the task
     /// key 4 組 ride here for recovery attribution, 10 §7.5.2).
     pub metadata: serde_json::Value,
@@ -96,7 +96,7 @@ pub struct BatchOutputLine {
     pub body: serde_json::Value,
 }
 
-/// 07 §5.7 client operations. One provider job carries ONE task's input in
+/// 07 §5.5 client operations. One provider job carries ONE task's input in
 /// this lane's v1 (1 job = 1 task) so the per-task-key `batch_job_id` column
 /// keys the recovery walk without job↔task fan-out bookkeeping.
 pub trait MistralBatchClient {
@@ -112,7 +112,7 @@ pub trait MistralBatchClient {
     fn get_job(&self, job_id: &str) -> Result<BatchJobRecord>;
     fn list_jobs(&self) -> Result<Vec<BatchJobRecord>>;
     fn list_uploads(&self) -> Result<Vec<BatchUploadRecord>>;
-    /// Provider 404 (already gone) reports as success (07 §5.7).
+    /// Provider 404 (already gone) reports as success (07 §5.5).
     fn delete_upload(&self, upload_id: &str) -> Result<()>;
     fn fetch_output(&self, output_file_id: &str) -> Result<Vec<BatchOutputLine>>;
 }
@@ -202,10 +202,10 @@ const BATCH_LIST_PAGE_SIZE: usize = 100;
 /// error; the pending real-API contract round (07 §5.2) revisits the bound.
 const BATCH_LIST_MAX_PAGES: usize = 50;
 
-/// Real Mistral Batch REST client (07 §5.7). Auth, base-url, and redirect/
+/// Real Mistral Batch REST client (07 §5.5). Auth, base-url, and redirect/
 /// encoding posture mirror `mistral_ocr::EnvMistralOcrClient` exactly: the
-/// R13-2 `tools.toml [markdown] auth` resolution (fallback `MISTRAL_API_KEY`),
-/// `MISTRAL_API_BASE` honored only when no `[markdown]` adapter is declared,
+/// `tools.toml [markdown] auth` credential resolution,
+/// the production origin fixed by the built-in target,
 /// `authenticated_agent` (redirects(0), strict timeouts), forced identity
 /// encoding, and bounded reads. Request/response shapes are the 2026-07-03
 /// archived 2026-07-03 live-verification record (07 §5.2 末尾).
@@ -233,30 +233,22 @@ impl EnvMistralBatchClient {
         }
     }
 
-    /// Mirror of `EnvMistralOcrClient::base_url` — the `MISTRAL_API_BASE`
-    /// override is honored only when no `tools.toml` `[markdown]` adapter is
-    /// declared.
+    /// Mirror of `EnvMistralOcrClient::base_url`: production uses the fixed
+    /// built-in origin. The explicit constructor override is for hermetic tests.
     fn base_url(&self) -> String {
         self.base_url
             .clone()
-            .or_else(|| {
-                crate::tool_lock::registered_declared_adapter("markdown")
-                    .is_none()
-                    .then(|| std::env::var("MISTRAL_API_BASE").ok())
-                    .flatten()
-            })
             .unwrap_or_else(|| "https://api.mistral.ai".to_owned())
             .trim_end_matches('/')
             .to_owned()
     }
 
-    /// Mirror of `EnvMistralOcrClient::api_key` (R13-2: a declared
-    /// `tools.toml [markdown] auth` wins; legacy `MISTRAL_API_KEY` fallback).
+    /// Mirror of `EnvMistralOcrClient::api_key`: `tools.toml [markdown] auth`
+    /// is the credential authority.
     fn api_key() -> Result<String> {
-        crate::tool_lock::resolve_role_api_key("markdown", "MISTRAL_API_KEY")?.ok_or_else(|| {
+        crate::tool_lock::resolve_role_api_key("markdown")?.ok_or_else(|| {
             AdapterError::Auth(
-                "no Mistral OCR API key: set MISTRAL_API_KEY or a tools.toml `[markdown] auth`"
-                    .to_owned(),
+                "no Mistral OCR API key: declare tools.toml `[markdown] auth`".to_owned(),
             )
         })
     }
@@ -348,7 +340,7 @@ impl MistralBatchClient for EnvMistralBatchClient {
 
     /// `POST {base}/v1/batch/jobs` — the verified job-create body: the model
     /// rides the JOB (`input_files` carries the uploaded file id), and
-    /// `metadata` is sent verbatim (07 §5.7: it must round-trip 完全・不変;
+    /// `metadata` is sent verbatim (07 §5.5: it must round-trip 完全・不変;
     /// the intent_token + task key 4 組 ride here, 10 §7.5.2).
     fn create_job(
         &self,
@@ -408,7 +400,7 @@ impl MistralBatchClient for EnvMistralBatchClient {
     }
 
     /// `DELETE {base}/v1/files/{id}` — provider 404 (already gone) reports as
-    /// success (07 §5.7): the sweep's delete is idempotent by contract.
+    /// success (07 §5.5): the sweep's delete is idempotent by contract.
     fn delete_upload(&self, upload_id: &str) -> Result<()> {
         let api_key = Self::api_key()?;
         let response = authenticated_agent(self.http_policy)
@@ -467,7 +459,7 @@ fn parse_job_record(value: &Value) -> Result<BatchJobRecord> {
             .get("output_file")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        // 07 §5.7: metadata is whatever the provider returned — verbatim.
+        // 07 §5.5: metadata is whatever the provider returned — verbatim.
         metadata: value.get("metadata").cloned().unwrap_or(Value::Null),
     })
 }
@@ -829,17 +821,17 @@ impl MistralBatchClient for MockBatchClient {
 /// adapter seams: the inline mock script wins; otherwise the real
 /// [`EnvMistralBatchClient`] when the Mistral OCR adapter is configured —
 /// the SAME condition the sync send path resolves its credential under
-/// (`EnvMistralOcrClient::api_key`: a declared `tools.toml [markdown] auth`
-/// wins, else the legacy `MISTRAL_API_KEY` env var); otherwise `None`.
-/// A declared-but-broken credential (`keychain:` / invalid runtime target)
-/// stays a loud error here, exactly as it is on the sync path.
+/// (`EnvMistralOcrClient::api_key`: declared `tools.toml [markdown] auth`);
+/// otherwise `None`.
+/// A declared credential with an invalid runtime target stays a loud error here,
+/// exactly as it is on the sync path.
 pub fn configured_mistral_batch_client() -> Result<Option<Box<dyn MistralBatchClient>>> {
     if let Ok(raw) = std::env::var(TEST_MISTRAL_BATCH_ENV)
         && !raw.trim().is_empty()
     {
         return Ok(Some(Box::new(MockBatchClient::from_env_value(&raw)?)));
     }
-    if crate::tool_lock::resolve_role_api_key("markdown", "MISTRAL_API_KEY")?.is_some() {
+    if crate::tool_lock::resolve_role_api_key("markdown")?.is_some() {
         return Ok(Some(Box::new(EnvMistralBatchClient::new())));
     }
     Ok(None)
@@ -847,13 +839,23 @@ pub fn configured_mistral_batch_client() -> Result<Option<Box<dyn MistralBatchCl
 
 /// Crate-wide test-only env lock. `std::env::set_var`/`remove_var` are
 /// process-global and `cargo test` is multi-threaded; every test that touches
-/// `MISTRAL_API_KEY` / [`TEST_MISTRAL_BATCH_ENV`] / [`MISTRAL_WORKSPACE_ID_ENV`]
+/// [`TEST_MISTRAL_BATCH_ENV`] / [`MISTRAL_WORKSPACE_ID_ENV`]
 /// / `batch_inventory::TEST_BATCH_INVENTORY_ENV` must hold THIS lock (a
 /// module-local lock cannot serialize against another module's tests over the
 /// same variables — batch_client and batch_inventory share all four).
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    static DECLARED_ADAPTER: std::sync::Once = std::sync::Once::new();
+    DECLARED_ADAPTER.call_once(|| {
+        crate::tool_lock::register_declared_adapters(std::collections::HashMap::from([(
+            "markdown".to_owned(),
+            crate::tool_lock::DeclaredAdapter {
+                auth: Some("plain:test-key".to_owned()),
+                ..crate::tool_lock::DeclaredAdapter::default()
+            },
+        )]));
+    });
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
@@ -1014,8 +1016,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "200 OK",
             &[],
@@ -1030,8 +1030,6 @@ mod tests {
         let uploaded = client
             .upload_batch_input(jsonl.as_bytes(), &filename)
             .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         assert_eq!(uploaded, "file-verified-1");
 
         let requests = server.join().unwrap();
@@ -1094,8 +1092,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "200 OK",
             &[],
@@ -1112,13 +1108,11 @@ mod tests {
         let record = client
             .create_job("file-verified-1", "mistral-ocr-2505", &sent_metadata)
             .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(record.job_id, "batch-verified-1");
         assert_eq!(record.status, BatchJobStatus::Queued);
         assert_eq!(record.output_file_id, None);
-        // The record's metadata is the PROVIDER's returned value (07 §5.7
+        // The record's metadata is the PROVIDER's returned value (07 §5.5
         // round-trip contract observes what came back, never an input echo).
         assert_eq!(
             record.metadata,
@@ -1157,18 +1151,14 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "404 Not Found",
             &[],
             r#"{"detail":"file already deleted"}"#,
         )]);
         let client = EnvMistralBatchClient::with_base_url(&base);
-        // 07 §5.7: already-gone reports as success.
+        // 07 §5.5: already-gone reports as success.
         client.delete_upload("file-gone").unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         let requests = server.join().unwrap();
         assert!(
             requests[0]
@@ -1184,8 +1174,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let page0 = serde_json::json!({
             "total": 3,
             "data": [
@@ -1208,8 +1196,6 @@ mod tests {
         ]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let jobs = client.list_jobs().unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(jobs.len(), 3);
         assert_eq!(jobs[0].job_id, "batch-1");
@@ -1239,8 +1225,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let page0 = serde_json::json!({
             "total": 2,
             "data": [
@@ -1252,8 +1236,6 @@ mod tests {
             spawn_scripted_server(vec![http_response("200 OK", &[], &page0.to_string())]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let uploads = client.list_uploads().unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(uploads.len(), 2);
         assert_eq!(uploads[0].upload_id, "file-a");
@@ -1280,8 +1262,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         // Every page is non-empty and no `total` is reported: only the
         // 50-page bound can stop this walk. The server accepts exactly 50
         // connections, so a 51st request would fail loudly (refused).
@@ -1300,8 +1280,6 @@ mod tests {
         let (base, server) = spawn_scripted_server(responses);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let jobs = client.list_jobs().unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(jobs.len(), BATCH_LIST_MAX_PAGES);
         let requests = server.join().unwrap();
@@ -1320,8 +1298,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         // The verified out-batch/batch_results.jsonl envelope: one JSON object
         // per line, `{"id", "custom_id", "response": {"status_code", "body"}}`.
         let payload = concat!(
@@ -1333,8 +1309,6 @@ mod tests {
         let (base, server) = spawn_scripted_server(vec![http_response("200 OK", &[], payload)]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let lines = client.fetch_output("file-out-1").unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
 
         assert_eq!(lines.len(), 2, "blank lines are skipped, not errors");
         assert_eq!(lines[0].custom_id, "task-a");
@@ -1359,8 +1333,6 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let (base, server) = spawn_scripted_server(vec![http_response(
             "429 Too Many Requests",
             &[("Retry-After", "7")],
@@ -1368,8 +1340,6 @@ mod tests {
         )]);
         let client = EnvMistralBatchClient::with_base_url(&base);
         let error = client.get_job("batch-1").unwrap_err();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
         server.join().unwrap();
 
         match error {
@@ -1412,19 +1382,10 @@ mod tests {
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
         // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(MISTRAL_WORKSPACE_ID_ENV) };
-        assert!(
-            configured_mistral_batch_client().unwrap().is_none(),
-            "no mock script and no credential → no batch client"
-        );
-
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("MISTRAL_API_KEY", "test-key") };
         let real = configured_mistral_batch_client()
             .unwrap()
-            .expect("the sync path's credential condition also configures the batch lane");
+            .expect("the declared credential also configures the batch lane");
         assert_eq!(real.provider_scope_id().unwrap(), DEFAULT_PROVIDER_SCOPE_ID);
 
         // FIXME: Audit that the environment access only happens in single-threaded code.
@@ -1435,7 +1396,5 @@ mod tests {
         assert_eq!(mock.provider_scope_id().unwrap(), "mock-ws");
         // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var(TEST_MISTRAL_BATCH_ENV) };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("MISTRAL_API_KEY") };
     }
 }

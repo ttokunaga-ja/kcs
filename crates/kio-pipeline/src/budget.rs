@@ -2,7 +2,7 @@
 //!
 //! The device-global charge/reservation ledger itself (formerly `CostLedger` /
 //! `ReservationLedger` here, a JSONL charge file plus a sibling
-//! reservations/reclaimed JSONL pair — see 10-operations.md §12.7's rename
+//! reservations/reclaimed JSONL pair — see 10-operations.md §11.7's rename
 //! table for the retired on-disk names) was retired 2026-07-21 in favor of
 //! `kio_pipeline::ledger` (`cost-ledger.sqlite`, 04-pipeline.md §5.4/§5.8).
 //! This module now holds only the ledger-storage-independent pieces: budget
@@ -230,7 +230,7 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
                 .map(|value| value as f64)
         });
     // M8: non-negative guard on budget caps (defense-in-depth behind the
-    // config.schema.json `minimum: 0` constraint, 10 §12 / 06 §11). A negative cap
+    // config.schema.json `minimum: 0` constraint, 10 §11 / 06 §10). A negative cap
     // is nonsensical and would silently invert the budget arithmetic; reject it
     // (exit 2 KIO-E-CONFIG-SCHEMA-001 via `pipeline_to_kio`).
     if let Some(cap) = monthly_usd_cap
@@ -249,12 +249,12 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
             )));
         }
         // CL61 (04 §5.4 L768): "設定キー名 = adapter_kind と同一 enum: markdownize /
-        // embedding / summary. enum 外の未知キーは schema error" — the per_adapter
+        // embedding. enum 外の未知キーは schema error" — the per_adapter
         // cap is device-layer-only (`crate::ledger::ops::check_then_reserve`'s
         // third condition; folder cap stays total-only), so its key namespace is
         // exactly `crate::ledger::ops::PER_ADAPTER_KIND_ENUM`, not the broader
         // `kio_adapter::types::AdapterKind` set (which also has `prepare` /
-        // `classification` / `rerank` — none of those are budget-capped).
+        // `rerank` — neither is budget-capped).
         if !crate::ledger::ops::is_valid_per_adapter_key(adapter) {
             return Err(PipelineError::Schema(format!(
                 "budget.per_adapter key must be one of {:?} at {}: {adapter}",
@@ -402,7 +402,7 @@ mod tests {
     }
 
     // CL61 (04 §5.4 L768): `[budget.per_adapter]` keys are the closed
-    // `markdownize`/`embedding`/`summary` enum (device-layer-only per
+    // `markdownize`/`embedding` enum (device-layer-only per
     // `crate::ledger::ops::check_then_reserve`'s third condition); an unknown key
     // is a schema error (exit 2 KIO-E-CONFIG-SCHEMA-001 via `pipeline_to_kio`'s
     // catch-all `PipelineError::Schema` mapping).
@@ -412,16 +412,15 @@ mod tests {
         let device = dir.path().join("device.toml");
         let folder = dir.path().join("folder.toml");
 
-        // The 3 valid keys parse.
+        // Both valid keys parse.
         std::fs::write(
             &device,
-            "[budget.per_adapter]\nmarkdownize = 30.0\nembedding = 15.0\nsummary = 5.0\n",
+            "[budget.per_adapter]\nmarkdownize = 30.0\nembedding = 15.0\n",
         )
         .unwrap();
         let ok = read_budget_policy(&device, &folder).unwrap();
         assert_eq!(ok.device_per_adapter.get("markdownize"), Some(&30.0));
         assert_eq!(ok.device_per_adapter.get("embedding"), Some(&15.0));
-        assert_eq!(ok.device_per_adapter.get("summary"), Some(&5.0));
 
         // The legacy JSONL-era "markdown" key (no trailing -ize) is now outside
         // the enum and must be rejected, not silently accepted under the wrong

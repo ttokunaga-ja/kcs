@@ -124,7 +124,7 @@ impl KioError {
         )
     }
 
-    /// QB8/QB9 (step4b-contract-tests-p3b.md §A, 06 §8 / 10 §12.5): the
+    /// QB8/QB9 (step4b-contract-tests-p3b.md §A, 06 §8 / 10 §11.5): the
     /// canonical, spec-listed error code for an incompatible
     /// `kio_format_version` is `KIO-E-STORE-VERSION-001` (exit 8), not a
     /// bespoke `KIO-E-CONFIG-FORMAT-001` — the latter never appeared in the

@@ -23,7 +23,7 @@
 //! QB21/QB22 (system-directory ignore patterns + template-version hashing),
 //! QB25-QB28/QB30/QB33-QB49 except QB29/31/32/37 (mtime racy-check, fsync
 //! chaining, XLSX escaping, LCS tie-break proof, UCD Script property,
-//! query_cache SQL read/write, embedding CAS byte reformat, tree
+//! query-vector cache persistence, embedding CAS byte reformat, tree
 //! chunking_config_hash/chunk_set_hash fields, diff derived-only detection,
 //! `parent_instance`, auto gen+1 on prepared_hash change, the 9-state
 //! `up_to_date` machine, tool_lock_hash no-op comparison, batch resume/retry
@@ -31,8 +31,8 @@
 //! descriptor publish, tag simple-case-folding, view assembly `order`
 //! uniqueness + percent-encoding, registry move-nonqualify + path validation
 //! extension), QB59/QB60 (PC20 rotation-point tracing for embedding-
-//! enrichment-finalize / index-batch-finalize), QB62-QB66 (query_cache
-//! multi-scope reuse and PC33/44 per-binding chunking-config wiring — both
+//! enrichment-finalize / index-batch-finalize), QB62-QB66 (multi-scope
+//! reuse and PC33/44 per-binding chunking-config wiring — both
 //! need QB33/34/64/65's infra first).
 
 use std::fs;
@@ -1297,8 +1297,8 @@ fn qb61_lifecycle_retire_advances_both_index_generation_and_last_lifecycle_epoch
 
 /// QB29(a)(b) + QB32: `chunks.chunk_id` / `embeddings.id` are
 /// `NOT NULL PRIMARY KEY` (a rowid table's bare `TEXT PRIMARY KEY` does not
-/// itself imply NOT NULL), and `idx_embeddings_type` exists so a
-/// `target_type='query_cache'` lookup does not scan the whole table.
+/// itself imply NOT NULL), and `idx_embeddings_type` supports bounded
+/// target-type lookups without scanning the whole table.
 #[test]
 fn qb29_qb32_chunks_and_embeddings_ddl_and_target_type_index() {
     let (dir, _pointer) = fixture();
@@ -1337,11 +1337,8 @@ fn qb29_qb32_chunks_and_embeddings_ddl_and_target_type_index() {
     assert!(index_exists.is_some(), "idx_embeddings_type must exist");
 }
 
-/// QB18: `[observability] retention_days` is the canonical key (10 §12.3
-/// L954) and takes effect — exercised indirectly via the config accepting
-/// it without a schema error (the same "previously bricked every command"
-/// regression class `[logs] retention_days` was fixed for) and, precisely,
-/// by confirming `[observability]` wins over a simultaneously-set `[logs]`.
+/// `[observability] retention_days` is the sole canonical retention key and is
+/// accepted by the strict config schema.
 #[test]
 fn qb18_observability_retention_days_is_the_canonical_key() {
     let (dir, _pointer) = fixture();
@@ -1350,15 +1347,6 @@ fn qb18_observability_retention_days_is_the_canonical_key() {
         "[observability]\nretention_days = 60\n",
     )
     .unwrap();
-    // A previously-schema-rejected key now runs cleanly end-to-end.
     success(&dir, &["status"]);
     success(&dir, &["search", "3600"]);
-
-    // Both sections set, with different values: [observability] wins.
-    fs::write(
-        dir.path().join(".kio/config.toml"),
-        "[observability]\nretention_days = 90\n[logs]\nretention_days = 7\n",
-    )
-    .unwrap();
-    success(&dir, &["status"]);
 }

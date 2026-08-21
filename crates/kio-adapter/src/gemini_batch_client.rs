@@ -278,7 +278,7 @@ fn qualified_model(model: &str) -> String {
 // Trait
 // ---------------------------------------------------------------------------
 
-/// 07 §5.7 client operations for the embedding Batch lane. One provider job
+/// 07 §5.5 client operations for the embedding Batch lane. One provider job
 /// carries ONE task's input (1 job = 1 task), the same v1 posture the OCR lane
 /// takes, so the per-task-key `batch_job_id` column keys the recovery walk.
 ///
@@ -501,9 +501,8 @@ pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbe
 // ---------------------------------------------------------------------------
 
 /// Real Gemini Batch REST client. Auth and base-url posture mirror the
-/// embedding adapter exactly: a declared `tools.toml [embedding] auth` wins,
-/// `GEMINI_API_KEY` is the fallback, and `GEMINI_API_BASE` is honored only when
-/// no `[embedding]` adapter is declared.
+/// embedding adapter exactly: `tools.toml [embedding] auth` is the credential
+/// authority and the production origin is fixed by the built-in target.
 #[derive(Debug, Clone, Default)]
 pub struct EnvGeminiBatchClient {
     base_url: Option<String>,
@@ -531,22 +530,15 @@ impl EnvGeminiBatchClient {
     fn base_url(&self) -> String {
         self.base_url
             .clone()
-            .or_else(|| {
-                crate::tool_lock::registered_declared_adapter("embedding")
-                    .is_none()
-                    .then(|| std::env::var("GEMINI_API_BASE").ok())
-                    .flatten()
-            })
             .unwrap_or_else(|| GEMINI_API_ORIGIN.to_owned())
             .trim_end_matches('/')
             .to_owned()
     }
 
     fn api_key() -> Result<String> {
-        crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.ok_or_else(|| {
+        crate::tool_lock::resolve_role_api_key("embedding")?.ok_or_else(|| {
             AdapterError::Auth(
-                "no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth`"
-                    .to_owned(),
+                "no Gemini embedding API key: declare tools.toml `[embedding] auth`".to_owned(),
             )
         })
     }
@@ -875,13 +867,13 @@ impl GeminiBatchClient for MockGeminiBatchClient {
 
 /// The active embedding Batch client: the mock seam when
 /// [`TEST_GEMINI_BATCH_ENV`] is set, otherwise the real client when an API key
-/// is resolvable (a declared `tools.toml [embedding] auth` or `GEMINI_API_KEY`).
+/// is resolvable from declared `tools.toml [embedding] auth`.
 /// `None` means the lane is unavailable and the caller must not send.
 pub fn resolve_gemini_batch_client() -> Result<Option<Box<dyn GeminiBatchClient>>> {
     if let Ok(raw) = std::env::var(TEST_GEMINI_BATCH_ENV) {
         return Ok(Some(Box::new(MockGeminiBatchClient::from_env_value(&raw)?)));
     }
-    if crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.is_some() {
+    if crate::tool_lock::resolve_role_api_key("embedding")?.is_some() {
         return Ok(Some(Box::new(EnvGeminiBatchClient::new())));
     }
     Ok(None)

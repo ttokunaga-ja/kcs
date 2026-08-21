@@ -955,28 +955,20 @@ pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution>
         }
         Some("no_usage_report") => Some(AdoptedEmbeddingExecution::NoUsageReport),
         Some(_) => None,
-        // R13-2: activate the Real path when EITHER a `tools.toml` `[embedding]`
-        // adapter is declared (its auth is resolved at execution — keychain there
-        // is a loud error) OR the legacy `GEMINI_API_KEY` env var is set. Before
-        // this a declared `auth = "env:MY_KEY"` was ignored (silent noop) because
-        // only `GEMINI_API_KEY` was checked.
+        // The declared tools.toml credential is the sole activation authority.
         None => real_embedding_activation(
             crate::tool_lock::registered_declared_adapter("embedding")
                 .and_then(|declared| declared.auth)
                 .is_some(),
-            std::env::var("GEMINI_API_KEY").is_ok(),
         ),
     }
 }
 
 /// R13-2: pure activation rule for the adopted embedding adapter (unit-testable).
-/// Real when the adapter is declared in `tools.toml` OR the legacy env key is set.
+/// Real when the adapter declares credentials in `tools.toml`.
 #[must_use]
-pub fn real_embedding_activation(
-    declared: bool,
-    env_key_present: bool,
-) -> Option<AdoptedEmbeddingExecution> {
-    (declared || env_key_present).then_some(AdoptedEmbeddingExecution::Real)
+pub fn real_embedding_activation(declared: bool) -> Option<AdoptedEmbeddingExecution> {
+    declared.then_some(AdoptedEmbeddingExecution::Real)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1080,7 +1072,7 @@ pub fn run_embedding(
     })
 }
 
-/// The send lane the active implementation prefers (07 §5.7). The offline
+/// The send lane the active implementation prefers (07 §5.5). The offline
 /// adapter has no batch lane to prefer — there is no provider job queue — so
 /// this is what keeps `poll_batch_embedding_jobs` from running for it.
 pub fn embedding_preferred_request_kind(
@@ -1262,25 +1254,18 @@ mod tests {
         assert_eq!(adopted_embedding_profile().adapter_id, "gemini_embedding_2");
     }
 
-    // R13-2(d): a declared `[embedding]` adapter activates the Real path even
-    // without GEMINI_API_KEY (the finding: a declared `auth = "env:MY_KEY"` used to
-    // be ignored). The legacy env-only activation still works too.
+    // A declared `[embedding]` credential activates the Real path.
     #[test]
-    fn r13_2_real_embedding_activation_honors_declaration_or_env() {
+    fn real_embedding_activation_requires_declaration() {
         assert_eq!(
-            real_embedding_activation(true, false),
+            real_embedding_activation(true),
             Some(AdoptedEmbeddingExecution::Real),
-            "a declared adapter activates without the env key"
+            "a declared adapter activates"
         );
         assert_eq!(
-            real_embedding_activation(false, true),
-            Some(AdoptedEmbeddingExecution::Real),
-            "the legacy env-only activation still works"
-        );
-        assert_eq!(
-            real_embedding_activation(false, false),
+            real_embedding_activation(false),
             None,
-            "neither declared nor env → inactive"
+            "an undeclared adapter remains inactive"
         );
     }
 

@@ -781,19 +781,23 @@ fn head_branch_tag_tips_and_protected_types_are_excluded() {
         "2025-01-02T00:00:00Z",
         CommitType::Manual,
     );
-    let imported = f.commit(
-        &f.tree("imported"),
+    let intermediate = f.commit(
+        &f.tree("intermediate"),
         vec![manual],
         "2025-01-03T00:00:00Z",
-        CommitType::Imported,
+        CommitType::Manual,
     );
-    let merged = f.commit(
-        &f.tree("merged"),
-        vec![imported],
+    let protected_manual = f.commit(
+        &f.tree("protected-manual"),
+        vec![intermediate],
         "2025-01-04T00:00:00Z",
-        CommitType::Merged,
+        CommitType::Manual,
     );
-    let purged = f.purged_commit(&f.tree("purged"), vec![merged], "2025-01-05T00:00:00Z");
+    let purged = f.purged_commit(
+        &f.tree("purged"),
+        vec![protected_manual],
+        "2025-01-05T00:00:00Z",
+    );
     let head = f.commit(
         &f.tree("head"),
         vec![purged],

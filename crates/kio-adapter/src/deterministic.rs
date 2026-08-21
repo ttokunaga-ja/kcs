@@ -48,7 +48,7 @@ impl DeterministicAdapter {
             allow_network: false,
             // The built-in deterministic adapter never bills (local, no
             // network) — QA18's `billable_kinds`/`reject_billing` are only
-            // REQUIRED for a billable adapter (07 §5.7 condition 6). Per the
+            // REQUIRED for a billable adapter (07 §5.5 condition 6). Per the
             // QA18 ruling, a non-billable adapter still states its billing
             // posture explicitly (`Nonbillable`) rather than leaving
             // `reject_billing` at `None` — a consumer must fail-closed

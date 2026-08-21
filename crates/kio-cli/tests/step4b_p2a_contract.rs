@@ -230,22 +230,14 @@ fn pa01_object_uri_rejects_every_type_but_image() {
 }
 
 #[test]
-fn pa02_image_uri_self_store_fallback_when_scope_id_unreachable() {
+fn pa02_image_uri_declared_scope_is_required() {
     let fixture = indexed_fixture();
     let image_hash = add_image_reference(&fixture.dir, &fixture.raw_hash, b"pa02 image bytes");
-    // An entirely unregistered/unreachable scope_id: never seen by this
-    // process's registry, not the current scope's own id either.
+    // An entirely unregistered/unreachable scope_id remains unreachable even
+    // when the current scope happens to hold bytes with the same image hash.
     let unreachable_uri = format!("kio://01ARZ3NDEKTSV4RRFFQ69G5FAV/object/image/{image_hash}");
-    let output = json_success(&fixture.dir, &["open", &unreachable_uri]);
-    assert_eq!(output["status"], "opened");
-    assert_eq!(output["object_type"], "image");
-
-    // A hash absent from the self store still fails not_found (the fallback
-    // does not fabricate objects).
-    let missing_hash = hash_bytes(b"pa02 not ingested anywhere");
-    let missing_uri = format!("kio://01ARZ3NDEKTSV4RRFFQ69G5FAV/object/image/{missing_hash}");
-    let error = json_failure(&fixture.dir, &["open", &missing_uri], 4);
-    assert_eq!(error["error_code"], "KIO-E-STORE-NOT-FOUND-001");
+    let error = json_failure(&fixture.dir, &["open", &unreachable_uri], 3);
+    assert_eq!(error["error_code"], "KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001");
 }
 
 #[test]
@@ -965,7 +957,7 @@ fn pa32_shared_derived_objects_survive_purge_only_when_a_live_reference_remains(
 }
 
 #[test]
-fn pa33_chunk_vec_is_target_scoped_and_embeddings_follow_live_reference_not_query_cache() {
+fn pa33_chunk_vec_is_target_scoped_and_embeddings_follow_live_reference() {
     let fixture = indexed_fixture();
     let sqlite = fixture.dir.path().join(".kio/index/sqlite.db");
     assert!(sqlite.exists());
