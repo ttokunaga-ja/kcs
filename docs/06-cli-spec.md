@@ -110,7 +110,7 @@ kio reindex [--regenerate] [--at <commit>] [--yes] [--online|--offline] [--realt
                                         # (raw 跨ぎ incremental の三つ組 — full では null) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--regenerate は確認プロンプト必須 (--yes で省略可)
 kio evidence verify <pointer> [--strict]
-kio evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Phase 4+ — §7、08 §4.3)
+kio evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は exactly-one / 相互排他。alias・fallback はない (§7、08 §4.3)
 kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)。
                                         # --latest の既定挙動 (auto retarget / proposal) は Phase 4 着手前確定 (08 §5 残未決)
 ```
@@ -483,11 +483,13 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED — retryable 理由を
                                含めば exit 3・全て permanent なら exit 4 (05 §1.8)。
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
-kio evidence verify --batch <pointers.jsonl>   一括 verify (Phase 4+ — 08 §4.3)
-                               (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
-                                なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3。
-                                search の retryability 分割 (05 §1.8) とは別 domain の規則 —
-                                pointer 単位の status 混在は retryability を見ず常に 4)
+kio evidence verify --batch <pointers.jsonl>   一括 verify。入力の構造・filesystem・integrity error は
+                               command-level であり partial result を publish しない（08 §4.3）。
+                               --strict 時は permanent (tombstoned / not_found / manifest_missing) を
+                               1件でも含めば 4、retryable (scope_unreachable / registry_duplicate /
+                               commit_shallow) を含むが permanent がなければ 3、全 alive なら 0。
+                               --strict なしは単発の semantics を保ち、検査完了時は 0（ただし
+                               registry_duplicate は 3）。
 kio open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
 kio evidence retarget          対応なし / ambiguous は 4。
                                tool_profile_hash 不一致で chunk 解決不能 (retarget 要) は 8

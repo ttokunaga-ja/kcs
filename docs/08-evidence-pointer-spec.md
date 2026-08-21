@@ -303,7 +303,7 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 
 # 4. Dead Evidence Pointer (purge 対応)
 
-「Evidence Pointer の不変性」(§6) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (確定。残未決 1 件 = bulk verify スループット — [09-mvp-scope.md §5.3](09-mvp-scope.md))。
+「Evidence Pointer の不変性」(§6) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (decided — [09-mvp-scope.md §5.3](09-mvp-scope.md))。
 
 ## 4.1 Tombstone レスポンス
 
@@ -364,8 +364,7 @@ kio evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 `unverifiable` は `--strict` 時の「時点帰属を検証できない解決」であり、`details.reason` で区別する:
 `commit_shallow` (§3.1 手順 8 — 状況により解消し得る) /
 `manifest_missing` (手順 6b — **恒久**)。exit は reason の再試行可能性に従い分岐する — `commit_shallow` のみなら 3 (unshallow で解消し得る)、`manifest_missing` を 1 件でも含めば **4** (恒久 — 再試行で進展しない。[06-cli-spec.md §7](06-cli-spec.md) / [10-operations.md §12.2](10-operations.md) の横断規約「4 = 再試行で進展しない」どおり。details.reason は引き続き全 reason を返す)。
-live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
-status にこれらをそのまま用いる。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
+live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
 retryable error `KIO-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
 0 を返さない (再構築中に既存 sqlite.db が読めても通常応答へ戻らず fail-closed — [05-runtime.md §6](05-runtime.md)。
 [06-cli-spec.md §7](06-cli-spec.md)、[05-runtime.md §2.6](05-runtime.md))。
@@ -378,18 +377,59 @@ permanent の 4 と区別しないと自動化が再試行可能性を判定で�
 `--strict` なしの verify は検査が完了すれば 0 を返し、生存状態は `status` フィールドで判定する。
 exit code の横断規約は [06-cli-spec.md §7](06-cli-spec.md)。
 
-bulk verify:
+batch verify は canonical CLI の一方の形である。single pointer と `--batch` は Clap の
+構造で exactly-one / 相互排他にし、alias・fallback・dual-read は置かない。
 
 ```bash
-kio evidence verify --batch <pointers.jsonl>
-# 各行が pointer JSON。各行に対する status を返す
+kio evidence verify --batch <pointers.jsonl> [--strict]
 ```
+
+`<pointers.jsonl>` は strict UTF-8 の JSONL である。logical record は 1..=4096、各行は
+pointer JSON object とし、terminal newline は許容するが blank / whitespace-only line は許容しない。
+1 logical record の UTF-8 byte 長は delimiter を除き 64 KiB 以下、入力ファイルの exact bytes
+（delimiter と terminal newline を含む）は 16 MiB 以下である。行順・重複行は保持する。入力は
+regular file・single link (`nlink == 1`) に限り、全 path component を nofollow で開く。pre-open /
+open / post-open の retained descriptor identity が一致しなければ拒否する。batch 全体で distinct
+`scope_id` は 256 以下、認証済み CAS bytes の aggregate は 4 GiB 以下である。
+
+正常な batch output は単一 JSON object だけであり、次の schema を exact とする。`input_sha256` は
+delimiter と terminal newline を含む input の exact bytes の SHA-256、`results` は入力と同順で各行を
+一度ずつ保持する。`<single exact status object>` は本節の単発 verify response を field 値までそのまま
+入れる。`status_counts` は six status (`alive`, `tombstoned`, `not_found`, `scope_unreachable`,
+`unverifiable`, `registry_duplicate`) の全 key を常に持つ。
+
+```json
+{
+  "schema": "kio.evidence.batch-verify",
+  "schema_version": 1,
+  "input_sha256": "sha256:<lowercase-hex>",
+  "strict": false,
+  "results": [{"line": 1, "result": <single exact status object>}],
+  "summary": {"total": 1, "status_counts": {"alive": 1, "tombstoned": 0, "not_found": 0, "scope_unreachable": 0, "unverifiable": 0, "registry_duplicate": 0}},
+  "verified_count": 1
+}
+```
+
+output publication is all-or-nothing: structural input error, integrity/rebuild/purge/corruption error, or
+command-level error publishes no partial `results`. Internal cache は許容するが output authority にはならない。
+各行の final status 前に scope authority、registry/index generation、active purge/read barrier を再検査する。
+従って batch の duplicate row も cache hit だけで返してはならず、各 row の最終 authority check を通す。
+
+strict batch の exit priority は permanent 4 > retryable 3 > success 0 である。permanent は
+`tombstoned` / `not_found` / `manifest_missing`、retryable は `scope_unreachable` /
+`registry_duplicate` / `commit_shallow` とする。non-strict は単発 verify semantics を保つ: 検査完了時は
+0 だが `registry_duplicate` は 3 である。
+
+release build、warm local SSD、one scope、4096 distinct all-alive rows、network-free の測定目標は
+1,000 pointer rows/min 以上である。この性能目標は上記の authority / registry / index / purge barrier を
+緩和する根拠にしてはならない。
 
 active purge journal 中の verify は評価を行わず、KIO-E-PURGE 系 retryable (exit 3) を返す
 ([05-runtime.md §3.5](05-runtime.md) の読取系規約 — marker 耐久化後・削除完了前の窓で
 「削除対象が alive」と誤答しないため)。
 
-`--batch` の実装は Phase 4+ ([09-mvp-scope.md §3.1](09-mvp-scope.md))。単発 verify は Step 4。
+batch verify は Phase 4 milestone 6 の implemented target/current である。retarget は引き続き
+Phase 4+ の non-goal である ([09-mvp-scope.md §3.1](09-mvp-scope.md))。
 
 ---
 
