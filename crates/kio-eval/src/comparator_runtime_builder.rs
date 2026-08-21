@@ -1,9 +1,9 @@
 //! Rust-owned construction contract for the sealed macOS comparator runtime.
 //!
-//! The administrator shell only creates/attaches the disk image.  Pin
-//! authentication, Mach-O closure rewriting, payload re-walking and manifest
-//! publication are deliberately here, next to the runtime admission verifier.
-use super::QhardError;
+//! The administrator-only Rust command owns the complete transaction: pin
+//! authentication, image creation/attachment, Mach-O closure rewriting,
+//! payload re-walking, and manifest publication.
+use super::{QhardError, RuntimeMountIdentity, observe_runtime_mount};
 use kio_core::cas::hash_bytes;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,21 +13,25 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+const MANAGED_ROOT: &str = "/Library/KioComparatorRuntime";
+const RUNTIME_ROOT: &str = "/Library/KioComparatorRuntime/v1";
+const IMAGE_PATH: &str = "/Library/KioComparatorRuntime/v1.dmg";
+const MANIFEST_PATH: &str = "/Library/KioComparatorRuntime/v1.manifest.json";
+const BUILD_PARENT: &str = "/private/tmp";
+const VOLUME_NAME: &str = "KioComparatorRuntime-v1";
+const CANONICAL_EVALUATOR: &str = "/usr/local/bin/kio-eval";
+
 const CONFIG_BYTES: &[u8] = br#"{"custom_adapters":[]}"#;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_PREIMAGE_BYTES: usize = 2 * 1024 * 1024;
 const SYSTEM_PREFIXES: [&str; 2] = ["/usr/lib/", "/System/Library/"];
 
-#[derive(Debug, Clone)]
-pub struct ComparatorRuntimePrepareOptions {
-    pub build_root: PathBuf,
-}
-#[derive(Debug, Clone)]
-pub struct ComparatorRuntimeFinalizeOptions {
+/// The only public result of the administrator-owned installer.  All paths
+/// are fixed production authority, rather than caller-selected options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComparatorRuntimeInstallSummary {
     pub runtime_root: PathBuf,
-    pub preimage: PathBuf,
     pub image: PathBuf,
-    pub out: PathBuf,
+    pub manifest: PathBuf,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReviewedPin {
@@ -324,57 +328,24 @@ fn validate(pre: &Preimage) -> Result<(), QhardError> {
     Ok(())
 }
 
-pub fn prepare_comparator_runtime(
-    options: ComparatorRuntimePrepareOptions,
-) -> Result<(), QhardError> {
-    if !options.build_root.is_absolute() || fs::symlink_metadata(&options.build_root).is_ok() {
-        return Err(err(
-            "comparator runtime build root must be an absent absolute path",
-        ));
-    }
+pub fn install_comparator_runtime() -> Result<ComparatorRuntimeInstallSummary, QhardError> {
     #[cfg(target_os = "macos")]
     {
-        macos::prepare(options)
+        macos::install()
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = options;
-        Err(err("comparator runtime preparation requires macOS"))
-    }
-}
-pub fn finalize_comparator_runtime(
-    options: ComparatorRuntimeFinalizeOptions,
-) -> Result<(), QhardError> {
-    if [
-        &options.runtime_root,
-        &options.preimage,
-        &options.image,
-        &options.out,
-    ]
-    .iter()
-    .any(|p| !p.is_absolute())
-        || fs::symlink_metadata(&options.out).is_ok()
-    {
-        return Err(err(
-            "comparator runtime finalization requires absolute create-only paths",
-        ));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::finalize(options)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = options;
-        Err(err("comparator runtime finalization requires macOS"))
+        Err(err("comparator runtime installation requires macOS"))
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use crate::runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command};
     use std::{
-        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        os::unix::process::CommandExt,
         process::Command,
     };
     const SEEDS: [(&str, &str); 5] = [
@@ -398,15 +369,38 @@ mod macos {
         loaders: Vec<String>,
         environment: bool,
     }
-    fn command(bin: &str, args: &[&str]) -> Result<Vec<u8>, QhardError> {
-        let o = Command::new(bin)
+    pub(super) fn command(bin: &str, args: &[&str]) -> Result<Vec<u8>, QhardError> {
+        let mut child = Command::new(bin);
+        child
             .args(args)
-            .output()
-            .map_err(|e| err(format!("cannot run {bin}: {e}")))?;
-        if !o.status.success() || o.stdout.len() > 524288 {
+            .env_clear()
+            .env("HOME", "/var/root")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC");
+        // hdiutil creates the image itself.  A fixed restrictive umask closes
+        // the creation-to-chmod window even when the invoking root process
+        // inherited a permissive umask.
+        unsafe {
+            child.pre_exec(|| {
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        let o = run_bounded_command(
+            &mut child,
+            BoundedProcessOptions {
+                timeout: DEFAULT_PROCESS_TIMEOUT,
+                max_stdout_bytes: 524_288,
+                max_stderr_bytes: 524_288,
+            },
+        )
+        .map_err(|e| err(format!("cannot run {bin}: {e}")))?;
+        if !o.status.success() {
             return Err(err(format!("{bin} failed or emitted excessive output")));
         }
-        Ok(o.stdout)
+        Ok(o.stdout.into_bytes())
     }
     pub(super) fn parse_otool(bytes: &[u8]) -> Result<Macho, QhardError> {
         let text = std::str::from_utf8(bytes).map_err(|_| err("non-UTF8 otool output"))?;
@@ -502,14 +496,15 @@ mod macos {
         {
             return Err(err("reviewed pin changed during nofollow copy"));
         }
-        let mut out = fs::OpenOptions::new()
+        let mut output = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(to)
             .map_err(|e| err(e.to_string()))?;
-        out.write_all(&bytes)
-            .and_then(|_| out.sync_all())
+        output
+            .write_all(&bytes)
+            .and_then(|_| output.sync_all())
             .map_err(|e| err(e.to_string()))?;
         Ok(())
     }
@@ -646,10 +641,594 @@ mod macos {
         }
         Ok(names.into_iter().collect())
     }
-    pub(super) fn prepare(o: ComparatorRuntimePrepareOptions) -> Result<(), QhardError> {
-        fs::create_dir(&o.build_root).map_err(|e| err(e.to_string()))?;
-        let staged = o.build_root.join("reviewed-sources");
-        let payload = o.build_root.join("payload");
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Identity {
+        dev: u64,
+        ino: u64,
+        uid: u32,
+        gid: u32,
+        mode: u32,
+    }
+    struct RetainedAuthority {
+        path: PathBuf,
+        identity: Identity,
+        descriptor: fs::File,
+    }
+    fn identity_metadata(metadata: &fs::Metadata) -> Identity {
+        Identity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode(),
+        }
+    }
+    fn identity(path: &Path) -> Result<Identity, QhardError> {
+        let metadata = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
+        Ok(identity_metadata(&metadata))
+    }
+    fn unchanged(path: &Path, expected: Identity) -> bool {
+        identity(path).is_ok_and(|actual| actual == expected)
+    }
+    /// Every component from `anchor` to `target` is authority.  Binding only
+    /// the leaf permits a post-check rename by a writable ancestor, so retain
+    /// nofollow descriptors and exact identities for the whole namespace.
+    fn require_authority_from(
+        anchor: &Path,
+        target: &Path,
+        expected_uid: u32,
+        expected_gid: u32,
+        label: &str,
+    ) -> Result<Vec<RetainedAuthority>, QhardError> {
+        if !anchor.is_absolute()
+            || !target.is_absolute()
+            || fs::canonicalize(anchor).map_err(|e| err(e.to_string()))? != anchor
+            || fs::canonicalize(target).map_err(|e| err(e.to_string()))? != target
+        {
+            return Err(err(format!("{label} is not canonical")));
+        }
+        let descendants = target
+            .strip_prefix(anchor)
+            .map_err(|_| err(format!("{label} is outside its authority anchor")))?;
+        let components = descendants
+            .components()
+            .map(|component| match component {
+                Component::Normal(name) => Ok(name),
+                _ => Err(err(format!("{label} has an invalid authority component"))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if components.is_empty() {
+            return Err(err(format!("{label} must not equal its authority anchor")));
+        }
+
+        fn retain(
+            path: &Path,
+            expected_uid: u32,
+            expected_gid: u32,
+            directory: bool,
+            label: &str,
+        ) -> Result<RetainedAuthority, QhardError> {
+            let metadata = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
+            if metadata.file_type().is_symlink()
+                || metadata.uid() != expected_uid
+                || metadata.gid() != expected_gid
+                || metadata.mode() & 0o022 != 0
+                || (directory && !metadata.is_dir())
+                || (!directory && !metadata.is_file())
+            {
+                return Err(err(format!(
+                    "{label} has unsafe authority component: {}",
+                    path.display()
+                )));
+            }
+            super::super::require_no_extended_acl(path, label)?;
+            let descriptor = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | if directory { libc::O_DIRECTORY } else { 0 })
+                .open(path)
+                .map_err(|e| err(format!("cannot retain {label} authority component: {e}")))?;
+            let named = identity(path)?;
+            if identity_metadata(&descriptor.metadata().map_err(|e| err(e.to_string()))?) != named {
+                return Err(err(format!(
+                    "{label} authority changed while binding: {}",
+                    path.display()
+                )));
+            }
+            Ok(RetainedAuthority {
+                path: path.to_owned(),
+                identity: named,
+                descriptor,
+            })
+        }
+
+        let mut current = anchor.to_owned();
+        let mut retained = vec![retain(&current, expected_uid, expected_gid, true, label)?];
+        for (index, component) in components.iter().enumerate() {
+            current.push(component);
+            retained.push(retain(
+                &current,
+                expected_uid,
+                expected_gid,
+                index + 1 != components.len(),
+                label,
+            )?);
+        }
+        recheck_authority(&retained, label)?;
+        Ok(retained)
+    }
+    /// The evaluator itself and every namespace component used to reach it
+    /// are production authority, rooted at the system namespace.
+    fn require_root_authority(
+        path: &Path,
+        label: &str,
+    ) -> Result<Vec<RetainedAuthority>, QhardError> {
+        require_authority_from(Path::new("/"), path, 0, 0, label)
+    }
+    fn recheck_authority(retained: &[RetainedAuthority], label: &str) -> Result<(), QhardError> {
+        for component in retained {
+            if identity_metadata(
+                &component
+                    .descriptor
+                    .metadata()
+                    .map_err(|e| err(e.to_string()))?,
+            ) != component.identity
+                || !unchanged(&component.path, component.identity)
+            {
+                return Err(err(format!(
+                    "{label} authority changed: {}",
+                    component.path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+    fn sync_parent(path: &Path) -> Result<(), QhardError> {
+        fs::File::open(
+            path.parent()
+                .ok_or_else(|| err("missing publication parent"))?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| err(e.to_string()))
+    }
+    fn sync_retained_parent(parent: &(Identity, fs::File)) -> Result<(), QhardError> {
+        if identity_metadata(&parent.1.metadata().map_err(|e| err(e.to_string()))?) != parent.0 {
+            return Err(QhardError::Indeterminate(
+                "publication parent identity changed".into(),
+            ));
+        }
+        parent.1.sync_all().map_err(|e| err(e.to_string()))
+    }
+    fn remove_if_owned(path: &Path, expected: Identity, directory: bool) -> Result<(), QhardError> {
+        if !unchanged(path, expected) {
+            return Err(QhardError::Indeterminate(format!(
+                "owned rollback target changed: {}",
+                path.display()
+            )));
+        }
+        (if directory {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        })
+        .map_err(|e| {
+            QhardError::Indeterminate(format!(
+                "cannot remove owned rollback target {}: {e}",
+                path.display()
+            ))
+        })
+    }
+    fn snapshot_build_tree(root: &Path) -> Result<Vec<(PathBuf, Identity, bool)>, QhardError> {
+        fn visit(
+            path: &Path,
+            entries: &mut Vec<(PathBuf, Identity, bool)>,
+        ) -> Result<(), QhardError> {
+            let metadata = fs::symlink_metadata(path).map_err(|e| err(e.to_string()))?;
+            if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+                return Err(err("unsafe build entry"));
+            }
+            let directory = metadata.is_dir();
+            entries.push((path.to_owned(), identity(path)?, directory));
+            if directory {
+                for child in fs::read_dir(path).map_err(|e| err(e.to_string()))? {
+                    visit(&child.map_err(|e| err(e.to_string()))?.path(), entries)?;
+                }
+            }
+            Ok(())
+        }
+        let mut entries = Vec::new();
+        visit(root, &mut entries)?;
+        Ok(entries)
+    }
+    fn remove_build_root(entries: &[(PathBuf, Identity, bool)]) -> Result<(), QhardError> {
+        for (path, expected, directory) in entries.iter().rev() {
+            remove_if_owned(path, *expected, *directory)?;
+        }
+        Ok(())
+    }
+    fn create_private_build_root() -> Result<PathBuf, QhardError> {
+        let parent = Path::new(BUILD_PARENT);
+        let parent_identity = identity(parent)?;
+        for _ in 0..32 {
+            let mut random = [0_u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|e| err(format!("cannot sample build-root nonce: {e}")))?;
+            let name = random
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let candidate = parent.join(format!("kio-comparator-runtime-v1-{name}"));
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&candidate) {
+                Ok(()) => {
+                    if !unchanged(parent, parent_identity) {
+                        return Err(QhardError::Indeterminate(
+                            "build parent changed during create".into(),
+                        ));
+                    }
+                    return Ok(candidate);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(err(error.to_string())),
+            }
+        }
+        Err(err("could not allocate unique comparator build root"))
+    }
+    fn reconcile_created_image(journal: &mut Journal) -> Result<(), QhardError> {
+        match fs::symlink_metadata(IMAGE_PATH) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(metadata) if metadata.file_type().is_file() => {
+                journal.image = Some(identity(Path::new(IMAGE_PATH))?);
+                Ok(())
+            }
+            Ok(_) => Err(QhardError::Indeterminate(
+                "hdiutil create left a non-file image target".into(),
+            )),
+            Err(error) => Err(QhardError::Indeterminate(format!(
+                "cannot reconcile image effect: {error}"
+            ))),
+        }
+    }
+    fn require_private_unpublished_image() -> Result<(), QhardError> {
+        let metadata = fs::symlink_metadata(IMAGE_PATH).map_err(|e| err(e.to_string()))?;
+        if !metadata.file_type().is_file()
+            || metadata.uid() != 0
+            || metadata.gid() != 0
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(err("new comparator image is writable or not root-owned"));
+        }
+        Ok(())
+    }
+    pub(super) fn mounted_effect(
+        baseline: &RuntimeMountIdentity,
+        actual: RuntimeMountIdentity,
+    ) -> Result<Option<RuntimeMountIdentity>, QhardError> {
+        if &actual == baseline {
+            return Ok(None);
+        }
+        if actual.mount_point != RUNTIME_ROOT {
+            return Err(QhardError::Indeterminate(format!(
+                "attach mounted comparator runtime at unexpected mountpoint: {}",
+                actual.mount_point
+            )));
+        }
+        if !actual.read_only {
+            return Err(QhardError::Indeterminate(
+                "attach changed mountpoint to a writable filesystem".into(),
+            ));
+        }
+        Ok(Some(actual))
+    }
+
+    /// An observed mount is rollback-owned only when it is an exact effect at
+    /// our requested mountpoint.  An ancestor/foreign mount cannot be safely
+    /// attributed to this invocation, so it must remain undetached.
+    pub(super) fn rollback_owned_mount_effect(
+        baseline: &RuntimeMountIdentity,
+        actual: &RuntimeMountIdentity,
+    ) -> Option<RuntimeMountIdentity> {
+        (actual != baseline && actual.mount_point == RUNTIME_ROOT).then(|| actual.clone())
+    }
+
+    fn reconcile_attached_mount(journal: &mut Journal) -> Result<(), QhardError> {
+        let baseline = journal.mount_baseline.as_ref().ok_or_else(|| {
+            QhardError::Indeterminate("missing mount observation baseline".into())
+        })?;
+        let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
+            QhardError::Indeterminate(format!("cannot reconcile mount effect: {error}"))
+        })?;
+        // Retain the exact observed effect before applying policy.  A failed
+        // attach may still have mounted a writable/otherwise-invalid volume;
+        // rollback must know that it owns an effect to detach it safely.
+        journal.mount = rollback_owned_mount_effect(baseline, &actual);
+        mounted_effect(baseline, actual)?;
+        Ok(())
+    }
+    fn reconcile_created_manifest(journal: &mut Journal) -> Result<(), QhardError> {
+        match fs::symlink_metadata(MANIFEST_PATH) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(metadata) if metadata.file_type().is_file() => {
+                journal.manifest = Some(identity(Path::new(MANIFEST_PATH))?);
+                Ok(())
+            }
+            Ok(_) => Err(QhardError::Indeterminate(
+                "finalize left a non-file manifest target".into(),
+            )),
+            Err(error) => Err(QhardError::Indeterminate(format!(
+                "cannot reconcile manifest effect: {error}"
+            ))),
+        }
+    }
+    struct Journal {
+        managed_root: Option<Identity>,
+        runtime_root: Option<Identity>,
+        build_root: Option<(PathBuf, Identity)>,
+        build_entries: Vec<(PathBuf, Identity, bool)>,
+        image: Option<Identity>,
+        manifest: Option<Identity>,
+        /// Full `statfs` observation before attachment.  This mount can be
+        /// writable: it is the ordinary directory used as hdiutil's owned
+        /// mountpoint and is restored after detach.
+        mount_baseline: Option<RuntimeMountIdentity>,
+        /// Full `statfs` observation after attachment.  A detach is allowed
+        /// only when this exact mounted filesystem is still present.
+        mount: Option<RuntimeMountIdentity>,
+        publication_parent: Option<(Identity, fs::File)>,
+    }
+    impl Journal {
+        fn rollback(&mut self) -> Result<(), QhardError> {
+            if let Some(mount) = self.mount.take() {
+                let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
+                    QhardError::Indeterminate(format!(
+                        "cannot inspect mounted runtime before detach: {error}"
+                    ))
+                })?;
+                if actual != mount {
+                    return Err(QhardError::Indeterminate(
+                        "mounted runtime observation changed before detach".into(),
+                    ));
+                }
+                command("/usr/bin/hdiutil", &["detach", RUNTIME_ROOT]).map_err(|error| {
+                    QhardError::Indeterminate(format!("cannot detach mounted runtime: {error}"))
+                })?;
+                let baseline = self.mount_baseline.as_ref().ok_or_else(|| {
+                    QhardError::Indeterminate("missing mount observation baseline".into())
+                })?;
+                let restored = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {
+                    QhardError::Indeterminate(format!(
+                        "cannot verify mountpoint restoration after detach: {error}"
+                    ))
+                })?;
+                if &restored != baseline {
+                    return Err(QhardError::Indeterminate(
+                        "detach did not restore exact mount observation".into(),
+                    ));
+                }
+            }
+            if let Some(identity) = self.manifest.take() {
+                remove_if_owned(Path::new(MANIFEST_PATH), identity, false)?;
+            }
+            if let Some(identity) = self.image.take() {
+                remove_if_owned(Path::new(IMAGE_PATH), identity, false)?;
+            }
+            if let Some((path, identity)) = self.build_root.take()
+                && self
+                    .build_entries
+                    .first()
+                    .is_some_and(|(root, retained, _)| root == &path && *retained == identity)
+            {
+                remove_build_root(&self.build_entries)?;
+            }
+            if let Some(identity) = self.runtime_root.take() {
+                remove_if_owned(Path::new(RUNTIME_ROOT), identity, true)?;
+            }
+            if let Some(identity) = self.managed_root.take() {
+                remove_if_owned(Path::new(MANAGED_ROOT), identity, true)?;
+            }
+            if self
+                .build_entries
+                .iter()
+                .any(|(path, retained, _)| unchanged(path, *retained))
+            {
+                return Err(QhardError::Indeterminate(
+                    "rollback could not prove all owned effects were removed".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+    fn install_inner(journal: &mut Journal) -> Result<ComparatorRuntimeInstallSummary, QhardError> {
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(err("comparator runtime installation requires root"));
+        }
+        if std::env::args_os().next().as_deref() != Some(std::ffi::OsStr::new(CANONICAL_EVALUATOR))
+        {
+            return Err(err(
+                "installer argv[0] must be canonical /usr/local/bin/kio-eval",
+            ));
+        }
+        let executable = std::env::current_exe().map_err(|e| err(e.to_string()))?;
+        if executable != Path::new(CANONICAL_EVALUATOR) {
+            return Err(err(
+                "installer must run from canonical /usr/local/bin/kio-eval",
+            ));
+        }
+        let authority = require_root_authority(&executable, "kio-eval")?;
+        for path in [MANAGED_ROOT, RUNTIME_ROOT, IMAGE_PATH, MANIFEST_PATH] {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(err(format!("create-only target already exists: {path}")));
+            }
+        }
+        let mut root_builder = fs::DirBuilder::new();
+        root_builder.mode(0o755);
+        root_builder
+            .create(MANAGED_ROOT)
+            .map_err(|e| err(e.to_string()))?;
+        journal.managed_root = Some(identity(Path::new(MANAGED_ROOT))?);
+        sync_parent(Path::new(MANAGED_ROOT))?;
+        let parent_descriptor = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(MANAGED_ROOT)
+            .map_err(|e| err(e.to_string()))?;
+        journal.publication_parent = Some((identity(Path::new(MANAGED_ROOT))?, parent_descriptor));
+        let mut mount_builder = fs::DirBuilder::new();
+        mount_builder.mode(0o755);
+        mount_builder
+            .create(RUNTIME_ROOT)
+            .map_err(|e| err(e.to_string()))?;
+        journal.runtime_root = Some(identity(Path::new(RUNTIME_ROOT))?);
+        journal.mount_baseline = Some(observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(
+            |error| {
+                QhardError::Indeterminate(format!(
+                    "cannot observe comparator mountpoint before attach: {error}"
+                ))
+            },
+        )?);
+        sync_parent(Path::new(RUNTIME_ROOT))?;
+        let build_root = create_private_build_root()?;
+        let build_identity = identity(&build_root)?;
+        journal.build_root = Some((build_root.clone(), build_identity));
+        let preimage = match prepare(&build_root) {
+            Ok(preimage) => preimage,
+            Err(error) => {
+                // The root is owner-only and every entry was just made by this
+                // process.  Snapshot before rollback so partial construction
+                // has the same exact-identity cleanup contract as success.
+                journal.build_entries = snapshot_build_tree(&build_root)?;
+                return Err(error);
+            }
+        };
+        journal.build_entries = snapshot_build_tree(&build_root)?;
+        recheck_authority(&authority, "kio-eval")?;
+        let payload = build_root.join("payload");
+        let payload = payload.to_str().ok_or_else(|| err("non-UTF8 build path"))?;
+        let create = command(
+            "/usr/bin/hdiutil",
+            &[
+                "create",
+                "-srcfolder",
+                payload,
+                "-format",
+                "UDRO",
+                "-fs",
+                "Case-sensitive APFS",
+                "-volname",
+                VOLUME_NAME,
+                "-srcowners",
+                "on",
+                "-noanyowners",
+                IMAGE_PATH,
+            ],
+        );
+        if let Err(create_error) = create {
+            reconcile_created_image(journal)?;
+            return Err(create_error);
+        }
+        reconcile_created_image(journal)?;
+        require_private_unpublished_image()?;
+        fs::set_permissions(IMAGE_PATH, fs::Permissions::from_mode(0o444))
+            .map_err(|e| err(e.to_string()))?;
+        // chmod mutates the identity contract (mode is part of it), so the
+        // rollback journal must retain the post-chmod observation.
+        journal.image = Some(identity(Path::new(IMAGE_PATH))?);
+        sync_retained_parent(
+            journal
+                .publication_parent
+                .as_ref()
+                .ok_or_else(|| err("missing publication parent"))?,
+        )?;
+        recheck_authority(&authority, "kio-eval")?;
+        let attach = command(
+            "/usr/bin/hdiutil",
+            &[
+                "attach",
+                "-readonly",
+                "-owners",
+                "on",
+                "-nobrowse",
+                "-noautoopen",
+                "-mountpoint",
+                RUNTIME_ROOT,
+                IMAGE_PATH,
+            ],
+        );
+        reconcile_attached_mount(journal)?;
+        if attach.is_ok() && journal.mount.is_none() {
+            return Err(QhardError::Indeterminate(
+                "hdiutil attach reported success without a mounted filesystem effect".into(),
+            ));
+        }
+        attach?;
+        recheck_authority(&authority, "kio-eval")?;
+        let finalized = finalize(
+            Path::new(RUNTIME_ROOT),
+            preimage,
+            Path::new(IMAGE_PATH),
+            Path::new(MANIFEST_PATH),
+        );
+        reconcile_created_manifest(journal)?;
+        finalized?;
+        sync_retained_parent(
+            journal
+                .publication_parent
+                .as_ref()
+                .ok_or_else(|| err("missing publication parent"))?,
+        )?;
+        recheck_authority(&authority, "kio-eval")?;
+        let (_, build_identity) = journal
+            .build_root
+            .as_ref()
+            .ok_or_else(|| err("missing build journal"))?;
+        if !journal
+            .build_entries
+            .first()
+            .is_some_and(|(root, retained, _)| root == &build_root && *retained == *build_identity)
+        {
+            return Err(QhardError::Indeterminate(
+                "missing exact build cleanup journal".into(),
+            ));
+        }
+        remove_build_root(&journal.build_entries)?;
+        if fs::symlink_metadata(&build_root).is_ok() {
+            return Err(err("comparator runtime build-root cleanup failed"));
+        }
+        journal.build_root = None;
+        journal.build_entries.clear();
+        Ok(ComparatorRuntimeInstallSummary {
+            runtime_root: RUNTIME_ROOT.into(),
+            image: IMAGE_PATH.into(),
+            manifest: MANIFEST_PATH.into(),
+        })
+    }
+    pub(super) fn install() -> Result<ComparatorRuntimeInstallSummary, QhardError> {
+        let mut journal = Journal {
+            managed_root: None,
+            runtime_root: None,
+            build_root: None,
+            build_entries: Vec::new(),
+            image: None,
+            manifest: None,
+            mount_baseline: None,
+            mount: None,
+            publication_parent: None,
+        };
+        match install_inner(&mut journal) {
+            Ok(summary) => Ok(summary),
+            Err(error) => match journal.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback),
+            },
+        }
+    }
+    fn prepare(build_root: &Path) -> Result<Preimage, QhardError> {
+        let metadata = fs::symlink_metadata(build_root).map_err(|e| err(e.to_string()))?;
+        if !metadata.file_type().is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(err("unsafe comparator runtime build root"));
+        }
+        let staged = build_root.join("reviewed-sources");
+        let payload = build_root.join("payload");
         for d in [
             &staged,
             &payload,
@@ -808,31 +1387,21 @@ mod macos {
             closure_images: images.into_iter().collect(),
         };
         validate(&pre)?;
-        let b = serde_jcs::to_vec(&pre).map_err(|e| err(e.to_string()))?;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(o.build_root.join("manifest-preimage.json"))
-            .and_then(|mut f| f.write_all(&b))
-            .map_err(|e| err(e.to_string()))?;
-        Ok(())
+        Ok(pre)
     }
-    pub(super) fn finalize(o: ComparatorRuntimeFinalizeOptions) -> Result<(), QhardError> {
-        let raw = fs::read(&o.preimage).map_err(|e| err(e.to_string()))?;
-        if raw.len() > MAX_PREIMAGE_BYTES {
-            return Err(err("preimage too large"));
-        }
-        let pre: Preimage = serde_json::from_slice(&raw).map_err(|e| err(e.to_string()))?;
+    fn finalize(
+        runtime_root: &Path,
+        pre: Preimage,
+        image: &Path,
+        out: &Path,
+    ) -> Result<(), QhardError> {
         validate(&pre)?;
-        if !runtime_root_matches_preimage(&o.runtime_root, &pre) {
+        if !runtime_root_matches_preimage(runtime_root, &pre) {
             return Err(err("runtime root does not match preimage binding"));
         }
-        let _ = super::super::ComparatorRuntime::bind(&o.runtime_root)?;
-        let runtime_allowed_xattrs = runtime_xattrs(&o.runtime_root)?;
-        let actual = rewalk(
-            &o.runtime_root,
-            &pre.closure_images.iter().cloned().collect(),
-        )?;
+        let runtime = super::super::ComparatorRuntime::bind(runtime_root)?;
+        let runtime_allowed_xattrs = runtime_xattrs(runtime_root)?;
+        let actual = rewalk(runtime_root, &pre.closure_images.iter().cloned().collect())?;
         if actual != pre.payload_files {
             return Err(err("mounted runtime differs from preimage"));
         }
@@ -848,10 +1417,10 @@ mod macos {
                 bytes: b,
             })
         }
-        if fs::canonicalize(&o.image).map_err(|e| err(e.to_string()))? != o.image {
+        if fs::canonicalize(image).map_err(|e| err(e.to_string()))? != image {
             return Err(err("runtime image path is not canonical"));
         }
-        let image_metadata = fs::symlink_metadata(&o.image).map_err(|e| err(e.to_string()))?;
+        let image_metadata = fs::symlink_metadata(image).map_err(|e| err(e.to_string()))?;
         if image_metadata.file_type().is_symlink()
             || !image_metadata.file_type().is_file()
             || image_metadata.uid() != 0
@@ -860,8 +1429,8 @@ mod macos {
         {
             return Err(err("runtime image ownership or mode is unsafe"));
         }
-        let image_allowed_xattrs = image_xattrs(&o.image)?;
-        let (image_sha256, _) = digest(&o.image, MAX_FILE_BYTES)?;
+        let image_allowed_xattrs = image_xattrs(image)?;
+        let (image_sha256, _) = digest(image, MAX_FILE_BYTES)?;
         let bytes = serde_jcs::to_vec(&Manifest {
             preimage: pre,
             image_sha256,
@@ -878,33 +1447,292 @@ mod macos {
             manifest_allowed_xattrs: Vec::new(),
         })
         .map_err(|e| err(e.to_string()))?;
-        let mut out = fs::OpenOptions::new()
+        let mut output = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o444)
-            .open(&o.out)
+            .open(out)
             .map_err(|e| err(e.to_string()))?;
-        out.write_all(&bytes)
-            .and_then(|_| out.write_all(b"\n"))
-            .and_then(|_| out.sync_all())
+        output
+            .write_all(&bytes)
+            .and_then(|_| output.write_all(b"\n"))
+            .and_then(|_| output.sync_all())
             .map_err(|e| err(e.to_string()))?;
         // A macOS provenance marker is permitted but never interpreted.  The
         // payload/image observations above are serialized; the manifest's own
         // marker is only an OS annotation and cannot be made self-describing
         // without a circular digest dependency.
-        let _ = manifest_xattrs(&o.out)?;
+        let _ = manifest_xattrs(out)?;
         let mut expected = bytes;
         expected.push(b'\n');
-        if fs::read(&o.out).map_err(|e| err(e.to_string()))? != expected {
+        if fs::read(out).map_err(|e| err(e.to_string()))? != expected {
             return Err(err("published manifest readback differs"));
         }
+        runtime.recheck(true)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{
+            os::unix::fs::{MetadataExt, PermissionsExt},
+            process::Command,
+        };
+        use tempfile::TempDir;
+
+        fn fixture() -> (TempDir, PathBuf, PathBuf, u32, u32) {
+            let temporary = tempfile::tempdir().unwrap();
+            let anchor = fs::canonicalize(temporary.path()).unwrap();
+            let parent = anchor.join("trusted");
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+            let leaf = parent.join("kio-eval");
+            fs::write(&leaf, b"sealed evaluator").unwrap();
+            fs::set_permissions(&leaf, fs::Permissions::from_mode(0o600)).unwrap();
+            (temporary, anchor, leaf, unsafe { libc::getuid() }, unsafe {
+                libc::getgid()
+            })
+        }
+
+        fn bind(anchor: &Path, leaf: &Path, uid: u32, gid: u32) -> Vec<RetainedAuthority> {
+            require_authority_from(anchor, leaf, uid, gid, "test evaluator").unwrap()
+        }
+
+        #[test]
+        fn authority_binding_accepts_a_canonical_private_tree() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let retained = bind(&anchor, &leaf, uid, gid);
+            assert_eq!(retained.len(), 3);
+            recheck_authority(&retained, "test evaluator").unwrap();
+        }
+
+        #[test]
+        fn authority_binding_rejects_a_writable_intermediate_ancestor() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let parent = leaf.parent().unwrap();
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o722)).unwrap();
+            assert!(require_authority_from(&anchor, &leaf, uid, gid, "test evaluator").is_err());
+        }
+
+        #[test]
+        fn authority_binding_rejects_an_acl_bearing_intermediate_ancestor() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let parent = leaf.parent().unwrap();
+            let user = std::env::var("USER").unwrap();
+            let output = Command::new("/bin/chmod")
+                .args([
+                    "+a",
+                    &format!("user:{user} allow read"),
+                    &parent.display().to_string(),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "chmod +a did not add a test ACL");
+            assert!(require_authority_from(&anchor, &leaf, uid, gid, "test evaluator").is_err());
+            let cleanup = Command::new("/bin/chmod")
+                .args(["-a#", "0", &parent.display().to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                cleanup.status.success(),
+                "chmod -a# did not remove the test ACL"
+            );
+        }
+
+        #[test]
+        fn authority_binding_rejects_a_symlink_component() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let outside = anchor.join("outside");
+            fs::write(&outside, b"sealed evaluator").unwrap();
+            fs::remove_file(&leaf).unwrap();
+            std::os::unix::fs::symlink(&outside, &leaf).unwrap();
+            assert!(require_authority_from(&anchor, &leaf, uid, gid, "test evaluator").is_err());
+        }
+
+        #[test]
+        fn authority_recheck_rejects_a_same_content_leaf_replacement() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let retained = bind(&anchor, &leaf, uid, gid);
+            fs::remove_file(&leaf).unwrap();
+            fs::write(&leaf, b"sealed evaluator").unwrap();
+            fs::set_permissions(&leaf, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(recheck_authority(&retained, "test evaluator").is_err());
+        }
+
+        #[test]
+        fn authority_recheck_rejects_a_parent_replacement() {
+            let (_temporary, anchor, leaf, uid, gid) = fixture();
+            let retained = bind(&anchor, &leaf, uid, gid);
+            let parent = leaf.parent().unwrap();
+            fs::remove_file(&leaf).unwrap();
+            fs::remove_dir(parent).unwrap();
+            fs::create_dir(parent).unwrap();
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(&leaf, b"sealed evaluator").unwrap();
+            fs::set_permissions(&leaf, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(recheck_authority(&retained, "test evaluator").is_err());
+        }
+
+        #[test]
+        fn cleanup_never_removes_a_foreign_replacement_or_create_only_collision() {
+            let temporary = tempfile::tempdir().unwrap();
+            let path = temporary.path().join("owned");
+            fs::write(&path, b"owned").unwrap();
+            let owned = identity(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, b"foreign").unwrap();
+            assert!(remove_if_owned(&path, owned, false).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"foreign");
+            assert!(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn private_build_root_is_owner_only_and_exactly_cleaned_up() {
+            let root = create_private_build_root().unwrap();
+            let metadata = fs::symlink_metadata(&root).unwrap();
+            assert_eq!(metadata.mode() & 0o777, 0o700);
+            assert_eq!(metadata.uid(), unsafe { libc::getuid() });
+            let retained = identity(&root).unwrap();
+            let entries = snapshot_build_tree(&root).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, root);
+            assert!(unchanged(&root, retained));
+            remove_build_root(&entries).unwrap();
+            assert!(fs::symlink_metadata(&root).is_err());
+        }
+
+        #[test]
+        fn post_chmod_image_identity_allows_exact_rollback_cleanup() {
+            let temporary = tempfile::tempdir().unwrap();
+            let image = temporary.path().join("runtime.dmg");
+            fs::write(&image, b"image").unwrap();
+            fs::set_permissions(&image, fs::Permissions::from_mode(0o600)).unwrap();
+            let before_chmod = identity(&image).unwrap();
+            fs::set_permissions(&image, fs::Permissions::from_mode(0o444)).unwrap();
+            let after_chmod = identity(&image).unwrap();
+            assert_ne!(
+                before_chmod, after_chmod,
+                "mode participates in rollback identity"
+            );
+            remove_if_owned(&image, after_chmod, false).unwrap();
+            assert!(fs::symlink_metadata(&image).is_err());
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observed_mount(
+        fsid: &str,
+        mount_point: &str,
+        mounted_from: &str,
+        filesystem_type: &str,
+        flags: u64,
+        read_only: bool,
+    ) -> RuntimeMountIdentity {
+        RuntimeMountIdentity {
+            fsid: fsid.into(),
+            mount_point: mount_point.into(),
+            mounted_from: mounted_from.into(),
+            filesystem_type: filesystem_type.into(),
+            flags,
+            read_only,
+        }
+    }
+
+    #[test]
+    fn attach_effect_preserves_full_mount_observation_and_rejects_writable_effects() {
+        let baseline = observed_mount(
+            "fsid(1,2)",
+            "/Library/KioComparatorRuntime/v1",
+            "/dev/disk1s1",
+            "apfs",
+            0,
+            false,
+        );
+        let mounted = observed_mount(
+            "fsid(9,10)",
+            "/Library/KioComparatorRuntime/v1",
+            "/dev/disk9s1",
+            "apfs",
+            1,
+            true,
+        );
+        assert_eq!(
+            macos::mounted_effect(&baseline, baseline.clone()).unwrap(),
+            None
+        );
+        assert_eq!(
+            macos::mounted_effect(&baseline, mounted.clone()).unwrap(),
+            Some(mounted.clone())
+        );
+
+        let mut writable = mounted.clone();
+        writable.flags = 0;
+        writable.read_only = false;
+        assert!(matches!(
+            macos::mounted_effect(&baseline, writable.clone()),
+            Err(QhardError::Indeterminate(_))
+        ));
+        assert_eq!(
+            macos::rollback_owned_mount_effect(&baseline, &writable),
+            Some(writable.clone())
+        );
+
+        let mut elsewhere = mounted;
+        elsewhere.mount_point = "/Library/KioComparatorRuntime".into();
+        assert!(matches!(
+            macos::mounted_effect(&baseline, elsewhere.clone()),
+            Err(QhardError::Indeterminate(_))
+        ));
+        assert_eq!(
+            macos::rollback_owned_mount_effect(&baseline, &elsewhere),
+            None,
+            "an ancestor/foreign mount must never be detached through RUNTIME_ROOT"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn administrator_tools_run_with_the_fixed_clean_environment() {
+        let output = macos::command("/usr/bin/env", &[]).unwrap();
+        let actual = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual,
+            BTreeSet::from([
+                "HOME=/var/root".into(),
+                "LANG=C".into(),
+                "LC_ALL=C".into(),
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin".into(),
+                "TZ=UTC".into(),
+            ])
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn administrator_tools_force_a_private_creation_umask() {
+        // This remains true even if the parent process has a permissive umask:
+        // `command` installs 077 in the child immediately before exec.
+        assert_eq!(
+            macos::command("/bin/sh", &["-c", "umask"]).unwrap(),
+            b"0077\n"
+        );
+    }
+
     #[test]
     fn pins_are_closed() {
         assert_eq!(reviewed_pins().len(), 29);
@@ -994,22 +1822,9 @@ mod tests {
         assert!(validate(&p).is_err());
     }
     #[test]
-    fn options_need_absolute_create_only_paths() {
-        assert!(
-            prepare_comparator_runtime(ComparatorRuntimePrepareOptions {
-                build_root: "relative".into()
-            })
-            .is_err()
-        );
-        assert!(
-            finalize_comparator_runtime(ComparatorRuntimeFinalizeOptions {
-                runtime_root: "/x".into(),
-                preimage: "/y".into(),
-                image: "/z".into(),
-                out: "relative".into()
-            })
-            .is_err()
-        );
+    fn install_is_the_only_public_comparator_construction_operation() {
+        #[cfg(not(target_os = "macos"))]
+        assert!(install_comparator_runtime().is_err());
     }
 
     #[cfg(target_os = "macos")]

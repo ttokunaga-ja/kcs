@@ -153,20 +153,12 @@ credential の**環境変数名だけ**を `forwarded_credential_names` とし�
 ### macOS 比較器 runtime の管理者構築
 
 正式 baseline 用 runtime は既存の Homebrew tree を変更せず、専用 read-only image として一度だけ構築する。
-管理者実行前に script digest を照合する。この revision の digest は
-`d1413269957a3cad2836f4d159fbc47fb3bbd4224fee1dbb72b29400bc1efe85` である。
-
-builder は固定された `/usr/local/bin/kio-eval` を root-owned、group/other 非 writable、かつ extended ACL なしとして要求する。
-先に監査済み release binary をこの場所へ provision してから、checkout の script を root-private copy にして
-一度だけ実行する。`build` / `verify` 引数は存在しない。
+管理者は、監査済みの canonical executable を `/usr/local/bin/kio-eval` に root-owned、group/other
+非 writable、extended ACL なしで配置してから、直接この唯一の管理者コマンドを実行する。旧 `prepare` /
+`finalize` command や shell wrapper は存在しない。
 
 ```bash
-sudo /usr/bin/install -o root -g wheel -m 0755 target/release/kio-eval /usr/local/bin/kio-eval
-readonly admin_dir=$(sudo /usr/bin/mktemp -d /private/tmp/kio-comparator-runtime-v1-admin.XXXXXX)
-sudo /bin/chmod 0700 "$admin_dir"
-sudo /usr/bin/install -o root -g wheel -m 0500 \
-  /absolute/path/to/kio/eval/build_macos_comparator_runtime.sh "$admin_dir/build-script"
-sudo /bin/zsh -f "$admin_dir/build-script"
+sudo /usr/local/bin/kio-eval benchmark comparator-runtime install
 ```
 
 Rust が reviewed pin の nofollow copy、Mach-O closure/rewrite、payload re-walk、固定 config、mount admission、

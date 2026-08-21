@@ -514,22 +514,8 @@ enum BenchmarkCommands {
 
 #[derive(Debug, Subcommand)]
 enum ComparatorRuntimeCommands {
-    /// Emit the deterministic runtime closure preimage in an empty private build root.
-    Prepare {
-        #[arg(long)]
-        build_root: PathBuf,
-    },
-    /// Verify the mounted read-only image and publish the final runtime manifest.
-    Finalize {
-        #[arg(long)]
-        runtime_root: PathBuf,
-        #[arg(long)]
-        preimage: PathBuf,
-        #[arg(long)]
-        image: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
-    },
+    /// Build, verify, and publish the macOS comparator runtime in one process.
+    Install,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1676,28 +1662,10 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
             },
             Commands::Benchmark { command } => match command {
                 BenchmarkCommands::ComparatorRuntime { command } => match command {
-                    ComparatorRuntimeCommands::Prepare { build_root } => {
-                        qhard::prepare_comparator_runtime(qhard::ComparatorRuntimePrepareOptions {
-                            build_root: build_root.clone(),
-                        })
-                        .map_err(|error| AppError::Input(error.to_string()))?;
-                        Ok(ExitCode::Success)
-                    }
-                    ComparatorRuntimeCommands::Finalize {
-                        runtime_root,
-                        preimage,
-                        image,
-                        out,
-                    } => {
-                        qhard::finalize_comparator_runtime(
-                            qhard::ComparatorRuntimeFinalizeOptions {
-                                runtime_root: runtime_root.clone(),
-                                preimage: preimage.clone(),
-                                image: image.clone(),
-                                out: out.clone(),
-                            },
-                        )
-                        .map_err(|error| AppError::Input(error.to_string()))?;
+                    ComparatorRuntimeCommands::Install => {
+                        let summary = qhard::install_comparator_runtime()
+                            .map_err(|error| AppError::Input(error.to_string()))?;
+                        println!("[ok] comparator runtime installed: {summary:?}");
                         Ok(ExitCode::Success)
                     }
                 },
@@ -2417,15 +2385,16 @@ mod tests {
             .is_ok()
         );
         assert!(
-            Args::try_parse_from([
-                "kio-eval",
-                "benchmark",
-                "comparator-runtime",
-                "prepare",
-                "--build-root",
-                "/tmp/build",
-            ])
-            .is_ok()
+            Args::try_parse_from(["kio-eval", "benchmark", "comparator-runtime", "install",])
+                .is_ok()
+        );
+        assert!(
+            Args::try_parse_from(["kio-eval", "benchmark", "comparator-runtime", "prepare",])
+                .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["kio-eval", "benchmark", "comparator-runtime", "finalize",])
+                .is_err()
         );
         assert!(
             Args::try_parse_from([

@@ -40,10 +40,7 @@ use crate::{
 
 #[path = "comparator_runtime_builder.rs"]
 pub mod comparator_runtime_builder;
-pub use comparator_runtime_builder::{
-    ComparatorRuntimeFinalizeOptions, ComparatorRuntimePrepareOptions, finalize_comparator_runtime,
-    prepare_comparator_runtime,
-};
+pub use comparator_runtime_builder::{ComparatorRuntimeInstallSummary, install_comparator_runtime};
 
 pub const FROZEN_GOLDEN_SHA256: &str =
     "sha256:d5c30eccc664e6bd4d96e1068970e225d209d04bde34c50eab300d6245d4e163";
@@ -206,6 +203,8 @@ pub enum QhardError {
     Input(String),
     #[error("Q_hard benchmark process failed: {0}")]
     Process(#[from] crate::runner::BoundedProcessError),
+    #[error("comparator runtime installation outcome is indeterminate: {0}")]
+    Indeterminate(String),
     #[error("could not serialize Q_hard benchmark report: {0}")]
     Serialize(#[from] serde_json::Error),
 }
@@ -4132,16 +4131,11 @@ fn runtime_mount_identity(details: &libc::statfs) -> Result<RuntimeMountIdentity
         flags,
         read_only: runtime_mount_is_read_only(flags),
     };
-    if !mount.read_only {
-        return Err(QhardError::Input(
-            "comparator runtime must be on an MNT_RDONLY read-only mount".into(),
-        ));
-    }
     Ok(mount)
 }
 
 #[cfg(target_os = "macos")]
-fn inspect_runtime_mount(path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
+fn observe_runtime_mount(path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         QhardError::Input("comparator runtime path contains an interior NUL byte".into())
     })?;
@@ -4156,7 +4150,7 @@ fn inspect_runtime_mount(path: &Path) -> Result<RuntimeMountIdentity, QhardError
 }
 
 #[cfg(target_os = "macos")]
-fn inspect_runtime_mount_fd(handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
+fn observe_runtime_mount_fd(handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
     use std::os::fd::AsRawFd;
     let mut details: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatfs(handle.as_raw_fd(), &mut details) } != 0 {
@@ -4169,17 +4163,37 @@ fn inspect_runtime_mount_fd(handle: &fs::File) -> Result<RuntimeMountIdentity, Q
 }
 
 #[cfg(not(target_os = "macos"))]
-fn inspect_runtime_mount(_path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
+fn observe_runtime_mount(_path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
     Err(QhardError::Input(
         "comparator runtime measurements require macOS MNT_RDONLY mount verification".into(),
     ))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn inspect_runtime_mount_fd(_handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
+fn observe_runtime_mount_fd(_handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
     Err(QhardError::Input(
         "comparator runtime measurements require macOS MNT_RDONLY mount verification".into(),
     ))
+}
+
+fn inspect_runtime_mount(path: &Path) -> Result<RuntimeMountIdentity, QhardError> {
+    let mount = observe_runtime_mount(path)?;
+    if !mount.read_only {
+        return Err(QhardError::Input(
+            "comparator runtime must be on an MNT_RDONLY read-only mount".into(),
+        ));
+    }
+    Ok(mount)
+}
+
+fn inspect_runtime_mount_fd(handle: &fs::File) -> Result<RuntimeMountIdentity, QhardError> {
+    let mount = observe_runtime_mount_fd(handle)?;
+    if !mount.read_only {
+        return Err(QhardError::Input(
+            "comparator runtime must be on an MNT_RDONLY read-only mount".into(),
+        ));
+    }
+    Ok(mount)
 }
 
 impl ComparatorRuntime {
