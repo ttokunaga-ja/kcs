@@ -68,7 +68,7 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 | **05** | [05-runtime.md](05-runtime.md) | **★契約**: 検索 (paging / MMR / `--at`) / commit_type / GC / purge / restore / time-travel / 並行性 |
 | **06** | [06-cli-spec.md](06-cli-spec.md) | CLI 全コマンド / exit code / error code namespace / JSON output / observability |
 | **07** | [07-adapter-spec.md](07-adapter-spec.md) | Adapter trait (Prepare / Markdownize / Embedding / etc.) / 実行形態 / **incremental Markdownize プロンプト規約** |
-| **08** | [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) | Evidence Pointer schema / 解決手順 / **Dead Pointer (purge) のセマンティクス** / 外部 Agent 相互運用 |
+| **08** | [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) | Evidence Pointer schema / 解決手順 / **Dead Pointer (purge) のセマンティクス** / exact-only retarget / 外部 Agent 相互運用 |
 | **09** | [09-mvp-scope.md](09-mvp-scope.md) | MVP scope / non-authorizing roadmap / Step 1-4 + 規模上限 / 北極星シナリオ / 凍結ゲート |
 | **10** | [10-operations.md](10-operations.md) | 横断規約 (semver / 観測ログ / 命名リネーム表 / 初回スキャン承認 / Adapter セキュリティ) |
 | ~~**11**~~ | [~~11-requirements.md~~](11-requirements.md) | **⚠️ DEPRECATED** — 古い統合要件ドラフト。`normalized_hash` / `offline-first` 等の旧表現を含む。新規読者は読まないこと。冒頭に DEPRECATED 注記あり。過去経緯参照のためだけに残す |

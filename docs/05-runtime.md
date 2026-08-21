@@ -1247,7 +1247,7 @@ GC が削除してはならないもの:
   gc_policy: auto = tiered retention・repaired = `[gc.derived_retention]` — §2.4) に従う)
 ```
 
-raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
+raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
 on-demand tree-only shallow sweep は Phase 4 milestone 2、bounded `after_index` hook は milestone 3、scheduled auto snapshot は milestone 4、Rust-only `on_idle` GC は milestone 5 で実装済みである。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
 
@@ -1288,7 +1288,7 @@ Kio は「原則として忘れない」が、**purge は「忘れる」ので�
 
 ## 3.3 Dead Evidence Pointer のセマンティクス
 
-「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。残未決 (bulk verify スループット — 1 件) は [09-mvp-scope.md §5.2](09-mvp-scope.md)。以下は採用済みセマンティクスの要約。
+「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。以下は採用済みセマンティクスの要約。
 
 ```text
 purge 後の pointer 解決:

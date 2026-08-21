@@ -639,7 +639,7 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 - デフォルト (HEAD) 検索の対象は **HEAD tree の `chunking_config_hash` の chunk のみ** (通常 = 現行値。**config 変更後〜新 tree publish 前の移行期間は旧値のまま検索し、`kio status` が再生成中を表示する — 現行値への切替は新 tree publish 時**。移行期間に検索を欠けさせない)。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る — tree v2 が時点 config を保存する意味はここにある — 全 tree が `chunking_config_hash` を持つため、代用も注記も不要である ([05-runtime.md §1.6](05-runtime.md))
 - 設定変更を検出したら、次回 `kio index` で **HEAD (現行 tree) が参照する normalized instance** の再 chunk + 再 embedding task を積む (unpublished な新 gen が残る crash 窓は、書き込み系冒頭の task 再検出 (§5.2) が当該 instance の publication を先に完遂することで解消する)。再 chunk はローカル処理で LLM 不要。embedding のみ再課金 (§5.4 budget guardrail の対象)。**履歴 instance は対象外** — 時点指定は対象 tree の `chunking_config_hash` (旧 config) の chunk で検索するため ([05-runtime.md §1.6](05-runtime.md))、新 config での履歴再 chunk はどの tree からも到達不能な chunk と embedding 課金を作るだけになる (03 §2.1 の「新規 chunk は常に最新 gen」とも整合)
 - 開始前に再生成対象 chunk 数と embedding 概算コストを提示し確認する (`--yes` で省略)
-- 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md)) 用に残置する (デフォルト検索には出ない。時点指定は対象 tree の config で対象になる — [05-runtime.md §1.6](05-runtime.md))
+- 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) 用に残置する (デフォルト検索には出ない。時点指定は対象 tree の config で対象になる — [05-runtime.md §1.6](05-runtime.md))
 - 再生成未完了の instance はその間検索から漏れる (index 未完了と同じ扱い。`kio status` に表示)
 
 ## 4.7 prepared_units (論理台帳 — SQLite テーブル非採用)

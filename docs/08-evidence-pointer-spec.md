@@ -47,7 +47,7 @@ Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 }
 ```
 
-`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md))。区切り等を含む path は表示専用としても受理せず schema violation として fail-closed にする。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§6.2)。
+`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md))。区切り等を含む path は表示専用としても受理せず schema violation として fail-closed にする。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
 
 ## 2.1 必須フィールド
 
@@ -302,7 +302,7 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 
 # 4. Dead Evidence Pointer (purge 対応)
 
-「Evidence Pointer の不変性」(§5) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (decided — [09-mvp-scope.md §5.2](09-mvp-scope.md))。
+「Evidence Pointer の不変性」(§6) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (decided — [09-mvp-scope.md §5.2](09-mvp-scope.md))。
 
 ## 4.1 Tombstone レスポンス
 
@@ -434,7 +434,33 @@ active purge journal 中の verify は評価を行わず、KIO-E-PURGE 系 retry
 ([05-runtime.md §3.5](05-runtime.md) の読取系規約 — marker 耐久化後・削除完了前の窓で
 「削除対象が alive」と誤答しないため)。
 
-# 5. 不変性保証 (immutability guarantee)
+# 5. Evidence Retarget
+
+```bash
+kio evidence retarget <pointer> --at <commit>
+```
+
+`--at` は必須で、`<commit>` は同一 scope に存在する full canonical `sha256:<64 lowercase hex>` commit hash に限る。prefix、ref、tag、`HEAD`、`--latest`、default、alias、fallback はない。pointer は単発 verify と同じ strict parser と 64 KiB 上限を使い、argv と `-` stdin のどちらにも同じ上限を適用する。操作は read-only であり、元 pointer、refs、CAS、working tree、source SQLite を変更しない。結果確定前は stdout に何も書かず、`--json` 成功時は単一 JSON object だけを返す。
+
+入力 pointer の optional `path_at_commit` / `heading_path` / `section_id` / byte span は照合 authority ではない。まず単発 canonical verifier と同じ scope resolver、registry duplicate 判定、format-version gate、index/rebuild gate、purge read barrier、point-in-time association 判定で元 pointer を検証する。旧 commit/tree では `(raw_hash, tool_profile_hash)` が一致する entry の UTF-8 byte-order-min path を旧 canonical path とし、その entry の pinned manifest と pointer の chunk CAS から旧 canonical heading / section / span を再導出する。old/target tree が shallow なら推測・HEAD fallback を行わない。
+
+target tree は同じ `raw_hash` を旧 canonical path に持つ exact entry だけを選び、その entry 自身が pin する target `tool_profile_hash` / `gen` / manifest を authority とする。同じ raw が別 path に重複配置されても別 path を先勝ちで選ばない。source SQLite はこの exact target identity の候補 hash を最大 4,096 件列挙するだけであり、各 candidate の chunk CAS、target manifest、normalized-unit CAS、publication/association を独立検証する。旧 canonical `heading_path` との完全一致がちょうど 1 件だけなら成功する。section / span は target chunk から再構築し、照合条件には使わない。semantic fingerprint、embedding/LLM similarity、fuzzy match、confidence は使わない。
+
+0 件は `KIO-E-EVIDENCE-RETARGET-NOT-FOUND-001` / exit 4、複数は `KIO-E-EVIDENCE-RETARGET-AMBIG-001` / exit 4 とする。candidate / history / aggregate 上限超過は `KIO-E-EVIDENCE-RETARGET-LIMIT-001` / exit 4。old/target shallow、active purge、authority drift は既存 retryable 分類 / exit 3、scope unreachable / registry duplicate / index rebuilding / format incompatible も既存分類をそのまま使う。malformed pointer、非 canonical・不存在の `--at` は usage / exit 2、CAS/schema/hash/identity 矛盾と欠落 manifest/chunk は corruption / exit 4 である。失敗を成功 schema の `status` union へ混ぜず、通常の structured error JSON を返す。
+
+production issuer が path/raw/profile/gen/chunk/section/span を持つ新 pointer を再構築し、単発 verify と batch verify が使う single canonical verifier へ再入力して `alive` かつ target commit 帰属を確認する。開始時、candidate 検証後、返却直前に scope binding、target commit/tree、index identity/generation、purge barrier を再検査し、変化は retryable drift として結果を破棄する。
+
+成功 response は次の field だけを exact に持つ。
+
+```json
+{"schema":"kio.evidence.retarget","schema_version":1,"status":"retargeted","target_commit":"sha256:<64 lowercase hex>","retargeted_from":{},"new_pointer":{},"match_method":"heading_path_exact"}
+```
+
+`retargeted_from` は入力文字列ではなく strict parser が得た canonical Evidence Pointer object、`new_pointer` は production issuer が作る canonical object である。上記 7 field 以外を成功 response に追加しない。
+
+上限は pointer 64 KiB、association 用 commit ancestry 100,000、tree entries は old/target 各 10,000、target candidates は 4,096（SQLite `LIMIT 4097` で超過検出）、manifest は old/target 各 8 MiB、units は manifest ごとに 4,096、normalized-unit / chunk object は各 128 MiB、command aggregate verified CAS bytes は 4 GiB とする。既存 commit/tree object 上限は CAS loader の current bound を共有する。
+
+# 6. 不変性保証 (immutability guarantee)
 
 ```
 - 既存 Evidence Pointer は Kio によって書き換えられない
@@ -448,11 +474,11 @@ active purge journal 中の verify は評価を行わず、KIO-E-PURGE 系 retry
 
 ---
 
-# 6. 外部 Agent との相互運用
+# 7. 外部 Agent との相互運用
 
 Kio は Evidence Pointer を **JSON object として AI Agent に返す**。Agent はこれを記憶し、後続の検証・参照・引用に使える。
 
-## 6.1 検索結果に含める形
+## 7.1 検索結果に含める形
 
 **検索レスポンス schema の正本は [05-runtime.md §1.7](05-runtime.md) とする**
 (本節は従属記述であり、差分が生じた場合は 05 側を正とする — 06 §8 と
@@ -479,7 +505,7 @@ Agent は `evidence_pointer` を保存し、後続のセッションで以下を
 - kio open <pointer>                原本ファイルを OS で開く
 ```
 
-## 6.2 引用フォーマット (人間向け)
+## 7.2 引用フォーマット (人間向け)
 
 UI / レポートでは Evidence Pointer を以下に整形して表示することを推奨:
 
@@ -493,6 +519,6 @@ commit hash の短縮表示は [03-data-model.md §8.1](03-data-model.md) の規
 
 ---
 
-# 7. Evidence Pointer Schema v1
+# 8. Evidence Pointer Schema v1
 
 現在受理する Evidence Pointer schema は version `1` だけである。URI の `sv` と inline / batch JSON の `schema_version` は `1` でなければならず、未知 version、未知 field、欠落 field はすべて KIO-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する。legacy reader、migration branch、unknown-field fallback は置かない。

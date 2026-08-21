@@ -109,6 +109,7 @@ kio reindex [--regenerate] [--at <commit>] [--yes] [--online|--offline] [--realt
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--regenerate は確認プロンプト必須 (--yes で省略可)
 kio evidence verify <pointer> [--strict]
 kio evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は exactly-one / 相互排他。alias・fallback はない (§7、08 §4.3)
+kio evidence retarget <pointer> --at <commit> # exact-only read-only retarget。--at は full canonical sha256 commit 必須。--latest/default/alias/fallback はない (08 §5)
 ```
 
 本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1 / §3.1](09-mvp-scope.md)。
@@ -465,7 +466,7 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                REBUILDING 扱い** (05 §1.6 — 未公開行を検索に見せない)。**明示の
                                commit / Evidence Pointer 指定による verify / open / view / restore・
                                単一 scope の search `--at <commit>`
-                               は HEAD 非依存に解決して通常応答する** (08 §3.1 の解決手順・08 §5 の
+                               は HEAD 非依存に解決して通常応答する** (08 §3.1 の解決手順・08 §6 の
                                不変性保証)。error は不在・利用不能・HEAD 不在 (HEAD 依存経路のみ)
                                の場合のみ。verify は検査未完了のため --strict なしでも
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
@@ -491,6 +492,7 @@ kio evidence verify --batch <pointers.jsonl>   一括 verify。入力の構造�
                                --strict なしは単発の semantics を保ち、検査完了時は 0（ただし
                                registry_duplicate は 3）。
 kio open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
+kio evidence retarget          canonical heading_path exact match が 0 件なら KIO-E-EVIDENCE-RETARGET-NOT-FOUND-001 / 4、複数なら KIO-E-EVIDENCE-RETARGET-AMBIG-001 / 4。invalid pointer / --at は 2、shallow/drift は既存 retryable 分類、CAS 矛盾は 4。
 ```
 
 スクリプト連携 (`kio index && kio search`) はこれらを参照する。コマンド固有の補足は各 sub-command の docstring で明記。

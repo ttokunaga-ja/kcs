@@ -641,7 +641,7 @@ sha256 とする。
 
 ## 8.1 Object hash 算出規約
 
-object hash は artifact identity と Evidence Pointer の永続性 (08 §5) を支えるプロダクト契約であり、`tool_profile_hash` (§5.1) と同じ厳密さで固定する。
+object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を支えるプロダクト契約であり、`tool_profile_hash` (§5.1) と同じ厳密さで固定する。
 
 **共通規則**:
 
@@ -795,7 +795,7 @@ entry では `normalize` を**省略**する (省略 = 当該ファイルの nor
 
 `normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1) であり必須である。欠落は schema violation として拒否する。`kio reindex --regenerate` 後も過去 commit の tree entry はその記録済み gen を
 指し続けるため、`kio view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
-不変性保証 ([08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md)) は、gen ではなく
+不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は、gen ではなく
 `manifest_hash → unit_object_hash` の immutable CAS closure により成立する。
 
 `commit_type` は固定 enum (詳細は [05-runtime.md §2](05-runtime.md)):
