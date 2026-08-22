@@ -1,257 +1,66 @@
 {
   "schema": "kio.ci-cost-baseline/v1",
-  "captured_at": "2026-08-22T20:14:49Z",
+  "captured_at": "2026-08-22T21:54:53Z",
+  "artifact_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
   "status": {
     "measurement_package": "complete",
     "formal_current_ci_baseline": "provisional",
     "github_confirmation": "pending",
     "blockers": [
       "matching_current_github_success_runs_zero",
-      "linux_rust_local_equivalent_not_successful",
       "windows_current_measurement_missing",
       "github_internal_queue_unavailable",
       "github_billing_minutes_unavailable"
     ]
   },
   "repository": {
-    "path": "/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio",
-    "measured_head": "dd1a60018c6e188654eac83685e0c1fd2ad412fb",
-    "measured_tree": "6a645072002fbe7ac08fa3e381c78f956c6e9e71",
+    "measured_head": "2a85016fe29421ceafa28924f43ec39bc497d23e",
+    "measured_tree": "49e48877971d8c4369da17610f299c693361ab1b",
     "workflow_path": ".github/workflows/ci.yml",
     "workflow_blob": "049c69c0e867d74c49535a74543510460ca70615",
-    "rust_toolchain": "1.98.0",
-    "origin_main_at_capture": "a5c265db64b63b1d6cd76c717bde125bc5a8504a",
-    "origin_workflow_blob": "ae79f4f9aa799417d6e7d0ef0e0dfdbf92257ab1"
+    "rust_toolchain": "1.98.0"
   },
   "method": {
-    "github": {
-      "source": "GitHub Actions REST API read through gh",
-      "reviewed_run_count": 12,
-      "eligibility": [
-        "workflow blob and five-job topology match",
-        "Rust 1.98.0 matches",
-        "job dependency matches",
-        "major flags, fixture profile, and evaluator path match",
-        "successful cost requires conclusion=success"
-      ],
-      "failure_and_cancelled_policy": "separate from successful cost",
-      "legacy_run_policy": "never substitute old 29-job or Rust 1.97 runs"
-    },
     "local": {
-      "source": "isolated Git archive at the measured tree with a one-commit Git worktree",
-      "run_limit": "at most one cold and one warm execution per command group",
-      "cold_definition": "empty Cargo target; preexisting offline Cargo registry",
-      "warm_definition": "same job target reused once; fresh empty /tmp",
+      "source": "isolated local measurements at the measured tree",
+      "cost_basis": "successful cold samples only",
+      "cold_definition": "empty Cargo target with a preexisting offline Cargo registry",
       "network": "none for Linux; Cargo offline for macOS",
-      "actions_setup_time": null,
-      "actions_setup_time_reason": "checkout and toolchain action elapsed time were not measured locally",
       "job_elapsed_interpretation": "local command-group wall time, not GitHub billing minutes",
-      "successful_cost_selection": "cold local provisional sample because the workflow has no cache action",
-      "failed_cost_policy": "time to failure is diagnostic waste evidence and is excluded from successful cost"
+      "warm_rerun": "not performed; mandatory validation was reused as measurement and duplicate high-cost execution was avoided"
+    },
+    "github": {
+      "matching_current_runs": 0,
+      "matching_current_success_runs": 0,
+      "queue_seconds": null,
+      "billing_minutes": null,
+      "current_job_elapsed_seconds": null
     },
     "units": {
-      "wall_and_cpu": "seconds",
-      "runner_equivalent": "elapsed seconds divided by 60; not billing minutes",
-      "memory_and_storage": "bytes",
-      "io": "Linux cgroup v2 byte counters; Docker bind-mount accounting may be incomplete"
+      "wall_seconds": "seconds",
+      "runner_equivalent_minutes": "elapsed seconds divided by 60; not billing minutes"
     }
+  },
+  "evidence": {
+    "classification": "ephemeral and non-authorizing local measurement evidence",
+    "acquisition_method": "isolated cold validation measurement; SHA-256 manifest retained only as a digest",
+    "linux_manifest_sha256": "7563b02f736a81ad38185c206e873b52e230f968abea98d7e720eee8cb3544b9",
+    "macos_manifest_sha256": "9bebfba6bd8ce402a18a675ea8c4887896f07f22addc2f6ebdfbc085aa3a9ff0"
   },
   "topology": {
     "job_count": 5,
-    "edges": [
-      {
-        "from": "rust",
-        "to": "synthetic-history-eval"
-      }
-    ],
+    "edges": [{"from": "rust", "to": "synthetic-history-eval"}],
     "critical_path_formula": "max(rust + synthetic-history-eval, persona-w0-integration, macos-security-r23, windows-security-r23)",
-    "jobs": [
-      {
-        "name": "rust",
-        "runner": "ubuntu-latest",
-        "needs": [],
-        "run_steps": 3,
-        "signal": "format, warnings-denied lint, and complete Linux workspace/all-target tests"
-      },
-      {
-        "name": "persona-w0-integration",
-        "runner": "ubuntu-latest",
-        "needs": [],
-        "run_steps": 9,
-        "signal": "Rust persona lifecycle, create-only preservation, leases, and filesystem attestation"
-      },
-      {
-        "name": "synthetic-history-eval",
-        "runner": "ubuntu-latest",
-        "needs": [
-          "rust"
-        ],
-        "run_steps": 18,
-        "signal": "release/all-features scale, history, cross-scope, rerank, and M3 recall gates"
-      },
-      {
-        "name": "macos-security-r23",
-        "runner": "macos-latest",
-        "needs": [],
-        "run_steps": 1,
-        "signal": "complete workspace/all-target tests under macOS semantics"
-      },
-      {
-        "name": "windows-security-r23",
-        "runner": "windows-latest",
-        "needs": [],
-        "run_steps": 1,
-        "signal": "complete workspace/all-target tests under Windows semantics"
-      }
-    ],
     "workflow_cache_action": false,
     "persisted_artifact_action": false,
-    "job_outputs": "ephemeral"
-  },
-  "github_observation": {
-    "matching_current_runs": 0,
-    "matching_current_success_runs": 0,
-    "adopted_success_run_ids": [],
-    "reviewed_conclusions": {
-      "success": 7,
-      "failure": 2,
-      "cancelled": 3
-    },
-    "success_but_contract_mismatch_count": 7,
-    "failure_or_cancelled_count": 5,
-    "reviewed_runs": [
-      {
-        "run_id": 31557993561,
-        "head_sha": "a5c265db64b63b1d6cd76c717bde125bc5a8504a",
-        "conclusion": "success",
-        "workflow_wall_seconds": 13279,
-        "accepted": false,
-        "reason": "legacy 29-job, Rust 1.97, and Python evaluator workflow"
-      },
-      {
-        "run_id": 31555478884,
-        "head_sha": "99c320e8b1cc48b89951384a13dcc4df42c774de",
-        "conclusion": "cancelled",
-        "workflow_wall_seconds": 3007,
-        "accepted": false,
-        "reason": "cancelled and legacy workflow"
-      },
-      {
-        "run_id": 31552224225,
-        "head_sha": "28f8e6ac3952166303f46c9faaeee06e3d51b8c3",
-        "conclusion": "cancelled",
-        "workflow_wall_seconds": 6554,
-        "accepted": false,
-        "reason": "cancelled and legacy workflow"
-      },
-      {
-        "run_id": 31549528580,
-        "head_sha": "d69809daf422f8ef4785f2f2ba7c93290e1c486f",
-        "conclusion": "cancelled",
-        "workflow_wall_seconds": 9342,
-        "accepted": false,
-        "reason": "cancelled and legacy workflow"
-      },
-      {
-        "run_id": 31515210806,
-        "head_sha": "e23f1c1b79b85eab0559f9dde0123a3e8a8432ae",
-        "conclusion": "failure",
-        "workflow_wall_seconds": 13186,
-        "accepted": false,
-        "reason": "failure and legacy workflow"
-      },
-      {
-        "run_id": 31514983907,
-        "head_sha": "8e49ff0f7266b0705791ac2186be6e7b6ac7bb52",
-        "conclusion": "failure",
-        "workflow_wall_seconds": 11054,
-        "accepted": false,
-        "reason": "failure and legacy workflow"
-      },
-      {
-        "run_id": 31448353357,
-        "head_sha": "7e441376d3f7cdf26fb1ee1f302e1a0aedf585c6",
-        "conclusion": "success",
-        "workflow_wall_seconds": 16251,
-        "accepted": false,
-        "reason": "legacy workflow"
-      },
-      {
-        "run_id": 31448102134,
-        "head_sha": "72703ee23458fbd6577a615384490ca50cb85512",
-        "conclusion": "success",
-        "workflow_wall_seconds": 15771,
-        "accepted": false,
-        "reason": "legacy workflow"
-      },
-      {
-        "run_id": 31447925826,
-        "head_sha": "7dba92e5a21687df2fe0bd7d8748eb33860b7be0",
-        "conclusion": "success",
-        "workflow_wall_seconds": 15093,
-        "accepted": false,
-        "reason": "legacy workflow"
-      },
-      {
-        "run_id": 31446726296,
-        "head_sha": "d5cd5bcb87f01539d5f5c420424e5ea4682400c3",
-        "conclusion": "success",
-        "workflow_wall_seconds": 16546,
-        "accepted": false,
-        "reason": "legacy workflow"
-      },
-      {
-        "run_id": 31443476382,
-        "head_sha": "cefb56425a0419ed7634e1232f03d9e1261fd796",
-        "conclusion": "success",
-        "workflow_wall_seconds": 15210,
-        "accepted": false,
-        "reason": "legacy workflow"
-      },
-      {
-        "run_id": 31442711945,
-        "head_sha": "753d239eaf8a55d10d159c16fed1a48e6435bfd3",
-        "conclusion": "success",
-        "workflow_wall_seconds": 14367,
-        "accepted": false,
-        "reason": "legacy workflow"
-      }
-    ],
-    "latest_legacy_success_reference_only": {
-      "run_id": 31557993561,
-      "artifact_count": 0,
-      "same_named_job_elapsed_seconds": {
-        "rust": 1177,
-        "persona-w0-integration": 199,
-        "synthetic-history-eval": 185,
-        "macos-security-r23": 465,
-        "windows-security-r23": 2063
-      },
-      "adopted_for_current_cost": false
-    },
-    "available_values": {
-      "workflow_wall_seconds_for_reviewed_runs": true,
-      "job_elapsed_seconds_for_latest_legacy_success": true
-    },
-    "unavailable_values": {
-      "current_job_elapsed_seconds": null,
-      "internal_queue_seconds": null,
-      "billing_minutes": null,
-      "runner_cpu_seconds": null,
-      "runner_peak_rss_bytes": null,
-      "runner_io_bytes": null
-    },
-    "timing_api": {
-      "raw_total_ms": 0,
-      "raw_job_duration_ms": 0,
-      "usable_as_billing": false
-    },
-    "cache_api_reference_only": {
-      "entry": "CodeQL cache",
-      "bytes": 63373817,
-      "classified_as_current_ci_dependency_cache": false
-    },
-    "current_failure_or_cancelled_waste_minutes": null
+    "job_outputs": "ephemeral",
+    "jobs": [
+      {"name": "rust", "runner": "ubuntu-latest", "needs": [], "run_steps": 3, "signal": "format, warnings-denied lint, and complete Linux workspace/all-target tests"},
+      {"name": "persona-w0-integration", "runner": "ubuntu-latest", "needs": [], "run_steps": 9, "signal": "Rust persona lifecycle, create-only preservation, leases, and filesystem attestation"},
+      {"name": "synthetic-history-eval", "runner": "ubuntu-latest", "needs": ["rust"], "run_steps": 18, "signal": "release/all-features scale, history, cross-scope, rerank, and M3 recall gates"},
+      {"name": "macos-security-r23", "runner": "macos-latest", "needs": [], "run_steps": 1, "signal": "complete workspace/all-target tests under macOS security and filesystem semantics"},
+      {"name": "windows-security-r23", "runner": "windows-latest", "needs": [], "run_steps": 1, "signal": "complete workspace/all-target tests under Windows portability and security semantics"}
+    ]
   },
   "local_provisional": {
     "linux_environment": {
@@ -266,11 +75,8 @@
       "derived_image": "sha256:849a545e80bed54fa282df00e395e1710727fd1812e99f18938dc6a9791b19c5",
       "cargo_registry_logical_bytes": 404948565,
       "dependency_cache": "preexisting offline Cargo registry",
-      "source_mount": "read-write Docker Desktop bind mount",
-      "tmp": "fresh native container filesystem per run",
-      "host_isolation": "no concurrent Kio measurement; non-dedicated host background load",
-      "raw_evidence_path": "/private/tmp/kio-phase-b-linux-accepted.jNI6mo",
-      "raw_manifest_sha256": "8e833ee5a6c99a837ff96a795b4c360719a04b95af233b7b1a2f7887da262401"
+      "source_isolation": "native container filesystem",
+      "host_isolation": "no concurrent Kio measurement; non-dedicated host background load"
     },
     "macos_environment": {
       "os": "macOS Darwin 25.6.0",
@@ -280,373 +86,50 @@
       "memory_bytes": 51539607552,
       "rustc": "1.98.0",
       "cargo": "1.98.0",
-      "cargo_registry_kib": 444164,
       "dependency_cache": "preexisting user Cargo registry",
       "filesystem_cache": "uncontrolled and warm from diagnostics",
-      "host_isolation": "no concurrent Kio measurement; non-dedicated host background load",
-      "raw_evidence_path": "/private/tmp/kio-phase-b-macos-accepted-final.IMsCXu",
-      "environment_sha256": "980290bc21ac70af5c2369ad556f6ecfb2de3f059b0acacd8d2dcc1651d5e229",
-      "raw_manifest_sha256": "99003ac9f5cc25ed0cd434c286d2aaf19f98b0569e875c668faeb95e59a4a711"
+      "host_isolation": "no concurrent Kio measurement; non-dedicated host background load"
     },
     "jobs": {
       "rust": {
-        "platform": "linux-arm64-local-equivalent",
-        "status": "failed",
-        "successful_cost": null,
-        "cold": {
-          "classification": "time_to_failure_not_success_cost",
-          "wall_seconds": 1335.65,
-          "time_to_failure_minutes": 22.260833,
-          "cpu_user_seconds": 4847.27,
-          "cpu_system_seconds": 386.42,
-          "maximum_resident_set_bytes": 4695449600,
-          "cgroup_memory_peak_bytes": 12267044864,
-          "exit_code": 101,
-          "target_bytes_before": 64,
-          "target_bytes_after": 9318190312,
-          "tmp_bytes_after": 46812869,
-          "io_read_bytes": 430678016,
-          "io_write_bytes": 3752898560,
-          "step_wall_seconds": {
-            "fmt": 1.367284,
-            "clippy": 29.492384,
-            "test_combined_build_and_assertions": 1299.363609,
-            "measurement_overhead": 5.426723
-          },
-          "cache_state": {
-            "target": "cold empty",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          },
-          "failure_tests": [
-            "qhard::tests::baseline_snapshot_rebases_each_current_scope_journal",
-            "qhard::tests::dyld_shared_cache_catalog_is_strict_and_arch_specific",
-            "qhard::tests::fixture_snapshot_rebases_current_task_output_refs",
-            "replay_boundary::tests::bound_executable_rejects_same_content_private_replacement",
-            "rerank::tests::fixture_b_mock_produces_a_hundred_title_bound_candidates_create_only",
-            "u7::tests::adapter_child_does_not_inherit_parent_credentials_or_kio_test_environment",
-            "u7::tests::stalled_stdin_writer_obeys_lifecycle_timeout"
-          ],
-          "source_tree_unchanged": true,
-          "source_tracked_clean_after": true
-        },
-        "warm": {
-          "status": "not_run",
-          "reason": "cold run exposed deterministic platform/test-contract failures; a warm repeat would not produce successful cost",
-          "wall_seconds": null,
-          "cpu_user_seconds": null,
-          "cpu_system_seconds": null,
-          "maximum_resident_set_bytes": null,
-          "exit_code": null
-        },
-        "github_failure_signal": "fmt, clippy, or workspace test nonzero; synthetic-history-eval is skipped because it needs rust",
-        "measurement_limit": "Docker Desktop arm64 bind-filesystem failures require GitHub Ubuntu confirmation"
+        "platform": "linux-arm64-local-equivalent", "status": "success", "selected_success_sample": "cold",
+        "cold": {"wall_seconds": 1316.53, "runner_equivalent_minutes": 21.942167, "cpu_user_seconds": 4927.69, "cpu_system_seconds": 216.48, "maximum_resident_set_bytes": 4836904960, "cgroup_memory_peak_bytes": 9928478720, "target_bytes_before": 4096, "target_bytes_after": 9322053327, "tmp_bytes_after": 51451639, "io_read_bytes": 2422353920, "io_write_bytes": 13112475648, "step_wall_seconds": {"fmt": 1.235143, "clippy": 21.560424, "test_combined_build_and_assertions": 1293.211037}, "exit_code": 0, "source_tree_unchanged": true, "source_tracked_clean_after": true, "cache_state": {"target": "cold empty", "dependency_registry": "preexisting offline", "filesystem_cache": "uncontrolled"}},
+        "github_failure_signal": "fmt, clippy, or workspace test nonzero; synthetic-history-eval is skipped because it needs rust"
       },
       "persona-w0-integration": {
-        "platform": "linux-arm64-local-equivalent",
-        "status": "success",
-        "selected_success_sample": "cold",
-        "cold": {
-          "wall_seconds": 160.01,
-          "runner_equivalent_minutes": 2.666833,
-          "cpu_user_seconds": 201.93,
-          "cpu_system_seconds": 35.96,
-          "maximum_resident_set_bytes": 1298083840,
-          "cgroup_memory_peak_bytes": 2891530240,
-          "exit_code": 0,
-          "target_bytes_before": 64,
-          "target_bytes_after": 1962132763,
-          "tmp_bytes_after": 10328388,
-          "io_read_bytes": 53579776,
-          "io_write_bytes": 25382912,
-          "breakdown_wall_seconds": {
-            "build": 41.417889,
-            "fixture_generation": 40.102462,
-            "create_only_and_attestation_assertions": 17.646708,
-            "lease_subprocess_coordination": 59.14063,
-            "measurement_overhead": 1.702311
-          },
-          "step_wall_seconds": {
-            "build": 41.417889,
-            "plan": 2.126265,
-            "schedule": 5.895368,
-            "render": 8.008451,
-            "materialize": 14.02042,
-            "create_only_refusal": 0.020304,
-            "scaffold": 10.051958,
-            "lease_lifecycle": 59.14063,
-            "attest": 17.626404
-          },
-          "generated_outputs": {
-            "persona_artifacts_bytes": 2594588,
-            "persona_workspaces_bytes": 5137736,
-            "plan_bytes": 222153,
-            "schedule_bytes": 579505,
-            "render_bytes": 1788143,
-            "attestation_bytes": 928
-          },
-          "cache_state": {
-            "target": "cold empty",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          }
-        },
-        "warm": {
-          "wall_seconds": 119.4,
-          "runner_equivalent_minutes": 1.99,
-          "cold_to_warm_saving_percent": 25.38,
-          "cpu_user_seconds": 116.73,
-          "cpu_system_seconds": 1.14,
-          "maximum_resident_set_bytes": 63713280,
-          "cgroup_memory_peak_bytes": 161931264,
-          "exit_code": 0,
-          "target_bytes_before": 1962132763,
-          "target_bytes_after": 1962132763,
-          "tmp_bytes_after": 10328388,
-          "io_read_bytes": 0,
-          "io_write_bytes": 5451776,
-          "breakdown_wall_seconds": {
-            "build": 0.579298,
-            "fixture_generation": 41.008098,
-            "create_only_and_attestation_assertions": 17.151035,
-            "lease_subprocess_coordination": 59.164338,
-            "measurement_overhead": 1.497231
-          },
-          "cache_state": {
-            "target": "same target reused once",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          }
-        },
-        "github_failure_signal": "unexpected create-only success, hash mutation, lease failure, or attestation schema/claims mismatch",
-        "source_tree_unchanged": true,
-        "source_tracked_clean_after": true
+        "platform": "linux-arm64-local-equivalent", "status": "success", "selected_success_sample": "cold",
+        "cold": {"wall_seconds": 152.38, "runner_equivalent_minutes": 2.539667, "cpu_user_seconds": 217.30, "cpu_system_seconds": 40.15, "maximum_resident_set_bytes": 1262391296, "cgroup_memory_peak_bytes": 3554627584, "target_bytes_before": 4096, "target_bytes_after": 1963617076, "tmp_bytes_after": 10328396, "io_read_bytes": 192888832, "io_write_bytes": 2055090176, "step_wall_seconds": {"build": 34.517013, "plan": 2.237056, "schedule": 5.979274, "render": 8.354647, "materialize": 14.098053, "create_only_refusal": 0.016939, "scaffold": 10.070016, "lease_lifecycle": 59.233627, "attest": 17.642516}, "exit_code": 0, "source_tree_unchanged": true, "source_tracked_clean_after": true, "cache_state": {"target": "cold empty", "dependency_registry": "preexisting offline", "filesystem_cache": "uncontrolled"}},
+        "github_failure_signal": "unexpected create-only success, hash mutation, lease failure, or attestation schema/claims mismatch"
       },
       "synthetic-history-eval": {
-        "platform": "linux-arm64-local-equivalent",
-        "status": "success_when_run_independently",
-        "selected_success_sample": "cold",
-        "dependency_caveat": "current rust local equivalent failed, so GitHub would skip this job",
-        "cold": {
-          "wall_seconds": 99.29,
-          "runner_equivalent_minutes": 1.654833,
-          "cpu_user_seconds": 364.59,
-          "cpu_system_seconds": 53.98,
-          "maximum_resident_set_bytes": 1448878080,
-          "cgroup_memory_peak_bytes": 2756681728,
-          "exit_code": 0,
-          "target_bytes_before": 64,
-          "target_bytes_after": 540070401,
-          "tmp_bytes_after": 95896006,
-          "io_read_bytes": 524288,
-          "io_write_bytes": 187650048,
-          "breakdown_wall_seconds": {
-            "build": 64.769754,
-            "fixture_generation_and_replay": 25.315359,
-            "assertion_and_evaluation": 7.497485,
-            "binary_staging_io": 0.021431,
-            "measurement_overhead": 1.685971
-          },
-          "step_wall_seconds": {
-            "build": 64.769754,
-            "scale_generate": 0.042404,
-            "scale_prepare": 4.558242,
-            "scale_attest": 0.073919,
-            "scale_benchmark": 0.770449,
-            "generate_corpus": 0.316019,
-            "install_replay_bin": 0.021431,
-            "replay_history": 20.38555,
-            "crossscope_dry_run": 0.009713,
-            "crossscope": 0.93944,
-            "rerank_dump": 1.194142,
-            "rerank_fixture_input": 0.010526,
-            "rerank_fixture_output": 0.002618,
-            "rerank_apply": 0.01021,
-            "m3_1": 1.047041,
-            "m3_1_short": 1.245415,
-            "m3_2": 1.187063,
-            "m3_3": 1.020093
-          },
-          "generated_outputs": {
-            "eval_corpus_bytes": 63663622,
-            "replay_binary_bytes": 22624352,
-            "scale_tiny_bytes": 8136319,
-            "rerank_fixture_input_bytes": 1395296,
-            "rerank_input_bytes": 48299,
-            "crossscope_results_bytes": 6854
-          },
-          "cache_state": {
-            "target": "cold empty",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          }
-        },
-        "warm": {
-          "wall_seconds": 33.39,
-          "runner_equivalent_minutes": 0.5565,
-          "cold_to_warm_saving_percent": 66.371,
-          "cpu_user_seconds": 14.27,
-          "cpu_system_seconds": 10.5,
-          "maximum_resident_set_bytes": 97345536,
-          "cgroup_memory_peak_bytes": 250646528,
-          "exit_code": 0,
-          "target_bytes_before": 540070401,
-          "target_bytes_after": 540070401,
-          "tmp_bytes_after": 95883459,
-          "io_read_bytes": 0,
-          "io_write_bytes": 164401152,
-          "breakdown_wall_seconds": {
-            "build": 0.522133,
-            "fixture_generation_and_replay": 25.166946,
-            "assertion_and_evaluation": 7.131288,
-            "binary_staging_io": 0.01655,
-            "measurement_overhead": 0.553083
-          },
-          "cache_state": {
-            "target": "same target reused once",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          }
-        },
-        "github_failure_signal": "any command failure, invalid fixture/apply result, or M3 threshold regression",
-        "source_tree_unchanged": true,
-        "source_tracked_clean_after": true
+        "platform": "linux-arm64-local-equivalent", "status": "success", "selected_success_sample": "cold",
+        "cold": {"wall_seconds": 91.32, "runner_equivalent_minutes": 1.522, "cpu_user_seconds": 360.78, "cpu_system_seconds": 54.54, "maximum_resident_set_bytes": 1423802368, "cgroup_memory_peak_bytes": 2974961664, "target_bytes_before": 4096, "target_bytes_after": 541380609, "tmp_bytes_after": 95875530, "io_read_bytes": 14438400, "io_write_bytes": 778362880, "step_wall_seconds": {"build": 60.108123, "scale_generate": 0.181661, "scale_prepare": 3.825678, "scale_attest": 0.068658, "scale_benchmark": 0.690732, "generate_corpus": 0.314596, "install_replay_bin": 0.013744, "replay_history": 20.592564, "crossscope_dry_run": 0.004401, "crossscope": 0.707757, "rerank_dump": 0.996939, "rerank_fixture_input": 0.010251, "rerank_fixture_output": 0.002488, "rerank_apply": 0.005771, "m3_1": 0.805782, "m3_1_short": 1.002330, "m3_2": 0.925305, "m3_3": 0.789092}, "exit_code": 0, "source_tree_unchanged": true, "source_tracked_clean_after": true, "cache_state": {"target": "cold empty", "dependency_registry": "preexisting offline", "filesystem_cache": "uncontrolled"}},
+        "github_failure_signal": "any command failure, invalid fixture/apply result, or M3 threshold regression"
       },
       "macos-security-r23": {
-        "platform": "macos-arm64-local",
-        "status": "success",
-        "selected_success_sample": "cold",
-        "cold": {
-          "wall_seconds": 885.97,
-          "runner_equivalent_minutes": 14.766167,
-          "cpu_user_seconds": 3468.6,
-          "cpu_system_seconds": 349.13,
-          "maximum_resident_set_bytes": 3998351360,
-          "aggregate_memory_peak_bytes": null,
-          "exit_code": 0,
-          "target_allocated_bytes_before": 0,
-          "target_allocated_bytes_after": 3834449920,
-          "target_files_after": 15922,
-          "io_read_bytes": null,
-          "io_write_bytes": null,
-          "time_reported_block_input_operations": 0,
-          "time_reported_block_output_operations": 0,
-          "breakdown_wall_seconds": null,
-          "breakdown_reason": "the workflow is one cargo test command; build and assertions are not separable without changing the command",
-          "cache_state": {
-            "target": "cold empty",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled and warmed by diagnostics"
-          },
-          "stdout_sha256": "1c3fce4666fb44dc5e2c0a437c1402c9ad181fe3b49c2af46b54798100bd130c",
-          "stderr_sha256": "75102ca3391da77f9d4628dfcfcf1d28231ffe421227ac84c63db6615b365b72"
-        },
-        "warm": {
-          "wall_seconds": 822.72,
-          "runner_equivalent_minutes": 13.712,
-          "cold_to_warm_saving_percent": 7.139,
-          "cpu_user_seconds": 3239.98,
-          "cpu_system_seconds": 319.84,
-          "maximum_resident_set_bytes": 4106059776,
-          "aggregate_memory_peak_bytes": null,
-          "exit_code": 0,
-          "target_allocated_bytes_before": 3834449920,
-          "target_allocated_bytes_after": 3834449920,
-          "target_files_after": 15922,
-          "io_read_bytes": null,
-          "io_write_bytes": null,
-          "time_reported_block_input_operations": 0,
-          "time_reported_block_output_operations": 0,
-          "cache_state": {
-            "target": "same target reused once",
-            "dependency_registry": "preexisting offline",
-            "filesystem_cache": "uncontrolled"
-          },
-          "stdout_sha256": "efc561813d92214b7128f2f25008f2ca0f64add78adddd718a8d62cceb6dd759",
-          "stderr_sha256": "de18040b0cd0debe8309ad0313b9928033c5f57192e4ee3d89dfe75eedae7db4"
-        },
-        "rss_caveat": "BSD time reports a maximum descendant/process RSS, not aggregate concurrent child RSS",
+        "platform": "macos-arm64-local", "status": "success", "selected_success_sample": "cold",
+        "cold": {"wall_seconds": 890.18, "runner_equivalent_minutes": 14.836333, "cpu_user_seconds": 3463.52, "cpu_system_seconds": 346.79, "maximum_resident_set_bytes": 4224974848, "target_allocated_bytes_before": 0, "target_allocated_bytes_after": 3834720256, "target_files_after": 15922, "io_read_bytes": null, "io_write_bytes": null, "stdout_sha256": "000e843bc78470de4fd739f06f2f04faa208143290ccffb8edce361c3075315f", "stderr_sha256": "76506a0c1fa898d59e08c2f03d8ad9ac92ba57f9994029c629cbd93d46c7a6b5", "exit_code": 0, "source_tree_unchanged": true, "source_tracked_clean_after": true, "cache_state": {"target": "cold empty", "dependency_registry": "preexisting offline", "filesystem_cache": "uncontrolled and warmed by diagnostics"}},
         "github_failure_signal": "workspace/all-target test nonzero under macOS semantics"
       },
       "windows-security-r23": {
-        "platform": "windows",
-        "status": "unknown",
-        "cold": null,
-        "warm": null,
-        "wall_seconds": null,
-        "runner_equivalent_minutes": null,
-        "cpu_user_seconds": null,
-        "cpu_system_seconds": null,
-        "maximum_resident_set_bytes": null,
-        "cache_state": null,
-        "io_read_bytes": null,
-        "io_write_bytes": null,
+        "platform": "windows", "status": "unknown", "cold": null, "wall_seconds": null, "runner_equivalent_minutes": null,
         "reason": "no matching GitHub workflow run and no Windows machine measurement",
         "github_failure_signal": "workspace/all-target test nonzero under Windows semantics"
       }
     }
   },
   "aggregate": {
-    "selected_basis": "cold successful local provisional samples",
-    "job_success_runner_equivalent_minutes": {
-      "rust": null,
-      "persona-w0-integration": 2.666833,
-      "synthetic-history-eval": 1.654833,
-      "macos-security-r23": 14.766167,
-      "windows-security-r23": null
-    },
-    "observed_successful_subset": {
-      "jobs": [
-        "persona-w0-integration",
-        "synthetic-history-eval",
-        "macos-security-r23"
-      ],
-      "dependency_caveat": "synthetic was measured independently even though current rust failed",
-      "cold_wall_seconds_sum": 1145.27,
-      "cold_runner_equivalent_minutes_sum": 19.087833,
-      "warm_wall_seconds_sum": 975.51,
-      "warm_runner_equivalent_minutes_sum": 16.2585,
-      "cold_to_warm_saving_percent": 14.823,
-      "cold_cpu_user_seconds_sum": 4035.12,
-      "cold_cpu_system_seconds_sum": 439.07
-    },
-    "diagnostic_linux_rust_time_to_failure_minutes": 22.260833,
-    "diagnostic_known_failure_scenario": {
-      "jobs": [
-        "rust",
-        "persona-w0-integration",
-        "macos-security-r23"
-      ],
-      "synthetic_skipped_by_dependency": true,
-      "windows_unknown": true,
-      "known_runner_equivalent_minutes": 39.693833,
-      "overall_runner_equivalent_minutes": null
-    },
+    "selected_basis": "cold successful local provisional samples only",
+    "job_success_runner_equivalent_minutes": {"rust": 21.942167, "persona-w0-integration": 2.539667, "synthetic-history-eval": 1.522, "macos-security-r23": 14.836333, "windows-security-r23": null},
+    "observed_successful_subset": {"jobs": ["rust", "persona-w0-integration", "synthetic-history-eval", "macos-security-r23"], "cold_wall_seconds_sum": 2450.41, "cold_runner_equivalent_minutes_sum": 40.840167},
     "overall_runner_equivalent_minutes": null,
-    "overall_runner_equivalent_reason": "rust has no successful cost and Windows is unknown",
+    "overall_runner_equivalent_reason": "Windows is unknown and unknown is not zero",
     "critical_path": {
-      "branches_minutes": {
-        "rust_plus_synthetic_history_eval": null,
-        "persona_w0_integration": 2.666833,
-        "macos_security_r23": 14.766167,
-        "windows_security_r23": null
-      },
-      "complete_observed_branch_max_minutes": 14.766167,
-      "complete_observed_branch_max_is_overall": false,
+      "branches_minutes": {"rust_plus_synthetic_history_eval": 23.464167, "persona_w0_integration": 2.539667, "macos_security_r23": 14.836333, "windows_security_r23": null},
       "overall_minutes": null,
-      "reason": "rust success and Windows operands are unknown"
+      "reason": "Windows branch is unknown and unknown is not zero"
     },
-    "targets": {
-      "critical_path_minutes": 45,
-      "aggregate_runner_equivalent_minutes": 250,
-      "critical_path_result": "unknown",
-      "aggregate_result": "unknown",
-      "observed_subset_context_only": {
-        "runner_equivalent_minutes": 19.087833,
-        "comparison": "below 250 but insufficient to declare pass"
-      },
-      "unknown_values_treated_as_zero": false
-    }
+    "targets": {"critical_path_minutes": 45, "aggregate_runner_equivalent_minutes": 250, "critical_path_result": "unknown", "aggregate_result": "unknown", "unknown_values_treated_as_zero": false}
   },
   "duplication": {
     "run_step_count": 32,
@@ -656,57 +139,28 @@
     "excess_copy_fraction_of_all_run_steps": 0.0625,
     "excess_copy_fraction_within_command_group": 0.666667,
     "time_weighted_duplicate_fraction": null,
-    "time_weighted_reason": "Linux has no successful current sample and Windows is unknown",
+    "time_weighted_reason": "Windows is unknown",
     "semantic_interchangeability": false,
     "reason": "the same command carries distinct Linux, macOS, and Windows platform signal"
   },
   "cache_and_artifacts": {
-    "cacheable": [
-      "Cargo registry",
-      "per-profile Cargo target directories",
-      "release binaries if a future trusted handoff preserves exact inputs"
-    ],
+    "cacheable": ["Cargo registry", "per-profile Cargo target directories", "release binaries if a future trusted handoff preserves exact inputs"],
     "currently_reused_across_github_jobs": [],
-    "ephemeral": [
-      "persona plan, schedule, render, materialization, workspaces, leases, and attestation",
-      "scale-tiny corpus and smoke report",
-      "synthetic corpus and replay history",
-      "cross-scope and rerank reports"
-    ],
+    "ephemeral": ["persona plan, schedule, render, materialization, workspaces, leases, and attestation", "scale-tiny corpus and smoke report", "synthetic corpus and replay history", "cross-scope and rerank reports"],
     "github_persisted_bytes": 0,
-    "github_cache_hit_rate": null,
-    "local_io_limit": "cgroup counters do not completely account for Docker Desktop bind-mount writes"
+    "github_cache_hit_rate": null
   },
   "historical_assets": {
     "path": "tasks/artifacts/ci-cost-baseline-2026-08-12.json",
-    "decision": "retain unchanged",
+    "decision": "deleted",
     "authority": "historical_non_authorizing_excluded",
-    "reason": "unique evidence for HEAD a5c265d and the old 29-job/Rust 1.97 workflow; the current artifact cannot replace that history",
+    "reason": "zero live consumers; historical-only evidence is recoverable from Git history without an archive, stub, or redirect",
     "current_consumers_found": 0,
-    "dead_measurement_wrapper_found": false,
-    "dead_python_ci_shim_found": false,
-    "dead_asset_deletion_commit_required": false
+    "recovery_commit": "11a4147e0d5972ef0f7325ac61efb6ad9a3f7345"
   },
   "missing_and_remeasurement": {
-    "required_for_formal_acceptance": [
-      "make the current Linux rust command group green in separately authorized work",
-      "run the unchanged current workflow on GitHub and collect successful matching runs, up to 10",
-      "measure the Windows job on a matching GitHub run or equivalent Windows machine",
-      "capture queue and billing data if GitHub exposes usable nonzero values"
-    ],
-    "matching_run_requirements": [
-      "workflow blob 049c69c0e867d74c49535a74543510460ca70615",
-      "exact five-job topology and rust -> synthetic dependency",
-      "Rust 1.98.0",
-      "same flags, tiny fixture profile, Rust persona path, and Rust evaluator path",
-      "conclusion=success for successful cost"
-    ],
-    "forbidden_substitutions": [
-      "old 29-job runs",
-      "Rust 1.97 runs",
-      "Python evaluator runs",
-      "failure or cancelled time in successful cost",
-      "zero in place of unknown Windows, queue, billing, CPU, RSS, or I/O"
-    ]
+    "required_for_formal_acceptance": ["run the unchanged current workflow on GitHub and collect successful matching runs, up to 10", "measure the Windows job on a matching GitHub run or equivalent Windows machine", "capture queue and billing data if GitHub exposes usable nonzero values"],
+    "matching_run_requirements": ["workflow blob 049c69c0e867d74c49535a74543510460ca70615", "exact five-job topology and rust -> synthetic dependency", "Rust 1.98.0", "same flags, tiny fixture profile, Rust persona path, and Rust evaluator path", "conclusion=success for successful cost"],
+    "forbidden_substitutions": ["old 29-job runs", "Rust 1.97 runs", "Python evaluator runs", "failure or cancelled time in successful cost", "zero in place of unknown Windows, queue, billing, CPU, RSS, or I/O"]
   }
 }

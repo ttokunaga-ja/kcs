@@ -1,14 +1,15 @@
 # Current five-job CI unique-signal ledger
 
 This ledger describes the workflow at measured revision
-`dd1a60018c6e188654eac83685e0c1fd2ad412fb`. The machine-readable source of
+`2a85016fe29421ceafa28924f43ec39bc497d23e`, tree
+`49e48877971d8c4369da17610f299c693361ab1b`, and workflow blob
+`049c69c0e867d74c49535a74543510460ca70615`. The machine-readable source of
 truth is [`ci-cost-baseline.json`](ci-cost-baseline.json); the current workflow
 is [`../../.github/workflows/ci.yml`](../../.github/workflows/ci.yml).
 
-The measurement package is complete, but formal current-CI baseline acceptance
-is provisional. GitHub has no successful run matching this workflow blob and
-topology, the Linux `rust` command group is not green in the isolated local
-equivalent, and Windows remains unmeasured.
+The Phase C measurement package is complete. Formal current-CI baseline
+acceptance remains provisional: GitHub has zero matching current runs, and the
+Windows job, queue time, and billing minutes are unknown.
 
 ## Signal carried by each job
 
@@ -22,8 +23,8 @@ equivalent, and Windows remains unmeasured.
 
 The three platform jobs invoke the exact same `cargo test --workspace
 --all-targets --locked` text, but they do not carry interchangeable evidence:
-each execution covers OS-specific compilation, filesystem, process, and security
-behavior.
+each execution covers OS-specific compilation, filesystem, process, and
+security behavior.
 
 ## Duplication accounting
 
@@ -36,48 +37,37 @@ platform job. The workspace test command occurs three times.
   `(3 - 1) / 32 = 6.25%` of run steps.
 - Within that one logical command group, `2 / 3 = 66.667%` are additional
   platform executions.
-- Time-weighted duplication is unknown: Linux has no successful current sample
-  and Windows has no current sample. Unknown values are not treated as zero.
+- Time-weighted duplication is unknown because Windows is unknown; unknown is
+  not treated as zero.
 
-There is no workflow cache action and no upload/persisted-artifact action. Cargo
-registries, build outputs, generated persona material, and synthetic fixtures
-are therefore either runner-local cache candidates or ephemeral job outputs,
-not reusable evidence in the current workflow.
+There is no workflow cache action and no upload/persisted-artifact action.
+Cargo registries, build outputs, generated persona material, and synthetic
+fixtures are therefore either runner-local cache candidates or ephemeral job
+outputs, not reusable evidence in the current workflow.
 
-## Current Linux failure signal
+## Current cost evidence
 
-The exact `rust` command group reached `cargo test` in an isolated Linux
-container and exited `101`. Seven `kio-eval` library tests failed: two
-snapshot-rebase cases, the dyld shared-cache catalog case, a private-executable
-replacement case, the fixture-B mock, and two U7 adapter lifecycle cases. The
-dyld test unconditionally reaches a sealed-macOS-runtime requirement on Linux,
-and the U7 tests use `/bin/sh` while the Linux image exposes it as a symlink that
-the adapter boundary deliberately rejects. Some remaining failures may depend
-on Docker Desktop's arm64 bind filesystem and must be confirmed on GitHub's
-Ubuntu runner. This is a local platform/test-contract failure, not a successful
-cost sample and not a measurement-wrapper failure.
+Successful cold local samples only are the provisional cost basis. Mandatory
+validation was reused as the measurement; no warm rerun was made, avoiding a
+duplicate high-cost execution. The raw evidence is ephemeral and non-authorizing;
+the retained acquisition record is its isolated cold-validation method and the
+two manifest digests in [`ci-cost-baseline.json`](ci-cost-baseline.json).
 
-Because `synthetic-history-eval` needs `rust`, GitHub would skip that downstream
-job after this failure. Its independent local measurement remains useful only
-as provisional cost evidence for the command group after the prerequisite is
-made green.
+Linux `rust`, persona, and synthetic jobs and macOS workspace tests are green
+in their measured local equivalents. Windows remains unmeasured, so this does
+not establish an overall critical path, total, or threshold result.
 
-## Phase 6 candidates — not implemented here
+## Non-current historical asset
 
-1. Treat a green Linux `rust` suite as a prerequisite to CI optimization. The
-   platform/test-contract repair needs separate authorization and is not part
-   of this measurement-only phase.
-2. After current GitHub runs exist, compare the time share of the three full
-   workspace-test executions. Consider focused OS-specific suites only if they
-   preserve the distinct macOS and Windows failure modes above.
-3. Evaluate an explicit Cargo dependency/target cache and build-output reuse.
-   Local warm results show what may be reusable, but a cache key, restore cost,
-   and GitHub hit rate have not been measured.
-4. Preserve the persona and synthetic lanes as distinct gates. Their lifecycle
-   and recall signals are not supplied by the generic workspace suite.
-5. Keep the existing `rust -> synthetic-history-eval` dependency unless current
-   GitHub evidence shows that its fail-fast saving is outweighed by critical-path
-   cost.
+`tasks/artifacts/ci-cost-baseline-2026-08-12.json` was deleted: it had zero
+live consumers and was historical-only. It is recoverable from Git commit
+`11a4147e0d5972ef0f7325ac61efb6ad9a3f7345`; no archive, stub, or redirect was
+kept.
+
+## Phase C boundary
 
 No workflow reorganization, product change, new job, cache action, or artifact
-upload was made in Phase B.
+upload was made. The five-job topology and its distinct signal lanes remain
+unchanged. Formal remeasurement requires matching successful GitHub runs and a
+Windows measurement; queue and billing remain unknown unless GitHub exposes
+usable values.
