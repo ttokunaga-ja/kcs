@@ -71,7 +71,7 @@ persona plan`, `schedule`, `render`, `materialize`, `scaffold`, `lease claim`,
 All outputs are Rust-owned, create-only records; no Python persona runtime,
 schema, or CLI participates.
 
-Development, CI, and the workspace contract all use Rust `1.97.1` with
+Development, CI, and the workspace contract all use Rust `1.98.0` with
 Edition 2024 (see `rust-toolchain.toml` and the workspace `Cargo.toml`). Kio is
 pre-stable and does not maintain a second MSRV compatibility contract.
 

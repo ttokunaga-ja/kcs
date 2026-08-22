@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo build -p kio-eval --bin kio-eval --locked
       - run: >-
           target/debug/kio-eval persona plan --profile tiny
@@ -115,7 +115,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.0
       # Optional ranking features must take this same eval path; `--all-features`
       # prevents a default-off ranking lane from bypassing the only Recall gate.
       - run: >-
@@ -179,7 +179,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo test --workspace --all-targets --locked
 
   windows-security-r23:
@@ -187,5 +187,5 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: cargo test --workspace --all-targets --locked
