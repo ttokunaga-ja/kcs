@@ -2968,17 +2968,6 @@ fn run_device_repair(rebuild_source: bool) -> Result<Value> {
         let registry = RegistryDb::open_default().map_err(index_to_kio)?;
         registry.all_entries().map_err(index_to_kio)?
     };
-    // This command is the explicit recovery boundary for the disposable
-    // device replica. Reset it once before projecting any scope so rows from a
-    // scope that later fails repair cannot remain searchable.
-    kio_index::aggregator::Aggregator::recreate(&aggregator_path()).map_err(|error| {
-        KioError::new(
-            "KIO-E-AGGREGATOR-001",
-            "the device search replica could not be recreated",
-            json!({ "reason": error.to_string() }),
-            ExitCode::PartialFailure,
-        )
-    })?;
     let mut entries: Vec<_> = entries.into_iter().filter(|entry| entry.indexed).collect();
     entries.sort_by(|left, right| {
         left.root_path
@@ -2993,9 +2982,28 @@ fn run_device_repair(rebuild_source: bool) -> Result<Value> {
             .and_then(|repo| validate_device_registry_entry(&entry, &repo).map(|()| repo))
         {
             Ok(repo) => live.push((entry, repo)),
+            // Exact-current validation is command-wide, including aggregate
+            // repair. Validate every selected store before resetting the
+            // replica or repairing a healthy sibling, and never translate a
+            // version mismatch into `failed_scopes` partial success.
+            Err(error) if error.error_code() == "KIO-E-STORE-VERSION-001" => {
+                return Err(error);
+            }
             Err(error) => failures.push(device_repair_failure(&entry, "open", &error)),
         }
     }
+    // This command is the explicit recovery boundary for the disposable
+    // device replica. Reset it once after the command-wide format gate and
+    // before projecting any scope so rows from a scope that later fails repair
+    // cannot remain searchable.
+    kio_index::aggregator::Aggregator::recreate(&aggregator_path()).map_err(|error| {
+        KioError::new(
+            "KIO-E-AGGREGATOR-001",
+            "the device search replica could not be recreated",
+            json!({ "reason": error.to_string() }),
+            ExitCode::PartialFailure,
+        )
+    })?;
     let mut duplicate_ids = BTreeSet::new();
     let mut counts = BTreeMap::new();
     for (entry, _) in &live {
@@ -3033,6 +3041,9 @@ fn run_device_repair(rebuild_source: bool) -> Result<Value> {
                 "status": value.get("status").cloned().unwrap_or_else(|| json!("repaired")),
                 "result": value,
             })),
+            Err(error) if error.error_code() == "KIO-E-STORE-VERSION-001" => {
+                return Err(error);
+            }
             Err(error) => failures.push(device_repair_failure(
                 &entry,
                 device_repair_stage(&error, rebuild_source),
@@ -3186,7 +3197,6 @@ fn device_repair_reason(stage: &str, error: &KioError) -> &'static str {
         "KIO-E-REGISTRY-DUP-001" => "registry_duplicate",
         "KIO-E-REGISTRY-STALE-001" => "registry_stale",
         "KIO-E-STORE-LOCKED-001" => "locked",
-        "KIO-E-STORE-VERSION-001" => "store_version_incompatible",
         "KIO-E-STORE-CORRUPT-001" => "store_corrupt",
         "KIO-E-PURGE-INCOMPLETE-001" => "purge_incomplete",
         "KIO-E-AGGREGATOR-001" => "replica_error",
@@ -6127,30 +6137,8 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     }
 
     if searched.is_empty() {
-        // PC53/PC54/PC55(a)/PC56 (05 §1.8 L390-391 / §R note-4 ruling,
-        // 2026-07-22: priority order VERSION → INCOMPAT → journal → DUP →
-        // REBUILDING): every enumerated scope has a `kio_format_version`
-        // newer than this build's supported ceiling. Checked FIRST, ahead of
-        // the journal/REBUILDING promotions below — a store-version mismatch
-        // is a more fundamental, permanent-until-upgrade incompatibility than
-        // either transient state (matches REBUILDING's own promotion shape,
-        // but at the STORE-VERSION exit 8, not exit 3).
-        let all_store_version_incompatible = !excluded.is_empty()
-            && excluded.iter().all(|entry| {
-                entry.get("reason").and_then(Value::as_str)
-                    == Some(STORE_VERSION_INCOMPATIBLE_REASON)
-            });
-        if all_store_version_incompatible {
-            return Err(KioError::new(
-                "KIO-E-STORE-VERSION-001",
-                "every searched scope's kio_format_version is newer than this build supports; \
-                 upgrade kio",
-                json!({ "excluded_scopes": excluded }),
-                ExitCode::IncompatibleProfile,
-            ));
-        }
-        // PC52/PC54/PC55(c) (05 §1.8 L390-391 / §R note-4 ruling: VERSION →
-        // INCOMPAT → journal → DUP → REBUILDING): every enumerated scope was
+        // PC52/PC55(c) (05 §1.8 L390-391 / §R note-4 ruling: INCOMPAT →
+        // journal → DUP → REBUILDING): every enumerated scope was
         // excluded by explicit `--vector`'s own per-scope profile-compat gate
         // (replica-header preparation's `VEC_PROFILE_INCOMPATIBLE_REASON` /
         // `VEC_PROFILE_ABSENT_REASON`, checked only when `resolved_mode ==
@@ -6199,8 +6187,9 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
         // every enumerated scope was excluded because its scope_id is a live
         // registry duplicate (`registry_all_targets`'s own dedup below, or a
         // cursor-replay scope that became ambiguous — R23-25 above). Checked
-        // ahead of (3) index availability, matching 10 §3's documented
-        // preflight priority (VERSION → journal → DUP → REBUILDING).
+        // ahead of (3) index availability, matching 10 §3's exclusion
+        // priority (journal → DUP → REBUILDING). The command-wide exact-format
+        // gate has already stopped any version mismatch before this aggregate.
         let all_registry_duplicate = !excluded.is_empty()
             && excluded.iter().all(|entry| {
                 entry.get("reason").and_then(Value::as_str) == Some("registry_duplicate")
@@ -7002,21 +6991,13 @@ const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
 /// `INDEX_REBUILDING_REASON`'s all-scopes promotion below).
 const PURGE_JOURNAL_ACTIVE_REASON: &str = "purge_journal_active";
 
-/// PC53/PC54/PC55(a) (05 §1.8 / 10 §11.5): this scope's `kio_format_version`
-/// is newer than this build's supported ceiling. Surfaced as
-/// `KIO-E-STORE-VERSION-001` / exit 8 when it is the sole failure mode across
-/// every searched scope (promoted ahead of the generic SCOPE-ALL-FAILED, like
-/// `INDEX_REBUILDING_REASON`).
-const STORE_VERSION_INCOMPATIBLE_REASON: &str = "store_version_incompatible";
-
 /// PC52/PC55(c) (05 §1.8 L390-391): this scope's chunk-embedding profile
 /// does not match the currently adopted embedding profile — checked only
 /// for explicit `--vector` (auto/`--hybrid` fold this into the device-wide
 /// text-fallback aggregate upstream, `resolve_vector_availability`).
 /// Surfaced as `KIO-E-SEARCH-VEC-INCOMPAT-001` / exit 8 when it is the sole
 /// exclusion reason across every searched scope (`all_vec_incompatible` in
-/// `run_search_inner`, mirroring `STORE_VERSION_INCOMPATIBLE_REASON`'s own
-/// promotion — §R ruling 4's VERSION → INCOMPAT priority).
+/// `run_search_inner`).
 const VEC_PROFILE_INCOMPATIBLE_REASON: &str = "embedding_profile_incompatible";
 
 /// PC52: this scope has no chunk-embedding data at all — checked only for
@@ -7327,12 +7308,13 @@ fn prepare_scope_from_replica_header(
 ) -> std::result::Result<ReplicaScopeResolution, ScopeSearchError> {
     multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, deadline);
     scope_deadline_check(deadline)?;
-    // Preserve the format-version priority and the existing cursor scope
-    // availability contract.  `Repository::open_for_search` validates only
-    // the scope store; it does not open the per-scope search index.
+    // `Repository::open_for_search` validates only the scope store; it does
+    // not open the per-scope search index. A format-version incompatibility is
+    // a command-wide hard stop: continuing the healthy scopes would conceal a
+    // repository that this binary must not interpret.
     let repo = Repository::open_for_search(&exec.target.repo_root).map_err(|error| {
         if error.error_code() == "KIO-E-STORE-VERSION-001" {
-            ScopeSearchError::Excluded(STORE_VERSION_INCOMPATIBLE_REASON.to_owned())
+            ScopeSearchError::Fatal(error)
         } else {
             ScopeSearchError::Excluded("unreachable".to_owned())
         }
@@ -13913,8 +13895,8 @@ fn resolve_scope_target_with_mode(
     // scope that exists but is format-incompatible is indistinguishable from
     // one that does not exist at all, and silently drops out of every
     // candidate pool above. That conflates two materially different
-    // diagnoses: "cannot find this scope" vs. "found it, but it needs an
-    // upgrade" (0). Before reporting the generic scope_unreachable, take one
+    // diagnoses: "cannot find this scope" vs. "found it, but its format is
+    // non-current" (0). Before reporting the generic scope_unreachable, take one
     // more direct, unvalidated peek at each candidate's `scope.json` (the
     // hint, every registry row for this scope_id, and the CWD) so a
     // genuinely-incompatible-version scope is reported as

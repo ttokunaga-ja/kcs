@@ -1449,6 +1449,35 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn runtime_binding_ignores_payload_internal_links_but_rejects_a_linked_payload_route() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let parent = fs::canonicalize(temp.path()).unwrap();
+        let plan_path = plan_file(&parent, PersonaProfile::Tiny);
+        let plan = PersonaPlan::parse_canonical(&fs::read(&plan_path).unwrap()).unwrap();
+        let destination = parent.join("workspace");
+        scaffold(&plan_path, &destination).unwrap();
+
+        // Payload contents do not grant lease authority. They are deliberately
+        // opaque even when ordinary workspace data contains links.
+        let leaf = payload_leaf(&destination, &plan);
+        let external = parent.join("ordinary-payload");
+        fs::write(&external, b"payload").unwrap();
+        symlink(&external, leaf.join("opaque-symlink")).unwrap();
+        fs::hard_link(&external, leaf.join("opaque-hardlink")).unwrap();
+        bind_workspace(&destination).unwrap();
+
+        // The plan-derived route to that opaque leaf remains authority. A
+        // replacement link must therefore be rejected before lease mutation.
+        let parked = parent.join("parked-payload-leaf");
+        fs::rename(&leaf, &parked).unwrap();
+        symlink(&parked, &leaf).unwrap();
+        assert!(bind_workspace(&destination).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn scaffold_never_adopts_a_payload_filled_existing_root() {
         let temp = tempdir().unwrap();
         let parent = fs::canonicalize(temp.path()).unwrap();

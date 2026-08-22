@@ -1264,12 +1264,9 @@ fn bump_format_version(dir: &std::path::Path) {
     fs::write(&scope_json, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
-/// PC53/PC54 (05 §1.8 L390-391 / 10 §11.5): a single scope whose
-/// `kio_format_version` is newer than this build's supported ceiling excludes
-/// with `KIO-E-STORE-VERSION-001` (not a generic `unreachable`), and — being
-/// the only searched scope — promotes to the command-level
-/// `KIO-E-STORE-VERSION-001` / exit 8 (ahead of the generic
-/// SCOPE-ALL-FAILED exit 3/4).
+/// PC53/PC54 (05 §1.8 L390-391 / 10 §11.5): a single non-current scope aborts
+/// search with `KIO-E-STORE-VERSION-001` / exit 8, rather than being treated
+/// as a generic unreachable scope.
 #[test]
 fn pc53_pc54_incompatible_format_version_scope_is_store_version_exit_8() {
     let (_parent, data_home, targets) = multi_scope_env(&["target"]);
@@ -1300,14 +1297,12 @@ fn pc53_pc54_incompatible_format_version_scope_is_store_version_exit_8() {
     assert_eq!(err["error_code"], "KIO-E-STORE-VERSION-001");
 }
 
-/// PC57 (05 §1.8 L392 / 06 §7 L362-363): a mixed all-scopes-failed set that
-/// includes at least one retryable reason (here, a replica header marked
-/// `index_rebuilding`) alongside a `store_version_incompatible` permanent
-/// reason from another scope exits 3, not the old unconditional exit 4
-/// — retryability, not a uniform "everything failed" verdict, decides the
-/// exit family once no single homogeneous-reason promotion (PC55) applies.
+/// PC57 (05 §1.8 L392 / 06 §7 L362-363): one non-current scope aborts a
+/// multi-scope search even when another scope is healthy. The command must not
+/// return a partial result set or record format incompatibility as an
+/// `excluded_scopes` entry.
 #[test]
-fn pc57_mixed_retryable_and_permanent_all_failed_exits_3() {
+fn pc57_non_current_scope_aborts_multi_scope_search_without_partial_success() {
     // Both targets must be indexed and registry-participating for the default
     // all-scopes enumeration to reach them.
     let (_parent, data_home, targets) = multi_scope_env(&["a", "b"]);
@@ -1330,53 +1325,19 @@ fn pc57_mixed_retryable_and_permanent_all_failed_exits_3() {
             .assert()
             .success();
     }
-    // `a`'s format_version is bumped to permanent/incompatible.
+    // A's format version is non-current; B remains healthy and searchable.
     bump_format_version(a);
-    // Move B's source HEAD without publishing a replacement projection. The
-    // snapshot writer marks B's durable replica header Rebuilding, so direct
-    // search must produce the retryable `index_rebuilding` exclusion from the
-    // replica-only route rather than a removed per-scope delay seam.
-    fs::write(
-        b.join("doc.md"),
-        "# Doc\n\nmixedreasonterm b after snapshot\n",
-    )
-    .unwrap();
-    let (snapshot_code, snapshot) = run_in(
-        &data_home,
-        b,
-        &[
-            "snapshot",
-            "create",
-            "--message",
-            "make B replica rebuilding",
-        ],
-    );
-    assert_eq!(
-        snapshot_code, 0,
-        "snapshot must advance B's source HEAD: {snapshot}"
-    );
-    assert_eq!(snapshot["status"], "created", "{snapshot}");
     let runner = a.parent().unwrap().join("runner");
     let (code, body) = run_in(&data_home, &runner, &["search", "mixedreasonterm"]);
     assert_eq!(
-        code, 3,
-        "mixed retryable(index_rebuilding)+permanent(store_version_incompatible) all-failed must be exit 3: {body}"
+        code, 8,
+        "a non-current scope must abort instead of returning B's partial result: {body}"
     );
-    assert_eq!(body["error_code"], "KIO-E-SEARCH-SCOPE-ALL-FAILED-001");
-    let excluded = body["context"]["excluded_scopes"]
-        .as_array()
-        .expect("mixed failure must report both scope exclusions");
+    assert_eq!(body["error_code"], "KIO-E-STORE-VERSION-001");
+    assert!(body.get("results").is_none(), "no partial success: {body}");
     assert!(
-        excluded
-            .iter()
-            .any(|scope| scope["reason"] == "store_version_incompatible"),
-        "A's permanent reason must be retained: {body}"
-    );
-    assert!(
-        excluded
-            .iter()
-            .any(|scope| scope["reason"] == "index_rebuilding"),
-        "B's replica-header rebuilding reason must be retained: {body}"
+        body["context"].get("excluded_scopes").is_none(),
+        "store-version incompatibility must not be converted to an exclusion: {body}"
     );
 }
 

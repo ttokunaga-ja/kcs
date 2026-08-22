@@ -2075,6 +2075,78 @@ fn ct3_repair_device_all_recovers_missing_source_and_replica_outside_a_scope() {
 }
 
 #[test]
+fn ct3_device_repairs_reject_non_current_scope_before_any_mutation() {
+    for operation in ["replica", "all"] {
+        let parent = tempfile::tempdir().unwrap();
+        let data_home = parent.path().join("xdg");
+        let current = parent.path().join("a-current");
+        let non_current = parent.path().join("z-non-current");
+        for (dir, text) in [
+            (&current, "current repair boundary"),
+            (&non_current, "non-current repair boundary"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("doc.md"), text).unwrap();
+            json_success_path(dir, &data_home, &["init"]);
+            json_success_path(dir, &data_home, &["index", "--offline", "--approve"]);
+        }
+
+        let aggregator = data_home.join("cache/kio/aggregator.sqlite");
+        let conn = Connection::open(&aggregator).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE phase_a_no_mutation_sentinel (value TEXT NOT NULL);
+             INSERT INTO phase_a_no_mutation_sentinel VALUES ('untouched');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let current_head = fs::read(current.join(".kio/HEAD")).unwrap();
+        let current_sqlite = fs::read(current.join(".kio/index/sqlite.db")).unwrap();
+        let scope_json = non_current.join(".kio/scope.json");
+        let mut scope: Value = serde_json::from_slice(&fs::read(&scope_json).unwrap()).unwrap();
+        scope["kio_format_version"] = Value::String("9.0.0".to_owned());
+        fs::write(&scope_json, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
+        let non_current_scope = fs::read(&scope_json).unwrap();
+
+        let stderr = hermetic_kio_command()
+            .current_dir(parent.path())
+            .env("XDG_CONFIG_HOME", data_home.join("config"))
+            .env("XDG_DATA_HOME", data_home.join("data"))
+            .env("XDG_CACHE_HOME", data_home.join("cache"))
+            .args(["repair", operation, "--json"])
+            .assert()
+            .code(8)
+            .get_output()
+            .stderr
+            .clone();
+        let error: Value = serde_json::from_slice(&stderr).unwrap();
+        assert_eq!(error["error_code"], "KIO-E-STORE-VERSION-001");
+        assert_eq!(error["context"]["found"], "9.0.0");
+
+        let sentinel: String = Connection::open(&aggregator)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM phase_a_no_mutation_sentinel",
+                [],
+                |row| row.get(0),
+            )
+            .expect("device replica must not be recreated before format rejection");
+        assert_eq!(sentinel, "untouched");
+        assert_eq!(fs::read(current.join(".kio/HEAD")).unwrap(), current_head);
+        assert_eq!(
+            fs::read(current.join(".kio/index/sqlite.db")).unwrap(),
+            current_sqlite,
+            "repair {operation} must not touch a healthy sibling"
+        );
+        assert_eq!(
+            fs::read(&scope_json).unwrap(),
+            non_current_scope,
+            "format rejection must preserve incompatible bytes"
+        );
+    }
+}
+
+#[test]
 fn ct3_repair_device_unreachable_registry_scope_is_partial_without_cwd_fallback() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");

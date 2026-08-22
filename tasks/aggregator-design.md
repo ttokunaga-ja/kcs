@@ -122,8 +122,10 @@ aggregator を失っても検索が成立しなければならない)。
    - vector 項 = `agg_embeddings` 全体に対する cosine — 従来どおり全体順位
    - RRF は **2 つの global rank** を足す。per-scope rank は登場しない
 3. **安全性の再確認 (結果件数に比例)**: 上位候補を出した scope についてのみ live `.kio` を開き、
-   (a) `kio_format_version` 互換、(b) purge journal 非活性、(c) `index_generation` が射影時と同一 —
-   を確認する。落ちた scope の候補は捨て、`excluded_scopes` に理由を記録し、次順位から補充する
+   (a) `kio_format_version == KIO_FORMAT_VERSION`、(b) purge journal 非活性、(c) `index_generation` が
+   射影時と同一 — を確認する。(a) の不一致は `KIO-E-STORE-VERSION-001` / exit 8 で command 全体を
+   停止し、scope 除外や次順位からの補充へ変換しない。(b) / (c) で落ちた scope の候補だけを捨て、
+   `excluded_scopes` に理由を記録して次順位から補充する
 4. diversify (MMR / group_by_raw_hash) を統合後の候補列へ適用 — 現行 §1.4 のまま
 
 **手順 3 が設計の要点である。** 安全性判定を replica に委ねると staleness がそのまま
@@ -137,7 +139,7 @@ scope 総数に依存しない。
 
 ```
 6. aggregator は安全性判定の最終権限を持たない。
-   purge journal / kio_format_version / index_generation は、
+   purge journal / exact-current kio_format_version / index_generation は、
    結果を返す scope について live .kio で再確認する。
 7. aggregator は候補の「選択と採点」を担い、liveness 判定を再実装しない。
    refresh 時に scope 側で解決済みの集合だけを持つ。

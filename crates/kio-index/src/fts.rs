@@ -1126,7 +1126,7 @@ fn linux_regular_fd_inventory() -> Result<BTreeMap<i32, SourceFileIdentity>> {
 ///
 /// This is for callers that need the raw SQLite connection rather than the FTS
 /// wrapper. It validates the complete public schema before returning, so it
-/// cannot accidentally adopt an empty, partial, or legacy `sqlite.db`.
+/// cannot accidentally adopt an empty, partial, or non-current `sqlite.db`.
 pub fn open_existing_source_index_connection(
     path: impl AsRef<std::path::Path>,
     mode: ExistingSourceIndexOpenMode,
@@ -2667,7 +2667,7 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
 ///
 /// `Ok(false)` means this connection contains no Kio index objects and can be
 /// initialized as a fresh store. `Ok(true)` means every required current object
-/// matches the public fingerprint. Any partial, legacy, or incompatible Kio
+/// matches the public fingerprint. Any partial, non-current, or incompatible Kio
 /// shape returns [`IndexError::Schema`] with rebuild guidance. Callers that
 /// intentionally open SQLite directly (notably repair) can use this check
 /// before selecting from the database.
@@ -2708,7 +2708,7 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
         ));
     }
     // GC's private-copy generation rotation may add one strict attestation
-    // table. It is deliberately optional so Phase 3 indexes remain readable;
+    // table. It is optional because only current rotation states create it;
     // when present it is validated below and is never treated as arbitrary
     // user schema.
     const OPTIONAL_GC_OBJECTS: &[&str] = &["gc_rotation_attestation"];
@@ -2962,15 +2962,14 @@ pub struct IndexMetadata {
     pub last_lifecycle_epoch: u64,
 }
 
-/// The one `index_metadata` row, or `None` on a store that predates this
-/// table (LC42) — the table only ever holds zero or one row (`id=1`), never
-/// a partial one. Tolerates the table itself being absent (an
-/// un-schema'd connection, or a pre-Step4b `sqlite.db`) the same way as a
-/// present-but-empty table, so callers do not each need their own
-/// `table_exists` probe before this call.
+/// The one `index_metadata` row, or `None` when the required current table is
+/// present but its single row has not yet been initialized. A missing table is
+/// a non-current derived database and must be rebuilt rather than interpreted.
 pub fn read_index_metadata(conn: &Connection) -> Result<Option<IndexMetadata>> {
     if !table_exists(conn, "index_metadata")? {
-        return Ok(None);
+        return Err(schema_rebuild_error(
+            "missing required current index_metadata table",
+        ));
     }
     Ok(conn
         .query_row(
@@ -2988,8 +2987,8 @@ pub fn read_index_metadata(conn: &Connection) -> Result<Option<IndexMetadata>> {
 }
 
 /// LC42: create the single `index_metadata` row only if absent — never
-/// overwrites an existing row (a fresh store's first write-command visit, or
-/// a pre-Step4b store's first encounter with this table). `generation` is
+/// overwrites an existing row during a current store's first write-command
+/// visit. `generation` is
 /// the caller-minted ULID; `last_lifecycle_epoch` must be the *current*
 /// `.kio/tombstones/lifecycle-epoch` counter value at the moment of this
 /// call — never the column's own `DEFAULT 0`, which LC42 explicitly warns
@@ -3123,7 +3122,7 @@ fn schema_rebuild_error(detail: impl std::fmt::Display) -> IndexError {
 
 // `PRAGMA table_info` cannot observe AUTOINCREMENT, CHECK, UNIQUE, trigger
 // WHEN clauses, or virtual-table options. These public definitions therefore
-// form the compatibility fingerprint; canonicalization below intentionally
+// form the current schema fingerprint; canonicalization below intentionally
 // ignores only case, whitespace, and SQL comments.
 const CURRENT_CHUNKS_SQL: &str = "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, first_seen_commit TEXT, created_at TEXT NOT NULL)";
 const CURRENT_CHUNK_CONFIG_GENERATIONS_SQL: &str = "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))";
@@ -3736,6 +3735,20 @@ mod tests {
     }
 
     #[test]
+    fn index_metadata_reader_requires_the_current_table() {
+        let non_current = Connection::open_in_memory().unwrap();
+        let error = read_index_metadata(&non_current)
+            .expect_err("a missing current index_metadata table must be rejected");
+        assert!(error.to_string().contains("kio repair rebuild-db"));
+
+        let current = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        assert_eq!(read_index_metadata(current.connection()).unwrap(), None);
+    }
+
+    #[test]
     fn current_file_schema_reopens_without_mutation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sqlite.db");
@@ -4326,7 +4339,7 @@ mod tests {
 
         let error = SqliteFtsIndex::open(&path, config)
             .err()
-            .expect("a complete schema must not conceal legacy objects");
+            .expect("a complete schema must not conceal non-current objects");
         assert!(
             error
                 .to_string()
@@ -4665,7 +4678,7 @@ mod tests {
     }
 
     #[test]
-    fn ct4_legacy_chunk_config_column_is_rejected_without_writing() {
+    fn ct4_non_current_chunk_config_column_is_rejected_without_writing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sqlite.db");
         {
@@ -4735,7 +4748,7 @@ mod tests {
             },
         )
         .err()
-        .expect("legacy schema must be rejected");
+        .expect("non-current schema must be rejected");
         assert!(error.to_string().contains("kio repair rebuild-db"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }

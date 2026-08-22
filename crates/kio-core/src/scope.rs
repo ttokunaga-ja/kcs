@@ -2854,15 +2854,10 @@ impl Repository {
         self.validated_scope_id().map(|_| ())
     }
 
-    /// QB8 (step4b-contract-tests-p3b.md §A, 03 §2 L154 / 10 §11.3 L948): the
-    /// `kio_format_version` compatibility judgment runs BEFORE JSON Schema
-    /// validation, not after. A store from a newer MINOR version may add
-    /// schema keys this build does not know about; reading the version first
-    /// lets that case degrade to `KIO-E-STORE-VERSION-001` / exit 8
-    /// (read-only + upgrade guidance) instead of being misclassified as a
-    /// `KIO-E-CONFIG-SCHEMA-001` unknown-key schema error. The previous
-    /// ordering ran schema validation first, so an unknown key masked the
-    /// real (version) problem behind a generic schema failure.
+    /// The exact `kio_format_version` judgment runs before current JSON Schema
+    /// validation. Missing, malformed, older, and newer versions all fail with
+    /// `KIO-E-STORE-VERSION-001` / exit 8; this ordering supplies a stable
+    /// rejection code and does not permit read-only degradation.
     fn validated_scope_id(&self) -> Result<String> {
         #[cfg(unix)]
         let text = if let Some(kio) = self.bound_kio.as_deref() {
@@ -6623,9 +6618,9 @@ fn read_scope_json_value(kio_dir: &Path) -> Result<Value> {
 }
 
 /// Validate a persisted scope before any public reader exposes its approval
-/// state. Version compatibility intentionally precedes schema validation so a
-/// future-format scope with new keys reports the upgrade-required error rather
-/// than an unknown-key schema error.
+/// state. Exact-version rejection intentionally precedes current-schema
+/// validation so every non-current version has the stable store-version error
+/// rather than being interpreted through unknown keys.
 fn validate_scope_json_value(value: &Value) -> Result<()> {
     let version = match value.get("kio_format_version") {
         Some(Value::String(version)) => version.as_str(),

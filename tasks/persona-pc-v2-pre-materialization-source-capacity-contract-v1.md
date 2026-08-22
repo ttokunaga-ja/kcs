@@ -41,10 +41,11 @@ exact, independently validated pins:
 - a solver input, canonical solution, and independent proof that use only
   pre-solve content inputs.
 
-If core supersession is selected, every dependent owner must first be a
-versioned successor or have an explicit byte-identity proof as required by
-[`persona-pc-core-extension-supersession-dependency-closure-v1-proposal.md`](persona-pc-core-extension-supersession-dependency-closure-v1-proposal.md).
-The legacy v2/v3 artifacts remain frozen and cannot be reinterpreted.
+If a different allocation is selected, every dependent owner must first be a
+versioned successor or have an explicit byte-identity proof, and an
+independently proved, version-compatible source closure must exist before any
+source plan. Frozen v2/v3 artifacts remain non-authorizing and cannot be
+reinterpreted.
 
 ## 3. Final planned source-plan shape
 
