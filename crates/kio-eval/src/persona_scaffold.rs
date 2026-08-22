@@ -10,11 +10,9 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use kio_core::cas::{canonical_json_bytes, hash_bytes};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use std::collections::BTreeMap;
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -181,8 +179,10 @@ pub(crate) fn bind_workspace(root: &Path) -> Result<WorkspaceAuthority, PersonaS
     })
 }
 
-// Publication is exact-pristine.  Runtime binding additionally permits only
-// the three closed lease protocol files in plan-derived writable leaves.
+// Publication is exact-pristine. Runtime binding has a different boundary:
+// scope leaves under `people` are production payload roots. We bind the
+// plan-derived route *to* each leaf, but deliberately never enumerate its
+// contents. Lease state remains the only mutable allowlist below `_control`.
 fn verify_runtime_tree(
     root: &fs::File,
     plan: &PersonaPlan,
@@ -190,80 +190,180 @@ fn verify_runtime_tree(
     owner_bytes: &[u8],
 ) -> Result<(), PersonaScaffoldError> {
     let expected = expected_tree(plan)?;
-    let mut actual = BTreeSet::new();
-    collect_tree(root, Path::new(""), &mut actual)?;
-    if expected.difference(&actual).next().is_some() {
-        return bad("workspace runtime topology is incomplete");
-    }
-    for extra in actual.difference(&expected) {
-        let parts: Vec<_> = extra.components().map(|c| c.as_os_str().to_str()).collect();
-        let allowed = match parts.as_slice() {
-            [
-                Some("_control"),
-                Some("personas"),
-                Some(persona),
-                Some(name),
-            ] => {
-                plan.personas.iter().any(|p| p.id.as_str() == *persona)
-                    && matches!(*name, ".lease.lock" | "lease.json" | "lease-recovery.jsonl")
-            }
-            [
-                Some("_control"),
-                Some("scopes"),
-                Some(persona),
-                Some(scope),
-                Some(name),
-            ] => {
-                plan.personas
-                    .iter()
-                    .find(|p| p.id.as_str() == *persona)
-                    .is_some_and(|p| p.scopes.iter().any(|s| s.id == *scope))
-                    && matches!(*name, ".lease.lock" | "lease.json" | "lease-recovery.jsonl")
-            }
-            _ => false,
-        };
-        if !allowed {
-            return bad("workspace runtime topology contains unknown entry");
-        }
-        let parent = extra
-            .parent()
-            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime file lacks parent".into()))?;
-        let mut dir = root.try_clone()?;
-        for c in parent.components() {
-            let Component::Normal(c) = c else {
-                return bad("runtime path invalid");
-            };
-            dir = cap_fs::open_dir_nofollow(&dir, Path::new(c))?;
-        }
-        let name = extra
-            .file_name()
-            .and_then(|x| x.to_str())
-            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime name invalid".into()))?;
-        let meta = cap_fs::stat(&dir, Path::new(name), cap_fs::FollowSymlinks::No)?;
-        #[cfg(unix)]
-        {
-            use cap_fs::MetadataExt;
-            let max = match name {
-                ".lease.lock" => 0,
-                "lease.json" => 16 * 1024,
-                "lease-recovery.jsonl" => 64 * 1024,
-                _ => unreachable!("allowlist above is closed"),
-            };
-            if !meta.file_type().is_file()
-                || meta.file_type().is_symlink()
-                || meta.nlink() != 1
-                || meta.mode() & 0o777 != 0o600
-                || meta.uid() != unsafe { libc::geteuid() }
-                || meta.len() as usize > max
-            {
-                return bad("runtime file is not private single-link regular");
-            }
-        }
-    }
+    let routes = runtime_routes(&expected)?;
+    let payload_leaves = payload_leaves(plan)?;
+    verify_runtime_directory(root, Path::new(""), &routes, &payload_leaves, plan)?;
     verify_file(root, "persona-plan.json", plan_bytes)?;
     let owner = read_exact(root, "persona-workspace-owner.json", owner_bytes)?;
     if parse_owner(&owner)?.plan_digest != plan.digest()? {
         return bad("runtime owner no longer binds plan");
+    }
+    Ok(())
+}
+
+/// Routing entries are plan-sized, whereas a payload leaf can contain an
+/// unbounded corpus. Keep the former in memory and never add the latter to a
+/// topology set.
+fn runtime_routes(
+    expected: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, BTreeSet<String>>, PersonaScaffoldError> {
+    let mut routes = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for path in expected {
+        let parent = path
+            .parent()
+            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime path lacks parent".into()))?;
+        let name = path
+            .file_name()
+            .and_then(|x| x.to_str())
+            .filter(|x| safe(x))
+            .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime name invalid".into()))?;
+        routes
+            .entry(parent.to_owned())
+            .or_default()
+            .insert(name.into());
+        routes.entry(path.clone()).or_default();
+    }
+    Ok(routes)
+}
+
+fn payload_leaves(plan: &PersonaPlan) -> Result<BTreeSet<PathBuf>, PersonaScaffoldError> {
+    let mut leaves = BTreeSet::new();
+    for person in &plan.personas {
+        for scope in &person.scopes {
+            let leaf = PathBuf::from(format!(
+                "people/{}-{}/home",
+                person.id.as_str(),
+                person.role
+            ))
+            .join(&scope.path);
+            if !leaves.insert(leaf.clone()) {
+                return bad("duplicate payload leaf");
+            }
+        }
+    }
+    // A scope cannot simultaneously be an opaque payload root and a routing
+    // parent for another scope. Frozen plans have distinct leaves; fail closed
+    // instead of accidentally skipping a planned route.
+    if leaves.iter().any(|leaf| {
+        leaves
+            .iter()
+            .any(|other| leaf != other && other.starts_with(leaf))
+    }) {
+        return bad("payload leaf is also a planned routing parent");
+    }
+    Ok(leaves)
+}
+
+fn verify_runtime_directory(
+    dir: &fs::File,
+    prefix: &Path,
+    routes: &BTreeMap<PathBuf, BTreeSet<String>>,
+    payload_leaves: &BTreeSet<PathBuf>,
+    plan: &PersonaPlan,
+) -> Result<(), PersonaScaffoldError> {
+    let expected = routes
+        .get(prefix)
+        .ok_or_else(|| PersonaScaffoldError::Unsafe("runtime route missing".into()))?;
+    let mut seen = BTreeSet::new();
+    for entry in cap_fs::read_dir(dir, Path::new("."))? {
+        let name = entry?
+            .file_name()
+            .to_str()
+            .filter(|x| safe(x))
+            .ok_or_else(|| PersonaScaffoldError::Unsafe("unsafe runtime entry".into()))?
+            .to_owned();
+        if expected.contains(&name) {
+            seen.insert(name);
+            continue;
+        }
+        if is_lease_file(prefix, &name, plan) {
+            verify_runtime_lease_file(dir, &name)?;
+            continue;
+        }
+        return bad("workspace runtime topology contains unknown entry");
+    }
+    if seen.len() != expected.len() {
+        return bad("workspace runtime topology is incomplete");
+    }
+    for name in expected {
+        let path = prefix.join(name);
+        let meta = cap_fs::stat(dir, Path::new(name), cap_fs::FollowSymlinks::No)?;
+        if meta.file_type().is_symlink() {
+            return bad("workspace runtime routing has symlink");
+        }
+        if !runtime_authority_file(&path) {
+            let child = cap_fs::open_dir_nofollow(dir, Path::new(name))?;
+            let opened = cap_fs::Metadata::from_file(&child)?;
+            if !opened.is_dir() || opened.file_type().is_symlink() || !same_cap(&meta, &opened) {
+                return bad("workspace runtime directory changed while opening");
+            }
+            #[cfg(unix)]
+            {
+                use cap_fs::MetadataExt;
+                if opened.mode() & 0o777 != expected_directory_mode(&path)
+                    || opened.uid() != unsafe { libc::geteuid() }
+                {
+                    return bad("workspace runtime directory mode is not private");
+                }
+            }
+            if !payload_leaves.contains(&path) {
+                verify_runtime_directory(&child, &path, routes, payload_leaves, plan)?;
+            }
+        } else if !meta.file_type().is_file() {
+            return bad("workspace runtime has special entry");
+        }
+    }
+    Ok(())
+}
+
+fn runtime_authority_file(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("persona-plan.json" | "persona-workspace-owner.json")
+    )
+}
+
+fn is_lease_file(prefix: &Path, name: &str, plan: &PersonaPlan) -> bool {
+    if !matches!(name, ".lease.lock" | "lease.json" | "lease-recovery.jsonl") {
+        return false;
+    }
+    let parts: Vec<_> = prefix
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect();
+    match parts.as_slice() {
+        [Some("_control"), Some("personas"), Some(persona)] => {
+            plan.personas.iter().any(|p| p.id.as_str() == *persona)
+        }
+        [Some("_control"), Some("scopes"), Some(persona), Some(scope)] => plan
+            .personas
+            .iter()
+            .find(|p| p.id.as_str() == *persona)
+            .is_some_and(|p| p.scopes.iter().any(|s| s.id == *scope)),
+        _ => false,
+    }
+}
+
+fn verify_runtime_lease_file(dir: &fs::File, name: &str) -> Result<(), PersonaScaffoldError> {
+    let meta = cap_fs::stat(dir, Path::new(name), cap_fs::FollowSymlinks::No)?;
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        let max = match name {
+            ".lease.lock" => 0,
+            "lease.json" => 16 * 1024,
+            "lease-recovery.jsonl" => 64 * 1024,
+            _ => unreachable!("closed by is_lease_file"),
+        };
+        if !meta.file_type().is_file()
+            || meta.file_type().is_symlink()
+            || meta.nlink() != 1
+            || meta.mode() & 0o777 != 0o600
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.len() as usize > max
+        {
+            return bad("runtime file is not private single-link regular");
+        }
     }
     Ok(())
 }
@@ -1046,6 +1146,21 @@ mod tests {
         path
     }
 
+    fn payload_leaf(root: &Path, plan: &PersonaPlan) -> PathBuf {
+        let person = plan
+            .personas
+            .iter()
+            .find(|p| p.id.as_str() == "p01")
+            .unwrap();
+        let scope = person.scopes.first().unwrap();
+        root.join(format!(
+            "people/{}-{}/home",
+            person.id.as_str(),
+            person.role
+        ))
+        .join(&scope.path)
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn creates_exact_topology_and_owner_for_each_profile() {
@@ -1290,6 +1405,66 @@ mod tests {
             b"opaque",
         )
         .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn runtime_binding_treats_scope_payloads_as_opaque_but_keeps_routes_closed() {
+        let temp = tempdir().unwrap();
+        let parent = fs::canonicalize(temp.path()).unwrap();
+        let plan_path = plan_file(&parent, PersonaProfile::Tiny);
+        let plan = PersonaPlan::parse_canonical(&fs::read(&plan_path).unwrap()).unwrap();
+        let destination = parent.join("workspace");
+        scaffold(&plan_path, &destination).unwrap();
+
+        // This exceeds the old global topology-entry ceiling. Binding must
+        // still be plan-sized because the payload leaf is not enumerated.
+        let leaf = payload_leaf(&destination, &plan);
+        for n in 0..8193 {
+            fs::write(leaf.join(format!("payload-{n:05}")), b"opaque").unwrap();
+        }
+        bind_workspace(&destination).unwrap();
+
+        for injected in [
+            destination.join("unexpected-root"),
+            destination.join("people").join("unexpected-person"),
+            destination
+                .join("people")
+                .join(format!("p01-{}", plan.personas[0].role))
+                .join("home")
+                .join("unexpected-intermediate"),
+            destination
+                .join("_control/personas/p01")
+                .join("unexpected-control"),
+        ] {
+            fs::write(&injected, b"reject").unwrap();
+            assert!(
+                bind_workspace(&destination).is_err(),
+                "accepted {injected:?}"
+            );
+            fs::remove_file(injected).unwrap();
+        }
+        bind_workspace(&destination).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn scaffold_never_adopts_a_payload_filled_existing_root() {
+        let temp = tempdir().unwrap();
+        let parent = fs::canonicalize(temp.path()).unwrap();
+        let plan = plan_file(&parent, PersonaProfile::Tiny);
+        let destination = parent.join("workspace");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("payload"), b"must remain untouched").unwrap();
+
+        assert!(matches!(
+            scaffold(&plan, &destination),
+            Err(PersonaScaffoldError::AlreadyExists(path)) if path == destination
+        ));
+        assert_eq!(
+            fs::read(destination.join("payload")).unwrap(),
+            b"must remain untouched"
+        );
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

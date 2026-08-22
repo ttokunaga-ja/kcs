@@ -1098,6 +1098,24 @@ mod tests {
         scaffold(&plan, &root).unwrap();
         (temp, root, parsed.personas[0].scopes[0].id.clone())
     }
+    fn payload_leaf(root: &Path, scope_id: &str) -> PathBuf {
+        let plan = crate::persona_plan::PersonaPlan::parse_canonical(
+            &std::fs::read(root.join("persona-plan.json")).unwrap(),
+        )
+        .unwrap();
+        let person = plan
+            .personas
+            .iter()
+            .find(|p| p.id.as_str() == "p01")
+            .unwrap();
+        let scope = person.scopes.iter().find(|s| s.id == scope_id).unwrap();
+        root.join(format!(
+            "people/{}-{}/home",
+            person.id.as_str(),
+            person.role
+        ))
+        .join(&scope.path)
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn parent_and_scope_lifecycle_is_descriptor_bound() {
@@ -1113,6 +1131,28 @@ mod tests {
         scope_release(&root, "p01", &scope, "parent", &child.release_token).unwrap();
         release(&root, "p01", &parent.release_token).unwrap();
         assert!(claim(&root, "p99", "x", None).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn populated_scope_payload_does_not_block_release_or_next_lifecycle() {
+        let (_t, root, scope) = workspace();
+        let parent = claim(&root, "p01", "parent-a", None).unwrap();
+        let child = scope_claim(&root, "p01", &scope, "parent-a", "worker-a", None).unwrap();
+
+        let payload = payload_leaf(&root, &scope);
+        std::fs::write(payload.join("production-artifact.txt"), b"opaque payload").unwrap();
+        std::fs::create_dir(payload.join("nested-output")).unwrap();
+        std::fs::write(
+            payload.join("nested-output").join("result.bin"),
+            b"still opaque",
+        )
+        .unwrap();
+
+        scope_release(&root, "p01", &scope, "parent-a", &child.release_token).unwrap();
+        release(&root, "p01", &parent.release_token).unwrap();
+        let next = claim(&root, "p01", "parent-b", None).unwrap();
+        release(&root, "p01", &next.release_token).unwrap();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
