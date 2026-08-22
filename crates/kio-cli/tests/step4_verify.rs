@@ -683,6 +683,62 @@ fn ct4_fsck_live_raw_with_republication_commit_backfills_retired_receipt() {
 }
 
 #[test]
+fn ct4_fsck_unindexed_scope_recovers_lifecycle_epoch_before_retired_backfill() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("evidence.md"), "# Evidence\n\nstill live\n").unwrap();
+    let repo = kio_core::scope::Repository::init(dir.path()).unwrap();
+    let snapshot = repo
+        .snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+        .unwrap();
+    let raw_hash = snapshot
+        .commit
+        .as_ref()
+        .and_then(|commit| repo.read_tree(&commit.tree).ok())
+        .and_then(|tree| tree.entries.first().map(|entry| entry.raw_hash.clone()))
+        .unwrap();
+    assert!(!dir.path().join(".kio/index/sqlite.db").exists());
+
+    let timestamp = "2026-07-13T00:00:00Z";
+    let purged_hash = write_purged_commit(&dir, timestamp, std::slice::from_ref(&raw_hash));
+    write_receipt(&dir, &raw_hash, &purged_hash, timestamp);
+    let purged_commit_object = repo.read_commit(&purged_hash).unwrap();
+    let republication = CommitObject::new(
+        purged_commit_object.tree.clone(),
+        vec![purged_hash.clone()],
+        "2026-07-14T00:00:00Z".to_owned(),
+        "republished".to_owned(),
+        purged_commit_object.tool_lock_hash.clone(),
+        CommitStats {
+            files_added: 0,
+            files_modified: 0,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let (republication_hash, _) = ObjectStore::new(dir.path().join(".kio"))
+        .write_json(
+            ObjectKind::Commit,
+            &serde_json::to_value(&republication).unwrap(),
+        )
+        .unwrap();
+    tag_commit(&dir, "republication", &republication_hash);
+
+    let output = success(&dir, &["repair", "verify-objects"]);
+    assert_eq!(output["status"], "ok", "{output}");
+    assert!(!dir.path().join(".kio/index/sqlite.db").exists());
+    let receipt = PurgeState::new(dir.path().join(".kio"))
+        .read_erase_receipt(&raw_hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.tail().lifecycle_epoch, Some(3));
+    assert_eq!(
+        receipt.tail().resurrection_commit.as_deref(),
+        Some(republication_hash.as_str())
+    );
+}
+
+#[test]
 fn ct4_fsck_active_journal_suppresses_raw_recovery_and_ref_mutation() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap().to_owned();

@@ -1068,13 +1068,13 @@ fn decode_show_string(string: &ShowString, font: Option<&FontMap>) -> Option<Str
 fn hex_bytes(raw: &[u8]) -> Vec<u8> {
     let digits: Vec<u8> = raw.iter().copied().filter(u8::is_ascii_hexdigit).collect();
     let mut out = Vec::with_capacity(digits.len() / 2 + 1);
-    let mut iter = digits.chunks_exact(2);
-    for pair in &mut iter {
+    let (pairs, remainder) = digits.as_chunks::<2>();
+    for pair in pairs {
         let high = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
         let low = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
         out.push((high << 4) | low);
     }
-    if let [odd] = iter.remainder() {
+    if let [odd] = remainder {
         let high = (*odd as char).to_digit(16).unwrap_or(0) as u8;
         out.push(high << 4);
     }

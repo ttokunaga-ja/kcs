@@ -1370,8 +1370,8 @@ fn udp_checksum(source: &[u8], destination: &[u8], datagram: &[u8]) -> u16 {
 }
 fn ipv4_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for word in header.chunks_exact(2) {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    for word in header.as_chunks::<2>().0 {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);

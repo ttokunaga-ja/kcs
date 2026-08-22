@@ -311,6 +311,10 @@ struct GcArgs {
     /// Confirm the retention shallow sweep without an interactive prompt.
     #[arg(long, conflicts_with = "dry_run")]
     yes: bool,
+
+    /// Inventory physical CAS objects without changing the scope.
+    #[arg(long, requires = "dry_run", conflicts_with = "yes")]
+    prune_unreachable: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1266,7 +1270,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Adapter(args) => run_adapter(args),
         Command::Ledger(args) => run_ledger(args),
         Command::Repair(args) => run_repair(args),
-        Command::Gc(args) => gc::run(args.dry_run, args.yes, json),
+        Command::Gc(args) => gc::run(args.dry_run, args.yes, args.prune_unreachable, json),
         Command::Search(args) => run_search(args),
         Command::Open(args) => run_open(args),
         Command::View(args) => run_view(args),
@@ -27318,6 +27322,14 @@ fn print_output(value: Value, json_mode: bool) {
         // nothing to open. `open` legitimately prints only its status because
         // it has already acted on the file; `view` has no such side effect.
         println!("{}", terminal_safe_text(view_path, false));
+    } else if value.get("operation").and_then(Value::as_str) == Some("unreachable_object_inventory")
+    {
+        // Milestone 8's report is the requested human artifact. Preserve the
+        // complete deterministic classification instead of collapsing it to
+        // the generic `dry_run` status line.
+        let rendered =
+            serde_json::to_string_pretty(&value).expect("serializing command output cannot fail");
+        println!("{}", terminal_safe_text(&rendered, true));
     } else if value.get("status").and_then(Value::as_str) == Some("dry_run")
         && value.get("candidate_count").is_some()
         && value.get("object_kinds_planned").is_some()
@@ -29334,7 +29346,8 @@ mod tests {
             sweep.command,
             Command::Gc(GcArgs {
                 dry_run: false,
-                yes: false
+                yes: false,
+                prune_unreachable: false,
             })
         ));
         assert!(Cli::try_parse_from(["kio", "gc", "--prune-unreachable"]).is_err());
@@ -29345,7 +29358,8 @@ mod tests {
             parsed.command,
             Command::Gc(GcArgs {
                 dry_run: true,
-                yes: false
+                yes: false,
+                prune_unreachable: false,
             })
         ));
     }

@@ -2385,6 +2385,19 @@ fn verify_objects_with_limits(
     // "その event の commit created_at と一致" requirement), never this fsck
     // invocation's own clock -- `find_republication_commit` now returns it
     // paired with the winning hash so this loop never has to re-derive it.
+    // Recover a missing or rolled-back lifecycle counter before the first
+    // append. Otherwise `increment_lifecycle_epoch` can reissue the existing
+    // tail epoch and the stricter marker validator correctly rejects the
+    // resulting non-monotonic sequence. The post-append call below remains
+    // necessary to rotate the index generation for the newly written event.
+    let index_exists = sqlite_path(repo.kio_dir()).exists();
+    if !retirements_to_backfill.is_empty() {
+        let max_event_lifecycle_epoch = purge.max_recorded_lifecycle_epoch()?;
+        purge.recover_lifecycle_epoch(0, max_event_lifecycle_epoch)?;
+        if index_exists {
+            recover_index_generation(repo.kio_dir())?;
+        }
+    }
     let repair_actor = std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned());
     let mut any_retired = false;
     for (raw_hash, marker_kind, republication_commit, republication_created_at) in
@@ -2425,15 +2438,13 @@ fn verify_objects_with_limits(
     // run at every locked-mutation entry point that can advance the
     // lifecycle-epoch counter): a backfilled `retired` above bumps that
     // counter exactly like the index/reindex/purge paths' own retire events
-    // do, but fsck had no call to `recover_index_generation` at all --
-    // `index_metadata.last_lifecycle_epoch`/`index_generation` stayed stale
-    // (and any genuine counter rollback undetected) until an unrelated
-    // index-touching write happened to run. Only when `sqlite.db` already
-    // exists: fsck must not conjure a fresh, empty index for a scope that
+    // do. Synchronize the post-append value so `index_metadata` does not stay
+    // stale until an unrelated index-touching write. Only when `sqlite.db`
+    // already exists: fsck must not conjure a fresh, empty index for a scope that
     // was never indexed (`recover_index_generation` has no existence guard
     // of its own -- its other callers run only after `rebuild_step3_index`
     // already guarantees the file is there).
-    if any_retired && sqlite_path(repo.kio_dir()).exists() {
+    if any_retired && index_exists {
         recover_index_generation(repo.kio_dir())?;
     }
     let repaired = staged_raws.len() as u64;

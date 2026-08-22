@@ -298,8 +298,18 @@ fn validate_event_sequence(events: &[LifecycleEvent], marker_kind: TombstoneMode
         TombstoneMode::Default => EventKind::Purged,
         TombstoneMode::Erase => EventKind::Erased,
     };
+    let mut previous_lifecycle_epoch = 0_u64;
     for (index, event) in events.iter().enumerate() {
         event.validate_fields(marker_kind)?;
+        let lifecycle_epoch = event
+            .lifecycle_epoch
+            .expect("validated lifecycle event carries an epoch");
+        if lifecycle_epoch <= previous_lifecycle_epoch {
+            return Err(corrupt_state(
+                "lifecycle event epochs must be positive and strictly increasing",
+            ));
+        }
+        previous_lifecycle_epoch = lifecycle_epoch;
         let expected = if index % 2 == 0 {
             opening
         } else {
@@ -370,11 +380,17 @@ impl EraseReceipt {
     }
 }
 
-fn parse_tombstone_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<TombstoneRecord> {
+pub(crate) fn parse_tombstone_bytes(
+    bytes: &[u8],
+    expected_raw_hash: &str,
+) -> Result<TombstoneRecord> {
     // Syntax and schema stay separate diagnostics: a torn write and a
     // well-formed record of the wrong shape need different operator responses.
     let generic: Value =
         serde_json::from_slice(bytes).map_err(|_| corrupt_state("tombstone has invalid JSON"))?;
+    if canonical_json_bytes(&generic)? != bytes {
+        return Err(corrupt_state("tombstone is not canonical JSON"));
+    }
     let record: TombstoneRecord = serde_json::from_value(generic)
         .map_err(|_| corrupt_state("tombstone has an invalid strict schema"))?;
     record.validate_structure()?;
@@ -384,9 +400,15 @@ fn parse_tombstone_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<Tombst
     Ok(record)
 }
 
-fn parse_erase_receipt_bytes(bytes: &[u8], expected_raw_hash: &str) -> Result<EraseReceipt> {
+pub(crate) fn parse_erase_receipt_bytes(
+    bytes: &[u8],
+    expected_raw_hash: &str,
+) -> Result<EraseReceipt> {
     let generic: Value = serde_json::from_slice(bytes)
         .map_err(|_| corrupt_state("erase receipt has invalid JSON"))?;
+    if canonical_json_bytes(&generic)? != bytes {
+        return Err(corrupt_state("erase receipt is not canonical JSON"));
+    }
     let receipt: EraseReceipt = serde_json::from_value(generic)
         .map_err(|_| corrupt_state("erase receipt has an invalid strict schema"))?;
     receipt.validate_structure()?;

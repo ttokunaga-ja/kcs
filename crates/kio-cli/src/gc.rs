@@ -447,7 +447,17 @@ fn is_runtime_deferred(report: &Value) -> bool {
         && report.get("reason").and_then(Value::as_str) == Some("max_runtime_seconds")
 }
 
-pub(super) fn run(dry_run: bool, yes: bool, json_mode: bool) -> Result<Value> {
+pub(super) fn run(
+    dry_run: bool,
+    yes: bool,
+    prune_unreachable: bool,
+    json_mode: bool,
+) -> Result<Value> {
+    if prune_unreachable {
+        // This is intentionally a separate read-only operation.  Do not bind
+        // the retention planner/session or inspect its recovery executor.
+        return kio_core::gc::UnreachableObjectInventory::bind_current()?.inventory();
+    }
     let now = fixed_now()?;
     // Do not canonicalize the public cwd before binding: canonicalization
     // follows a symlink and would erase the evidence that the supplied scope

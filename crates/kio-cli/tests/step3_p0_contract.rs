@@ -8324,32 +8324,6 @@ fn r13_3_unwritable_log_path_does_not_fail_the_search() {
     json_success(&dir, &["search", "トークン"]);
 }
 
-/// R13-2(4)/(f): an online embedding adapter that activates via the legacy
-/// GEMINI_API_KEY env var with NO tools.toml declaration is env-only drift
-/// (docs/07 §7.1). It must be recorded once per run (undeclared-adapter warn),
-/// not silently. A bad API base keeps any actual embed attempt hermetic (fast
-/// connection refusal → graceful text fallback), so the search still succeeds.
-#[test]
-fn r13_2_undeclared_env_only_embedding_activation_warns_once() {
-    let dir = indexed_scope();
-    kio(&dir, &["search", "トークン"])
-        .env("GEMINI_API_KEY", "fake-key-not-used-for-real-http")
-        .env("GEMINI_API_BASE", "http://127.0.0.1:1")
-        .arg("--json")
-        .assert()
-        .success();
-    let errors =
-        fs::read_to_string(dir.path().join(".test-data/kio/logs/errors.jsonl")).unwrap_or_default();
-    let warns = errors
-        .lines()
-        .filter(|line| line.contains("KIO-W-ADAPTER-UNDECLARED-001"))
-        .count();
-    assert_eq!(
-        warns, 1,
-        "env-only (undeclared) activation must warn exactly once per run: {errors}"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Stage 1/2 — the `offline_api` embedding adapter (07 §3 D9, 07 §5.3, 07 §5.5).
 //

@@ -1210,12 +1210,12 @@ mod macos {
             (IMAGE_PATH, journal.image, "runtime image"),
             (MANIFEST_PATH, journal.manifest, "runtime manifest"),
         ] {
-            if let Some(expected) = expected {
-                if !unchanged(Path::new(path), expected) {
-                    return Err(QhardError::Indeterminate(format!(
-                        "{label} changed during transaction"
-                    )));
-                }
+            if let Some(expected) = expected
+                && !unchanged(Path::new(path), expected)
+            {
+                return Err(QhardError::Indeterminate(format!(
+                    "{label} changed during transaction"
+                )));
             }
         }
         Ok(())
@@ -1229,10 +1229,10 @@ mod macos {
             if let Some(managed) = &self.managed_binding {
                 recheck_created(managed, "managed runtime root")?;
             }
-            if self.mount.is_none() {
-                if let Some(runtime) = &self.runtime_binding {
-                    recheck_created(runtime, "runtime mountpoint")?;
-                }
+            if self.mount.is_none()
+                && let Some(runtime) = &self.runtime_binding
+            {
+                recheck_created(runtime, "runtime mountpoint")?;
             }
             if let Some(mount) = self.mount.take() {
                 let actual = observe_runtime_mount(Path::new(RUNTIME_ROOT)).map_err(|error| {

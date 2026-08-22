@@ -3536,8 +3536,10 @@ fn vector_to_le_bytes(vector: &[f32]) -> Vec<u8> {
 
 fn vector_from_le_bytes(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
         .collect()
 }
 

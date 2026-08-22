@@ -82,6 +82,8 @@ kio repair replica | kio repair -r                                # device repli
                                         # 対象 0 件はプロンプトなしの冪等成功。非対話 (isatty=false) で --yes 無しは
                                         # KIO-E-CONFIRM-REJECTED-001 で拒否し、**何も削除しない**。
 kio gc --dry-run                       # Phase 4 milestone 1: retention による shallow 候補のread-only plan (§6.1)
+kio gc --dry-run --prune-unreachable [--json]
+                                        # Phase 4 milestone 8: Rust-only unreachable-object read-only inventory (§6.2)
 kio snapshot create [-m "<message>"]    # manual snapshot。-m省略時は自動 message
 kio snapshot auto                        # Phase 4 milestone 4–5: OS scheduler invoked auto snapshot / explicit on_idle GC
 kio log [--at <commit>] [--since <dur>]
@@ -420,6 +422,57 @@ kio gc --yes --json
 - internal child scopeはchild subprocess自身がそのscopeへ1回だけhookを適用し、保持済みchild capabilityと再bind identityが一致しない場合はfail-closedする。親scope hookがchildへ代理適用されることはなく、childのGC結果は親の`child_scopes[].gc`へ保持する。
 
 scheduled snapshotはPhase 4 milestone 4、Rust-only `on_idle` はmilestone 5で公開済みである ([05-runtime.md §2.2-§2.6](05-runtime.md))。
+
+## 6.2 Unreachable-object read-only inventory (Phase 4 milestone 8)
+
+canonical CLI は次の一形態だけである。
+
+```text
+kio gc --dry-run --prune-unreachable [--json]
+```
+
+`--dry-run` は必須であり、`kio gc --prune-unreachable` は usage error / exit 2 とする。
+`--yes` とは同時指定できない。alias、短縮形、別 schema、bare mutating prune は存在しない。
+この操作は retention planner / sweep executor、`after_index`、`on_idle`、receipt、marker、resume の
+どれにも接続せず、scope の byte を一切変更しない。report は診断資料に限り、現在または将来の
+mutation authority にはならない。
+
+truth は SQLite cache ではなく、retained descriptor から nofollow で読んだ refs、commit/tree CAS、
+manifest と normalized-unit pin、embedding target、immutable tool-lock、shallow receipt、purge lifecycle、
+GC/writer barrier から導出する。全 object は `(kind, hash)` の辞書順で一度だけ現れ、各行は次の形である。
+
+```json
+{
+  "kind": "manifest",
+  "hash": "sha256:<64 lowercase hex>",
+  "physical_bytes": 123,
+  "classification": "candidate",
+  "reason": "zero_tree_references"
+}
+```
+
+top-level schema は `schema_version=1`、`operation="unreachable_object_inventory"`、
+`status="dry_run"`、`read_only=true`、`diagnostic_only=true`、`mutation_authority=false`、
+`objects[]`、分類別 count/physical bytes を持つ `summary`、検証済み `shallow_boundaries[]`、
+実際に適用した `limits`、独立2 pass の `stats` だけを持つ。ambient absolute path、秘密、時刻、
+削除指示は出力しない。`--json` はこの schema を compact JSON で返し、指定しない場合も同じ
+全 report を terminal-safe な pretty JSON で表示する。同一安定scopeへの出力は決定的である。
+
+分類の current contract は [05-runtime.md §2.7](05-runtime.md) と
+[03-data-model.md §8.3](03-data-model.md) を正本とする。候補は参照ゼロを正本graphから証明した
+manifest、normalized unit、embedding、未公開tool-lockだけである。commit/tree/raw/chunk、
+live参照、prepared/image、および証明不能なobjectは候補にしない。validなshallow receiptが
+一つでも存在するとき、欠落treeが隠すsemantic closureを復元できないため、その不確実性に
+属するorphan manifest / normalized unitは `inventory_only / shallow_history_unavailable` とする。
+
+走査は object数、physical/verified bytes、manifest unit数、ref/receipt数、履歴step、directory entry、
+name bytes、depth を上限化する。retained descriptor・capability-relative・nofollow、regular file・
+link count・identity・size・hash検証を行い、共有writer barrierの下で独立した全走査を2回実施する。
+mutation-free shared descriptor writer barrierを実装済みのplatformはmacOS / Linuxであり、その他では
+scopeを変更せずfail-closedする。
+active purge / GC recovery / writer、malformed・欠落・hash mismatch、symlink/reparse、unsafe hardlink、
+inode/directory交換、上限超過、pass間差分は候補0へ縮退せず既存のcause-specific structured errorで
+fail-closedする。failure時はstdoutを空のままにする。
 
 ---
 

@@ -3,6 +3,10 @@
 //! Public paths are used only to bind and diagnose a scope.  Every store read
 //! below is relative to a retained directory descriptor.
 
+mod unreachable_inventory;
+
+pub use unreachable_inventory::{UnreachableInventoryLimits, UnreachableObjectInventory};
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};

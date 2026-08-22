@@ -1154,11 +1154,11 @@ pub fn deterministic_embedding_vector(seed: &str, dimensions: usize) -> Vec<f32>
         hasher.update(seed.as_bytes());
         hasher.update(counter.to_le_bytes());
         let digest = hasher.finalize();
-        for chunk in digest.chunks_exact(4) {
+        for chunk in digest.as_chunks::<4>().0 {
             if values.len() >= dimensions {
                 break;
             }
-            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let bits = u32::from_le_bytes(*chunk);
             values.push((bits as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32);
         }
         counter += 1;

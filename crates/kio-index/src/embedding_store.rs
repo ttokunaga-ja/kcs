@@ -717,8 +717,10 @@ pub fn rebuild_image_vec(
 /// Decode a raw little-endian f32 BLOB into a vector.
 pub fn f32_from_le_bytes(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -741,8 +743,8 @@ pub fn validate_embedding_vector(vector: &[u8], dimensions: u64) -> Result<()> {
         )));
     }
     let mut norm_sq = 0.0f64;
-    for chunk in vector.chunks_exact(4) {
-        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in vector.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return Err(IndexError::Contract(
                 "embedding vector component is not finite".to_owned(),

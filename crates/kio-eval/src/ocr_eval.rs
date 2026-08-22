@@ -1112,7 +1112,7 @@ fn base64_decode(value: &str) -> Result<Vec<u8>, OcrEvalError> {
         return Err(OcrEvalError::Invalid("invalid provider base64 payload"));
     }
     let mut output = Vec::with_capacity(value.len() / 4 * 3);
-    for (position, chunk) in value.as_bytes().chunks_exact(4).enumerate() {
+    for (position, chunk) in value.as_bytes().as_chunks::<4>().0.iter().enumerate() {
         let padding = usize::from(chunk[2] == b'=') + usize::from(chunk[3] == b'=');
         if padding > 0 && position + 1 != value.len() / 4 {
             return Err(OcrEvalError::Invalid("invalid provider base64 padding"));

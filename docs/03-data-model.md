@@ -852,6 +852,55 @@ chunk object の永続 JSON は上記の `spec_version` + identity fields + `tex
 §8.1 の identity hash を再計算して保存 fan-out key と照合し、`text_hash` を object 内の `text` と
 対応 normalized unit の exact span の両方に照合する。
 
+## 8.3 Unreachable-object inventory graph
+
+Phase 4 milestone 8 の read-only inventory は、`.kio/objects/` の次の physical namespaceだけを
+CAS object kindとして列挙する。
+
+```text
+commits, trees, raw, chunks, manifests, normalized_unit_objects,
+embeddings, toollocks, prepared, image
+```
+
+mutable projection/cacheである `objects/normalized/` と `objects/normalized_units/` は物理CAS objectの
+件数・bytes・candidateに含めない。未知namespace、非canonical fan-out、hash leaf以外はcorruptionである。
+
+到達edgeは次の正本だけから構成する。SQLite table/rowはedgeを追加も削除もしない。
+
+```text
+HEAD / refs/heads/* / refs/tags-v1/tag-* → commit
+commit.parents                         → commit
+commit.tree                            → tree
+commit.tool_lock_hash                  → toollock
+tree.entries[].normalize.manifest_hash → manifest
+manifest.units[status=done].unit_object_hash → normalized_unit
+embedding(target_type=chunk).target_hash     → existing chunk.text_hash
+embedding(target_type=image).target_hash     → existing image hash
+```
+
+commitはref未到達でもappend-onlyであり、その `tree` / `tool_lock_hash` edgeを保持する。物理treeは
+既存retention GCの専管なので、commitから未参照でもそのnormalize edgeを安全側で保持する。
+shallow receiptは対応commitのtree欠落だけを説明し、別objectへの削除権限を与えない。一つでも
+validなshallow receiptがあれば欠落treeのclosureを復元できないため、現在のtreeから未参照の
+manifestと現在のmanifestから未参照のnormalized unitは `inventory_only /
+shallow_history_unavailable` とし、参照ゼロと推定しない。
+
+完了済みpurgeは履歴treeを書き換えずraw/derived closureを物理消去するため、厳格に検証したcanonical
+final lifecycle eventだけがhistorical closure欠落を説明できる。`purged` / `erased` はeventの `in_commit`、
+`retired` はverified resurrection commitをanchorとし、そのanchorに対する**strict ancestor commit**が参照する
+treeのclosureだけを説明する。anchor自身・その子孫・無関係branch・commitから未参照のtree・marker不整合は
+説明対象外でありfail-closedする。欠落manifestのunit pinは復元不能なので、同じraw/profile/gen identityを持つ
+存置normalized unitは参照ゼロと推定せず `inventory_only` に保護する。
+markerの構造、leaf identity、event列、epoch、`in_commit`のref到達性・`commit_type=purged`・
+`purged_raws` membership・`created_at`、retirement ancestryと存置treeのraw membershipを検証する。
+各 marker record の `lifecycle_epoch` は正の値かつ event 順に厳密単調増加でなければならず、
+重複・逆行した record は historical closure 欠落を説明できない corruption とする。
+active journal / GC recovery / writer、counter不整合、またはこの因果関係を確定できない状態では候補を出さない。
+
+物理bytesはverified regular fileの実サイズであり、summaryの `physical_bytes` は全object行の総和、
+分類別bytesの総和も必ずこれに一致する。canonical hashは常に完全な `sha256:<64 lowercase hex>`。
+reportはpath、元filename、actor、reason等のlifecycle内容、secretを公開しない。
+
 # 9. Dedup スコープ
 
 ```

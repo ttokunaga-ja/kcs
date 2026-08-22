@@ -1099,7 +1099,7 @@ current reader は上記以外を拒否し、legacy enum の読取りや変換�
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は bounded `after_index` hook、milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot、milestone 5 は同じ `kio snapshot auto` invocation 内だけで動く Rust-only `on_idle` GC である。Kio は daemon / scheduler installer を持たない。
+> GC (§2.2-2.7) は Phase 4 で段階導入する ([09-mvp-scope.md §3.1](09-mvp-scope.md))。milestone 1 は read-only planner、milestone 2 は明示確認付きの receipt先行 tree-only shallow sweep、milestone 3 は bounded `after_index` hook、milestone 4 は OS scheduler から呼ぶ scheduled auto snapshot、milestone 5 は同じ `kio snapshot auto` invocation 内だけで動く Rust-only `on_idle` GC、milestone 8 は独立したRust-only unreachable-object read-only inventoryである。Kio は daemon / scheduler installer を持たない。
 
 ```text
 gc_policy(commit_type):
@@ -1221,18 +1221,14 @@ keep_repaired_per_branch = 5
 
 ## 2.6 GC の削除対象 (規範)
 
-GC が削除してよいもの:
+現行 retention GC が削除してよいもの:
 
 ```text
 - tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
   いる場合は削除しない** — tree は content hash 共有されるため、reachability 確認 (全非 shallow commit
   からの参照 0) が削除の前提)
-- SQLite index / FTS など objects/ から再構築可能な cache。device-local の query-vector replay cache は
-  これとは別の非 CAS file cache であり、削除・破損時の影響は cursor 拒否だけである (§1.5)。index を削除すると再構築までの間、
-  検索と pointer 解決の 6a/6b 検証は実行不能 — このときの解決は not_found ではなく
-  `KIO-E-INDEX-REBUILDING-001` の再構築要求を返す [§6・[08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)]。
-  検証不能を「不在の確定」と混同しない)
-- どの commit からも参照されない中間 object (中断した index が残した prepared 等)
+- sweep 前後の SQLite generation rotation は §2.5 の protocol に限る。index/FTS 全体の再構築は
+  `kio repair rebuild-db` の責務であり、unreachable-object inventory は SQLite を変更しない
 ```
 
 GC が削除してはならないもの:
@@ -1241,15 +1237,51 @@ GC が削除してはならないもの:
 - commit object (append-only。§2.2)
 - raw object / chunk object — これらを削除する唯一の経路は purge (§3)
 - toollock object — 参照する commit object が存在する限り削除不可 (commit は append-only のため実質恒久。
-  未公開 finalize 由来の未参照 toollock のみ、全 commit 参照走査の後に回収可)
+  未公開 finalize 由来の未参照 toollock は milestone 8 で診断候補にできるが、削除はしない)
 - manifest object — 参照する tree object が存在する限り削除不可 (削除の唯一の経路は purge。shallow 化で
-  未参照になったものの回収は Phase 4 GC の対象 — shallow 化を駆動した系統の retention (§2.2 表の
-  gc_policy: auto = tiered retention・repaired = `[gc.derived_retention]` — §2.4) に従う)
+  未参照になったものは milestone 8 で診断候補にできるが、現行 retention GC は回収しない)
+- prepared / image object — lifecycle の削除主体は `kio repair verify-objects --prune-orphans` であり、
+  unreachable-object inventory は削除候補にしない
 ```
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
 
 on-demand tree-only shallow sweep は Phase 4 milestone 2、bounded `after_index` hook は milestone 3、scheduled auto snapshot は milestone 4、Rust-only `on_idle` GC は milestone 5 で実装済みである。本節の削除対象規範と §2.2 の gc_policy schema は Step 1 の DB / object 設計時から遵守する。
+
+## 2.7 Unreachable-object inventory (Phase 4 milestone 8)
+
+`kio gc --dry-run --prune-unreachable [--json]` は Rust-only・read-only の物理 CAS inventory である。
+名称に `prune` を含むが、削除、truncate、隔離、receipt、marker、resume、確認prompt、`--yes`、
+自動hookは持たない。過去のreportを含め、出力はmutation authorityにならない。
+
+到達性は SQLite を根拠にせず、全 ref root と append-only commit DAG、物理tree、immutable manifest →
+normalized-unit pin、commit → immutable tool-lock、embedding → chunk text/image target、strict shallow receipt、
+canonical purge lifecycleから導出する。refから未到達のcommitもappend-onlyであり、そのcommitが参照する
+tool-lockとtree closureを誤回収しない。完了済みpurgeが説明するhistorical closure欠落は正常であるが、
+markerの構造・`in_commit`・`purged_raws` membership・ref到達性・時刻・resurrection ancestryのいずれかを
+検証できなければ説明に使わずfail-closedする。欠落を説明できるtreeはfinal purge/resurrection anchorの
+strict ancestor commitが参照するものだけであり、anchor以後や無関係branchへ説明権限を拡張しない。
+
+| kind | classification / reason |
+| --- | --- |
+| commit | `protected / append_only_history`、ref未到達でも `append_only_unreachable_history`、shallow receipt境界は `append_only_shallow_history` |
+| tree | `protected / retention_gc_owned`。削除判断は既存retention GCだけが担う |
+| raw / chunk | `protected / evidence_pointer_permanence`。物理削除経路はpurgeだけ |
+| manifest | 物理treeから参照ありは `protected / tree_referenced`、参照ゼロを証明した場合だけ `candidate / zero_tree_references`。validなshallow receiptが一つでもあり欠落treeのclosureを証明不能なら `inventory_only / shallow_history_unavailable` |
+| normalized unit | manifest pinありは `protected / manifest_referenced`、pinゼロを証明した場合だけ `candidate / zero_manifest_references`。purgeで欠落したhistorical manifestとraw/profile/genが一致してpinを証明不能なら `inventory_only / historical_manifest_unavailable`、validなshallow receiptが一つでもあり欠落tree/manifest closureを証明不能なら `inventory_only / shallow_history_unavailable` |
+| embedding | verified chunk text/image targetありは `protected / target_referenced`、正当なtarget kind/hashで対象ゼロを証明した場合だけ `candidate / zero_target_references`。targetを証明不能なら `inventory_only / unprovable_target` |
+| tool-lock | commit参照ありは `protected / commit_referenced`、全commit参照ゼロを証明した未公開objectだけ `candidate / zero_commit_references` |
+| prepared / image | `inventory_only / verify_objects_orphan_lifecycle`。`repair verify-objects --prune-orphans`の専管 |
+
+走査は retained scope / `.kio` descriptor と同じwriter gateのshared lockを保持し、すべて capability-relative・
+nofollow で行う。symlink/reparse、非regular、unsafe hardlink、identity/size/hash/link countの変化を拒否する。
+このmutation-free shared descriptor gateを実装済みのplatformはmacOS / Linuxであり、その他ではscopeを
+変更せずfail-closedする。
+object数、総physical/verified bytes、manifest unit数、history/ref/receipt/directory/name/depthを上限化し、
+refs・receipt・purge/GC stateを含む独立した全走査を2回行って結果とfilesystem observationの完全一致を
+要求する。active/recovery/uncertain state、欠落、malformed、race、上限超過はcandidate 0へ縮退せず
+fail-closedし、failure時に部分stdoutを出さない。report schemaは [06-cli-spec.md §6.2](06-cli-spec.md)、
+object graphは [03-data-model.md §8.3](03-data-model.md) を正本とする。
 
 # 3. Purge (法務・秘匿・誤取り込み)
 
@@ -1396,7 +1428,9 @@ SQLite Tx は index_metadata の **`last_lifecycle_epoch`** ([04-pipeline.md §4
 — DEFAULT 0 のままの全件誤検出を防ぐ)。**counter の耐久順序と回復**: counter の +1 (fsync) を
 event append より先に行い、**全ての lifecycle event (purged・erased・retired) に、その時点の
 counter 値を `lifecycle_epoch` として必須記録する** (purge の `epoch`
-(target_epoch) とは**別 field** — 2 系統のカウンタを混用しない)。
+(target_epoch) とは**別 field** — 2 系統のカウンタを混用しない)。各 marker record 内では
+`lifecycle_epoch` を正の値かつ event 順に**厳密単調増加**とし、重複・逆行は読取時に
+`KIO-E-STORE-CORRUPT-001` として fail-closed する。
 **巻き戻り検出は機械条件のみ**: locked mutation 冒頭で
 `counter < max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値)` (lifecycle_epoch を記録した event が無ければ後者は 0 として評価) なら欠落・不正・
 backup 復元による巻き戻りとみなし、**その max + 1 で counter を再作成して無条件で

@@ -655,6 +655,18 @@ cache は再生成可能な非 truth であり次回の open が再 materialize 
 
 MVP では手動実行のみとする。
 
+### Read-only unreachable-object inventory との責務分離
+
+Phase 4 milestone 8 の `kio gc --dry-run --prune-unreachable` は `verify-objects` のrepair計画でも、
+`--prune-orphans` のpreviewでもない。前者は全physical CAS objectをdescriptor-boundで2回読み、
+正本graphから診断分類を返すだけで、lock leaf・scope・cacheを含め一切書き換えない。後者だけが
+確認付きlocked repairとしてprepared/image/staging/open-cache lifecycleを削除できる。
+
+したがって inventory の `candidate` 行を `prune_orphans_apply` へ渡すAPI、report再読込み、receipt、
+resume state、削除executorは置かない。prepared/imageはinventoryでは常に`inventory_only`であり、
+manifest/normalized-unit/embedding/未公開tool-lockのdiagnostic candidateも現行operationでは削除不能である。
+分類とschemaの正本は [05-runtime.md §2.7](05-runtime.md) / [06-cli-spec.md §6.2](06-cli-spec.md)。
+
 ## 7.5.2 バックアップ運用
 
 正式なバックアップ手段は次の 2 つとし、専用コマンドは MVP では追加しない。

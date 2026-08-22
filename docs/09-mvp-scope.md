@@ -34,7 +34,7 @@
 以下は実装を許可せず、CLI syntax、schema、error code、default、互換性を定めない名称だけの記録である。
 
 - export / import
-- prune-unreachable
+- bare mutating prune
 - non-tree CAS reclamation
 - CoW GC
 - move tracking
@@ -132,8 +132,9 @@ Step 別の目安 (テスト除く):
 | Rust-only on_idle GC (OS scheduler が起動する `kio snapshot auto` に限定、常駐なし) | [05-runtime.md §2.3](05-runtime.md) | Phase 4 milestone 5 |
 | `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4 milestone 6 (implemented target/current) |
 | `kio evidence retarget <pointer> --at <commit>` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4 milestone 7 (implemented current) |
+| Rust-only unreachable-object read-only inventory (`kio gc --dry-run --prune-unreachable`) | [06-cli-spec.md §6.2](06-cli-spec.md) / [05-runtime.md §2.7](05-runtime.md) | Phase 4 milestone 8 (implemented current) |
 
-注: milestone 1–5 は各 current spec の実装済み契約、milestone 6 の batch verify と milestone 7 の exact-only retarget は implemented current である。これらは Phase 4 全体の実装済み表明ではない。
+注: milestone 1–5 は各 current spec の実装済み契約、milestone 6 の batch verify、milestone 7 の exact-only retarget、milestone 8 の read-only inventory は implemented current である。milestone 8 は物理 prune、non-tree CAS sweep、CoW GC を承認しない。これらは Phase 4 全体の実装済み表明ではない。
 
 ## 3.2 Step 1 着手ゲート
 

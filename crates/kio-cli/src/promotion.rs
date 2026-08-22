@@ -8,8 +8,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kio_adapter::tool_lock::{load_tool_lock, tool_lock_hash};
-use kio_core::cas::{is_hash, read_bounded_regular_file};
+use kio_adapter::tool_lock::{canonical_tool_lock_value, load_tool_lock, tool_lock_hash};
+use kio_core::cas::{
+    ContentObjectKind, ObjectStore, canonical_json_bytes, is_hash, read_bounded_regular_file,
+};
 use kio_core::{ExitCode, KioError};
 use kio_pipeline::markdownize::{UnitStatus, load_validated_normalized_instance};
 use kio_pipeline::task::{TaskDescriptor, TaskOutputRef, TaskStatus, validate_task_output_ref};
@@ -58,6 +60,16 @@ pub(crate) fn stage_promotion(
     load_tool_lock(&tool_lock_bytes).map_err(|error| KioError::schema(error.to_string()))?;
     let staged_tool_lock_hash =
         tool_lock_hash(&staged_tool_lock).map_err(|error| KioError::schema(error.to_string()))?;
+    let canonical_tool_lock = canonical_tool_lock_value(&staged_tool_lock)
+        .map_err(|error| KioError::schema(error.to_string()))?;
+    let canonical_bytes = canonical_json_bytes(&canonical_tool_lock)?;
+    let published_hash = ObjectStore::new(kio_dir)
+        .write_content_object(ContentObjectKind::Toollock, &canonical_bytes)?;
+    if published_hash != staged_tool_lock_hash {
+        return Err(KioError::schema(
+            "published immutable tool-lock hash differs from staged promotion authority",
+        ));
+    }
     let state = PromotionState {
         spec_version: PROMOTION_STATE_SPEC_VERSION,
         previous_head: previous_head.to_owned(),

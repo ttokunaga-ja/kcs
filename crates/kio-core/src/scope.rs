@@ -17,8 +17,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::ExitCode;
 use crate::cas::{
-    CAS_STREAM_BUFFER_BYTES, MAX_RAW_OBJECT_BYTES, ObjectKind, ObjectStore, append_jsonl,
-    atomic_overwrite, atomic_write, hash_json, is_hash, lower_hex,
+    CAS_STREAM_BUFFER_BYTES, ContentObjectKind, MAX_RAW_OBJECT_BYTES, ObjectKind, ObjectStore,
+    append_jsonl, atomic_overwrite, atomic_write, canonical_json_bytes, is_hash, lower_hex,
 };
 use crate::dag::{
     CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject, build_tree,
@@ -1722,6 +1722,13 @@ impl Repository {
                 "staged promotion tool_lock_hash must be sha256 lowercase hex",
             ));
         }
+        self.store
+            .inspect_content_object(ContentObjectKind::Toollock, tool_lock_hash)
+            .map_err(|_| {
+                KioError::schema(
+                    "staged promotion tool_lock_hash must name a published immutable tool-lock",
+                )
+            })?;
         self.promote_normalize_refs_with_tool_lock_hash(
             message,
             normalize_by_path,
@@ -1812,7 +1819,7 @@ impl Repository {
                 .unwrap_or_else(|| format!("online Markdownize promotion at {created_at}")),
             match staged_tool_lock_hash {
                 Some(hash) => hash.to_owned(),
-                None => self.tool_lock_hash()?,
+                None => self.publish_tool_lock()?,
             },
             stats.clone(),
             CommitType::Auto,
@@ -1919,7 +1926,7 @@ impl Repository {
             message
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("object repair at {created_at}")),
-            self.tool_lock_hash()?,
+            self.publish_tool_lock()?,
             CommitStats {
                 files_added: 0,
                 files_modified: 0,
@@ -2102,7 +2109,7 @@ impl Repository {
         // `resurrection_commit` to retire the marker against, and the
         // tombstone/receipt would stay active indefinitely despite the raw
         // object being alive again.
-        let current_tool_lock_hash = self.tool_lock_hash()?;
+        let (current_tool_lock_hash, current_tool_lock_bytes) = self.tool_lock_identity()?;
         if !force_commit
             && resurrection_candidates.is_empty()
             && head_tree_hash.as_deref() == Some(tree_hash.as_str())
@@ -2167,6 +2174,15 @@ impl Repository {
                 commit: None,
                 stats,
             });
+        }
+
+        let published_tool_lock_hash = self
+            .store
+            .write_content_object(ContentObjectKind::Toollock, &current_tool_lock_bytes)?;
+        if published_tool_lock_hash != current_tool_lock_hash {
+            return Err(KioError::schema(
+                "published immutable tool-lock hash differs from snapshot authority",
+            ));
         }
 
         let created_at = fixed_now
@@ -3046,22 +3062,35 @@ impl Repository {
         Ok(map)
     }
 
-    fn tool_lock_hash(&self) -> Result<String> {
+    fn publish_tool_lock(&self) -> Result<String> {
+        let (expected_hash, bytes) = self.tool_lock_identity()?;
+        let published_hash = self
+            .store
+            .write_content_object(ContentObjectKind::Toollock, &bytes)?;
+        if published_hash != expected_hash {
+            return Err(KioError::schema(
+                "published immutable tool-lock hash differs from mutable authority",
+            ));
+        }
+        Ok(published_hash)
+    }
+
+    fn tool_lock_identity(&self) -> Result<(String, Vec<u8>)> {
         #[cfg(unix)]
         if let Some(kio) = self.bound_kio.as_deref() {
             let text = read_bound_regular_text_at(kio, "tool-lock.json", MAX_BOUND_CONFIG_BYTES)?;
             let value: Value =
                 serde_json::from_str(&text).map_err(|err| KioError::schema(err.to_string()))?;
-            return hash_json(&canonical_tool_lock_value(&value)?);
+            let canonical = canonical_tool_lock_value(&value)?;
+            let bytes = canonical_json_bytes(&canonical)?;
+            return Ok((crate::cas::hash_bytes(&bytes), bytes));
         }
         let path = self.kio_dir.join("tool-lock.json");
-        if path.is_file() {
-            let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
-                .map_err(|err| KioError::schema(err.to_string()))?;
-            hash_json(&canonical_tool_lock_value(&value)?)
-        } else {
-            hash_json(&json!({ "spec_version": 1 }))
-        }
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kio_io(&path)?)
+            .map_err(|err| KioError::schema(err.to_string()))?;
+        let canonical = canonical_tool_lock_value(&value)?;
+        let bytes = canonical_json_bytes(&canonical)?;
+        Ok((crate::cas::hash_bytes(&bytes), bytes))
     }
 }
 
@@ -3441,7 +3470,7 @@ fn replace_bound_regular_file_at(kio: &File, relative: &str, contents: &[u8]) ->
     ))
 }
 
-fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
+pub(crate) fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
     let object = value
         .as_object()
         .ok_or_else(|| KioError::schema("tool-lock.json must be an object"))?;
@@ -5652,6 +5681,105 @@ pub struct BoundStoreLock {
     bytes: Vec<u8>,
 }
 
+/// A mutation-free reader barrier over the same retained `.kio` directory
+/// gate used by every cooperating writer. Unlike [`BoundStoreLock`], this
+/// guard never creates, reclaims, exchanges, or removes `.kio/.lock`.
+#[cfg(unix)]
+pub(crate) struct BoundStoreReadGuard {
+    kio: File,
+    _gate: File,
+    initial_lock: Option<(Vec<u8>, BoundLockObservation)>,
+}
+
+#[cfg(not(unix))]
+pub(crate) struct BoundStoreReadGuard {
+    _private: (),
+}
+
+#[cfg(unix)]
+impl BoundStoreReadGuard {
+    /// Recheck the public lock leaf while the shared kernel gate remains held.
+    /// A byte-identical dead release sentinel is harmless; a live owner or any
+    /// replacement is an uncertain writer boundary and therefore retryable.
+    pub(crate) fn recheck_idle(&self) -> Result<()> {
+        let current = match read_bound_lock(&self.kio, ".lock") {
+            Ok((bytes, observation)) => {
+                let lock =
+                    parse_canonical_lock(&bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
+                if lock.pid != u32::MAX {
+                    return Err(KioError::locked(".kio/.lock"));
+                }
+                Some((bytes, observation))
+            }
+            Err(error) if bound_is_not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        if current != self.initial_lock {
+            return Err(KioError::locked(".kio/.lock"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+impl BoundStoreReadGuard {
+    pub(crate) fn recheck_idle(&self) -> Result<()> {
+        Err(KioError::new(
+            "KIO-E-STORE-CORRUPT-001",
+            "platform lacks a verified descriptor-relative read-only writer barrier",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
+    }
+}
+
+/// Acquire a shared, non-blocking reader gate on the retained `.kio`
+/// capability. This is the read-only counterpart of the writers' exclusive
+/// directory `flock`; it deliberately has no pathname or lock-file mutation.
+#[cfg(unix)]
+pub(crate) fn acquire_bound_store_read_guard(kio: &File) -> Result<BoundStoreReadGuard> {
+    use std::os::fd::AsRawFd;
+
+    let gate = open_bound_directory_for_io(kio, Path::new(".kio"))?;
+    // SAFETY: `gate` is owned by the returned guard, names the retained `.kio`
+    // directory, and outlives every inventory read protected by this lock.
+    if unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)) {
+            return Err(KioError::locked(".kio/.lock"));
+        }
+        return Err(KioError::io(error.to_string(), ".kio"));
+    }
+    let initial_lock = match read_bound_lock(kio, ".lock") {
+        Ok((bytes, observation)) => {
+            let lock = parse_canonical_lock(&bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
+            if lock.pid != u32::MAX {
+                return Err(KioError::locked(".kio/.lock"));
+            }
+            Some((bytes, observation))
+        }
+        Err(error) if bound_is_not_found(&error) => None,
+        Err(error) => return Err(error),
+    };
+    Ok(BoundStoreReadGuard {
+        kio: kio
+            .try_clone()
+            .map_err(|error| KioError::io(error.to_string(), ".kio"))?,
+        _gate: gate,
+        initial_lock,
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn acquire_bound_store_read_guard(_kio: &File) -> Result<BoundStoreReadGuard> {
+    Err(KioError::new(
+        "KIO-E-STORE-CORRUPT-001",
+        "platform lacks a verified descriptor-relative read-only writer barrier",
+        json!({}),
+        ExitCode::PermanentFailure,
+    ))
+}
+
 /// Windows and other non-Unix platforms deliberately expose the same type so
 /// the GC state machine remains portable, but do not provide a path-based
 /// substitute for descriptor-relative no-follow locking.
@@ -7211,7 +7339,7 @@ mod tests {
             );
         }
     }
-    use crate::cas::{ObjectKind, ObjectStore, hash_bytes};
+    use crate::cas::{ContentObjectKind, ObjectKind, ObjectStore, hash_bytes};
     use crate::dag::{CommitType, NormalizeRef};
     use crate::purge::PurgeState;
     use serde_json::json;
@@ -8436,5 +8564,26 @@ mod tests {
         });
         let error = super::canonical_tool_lock_value(&value).unwrap_err();
         assert!(error.to_string().contains("markdown.auth"));
+    }
+
+    #[test]
+    fn unchanged_snapshot_does_not_repair_or_publish_a_missing_tool_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("doc.txt"), b"stable").unwrap();
+        let first = repo
+            .snapshot(Some("initial"), Some("2026-08-20T00:00:00Z"))
+            .unwrap();
+        let commit = first.commit.unwrap();
+        let tool_lock_path = ObjectStore::new(repo.kio_dir())
+            .content_path(ContentObjectKind::Toollock, &commit.tool_lock_hash)
+            .unwrap();
+        fs::remove_file(&tool_lock_path).unwrap();
+
+        let second = repo
+            .snapshot(Some("unchanged"), Some("2026-08-20T00:00:01Z"))
+            .unwrap();
+        assert!(second.noop);
+        assert!(!tool_lock_path.exists());
     }
 }
