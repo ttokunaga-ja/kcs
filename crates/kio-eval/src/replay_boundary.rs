@@ -856,7 +856,6 @@ impl ReplayDevice {
                 "private binary changed while reopening executable descriptor",
             ));
         }
-        drop(private_executable);
         let after = regular_observed_at(&parent_handle, &source_name, MAX_BINARY_BYTES, parent)?;
         if after.bytes != bytes || after.identity != source_identity {
             return Err(ReplayBoundaryError::unsafe_(
@@ -876,6 +875,7 @@ impl ReplayDevice {
             original_identity: source_identity,
             private_parent: bin,
             private_identity,
+            private_executable,
             descriptor,
         })
     }
@@ -959,6 +959,10 @@ pub struct BoundExecutable {
     original_identity: FileIdentity,
     private_parent: fs::File,
     private_identity: FileIdentity,
+    // Keep this nofollow descriptor alive for the whole binding lifetime.  An
+    // unlinked private path cannot then recycle this exact inode into a
+    // same-bytes replacement that would otherwise evade an identity check.
+    private_executable: fs::File,
     descriptor: DescriptorExecutable,
 }
 impl BoundExecutable {
@@ -987,6 +991,17 @@ impl BoundExecutable {
             return Err(ReplayBoundaryError::unsafe_(
                 &self.path,
                 "original binary identity changed",
+            ));
+        }
+        let retained_private = cap_fs::Metadata::from_file(&self.private_executable)
+            .map_err(|e| ReplayBoundaryError::io(&self.path, e))?;
+        if !retained_private.file_type().is_file()
+            || link_count(&retained_private) != 1
+            || file_identity(&retained_private) != self.private_identity
+        {
+            return Err(ReplayBoundaryError::unsafe_(
+                &self.path,
+                "retained private binary snapshot changed",
             ));
         }
         let private =

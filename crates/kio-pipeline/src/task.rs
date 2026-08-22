@@ -681,14 +681,46 @@ fn replace_relocated_task_journal(
             Path::new("tasks.jsonl"),
         )
         .pipeline_io(&destination_store.path)?;
-        destination_dir
-            .sync_all()
-            .pipeline_io(&destination_store.path)
+        sync_relocated_task_directory(destination_dir, &destination_store.path)
     })();
     if result.is_err() {
         let _ = cap_fs::remove_file(destination_dir, Path::new(&temporary_name));
     }
     result
+}
+
+// `open_ambient_dir` intentionally retains a capability-style directory
+// descriptor.  On Linux that can be an O_PATH descriptor, which is suitable
+// for capability-relative operations but cannot itself be synced.  Reopen the
+// already-bound directory through `.` and prove it is the same object before
+// using the real read-only descriptor for the durability barrier.
+#[cfg(unix)]
+fn sync_relocated_task_directory(destination_dir: &fs::File, label: &Path) -> Result<()> {
+    let expected = cap_fs::Metadata::from_file(destination_dir).pipeline_io(label)?;
+    if !expected.file_type().is_dir() {
+        return Err(PipelineError::corrupt(
+            label.display().to_string(),
+            "bound Kio store directory changed type",
+        ));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let syncable = cap_fs::open(destination_dir, Path::new("."), &options).pipeline_io(label)?;
+    let observed = cap_fs::Metadata::from_file(&syncable).pipeline_io(label)?;
+    if !observed.file_type().is_dir() || !same_cap_file_identity(&expected, &observed) {
+        return Err(PipelineError::corrupt(
+            label.display().to_string(),
+            "bound Kio store directory changed while reopening for fsync",
+        ));
+    }
+    syncable.sync_all().pipeline_io(label)
+}
+
+#[cfg(not(unix))]
+fn sync_relocated_task_directory(destination_dir: &fs::File, label: &Path) -> Result<()> {
+    destination_dir.sync_all().pipeline_io(label)
 }
 
 fn create_relocated_task_temp(

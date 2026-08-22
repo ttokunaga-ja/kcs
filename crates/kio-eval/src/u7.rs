@@ -738,7 +738,23 @@ mod tests {
         sync::{Mutex, OnceLock},
     };
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt};
+
     use super::*;
+
+    #[cfg(unix)]
+    fn adapter_test_shell(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let shell = directory.path().join("shell");
+        fs::write(&shell, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = fs::symlink_metadata(&shell).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert!(!metadata.file_type().is_symlink());
+        (directory, shell)
+    }
+
     #[test]
     fn both_agree() {
         assert_eq!(
@@ -893,9 +909,10 @@ mod tests {
         );
         let mut environment = BTreeMap::new();
         environment.insert("U7_ALLOWED".into(), "yes".into());
+        let (_shell_directory, shell) = adapter_test_shell(&script);
         let command = AdapterCommand {
-            program: PathBuf::from("/bin/sh"),
-            args: vec!["-c".into(), script],
+            program: shell,
+            args: vec![],
             environment,
         };
         let result = run_adapter(&command, &[(request, 1)], &AdapterLimits::default());
@@ -917,9 +934,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stalled_stdin_writer_obeys_lifecycle_timeout() {
+        let (_shell_directory, shell) = adapter_test_shell("exec /bin/sleep 5");
         let command = AdapterCommand {
-            program: PathBuf::from("/bin/sh"),
-            args: vec!["-c".into(), "sleep 5".into()],
+            program: shell,
+            args: vec![],
             environment: BTreeMap::new(),
         };
         let limits = AdapterLimits {

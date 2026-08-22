@@ -3119,9 +3119,10 @@ fn dyld_cache_platform_tuple() -> Result<String, QhardError> {
 fn parse_dyld_cache_catalog_optional(
     output: &str,
     architecture: &str,
+    platform: &str,
     inspector: FileBinding,
 ) -> Result<Option<DyldSharedCacheCatalog>, QhardError> {
-    if output.len() > MAX_DYLD_INFO_OUTPUT_BYTES || architecture.is_empty() {
+    if output.len() > MAX_DYLD_INFO_OUTPUT_BYTES || architecture.is_empty() || platform.is_empty() {
         return Err(QhardError::Input(
             "dyld shared-cache catalog is unbounded or malformed".into(),
         ));
@@ -3319,7 +3320,7 @@ fn parse_dyld_cache_catalog_optional(
     Ok(Some(DyldSharedCacheCatalog {
         inspector,
         architecture: architecture.to_owned(),
-        platform: dyld_cache_platform_tuple()?,
+        platform: platform.to_owned(),
         images,
     }))
 }
@@ -3327,9 +3328,10 @@ fn parse_dyld_cache_catalog_optional(
 fn parse_dyld_cache_catalog(
     output: &str,
     architecture: &str,
+    platform: &str,
     inspector: FileBinding,
 ) -> Result<DyldSharedCacheCatalog, QhardError> {
-    parse_dyld_cache_catalog_optional(output, architecture, inspector)?.ok_or_else(|| {
+    parse_dyld_cache_catalog_optional(output, architecture, platform, inspector)?.ok_or_else(|| {
         QhardError::Input("dyld shared-cache catalog has no matching architecture images".into())
     })
 }
@@ -3337,6 +3339,7 @@ fn parse_dyld_cache_catalog(
 fn load_dyld_cache_catalog() -> Result<DyldSharedCacheCatalog, QhardError> {
     let (path, binding) = trusted_dyld_info()?;
     let architecture = cache_architecture()?;
+    let platform = dyld_cache_platform_tuple()?;
     let run = |arch: &str| -> Result<String, QhardError> {
         let mut command = Command::new(&path);
         command
@@ -3362,11 +3365,11 @@ fn load_dyld_cache_catalog() -> Result<DyldSharedCacheCatalog, QhardError> {
         Ok(output.stdout)
     };
     let raw = run(architecture)?;
-    match parse_dyld_cache_catalog_optional(&raw, architecture, binding.clone()) {
+    match parse_dyld_cache_catalog_optional(&raw, architecture, &platform, binding.clone()) {
         Ok(Some(catalog)) => Ok(catalog),
         Ok(None) if architecture == "arm64e" => {
             let arm64 = run("arm64")?;
-            parse_dyld_cache_catalog(&arm64, "arm64", binding)
+            parse_dyld_cache_catalog(&arm64, "arm64", &platform, binding)
         }
         Ok(None) => Err(QhardError::Input(
             "dyld shared-cache catalog has no matching architecture images".into(),
@@ -5555,7 +5558,7 @@ mod tests {
     fn dyld_shared_cache_catalog_is_strict_and_arch_specific() {
         let catalog = parse_dyld_cache_catalog(
             "/usr/lib/libSystem.B.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n    -linked_dylibs:\n        attributes     load path\n        upward         /usr/lib/libobjc.A.dylib\n/usr/lib/libobjc.A.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n    -linked_dylibs:\n        attributes     load path\n/usr/lib/libSystem.B.dylib [x86_64]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC62\n    -linked_dylibs:\n        attributes     load path\n",
-            "arm64e", test_dyld_info_binding()).unwrap();
+            "arm64e", "macos:test:build:kernel:aarch64", test_dyld_info_binding()).unwrap();
         assert_eq!(catalog.images.len(), 2);
         assert_eq!(
             catalog.images["/usr/lib/libSystem.B.dylib"].linked_dylibs[0].path,
@@ -5564,6 +5567,7 @@ mod tests {
         assert!(parse_dyld_cache_catalog(
             "/tmp/evil.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n",
             "arm64e",
+            "macos:test:build:kernel:aarch64",
             test_dyld_info_binding()
         )
         .is_err());
@@ -5571,15 +5575,17 @@ mod tests {
             parse_dyld_cache_catalog(
                 "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        invalid\n",
                 "arm64e",
+                "macos:test:build:kernel:aarch64",
                 test_dyld_info_binding()
             )
             .is_err()
         );
         assert!(parse_dyld_cache_catalog(
-            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n", "arm64e", test_dyld_info_binding()).is_err());
+            "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n", "arm64e", "macos:test:build:kernel:aarch64", test_dyld_info_binding()).is_err());
         assert!(parse_dyld_cache_catalog(
             "/usr/lib/a.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n    -linked_dylibs:\n        attributes     load path\n        unexpected     /usr/lib/b.dylib\n/usr/lib/b.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n    -linked_dylibs:\n        attributes     load path\n",
             "arm64e",
+            "macos:test:build:kernel:aarch64",
             test_dyld_info_binding()
         )
         .is_err());
@@ -5591,7 +5597,13 @@ mod tests {
             "/usr/lib/a.dylib [arm64e]:\n-uuid:\n40277974-D20C-3EC8-B25C-43AE30D8CC60\n-linked_dylibs:\nattributes     load path\ngarbage\n",
         ] {
             assert!(
-                parse_dyld_cache_catalog(malformed, "arm64e", test_dyld_info_binding()).is_err()
+                parse_dyld_cache_catalog(
+                    malformed,
+                    "arm64e",
+                    "macos:test:build:kernel:aarch64",
+                    test_dyld_info_binding()
+                )
+                .is_err()
             );
         }
     }

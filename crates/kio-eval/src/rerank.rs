@@ -1419,7 +1419,30 @@ mod tests {
         let golden = temp.path().join("golden.jsonl");
         fs::write(&golden, r#"{"query_id":"q1","class":"hard","query":"needle","expected":[{"path":"x/doc.pdf"}]}"#).unwrap();
         let bin = temp.path().join("mock-kio.sh");
-        fs::write(&bin, "#!/bin/sh\nset -eu\ntest \"${GEMINI_API_KEY:-}\" = test-fixture-key\ntest -z \"${MISTRAL_API_KEY:-}\"\nh=sha256:0000000000000000000000000000000000000000000000000000000000000000\nprintf '{\\\"results\\\":['\ni=0\nwhile test \"$i\" -lt 100; do\n test \"$i\" -eq 0 || printf ','\n printf '{\\\"title\\\":\\\"doc.pdf.md\\\",\\\"evidence_pointer\\\":{\\\"schema_version\\\":1,\\\"commit\\\":\\\"%s\\\",\\\"raw_hash\\\":\\\"%s\\\",\\\"tool_profile_hash\\\":\\\"%s\\\",\\\"chunk_hash\\\":\\\"%s\\\",\\\"path_at_commit\\\":\\\"doc.pdf.md\\\",\\\"byte_start\\\":0,\\\"byte_end\\\":4,\\\"scope_id\\\":\\\"scope\\\",\\\"scope_path\\\":\\\"%s/.kio\\\"}}' \"$h\" \"$h\" \"$h\" \"$h\" \"$PWD\"\n i=$((i+1))\ndone\nprintf ']}'\n").unwrap();
+        let scope_path = fs::canonicalize(scope.join(".kio")).unwrap();
+        let hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let response = json!({
+            "results": (0..100)
+                .map(|_| json!({
+                    "title": "doc.pdf.md",
+                    "evidence_pointer": {
+                        "schema_version": 1,
+                        "commit": hash,
+                        "raw_hash": hash,
+                        "tool_profile_hash": hash,
+                        "chunk_hash": hash,
+                        "path_at_commit": "doc.pdf.md",
+                        "byte_start": 0,
+                        "byte_end": 4,
+                        "scope_id": "scope",
+                        "scope_path": scope_path,
+                    },
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let response_path = PathBuf::from(format!("{}.response.json", bin.display()));
+        fs::write(&response_path, serde_json::to_vec(&response).unwrap()).unwrap();
+        fs::write(&bin, "#!/bin/sh\nset -eu\ntest \"${GEMINI_API_KEY:-}\" = test-fixture-key\ntest -z \"${MISTRAL_API_KEY:-}\"\nexec /bin/cat \"$0.response.json\"\n").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
         let out = temp.path().join("outside.json");
         let options = FixtureRerankDumpOptions {
