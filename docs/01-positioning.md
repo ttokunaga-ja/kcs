@@ -104,27 +104,105 @@ kio open <検索結果の pointer>
 
 # 4.4 競合・近接事例
 
-「自分だけが新しい」という前提で進めると埋もれる。比較は思想ではなく **ユーザー体験差** を基準にする。
+「自分だけが新しい」という前提で進めると埋もれる。比較は思想や機能数ではなく、**現在のユーザー体験差**と、将来クラウドへ拡張する場合の**戦略上の脅威**を分けて行う。
 
-| プロダクト | レイヤー | Kio との重なり | Kio との非重複 |
+> **調査基準日: 2026-08-23。** 以下は各社の公式公開資料で確認できた範囲に限る。未確認の機能を「存在しない」と断定せず、性能・復旧時間・顧客数等のベンダー主張を独立検証済みの値として扱わない。Kio Cloudに関する記述はすべて**未実装・未承認の将来仮説**であり、現行MVPの機能ではない。
+
+競合は一列に並べず、次の四層で追う。
+
+```text
+Layer A: Local knowledge access
+  DocsAgent / Constella / Msty / Obsidian ecosystem / Khoj / AnythingLLM
+
+Layer B: AI-native sharing and current-state enterprise search
+  Box Hubs / SharePoint Agents / Dropbox Dash / Glean / Notion / Gemini Notebook
+
+Layer C: Secure content collaboration + recovery
+  Egnyte / Box / Microsoft / Dropbox
+
+Layer D: Versioned file data + cyber recovery baseline
+  Nasuni / Rubrik / Cohesity / Veeam
+```
+
+## 4.4.1 現行Local方針・MVPの直接競合と第一代替
+
+| プロダクト | レイヤー | Kio との重なり | Kio が維持すべき体験差 |
 | --- | --- | --- | --- |
-| **Perkeep** | content-addressed personal storage | content-addressed・ローカル中心・思想 | Markdown 正規化なし、AI 検索なし、Evidence Pointer なし、即効性弱 |
-| **git-annex** | 大容量ファイル × Git | content-addressed の発想、CLI 中心 | 知識検索なし、Markdown化・Embedding なし |
-| **Obsidian + Smart Connections** | ノート vault + ローカル意味検索 | local-first AI 検索、ローカル embedding | vault 内に閉じる。任意ファイル・PDF・履歴 DAG なし |
-| **Khoj** | personal AI / second brain | local-first AI 検索、PDF 含む | content-addressed archive ではない、Evidence Pointer なし、time-travel なし |
-| **AnythingLLM** | local-first AI app | local-first、文書取り込み | チャット中心、CAS や履歴 DAG なし |
-| **DEVONthink** | 文書管理アプリ | ローカル中心、文書管理 | macOS 商用、CAS 中心ではない、Evidence Pointer なし |
-| **Microsoft Recall** | 画面 snapshot 検索 | time-travel 体験 | 画面ベースであってファイルベースではない、ファイル原本に戻れない |
-| **Apple Intelligence** | OS 統合 AI | プライバシー・ローカル処理 | OS ベンダー専属、汎用ローカルアーカイブではない |
-| **OS/ローカル全文検索 (Spotlight, Recoll, ripgrep-all)** | ローカル全文検索 | ローカル・即時・無料。「本文の一部から探す」体験の第一代替 | 語彙一致が前提で、言い換え・意味検索に弱い。削除済み・上書き済み・過去版には届かない (現在のファイルシステムのみ)。根拠が path 依存で、移動・リネームで死ぬ。Evidence Pointer なし |
-| **NotebookLM** | クラウド型 evidence-grounded QA | citation 付き AI 回答、研究者ユーザー層、無料 | アップロード型でデータ主権がクラウド側。ソースは notebook 単位の手動登録で、ファイルシステム横断・履歴なし。citation は notebook 内参照であり、不変性・time-travel・ローカル原本回帰なし (詳細は下記) |
-| **Zotero / Paperless-ngx** | 文書アーカイブ (OCR + 全文検索 + メタデータ) | 研究者の PDF 管理定番、ローカル運用可、OCR 全文検索 | 専用ライブラリへの取り込み型で、任意フォルダの横断ではない。意味検索なし。CAS 履歴なし (削除済み・過去版検索なし)。Evidence Pointer なし |
+| [**DocsAgent**](https://github.com/docsagent/docsagent) | local document intelligence + MCP | ローカル文書のparse/index、CLI検索、semantic search、Agent接続 | 現在版を検索できるだけでなく、改名・移動・削除・上書き前を含む履歴検索と、不変Evidence Pointerを一続きで示す |
+| [**Constella**](https://github.com/Constella-OS/constella-desktop) | local knowledge substrate + graph + MCP | folder index、SQLite/LanceDB、knowledge graph、local/cloud model、MCP | personal knowledge graphではなく、raw原本・snapshot・検証可能な履歴を持つarchiveに集中する |
+| [**Msty Knowledge Stacks**](https://docs.msty.app/features/knowledge-stack/basics) | device-local RAG workspace | file/folder/Obsidian取り込み、端末内処理、content Q&A | RAG corpusではなく、原本identity・過去版・削除済み資料まで辿れるversioned archiveとする |
+| [**Perkeep**](https://perkeep.org/) | content-addressed personal storage | content-addressed・ローカル中心・思想 | Markdown正規化、AI検索、Evidence Pointerと、初日から効く検索体験を提供する |
+| [**git-annex**](https://git-annex.branchable.com/) | 大容量ファイル × Git | content-addressedの発想、CLI中心 | 大容量同期ではなく、異種文書の知識検索・正規化・原文根拠へ集中する |
+| [**Obsidian + Smart Connections**](https://smartconnections.app/smart-connections/) | note vault + local semantic search | local-first AI検索、ローカルembedding | vaultを置き換えず、任意のindexed scopeとファイル形式・履歴を横断する |
+| [**Khoj**](https://docs.khoj.dev/) / [**AnythingLLM**](https://anythingllm.com/) | personal AI / local-first AI app | 文書取り込み、検索、chat | chat UXでは競わず、content-addressed archive、time-travel、Evidence PointerをAPI・CLIへ出す |
+| [**DEVONthink**](https://www.devontechnologies.com/apps/devonthink/ai) | 文書管理アプリ | ローカル中心、文書管理、検索 | 文書管理UIではなく、既存folderを置き換えない履歴・証拠layerに徹する |
+| [**Spotlight**](https://support.apple.com/guide/mac-help/search-with-spotlight-mchlp1008/mac) / [**Recoll**](https://www.recoll.org/) / [**ripgrep-all**](https://github.com/phiresky/ripgrep-all) | OS・ローカル全文検索 | ローカル、即時、低コスト。「本文の一部から探す」第一代替 | 言い換え・scan/画像、削除・上書き済みの過去版へ届き、path変更後も根拠を解決する |
+| [**Gemini Notebook**](https://support.google.com/gemininotebook/answer/16322204?hl=en) | cloud source-grounded notebook sharing | source集合へのQ&A、出典、共有 | local truth、任意folder横断、snapshot履歴、不変Evidence Pointer、ローカル原本回帰を結ぶ（詳細 §4.4.4） |
+| [**Zotero**](https://www.zotero.org/) / [**Paperless-ngx**](https://docs.paperless-ngx.com/) | 専用文書archive | PDF/OCR、metadata、ローカル運用 | 専用libraryを置き換えず、その外側も含めて横断し、CAS履歴とEvidenceを加える |
+| [**Pieces**](https://pieces.app/enterprise) | personal/team work memory | 時系列context、AIからのrecall | 人の活動memoryではなく、組織資料の版・raw原本・claimの根拠を正本化する |
 
-参考: Perkeep https://perkeep.org/ / git-annex https://git-annex.branchable.com/ / Khoj https://docs.khoj.dev/ / Smart Connections https://smartconnections.app/smart-connections/ / DEVONthink https://www.devontechnologies.com/apps/devonthink/ai / Recall https://support.microsoft.com/en-us/windows/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15 / Apple Intelligence https://www.apple.com/apple-intelligence / AnythingLLM https://anythingllm.com/ / Recoll https://www.recoll.org/ / ripgrep-all https://github.com/phiresky/ripgrep-all / NotebookLM https://notebooklm.google.com/ / Zotero https://www.zotero.org/ / Paperless-ngx https://docs.paperless-ngx.com/
+Local MVPの競合比較では、「ローカルファイルをindexする」「PDFをembeddingする」「Agentから検索する（競合のMCP / Kioの現行CLI・構造化JSON）」だけでは差別化にならない。Kioの比較デモは、同じ検索結果を出すことではなく、**過去版・削除済み資料を発見し、どのraw source identityに由来し、Normalized MarkdownのどのUTF-8 spanを根拠とするかを後日も検証できること**まで含める。MCP / external Agent APIは未承認roadmapであり、現行MVPの提供機能として扱わない（[09-mvp-scope.md §2](09-mvp-scope.md)）。
 
-## 4.4.1 NotebookLM との差別化 — citation と Evidence Pointer は別物
+## 4.4.2 将来Cloudの戦略競合
 
-NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kio open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、Kio は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (Kio で見つけた原本を NotebookLM に投入する使い方は妨げない)。
+| 競合 | 公式資料で確認できる重なり | 脅威 | Kio Cloudが狙う場合の差 |
+| --- | --- | ---: | --- |
+| [**Nasuni**](https://www.nasuni.com/press-release/nasuni-unveils-expanded-strategy-brand-and-platform-enhancements-for-file-data-activation-to-help-maximize-ai-investments-and-productivity/) | global namespace、permissions、versioning、cyber resilience。permission-aware MCPのAI Activateは2026年Q4 GA予定 | **最重要** | storage移行ではなく既存storage上へ重ね、回答を特定commitとclaim-level Evidenceへ固定する。予定機能を提供中と扱わない |
+| [**Egnyte**](https://www.egnyte.com/products/ai-assistant) | secure content collaboration、権限準拠AI、versioning、[snapshot recovery](https://helpdesk.egnyte.com/hc/en-us/articles/4416718848397-Snapshot-Based-Ransomware-Recovery) | **最重要** | citationではなく、改名・移動・上書き後も解決するpointer、過去時点Q&A、固定knowledge releaseで差を作る |
+| [**Box Hubs + Box AI**](https://blog.box.com/box-hubs-smarter-way-share-knowledge-across-your-organization) | curated scopeへのQ&A、引用、権限、source更新の反映。Box Shieldは[content recovery](https://support.box.com/hc/en-us/articles/37868517994899-Box-Shield-is-adding-advanced-ransomware-recovery-capabilities-Jan-2025)も提供 | 高 | 「常に最新」に対し、Pinned / Live / Releaseを明示し、共有時点と回答根拠を再現する |
+| [**SharePoint Agents**](https://support.microsoft.com/en-us/sharepoint/copilot-in-sharepoint/get-started-with-agents-in-sharepoint) + [**OneDrive**](https://support.microsoft.com/en-US/onedrive/restore-your-onedrive) | site/library scope、質問者権限に応じた回答、共有、version/restore | 高 | Office UIや配布力と競わず、異種storage、content identity、長期historical evidenceへ集中する |
+| [**Dropbox Dash**](https://dash.dropbox.com/) + [**Dropbox Rewind**](https://help.dropbox.com/delete-restore/rewind) | 複数SaaS横断検索、sourced answer、context-richなStacks、時点復元 | 高 | 横断検索と復元を、検索commit・claim evidence・生成profile・権限判断を含む検証可能なchainへ結ぶ |
+| [**Glean**](https://www.glean.com/enterprise-search) / [**Notion Enterprise Search**](https://www.notion.com/help/enterprise-search) | 多数connectorを横断するcurrent-state search、権限準拠、出典付き回答 | 中〜高 | connector数で競わず、bounded project、raw履歴、`as-of` / `diff` query、external handoffを主戦場にする |
+| [**Gemini Notebook**](https://support.google.com/gemininotebook/answer/16322204?hl=en) | source集合を共有し、受領者が原文を読み、AIへ質問する体験 | 中 | live更新か固定版かを明示し、raw digest、ACL、期限、answer receipt、時点差分を企業・技術用途向けに強化する |
+| [**Rubrik**](https://www.rubrik.com/solutions/ransomware-recovery) / [**Cohesity**](https://www.cohesity.com/solutions/ransomware/) / [**Veeam**](https://www.veeam.com/solutions/data-security/ransomware-recovery.html) | immutable/isolated copy、異常検知、clean recovery、復旧運用 | 隣接基準 | 汎用backupとして競わない。Kioがsecurity claimを行う際の最低基準として比較する |
+
+Nasuniは将来の構造が最も近く、EgnyteはAI・権限・共有・復旧を現在の製品体系で統合した強い比較対象である。この2社をCloud戦略の定期benchmarkとする。
+
+## 4.4.3 競争判断 — 機能ではなく「履歴付き証拠workflow」に置く
+
+次の各機能は必要になり得るが、単体ではmoatではない。
+
+```text
+- local / cloud RAG
+- shared scopeへのAI Q&Aとcitation
+- permission-aware retrieval
+- version history / point-in-time restore
+- MCP / Agent API
+- content-addressed storage
+```
+
+将来Cloudの差別化仮説は、これらを次の一つのworkflowへ結ぶことである。
+
+```text
+Versioned source identity
+  + explicit Pinned / Live / Release share
+  + every answer bound to the searched commit
+  + claim-level immutable Evidence Pointer
+  + historical / as-of / diff query
+  + permission-aware verification
+  = reproducible knowledge handoff
+```
+
+最初のwedgeは、project終了時の**Pinned Snapshot Share**である。顧客・後任・共同研究者は固定されたknowledge releaseへAIで質問し、各claimの原文根拠を確認でき、作成者は後日「何を共有したか」を再現できる。Google Drive / OneDrive / NASを置き換えず、project単位で導入する。
+
+Knowledge Continuityは同じCAS・commit・evidenceを利用できる第二の柱だが、現行のauto commitはindex/finalize成功時の履歴点であり、分離保管・常時保護・clean point判定・RPO/RTOを意味しない（[05-runtime.md §8.1](05-runtime.md)、[09-mvp-scope.md §2](09-mvp-scope.md)）。訴求は次のgateを満たしてから行う。
+
+| claim | 使用条件 |
+| --- | --- |
+| automatic history | 対象となるindex/finalizeまたはschedulerのauto commitを実装・検証済み |
+| point-in-time recovery | 対象scopeで復旧試験が成功し、保持範囲と制約を明示できる |
+| immutable/protected history | 通常のapp/admin credentialではretention中の上書き・削除ができない |
+| ransomware-resilient | 別trust domainのvault、検知、containment、clean point選択、隔離復旧、定期演習が揃う |
+| business continuity | RPO/RTO、runbook、依存serviceを含む復旧演習を提供する |
+| ransomware-proof | **使用しない** |
+
+将来Cloudの推奨category、wedge、優位性、非目標、claim gateの詳細は、非規範の戦略文書 [cloud-competitive-advantage.md](../strategy/cloud-competitive-advantage.md) を参照する。multi-device sync / cloud sharing自体は現行MVPの未承認roadmapである（[09-mvp-scope.md §2](09-mvp-scope.md)）。
+
+## 4.4.4 Gemini Notebook / NotebookLMとの差別化 — citationとEvidence Pointerは別物
+
+Gemini Notebookのcitationは「notebookへ登録されたsource集合の中で回答根拠へ戻る」体験であり、そのnotebookと共有linkのlifecycleに閉じる。Evidence Pointerは `commit / tree / raw_hash / chunk_hash / span` で根拠を固定するため、次の4点で体験が異なる: (1) **不変性** — 原本のrename・移動・削除・上書き後も、明示purgeまではpointerを解決できる。(2) **time-travel** — 過去の任意snapshot時点を検索・参照できる。(3) **ローカル原本回帰** — `kio open` でOS規定appの原本へ戻れる。(4) **任意folder横断** — upload用corpusを作らず、手元の全indexed scope（過去版・削除済みを含む）を対象にできる。
+
+Gemini Notebookは「選んだsource集合を読み、質問する」共有体験の強い基準であり、Kioと併用可能である。KioがCloudへ進む場合も、単なる同等Q&Aではなく、共有mode、検索commit、claim-level Evidence、変更差分を明示できる場合にだけ差別化が成立する。
 
 # 4.5 Perkeep 失敗分析 (Kio が学ぶべきこと)
 
@@ -150,7 +228,7 @@ Kio が同じ轍を踏まないための行動原則:
 | 領域 | 重なる相手 | Kio のスタンス |
 | --- | --- | --- |
 | 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、Kio は vault + Documents + Downloads + コードを横断 |
-| AI チャット UX | Khoj, AnythingLLM | **競合しない**。Kio は CLI の構造化 JSON を提供する |
+| AI チャット UX | Khoj, AnythingLLM | **chat UI自体は競わない**。ローカル文書検索は第一代替として比較しつつ、Kioは履歴・EvidenceをCLIの構造化JSONで提供する |
 | 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。Kio は知識検索と Evidence。両立可能 |
 | 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
 | OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
@@ -239,7 +317,7 @@ Kio は既存ツールを置き換えない。**横断する**外部アーカイ
 | Obsidian vault | vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、Kio は vault + Documents + Downloads + コードを横断。 |
 | Git リポジトリ | リポジトリ自体には `.kio` を置かない (Git に管理される)。`kio index` は VCS repo root 配下に既定で子 `.kio` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。検索が横断するのは repo 外のファイルと他 scope である (横断検索は scope_registry 経由の全 scope 検索であり、親 `.kio` 自体は直下のみ管理 — 03 §3)。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
-| Khoj / AnythingLLM | Kio の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
+| Khoj / AnythingLLM | ローカル文書検索では第一代替だが、chat UXは彼らに任せる。Kioの履歴・Evidenceを構造化APIから呼ぶ相互運用も狙う。 |
 
 ---
 

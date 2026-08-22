@@ -61,7 +61,7 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 | 順 | ファイル | 役割 |
 | --- | --- | --- |
 | 0 | [README.md](README.md) | 全体俯瞰・Reading Path (本書) |
-| **01** | [01-positioning.md](01-positioning.md) | **★最初に読む**。core 一文 / ターゲット / 差別化の核 / **競合分析 + Perkeep 失敗分析** / 既存ワークフロー / 発言禁止リスト |
+| **01** | [01-positioning.md](01-positioning.md) | **★最初に読む**。core 一文 / ターゲット / 差別化の核 / **Local・将来Cloudの競合分析 + Perkeep失敗分析** / 既存ワークフロー / 発言禁止リスト |
 | **02** | [02-philosophy.md](02-philosophy.md) | 理念 (Evidence Pointer の根拠、Markdown 正規化の妥協点、忘れない vs purge) |
 | **03** | [03-data-model.md](03-data-model.md) | **★契約**: CAS / `.kio` layout / object 種別 / identity / `tool_profile_hash` / 書き込み境界 / dedup スコープ |
 | **04** | [04-pipeline.md](04-pipeline.md) | **★契約**: ingest → prepare → markdownize (incremental) → chunk → embed → index / SQLite schema / batch (retry / budget) |
@@ -77,6 +77,10 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 
 旧 `docs/research/` (LLM 出力由来の設計検討メモ + folder-history 独立設計書) は 2026-07-18 に docs から
 撤去した — 正本は `01-` 〜 `10-` の spec のみ。経緯を参照する場合は git 履歴 (撤去直前のコミット) を辿る。
+
+## 1.2 非規範の戦略文書
+
+[`strategy/`](../strategy/) は市場・事業・将来製品の意思決定材料を置く領域であり、`01-`〜`10-` のReading Pathや実装specには含めない。現在の将来Cloud仮説は [cloud-competitive-advantage.md](../strategy/cloud-competitive-advantage.md) を参照する。同文書の機能・roadmap・設計判断は、明示的にspecへ採用されるまで未承認である。
 
 ---
 
