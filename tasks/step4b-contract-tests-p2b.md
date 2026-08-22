@@ -1,5 +1,7 @@
 # Step4b 契約テスト仕様書: fsck 拡大 / evidence pointer 解決・verify・retarget (P2-B)
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ための契約仕様。Rust 実装コードは含まない。
 > 正本は `docs/10-operations.md` **§7.5 全体 (§7.5.1 kio repair --verify-objects / §7.5.2 バックアップ運用 /
 > §7.5.3 SQLite schema 変更の規約)** と **§3 (Scope Registry)**、`docs/08-evidence-pointer-spec.md` **全体
@@ -9,21 +11,21 @@
 
 **担当グループ**: P2-B (fsck / evidence pointer resolve・verify・retarget)。
 
-**対象 U 項目 (`tasks/step4b-spec-gap.md`)**: F 領域 = U39, U40, U41, U42, U43, U44, U45, U46, U47, U144。
+**対象 U 項目 (当時の gap inventory)**: F 領域 = U39, U40, U41, U42, U43, U44, U45, U46, U47, U144。
 G 領域 = U48, U49, U50, U51, U52, U54, U55, U56, U57, U58, U59, U60, U61, U62 (**U53 は判定部を除外** —
 canonical final event の 4 分岐アルゴリズムと `purged→tombstoned` 改称そのものは
-`tasks/step4b-contract-tests-lifecycle.md` の **LC8-LC14** が既に契約化済み。本書は参照のみで再契約
+Phase 1 の **LC8-LC14** が既に契約化済み。本書は参照のみで再契約
 しない。U53 のうち本書が引き取るのは evidence verify の **6 値 status union 化**であり、これは U57 の
 契約 (§S) に統合済み)。
 加えて **Phase 1 引き継ぎ 1 件**: `kio evidence verify` の canonical final event 正本化の共有化
-(発注側指示の「LC21 原則」— `tasks/step4b-contract-tests-lifecycle.md` **LC21** 「検証失敗 marker は
+(発注側指示の「LC21 原則」— **LC21** 「検証失敗 marker は
 入口非依存で corruption (fsck/resolver/re-purge 統一)」を土台に、本書 §X で**検証失敗に限らない**
 canonical dispatch 全体の共有化まで踏み込んで契約化する)。
 
 ## 対象外 (他グループ・Phase 3 送り — 混同注意)
 
 - B 領域 (tombstone/erase receipt events[] lifecycle 本体、U13-U21/U35/U36) — Phase 1 で実装済み・
-  `step4b-contract-tests-lifecycle.md` の LC1-LC61 が契約の正本。本書は参照するのみ (§X で明示的に
+  現行 canonical docs と Rust tests が契約の正本。本書は参照するのみ (§X で明示的に
   参照する箇所のみ引用)
 - C 領域 (`kio open` object URI 解決手順・cache — U22-U24) — 別 P2 グループ。本書 §M (U50) は
   pointer **schema** としての object URI type 制約 (発行・受理の型そのもの) のみを扱い、`kio open` の
@@ -31,7 +33,7 @@ canonical dispatch 全体の共有化まで踏み込んで契約化する)。
 - D 領域 (restore の退避・隔離・no-replace publish — U25-U27) — 別 P2 グループ
 - E 領域の残り (purge 削除範囲・staging・ログ scrub・working tree 警告・二重 purge — U28-U34/U37/U38) —
   別 P2 グループ。E 領域のうち journal/epoch 機構本体 (U35/U36) は Phase 1 実装済みで
-  `step4b-contract-tests-lifecycle.md` §G/§H (LC39-LC57) が正本
+  現行 canonical docs と Rust tests が正本（LC39-LC57 は provenance）
 - H 領域 (検索 gate/cursor/時点条件/multi-scope — U63 以降) — 別 P2 グループ。本書 §H (U46) は
   registry の live 重複**検出**契約のみを扱い、横断検索の `excluded_scopes` 統合・partial 表示は H 側の
   管轄 (該当箇所で明示的に境界を注記する)
@@ -179,7 +181,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 期待: (a) は正常な dead terminal として manifest 欠落を corruption としない (`dead_by_tombstone_count`
   等の既存カウンタに算入)。(b) は「古い退役 event が新規破損を隠さない」ため corruption と判定する
   (`manifest_corrupt` 相当の finding)。この判定は §D(PB05 自身)・fsck 側の raw 欠落説明スコープ
-  (`step4b-contract-tests-lifecycle.md` LC17/LC35-38 と同一原則) を manifest object に対しても適用する
+  (LC17/LC35-38 と同一原則) を manifest object に対しても適用する
   ことを要求する — raw 側だけ範囲限定して manifest 側は無条件除外、という非対称実装は契約違反。
 
 ### PB06 HEAD tree entry の作業コピー manifest.json canonical JCS hash 一致検査 (未 finalize と corruption の分離) [P0]
@@ -264,7 +266,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a)(b) いずれも exit code は 0 (legacy 警告の有無・件数は exit を変えない)。legacy 警告は
   corruption カウンタとは別の種別ごとの件数として出力に含まれる。この規則は
-  `step4b-contract-tests-lifecycle.md` **LC7** が tombstone/receipt の reason legacy 警告について
+  **LC7** が tombstone/receipt の reason legacy 警告について
   既に固定済みであり、本契約はそれを normalized unit の path/reason legacy 警告一般に拡張する
   regression-lock として位置づける (再定義ではなく適用範囲の確認)。
 
@@ -280,7 +282,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB12 CLI フラグ追加と `--rebuild-db`/`--verify-objects [--prune-orphans]`/`--registry-prune` の exactly-one 構文 [P0]
 - 正本: 10-operations.md §7.5.1 導入部の `kio repair --verify-objects --prune-orphans` 構文、および
   U46 統合要約の『`kio repair` は `(--rebuild-db [--online|--offline] | --verify-objects
-  [--prune-orphans] | --registry-prune)` の exactly-one 必須構文に拡張する』(spec-gap U46 統合要約、
+  [--prune-orphans] | --registry-prune)` の exactly-one 必須構文に拡張する』（当時の U46 統合要約、
   出典 gap-10-03 G11 等)。
 - 前提: `kio repair` を (a) `--verify-objects --prune-orphans`、(b) `--prune-orphans` 単独 (
   `--verify-objects` を伴わない)、(c) `--rebuild-db --prune-orphans` (併用不可の組み合わせ) で実行。
@@ -516,7 +518,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   (`main.rs` L970-972) は `rebuild_step3_index` の直後に `recover_index_generation(repo.kio_dir())`
   を呼び、これが `index_metadata` 未初期化なら `purge.read_lifecycle_epoch()` の現在値で
   `ensure_index_metadata` する (L4455-4460) ため、本契約は**実質的に既に満たされている**可能性が高い
-  ([適合済みの可能性] — U144 の統合要約は Step 4b Phase 1 適用前の spec-gap 記述であり、Phase 1c
+  ([適合済みの可能性] — U144 の統合要約は Step 4b Phase 1 適用前の historical inventory 記述であり、Phase 1c
   で `recover_index_generation` が追加された結果、本契約は regression-lock として位置づけを見直す)。
   **[解釈割れ]**: `rebuild_sqlite_index` 自身の DB スワップ Tx とは別の後続呼び出しであり、spec 文言
   「同じ完了 Tx」を文字通り同一 SQL トランザクションと読むなら未達、`run_repair` 全体を包む
@@ -953,7 +955,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `main.rs` L6963-6973) が `purge.read_barrier_active()` を検査し、true なら
   `purge_journal_active_error()` (`KIO-E-PURGE-JOURNAL-ACTIVE-001`, `ExitCode::PartialFailure`=3) を
   返す — これは Step 4b Phase 1c で追加された §I read barrier (LC52-56) の副産物として**既に本契約を
-  満たしている可能性が高い**([適合済みの可能性] — spec-gap の元記述はこの Phase 1c 追加前のコード
+  満たしている可能性が高い**([適合済みの可能性] — historical inventory の元記述はこの Phase 1c 追加前のコード
   読解に基づく)。本契約は regression-lock として維持し、raw_hash 単位ではなく scope 全体の active
   journal 検出であること (対象 raw_hash と無関係な purge でも拒否されること) を追加で確認する。
 
@@ -1034,7 +1036,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ## X. evidence verify の canonical validator 統一 (Phase 1 引き継ぎ — LC21 原則)
 
 > 発注側指示: 「Phase 1 引き継ぎの **evidence verify の同一 validator 化 (LC21 原則 — verify も
-> canonical final event 正本化を共有)**」。`step4b-contract-tests-lifecycle.md` **LC21** は「検証
+> canonical final event 正本化を共有)**」。**LC21** は「検証
 > **失敗** marker は入口非依存で corruption (fsck/resolver/re-purge 統一)」を既に契約化済みだが、
 > これは malformed marker の corruption 判定に限定した narrow な契約である。本節はそれを踏み台に、
 > **検証成功マーカー同士の canonical 集約そのもの** (LC8-10 の 4 分岐アルゴリズム全体) が
@@ -1054,7 +1056,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB64 LC10 worked example の evidence verify 経由再現: tombstone purged@10 + receipt retired@11 は alive [P0]
 - 正本: 08 §3.1 手順 5 L187-190『(§3.2 の解決成功条件... をここで検査する — (i) が個別 marker の
   末尾で先に短絡しない: 例えば tombstone 末尾 purged@epoch10 + receipt 末尾 retired@epoch11 は
-  canonical = retired であり (iii) 側)』(`step4b-contract-tests-lifecycle.md` **LC10** と同一
+  canonical = retired であり (iii) 側)』(**LC10** と同一
   シナリオ、本契約はそれを `kio evidence verify` 経由で再現する)。
 - 前提: raw_hash `X` の tombstone 末尾 event = `{kind:"purged", lifecycle_epoch:10}`、erase receipt
   末尾 event = `{kind:"retired", lifecycle_epoch:11}` (両方とも構造検証通過)。raw object `X` は CAS に
@@ -1069,7 +1071,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `evidence verify` だけが違反する具体的な再現ケース。
 
 ### PB65 LC12/13/14 分岐の evidence verify 経由でのエラーコード忠実性 (パラメタ化) [P0]
-- 正本: 08 §3.1 手順 5 (ii)(iii)(iv) L192-204 (`step4b-contract-tests-lifecycle.md` **LC12/LC13/LC14**
+- 正本: 08 §3.1 手順 5 (ii)(iii)(iv) L192-204（**LC12/LC13/LC14**
   と同一分岐、`main.rs` の `enforce_canonical_marker_barrier` L7069-7085 が `open`/`view`/`restore`
   向けに既に実装済みの 4 分岐)。
 - 前提: (a) canonical final event = `erased`・raw 不在 (LC12 相当)。(b) canonical final event =
@@ -1104,7 +1106,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   という規範は同一 **実装** の共有を要求する趣旨と読む。
 
 ### PB67 [regression-lock] LC21 の malformed marker 一貫性は低レベル parse 共有により既に成立 [P1]
-- 正本: `step4b-contract-tests-lifecycle.md` **LC21**『検証失敗の marker は入口非依存で corruption
+- 正本: 08 §3.1 および現行 Rust tests（**LC21** provenance）『検証失敗の marker は入口非依存で corruption
   (fsck/resolver/re-purge 統一)』
 - 前提: 構造検証 (kind 別必須 field 欠落等、LC16 相当) に失敗する tombstone レコードを用意する。
   `verify_pointer_for_cli` も fsck の `canonical_lookup` (`verify_objects.rs` L1517 以降) も、共に

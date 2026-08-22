@@ -1,24 +1,26 @@
 # Step4b 契約テスト仕様書: task 状態機械 / Tier 承認 / adapter 契約 / pipeline 残 (P3-A)
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ための契約仕様。Rust 実装コードは含まない。
 > 正本は `docs/04-pipeline.md` **§3 (Markdownize, §3.1/§3.2) / §5.1〜§5.3 (タスクモデル・状態遷移・
 > エラー種別) / §5.5〜§5.7 (冪等性・exit code・Resume/Repair)**、`docs/07-adapter-spec.md` **全体
 > (§1〜§9)**、`docs/10-operations.md` **§1/§1.1 (初回スキャン承認・Secrets デフォルト除外)** — 期待値は
 > これら (および直接引用する隣接節) の規範文からのみ導く。系譜は
-> `tasks/step4b-contract-tests-{ledger,lifecycle}.md` (Phase 1) の ID 体系・優先度規約・
+> Phase 1 の ledger/lifecycle ID 体系・優先度規約・
 > 「未定義/曖昧の切り出し」方針。記法は `### QA<連番> ... - 正本 / 前提 / 操作 / 期待` 形式 (自己完結)。
 >
-> **現状確認の前置き**: `tasks/step4b-spec-gap.md` の「実装状態」欄は 2026-07-21 時点のスナップショットで
+> **現状確認の前置き**: 当時の gap inventory の「実装状態」欄は 2026-07-21 時点のスナップショットで
 > あり、本書作成時点 (2026-07-22) には Phase 1 (`crates/kio-pipeline/src/ledger/` — cost-ledger.sqlite
 > 2 相プロトコル・abandon・`--reset-violations`・stalled 表示) と一部 Phase 2 相当の作業
 > (`--prune-orphans`/`--registry-prune` CLI 配線、`kio search` の `--online`/`--offline`) が実際には
-> 既に着地しており、spec-gap の記述より実装が進んでいる箇所が複数ある。本書の各契約は spec-gap の
+> 既に着地しており、historical inventory の記述より実装が進んでいる箇所が複数ある。本書の各契約は inventory の
 > 文言ではなく **本書作成時点で直接読んだ現行コード** を「現状」として引用する (該当箇所ごとに
 > file:line を再確認済み)。
 
 **担当グループ**: P3-A (task 状態機械 / Tier 承認 / adapter 契約 / pipeline 残)。
 
-**対象 U 項目 (`tasks/step4b-spec-gap.md`)**: A 領域残り **U1, U2, U3, U4, U11, U12**、I 領域全部
+**対象 U 項目 (当時の gap inventory)**: A 領域残り **U1, U2, U3, U4, U11, U12**、I 領域全部
 **U78-U94, U143**。加えて Phase 2 からの繰越 3 件: **PB14, PB16, PB17** (staging root 分類・open cache
 残骸回収)、**PB24** (registry live 重複 fail-closed の書込系/online 起動への拡大)、**CL40**
 (Markdownize 部分回復の再導出)。
@@ -924,7 +926,7 @@
 - 正本: 07 §5.3 L464-466『embedding の SQLite schema (embeddings/chunk_vec) の正本は
   04-pipeline.md §4.3 とする...SQL 定義の重複記載は 2026-07-14 に解消し、本節から参照する』
 - 前提: `embeddings`/`chunk_vec` の `CREATE TABLE` は `crates/kio-index/src/fts.rs` にのみ存在し、
-  `crates/kio-adapter/` 側には重複定義が無い (spec-gap 記載の「適合済みの可能性」を本書作成時に
+  `crates/kio-adapter/` 側には重複定義が無い（historical inventory 記載の「適合済みの可能性」を本書作成時に
   再確認済み)。
 - 操作: `crates/kio-adapter/src/` 全体で `CREATE TABLE.*embeddings\|CREATE TABLE.*chunk_vec` を
   grep する。
@@ -1161,7 +1163,7 @@
   `cache_home().join("kio/open").join(digest)` を削除し (2197-2205)、(b) 別途
   `cache_home().join("kio/open/image")` 配下を全走査して `live_images` に含まれない digest の
   ディレクトリを削除する (2207-2219) — raw 系と image 系が既に型分離された path
-  (`open/<digest>/` vs `open/image/<digest>/`) で扱われている (spec-gap の U24 記載
+  (`open/<digest>/` vs `open/image/<digest>/`) で扱われている（当時の U24 記載
   「image/型分離は無くflat namespace」は本書作成時点では既に解消済み)。
 - 操作: (a) canonical final event が purged/erased な raw_hash の open cache 残存。(b) live
   参照 0 の image object の open cache 残存 (`open/image/<digest>/`)。を用意して
@@ -1348,5 +1350,5 @@
 P2=8、目安 50-70 をやや超過するが、内 10 件は regression-lock (新規実装ではなく現状固定) であり
 実質的な新規ギャップ契約は 61 件)。
 **解釈割れ注記**: 8 件 (§V)。**regression-lock (現状固定・回帰防止のみ)**: QA28, QA32, QA35, QA43,
-QA51, QA57, QA61 (部分), QA62, QA65, QA68 = 10 件 (spec-gap の「適合済みの可能性」再精査により
+QA51, QA57, QA61 (部分), QA62, QA65, QA68 = 10 件（historical inventory の「適合済みの可能性」再精査により
 U84・U90・一部 U81/U83/U86/U92/U94/U143 を契約 1 本ずつに圧縮する方針を確定)。

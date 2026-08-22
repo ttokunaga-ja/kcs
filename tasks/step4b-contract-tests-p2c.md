@@ -1,14 +1,16 @@
 # Step4b 契約テスト仕様書: 検索 / gate / mode / cursor / multi-scope / exit (P2-C)
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ためのケース仕様。Rust 実装コードは含まない。
 > 正本 spec は `docs/05-runtime.md` **§1 全体 (1.1〜1.8)** と **§2.1〜§2.6** (shallow/GC の検索面参照のみ)、
 > `docs/06-cli-spec.md` **§3 (Search)** と **§7 (Exit Code)** / §8 (Error Code Namespace の横断参照)、
 > `docs/07-adapter-spec.md` **§3 (ネットワーク送信原則と opt-in — gate 正本)**。期待値はすべてこれらの
-> 節の規範文から導く (1 文引用付き)。系譜は `tasks/step4b-contract-tests-{ledger,lifecycle}.md` と同じ
+> 節の規範文から導く (1 文引用付き)。系譜は Phase 1 の ledger/lifecycle ID と同じ
 > `### PC<連番> ... - 正本 / 前提 / 操作 / 期待` 形式 (自己完結)。
 
-**対象 U 項目**: `tasks/step4b-spec-gap.md` の **U63〜U77, U145** (H 領域 = 検索 / gate / mode / exit)。
-Phase 割当は spec-gap 全体表の「Phase 2」。
+**対象 U 項目**: 当時の gap inventory の **U63〜U77, U145** (H 領域 = 検索 / gate / mode / exit)。
+Phase 割当は当時の inventory の「Phase 2」。
 
 **実装状態の再確認 (指示書 手順1)**: 「適合済みの可能性」4 件 (U66, U68, U73, U76) は本書作成にあたり
 実装を直接精査した。**U66・U68・U76 は真に適合** — 現状固定の確認契約に圧縮 (PC18, PC28-29)。
@@ -781,7 +783,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   reachable on the cursor path」と主張するが、`TimeSelector::AllHistory` 等のフレッシュ
   (非 cursor) 経路 (main.rs L2402-2405, `history_plan_error(error, exec.from_cursor)` の
   `from_cursor` 引数は SHALLOW 分岐では使われない) からも到達することを PC47 で確認する — 影響範囲は
-  spec-gap の記述 (「scope 全体を除外/失敗させる」) よりも広く、**multi-scope 検索コマンド全体**が
+  historical inventory の記述 (「scope 全体を除外/失敗させる」) よりも広く、**multi-scope 検索コマンド全体**が
   巻き込まれる。
 
 ### PC46 shallow_skipped 件数のレスポンス可視化 [P1]
@@ -991,14 +993,14 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 ### PC59 `--at` は `--scope` 単一指定を必須とする — `--scope` 省略 (デフォルト全 scope) はエラー [P0]
 - 正本: 06 §3 L226-227 (『`kio search "..." --at <commit> --scope <path>` — --at は --scope
   単一指定を必須とする (独立 DAG の multi-scope に単一 commit は適用不能 — 05 §1.6)』) / 05 §1.6
-  統合要約 (spec-gap U77: 『kio search --at <commit> に --scope 単一指定必須の制約を新設する』)
+  統合要約（当時の U77: 『kio search --at <commit> に --scope 単一指定必須の制約を新設する』）
 - 前提: registry に複数 scope が登録されている。
 - 操作: `kio search "<query>" --at <commit>` (`--scope` 省略) を実行する。
 - 期待: `KIO-E-CONFIG-USAGE-001` (exit 2、invalid usage) — 「`--at` は `--scope` 単一指定を要する」
   旨のメッセージ。**現状**: `parse_search_args` (main.rs L5012-5141) に `--at` と `scope`/
   `descendants`/`all_scopes` を関連付ける検証が無く、`enumerate_scope_targets` は `--scope` 省略時
   そのまま全 scope を列挙し (main.rs L5340-5346)、各 scope が `--at` の commit をそれぞれ独立に
-  解決しようとするだけで usage error にならない (spec-gap の記述どおり)。
+  解決しようとするだけで usage error にならない（当時の inventory の記述どおり）。
 
 ### PC60 `--at` + `--scope --descendants` (複数 scope化) もエラー、`--scope` 単一 (descendants なし) のみ許容 [P0]
 - 正本: PC59 と同一引用。「単一 commit は独立 DAG の multi-scope に適用不能」という理由は
@@ -1016,7 +1018,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 ## P. chunking config 変更時の再 chunk/再 embedding 対象を HEAD 参照 instance に限定 (04-pipeline.md §4.6)
 
 ### PC61 rebuild の再 chunk/再 association 対象を HEAD tree が参照する normalized instance のみに限定する [P1]
-- 正本: `tasks/step4b-spec-gap.md` U145 統合要約 (04 §4.6 由来): 『chunking config 変更検出時の
+- 正本: 04 §4.6（当時の U145 統合要約）: 『chunking config 変更検出時の
   再 chunk/再 embedding タスク対象を、旧 spec「全 normalized instance (履歴分含む)」から新 spec
   「HEAD (現行 tree) が参照する normalized instance のみ」へ縮小する。履歴 instance は時点指定検索で
   旧 config のまま参照されるため (H 領域 U69/U71)、新 config での履歴再 chunk はどの tree からも

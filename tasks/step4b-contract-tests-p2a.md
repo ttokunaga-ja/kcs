@@ -1,16 +1,18 @@
 # Step4b 契約テスト仕様書: open cache / restore / purge 挙動 (P2-A)
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ための契約仕様。Rust 実装コードは含まない。
 > 正本は `docs/05-runtime.md` **§3 (Purge の機構) / §4 (Restore / Time-travel)**、
 > `docs/06-cli-spec.md` **§1.1 (open の原本解決) / §5 (Restore) / §6 (Delete / Archive / Purge)**、
 > `docs/02-philosophy.md` **§2.4 (履歴改変) / §6.1 (原本ファイルは証拠として扱う)** — 期待値はこれら
-> (および直接引用する隣接節) の規範文からのみ導く。系譜は `tasks/step4b-contract-tests-{ledger,lifecycle}.md`
-> (Phase 1) の ID 体系・優先度規約・「未定義/曖昧の切り出し」方針。記法は本タスクの共通指示書
+> (および直接引用する隣接節) の規範文からのみ導く。系譜は Phase 1 の ledger/lifecycle ID
+> 体系・優先度規約・「未定義/曖昧の切り出し」方針。記法は本タスクの共通指示書
 > (`step4b-contract-instructions.md`) が定める `### PA<連番> ... - 正本 / 前提 / 操作 / 期待` 形式。
 
 **担当グループ**: P2-A (open cache / restore / purge 挙動)。
 
-**対象 U 項目 (`tasks/step4b-spec-gap.md`)**: C 領域 **U22, U23, U24**、D 領域 **U25, U26, U27**、
+**対象 U 項目 (当時の gap inventory)**: C 領域 **U22, U23, U24**、D 領域 **U25, U26, U27**、
 E 領域の残り **U28, U29, U30, U31, U32, U33, U34, U37, U38**（**U35, U36 は Phase 1 で実装済みのため
 再契約しない — 参照のみ**）。加えて Phase 1 からの引き継ぎ 2 件:
 **LC46 の継続 (purge closure 完全化 — journal closure を prepared 相で確定し resume 時再利用)** と
@@ -21,7 +23,7 @@ E 領域の残り **U28, U29, U30, U31, U32, U33, U34, U37, U38**（**U35, U36 �
 
 - events[] lifecycle スキーマ自体 (kind enum・遷移文法・legacy 変換・canonical final event 算出関数
   `kio_core::purge::canonical_final_event`・epoch/lifecycle-epoch カウンタ・§I 読取 barrier の
-  2 点/3 点検査機構) — Phase 1 (`tasks/step4b-contract-tests-lifecycle.md` LC1-57) で契約済み・実装済み。
+  2 点/3 点検査機構) — Phase 1 で契約済み・実装済み。
   本書は **これらを所与として使う側**（restore への配線状況・purge closure の内容）のみを契約する。
 - cost-ledger.sqlite / Online Batch 2 相プロトコルの内部規則 (状態機械・冪等記帳・outcome enum 等) —
   Phase 1 (`tasks/step4b-contract-tests-ledger.md` CL1-71) で契約済み・実装済み。§L (U37) は
@@ -242,7 +244,7 @@ P0/P1/P2 集計は末尾 §Q。
 
 ### PA10 一時展開は restore ではない (read-only・`--to`/`--force` 対象外) [P2]
 - 正本: 06 §1.1 L150 (段落冒頭)『一時展開は **restore ではない**: working tree に書かず read-only で
-  あるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外』
+  あるため、[§5](../docs/06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外』
 - 前提: raw_hash `X` が working tree に存在せず (削除済み・過去版)、`kio open X` が一時展開経路を通る。
 - 操作: 展開されたファイルの権限・呼び出し規約を確認する。
 - 期待: 展開先ファイルは read-only (0400 相当) で作成され、`kio open` のコマンドラインに `--to` や
@@ -317,7 +319,7 @@ P0/P1/P2 集計は末尾 §Q。
 - 前提: `kio repair --verify-objects --prune-orphans` を実行しようとする。
 - 操作: CLI の引数パーサを検査する。
 - 期待: `--prune-orphans` は `--verify-objects` のサブフラグとして受理される。**実装状態の確認**:
-  `tasks/step4b-spec-gap.md` U24 の実装状態注記どおり、`--prune-orphans` フラグは crates 全体で
+  当時の U24 実装状態注記どおり、`--prune-orphans` フラグは crates 全体で
   grep 0 件であり (`verify_objects.rs` に同機能なし)、PA14 が要求する「purge 済み raw/image の cache
   残骸回収」を実行する CLI 経路自体が存在しない。本契約は F 領域 (fsck 拡大、別グループ) と隣接するが、
   `--prune-orphans` **の cache 回収機能**という限りで PA14 の実行可能性の前提として本書に含める。
@@ -555,7 +557,7 @@ P0/P1/P2 集計は末尾 §Q。
 
 ## G. purge CLI 構文・保証範囲反転・削除対象拡大 (U28 / U29 / U30、圧縮)
 
-> `tasks/step4b-spec-gap.md` はこの 3 項目を「適合済みの可能性」と評価している。現行実装を精査した
+> 当時の gap inventory はこの 3 項目を「適合済みの可能性」と評価している。現行実装を精査した
 > 結果、3 項目とも規範文と実質的に一致することを確認したため、各 1〜2 本の「現状固定」契約へ圧縮する
 > (指示書「真に適合なら契約 1 本 (現状固定) に圧縮してよい」に従う)。
 
@@ -614,7 +616,7 @@ P0/P1/P2 集計は末尾 §Q。
   `embeddings` 行、(c) `X` とは無関係な `target_type='query_cache'` の `embeddings` 行。
 - 操作: purge を実行する。
 - 期待: (a) は削除される。(b) は他 chunk からの参照が残るため削除されない。(c) は最初から候補に
-  含まれず削除されない。**現状確認**: `tasks/step4b-spec-gap.md` U31 の実装状態注記
+  含まれず削除されない。**現状確認**: 当時の U31 実装状態注記
   (`fts.rs:245-306` の `purge_raw`) によれば、この 3 条件は既に実装されている — 現状固定として
   1 本に圧縮する。
 
@@ -653,7 +655,7 @@ P0/P1/P2 集計は末尾 §Q。
 ## J. purge のログ scrub 範囲を scope_id 単位に限定 (U33)
 
 ### PA36 ログ scrub は当該 scope の scope_id を持つ行のみを対象とし、他 scope の同一 raw_hash 行には触れない [P0]
-- 正本: 10-operations.md §7/§12.6 相当 (`tasks/step4b-spec-gap.md` U33 統合要約)『purge のログ scrub
+- 正本: 10-operations.md §7/§12.6 相当（当時の U33 統合要約）『purge のログ scrub
   対象を旧 spec の「対象の raw_hash/path/query を含む行」から新 spec の「**当該 scope の scope_id を
   持ち**対象の raw_hash/path/query を含む行」に変更する。device-global log の別 scope の同一 raw_hash
   行には触れないようにし、scope 由来の行は scope_id を必須 field とする規約を追加する』
@@ -700,7 +702,7 @@ P0/P1/P2 集計は末尾 §Q。
   (purge.rs:1925-1943, 1537-1554) は working tree に同一 raw_hash を持つ tree entry が 1 件でも
   あれば `KIO-E-PURGE-WORKING-COPY-001` (`ExitCode::PermanentFailure`) で purge**そのものを完全に
   拒否**しており、PA37 が要求する「警告のみで purge は進む」という読みとは異なる。しかし
-  `tasks/step4b-spec-gap.md` の U34 実装状態注記はこの `refuse_live_working_copy` の存在に一切
+  当時の U34 実装状態注記はこの `refuse_live_working_copy` の存在に一切
   触れておらず ([未実装] とだけ記す)、既存の hard block を「PA37 の適用対象外 (別の独立した安全機構)」
   と見るか「PA37 と矛盾する過剰実装」と見るかは spec 側の記述だけでは判定できない。本書はどちらか
   一方を規範として断定せず、実装時に発注側の裁定を要すると注記するにとどめる (現状の hard block を
@@ -767,13 +769,13 @@ P0/P1/P2 集計は末尾 §Q。
 ## M. 二重 purge (再 purge) の挙動確定 (U38) — Phase 1 で充足済み、参照のみ
 
 ### PA42 再 purge は既存 tombstone/erase receipt へ新規 purged/erased event を追加 append する (Phase 1 LC58-60 準拠、参照のみ) [P2] [現状固定]
-- 正本: 09-mvp-scope.md §5.3 相当 (`tasks/step4b-spec-gap.md` U38 統合要約)『既に purge 済みの
+- 正本: 09-mvp-scope.md §5.3 相当（当時の U38 統合要約）『既に purge 済みの
   raw_hash を再度 purge すると、同一 raw_hash の lifecycle `events[]` へ新たな `purged` event を
   追加 append する』
 - 前提: raw_hash `X` の tombstone が既に active (`purged`) または retired 状態。`X` を再度
   `kio purge --raw-hash X --reason <任意>` する。
 - 操作: 再 purge を実行する。
-- 期待: Phase 1 の `tasks/step4b-contract-tests-lifecycle.md` **LC58 (再 purge は events[] へ新規
+- 期待: Phase 1 の **LC58 (再 purge は events[] へ新規
   purged/erased event を追加 append)**・**LC59 (「既存 active marker」判定は当該 marker 自身の末尾
   event で行う)**・**§M 裁定 #2 (reason 一致要件なし)** が既にこの挙動を契約・実装済み
   (`kio-core/src/purge.rs` の `state.begin()` — 再 purge 時に retired 状態の marker へは新規
@@ -786,7 +788,7 @@ P0/P1/P2 集計は末尾 §Q。
 
 ## N. purge closure 完全化 (LC46 の継続 — Phase 1 引き継ぎ)
 
-> Phase 1 (`tasks/step4b-contract-tests-lifecycle.md`) は **LC46-LC51** で purge journal の
+> Phase 1 は **LC46-LC51** で purge journal の
 > 機構自体 (record の必須 field 一式・phase の名称と厳密順序・`closure`/`planned_commit` が
 > `prepared` 相で一度確定され、以後のフィールド値としては再計算されず resume 時にそのまま journal
 > から読み戻される、という**構造**) を契約・実装済みであり、既存のユニットテスト
@@ -871,7 +873,7 @@ P0/P1/P2 集計は末尾 §Q。
 
 ## O. restore canonical dispatch の分岐 ii〜iv (Phase 1 引き継ぎ)
 
-> Phase 1 (`tasks/step4b-contract-tests-lifecycle.md` LC8-LC14) は canonical final event の 4 分岐
+> Phase 1 (LC8-LC14) は canonical final event の 4 分岐
 > ((i) purged→tombstone、(ii) erased かつ raw 不在→not_found、(iii) retired かつ raw 不在→
 > STORE-CORRUPT、(iv) marker 無しかつ raw 不在→STORE-CORRUPT) を**アルゴリズムとして**契約し、
 > `crates/kio-cli/src/main.rs` の `enforce_canonical_marker_barrier` (main.rs:7055-7086) として実装
@@ -959,7 +961,7 @@ P0/P1/P2 集計は末尾 §Q。
    preview/完了表示が working tree 残存原本を「必ず警告する」と述べるのみで、purge 自体を止めるとは
    書いていない。一方、現行実装 `refuse_live_working_copy` (purge.rs:1925-1943) は working tree に
    同一 raw_hash の tree entry が 1 件でもあれば purge 全体を `KIO-E-PURGE-WORKING-COPY-001` で
-   完全に拒否しており、`tasks/step4b-spec-gap.md` の U34 実装状態評価はこの既存機構に一切言及して
+   完全に拒否しており、当時の U34 実装状態評価はこの既存機構に一切言及して
    いない。新規則の「警告のみで purge は進む」という読みと、既存の「hard block」という読みのどちらを
    正本とするか、あるいは「同一 path での残存 (現行の hard block 対象)」と「別名での残存 (PA37 の
    警告対象)」とでケースを分けるべきかは、spec の文言だけからは一意に決まらない。発注側の裁定を要する。

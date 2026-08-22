@@ -1,5 +1,7 @@
 # Step4b 契約テスト仕様書: CLI 横断 / exit・error 表 / log time-travel / その他 (P3-B)
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ための契約仕様。Rust 実装コードは含まない。
 > 正本は `docs/06-cli-spec.md` **§7 (Exit Code) / §8 (Error Code Namespace) / log 構文 (§1 L61)**、
 > `docs/10-operations.md` **§12 全体 (§12.1〜§12.8) / §3 (Scope Registry) / §4 (フォルダ運用) / §7 (Purge 保証範囲の周辺参照)**、
@@ -8,21 +10,21 @@
 > `docs/04-pipeline.md` **§1.1 / §2 / §2.2 / §4 全体 / §4.6-4.7 (J 領域の一次 source。06/10/05/03 の精読対象外だが
 > J 領域の主要 spec § が本書にあるため引用する)**。各契約は spec の規範文からのみ期待値を導き、実装が
 > 「どう書かれそうか」からは導かない。曖昧・spec 沈黙の点は該当契約の「期待」内に `[解釈割れ]` として
-> 引用付きで注記し、末尾 §Z に一覧化する (勝手に決めない)。系譜は `tasks/step4b-contract-tests-{ledger,lifecycle,p2a,p2b,p2c}.md`
-> の ID 体系・優先度規約。記法は共通指示書 (`p2-contract-instructions.md`) が定める
+> 引用付きで注記し、末尾 §Z に一覧化する (勝手に決めない)。系譜は Phase 1/2 の
+> ID 体系・優先度規約。記法は共通指示書 (`p2-contract-instructions.md`) が定める
 > `### QB<連番> ... - 正本 / 前提 / 操作 / 期待` 形式。
 
 **担当グループ**: P3-B (CLI 横断 / exit・error 表 / log time-travel / その他)。
 
-**対象 U 項目 (`tasks/step4b-spec-gap.md`)**:
+**対象 U 項目 (当時の gap inventory)**:
 K 領域 **U121-U128** (P2-C = `step4b-contract-tests-p2c.md` で入った分は差分のみ)、
-L 領域 **U130-U142** (**U129 は Phase 4+ の GC 機構全体で対象外** — spec-gap 自身が
+L 領域 **U130-U142** (**U129 は Phase 4+ の GC 機構全体で対象外** — historical inventory が
 「項目自身が Phase 4 要件・MVP 対象外と明記しており想定通り」と注記する未実装確認のみの項目のため、
 本書でも一切扱わない)、
 J 領域の残り **U95, U96, U98, U99, U100, U101, U102, U103, U104, U105, U106, U107, U108, U109, U110, U111,
 U112, U114, U115, U116, U117, U118, U119** (**U97 / U113 / U120 は Phase 1 の対象であり本書は扱わない** —
 byte_start/byte_end 全域改称・objects/image/ 単数形化・purge/epoch と tombstones/lifecycle-epoch の
-layout 新設は `step4b-contract-tests-lifecycle.md` の管轄)、
+layout 新設は Phase 1 で実装・検証済み)、
 `log --at/--since` の本実装 (time-travel の log 面 — 06-cli-spec.md §1 L61 の構文のみ確定し
 挙動未実装)、
 P2 繰越 4 件 (`step4b-contract-tests-p2c.md` の **PC20** [index_generation の embedding/batch-finalize
@@ -36,7 +38,7 @@ ancestor gate の実装配線])。
   **具体的な発火条件**) には立ち入らない — これらは承認 publish/self-heal の内部設計 (07-adapter-spec.md §3/§8.1)
   を要し、本書の精読対象 (06/10/05/03) の外側にある。本書が扱うのは DOMAIN 一覧上の呼称・既存コードとの
   整合確認までである
-- B/C/D/E/F/G/H 領域 — Phase 1/2 で契約済み (`step4b-contract-tests-{ledger,lifecycle,p2a,p2b,p2c}.md`)。
+- B/C/D/E/F/G/H 領域 — Phase 1/2 で契約済み（ID は provenance）。
   本書は参照するのみで再契約しない。特に H 領域の cursor/index_generation/query_cache/ancestor gate の
   **一般アルゴリズム自体** は `step4b-contract-tests-p2c.md` の PC19-PC44 が正本 — 本書の §E (P2 繰越) は
   それら契約が明示的に残した**未決の実装配線**にのみ追加契約する
@@ -146,7 +148,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (main.rs:1149-1162) の型を確認。(c) 不正な config.toml で任意コマンドを実行。
 - 期待: (a) `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否 (tool_lock.rs:468 で既存実装確認)。(b) 型は
   `Option<String>` であり閉 enum ではない (schema/コード上の制約なし)。(c) 常に `KIO-E-CONFIG-SCHEMA-001`
-  (NNN プレースホルダは残らない、grep 0 件)。**現状**: 3 件とも既に適合 (spec-gap の「適合済みの可能性」
+  (NNN プレースホルダは残らない、grep 0 件)。**現状**: 3 件とも既に適合（historical inventory の「適合済みの可能性」
   判定を確定) — 本契約は現状固定の回帰ロック。
 
 ### QB4 preflight (0)-(4) 同時違反優先順位マトリクス [P0]
@@ -335,7 +337,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   ならない。**現状**: (a) 全ディスク走査を行う実装 (`WalkDir` 等の再帰クレート使用) はそもそも存在しない
   ため構造的に充足。(b) `data_home()` (scope.rs:2696-2704) は `xdg_dir("XDG_DATA_HOME")` が失敗した
   場合に `home_dir().join(".local/share")` へ正しくフォールバックする (`xdg.rs` の単体テストで検証済み)
-  — spec-gap が疑っていた「不正パス生成バグ」は現行実装には存在しない。本契約は両サブクレームとも
+  — historical inventory が疑っていた「不正パス生成バグ」は現行実装には存在しない。本契約は両サブクレームとも
   現状固定の回帰ロック。
 
 ### QB15 VCS リポジトリ root 配下の子 `.kio` 生成除外 [P1]
@@ -451,7 +453,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB23 U138/U139/U140/U141 複合現状固定確認 (エントリコマンド文言・purge/erase 例外注記・
   Phase4 auto snapshot 改称・構造化 API 除外、パラメタ化 4 件) [P2]
-- 正本 (spec-gap 統合要約からの二次引用 — 原典 README.md / 01-positioning.md は本書の精読対象外):
+- 正本（historical inventory 統合要約からの二次引用 — 原典 README.md / 01-positioning.md は本書の精読対象外）:
   (a) 『最低体験ラインの入口を `kio snapshot` から `kio index --approve` に変更する...`kio open` も
   引数なしから `kio open <検索結果のpointer>` に変更する』(U138)。
   (b) 『Evidence Pointer/CAS の恒久性の説明に「ユーザー明示の purge/erase を除く」という例外を明記する』
@@ -460,20 +462,20 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   は MVP である旨を明記する』(U140)。
   (d) 『MVP では外部 Agent 向けの構造化 API サーフェスを持たず、`--json` フラグ出力のみで足りる』(U141)。
 - 前提: (a) `kio index`/`kio open` の引数要件。(b)-(d) はいずれも文書表現の確認であり実装への直接
-  影響が薄いと spec-gap 自身が注記する項目 (「過剰抽出の疑い」「適合済みの可能性」)。
+  影響が薄いと historical inventory が注記する項目 (「過剰抽出の疑い」「適合済みの可能性」)。
 - 操作: (a) `kio index` を引数無しで実行、`kio open` を引数無しで実行。(b)-(d) は README.md /
   01-positioning.md の該当箇所 (本書の管轄外) を確認する。
 - 期待: (a) `kio index` 単独実行は非対話環境で `KIO-E-CONFIG-USAGE-001` (exit 2) となり、`--approve`/
   `--yes` が実質的なエントリゲートである。`kio open` 単独実行 (pointer 無し) も同じく exit 2。
   (b)(c)(d) は実装への影響が無いことを確認する現状固定 (b: purge/erase 後の到達不能性は
-  `step4b-contract-tests-lifecycle.md` の LC 系が実装確認済み。c: 取り込み完了時 auto snapshot は
+  Phase 1 の LC 系が実装確認済み。c: 取り込み完了時 auto snapshot は
   `main.rs:723` 型で MVP コード経路に既に存在。d: `--json` 以外の構造化 API 面は grep 0 件)。
   **現状**: (a) `IndexArgs`/`read_pointer_input` は clap レベルでは required 化されていないが
   `run_index`/`read_pointer_input` の手書き検証で実質的に必須化されている (main.rs:744-754/6840-6845) —
   機能的には充足。本契約は 4 項目とも軽量な現状固定確認として 1 本に圧縮する。
 
 ### QB24 U142 Step 割当表整合 + Recall@10 射影の `path_at_commit` 追加 [P1]
-- 正本 (spec-gap 統合要約からの二次引用 — 原典 09-mvp-scope.md §3/§4.3 は本書の精読対象外):
+- 正本（historical inventory 統合要約からの二次引用 — 原典 09-mvp-scope.md §3/§4.3 は本書の精読対象外）:
   『実装割当表に `kio adapter revoke` (Step 2)、`kio repair --registry-prune` (Step 3)、
   `kio repair --rebuild-db` (Step 3)、`--prune-orphans` (Step 4) を新規追加する...`--all-history`
   シナリオ (M3-2) の Recall@10 計算を、旧 distinct 射影 `(raw_hash, section)` から新
@@ -672,7 +674,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (0 件なら pending として text-only 継続、chunk_vec 行を作らない)。現行 profile の重複 2 件以上は
   corruption として rebuild を停止する。**現状**: `rebuild_chunk_vec`
   (embedding_store.rs 該当関数) の実装がこの profile 限定フィルタと 2 件以上検知ロジックを持つかは
-  spec-gap 記載時点で「不在」と判定されており、本契約が具体的な検証シナリオを固定する。
+  historical inventory 記載時点で「不在」と判定されており、本契約が具体的な検証シナリオを固定する。
 
 ### QB36 embedding CAS object の bytes 構築 (JCS+LF+base64+LF+digest) [P1]
 - 正本: 03-data-model.md §8.1 (『embedding object の保存 bytes は **`JCS(identity fields) + LF +
@@ -764,7 +766,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 - 期待: `prepared_hash` 変化を検出し、`--force` 無しでも新 gen (gen=1) の instance が作られる (自動
   gen+1)。オンライン課金を伴うため確認プロンプト (または `--yes` 相当) を要求し、budget guardrail の
   対象になる。**現状**: gen+1 を駆動する経路は `kio reindex --force` のみが確認されており (U105 の
-  spec-gap 統合要約に基づく)、prepared_hash 変化起因の自動トリガーは未確認区分 — 本契約が
+  historical inventory 統合要約に基づく)、prepared_hash 変化起因の自動トリガーは未確認区分 — 本契約が
   具体シナリオを固定する。
 
 ### QB42 `up_to_date` 判定 state machine の全面新設 [P0]

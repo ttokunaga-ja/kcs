@@ -1,5 +1,7 @@
 # Step4b 契約テスト仕様書: cost-ledger.sqlite + Online Batch 2 相プロトコル
 
+> **Historical record, non-authorizing.** 現行 authority は本文が引用する canonical docs と Rust tests に限る。ID は review provenance のためだけに残し、compatibility、migration、CLI、schema、future work を authorize しない。
+
 > 本書は **実装より先にテストを固定する** ためのケース仕様。Rust 実装コードは含まない。
 > 正本 spec は `docs/04-pipeline.md` **§5.4 (Cost Guardrail / Kill Switch)** と **§5.8 (Online Batch
 > 投入の 2 相プロトコル)** — この 2 節が契約の源泉であり、期待値はすべてこの 2 節 (および 2 節が
@@ -8,7 +10,7 @@
 > 各契約の記法は本タスクの指示書 (`step4b-ledger-contract-instructions.md`) が定める
 > `### CL<連番> ... - 正本 / 前提 / 操作 / 期待` 形式に従う (自己完結)。
 
-**対象 U 項目**: `tasks/step4b-spec-gap.md` の **U5, U6, U7, U8, U9, U10, U11, U1 (abandon 部分のみ)**。
+**対象 U 項目**: 当時の gap inventory の **U5, U6, U7, U8, U9, U10, U11, U1 (abandon 部分のみ)**。
 U1 のうち `hold_reason` 3 値 enum・`paused`/`pending+next_retry_at` の分離自体は 04 §5.1 契約であり
 本書の対象外 (別ロットの契約テストが担う) — 本書が U1 から取り込むのは **`kio batch abandon` CLI と
 `stalled` 表示**の部分のみ。U2/U3/U4/U12 は対象外 (U4 の budget cap 判定式 (check-then-reserve /
@@ -810,7 +812,7 @@ P0/P1 集計は末尾「集計」節。
 
 ## I. budget cap (check-then-reserve)
 
-> 04 §5.4 L767-768 が源泉。本節は指示書の網羅領域 9 に対応する — `tasks/step4b-spec-gap.md` の
+> 04 §5.4 L767-768 が源泉。本節は指示書の網羅領域 9 に対応する — 当時の gap inventory の
 > U4 (対象外) と一部同一パラグラフを共有するが、契約化の対象は「ledger スキーマ・batch_requests
 > 予約行との結合」に限定し、U4 固有の config パース詳細 (per_adapter の folder 側廃止等) には立ち
 > 入らない。

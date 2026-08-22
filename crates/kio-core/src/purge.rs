@@ -5,11 +5,11 @@
 //! that gate them. Physical artifact deletion and CLI orchestration live above
 //! it. Callers that mutate this state must already hold the scope store lock.
 //!
-//! Step4b (`tasks/step4b-contract-tests-lifecycle.md`, LC1-LC60) rewrote the
-//! tombstone / erase-receipt records from a flat single-purge shape to an
-//! append-only `events[]` lifecycle (`purged`/`erased`/`retired`), added the
-//! purge-epoch (`purge/epoch`) and lifecycle-epoch
-//! (`tombstones/lifecycle-epoch`) monotonic counters, and reversed the old
+//! `docs/05-runtime.md` and `docs/06-cli-spec.md`, backed by the Rust contract
+//! tests, define tombstone / erase-receipt records as an append-only `events[]`
+//! lifecycle (`purged`/`erased`/`retired`) with purge-epoch (`purge/epoch`) and
+//! lifecycle-epoch (`tombstones/lifecycle-epoch`) monotonic counters. They also
+//! reverse the old
 //! "public tombstone permanently blocks re-ingest" rule into a resurrection
 //! flow: re-publication is allowed and retires the marker in the same locked
 //! mutation as the republication's snapshot finalize (05-runtime.md §3.5).

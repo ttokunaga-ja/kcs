@@ -1,7 +1,8 @@
 //! Step4b contract tests: `cost-ledger.sqlite` + Online Batch 2-phase protocol.
 //!
-//! Source of record (in priority order): `tasks/step4b-contract-tests-ledger.md`
-//! (CL01-CL71 + §M rulings) > `docs/04-pipeline.md` §5.4/§5.8 > implementation.
+//! Canonical authority: `docs/04-pipeline.md` §5.4/§5.8, enforced by the Rust
+//! implementation and these tests. CL01-CL71 and §M labels from the historical
+//! task record are review provenance only.
 //!
 //! Coverage note: the pure-computation half of
 //! CL13/CL21/CL27/CL28/CL29/CL30/CL48/CL49/CL50/CL52/CL61 is covered
