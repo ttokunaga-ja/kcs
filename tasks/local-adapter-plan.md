@@ -1662,7 +1662,7 @@ system message を送らないので、供給する instruction は無い。
 **V3 決着前に恒久コーパスを埋め込まないこと。**
 
 **手順上の罠を 1 つ潰した。** `/tokenize` は既定で `add_generation_prompt=True` を
-適用するため、`v4-probe.json` の `rendered_prompt` (40 token) は embedding 経路が
+適用するため、V4 測定で確認した 40-token prompt は embedding 経路が
 実際に使った描画 (37 token) ではない。これを正にすると**存在しない assistant turn を
 含む template を恒久凍結する**。今回は token id 一致まで取って確定した。
 

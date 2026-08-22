@@ -1,11 +1,10 @@
-# V4 archived result artifacts
+# V4 accepted profile
 
-These files record the completed 2026-07-27 measurement of
-`Qwen/Qwen3-VL-Embedding-2B` revision `9f2f7e71` on vLLM 0.26.0.
-
-- `v4-capture.json` and `v4-probe*.json` are immutable raw observations.
-- `chat_template.confirmed.jinja` is the confirmed template witness.
-- `v4-profile.json` is the accepted derived profile.
+`v4-profile.json` is the Rust-consumed frozen result of the completed
+2026-07-27 measurement of `Qwen/Qwen3-VL-Embedding-2B` revision `9f2f7e71` on
+vLLM 0.26.0. The former Python producer and unconsumed capture/probe/template
+artifacts were removed; they remain recoverable from Git history and are not a
+runnable reproduction contract.
 
 The accepted Rust identity binds:
 
@@ -13,6 +12,5 @@ The accepted Rust identity binds:
 - prompt-template hash `sha256:7b7f47224b2e5c3fee914cb56bf6c701202dfe2693e4b1160291a81a44389e8b`
 - dimensions `768`
 
-The former Python producer was deliberately removed.  These artifacts are an
-archive, not a runnable product contract; future profile changes require a new
-typed Rust vector and explicit product review.
+Future profile changes require a new typed Rust vector and explicit product
+review.

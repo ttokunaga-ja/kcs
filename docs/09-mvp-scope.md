@@ -398,7 +398,6 @@ docs/
   08-evidence-pointer-spec.md  Evidence Pointer / Dead Pointer
   09-mvp-scope.md              本書
   10-operations.md             横断規約 (semver / 観測 / リネーム表)
-  11-requirements.md           既存要件ドラフト (ARCHIVED — 現行正本ではない。読む順に含めない、README §1)
 ```
 
 ## 6.2 凍結ゲート

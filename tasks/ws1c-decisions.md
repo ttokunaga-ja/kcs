@@ -316,7 +316,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
 64. Canonical phase boundaries win over stale kickoff prose. Step 4 implements single-pointer
     `evidence verify`; verify batch, retarget, export/import, `kio move`, `kio gc`, retention, and full
-    purge DAG rewriting remain Phase 4+/v2. `docs/11-requirements.md` is not a current source.
+    purge DAG rewriting remain Phase 4+/v2. The removed requirements draft was not a current source.
 65. Time-travel has one effective selector. `--since` implies all-history and freezes its page-1 UTC
     cutoff inside the signed cursor; duration grammar is positive `s/m/h/d/w`. `--at` resolves per
     selected scope and uses existing partial/all-failed multi-scope behavior. Explicit-at shallow is

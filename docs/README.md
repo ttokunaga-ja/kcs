@@ -71,9 +71,7 @@ cache = aggregator                       全 scope の chunk (live + 過去) の
 | **08** | [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) | Evidence Pointer schema / 解決手順 / **Dead Pointer (purge) のセマンティクス** / exact-only retarget / 外部 Agent 相互運用 |
 | **09** | [09-mvp-scope.md](09-mvp-scope.md) | MVP scope / non-authorizing roadmap / Step 1-4 + 規模上限 / 北極星シナリオ / 凍結ゲート |
 | **10** | [10-operations.md](10-operations.md) | 横断規約 (semver / 観測ログ / 命名リネーム表 / 初回スキャン承認 / Adapter セキュリティ) |
-| ~~**11**~~ | [~~11-requirements.md~~](11-requirements.md) | **⚠️ DEPRECATED** — 古い統合要件ドラフト。`normalized_hash` / `offline-first` 等の旧表現を含む。新規読者は読まないこと。冒頭に DEPRECATED 注記あり。過去経緯参照のためだけに残す |
-
-各 spec は前番の概念を前提にできる構成。逆順参照 (例: 03 が 06 を前提) は基本的に発生しない。**`11-requirements.md` は DEPRECATED で読む順序の対象外** (新規読者は読まないこと、`01-` 〜 `10-` のみで完結する)。
+各 spec は前番の概念を前提にできる構成。逆順参照 (例: 03 が 06 を前提) は基本的に発生しない。旧統合要件ドラフトは current consumer がなく、旧 CLI/schema を残すだけだったため削除済みである。`01-` 〜 `10-` のみで完結する。
 
 ## 1.1 設計検討メモ (撤去済み)
 

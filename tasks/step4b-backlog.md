@@ -89,7 +89,7 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
     残 2 ミスは hard3 の画像系 (qb23=OCR 抽出不能の画像 husk・qb09)。測定
     `eval/baseline-results-2026-07-24b.json`。
   - **合算 M3-1 ゲートも改善**: qhard `6/8 → 8/8`。synthetic M3-1 (18 問・text-only・本変更の対象外)
-    と合算 = 17+8=25/26 >= 21 で PASS 継続 (`eval/qhard-results.json`)。
+    と合算 = 17+8=25/26 >= 21 で PASS 継続。
   - **2 ラウンドの相補性**: contextual embedding (within-scope 品質) + cross-scope score 化
     (絶対 cosine を横断で活かす) の**両方が揃って初めて**利得が顕在化 (プレビュー 14→23 の実機再現)。
 - 残るユーザー側 Done: **baseline ゲート充足済み (`22/24`, `06e327e`)**。残 = dogfood (ユーザー実フォルダ)。

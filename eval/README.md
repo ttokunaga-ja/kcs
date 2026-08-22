@@ -101,8 +101,8 @@ exit `3` (部分成功) は stdout の JSON を採点対象にする (実装後�
 Q_hard は raster PDF / PPTX 図表 / 画像を正解担体とするため、合成 corpus とは別の
 **明示的に attest された外部 fixture** でのみ計測する。fixture がない、attestation が
 ない、または tree / environment / golden digest / scope 一覧が一致しない場合、
-`kio-eval benchmark qhard` は失敗する。checked-in の `qhard-results.json` は歴史成果物であり、
-入力にも Done 判定にも用いない。
+`kio-eval benchmark qhard` は失敗する。旧形式の checked-in 結果は current consumer も
+Rust producer も持たないため削除済みであり、入力にも Done 判定にも用いない。
 
 ```bash
 target/release/kio-eval benchmark qhard \
