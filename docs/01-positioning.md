@@ -169,6 +169,7 @@ Nasuniは将来の構造が最も近く、EgnyteはAI・権限・共有・復旧
 - version history / point-in-time restore
 - MCP / Agent API
 - content-addressed storage
+- blockchain / external timestamp anchoring
 ```
 
 将来Cloudの差別化仮説は、これらを次の一つのworkflowへ結ぶことである。
@@ -183,6 +184,19 @@ Versioned source identity
   = reproducible knowledge handoff
 ```
 
+このworkflowの高保証オプションとして、将来の **Externally Witnessed Snapshots** を検討する。CASはobject内容の不一致を検知できるが、運営者または攻撃者が保存領域全体を支配して別のsnapshot DAGへ作り替えた場合に、「以前の履歴が存在したこと」を外部へ単独では証明できない。その境界を補う採用候補は次の通りである。
+
+```text
+CAS + snapshot DAG
+  -> signed snapshot/checkpoint envelope
+  -> append-only Merkle transparency log
+  -> independent witness + RFC 3161 timestamp
+  -> optional aggregate public-chain anchor
+  + separately governed WORM vault and restore drills
+```
+
+署名付きenvelope、transparency log、外部timestampは現行MVPおよび現行commit schemaの機能ではない。独自/private blockchainはdefault候補にせず、public chainを使う場合も第三者証人の一選択肢として、tenant、scope、user、path、query、回答本文、`raw_hash`、完全なEvidence Pointerを載せず、salt/nonceを含むdomain-separated leaf commitmentを集約したrootだけをanchorする。これは改竄の検知と存在時刻の外部検証を強めるが、改竄・削除・malwareを防止せず、原典やAI回答の正しさ、復旧可能性、RPO/RTOも保証しない。復旧用WORM copyとrestore drillは別のcontrolである。用語も「blockchain-powered」ではなく、検証要件を満たした場合に限り「cryptographically verifiable history」「externally witnessed snapshots」と表現する（[NIST Blockchain Technology Overview](https://www.nist.gov/publications/blockchain-technology-overview)、[RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html)、[RFC 3161](https://www.rfc-editor.org/info/rfc3161/)）。
+
 最初のwedgeは、project終了時の**Pinned Snapshot Share**である。顧客・後任・共同研究者は固定されたknowledge releaseへAIで質問し、各claimの原文根拠を確認でき、作成者は後日「何を共有したか」を再現できる。Google Drive / OneDrive / NASを置き換えず、project単位で導入する。
 
 Knowledge Continuityは同じCAS・commit・evidenceを利用できる第二の柱だが、現行のauto commitはindex/finalize成功時の履歴点であり、分離保管・常時保護・clean point判定・RPO/RTOを意味しない（[05-runtime.md §8.1](05-runtime.md)、[09-mvp-scope.md §2](09-mvp-scope.md)）。訴求は次のgateを満たしてから行う。
@@ -191,9 +205,13 @@ Knowledge Continuityは同じCAS・commit・evidenceを利用できる第二の�
 | --- | --- |
 | automatic history | 対象となるindex/finalizeまたはschedulerのauto commitを実装・検証済み |
 | point-in-time recovery | 対象scopeで復旧試験が成功し、保持範囲と制約を明示できる |
+| cryptographically verifiable history | canonicalな署名対象、鍵の生成・rotation・失効、log inclusion/consistency proof、offline verificationを実装・相互運用試験済み |
+| externally witnessed snapshots | 独立witnessまたはTSA receipt、split-view監視、公開commitmentとtenant snapshotの対応、privacy/purge手順を検証済み |
+| cryptographically verifiable answer receipt | canonical receipt hashが回答本文・claim・Evidence Pointer・検索commit・policy/retrieval状態をbindし、issuer/serviceまたは委任signerの署名を外部検証可能。log inclusion/timestampは追加証跡であり署名の代替にしない |
 | immutable/protected history | 通常のapp/admin credentialではretention中の上書き・削除ができない |
 | ransomware-resilient | 別trust domainのvault、検知、containment、clean point選択、隔離復旧、定期演習が揃う |
 | business continuity | RPO/RTO、runbook、依存serviceを含む復旧演習を提供する |
+| blockchain-powered | **使用しない**。有効化した外部anchorの方式と保証範囲を具体的に説明する |
 | ransomware-proof | **使用しない** |
 
 将来Cloudの推奨category、wedge、優位性、非目標、claim gateの詳細は、非規範の戦略文書 [cloud-competitive-advantage.md](../strategy/cloud-competitive-advantage.md) を参照する。multi-device sync / cloud sharing自体は現行MVPの未承認roadmapである（[09-mvp-scope.md §2](09-mvp-scope.md)）。

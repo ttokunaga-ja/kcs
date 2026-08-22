@@ -16,7 +16,7 @@ Kio Cloudを作るなら、既存storageを置き換える製品にはしない�
 
 > **Verifiable, recoverable knowledge for humans and AI.**
 
-ただし、`recoverable`を外部表現として使用できるのは、§9の段階5 exit gateを通過した後だけである。段階1〜3では **Verifiable, versioned knowledge handoff for humans and AI.** を使用し、復旧能力を示唆しない。
+ただし、`recoverable`を外部表現として使用できるのは、§10の段階5 exit gateを通過した後だけである。段階1〜3では **Verifiable, versioned knowledge handoff for humans and AI.** を使用し、復旧能力を示唆しない。
 
 最初に検証すべき中核は、次の三点を一つの体験として結ぶことにある。
 
@@ -75,9 +75,11 @@ moat候補は、これらを同じcontent identityへ結び、共有時点・回
 
 特に、現行のtruth/cacheの分離を保持する必要がある。folder-local `.kio`、CAS、commitが正本であり、normalized view、index、scope registry、aggregatorは再構築可能なcacheとして扱われる。この考え方はクラウドでも有効だが、cloud copyを正本にするかは別途の製品決定である。
 
+CASは保存されているobjectがhashと一致することを検証できる。一方で、store全体を支配する者が過去のobject・refs・DAGを削除し、別の自己整合的なDAGを再構築した場合、「以前に別の履歴が存在した」ことは内部hashだけでは外部へ証明できない。この限界を補う高保証の候補は、blockchainそのものではなく、外部から検証できる履歴である。
+
 現行のauto commitはindex/finalize成功時に履歴点を作る設計である。これは「履歴付き」の出発点にはなるが、連続保護、攻撃検知、隔離、clean point判定、RPO/RTOの保証を意味しない。
 
-また、現行のpurgeではEvidence Pointerとの整合性のためmetadata/tombstoneを扱う。クラウドでは法的削除、個人情報を含むpath、retention lock、legal hold、共有cache、回答ログとの緊張を明示的に解かなければならない。ここを「不変だから消せない」で済ませる案は採用候補にしない。
+また、現行のpurgeではEvidence Pointerとの整合性のためmetadata/tombstoneを扱う。クラウドでは法的削除、個人情報を含むpath、retention lock、legal hold、共有cache、回答ログとの緊張を明示的に解かなければならない。ここを「不変だから消せない」で済ませる案は採用候補にしない。Evidence PointerのspanはNormalized unit本文内のUTF-8 byte spanであり、raw byte spanではない。
 
 ## 4. 競争地図
 
@@ -188,6 +190,8 @@ unverified    pointer、permission、scan等を確認できない
 
 各claimに、少なくともsnapshot commit、Evidence Pointer、表示したspan、生成時刻、model/providerの識別、policy状態を結び付けられるかを検証する。Live shareでもanswer receiptは必ず具体的なcommitへbindする候補とする。
 
+高保証trackを採用する場合、answer receiptには将来、answer digest、snapshot commit、permission/policy状態、retrieval manifest、Evidence Pointer、model/profileの各digestと、snapshot/checkpointのsignature、transparency logのinclusion/consistency proof、外部timestamp proofを含むproof bundleを追加する候補がある。ただしcheckpointのproofだけでは、回答本文、claim、pointer、model/policyとの結合は認証されない。これらを固定したと表現するには、canonical receipt bytesまたはそのhashへissuer/serviceまたは委任signerが署名し、そのreceiptとsnapshot/checkpointの結合までverifierが検証しなければならない。log inclusionやtimestampは追加のappend-only・時刻証跡であり、issuer認証の代替にしない。成立後も保証対象は入力・履歴・出典・回答本文の固定性であり、AIの真実性、原典の正しさ、snapshotのmalware-free性、復旧可能性ではない。
+
 ### 7.3 AccessとAI安全性
 
 permission-aware accessは差別化でなく下限である。shareのACLを検索、retrieval、pointer resolve、source preview、answer receiptのすべてに一貫適用できなければ、外部共有は開始しない。
@@ -209,7 +213,30 @@ Knowledge Continuityの仮説は「ファイルを戻す」より広い。clean�
 
 将来的なprotected vaultは、production tenant/projectと別trust domainに置く候補とする。WORM/retention lockを採用する場合も、法的削除、retention上限、lockの誤設定、緊急時の権限分離までを含めて評価する。
 
-## 9. 段階的ロードマップとclaim gate
+復旧候補へmalware scan等のsecurity attestationを付ける場合は、対象commit、scanner/profile、定義version、結果、実行時刻、signerを署名対象へbindする候補とする。attestationは「その時点の構成でその結果が記録された」ことを示すだけで、scanの検出精度やsnapshotの安全性を暗号学的に保証しない。
+
+WORMや外部anchorはランサムウェアを阻止せず、clean point、scan efficacy、RPO/RTOも保証しない。このためKnowledge Continuityのclaim gateをこの高保証trackで代替しない。
+
+## 9. 高保証track: Externally Witnessed Cryptographic History
+
+これは現行機能ではなく、顧客opt-inの未承認候補である。既存の価値ロードマップを実装Phaseへ置換せず、次のassurance progressionとして並走評価する。目的は「blockchain搭載」ではなく、Kio運営者を含む単一store支配者が過去を密かに差し替えにくい、verifiable historyとanswer workflowである。
+
+| 順序 | trust stack候補 | 検証できること / 境界 |
+|---:|---|---|
+| 1 | CAS | object整合性。過去全削除＋自己整合的DAG再構築は外部証明できない。 |
+| 2 | signed snapshot/checkpoint envelope | 作成主体と固定されたsnapshot/checkpoint。現行commit schemaの変更を意味しない。 |
+| 3 | Merkle transparency log | inclusion proofとconsistency proofによるappend-only性の検証候補。 |
+| 4 | independent monitor/witness | checkpointを独立に観測・共有し、split-viewを検知する候補。 |
+| 5 | RFC 3161をdefault、public-chain/OpenTimestamps aggregate-root anchorはopt-in | checkpointが時刻以前に存在したことの外部証明候補。独自/private blockchainを既定で作らない。 |
+| 6 | 別trust domainのWORM vault + restore drill | object保持・復元経路を評価する候補。復旧保証ではない。 |
+
+署名層の採用には、canonical envelope、signer identity、鍵の生成・rotation・失効、鍵侵害時の扱い、offline verificationが必要である。log層にはinclusion/consistency proofと独立checkpoint観測が必要であり、本書では具体的な署名payload、CLI、anchor cadenceを確定しない。
+
+公開anchorには、salt/nonceを含むdomain-separated leaf commitmentを集約したrootのみを候補とする。tenant、scope、user、path、query、answer、個別raw hash、Evidence Pointer全文を載せない。pseudonymisationは匿名化ではなく、外部anchorと削除要件の意味論・法務評価が通るまで有効化しない。現行purgeのtombstone/not_found等の意味論を上書きせず、「過去にcommitmentが存在した」こととcontentを削除する要件の関係をexit gateにする。
+
+このtrackは既存の段階2のclaim receiptを強化し得るが、段階4のseparated protection prototypeや段階5のcontinuity販売判定を飛ばさない。外部証人は履歴の証明を補強し、clean recoveryの運用保証を置き換えない。
+
+## 10. 段階的ロードマップとclaim gate
 
 ロードマップは実装順序の決定ではなく、価値の検証順序である。各段階はexit gateを満たすまで次の市場claimへ進まない。
 
@@ -224,7 +251,7 @@ Knowledge Continuityの仮説は「ファイルを戻す」より広い。clean�
 
 段階1〜3の間、Kioはstorage replacementでもbackup製品でもない。段階4以降も、Rubrik/Cohesity/Veeam級の保証を比較可能に示せない限り、ransomwareのmarketing claimは出さない。
 
-## 10. 失敗条件と反証
+## 11. 失敗条件と反証
 
 この戦略は魅力的に見えるが、次のいずれかが観測されたら縮小・方向転換を検討する。
 
@@ -236,11 +263,13 @@ Knowledge Continuityの仮説は「ファイルを戻す」より広い。clean�
 | ownerがcommit選択を理解できない | snapshot modelが操作負荷になっている | release/presetの表現を試す |
 | 導入にstorage migrationや全社IAM統合が必須 | overlayの利点が消えている | scopeをproject単位へ戻す |
 | security reviewで隔離・削除設計が通らない | continuityの信頼境界が未成熟 | recovery claimを延期 |
+| 外部証人のprivacy/purge評価が通らない | anchorが削除要件または顧客信頼と両立しない | high-assurance trackを有効化しない |
+| monitor/witnessがsplit-viewまたは検証失敗を検知する | 履歴保証の前提が崩れた | 当該保証claimを停止し、調査・再発行する |
 | Nasuni/Egnyte等が同等のsnapshot proofを提供する | 比較優位が縮小した | adapter/format/recipient workflowへ再集中 |
 
 特に「Evidence Pointerがあるから正しい」という誤解は失敗条件である。証跡は検証の入口であり、原典の品質、鮮度、悪意、矛盾を消去しない。
 
-## 11. Success metrics
+## 12. Success metrics
 
 metricsは利用量だけでなく、共有した知識が検証・再利用・復旧に値したかを測る。
 
@@ -251,12 +280,13 @@ metricsは利用量だけでなく、共有した知識が検証・再利用・�
 | handoff efficiency | 初回質問までの時間、ownerへの追加質問数、handoff完了までの往復数 | 資料探索・説明の負担が減る |
 | time-aware value | as-of/diff queryの利用率、変更判断での再利用率 | versioningが実際の意思決定を支える |
 | trust | 権限逸脱ゼロ、失効後アクセスゼロ、検証失敗率 | 外部共有の最低品質を保つ |
+| high assurance (opt-in) | 署名・inclusion・consistency・timestamp proofの検証成功率、monitor/witnessのcoverage、anchor遅延 | 外部証人付き履歴が運用可能かを測る |
 | cost | share当たりstorage/AI/support費、再index費 | overlayが経済的に持続する |
 | continuity (後段) | restore演習成功率、clean point確認率、実測RPO/RTO | sales claimを支える証跡になる |
 
 評価は、同じprojectでの通常共有（共有フォルダ、PDF package、既存portal）との比較を含める。絶対利用数だけで「proofが価値を作った」と結論付けない。
 
-## 12. 四半期更新ルール
+## 13. 四半期更新ルール
 
 本書は非規範資料として、少なくとも四半期ごとに更新候補をレビューする。
 
@@ -266,10 +296,11 @@ metricsは利用量だけでなく、共有した知識が検証・再利用・�
 4. Rubrik、Cohesity、Veeam、CISA/NISTの復旧基準を見直し、Kioの表現が過大になっていないかを確認する。
 5. design partnerの成功指標と反証を更新し、未通過gateのclaimを追加しない。
 6. 仕様変更が必要になった場合は、本書を直接規範化せず、identity/access、share/evidence、retention/purge、continuity/recoveryを別の承認済み仕様へ分ける。
+7. high-assurance trackについて、署名鍵・monitor/witnessの独立性、RFC 3161/anchorの検証率、privacy/purgeの法務評価、vault restore drillを確認し、未通過の保証を表現しない。
 
 更新時には、基準日、変更した競合の公開情報、未検証のベンダー主張、Kioの実測値と仮説を分離して記録する。
 
-## 13. 意思決定要約
+## 14. 意思決定要約
 
 | 判断 | 推奨 | 理由 |
 |---|---|---|
@@ -279,11 +310,12 @@ metricsは利用量だけでなく、共有した知識が検証・再利用・�
 | answer primitive | claim-level proof-carrying answer | citation付きQ&Aから差を作る |
 | temporal capability | historical / as-of / diff | Kioの履歴資産を顧客価値へ変える |
 | continuity | 第二段階 | security市場の信用・運用要件を先送りせず検証する |
+| high-assurance history | customer opt-inのassurance progression | blockchainではなく外部証人付きの検証可能な履歴・回答workflowを強化する |
 | benchmark | Nasuni / Egnyte | AI・共有・復旧の統合競合として最も重要 |
 
 この仮説が成立する条件は、受領者が「最新資料を検索する」だけではなく、「その時点に何が根拠だったか」を短時間に検証したいことである。その需要を確認できなければ、Kio Cloudは作らず、現行のlocal knowledge archiveを強化する方が合理的である。
 
-## 14. 公式一次ソース
+## 15. 公式一次ソース
 
 以下は本書の競合・基準情報を確認するための公式一次ソースである。各社の機能、性能、ロードマップ、安全性に関する主張はベンダー自身の表明であり、独立検証ではない。
 
@@ -310,3 +342,10 @@ metricsは利用量だけでなく、共有した知識が検証・再利用・�
 21. [AWS S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
 22. [OWASP LLM01: Prompt Injection](https://genai.owasp.org/llmrisk2023-24/llm01-24-prompt-injection/)
 23. [OWASP LLM Verification Standard](https://owasp.org/www-project-llm-verification-standard/LLMSVS-v2.0-en.html)
+24. [NISTIR 8202: Blockchain Technology Overview](https://www.nist.gov/publications/blockchain-technology-overview)
+25. [RFC 9162: Certificate Transparency Version 2.0](https://www.rfc-editor.org/rfc/rfc9162.html)
+26. [Sigstore Rekor CLI](https://docs.sigstore.dev/logging/cli/)
+27. [RFC 3161: Internet X.509 Public Key Infrastructure Time-Stamp Protocol](https://www.rfc-editor.org/info/rfc3161/)
+28. [OpenTimestamps](https://opentimestamps.org/)
+29. [Google Cloud Storage: Bucket Lock](https://docs.cloud.google.com/storage/docs/using-bucket-lock)
+30. [ICO: Pseudonymisation](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/data-sharing/anonymisation/pseudonymisation/)
