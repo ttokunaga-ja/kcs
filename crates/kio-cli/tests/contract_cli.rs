@@ -694,12 +694,20 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .current_dir(temp.path())
         .assert()
         .success();
-    // Secure release leaves a canonical dead sentinel rather than performing
-    // a check-then-unlink that could remove a replacement lock. A following
-    // writer must reclaim it through the serialized exchange protocol.
-    let released: Value =
-        serde_json::from_slice(&fs::read(temp.path().join(".kio/.lock")).unwrap()).unwrap();
-    assert_eq!(released["pid"], u32::MAX);
+    // macOS/Linux secure release leaves a canonical dead sentinel rather than
+    // performing a check-then-unlink that could remove a replacement lock. A
+    // following writer must reclaim it through the serialized exchange
+    // protocol.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let released: Value =
+            serde_json::from_slice(&fs::read(temp.path().join(".kio/.lock")).unwrap()).unwrap();
+        assert_eq!(released["pid"], u32::MAX);
+    }
+    // Other supported ordinary StoreLock platforms use token-checked removal
+    // because they do not have the same descriptor-relative exchange primitive.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    assert!(!temp.path().join(".kio/.lock").exists());
     kio()
         .args([
             "snapshot",
