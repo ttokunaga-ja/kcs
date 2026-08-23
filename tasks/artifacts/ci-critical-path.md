@@ -3,10 +3,11 @@
 The canonical measurements are in
 [`ci-cost-baseline.json`](ci-cost-baseline.json), and the signal/duplication
 ledger is [`ci-cost-unique-signal.md`](ci-cost-unique-signal.md). All values
-are cohort-bound. The current product changes end at `2c7db5d...`, tree
-`7ea87a6...`, and workflow blob `bdc01e2...`; the final-candidate clean-Linux
+are cohort-bound. The current product changes end at `d66b958...`, tree
+`8ef044c...`, and workflow blob `bdc01e2...`; the final-candidate clean-Linux
 cold/warm cohort is bound to the same head/tree. The older `f50e8cc...` / tree
-`477a8d9...` measurements remain historical and are not relabeled. Earlier Phase C local values refer
+`477a8d9...` and superseded `2c7db5d...` / tree `7ea87a6...` measurements
+remain historical and are not relabeled. Earlier Phase C local values refer
 to `2a85016...` / tree `49e4887...` / workflow `049c69c...`; GitHub attempt 1
 refers to `c9f334e...` / workflow `049c69c...`. They are not combined.
 
@@ -76,21 +77,22 @@ acceptance even though it has a finite 45-minute cap.
 
 ## Final-candidate measured Linux operand and path estimate
 
-At exact product head `2c7db5d...`, tree `7ea87a6...`, and workflow blob
+At exact product head `d66b958...`, tree `8ef044c...`, and workflow blob
 `bdc01e2...`, the clean Linux workspace-test command succeeded cold in
-**744.24 seconds = 12.404 minutes** and warm in **491.76 seconds = 8.196
-minutes**. Both covered 49 result blocks and 2,219 passed tests with zero
+**434.42 seconds = 7.240333 minutes** and warm in **378.37 seconds = 6.306167
+minutes**. Both covered 49 result blocks and 2,220 passed tests with zero
 failures or ignored tests. The cold/warm pair covers only:
 
 ```text
 cargo +1.98.0 test --workspace --all-targets --locked --no-fail-fast
 ```
 
-Every over-60-second progress warning—28 cold and 20 warm—later terminated
+Every over-60-second progress warning—15 cold and 19 warm—later terminated
 `ok`. These warnings do not represent missing results or infinite waits. The
 failed pre-fix `57819593...` cold attempt is excluded: it exposed an inherited
-flock race, after which `2c7db5d...` passed 200 repeated parallel `kio-core`
-suite runs and the successful pair above.
+flock race, after which historical `2c7db5d...` passed 200 repeated parallel `kio-core`
+suite runs. Final `d66b958...` then added readiness-driven bounded-stdin draining,
+and the successful pair above measures that final tree.
 
 The latest topology-identical exact workflow-order operands remain attached to
 the separate `f50e8cc...` cohort:
@@ -98,13 +100,13 @@ the separate `f50e8cc...` cohort:
 ```text
 historical rust fmt                  =   1.13 s
 historical rust clippy               =  13.99 s
-current exact cold workspace test    = 744.24 s
+current exact cold workspace test    = 434.42 s
 historical synthetic command lane    =  83.99689 s
-mixed-cohort planning estimate       = 843.35689 s = 14.055948 min
+mixed-cohort planning estimate       = 533.53689 s = 8.892282 min
 ```
 
-The estimate is below the 40-minute local target with 25.944052 minutes of
-margin and below the 45-minute GitHub reference with 30.944052 minutes of
+The estimate is below the 40-minute local target with 31.107718 minutes of
+margin and below the 45-minute GitHub reference with 36.107718 minutes of
 margin. It is deliberately labelled a planning estimate: it is not a same-run
 measurement, upper-bound guarantee, GitHub workflow result, queue/billing
 sample, or successful-current baseline.
@@ -153,13 +155,13 @@ RSS, I/O, and cache telemetry were unavailable and remain unknown.
   acceptance. Attempt 1 observed 54:59 under the older workflow, failed, and is
   not a current success sample. The Phase F workflow's configured
   `rust + synthetic` cap is 45 minutes; a cap is not a measured result.
-- Final-candidate local Linux dependency-path planning estimate: 14.055948
+- Final-candidate local Linux dependency-path planning estimate: 8.892282
   minutes — **below the 40-minute local planning target**, but mixed-cohort and
   not a GitHub acceptance sample.
 - Aggregate runner-equivalent target: 250 minutes — **unknown**, because the
   successful Windows operand is missing. Attempt 1 observed 83:41 before its
   independent failures, but failure cost cannot establish success.
-- Final-candidate exact cold workspace-test operand: 12.404 minutes — one
+- Final-candidate exact cold workspace-test operand: 7.240333 minutes — one
   command only, insufficient to declare either the complete Rust job or the
   five-job aggregate.
 - Historical `f50e8cc...` local known Linux subset: 10.810880 minutes — three

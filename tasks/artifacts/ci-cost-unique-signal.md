@@ -1,11 +1,11 @@
 # Current five-job CI unique-signal ledger
 
 This ledger keeps the cohorts separate. The current product changes end at
-`2c7db5de3251eb6fb9630731cd987aa09439e6fb`, tree
-`7ea87a6d07a62a85dff3cfcb7e33af0a70ddbd30`, and use workflow blob
+`d66b95859c983144bd3afc9469605f34b07ada86`, tree
+`8ef044c030ee7f113a0ebfccf29f298abe7c6a6b`, and use workflow blob
 `bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The final-candidate clean-Linux
 cold/warm cohort is bound to that same product head/tree. The earlier
-`f50e8cc...` / `477a8d9...` pair remains a separate historical cohort. The candidate
+`f50e8cc...` / `477a8d9...` pair and the superseded `2c7db5d...` / `7ea87a6...` pair remain separate historical cohorts. The candidate
 commit containing this evidence is resolved with
 `git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json`; a commit
 cannot contain its own SHA.
@@ -155,7 +155,7 @@ credential boundaries were not weakened.
 
 ## Final-candidate clean-Linux cold/warm evidence
 
-The exact tracked tree at `2c7db5d...` was measured in a writable Debian
+The exact tracked tree at `d66b958...` was measured in a writable Debian
 Bookworm arm64 container with a fresh target, network disabled, a read-only
 preexisting Cargo registry, Rust 1.98.0, 14 logical CPUs, and a 14 GiB memory
 limit. The cold command and its one immediate warm repeat were:
@@ -170,14 +170,14 @@ GitHub queue/billing, or the five-job workflow.
 
 | Pass | Wall | Runner-equivalent | User / system CPU | Max RSS | Harness result | Over-60 s warnings |
 | --- | ---: | ---: | ---: | ---: | --- | ---: |
-| cold, empty target | 744.24 s | 12.404 min | 5,477.88 / 368.39 s | 1,374,808 KiB | 49 result blocks; 2,219 passed; 0 failed/ignored | 28; all later `ok` |
-| warm, same target | 491.76 s | 8.196 min | 3,193.56 / 94.59 s | 766,348 KiB | 49 result blocks; 2,219 passed; 0 failed/ignored | 20; all later `ok` |
+| cold, empty target | 434.42 s | 7.240333 min | 3,014.04 / 152.25 s | 1,426,808 KiB | 49 result blocks; 2,220 passed; 0 failed/ignored | 15; all later `ok` |
+| warm, same target | 378.37 s | 6.306167 min | 2,864.87 / 75.90 s | 799,780 KiB | 49 result blocks; 2,220 passed; 0 failed/ignored | 19; all later `ok` |
 
-The warm pass was 252.48 seconds (33.92454%) shorter in this single
+The warm pass was 56.05 seconds (12.90226%) shorter in this single
 non-dedicated-host pair. This is not a distribution or GitHub cache claim. The
 raw log SHA-256 values are
-`ede42185fd47ac4d5cf40dc3b1e90e907459dd49f094241db95b0097257af1dd`
-and `f8db5fc366cbb0a68d86ade46777a1e41211343178bf2744c69f4f1b54ac959d`.
+`853eab4c6b35d032a6ac89e2b6a7947e275d046c2f1b76e9ca232e04c8dc1bb3`
+and `e0ab6bc18d8cdf949aa60ccd53b33a47afcdaddd6058c98d36daa2aea471413d`.
 The machine-readable artifact records all 49 binary/result-block identities,
 times, aggregate resource counters, and evidence digests. Per-binary CPU, RSS,
 and I/O remain unavailable; GNU `time` filesystem counters are tool-defined
@@ -191,15 +191,18 @@ cold was not rerun. Warm then ran exactly once and its wrapper exited zero.
 An earlier clean attempt at `57819593...` failed after 424.13 seconds in
 `bound_reentrant_lock_allows_nested_repository_store_lock`. It exposed a
 fork-before-exec inherited-flock race and is excluded from successful cost.
-`2c7db5d...` removed the spawning liveness probe, explicitly unlocks the final
-logical gate, and adds cloned-open-file-description regressions; 200 repeated
-parallel `kio-core` full-suite runs then passed before this successful cold/warm
-pair.
+`2c7db5d...` remains the historical lock-repair cohort: it removed the spawning
+liveness probe, explicitly unlocked the final logical gate, and added
+cloned-open-file-description regressions; its 200 repeated parallel `kio-core`
+full-suite runs passed. Final `d66b958...` additionally makes bounded stdin
+readiness-driven under the shared deadline, drains immediately writable input in
+1 MiB fairness bursts, and adds a 32 MiB no-output-until-EOF regression; this
+cold/warm pair measures that final tree.
 
 ## Slow-warning disposition on final bytes
 
 The older GitHub attempt emitted 30 progress warnings; the final cold/warm pair
-emitted 28/20. Every warned test in all three logs later emitted `... ok`; no
+emitted 15/19. Every warned test in all three logs later emitted `... ok`; no
 warning was a missing result, failure, ignore, or infinite wait. Counts are
 host-sensitive and are not a formal speedup percentage. The structural change
 is stronger evidence: the Full consumer/schedule/render/scaffold regeneration
@@ -208,13 +211,13 @@ heavy paths retain distinct behavior:
 
 | Current heavy group | Cold / warm warnings | Retained unique signal |
 | --- | ---: | --- |
-| `persona_attest` | 7 / 7 | descriptor-bound mutation detection, publication identity, link/case-fold rejection, and create-only attestation |
-| `persona_consumer` | 5 / 3 | Tiny/Pilot canonical loading, identity recheck, malformed/cross-plan rejection |
+| `persona_attest` | 5 / 7 | descriptor-bound mutation detection, publication identity, link/case-fold rejection, and create-only attestation |
+| `persona_consumer` | 2 / 2 | Tiny/Pilot canonical loading, identity recheck, malformed/cross-plan rejection |
 | `persona_lease` | 8 / 8 | durable claim/release, recovery, linked/opaque-state rejection, ancestor mutation detection, and direct workspace-FD invariant |
-| materialize/render/scaffold/public CLI | 8 / 2 | durable publication, bounded rendering/topology, and canonical command-surface integration |
+| render/public CLI | 0 / 2 | durable publication, bounded rendering/topology, and canonical command-surface integration |
 
-`kio-eval` remained the dominant binary: its library block took 407.72/259.79
-seconds and its CLI block 63.28/60.10 seconds. These binary walls overlap no
+`kio-eval` remained the dominant binary: its library block took 215.10/230.76
+seconds and its CLI block 58.23/60.13 seconds. These binary walls overlap no
 other binary, but individual tests within a block run concurrently; warning
 durations must not be summed.
 
@@ -225,18 +228,18 @@ cold/warm workspace-test values were 394.88/329.78 seconds for 2,216 passed,
 with 16/13 warnings, and its exact workflow-order `rust` and synthetic command
 lanes were 426.38 and 83.99689 seconds. Persona W0 was 138.275887 seconds.
 
-For the final candidate, combining the exact 744.24-second cold test operand
+For the final candidate, combining the exact 434.42-second cold test operand
 with the latest topology-identical `f50e8cc...` fmt (1.13 s), Clippy (13.99 s),
 and synthetic (83.99689 s) operands gives a planning estimate of
-**843.35689 seconds = 14.055948 minutes** for `rust -> synthetic-history-eval`.
-It is below the 40-minute local target by 25.944052 minutes and the 45-minute
-reference by 30.944052 minutes. Because the operands are cohort-separated, this
+**533.53689 seconds = 8.892282 minutes** for `rust -> synthetic-history-eval`.
+It is below the 40-minute local target by 31.107718 minutes and the 45-minute
+reference by 36.107718 minutes. Because the operands are cohort-separated, this
 is not an exact same-run measurement, guarantee, GitHub success sample, or
 billing result. The configured five-job timeout sum is 140 minutes, below the
 250-minute reference, but the measured successful aggregate remains unknown
 without current macOS and Windows success operands.
 
-The bounded-runner delta validations remain green: Linux runner 18/18, U7
+The bounded-runner delta validations remain green: Linux runner 19/19, U7
 14/14, OCR 10/10, all 18 synthetic commands, and Persona W0. Windows runtime
 remains CI-only confirmation; unknown is not substituted with zero.
 
