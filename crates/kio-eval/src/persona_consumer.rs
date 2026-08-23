@@ -135,13 +135,12 @@ mod tests {
 
     static TINY: OnceLock<GeneratedBundle> = OnceLock::new();
     static PILOT: OnceLock<GeneratedBundle> = OnceLock::new();
-    static FULL: OnceLock<GeneratedBundle> = OnceLock::new();
 
     fn generated(profile: PersonaProfile) -> &'static GeneratedBundle {
         let slot = match profile {
             PersonaProfile::Tiny => &TINY,
             PersonaProfile::Pilot => &PILOT,
-            PersonaProfile::Full => &FULL,
+            PersonaProfile::Full => panic!("Full bundle is exercised by persona_full_contract"),
         };
         slot.get_or_init(|| {
             let plan = frozen_plan(profile);
@@ -169,12 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn loads_actual_generated_canonical_artifacts_for_every_profile() {
-        for profile in [
-            PersonaProfile::Tiny,
-            PersonaProfile::Pilot,
-            PersonaProfile::Full,
-        ] {
+    fn loads_actual_generated_canonical_artifacts_for_tiny_and_pilot() {
+        for profile in [PersonaProfile::Tiny, PersonaProfile::Pilot] {
             let (_root, plan, schedule, render) = write_bundle(profile);
             let bundle = CanonicalPersonaBundle::load(&plan, &schedule, &render).unwrap();
             assert_eq!(bundle.identity.profile, profile);

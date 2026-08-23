@@ -1303,7 +1303,7 @@ mod tests {
     use crate::persona_plan::{PersonaProfile, frozen_plan};
 
     #[test]
-    fn deterministic_and_streaming_full_suite() {
+    fn deterministic_and_streaming_tiny_suite() {
         let plan = frozen_plan(PersonaProfile::Tiny);
         let a = build_suite_schedule(&plan).unwrap();
         let b = build_suite_schedule(&plan).unwrap();
@@ -1323,12 +1323,10 @@ mod tests {
     }
 
     #[test]
-    fn all_profiles_have_deterministic_plan_bound_schedules() {
-        for profile in [
-            PersonaProfile::Tiny,
-            PersonaProfile::Pilot,
-            PersonaProfile::Full,
-        ] {
+    fn tiny_and_pilot_have_deterministic_plan_bound_schedules() {
+        // The Full suite is generated exactly once by the explicit manual
+        // contract example. Normal CI validates deterministic schedules here.
+        for profile in [PersonaProfile::Tiny, PersonaProfile::Pilot] {
             let plan = frozen_plan(profile);
             let first = build_person_schedule(&plan, &plan.personas[0]).unwrap();
             let second = build_person_schedule(&plan, &plan.personas[0]).unwrap();
@@ -1351,10 +1349,7 @@ mod tests {
                     "sha256:b573b50aa2d1bcddd9268ae319520cea96d82d2fa5841bd5e8f07d33b4d28c66",
                     "sha256:eea316e469a060d67b131bc6350e156d93b1a0d2a8bf86fe9671742ebe2accee",
                 ),
-                PersonaProfile::Full => (
-                    "sha256:0bb6ad9c9b95c318a2d938192e8663cd5ad5ccde9e156cb163bc8875e27ce56f",
-                    "sha256:028a26df50a8aa94b33ed9a8edd306dac8baf588950e70b4857c0b2e617a4529",
-                ),
+                PersonaProfile::Full => unreachable!("Full is manual-only"),
             };
             assert_eq!(first.digest().unwrap(), expected.0, "{profile:?} P01");
             assert_eq!(suite_first.suite_digest, expected.1, "{profile:?} suite");

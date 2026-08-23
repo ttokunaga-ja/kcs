@@ -18,6 +18,9 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # Attempt 1 took 50:53 before duplicate Full/FD stress was removed. The
+    # repaired lane must leave ten minutes for its dependent synthetic gate.
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v7
@@ -32,6 +35,9 @@ jobs:
 
   persona-w0-integration:
     runs-on: ubuntu-latest
+    # Measured current/local samples are 03:12/02:32; retain filesystem-I/O
+    # headroom without allowing this independent lifecycle lane to drift.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
@@ -112,6 +118,9 @@ jobs:
   synthetic-history-eval:
     needs: rust
     runs-on: ubuntu-latest
+    # Attempt 1 completed in 04:06. Together with rust this finite bound is the
+    # 45-minute dependency critical-path target.
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v7
@@ -176,6 +185,9 @@ jobs:
 
   macos-security-r23:
     runs-on: macos-latest
+    # The failed host-dependent attempt ran 23:45; the portable suite keeps
+    # measured headroom while rejecting another unbounded platform lane.
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v7
@@ -184,6 +196,9 @@ jobs:
 
   windows-security-r23:
     runs-on: windows-latest
+    # Attempt 1 stopped at compile time (01:45), so successful runtime remains
+    # unknown. Use the workflow target itself rather than treating unknown as 0.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v7

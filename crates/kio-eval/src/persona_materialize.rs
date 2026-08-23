@@ -649,21 +649,34 @@ mod tests {
         persona_render_artifact::RenderArtifact,
         persona_schedule::build_suite_schedule,
     };
-    use std::fs;
+    use std::{fs, sync::OnceLock};
     use tempfile::tempdir;
     #[cfg(target_os = "macos")]
     use tempfile::tempdir_in;
 
+    static TINY_BUNDLE: OnceLock<(Vec<u8>, Vec<u8>, Vec<u8>)> = OnceLock::new();
+
+    fn tiny_bundle() -> &'static (Vec<u8>, Vec<u8>, Vec<u8>) {
+        TINY_BUNDLE.get_or_init(|| {
+            let plan = frozen_plan(PersonaProfile::Tiny);
+            let schedule = build_suite_schedule(&plan).unwrap();
+            let render = RenderArtifact::build(&plan).unwrap();
+            (
+                plan.canonical_bytes().unwrap(),
+                schedule.canonical_bytes().unwrap(),
+                render.canonical_bytes().unwrap(),
+            )
+        })
+    }
+
     fn inputs(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        let plan = frozen_plan(PersonaProfile::Tiny);
-        let schedule = build_suite_schedule(&plan).unwrap();
-        let render = RenderArtifact::build(&plan).unwrap();
+        let (plan, schedule, render) = tiny_bundle();
         let plan_path = root.join("plan.json");
         let schedule_path = root.join("schedule.json");
         let render_path = root.join("render.json");
-        fs::write(&plan_path, plan.canonical_bytes().unwrap()).unwrap();
-        fs::write(&schedule_path, schedule.canonical_bytes().unwrap()).unwrap();
-        fs::write(&render_path, render.canonical_bytes().unwrap()).unwrap();
+        fs::write(&plan_path, plan).unwrap();
+        fs::write(&schedule_path, schedule).unwrap();
+        fs::write(&render_path, render).unwrap();
         (plan_path, schedule_path, render_path)
     }
 

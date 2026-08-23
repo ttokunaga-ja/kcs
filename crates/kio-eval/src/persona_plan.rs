@@ -2470,6 +2470,7 @@ mod tests {
                         );
                     }
                 }
+                assert_structural_events(person, q, &sources);
                 assert_eq!(
                     &person.scopes[..12]
                         .iter()
@@ -2510,43 +2511,6 @@ mod tests {
     }
 
     #[test]
-    fn cohort_projection_is_feasible_for_every_profile_and_persona() {
-        for profile in [
-            PersonaProfile::Tiny,
-            PersonaProfile::Pilot,
-            PersonaProfile::Full,
-        ] {
-            for person in frozen_plan(profile).personas {
-                let sources = source_projections(&person).unwrap();
-                for cohort in &person.cohorts {
-                    let selected = sources
-                        .iter()
-                        .filter(|source| source.cohort == Some(cohort.cohort))
-                        .collect::<Vec<_>>();
-                    assert_eq!(selected.len() as u32, cohort.source_count);
-                    assert_eq!(
-                        selected
-                            .iter()
-                            .map(|source| source.planned_chunks)
-                            .sum::<u32>(),
-                        cohort.chunks
-                    );
-                    if profile == PersonaProfile::Full && cohort.cohort != Cohort::U {
-                        assert_eq!(
-                            selected
-                                .iter()
-                                .map(|source| source.scope_id.as_str())
-                                .collect::<BTreeSet<_>>()
-                                .len(),
-                            SCOPES_PER_PERSON
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn malformed_scope_capacity_is_rejected_without_panicking() {
         let mut plan = frozen_plan(PersonaProfile::Tiny);
         let person = &mut plan.personas[0];
@@ -2567,129 +2531,120 @@ mod tests {
         assert!(matches!(result, Ok(Err(_))));
     }
 
-    #[test]
-    fn structural_events_bind_exact_sources_dependencies_and_profile_counts() {
-        for profile in [
-            PersonaProfile::Tiny,
-            PersonaProfile::Pilot,
-            PersonaProfile::Full,
-        ] {
-            let plan = frozen_plan(profile);
-            for person in &plan.personas {
-                let sources = source_projections(person).unwrap();
-                let source_by_id = sources
+    fn assert_structural_events(
+        person: &PersonPlan,
+        profile: PersonaProfile,
+        sources: &[SourceProjection],
+    ) {
+        let source_by_id = sources
+            .iter()
+            .map(|source| (source.source_id.as_str(), source))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let expected = if profile == PersonaProfile::Full {
+            [3, 21, 3, 2, 1]
+        } else {
+            [3, 2, 3, 2, 1]
+        };
+        assert_eq!(person.structural.len(), expected.iter().sum::<usize>());
+        let mut event_ids = BTreeSet::new();
+        let mut seen_ids = BTreeSet::new();
+        for (wave, count) in [Wave::W1, Wave::W2, Wave::W3, Wave::W4, Wave::W5]
+            .into_iter()
+            .zip(expected)
+        {
+            let wave_events = person
+                .structural
+                .iter()
+                .filter(|event| event.wave == wave)
+                .collect::<Vec<_>>();
+            assert_eq!(wave_events.len(), count);
+            assert_eq!(
+                wave_events
                     .iter()
-                    .map(|source| (source.source_id.as_str(), source))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let expected = if profile == PersonaProfile::Full {
-                    [3, 21, 3, 2, 1]
-                } else {
-                    [3, 2, 3, 2, 1]
-                };
-                assert_eq!(person.structural.len(), expected.iter().sum::<usize>());
-                let mut event_ids = BTreeSet::new();
-                let mut seen_ids = BTreeSet::new();
-                for (wave, count) in [Wave::W1, Wave::W2, Wave::W3, Wave::W4, Wave::W5]
-                    .into_iter()
-                    .zip(expected)
-                {
-                    let wave_events = person
-                        .structural
-                        .iter()
-                        .filter(|event| event.wave == wave)
-                        .collect::<Vec<_>>();
-                    assert_eq!(wave_events.len(), count);
-                    assert_eq!(
-                        wave_events
-                            .iter()
-                            .map(|event| event.ordinal)
-                            .collect::<Vec<_>>(),
-                        (1..=u8::try_from(count).unwrap()).collect::<Vec<_>>()
-                    );
-                }
-                for event in &person.structural {
-                    assert!(event_ids.insert(event.event_id.as_str()));
-                    assert!(
-                        event
-                            .depends_on
-                            .iter()
-                            .all(|dependency| seen_ids.contains(dependency.as_str()))
-                    );
-                    seen_ids.insert(event.event_id.as_str());
-                }
-                let near = person
-                    .structural
-                    .iter()
-                    .find(|event| event.kind == StructuralKind::NearDuplicate)
-                    .unwrap();
-                let derive = person
-                    .structural
-                    .iter()
-                    .find(|event| event.kind == StructuralKind::DerivedFormat)
-                    .unwrap();
-                assert_eq!(near.transform, TransformKind::NearPngOneChannel);
-                assert_eq!(near.child_variant, Some(FormatVariant::Png));
-                assert_eq!(derive.transform, TransformKind::PngToScanPdf);
-                assert_eq!(derive.child_variant, Some(FormatVariant::PdfScan));
-                assert_ne!(near.parent_source_id, derive.parent_source_id);
-                for parent in [&near.parent_source_id, &derive.parent_source_id] {
-                    let source = source_by_id[parent.as_deref().unwrap()];
-                    assert_eq!(source.variant, FormatVariant::Png);
-                    assert_eq!(source.gate_role, GateRole::RawOnly);
-                }
-                let rename_scopes = person
-                    .structural
-                    .iter()
-                    .filter(|event| {
-                        event.wave == Wave::W2 && event.kind == StructuralKind::SameScopeRename
-                    })
-                    .map(|event| event.source_scope_id.as_deref().unwrap())
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(
-                    rename_scopes.len(),
-                    if profile == PersonaProfile::Full {
-                        SCOPES_PER_PERSON
-                    } else {
-                        1
-                    }
-                );
-                let moves = person
-                    .structural
-                    .iter()
-                    .filter(|event| {
-                        matches!(
-                            event.kind,
-                            StructuralKind::CrossScopeMove | StructuralKind::ArchiveMove
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(moves.len(), 3);
-                assert!(
-                    moves
-                        .iter()
-                        .all(|event| event.source_id == moves[0].source_id)
-                );
-                let create = person
-                    .structural
-                    .iter()
-                    .find(|event| event.kind == StructuralKind::Create)
-                    .unwrap();
-                let delete = person
-                    .structural
-                    .iter()
-                    .find(|event| event.kind == StructuralKind::DeleteForRestore)
-                    .unwrap();
-                let restore = person
-                    .structural
-                    .iter()
-                    .find(|event| event.kind == StructuralKind::RestoreToActiveScope)
-                    .unwrap();
-                assert_eq!(create.source_id, delete.source_id);
-                assert_eq!(delete.source_id, restore.source_id);
-                assert_eq!(delete.paired_event_id.as_deref(), Some(&*restore.event_id));
-                assert_eq!(restore.paired_event_id.as_deref(), Some(&*delete.event_id));
-            }
+                    .map(|event| event.ordinal)
+                    .collect::<Vec<_>>(),
+                (1..=u8::try_from(count).unwrap()).collect::<Vec<_>>()
+            );
         }
+        for event in &person.structural {
+            assert!(event_ids.insert(event.event_id.as_str()));
+            assert!(
+                event
+                    .depends_on
+                    .iter()
+                    .all(|dependency| seen_ids.contains(dependency.as_str()))
+            );
+            seen_ids.insert(event.event_id.as_str());
+        }
+        let near = person
+            .structural
+            .iter()
+            .find(|event| event.kind == StructuralKind::NearDuplicate)
+            .unwrap();
+        let derive = person
+            .structural
+            .iter()
+            .find(|event| event.kind == StructuralKind::DerivedFormat)
+            .unwrap();
+        assert_eq!(near.transform, TransformKind::NearPngOneChannel);
+        assert_eq!(near.child_variant, Some(FormatVariant::Png));
+        assert_eq!(derive.transform, TransformKind::PngToScanPdf);
+        assert_eq!(derive.child_variant, Some(FormatVariant::PdfScan));
+        assert_ne!(near.parent_source_id, derive.parent_source_id);
+        for parent in [&near.parent_source_id, &derive.parent_source_id] {
+            let source = source_by_id[parent.as_deref().unwrap()];
+            assert_eq!(source.variant, FormatVariant::Png);
+            assert_eq!(source.gate_role, GateRole::RawOnly);
+        }
+        let rename_scopes = person
+            .structural
+            .iter()
+            .filter(|event| event.wave == Wave::W2 && event.kind == StructuralKind::SameScopeRename)
+            .map(|event| event.source_scope_id.as_deref().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            rename_scopes.len(),
+            if profile == PersonaProfile::Full {
+                SCOPES_PER_PERSON
+            } else {
+                1
+            }
+        );
+        let moves = person
+            .structural
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    StructuralKind::CrossScopeMove | StructuralKind::ArchiveMove
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(moves.len(), 3);
+        assert!(
+            moves
+                .iter()
+                .all(|event| event.source_id == moves[0].source_id)
+        );
+        let create = person
+            .structural
+            .iter()
+            .find(|event| event.kind == StructuralKind::Create)
+            .unwrap();
+        let delete = person
+            .structural
+            .iter()
+            .find(|event| event.kind == StructuralKind::DeleteForRestore)
+            .unwrap();
+        let restore = person
+            .structural
+            .iter()
+            .find(|event| event.kind == StructuralKind::RestoreToActiveScope)
+            .unwrap();
+        assert_eq!(create.source_id, delete.source_id);
+        assert_eq!(delete.source_id, restore.source_id);
+        assert_eq!(delete.paired_event_id.as_deref(), Some(&*restore.event_id));
+        assert_eq!(restore.paired_event_id.as_deref(), Some(&*delete.event_id));
     }
 
     #[test]

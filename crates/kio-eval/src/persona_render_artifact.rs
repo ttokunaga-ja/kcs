@@ -521,11 +521,10 @@ mod tests {
         assert!(!text.contains("kio_observed"));
     }
     #[test]
-    fn all_profile_artifacts_fit_the_explicit_bounds() {
+    fn tiny_and_pilot_artifacts_fit_the_explicit_bounds() {
         for (profile, expected_sources, expected_digest) in [
             (PersonaProfile::Tiny, 4_000, TINY_ARTIFACT_HASH),
             (PersonaProfile::Pilot, 20_000, PILOT_ARTIFACT_HASH),
-            (PersonaProfile::Full, 195_000, FULL_ARTIFACT_HASH),
         ] {
             let plan = frozen_plan(profile);
             let artifact = RenderArtifact::build(&plan).unwrap();

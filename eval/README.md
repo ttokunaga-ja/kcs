@@ -408,6 +408,19 @@ persona-PC suite の唯一の semantic authority は Rust の canonical artifact
 `schedule` と `render` は同一 plan に束縛された deterministic projection である。Python
 に semantic parser、generator、renderer、materializer、scaffold、prepare/replay runner はない。
 
+通常の Rust CI は Tiny/Pilot の凍結ベクタに加え、唯一の Full plan/source-projection authority で
+195,000 source / 2,400,000 chunk の契約を検証する。重複する Full suite schedule、render artifact、
+consumer、scaffold stress は通常 CI に含めない。Full source projection、suite schedule、render artifact
+をそれぞれ一度だけ生成して凍結 digest と上限を検証する明示的な Rust-owned manual command は次である
+（Rust 1.98.0）。
+
+```sh
+cargo +1.98.0 run --release --locked -p kio-eval --example persona_full_contract
+```
+
+この command は deterministic JSON summary を出力する。これは cold/full fixture generation の固有信号であり、
+通常 CI の高速な contract lane と混同しない。example は通常 CI で compile されるが、実行はしない。
+
 ```bash
 target/release/kio-eval persona plan --profile tiny \
   --out /private/tmp/kio-persona-tiny-plan.json

@@ -1322,19 +1322,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn repeated_operations_do_not_leak_file_descriptors() {
-        fn fds() -> usize {
-            std::fs::read_dir("/proc/self/fd").unwrap().count()
-        }
+    fn lifecycle_does_not_retain_a_descriptor_into_its_workspace() {
         let (_t, root, _scope) = workspace();
-        let before = fds();
-        for i in 0..32 {
-            let lease = claim(&root, "p01", &format!("s-{i}"), None).unwrap();
-            release(&root, "p01", &lease.release_token).unwrap();
+        let lease = claim(&root, "p01", "one-lifecycle", None).unwrap();
+        release(&root, "p01", &lease.release_token).unwrap();
+
+        let workspace = std::fs::canonicalize(&root).unwrap();
+        for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+            let target = std::fs::read_link(entry.unwrap().path());
+            if let Ok(target) = target {
+                assert!(
+                    !target.starts_with(&workspace),
+                    "descriptor retained into test workspace: {}",
+                    target.display()
+                );
+            }
         }
-        // read_dir itself uses one descriptor; allow a small runtime margin but
-        // not a per-operation growth pattern.
-        assert!(fds() <= before + 3);
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

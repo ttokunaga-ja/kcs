@@ -637,25 +637,34 @@ mod tests {
     use std::{
         fs,
         sync::{
-            Arc,
+            Arc, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
     };
     use tempfile::tempdir;
 
+    static TINY_BUNDLE: OnceLock<(Vec<u8>, Vec<u8>, Vec<u8>)> = OnceLock::new();
+
+    fn tiny_bundle() -> &'static (Vec<u8>, Vec<u8>, Vec<u8>) {
+        TINY_BUNDLE.get_or_init(|| {
+            let plan = crate::persona_plan::frozen_plan(PersonaProfile::Tiny);
+            let schedule = build_suite_schedule(&plan).unwrap();
+            let render = RenderArtifact::build(&plan).unwrap();
+            (
+                plan.canonical_bytes().unwrap(),
+                schedule.canonical_bytes().unwrap(),
+                render.canonical_bytes().unwrap(),
+            )
+        })
+    }
+
     fn bundle() -> (tempfile::TempDir, PathBuf) {
         let temp = tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
-        let plan = crate::persona_plan::frozen_plan(PersonaProfile::Tiny);
-        let schedule = build_suite_schedule(&plan).unwrap();
-        let render = RenderArtifact::build(&plan).unwrap();
-        fs::write(base.join("plan.json"), plan.canonical_bytes().unwrap()).unwrap();
-        fs::write(
-            base.join("schedule.json"),
-            schedule.canonical_bytes().unwrap(),
-        )
-        .unwrap();
-        fs::write(base.join("render.json"), render.canonical_bytes().unwrap()).unwrap();
+        let (plan, schedule, render) = tiny_bundle();
+        fs::write(base.join("plan.json"), plan).unwrap();
+        fs::write(base.join("schedule.json"), schedule).unwrap();
+        fs::write(base.join("render.json"), render).unwrap();
         let root = base.join("materialized");
         materialize(MaterializeRequest {
             plan: &base.join("plan.json"),

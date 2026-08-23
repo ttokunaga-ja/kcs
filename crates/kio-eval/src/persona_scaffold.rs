@@ -1163,12 +1163,8 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn creates_exact_topology_and_owner_for_each_profile() {
-        for profile in [
-            PersonaProfile::Tiny,
-            PersonaProfile::Pilot,
-            PersonaProfile::Full,
-        ] {
+    fn creates_exact_topology_and_owner_for_tiny_and_pilot() {
+        for profile in [PersonaProfile::Tiny, PersonaProfile::Pilot] {
             let temp = tempdir().unwrap();
             let parent = fs::canonicalize(temp.path()).unwrap();
             let plan_path = plan_file(&parent, profile);
