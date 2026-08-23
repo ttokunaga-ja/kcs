@@ -7,8 +7,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
-#[cfg(not(windows))]
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5201,18 +5199,47 @@ struct LockGate {
 }
 
 #[cfg(unix)]
+fn unlock_flock(file: &File) {
+    use std::os::fd::AsRawFd;
+
+    // Closing the local descriptor is normally sufficient, but a concurrent
+    // fork may retain the same open-file description until its exec boundary.
+    // Explicit unlock releases that shared kernel lock at the logical guard
+    // boundary instead of extending it into the child process transiently.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+#[cfg(unix)]
 impl Drop for LockGate {
     fn drop(&mut self) {
-        LOCK_GATE_POOL.with(|pool| {
+        let final_owner = LOCK_GATE_POOL.with(|pool| {
             let mut pool = pool.borrow_mut();
             let Some((count, _)) = pool.get_mut(&self.key) else {
-                return;
+                return false;
             };
             *count -= 1;
             if *count == 0 {
                 pool.remove(&self.key);
+                true
+            } else {
+                false
             }
         });
+        if final_owner {
+            unlock_flock(&self._file);
+        }
+    }
+}
+
+#[cfg(unix)]
+struct BoundLockGate {
+    file: File,
+}
+
+#[cfg(unix)]
+impl Drop for BoundLockGate {
+    fn drop(&mut self) {
+        unlock_flock(&self.file);
     }
 }
 
@@ -5594,7 +5621,7 @@ fn process_is_alive(pid: u32) -> bool {
     !queried || exit_code == STILL_ACTIVE as u32
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
     if pid == RELEASED_LOCK_PID {
         return false;
@@ -5602,19 +5629,24 @@ fn process_is_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
-    // `kill -0` は EPERM (他ユーザ所有の生存プロセス) と ESRCH (不在) を exit code で
-    // 区別できず、生存 lock を stale 回収する誤判定側に倒れる。`ps -p` は所有者に
-    // 関係なく存在を確認できる。spawn 失敗時は保守的に「生存」と見なし回収しない。
-    match Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(_) => true,
+
+    // PID zero names a process group rather than a process, and values above
+    // pid_t's positive range cannot name a Unix process.
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return false;
     }
+    // SAFETY: signal zero performs no delivery. ESRCH is the sole definite
+    // absence result; EPERM and every other error are conservatively live.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        true
+    } else {
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn process_is_alive(pid: u32) -> bool {
+    pid != RELEASED_LOCK_PID
 }
 
 fn new_lock_token(pid: u32) -> String {
@@ -5700,7 +5732,7 @@ fn bound_lock_io(error: std::io::Error, path: impl Into<String>) -> KioError {
 #[cfg(unix)]
 pub struct BoundStoreLock {
     kio: File,
-    _gate: File,
+    _gate: BoundLockGate,
     locks: File,
     pid: u32,
     token: String,
@@ -5714,7 +5746,7 @@ pub struct BoundStoreLock {
 #[cfg(unix)]
 pub(crate) struct BoundStoreReadGuard {
     kio: File,
-    _gate: File,
+    _gate: BoundLockGate,
     initial_lock: Option<(Vec<u8>, BoundLockObservation)>,
 }
 
@@ -5777,6 +5809,7 @@ pub(crate) fn acquire_bound_store_read_guard(kio: &File) -> Result<BoundStoreRea
         }
         return Err(KioError::io(error.to_string(), ".kio"));
     }
+    let gate = BoundLockGate { file: gate };
     let initial_lock = match read_bound_lock(kio, ".lock") {
         Ok((bytes, observation)) => {
             let lock = parse_canonical_lock(&bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
@@ -5978,7 +6011,7 @@ fn preflight_bound_lock_entry(kio: &File) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn acquire_bound_lock_gate(kio: &File) -> Result<File> {
+fn acquire_bound_lock_gate(kio: &File) -> Result<BoundLockGate> {
     use std::os::fd::AsRawFd;
 
     // `try_clone` shares an open-file description with the caller on Unix;
@@ -5995,7 +6028,7 @@ fn acquire_bound_lock_gate(kio: &File) -> Result<File> {
         }
         return Err(KioError::io(error.to_string(), ".kio"));
     }
-    Ok(gate)
+    Ok(BoundLockGate { file: gate })
 }
 
 #[cfg(unix)]
@@ -7029,6 +7062,18 @@ mod tests {
         let path = repo.kio_dir().join(".lock");
 
         let outer = super::acquire_bound_reentrant_store_lock(&retained, vec![path]).unwrap();
+        // Model the descriptor inherited across a concurrent fork before its
+        // exec closes CLOEXEC handles. The logical guard must explicitly
+        // unlock the shared open-file description even while this duplicate
+        // remains open.
+        let inherited_gate = outer
+            .inner
+            .as_ref()
+            .unwrap()
+            ._gate
+            .file
+            .try_clone()
+            .unwrap();
         let nested = repo.lock_store().unwrap();
         drop(nested);
         drop(outer);
@@ -7036,6 +7081,7 @@ mod tests {
         // The descriptor-bound owner released its own entry, and no synthetic
         // depth remains to make a later ordinary writer spuriously reentrant.
         assert!(StoreLock::acquire(repo.kio_dir()).is_ok());
+        drop(inherited_gate);
     }
 
     #[cfg(unix)]
@@ -7499,6 +7545,13 @@ mod tests {
         assert!(!process_is_alive(RELEASED_LOCK_PID));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_process_liveness_rejects_values_outside_the_pid_range() {
+        assert!(!process_is_alive(0));
+        assert!(!process_is_alive(RELEASED_LOCK_PID - 1));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_process_liveness_rejects_reserved_pid_zero() {
@@ -7538,6 +7591,19 @@ mod tests {
             Ok(_) => panic!("a held device-global lock must block acquisition"),
             Err(err) => assert_eq!(err.error_code(), "KIO-E-STORE-LOCKED-001"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_lock_drop_unlocks_an_inherited_open_file_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inherited.lock");
+        let held = StoreLock::acquire_path(path.clone()).unwrap();
+        let inherited_gate = held._gate.as_ref().unwrap()._file.try_clone().unwrap();
+
+        drop(held);
+        assert!(StoreLock::acquire_path(path).is_ok());
+        drop(inherited_gate);
     }
 
     #[cfg(unix)]
