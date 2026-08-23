@@ -5353,6 +5353,11 @@ struct LockFile {
     created_at: String,
 }
 
+/// Reserved owner written by the lock-release exchange protocol. No supported
+/// platform can assign this value to a Kio process; treating it as dead is part
+/// of the on-disk protocol and must not depend on spawning a liveness probe.
+const RELEASED_LOCK_PID: u32 = u32::MAX;
+
 #[cfg(unix)]
 fn reclaim_stale_lock(path: &Path, replacement: &[u8]) -> Result<bool> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -5452,7 +5457,7 @@ fn release_ordinary_lock(path: &Path, pid: u32, token: &str) -> Result<()> {
             .ok_or_else(|| KioError::locked(path.display().to_string()))?;
         let temp_name = format!(".{name}.released-{}-{}", std::process::id(), unix_nanos());
         let temp = parent.join(&temp_name);
-        let sentinel = canonical_lock_bytes(u32::MAX, &new_lock_token(u32::MAX))?;
+        let sentinel = canonical_lock_bytes(RELEASED_LOCK_PID, &new_lock_token(RELEASED_LOCK_PID))?;
         let mut temp_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -5553,6 +5558,9 @@ fn read_lock_file_legacy(path: &Path) -> Result<Option<LockFile>> {
 
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
+    if pid == RELEASED_LOCK_PID {
+        return false;
+    }
     if pid == std::process::id() {
         return true;
     }
@@ -5588,6 +5596,9 @@ fn process_is_alive(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 fn process_is_alive(pid: u32) -> bool {
+    if pid == RELEASED_LOCK_PID {
+        return false;
+    }
     if pid == std::process::id() {
         return true;
     }
@@ -5722,7 +5733,7 @@ impl BoundStoreReadGuard {
             Ok((bytes, observation)) => {
                 let lock =
                     parse_canonical_lock(&bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
-                if lock.pid != u32::MAX {
+                if lock.pid != RELEASED_LOCK_PID {
                     return Err(KioError::locked(".kio/.lock"));
                 }
                 Some((bytes, observation))
@@ -5769,7 +5780,7 @@ pub(crate) fn acquire_bound_store_read_guard(kio: &File) -> Result<BoundStoreRea
     let initial_lock = match read_bound_lock(kio, ".lock") {
         Ok((bytes, observation)) => {
             let lock = parse_canonical_lock(&bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
-            if lock.pid != u32::MAX {
+            if lock.pid != RELEASED_LOCK_PID {
                 return Err(KioError::locked(".kio/.lock"));
             }
             Some((bytes, observation))
@@ -6008,7 +6019,7 @@ impl Drop for BoundStoreLock {
         // stale-lock protocol. This is conservative (the lock may outlive this
         // guard briefly) but cannot remove a concurrent owner's replacement.
         let archive = bound_lock_name("released");
-        let released_pid = u32::MAX;
+        let released_pid = RELEASED_LOCK_PID;
         let released_token = new_lock_token(released_pid);
         let Ok(released_bytes) = canonical_lock_bytes(released_pid, &released_token) else {
             return;
@@ -6947,11 +6958,11 @@ mod tests {
     use super::enforce_config_semantics;
     use super::{
         ArchiveLimits, DEFAULT_MAX_ARCHIVE_FILE_BYTES, MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
-        PendingNormalizeRef, Repository, StoreLock, append_jsonl_rotating, civil_from_days,
-        format_unix_seconds, format_utc_seconds, open_scope_file_nofollow, parse_utc_seconds,
-        process_is_alive, prune_rotated_logs, read_adapter_lane, read_logs_retention_days,
-        read_network_approval_pending, read_network_approvals, redact_context,
-        redact_message_paths, rotate_stale_log, write_network_approval_pending,
+        PendingNormalizeRef, RELEASED_LOCK_PID, Repository, StoreLock, append_jsonl_rotating,
+        civil_from_days, format_unix_seconds, format_utc_seconds, open_scope_file_nofollow,
+        parse_utc_seconds, process_is_alive, prune_rotated_logs, read_adapter_lane,
+        read_logs_retention_days, read_network_approval_pending, read_network_approvals,
+        redact_context, redact_message_paths, rotate_stale_log, write_network_approval_pending,
     };
 
     #[cfg(unix)]
@@ -7483,8 +7494,9 @@ mod tests {
     }
 
     #[test]
-    fn process_liveness_recognizes_current_process() {
+    fn process_liveness_recognizes_current_process_and_released_sentinel() {
         assert!(process_is_alive(std::process::id()));
+        assert!(!process_is_alive(RELEASED_LOCK_PID));
     }
 
     #[cfg(windows)]
