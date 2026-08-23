@@ -1,11 +1,11 @@
 # Current five-job CI unique-signal ledger
 
 This ledger keeps the cohorts separate. The current product changes end at
-`b849f7cc927806fb6264f1ad5b6c696016655053`, tree
-`3817b04e490d4020e4fc6066bf5cdc1002bb8937`, and use workflow blob
-`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The clean-Linux cold/warm cost
-cohort remains bound to the earlier Phase F product head `f50e8cc...`, tree
-`477a8d9...`; it is not relabeled as a final-head measurement. The candidate
+`2c7db5de3251eb6fb9630731cd987aa09439e6fb`, tree
+`7ea87a6d07a62a85dff3cfcb7e33af0a70ddbd30`, and use workflow blob
+`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The final-candidate clean-Linux
+cold/warm cohort is bound to that same product head/tree. The earlier
+`f50e8cc...` / `477a8d9...` pair remains a separate historical cohort. The candidate
 commit containing this evidence is resolved with
 `git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json`; a commit
 cannot contain its own SHA.
@@ -153,84 +153,92 @@ descriptor remains under the workspace after a complete claim/release
 lifecycle. Production `fsync`, nofollow, identity revalidation, create-only, and
 credential boundaries were not weakened.
 
-## Phase F clean-Linux cold/warm evidence
+## Final-candidate clean-Linux cold/warm evidence
 
-The immutable `f50e8cc...` measurement bytes were copied into a writable Debian
+The exact tracked tree at `2c7db5d...` was measured in a writable Debian
 Bookworm arm64 container with a fresh target, network disabled, a read-only
 preexisting Cargo registry, Rust 1.98.0, 14 logical CPUs, and a 14 GiB memory
-limit. The exact measurement command was:
+limit. The cold command and its one immediate warm repeat were:
 
 ```sh
 cargo +1.98.0 test --workspace --all-targets --locked --no-fail-fast
 ```
 
-`--no-fail-fast` was added locally to retain complete diagnostics; both passes
-exited zero. This measures the workspace test command, not `cargo fmt`, Clippy,
-the complete `rust` job, another job, queueing, billing, or the five-job
-workflow.
+`--no-fail-fast` retains complete diagnostic output; both commands exited zero.
+This is the workspace-test operand, not formatting, Clippy, a complete job,
+GitHub queue/billing, or the five-job workflow.
 
 | Pass | Wall | Runner-equivalent | User / system CPU | Max RSS | Harness result | Over-60 s warnings |
 | --- | ---: | ---: | ---: | ---: | --- | ---: |
-| cold, empty target | 394.88 s | 6.581333 min | 3,097.29 / 113.58 s | 1,303,388 KiB | 49 binaries; 2,216 passed; 0 failed/ignored | 16; all later `ok` |
-| warm, same target | 329.78 s | 5.496333 min | 2,431.99 / 71.51 s | 793,404 KiB | 49 binaries; 2,216 passed; 0 failed/ignored | 13; all later `ok` |
+| cold, empty target | 744.24 s | 12.404 min | 5,477.88 / 368.39 s | 1,374,808 KiB | 49 result blocks; 2,219 passed; 0 failed/ignored | 28; all later `ok` |
+| warm, same target | 491.76 s | 8.196 min | 3,193.56 / 94.59 s | 766,348 KiB | 49 result blocks; 2,219 passed; 0 failed/ignored | 20; all later `ok` |
 
-The warm pass was 65.10 seconds shorter than the cold pass in this single
-non-dedicated-host pair. That observation is not a distribution or a GitHub
-cache claim. The raw log digests are
-`dc667ef40501c0a7162bde5e79a35716caead6efe9105c9bc2f2a91323896cd9`
-(cold) and
-`9167c089beda618b86924d6ec76285c48a3f849170b4b1b7d289dbadc0143757`
-(warm). The machine-readable artifact records all 49 binary names, pass
-counts, and cold/warm harness times.
+The warm pass was 252.48 seconds (33.92454%) shorter in this single
+non-dedicated-host pair. This is not a distribution or GitHub cache claim. The
+raw log SHA-256 values are
+`ede42185fd47ac4d5cf40dc3b1e90e907459dd49f094241db95b0097257af1dd`
+and `f8db5fc366cbb0a68d86ade46777a1e41211343178bf2744c69f4f1b54ac959d`.
+The machine-readable artifact records all 49 binary/result-block identities,
+times, aggregate resource counters, and evidence digests. Per-binary CPU, RSS,
+and I/O remain unavailable; GNU `time` filesystem counters are tool-defined
+rusage counts, not bytes.
 
-GNU `time` reported aggregate page faults, context switches, and filesystem
-input/output counters. Those filesystem counters are tool-defined rusage
-counts, not bytes. Per-test CPU, RSS, and I/O were not available and remain
-unknown. Post-run target and temporary-directory sizes were 8,745,391,528 and
-97,609,519 bytes respectively; they are storage sizes, not I/O throughput.
+The cold evidence-wrapper exited after the successful command because its `jq`
+marker writer used a reserved variable name. The marker was recovered from the
+already sealed begin time, completion time, GNU `time` exit status, and log;
+cold was not rerun. Warm then ran exactly once and its wrapper exited zero.
 
-The old GitHub Rust job emitted 30 warnings and later `ok` for all 30. The
-measured Phase F cold/warm runs emitted 16/13 and later `ok` for every warning.
-The cold groups were six attestation, two consumer, and eight lease tests;
-the warm groups were four, two, and seven. Ordinary Full regeneration no longer
-appears in consumer/render/schedule/scaffold warning paths, and the old
-32-lifecycle FD proxy is gone. The retained heavy signals are deliberate:
+An earlier clean attempt at `57819593...` failed after 424.13 seconds in
+`bound_reentrant_lock_allows_nested_repository_store_lock`. It exposed a
+fork-before-exec inherited-flock race and is excluded from successful cost.
+`2c7db5d...` removed the spawning liveness probe, explicitly unlocks the final
+logical gate, and adds cloned-open-file-description regressions; 200 repeated
+parallel `kio-core` full-suite runs then passed before this successful cold/warm
+pair.
 
-| Current heavy group | Retained unique signal |
-| --- | --- |
-| `persona_attest` | descriptor-bound mutation detection, publication identity, symlink/hardlink/case-fold rejection, and create-only attestation |
-| `persona_consumer` | Tiny/Pilot canonical artifact loading plus foreign-plan schedule/render rejection |
-| `persona_lease` | durable claim/release, recovery, linked/opaque-state rejection, ancestor mutation detection, and the direct workspace-FD invariant |
+## Slow-warning disposition on final bytes
 
-The 30-to-16/13 comparison is diagnostic only because host, command, and cohort
-differ. It does not supply a formal speedup percentage or a successful GitHub
-sample.
+The older GitHub attempt emitted 30 progress warnings; the final cold/warm pair
+emitted 28/20. Every warned test in all three logs later emitted `... ok`; no
+warning was a missing result, failure, ignore, or infinite wait. Counts are
+host-sensitive and are not a formal speedup percentage. The structural change
+is stronger evidence: the Full consumer/schedule/render/scaffold regeneration
+and the 32-lifecycle FD proxy no longer exist in ordinary CI. The remaining
+heavy paths retain distinct behavior:
 
-After that cost measurement, `b849f7c...` corrected the bounded runner state
-machine so EOF on both output pipes cannot fall through to an unbounded child
-`wait`, and added one Unix regression test. The workflow blob did not change.
-An isolated Linux delta validation at that exact product head passed runner
-18/18, U7 14/14, OCR 10/10, all 18 Synthetic workflow commands, and the Persona
-W0 lifecycle in about 123 seconds. No clean-Linux cold/warm cost rerun was made
-for this one-test delta, so the 49-binary / 2,216-test timings above remain
-evidence only for `f50e8cc...`.
+| Current heavy group | Cold / warm warnings | Retained unique signal |
+| --- | ---: | --- |
+| `persona_attest` | 7 / 7 | descriptor-bound mutation detection, publication identity, link/case-fold rejection, and create-only attestation |
+| `persona_consumer` | 5 / 3 | Tiny/Pilot canonical loading, identity recheck, malformed/cross-plan rejection |
+| `persona_lease` | 8 / 8 | durable claim/release, recovery, linked/opaque-state rejection, ancestor mutation detection, and direct workspace-FD invariant |
+| materialize/render/scaffold/public CLI | 8 / 2 | durable publication, bounded rendering/topology, and canonical command-surface integration |
 
-Separate fresh local Linux job containers then replayed the workflow command
-order. The `rust` sequence succeeded in 426.38 seconds by command sum (fmt
-1.13 s, Clippy 13.99 s, test 411.26 s). The dependent synthetic sequence
-succeeded in 83.99689 seconds, including a 54.68-second fresh release build and
-all scale, replay, cross-scope, rerank, and M3 gates. Their local command-path
-estimate is 510.37689 seconds = **8.506281 minutes**. It is below the 40-minute
-local planning target with 31.493719 minutes of margin, but excludes checkout,
-toolchain setup, GitHub queueing, and runner differences. It is not a current
-GitHub success sample or billing result.
+`kio-eval` remained the dominant binary: its library block took 407.72/259.79
+seconds and its CLI block 63.28/60.10 seconds. These binary walls overlap no
+other binary, but individual tests within a block run concurrently; warning
+durations must not be summed.
 
-The independent Persona W0 lane also succeeded from a fresh target in
-138.275887 seconds = 2.304598 minutes, including the expected refusal of the
-second materialization, unchanged first-publication hashes, lease lifecycle,
-and filesystem attestation. The three known successful Linux command lanes sum
-to 10.810880 runner-equivalent minutes locally. The five-job aggregate remains
-unknown because current successful macOS and Windows cost operands are absent.
+## Critical-path planning evidence
+
+The older immutable `f50e8cc...` cohort is preserved rather than relabeled. Its
+cold/warm workspace-test values were 394.88/329.78 seconds for 2,216 passed,
+with 16/13 warnings, and its exact workflow-order `rust` and synthetic command
+lanes were 426.38 and 83.99689 seconds. Persona W0 was 138.275887 seconds.
+
+For the final candidate, combining the exact 744.24-second cold test operand
+with the latest topology-identical `f50e8cc...` fmt (1.13 s), Clippy (13.99 s),
+and synthetic (83.99689 s) operands gives a planning estimate of
+**843.35689 seconds = 14.055948 minutes** for `rust -> synthetic-history-eval`.
+It is below the 40-minute local target by 25.944052 minutes and the 45-minute
+reference by 30.944052 minutes. Because the operands are cohort-separated, this
+is not an exact same-run measurement, guarantee, GitHub success sample, or
+billing result. The configured five-job timeout sum is 140 minutes, below the
+250-minute reference, but the measured successful aggregate remains unknown
+without current macOS and Windows success operands.
+
+The bounded-runner delta validations remain green: Linux runner 18/18, U7
+14/14, OCR 10/10, all 18 synthetic commands, and Persona W0. Windows runtime
+remains CI-only confirmation; unknown is not substituted with zero.
 
 ## Non-current historical asset
 

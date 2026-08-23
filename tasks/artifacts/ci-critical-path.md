@@ -3,10 +3,10 @@
 The canonical measurements are in
 [`ci-cost-baseline.json`](ci-cost-baseline.json), and the signal/duplication
 ledger is [`ci-cost-unique-signal.md`](ci-cost-unique-signal.md). All values
-are cohort-bound. The current product changes end at `b849f7c...`, tree
-`3817b04...`, and workflow blob `bdc01e2...`; the clean-Linux cold/warm cost
-cohort remains bound to `f50e8cc...` / tree `477a8d9...` and is not relabeled
-as final-head cost. Earlier Phase C local values refer
+are cohort-bound. The current product changes end at `2c7db5d...`, tree
+`7ea87a6...`, and workflow blob `bdc01e2...`; the final-candidate clean-Linux
+cold/warm cohort is bound to the same head/tree. The older `f50e8cc...` / tree
+`477a8d9...` measurements remain historical and are not relabeled. Earlier Phase C local values refer
 to `2a85016...` / tree `49e4887...` / workflow `049c69c...`; GitHub attempt 1
 refers to `c9f334e...` / workflow `049c69c...`. They are not combined.
 
@@ -74,52 +74,54 @@ These are termination bounds, not runtime measurements, queue time, or billing
 minutes. The Windows branch therefore remains unknown for measured critical-path
 acceptance even though it has a finite 45-minute cap.
 
-## Phase F measured local Linux path estimate
+## Final-candidate measured Linux operand and path estimate
 
-At the exact `f50e8cc...` measurement head/tree/workflow identity, the clean
-Linux workspace test command succeeded in **394.88 seconds = 6.581333 minutes** and
-its immediate warm repeat succeeded in **329.78 seconds = 5.496333 minutes**.
-Both executed all 49 test binaries and 2,216 tests with zero failures or ignored
-tests. Those two samples cover only:
-
-```text
-cargo test --workspace --all-targets --locked --no-fail-fast
-```
-
-Separate fresh local Linux containers then replayed the exact workflow command
-order for the two dependent jobs:
+At exact product head `2c7db5d...`, tree `7ea87a6...`, and workflow blob
+`bdc01e2...`, the clean Linux workspace-test command succeeded cold in
+**744.24 seconds = 12.404 minutes** and warm in **491.76 seconds = 8.196
+minutes**. Both covered 49 result blocks and 2,219 passed tests with zero
+failures or ignored tests. The cold/warm pair covers only:
 
 ```text
-rust fmt                           =   1.13 s
-rust clippy                        =  13.99 s
-rust workspace test               = 411.26 s
-rust command sum                  = 426.38 s = 7.106333 min
-synthetic complete command lane   =  83.99689 s = 1.399948 min
-local dependency path estimate    = 510.37689 s = 8.506281 min
+cargo +1.98.0 test --workspace --all-targets --locked --no-fail-fast
 ```
 
-Both fresh-target jobs succeeded. Synthetic included its fresh
-release/all-features build and all scale, replay, cross-scope, rerank, and M3
-steps. The 8.506281-minute estimate is **below the 40-minute local target** with
-31.493719 minutes of margin and below the 45-minute GitHub reference with
-36.493719 minutes of margin.
+Every over-60-second progress warning—28 cold and 20 warm—later terminated
+`ok`. These warnings do not represent missing results or infinite waits. The
+failed pre-fix `57819593...` cold attempt is excluded: it exposed an inherited
+flock race, after which `2c7db5d...` passed 200 repeated parallel `kio-core`
+suite runs and the successful pair above.
 
-This is an exact local command-path estimate, not a GitHub workflow result. It
-excludes checkout, toolchain setup, GitHub queueing, runner-image differences,
-and every independent job. The successful-current GitHub critical path and
-aggregate therefore remain unknown. The finite configured dependency cap is 45
-minutes and the configured five-job aggregate cap is 140 minutes; caps are not
-runtime measurements.
+The latest topology-identical exact workflow-order operands remain attached to
+the separate `f50e8cc...` cohort:
 
-The independent Persona W0 command lane succeeded in 2.304598 minutes. The
-three measured `f50e8cc...` Linux job command lanes therefore sum to 10.810880
-runner-equivalent minutes locally. This is still not the five-job aggregate:
-current successful macOS and Windows cost operands are unknown.
+```text
+historical rust fmt                  =   1.13 s
+historical rust clippy               =  13.99 s
+current exact cold workspace test    = 744.24 s
+historical synthetic command lane    =  83.99689 s
+mixed-cohort planning estimate       = 843.35689 s = 14.055948 min
+```
 
-The later `b849f7c...` runner deadline fix kept the workflow blob unchanged and
-passed isolated Linux runner/U7/OCR, all Synthetic commands, and Persona W0
-delta validation. Its clean-Linux cold/warm cost was not remeasured, so the
-numeric path estimate above remains attached only to `f50e8cc...`.
+The estimate is below the 40-minute local target with 25.944052 minutes of
+margin and below the 45-minute GitHub reference with 30.944052 minutes of
+margin. It is deliberately labelled a planning estimate: it is not a same-run
+measurement, upper-bound guarantee, GitHub workflow result, queue/billing
+sample, or successful-current baseline.
+
+For historical comparison only, the exact `f50e8cc...` workflow sequence was
+426.38 seconds for `rust` and 83.99689 seconds for synthetic, or 8.506281
+minutes along the dependency path; its independent Persona W0 lane was
+2.304598 minutes. The `f50e8cc...` clean/warm workspace-test pair was
+394.88/329.78 seconds for 2,216 passed. Host load and later product tests differ,
+so these values are preserved rather than interpreted as a formal before/after
+percentage.
+
+The successful-current GitHub critical path and five-job aggregate remain
+unknown. The finite configured dependency cap is 45 minutes and configured
+aggregate cap is 140 minutes; caps are termination configuration, not measured
+runtime. Current successful macOS and Windows cost operands are absent, and
+unknown is never treated as zero.
 
 ## Matching GitHub attempt 1 (failure cohort)
 
@@ -151,13 +153,17 @@ RSS, I/O, and cache telemetry were unavailable and remain unknown.
   acceptance. Attempt 1 observed 54:59 under the older workflow, failed, and is
   not a current success sample. The Phase F workflow's configured
   `rust + synthetic` cap is 45 minutes; a cap is not a measured result.
-- Current local Linux command-path estimate: 8.506281 minutes — **below the
-  40-minute local planning target**, but not a GitHub acceptance sample.
+- Final-candidate local Linux dependency-path planning estimate: 14.055948
+  minutes — **below the 40-minute local planning target**, but mixed-cohort and
+  not a GitHub acceptance sample.
 - Aggregate runner-equivalent target: 250 minutes — **unknown**, because the
   successful Windows operand is missing. Attempt 1 observed 83:41 before its
   independent failures, but failure cost cannot establish success.
-- Current local known Linux subset: 10.810880 minutes — three successful job
-  command lanes only; insufficient to declare the five-job aggregate result.
+- Final-candidate exact cold workspace-test operand: 12.404 minutes — one
+  command only, insufficient to declare either the complete Rust job or the
+  five-job aggregate.
+- Historical `f50e8cc...` local known Linux subset: 10.810880 minutes — three
+  successful job command lanes only; context, not current aggregate evidence.
 - Prior Phase C observed known subset: 40.840167 minutes — context only,
   insufficient to declare aggregate success.
 - Prior Phase C known complete branch maximum: 23.464167 minutes — context only,
@@ -167,10 +173,10 @@ RSS, I/O, and cache telemetry were unavailable and remain unknown.
 
 ## Evidence and limits
 
-The prior Phase C samples came from isolated local cold validation at their
-exact product tree. Their raw evidence is ephemeral and non-authorizing; only
-the acquisition method and SHA-256 evidence-manifest digests are recorded in
-[`ci-cost-baseline.json`](ci-cost-baseline.json). The current Phase F candidate
+The prior and final-candidate local samples came from isolated validation at
+their exact product trees. Their raw evidence is ephemeral and non-authorizing;
+the acquisition method, per-binary values, and SHA-256 evidence digests are
+recorded in [`ci-cost-baseline.json`](ci-cost-baseline.json). The current Phase F candidate
 has zero matching GitHub attempts and zero matching successful runs. The one
 recorded attempt belongs to the older workflow and is a failure cohort. GitHub
 queue time and billing minutes are unknown, as are a successful Windows wall
