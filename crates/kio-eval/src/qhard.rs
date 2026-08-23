@@ -34,7 +34,9 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    boundary::sync_retained_directory,
+    boundary::{
+        directory_identity_from_file, directory_identity_from_path, sync_retained_directory,
+    },
     runner::{BoundedProcessOptions, DEFAULT_PROCESS_TIMEOUT, run_bounded_command},
 };
 
@@ -168,13 +170,21 @@ impl ControlledEnvironment {
                     name.to_string_lossy()
                 )));
             }
-            let opened = directory.handle.metadata().map_err(|e| {
+            let listed_identity = directory_identity_from_path(&directory.public_path, &listed)
+                .map_err(|e| {
+                    QhardError::Input(format!(
+                        "cannot inspect controlled environment directory {}: {e}",
+                        name.to_string_lossy()
+                    ))
+                })?;
+            let opened_identity = directory_identity_from_file(&directory.handle).map_err(|e| {
                 QhardError::Input(format!(
                     "cannot inspect retained controlled environment directory {}: {e}",
                     name.to_string_lossy()
                 ))
             })?;
-            if !same_directory(&listed, &opened) {
+            if !matches!((listed_identity, opened_identity), (Some(listed), Some(opened)) if listed == opened)
+            {
                 return Err(QhardError::Input(format!(
                     "controlled environment directory {} changed while bound",
                     name.to_string_lossy()
@@ -525,7 +535,7 @@ impl PrivateTreeSnapshot {
 struct RetainedDirectory {
     public_path: PathBuf,
     handle: fs::File,
-    identity: fs::Metadata,
+    sync_metadata: fs::Metadata,
 }
 
 impl RetainedDirectory {
@@ -538,6 +548,9 @@ impl RetainedDirectory {
                 "{label} must be a real directory"
             )));
         }
+        let listed_identity = directory_identity_from_path(path, &listed)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?
+            .ok_or_else(|| QhardError::Input(format!("{label} must have a stable identity")))?;
         let canonical = fs::canonicalize(path)
             .map_err(|e| QhardError::Input(format!("cannot canonicalize {label}: {e}")))?;
         let parent = canonical
@@ -554,17 +567,31 @@ impl RetainedDirectory {
         let opened = handle
             .metadata()
             .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
-        if !same_directory(&listed, &opened) {
+        let opened_identity = directory_identity_from_file(&handle)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?
+            .ok_or_else(|| QhardError::Input(format!("{label} must have a stable identity")))?;
+        if listed_identity != opened_identity {
             return Err(QhardError::Input(format!("{label} changed while binding")));
         }
         Ok(Self {
             public_path: canonical,
             handle,
-            identity: opened,
+            sync_metadata: opened,
         })
     }
 
     fn child(&self, name: &str, label: &str) -> Result<Self, QhardError> {
+        let public_path = self.public_path.join(name);
+        let listed = fs::symlink_metadata(&public_path)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?;
+        if listed.file_type().is_symlink() || !listed.is_dir() {
+            return Err(QhardError::Input(format!(
+                "{label} must be a real directory"
+            )));
+        }
+        let listed_identity = directory_identity_from_path(&public_path, &listed)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?
+            .ok_or_else(|| QhardError::Input(format!("{label} must have a stable identity")))?;
         let handle = cap_fs::open_dir_nofollow(&self.handle, Path::new(name)).map_err(|_| {
             QhardError::Input(format!("{label} must be a real non-reparse directory"))
         })?;
@@ -576,10 +603,16 @@ impl RetainedDirectory {
                 "{label} must be a real directory"
             )));
         }
+        let opened_identity = directory_identity_from_file(&handle)
+            .map_err(|e| QhardError::Input(format!("cannot inspect {label}: {e}")))?
+            .ok_or_else(|| QhardError::Input(format!("{label} must have a stable identity")))?;
+        if listed_identity != opened_identity {
+            return Err(QhardError::Input(format!("{label} changed while binding")));
+        }
         Ok(Self {
-            public_path: self.public_path.join(name),
+            public_path,
             handle,
-            identity,
+            sync_metadata: identity,
         })
     }
 
@@ -795,25 +828,9 @@ fn same_file(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
     }
     #[cfg(windows)]
     {
-        use cap_primitives::fs::MetadataExt;
-        left.volume_serial_number() == right.volume_serial_number()
-            && left.file_index() == right.file_index()
-    }
-    #[allow(unreachable_code)]
-    false
-}
-
-fn same_directory(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        return left.dev() == right.dev() && left.ino() == right.ino();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        left.volume_serial_number() == right.volume_serial_number()
-            && left.file_index() == right.file_index()
+        use cap_primitives::fs::_WindowsByHandle;
+        return left.volume_serial_number() == right.volume_serial_number()
+            && left.file_index() == right.file_index();
     }
     #[allow(unreachable_code)]
     false
@@ -1840,7 +1857,7 @@ pub fn write_report(
     let bytes = serde_json::to_vec_pretty(report)?;
     publish_report(
         &parent.handle,
-        &parent.identity,
+        &parent.sync_metadata,
         &parent.public_path,
         Path::new(name),
         &bytes,
@@ -4090,12 +4107,17 @@ fn runtime_public_root_matches_handle(
 ) -> Result<(), QhardError> {
     let listed = fs::symlink_metadata(path)
         .map_err(|e| QhardError::Input(format!("cannot inspect comparator runtime root: {e}")))?;
-    let retained = handle.handle.metadata().map_err(|e| {
+    let listed_identity = directory_identity_from_path(path, &listed)
+        .map_err(|e| QhardError::Input(format!("cannot inspect comparator runtime root: {e}")))?;
+    let retained_identity = directory_identity_from_file(&handle.handle).map_err(|e| {
         QhardError::Input(format!(
             "cannot inspect retained comparator runtime root: {e}"
         ))
     })?;
-    if listed.file_type().is_symlink() || !listed.is_dir() || !same_directory(&listed, &retained) {
+    if listed.file_type().is_symlink()
+        || !listed.is_dir()
+        || !matches!((listed_identity, retained_identity), (Some(listed), Some(retained)) if listed == retained)
+    {
         return Err(QhardError::Input(
             "comparator runtime public root changed while bound".into(),
         ));
@@ -5326,7 +5348,7 @@ pub fn write_baseline_report(
     }
     publish_report(
         &parent.handle,
-        &parent.identity,
+        &parent.sync_metadata,
         &parent.public_path,
         Path::new(
             absolute
@@ -5370,7 +5392,7 @@ pub fn write_baseline_attestation(
     }
     publish_report(
         &parent.handle,
-        &parent.identity,
+        &parent.sync_metadata,
         &parent.public_path,
         Path::new(
             absolute
@@ -5388,6 +5410,7 @@ mod tests {
         markdownize::MarkdownizeMode,
         task::{TaskDescriptor, TaskStatus, TaskStore, TaskType},
     };
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -5464,6 +5487,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn comparator_preflight_rejects_symlink_and_nonexecutable() {
         let dir = tempfile::tempdir().unwrap();
@@ -6472,6 +6496,7 @@ mod tests {
             0o600
         );
     }
+    #[cfg(unix)]
     #[test]
     fn scope_discovery_skips_symlink_and_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
@@ -6804,6 +6829,7 @@ mod tests {
         };
         assert!(environment.recheck_private_directories().is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn report_rejects_symlinked_parent() {
         let fixture = tempfile::tempdir().unwrap();

@@ -994,8 +994,8 @@ fn links(m: &cap_fs::Metadata) -> u64 {
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
-        return m.number_of_links().unwrap_or(0);
+        use cap_fs::_WindowsByHandle;
+        return u64::from(m.number_of_links().unwrap_or(0));
     }
     #[allow(unreachable_code)]
     0
@@ -1008,7 +1008,7 @@ fn same(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
+        use cap_fs::_WindowsByHandle;
         return a.volume_serial_number() == b.volume_serial_number()
             && a.file_index() == b.file_index();
     }
@@ -1025,7 +1025,7 @@ fn file_identity(metadata: &cap_fs::Metadata) -> FileIdentity {
 }
 #[cfg(windows)]
 fn file_identity(metadata: &cap_fs::Metadata) -> FileIdentity {
-    use cap_fs::MetadataExt;
+    use cap_fs::_WindowsByHandle;
     FileIdentity {
         volume: metadata.volume_serial_number().unwrap_or(0),
         index: metadata.file_index().unwrap_or(0),

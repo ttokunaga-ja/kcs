@@ -660,8 +660,8 @@ fn links(metadata: &cap_fs::Metadata) -> u64 {
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
-        return metadata.number_of_links().unwrap_or(0);
+        use cap_fs::_WindowsByHandle;
+        return u64::from(metadata.number_of_links().unwrap_or(0));
     }
     #[allow(unreachable_code)]
     0
@@ -678,7 +678,7 @@ fn identity(metadata: &cap_fs::Metadata) -> FileIdentity {
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
+        use cap_fs::_WindowsByHandle;
         FileIdentity {
             volume: metadata.volume_serial_number().unwrap_or(0),
             index: metadata.file_index().unwrap_or(0),

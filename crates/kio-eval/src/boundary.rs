@@ -22,6 +22,18 @@ const DEVICE_SUBDIRS: [&str; 6] = ["home", "config", "cache", "data", "state", "
 
 pub type BoundaryResult<T> = Result<T, BoundaryError>;
 
+/// An in-process identity for a real directory.
+///
+/// The Windows representation deliberately remains opaque: it is only valid
+/// for comparing a public path with the handle retained for this operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectoryIdentity {
+    #[cfg(unix)]
+    Unix { dev: u64, ino: u64 },
+    #[cfg(windows)]
+    Windows(kio_core::cas::WindowsDirectoryIdentity),
+}
+
 #[derive(Debug, Error)]
 #[error("unsafe evaluator corpus boundary at {path}: {message}")]
 pub struct BoundaryError {
@@ -371,6 +383,9 @@ fn open_canonical_directory(path: &Path) -> BoundaryResult<fs::File> {
             "corpus root must be a real directory",
         ));
     }
+    let listed_identity = directory_identity_from_path(path, &listed)
+        .map_err(|error| BoundaryError::io(path, error))?
+        .ok_or_else(|| BoundaryError::new(path, "corpus root must be a real directory"))?;
     let parent = path
         .parent()
         .ok_or_else(|| BoundaryError::new(path, "corpus root has no parent"))?;
@@ -381,10 +396,10 @@ fn open_canonical_directory(path: &Path) -> BoundaryResult<fs::File> {
         .map_err(|error| BoundaryError::io(parent, error))?;
     let handle = cap_fs::open_dir_nofollow(&parent_handle, Path::new(leaf))
         .map_err(|error| BoundaryError::io(path, error))?;
-    let opened = handle
-        .metadata()
-        .map_err(|error| BoundaryError::io(path, error))?;
-    if !same_directory_identity(&listed, &opened) {
+    let opened_identity = directory_identity_from_file(&handle)
+        .map_err(|error| BoundaryError::io(path, error))?
+        .ok_or_else(|| BoundaryError::new(path, "corpus root is not a real directory"))?;
+    if listed_identity != opened_identity {
         return Err(BoundaryError::new(
             path,
             "corpus root changed while opening",
@@ -436,20 +451,57 @@ fn open_runner_cwd(scope: &fs::File, path: &Path) -> BoundaryResult<fs::File> {
     cap_fs::open(scope, Path::new("."), &options).map_err(|error| BoundaryError::io(path, error))
 }
 
-pub(crate) fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+pub(crate) fn directory_identity_from_path(
+    path: &Path,
+    listed: &fs::Metadata,
+) -> io::Result<Option<DirectoryIdentity>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return before.dev() == after.dev() && before.ino() == after.ino();
+        let _ = path;
+        return Ok(
+            (listed.is_dir() && !listed.file_type().is_symlink()).then_some(
+                DirectoryIdentity::Unix {
+                    dev: listed.dev(),
+                    ino: listed.ino(),
+                },
+            ),
+        );
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        return before.volume_serial_number() == after.volume_serial_number()
-            && before.file_index() == after.file_index();
+        let _ = listed;
+        return kio_core::cas::windows_real_directory_identity(path)
+            .map(|identity| identity.map(DirectoryIdentity::Windows));
     }
     #[allow(unreachable_code)]
-    false
+    Ok(None)
+}
+
+pub(crate) fn directory_identity_from_file(
+    file: &fs::File,
+) -> io::Result<Option<DirectoryIdentity>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        return Ok(
+            (metadata.is_dir() && !metadata.file_type().is_symlink()).then_some(
+                DirectoryIdentity::Unix {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+            ),
+        );
+    }
+    #[cfg(windows)]
+    {
+        return Ok(
+            kio_core::cas::windows_directory_handle_identity(file).map(DirectoryIdentity::Windows)
+        );
+    }
+    #[allow(unreachable_code)]
+    Ok(None)
 }
 
 /// Durably flush a retained directory without relying on its capability handle
@@ -460,7 +512,7 @@ pub(crate) fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadat
 /// descriptor instead.
 pub(crate) fn sync_retained_directory(
     directory: &fs::File,
-    expected: &fs::Metadata,
+    _expected: &fs::Metadata,
     path: &Path,
 ) -> BoundaryResult<()> {
     #[cfg(unix)]
@@ -471,10 +523,12 @@ pub(crate) fn sync_retained_directory(
             ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
         let syncable = cap_fs::open(directory, Path::new("."), &options)
             .map_err(|error| BoundaryError::io(path, error))?;
-        let observed = syncable
-            .metadata()
+        let expected = directory_identity_from_file(directory)
             .map_err(|error| BoundaryError::io(path, error))?;
-        if !observed.is_dir() || !same_directory_identity(expected, &observed) {
+        let observed = directory_identity_from_file(&syncable)
+            .map_err(|error| BoundaryError::io(path, error))?;
+        if !matches!((expected, observed), (Some(expected), Some(observed)) if expected == observed)
+        {
             return Err(BoundaryError::new(
                 path,
                 "retained directory changed before sync",
@@ -486,14 +540,11 @@ pub(crate) fn sync_retained_directory(
     }
     #[cfg(windows)]
     {
-        let observed = directory
-            .metadata()
-            .map_err(|error| BoundaryError::io(path, error))?;
-        if !observed.is_dir() || !same_directory_identity(expected, &observed) {
-            return Err(BoundaryError::new(
-                path,
-                "retained directory changed before sync",
-            ));
+        if directory_identity_from_file(directory)
+            .map_err(|error| BoundaryError::io(path, error))?
+            .is_none()
+        {
+            return Err(BoundaryError::new(path, "retained directory is not real"));
         }
     }
     Ok(())

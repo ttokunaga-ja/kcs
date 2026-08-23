@@ -528,17 +528,19 @@ fn open_or_create_cache_parent(
         )));
     }
     #[cfg(windows)]
-    if !kio_core::cas::windows_directory_is_real(existing).map_err(|error| {
-        crate::IndexError::Schema(format!(
-            "inspect aggregator cache ancestor reparse state {}: {error}",
-            existing.display()
-        ))
-    })? {
-        return Err(crate::IndexError::Schema(format!(
-            "aggregator cache ancestor must not be a Windows reparse point: {}",
-            existing.display()
-        )));
-    }
+    let before_identity = kio_core::cas::windows_real_directory_identity(existing)
+        .map_err(|error| {
+            crate::IndexError::Schema(format!(
+                "inspect aggregator cache ancestor reparse state {}: {error}",
+                existing.display()
+            ))
+        })?
+        .ok_or_else(|| {
+            crate::IndexError::Schema(format!(
+                "aggregator cache ancestor must not be a Windows reparse point: {}",
+                existing.display()
+            ))
+        })?;
     let resolved_existing = std::fs::canonicalize(existing).map_err(|e| {
         crate::IndexError::Schema(format!(
             "resolve aggregator cache ancestor {}: {e}",
@@ -569,13 +571,7 @@ fn open_or_create_cache_parent(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        let opened = handle.metadata().map_err(|e| {
-            crate::IndexError::Schema(format!("inspect opened aggregator cache ancestor: {e}"))
-        })?;
-        if before.volume_serial_number() != opened.volume_serial_number()
-            || before.file_index() != opened.file_index()
-        {
+        if kio_core::cas::windows_directory_handle_identity(&handle) != Some(before_identity) {
             return Err(crate::IndexError::Schema(format!(
                 "aggregator cache ancestor changed while opening: {}",
                 existing.display()

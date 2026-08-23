@@ -54,6 +54,8 @@ use kio_core::cas::{
     ChunkObject, ContentObjectKind, MAX_RAW_OBJECT_BYTES, ObjectStore, canonical_json_bytes,
     fanout_path, is_hash, read_bounded_regular_file,
 };
+#[cfg(windows)]
+use kio_core::cas::{windows_directory_handle_identity, windows_real_directory_identity};
 use kio_core::dag::{CommitObject, CommitType, NormalizeRef, TreeObject};
 use kio_core::gc::{
     GcAutomationBinding, GcAutomationMode, GcSweepSession, SnapshotAutoBinding,
@@ -10082,34 +10084,36 @@ struct ChunkLedgerDir {
     handle: std::fs::File,
 }
 
+#[cfg(unix)]
 fn same_directory_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        return before.dev() == after.dev() && before.ino() == after.ino();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        return before.volume_serial_number() == after.volume_serial_number()
-            && before.file_index() == after.file_index();
-    }
-    #[allow(unreachable_code)]
-    false
+    use std::os::unix::fs::MetadataExt;
+
+    before.dev() == after.dev() && before.ino() == after.ino()
 }
 
 /// Open the repository's `.kio` root through its parent and keep that handle.
 /// A path-string open of `.kio/index` can otherwise follow a `.kio` symlink
 /// installed between validation and open.
 fn open_kio_root_dir(kio_dir: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
     let before = fs::symlink_metadata(kio_dir)
         .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
+    #[cfg(unix)]
     if before.file_type().is_symlink() || !before.is_dir() {
         return Err(KioError::io(
             "repository .kio root must be a real directory, not a symlink",
             kio_dir.display().to_string(),
         ));
     }
+    #[cfg(windows)]
+    let before = windows_real_directory_identity(kio_dir)
+        .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?
+        .ok_or_else(|| {
+            KioError::io(
+                "repository .kio root must be a real directory, not a reparse point",
+                kio_dir.display().to_string(),
+            )
+        })?;
     // A descriptor-bound child has already `fchdir`ed into the retained `.kio`
     // directory, so `.` is both its only operational store spelling and an
     // inode-stable authority. Do not recover a parent/leaf path in this case:
@@ -10133,10 +10137,16 @@ fn open_kio_root_dir(kio_dir: &Path) -> Result<std::fs::File> {
         .map_err(|error| KioError::io(error.to_string(), outer.display().to_string()))?;
     let root = cap_fs::open_dir_nofollow(&outer_handle, Path::new(leaf))
         .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
-    let after = root
-        .metadata()
-        .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
-    if !same_directory_identity(&before, &after) {
+    #[cfg(unix)]
+    let unchanged = {
+        let after = root
+            .metadata()
+            .map_err(|error| KioError::io(error.to_string(), kio_dir.display().to_string()))?;
+        same_directory_identity(&before, &after)
+    };
+    #[cfg(windows)]
+    let unchanged = windows_directory_handle_identity(&root) == Some(before);
+    if !unchanged {
         return Err(KioError::io(
             "repository .kio root changed while opening",
             kio_dir.display().to_string(),

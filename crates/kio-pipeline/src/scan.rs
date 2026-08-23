@@ -814,7 +814,7 @@ fn same_cap_directory_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata
 }
 #[cfg(windows)]
 fn same_cap_directory_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
-    use cap_fs::MetadataExt;
+    use cap_fs::_WindowsByHandle;
     left.volume_serial_number() == right.volume_serial_number()
         && left.file_index() == right.file_index()
 }
@@ -1375,7 +1375,7 @@ fn same_bound_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -
 
 #[cfg(windows)]
 fn same_bound_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
-    use cap_fs::MetadataExt;
+    use cap_fs::_WindowsByHandle;
     left.volume_serial_number() == right.volume_serial_number()
         && left.file_index() == right.file_index()
 }

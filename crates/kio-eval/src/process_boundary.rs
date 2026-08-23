@@ -513,7 +513,7 @@ fn file_identity(meta: &cap_fs::Metadata) -> FileIdentity {
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
+        use cap_fs::_WindowsByHandle;
         FileIdentity {
             volume: meta.volume_serial_number().unwrap_or(0),
             index: meta.file_index().unwrap_or(0),

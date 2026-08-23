@@ -18,6 +18,9 @@ use cap_primitives::{ambient_authority, fs as cap_fs};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::boundary::{
+    DirectoryIdentity, directory_identity_from_file, directory_identity_from_path,
+};
 #[cfg(target_os = "linux")]
 use crate::process_boundary::configure_descriptor_environment;
 use crate::process_boundary::{DescriptorExecutable, ProcessBoundaryError, configure_retained_cwd};
@@ -731,7 +734,14 @@ impl ReplayDevice {
             }
             let identity = cap_fs::Metadata::from_file(&file)
                 .map_err(|e| ReplayBoundaryError::io(state.path.join(&temp), e))
-                .map(|metadata| file_identity(&metadata))?;
+                .and_then(|metadata| {
+                    file_identity(&metadata).ok_or_else(|| {
+                        ReplayBoundaryError::unsafe_(
+                            state.path.join(&temp),
+                            "temporary manifest has no stable file identity",
+                        )
+                    })
+                })?;
             drop(file);
             Ok(StagedHistoryManifest {
                 boundary,
@@ -840,7 +850,14 @@ impl ReplayDevice {
         }
         let private_identity = cap_fs::Metadata::from_file(&out)
             .map_err(|e| ReplayBoundaryError::io(&bin_path, e))
-            .map(|metadata| file_identity(&metadata))?;
+            .and_then(|metadata| {
+                file_identity(&metadata).ok_or_else(|| {
+                    ReplayBoundaryError::unsafe_(
+                        &bin_path,
+                        "private binary has no stable file identity",
+                    )
+                })
+            })?;
         let mut read_options = cap_fs::OpenOptions::new();
         read_options
             .read(true)
@@ -849,7 +866,14 @@ impl ReplayDevice {
             .map_err(|e| ReplayBoundaryError::io(&bin_path, e))?;
         let reopened_identity = cap_fs::Metadata::from_file(&private_executable)
             .map_err(|e| ReplayBoundaryError::io(&bin_path, e))
-            .map(|metadata| file_identity(&metadata))?;
+            .and_then(|metadata| {
+                file_identity(&metadata).ok_or_else(|| {
+                    ReplayBoundaryError::unsafe_(
+                        &bin_path,
+                        "reopened private binary has no stable file identity",
+                    )
+                })
+            })?;
         if reopened_identity != private_identity {
             return Err(ReplayBoundaryError::unsafe_(
                 &bin_path,
@@ -996,8 +1020,8 @@ impl BoundExecutable {
         let retained_private = cap_fs::Metadata::from_file(&self.private_executable)
             .map_err(|e| ReplayBoundaryError::io(&self.path, e))?;
         if !retained_private.file_type().is_file()
-            || link_count(&retained_private) != 1
-            || file_identity(&retained_private) != self.private_identity
+            || link_count(&retained_private) != Some(1)
+            || file_identity(&retained_private) != Some(self.private_identity)
         {
             return Err(ReplayBoundaryError::unsafe_(
                 &self.path,
@@ -1033,35 +1057,6 @@ impl BoundExecutable {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DirectoryIdentity {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-    #[cfg(windows)]
-    volume: u32,
-    #[cfg(windows)]
-    index: u64,
-}
-fn directory_identity(metadata: &fs::Metadata) -> DirectoryIdentity {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        DirectoryIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        DirectoryIdentity {
-            volume: metadata.volume_serial_number().unwrap_or(0),
-            index: metadata.file_index().unwrap_or(0),
-        }
-    }
-}
 fn open_directory(path: &Path, label: &str) -> ReplayBoundaryResult<(fs::File, DirectoryIdentity)> {
     let listed = fs::symlink_metadata(path).map_err(|e| ReplayBoundaryError::io(path, e))?;
     if listed.file_type().is_symlink() || !listed.is_dir() {
@@ -1070,6 +1065,9 @@ fn open_directory(path: &Path, label: &str) -> ReplayBoundaryResult<(fs::File, D
             format!("{label} must be a real directory"),
         ));
     }
+    let listed_identity = directory_identity_from_path(path, &listed)
+        .map_err(|e| ReplayBoundaryError::io(path, e))?
+        .ok_or_else(|| ReplayBoundaryError::unsafe_(path, "directory has no stable identity"))?;
     let parent = path
         .parent()
         .ok_or_else(|| ReplayBoundaryError::unsafe_(path, "directory has no parent"))?;
@@ -1096,13 +1094,16 @@ fn open_directory(path: &Path, label: &str) -> ReplayBoundaryResult<(fs::File, D
             format!("{label} must remain a directory while binding"),
         ));
     }
-    if directory_identity(&listed) != directory_identity(&opened) {
+    let opened_identity = directory_identity_from_file(&handle)
+        .map_err(|e| ReplayBoundaryError::io(path, e))?
+        .ok_or_else(|| ReplayBoundaryError::unsafe_(path, "directory has no stable identity"))?;
+    if listed_identity != opened_identity {
         return Err(ReplayBoundaryError::unsafe_(
             path,
             "directory changed while binding",
         ));
     }
-    Ok((handle, directory_identity(&opened)))
+    Ok((handle, opened_identity))
 }
 
 /// Open every lexical ancestor nofollow. macOS's two OS-owned aliases are
@@ -1172,6 +1173,16 @@ fn open_child_directory(
     path: &Path,
     label: &str,
 ) -> ReplayBoundaryResult<(fs::File, DirectoryIdentity)> {
+    let listed = fs::symlink_metadata(path).map_err(|e| ReplayBoundaryError::io(path, e))?;
+    if listed.file_type().is_symlink() || !listed.is_dir() {
+        return Err(ReplayBoundaryError::unsafe_(
+            path,
+            format!("{label} must be a real directory"),
+        ));
+    }
+    let listed_identity = directory_identity_from_path(path, &listed)
+        .map_err(|e| ReplayBoundaryError::io(path, e))?
+        .ok_or_else(|| ReplayBoundaryError::unsafe_(path, "directory has no stable identity"))?;
     let mut options = cap_fs::OpenOptions::new();
     options
         .read(true)
@@ -1191,7 +1202,16 @@ fn open_child_directory(
             format!("{label} must remain a directory while binding"),
         ));
     }
-    Ok((handle, directory_identity(&metadata)))
+    let opened_identity = directory_identity_from_file(&handle)
+        .map_err(|e| ReplayBoundaryError::io(path, e))?
+        .ok_or_else(|| ReplayBoundaryError::unsafe_(path, "directory has no stable identity"))?;
+    if listed_identity != opened_identity {
+        return Err(ReplayBoundaryError::unsafe_(
+            path,
+            "directory changed while binding",
+        ));
+    }
+    Ok((handle, opened_identity))
 }
 fn normal_component(value: &str, label: &str) -> ReplayBoundaryResult<()> {
     let mut parts = Path::new(value).components();
@@ -1267,8 +1287,8 @@ fn observed_file_at(
         .map_err(|e| ReplayBoundaryError::io(label.join(path), e))?;
     if !before.file_type().is_file()
         || before.len() > maximum
-        || link_count(&before) == 0
-        || (require_single_link && link_count(&before) != 1)
+        || !matches!(link_count(&before), Some(1..))
+        || (require_single_link && link_count(&before) != Some(1))
     {
         return Err(ReplayBoundaryError::unsafe_(
             label.join(path),
@@ -1286,10 +1306,11 @@ fn observed_file_at(
         .map_err(|e| ReplayBoundaryError::io(label.join(path), e))?;
     if !opened.file_type().is_file()
         || opened.len() > maximum
-        || link_count(&opened) == 0
-        || (require_single_link && link_count(&opened) != 1)
+        || !matches!(link_count(&opened), Some(1..))
+        || (require_single_link && link_count(&opened) != Some(1))
         || file_identity(&before) != file_identity(&opened)
         || file_identity(&opened) != file_identity(&after)
+        || file_identity(&opened).is_none()
         || link_count(&before) != link_count(&opened)
         || link_count(&opened) != link_count(&after)
     {
@@ -1315,7 +1336,9 @@ fn observed_file_at(
     };
     Ok(ObservedFile {
         bytes,
-        identity: file_identity(&opened),
+        identity: file_identity(&opened).ok_or_else(|| {
+            ReplayBoundaryError::unsafe_(label.join(path), "file has no stable identity")
+        })?,
         #[cfg(unix)]
         executable,
     })
@@ -1555,34 +1578,34 @@ struct FileIdentity {
     #[cfg(windows)]
     index: u64,
 }
-fn file_identity(m: &cap_fs::Metadata) -> FileIdentity {
+fn file_identity(m: &cap_fs::Metadata) -> Option<FileIdentity> {
     #[cfg(unix)]
     {
         use cap_fs::MetadataExt;
-        FileIdentity {
+        Some(FileIdentity {
             dev: m.dev(),
             ino: m.ino(),
-        }
+        })
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
-        FileIdentity {
-            volume: m.volume_serial_number().unwrap_or(0),
-            index: m.file_index().unwrap_or(0),
-        }
+        use cap_fs::_WindowsByHandle;
+        Some(FileIdentity {
+            volume: m.volume_serial_number()?,
+            index: m.file_index()?,
+        })
     }
 }
-fn link_count(m: &cap_fs::Metadata) -> u64 {
+fn link_count(m: &cap_fs::Metadata) -> Option<u64> {
     #[cfg(unix)]
     {
         use cap_fs::MetadataExt;
-        m.nlink()
+        Some(m.nlink())
     }
     #[cfg(windows)]
     {
-        use cap_fs::MetadataExt;
-        m.number_of_links().unwrap_or(0)
+        use cap_fs::_WindowsByHandle;
+        m.number_of_links().map(u64::from)
     }
 }
 fn direct_entries(
@@ -1606,7 +1629,7 @@ fn direct_entries(
         normal_component(&name, "directory entry name")?;
         let metadata = cap_fs::stat(root, Path::new(&name), cap_fs::FollowSymlinks::No)
             .map_err(|e| ReplayBoundaryError::io(public.join(&name), e))?;
-        if metadata.file_type().is_file() && link_count(&metadata) == 1 {
+        if metadata.file_type().is_file() && link_count(&metadata) == Some(1) {
             total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
                 ReplayBoundaryError::unsafe_(public, "direct-entry byte accounting overflow")
             })?;

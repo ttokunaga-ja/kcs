@@ -8,6 +8,8 @@ use crate::{
     scale_fixture::ValidatedFixture,
     scale_spec::{self, SCOPES, ScaleScope},
 };
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle;
 #[cfg(unix)]
 use cap_primitives::fs::MetadataExt;
 use cap_primitives::{ambient_authority, fs as cap_fs};
@@ -451,7 +453,6 @@ fn leaf_identity(metadata: &cap_fs::Metadata) -> LeafIdentity {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
         LeafIdentity {
             volume: metadata.volume_serial_number(),
             index: metadata.file_index(),
@@ -471,7 +472,6 @@ fn same(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
         return a.volume_serial_number() == b.volume_serial_number()
             && a.file_index() == b.file_index();
     }
@@ -1952,13 +1952,17 @@ fn is_official_output(path: &Path, fixture: &ValidatedFixture) -> Result<bool, A
     };
     let parent_metadata = fs::symlink_metadata(parent)
         .map_err(|error| unsafe_state(format!("cannot inspect official output parent: {error}")))?;
-    let root_metadata = fixture
-        .try_clone_root()?
-        .metadata()
+    let parent_identity = crate::boundary::directory_identity_from_path(parent, &parent_metadata)
+        .map_err(|error| {
+        unsafe_state(format!("cannot inspect official output parent: {error}"))
+    })?;
+    let root = fixture.try_clone_root()?;
+    let root_identity = crate::boundary::directory_identity_from_file(&root)
         .map_err(|error| unsafe_state(format!("cannot inspect fixture root: {error}")))?;
-    Ok(!parent_metadata.file_type().is_symlink()
-        && crate::boundary::same_directory_identity(&parent_metadata, &root_metadata)
-        && absolute.file_name() == Some(std::ffi::OsStr::new(scale_spec::ATTESTATION_NAME)))
+    Ok(
+        matches!((parent_identity, root_identity), (Some(parent), Some(root)) if parent == root)
+            && absolute.file_name() == Some(std::ffi::OsStr::new(scale_spec::ATTESTATION_NAME)),
+    )
 }
 
 fn absolute_clean(path: &Path) -> Result<PathBuf, AttestError> {
@@ -2038,10 +2042,10 @@ fn publish_external(
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .ok_or_else(|| unsafe_state("external output has an unsafe leaf"))?;
-    let corpus_identity = fixture
-        .try_clone_root()?
-        .metadata()
-        .map_err(|error| other("corpus", error))?;
+    let corpus = fixture.try_clone_root()?;
+    let corpus_identity = crate::boundary::directory_identity_from_file(&corpus)
+        .map_err(|error| other("corpus", error))?
+        .ok_or_else(|| unsafe_state("corpus root is not a real directory"))?;
     let mut handle = cap_fs::open_ambient_dir(Path::new("/"), ambient_authority())
         .map_err(|error| other("external output root", error))?;
     let mut retained_path = PathBuf::from("/");
@@ -2050,18 +2054,22 @@ fn publish_external(
             handle = cap_fs::open_dir_nofollow(&handle, Path::new(part))
                 .map_err(|error| other("external output parent", error))?;
             retained_path.push(part);
-            let retained = handle
-                .metadata()
-                .map_err(|error| other("external output parent", error))?;
             let public = fs::symlink_metadata(&retained_path)
                 .map_err(|error| other("external output parent", error))?;
-            if !retained.is_dir()
-                || public.file_type().is_symlink()
-                || !crate::boundary::same_directory_identity(&retained, &public)
-            {
+            let public_identity =
+                crate::boundary::directory_identity_from_path(&retained_path, &public)
+                    .map_err(|error| other("external output parent", error))?;
+            let retained_identity = crate::boundary::directory_identity_from_file(&handle)
+                .map_err(|error| other("external output parent", error))?;
+            let Some(retained_identity) = retained_identity else {
+                return Err(unsafe_state(
+                    "external output parent is not a real directory",
+                ));
+            };
+            if public_identity != Some(retained_identity) {
                 return Err(unsafe_state("external output parent changed while binding"));
             }
-            if crate::boundary::same_directory_identity(&retained, &corpus_identity) {
+            if retained_identity == corpus_identity {
                 return Err(unsafe_state(
                     "external attestation output aliases the corpus",
                 ));
@@ -2147,7 +2155,7 @@ fn publish_in_parent(
     {
         return Err(unsafe_state("attestation staging bytes differ from report"));
     }
-    recheck_public_parent(target_path, target_metadata)?;
+    recheck_public_parent(target_path, target_parent)?;
     crate::scale_fixture::rename_noreplace(staging_parent, &temp, target_parent, leaf)
         .map_err(AttestError::Fixture)?;
     let verification = (|| -> Result<(), AttestError> {
@@ -2168,7 +2176,7 @@ fn publish_in_parent(
                 "published attestation differs from staged binding",
             ));
         }
-        recheck_public_parent(target_path, target_metadata)?;
+        recheck_public_parent(target_path, target_parent)?;
         let reread = observed_regular(
             target_parent,
             leaf,
@@ -2186,12 +2194,14 @@ fn publish_in_parent(
     verification.map_err(|error| AttestError::Indeterminate(error.to_string()))
 }
 
-fn recheck_public_parent(path: &Path, expected: &fs::Metadata) -> Result<(), AttestError> {
+fn recheck_public_parent(path: &Path, retained: &fs::File) -> Result<(), AttestError> {
     let public = fs::symlink_metadata(path)
         .map_err(|error| unsafe_state(format!("cannot recheck public output parent: {error}")))?;
-    if public.file_type().is_symlink()
-        || !public.is_dir()
-        || !crate::boundary::same_directory_identity(expected, &public)
+    let public_identity = crate::boundary::directory_identity_from_path(path, &public)
+        .map_err(|error| unsafe_state(format!("cannot recheck public output parent: {error}")))?;
+    let retained_identity = crate::boundary::directory_identity_from_file(retained)
+        .map_err(|error| unsafe_state(format!("cannot recheck public output parent: {error}")))?;
+    if !matches!((public_identity, retained_identity), (Some(public), Some(retained)) if public == retained)
     {
         return Err(unsafe_state(
             "public output parent changed during publication",
@@ -2356,10 +2366,10 @@ mod publication_tests {
         let parent = temp.path().join("output");
         let displaced = temp.path().join("displaced");
         fs::create_dir(&parent).unwrap();
-        let expected = fs::metadata(&parent).unwrap();
+        let retained = cap_fs::open_ambient_dir(&parent, ambient_authority()).unwrap();
         fs::rename(&parent, &displaced).unwrap();
         fs::create_dir(&parent).unwrap();
-        assert!(recheck_public_parent(&parent, &expected).is_err());
+        assert!(recheck_public_parent(&parent, &retained).is_err());
     }
 
     #[cfg(unix)]

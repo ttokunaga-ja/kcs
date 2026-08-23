@@ -10,7 +10,10 @@ use std::{
 use cap_primitives::{ambient_authority, fs as cap_fs};
 use thiserror::Error;
 
-use crate::boundary::{same_directory_identity, sync_retained_directory};
+use crate::boundary::{
+    DirectoryIdentity, directory_identity_from_file, directory_identity_from_path,
+    sync_retained_directory,
+};
 
 #[derive(Debug, Error)]
 #[error("{0}")]
@@ -21,7 +24,7 @@ pub struct ArtifactError(String);
 pub struct CreateOnlyArtifact {
     parent: fs::File,
     parent_path: PathBuf,
-    parent_identity: fs::Metadata,
+    parent_identity: DirectoryIdentity,
     name: OsString,
     public_path: PathBuf,
     label: &'static str,
@@ -63,14 +66,18 @@ impl CreateOnlyArtifact {
             .map_err(|error| ArtifactError(format!("cannot retain {label} parent: {error}")))?;
         let listed_parent = fs::symlink_metadata(&canonical_parent)
             .map_err(|error| ArtifactError(format!("cannot inspect {label} parent: {error}")))?;
-        let parent_identity = parent
-            .metadata()
+        let listed_identity = directory_identity_from_path(&canonical_parent, &listed_parent)
             .map_err(|error| ArtifactError(format!("cannot inspect {label} parent: {error}")))?;
-        if !same_directory_identity(&listed_parent, &parent_identity) {
-            return Err(ArtifactError(format!(
-                "{label} parent changed while it was retained"
-            )));
-        }
+        let parent_identity = directory_identity_from_file(&parent)
+            .map_err(|error| ArtifactError(format!("cannot inspect {label} parent: {error}")))?;
+        let parent_identity = match (listed_identity, parent_identity) {
+            (Some(listed), Some(opened)) if listed == opened => opened,
+            _ => {
+                return Err(ArtifactError(format!(
+                    "{label} parent changed while it was retained"
+                )));
+            }
+        };
         match cap_fs::stat(&parent, Path::new(&name), cap_fs::FollowSymlinks::No) {
             Ok(_) => {
                 return Err(ArtifactError(format!(
@@ -114,9 +121,12 @@ impl CreateOnlyArtifact {
                 self.label
             )));
         }
-        sync_retained_directory(&self.parent, &self.parent_identity, &self.parent_path).map_err(
-            |error| ArtifactError(format!("cannot sync {} directory: {error}", self.label)),
-        )?;
+        let metadata = self.parent.metadata().map_err(|error| {
+            ArtifactError(format!("cannot inspect {} parent: {error}", self.label))
+        })?;
+        sync_retained_directory(&self.parent, &metadata, &self.parent_path).map_err(|error| {
+            ArtifactError(format!("cannot sync {} directory: {error}", self.label))
+        })?;
         self.recheck_parent()?;
         Ok(())
     }
@@ -125,11 +135,15 @@ impl CreateOnlyArtifact {
         let listed = fs::symlink_metadata(&self.parent_path).map_err(|error| {
             ArtifactError(format!("cannot recheck {} parent: {error}", self.label))
         })?;
-        let opened = self.parent.metadata().map_err(|error| {
+        let listed_identity =
+            directory_identity_from_path(&self.parent_path, &listed).map_err(|error| {
+                ArtifactError(format!("cannot recheck {} parent: {error}", self.label))
+            })?;
+        let opened_identity = directory_identity_from_file(&self.parent).map_err(|error| {
             ArtifactError(format!("cannot recheck {} parent: {error}", self.label))
         })?;
-        if !same_directory_identity(&self.parent_identity, &opened)
-            || !same_directory_identity(&self.parent_identity, &listed)
+        if listed_identity != Some(self.parent_identity)
+            || opened_identity != Some(self.parent_identity)
         {
             return Err(ArtifactError(format!(
                 "{} parent changed before publication",

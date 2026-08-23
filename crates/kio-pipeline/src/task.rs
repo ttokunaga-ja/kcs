@@ -615,13 +615,32 @@ fn open_checked_store_dir(destination_kio: &Path) -> Result<fs::File> {
             "Kio store root is not a real directory",
         ));
     }
+    // `std::os::windows::fs::MetadataExt` exposes the identity fields behind
+    // an unstable API on Rust 1.98. More importantly, metadata obtained by
+    // re-resolving this public path after opening it would not bind the
+    // directory handle we will use. Capture a real-directory identity before
+    // canonicalization and compare it with the opened handle below.
+    #[cfg(windows)]
+    let listed_identity = kio_core::cas::windows_real_directory_identity(destination_kio)
+        .pipeline_io(destination_kio)?
+        .ok_or_else(|| {
+            PipelineError::corrupt(
+                destination_kio.display().to_string(),
+                "Kio store root is not a real directory",
+            )
+        })?;
     let canonical = destination_kio
         .canonicalize()
         .pipeline_io(destination_kio)?;
     let directory =
         cap_fs::open_ambient_dir(&canonical, ambient_authority()).pipeline_io(destination_kio)?;
     let opened = cap_fs::Metadata::from_file(&directory).pipeline_io(destination_kio)?;
-    if !opened.file_type().is_dir() || !same_store_directory_identity(&listed, &opened) {
+    #[cfg(windows)]
+    let identity_matches =
+        kio_core::cas::windows_directory_handle_identity(&directory) == Some(listed_identity);
+    #[cfg(not(windows))]
+    let identity_matches = same_store_directory_identity(&listed, &opened);
+    if !opened.file_type().is_dir() || !identity_matches {
         return Err(PipelineError::corrupt(
             destination_kio.display().to_string(),
             "Kio store root changed while it was being opened",
@@ -759,14 +778,6 @@ fn same_store_directory_identity(listed: &fs::Metadata, opened: &cap_fs::Metadat
     listed.dev() == opened.dev() && listed.ino() == opened.ino()
 }
 
-#[cfg(windows)]
-fn same_store_directory_identity(listed: &fs::Metadata, opened: &cap_fs::Metadata) -> bool {
-    use cap_fs::MetadataExt as CapMetadataExt;
-    use std::os::windows::fs::MetadataExt as StdMetadataExt;
-    listed.volume_serial_number() == opened.volume_serial_number()
-        && listed.file_index() == opened.file_index()
-}
-
 #[cfg(not(any(unix, windows)))]
 fn same_store_directory_identity(_listed: &fs::Metadata, opened: &cap_fs::Metadata) -> bool {
     opened.file_type().is_dir()
@@ -796,7 +807,7 @@ fn same_cap_file_state(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> boo
 
 #[cfg(windows)]
 fn same_cap_file_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
-    use cap_fs::MetadataExt;
+    use cap_fs::_WindowsByHandle;
     left.volume_serial_number() == right.volume_serial_number()
         && left.file_index() == right.file_index()
 }

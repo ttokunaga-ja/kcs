@@ -259,6 +259,20 @@ fn bind_source_index(
                     root.display()
                 )));
             }
+            #[cfg(windows)]
+            let before_root_identity = kio_core::cas::windows_real_directory_identity(root)
+                .map_err(|e| {
+                    IndexError::Schema(format!(
+                        "inspect source index root reparse state {}: {e}",
+                        root.display()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    IndexError::Schema(format!(
+                        "source index root must be a real directory, not a reparse point: {}",
+                        root.display()
+                    ))
+                })?;
             let outer_handle = cap_fs::open_ambient_dir(outer, cap_primitives::ambient_authority())
                 .map_err(|e| {
                     IndexError::Schema(format!(
@@ -270,13 +284,19 @@ fn bind_source_index(
                 .map_err(|e| {
                     IndexError::Schema(format!("open source index root {}: {e}", root.display()))
                 })?;
+            #[cfg(not(windows))]
             let opened_root = root_handle.metadata().map_err(|e| {
                 IndexError::Schema(format!(
                     "inspect opened source index root {}: {e}",
                     root.display()
                 ))
             })?;
-            if !same_std_and_cap_directory(&before_root, &opened_root) {
+            #[cfg(not(windows))]
+            let root_matches = same_std_and_cap_directory(&before_root, &opened_root);
+            #[cfg(windows)]
+            let root_matches = kio_core::cas::windows_directory_handle_identity(&root_handle)
+                == Some(before_root_identity);
+            if !root_matches {
                 return Err(IndexError::Schema(format!(
                     "source index root changed while opening: {}",
                     root.display()
@@ -295,12 +315,27 @@ fn bind_source_index(
     } else {
         // A bare relative path has no repository-root component to bind. Keep
         // the old lstat/open/identity check for that API convenience case.
+        #[cfg(not(windows))]
         let before = std::fs::symlink_metadata(parent).map_err(|e| {
             IndexError::Schema(format!(
                 "inspect source index parent {}: {e}",
                 parent.display()
             ))
         })?;
+        #[cfg(windows)]
+        let before_identity = kio_core::cas::windows_real_directory_identity(parent)
+            .map_err(|e| {
+                IndexError::Schema(format!(
+                    "inspect source index parent reparse state {}: {e}",
+                    parent.display()
+                ))
+            })?
+            .ok_or_else(|| {
+                IndexError::Schema(format!(
+                    "source index parent must be a real directory, not a reparse point: {}",
+                    parent.display()
+                ))
+            })?;
         let handle = cap_fs::open_ambient_dir(parent, cap_primitives::ambient_authority())
             .map_err(|e| {
                 IndexError::Schema(format!(
@@ -308,13 +343,19 @@ fn bind_source_index(
                     parent.display()
                 ))
             })?;
+        #[cfg(not(windows))]
         let after = handle.metadata().map_err(|e| {
             IndexError::Schema(format!(
                 "inspect opened source index parent {}: {e}",
                 parent.display()
             ))
         })?;
-        if !same_std_and_cap_directory(&before, &after) {
+        #[cfg(not(windows))]
+        let parent_matches = same_std_and_cap_directory(&before, &after);
+        #[cfg(windows)]
+        let parent_matches =
+            kio_core::cas::windows_directory_handle_identity(&handle) == Some(before_identity);
+        if !parent_matches {
             return Err(IndexError::Schema(format!(
                 "source index parent changed while opening: {}",
                 parent.display()
@@ -459,15 +500,19 @@ fn source_file_state(file: &std::fs::File) -> Result<SourceFileState> {
 
 #[cfg(windows)]
 fn source_file_state(file: &std::fs::File) -> Result<SourceFileState> {
+    use cap_fs::_WindowsByHandle;
     use std::os::windows::fs::MetadataExt;
     let metadata = file
         .metadata()
         .map_err(|error| IndexError::Schema(format!("inspect GC source index state: {error}")))?;
+    let by_handle = cap_fs::Metadata::from_file(file).map_err(|error| {
+        IndexError::Schema(format!("inspect GC source index handle state: {error}"))
+    })?;
     let modified = metadata.last_write_time();
     Ok(SourceFileState {
         identity: SourceFileIdentity {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index: metadata.file_index(),
+            volume_serial_number: by_handle.volume_serial_number(),
+            file_index: by_handle.file_index(),
         },
         len: metadata.file_size(),
         modified_seconds: i64::try_from(modified / 10_000_000).unwrap_or(i64::MAX),
@@ -545,12 +590,21 @@ fn cap_source_leaf_identity(
     parent: &std::fs::File,
     leaf: &Path,
 ) -> Result<Option<SourceFileIdentity>> {
-    use cap_fs::MetadataExt;
+    use cap_fs::_WindowsByHandle;
     match cap_fs::stat(parent, leaf, cap_fs::FollowSymlinks::No) {
-        Ok(metadata) if metadata.is_file() => Ok(Some(SourceFileIdentity {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index: metadata.file_index(),
-        })),
+        Ok(metadata) if metadata.is_file() && metadata.number_of_links() == Some(1) => {
+            Ok(Some(SourceFileIdentity {
+                volume_serial_number: metadata.volume_serial_number(),
+                file_index: metadata.file_index(),
+            }))
+        }
+        Ok(metadata) if metadata.is_file() => Err(IndexError::Schema(format!(
+            "source index target must have exactly one hard link (found {}): {}",
+            metadata
+                .number_of_links()
+                .map_or_else(|| "unknown".to_owned(), |links| links.to_string()),
+            leaf.display()
+        ))),
         Ok(_) => Err(IndexError::Schema(format!(
             "source index target is not a regular file: {}",
             leaf.display()
@@ -582,7 +636,6 @@ fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
         ino: m.ino(),
     })
 }
-
 /// Return a stable, marker-safe representation of the primary SQLite file's
 /// platform identity.  This intentionally has no pathname component: it is
 /// the identity of the retained descriptor, and is compared with a fresh
@@ -801,9 +854,8 @@ fn source_file_identity(_: &std::fs::File) -> Result<SourceFileIdentity> {
 }
 #[cfg(windows)]
 fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = file
-        .metadata()
+    use cap_fs::_WindowsByHandle;
+    let metadata = cap_fs::Metadata::from_file(file)
         .map_err(|e| IndexError::Schema(format!("inspect opened source index: {e}")))?;
     Ok(SourceFileIdentity {
         volume_serial_number: metadata.volume_serial_number(),
@@ -815,12 +867,6 @@ fn source_file_identity(file: &std::fs::File) -> Result<SourceFileIdentity> {
 fn same_std_and_cap_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     before.dev() == after.dev() && before.ino() == after.ino()
-}
-#[cfg(windows)]
-fn same_std_and_cap_directory(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    before.volume_serial_number() == after.volume_serial_number()
-        && before.file_index() == after.file_index()
 }
 #[cfg(not(any(unix, windows)))]
 fn same_std_and_cap_directory(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
@@ -847,6 +893,25 @@ fn validate_bound_source_file(file: &std::fs::File, path: &Path) -> Result<()> {
             return Err(IndexError::Schema(format!(
                 "source index target must have exactly one hard link (found {}): {}",
                 metadata.nlink(),
+                path.display()
+            )));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs::_WindowsByHandle;
+        let by_handle = cap_fs::Metadata::from_file(file).map_err(|error| {
+            IndexError::Schema(format!(
+                "inspect opened source index handle {}: {error}",
+                path.display()
+            ))
+        })?;
+        if by_handle.number_of_links() != Some(1) {
+            return Err(IndexError::Schema(format!(
+                "source index target must have exactly one hard link (found {}): {}",
+                by_handle
+                    .number_of_links()
+                    .map_or_else(|| "unknown".to_owned(), |links| links.to_string()),
                 path.display()
             )));
         }
@@ -4076,9 +4141,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn source_index_hardlinks_are_rejected_without_touching_the_other_path() {
+        #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4105,8 +4171,29 @@ mod tests {
         .expect_err("helper must reject a hardlinked source index");
         assert!(error.to_string().contains("exactly one hard link"));
         assert_eq!(std::fs::read(&target).unwrap(), before);
-        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
-        assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+        #[cfg(unix)]
+        {
+            assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 2);
+            assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+        }
+        #[cfg(windows)]
+        {
+            use cap_fs::_WindowsByHandle;
+            let target = std::fs::File::open(&target).unwrap();
+            let path = std::fs::File::open(&path).unwrap();
+            assert_eq!(
+                cap_fs::Metadata::from_file(&target)
+                    .unwrap()
+                    .number_of_links(),
+                Some(2)
+            );
+            assert_eq!(
+                cap_fs::Metadata::from_file(&path)
+                    .unwrap()
+                    .number_of_links(),
+                Some(2)
+            );
+        }
     }
 
     #[cfg(unix)]

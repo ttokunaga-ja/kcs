@@ -11,6 +11,8 @@ use std::{
 };
 
 use cap_primitives::fs as cap_fs;
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle;
 #[cfg(unix)]
 use cap_primitives::fs::MetadataExt;
 use kio_core::cas::canonical_json_bytes;

@@ -927,12 +927,9 @@ fn verify_published(
     recheck_parent(parent)?;
     let root = cap_fs::open_dir_nofollow(&parent.handle, Path::new(&parent.leaf))?;
     let metadata = cap_fs::Metadata::from_file(&root)?;
-    #[cfg(unix)]
-    use cap_fs::MetadataExt;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || staged.dev() != metadata.dev()
-        || staged.ino() != metadata.ino()
+        || !same_directory_cap(staged, &metadata)
     {
         return bad("published root identity invalid");
     }
@@ -1017,17 +1014,34 @@ fn recheck_named_directory(
     name: &str,
     expected: &cap_fs::Metadata,
 ) -> Result<(), PersonaScaffoldError> {
-    #[cfg(unix)]
-    use cap_fs::MetadataExt;
     let named = cap_fs::stat(&parent.handle, Path::new(name), cap_fs::FollowSymlinks::No)?;
-    if !named.is_dir()
-        || named.file_type().is_symlink()
-        || expected.dev() != named.dev()
-        || expected.ino() != named.ino()
-    {
+    if !named.is_dir() || named.file_type().is_symlink() || !same_directory_cap(expected, &named) {
         return bad("named directory identity changed");
     }
     Ok(())
+}
+#[cfg(unix)]
+fn same_directory_cap(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
+    use cap_fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+#[cfg(windows)]
+fn same_directory_cap(a: &cap_fs::Metadata, b: &cap_fs::Metadata) -> bool {
+    use cap_fs::_WindowsByHandle;
+    matches!(
+        (
+            a.volume_serial_number(),
+            a.file_index(),
+            b.volume_serial_number(),
+            b.file_index(),
+        ),
+        (Some(a_volume), Some(a_index), Some(b_volume), Some(b_index))
+            if a_volume == b_volume && a_index == b_index
+    )
+}
+#[cfg(not(any(unix, windows)))]
+fn same_directory_cap(_: &cap_fs::Metadata, _: &cap_fs::Metadata) -> bool {
+    false
 }
 #[cfg(unix)]
 fn validate_parent_permissions(metadata: &fs::Metadata) -> Result<(), PersonaScaffoldError> {
