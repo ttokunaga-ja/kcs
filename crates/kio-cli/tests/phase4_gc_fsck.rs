@@ -96,6 +96,12 @@ fn fixture_with_index(with_index: bool) -> (TempDir, String, String) {
 }
 
 fn current_index_state(dir: &TempDir) -> GcIndexState {
+    // Phase E keeps SQLite binding fail-closed outside macOS/Linux.  Frozen
+    // no-index fixtures are nevertheless a valid `Absent -> Absent` state,
+    // so avoid opening a non-existent SQLite leaf before reporting Absence.
+    if !dir.path().join(".kio/index/sqlite.db").is_file() {
+        return GcIndexState::Absent;
+    }
     let session =
         GcSweepSession::bind(Repository::open(dir.path()).unwrap().root().to_path_buf()).unwrap();
     let kio = session.retained_kio_handle().unwrap();
@@ -211,7 +217,7 @@ fn final_shallow_receipt_explains_missing_tree_but_markerless_coexistence_is_cor
 
 #[test]
 fn active_marker_blocks_fsck_repair_and_restore_before_destination_side_effects() {
-    let (dir, commit, tree) = fixture();
+    let (dir, commit, tree) = fixture_without_index();
     write_marker(&dir, &commit, &tree, GcSweepPhase::Prepared);
     let marker_before = fs::read(dir.path().join(".kio/gc/in_progress")).unwrap();
 
@@ -232,13 +238,20 @@ fn active_marker_blocks_fsck_repair_and_restore_before_destination_side_effects(
     );
     let fsck = fsck_output.stdout;
     let value: Value = serde_json::from_slice(&fsck).unwrap();
-    assert!(
-        value["remaining_findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f["kind"] == "gc_sweep_incomplete")
-    );
+    let findings = value["remaining_findings"].as_array().unwrap();
+    #[cfg(unix)]
+    assert!(findings.iter().any(|f| f["kind"] == "gc_sweep_incomplete"));
+    #[cfg(not(unix))]
+    {
+        // Phase E requires unsupported platforms to fail closed rather than
+        // advertising a resumable descriptor-bound sweep.
+        assert!(
+            findings
+                .iter()
+                .any(|f| f["kind"] == "gc_sweep_marker_corrupt")
+        );
+        assert!(!findings.iter().any(|f| f["kind"] == "gc_sweep_incomplete"));
+    }
     assert_eq!(
         marker_before,
         fs::read(dir.path().join(".kio/gc/in_progress")).unwrap()
@@ -285,13 +298,20 @@ fn every_frozen_receipt_tree_transition_is_recovery_pending() {
             .stdout
             .clone();
         let value: Value = serde_json::from_slice(&output).unwrap();
-        assert!(
-            value["remaining_findings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|f| f["kind"] == "gc_sweep_incomplete")
-        );
+        let findings = value["remaining_findings"].as_array().unwrap();
+        #[cfg(unix)]
+        assert!(findings.iter().any(|f| f["kind"] == "gc_sweep_incomplete"));
+        #[cfg(not(unix))]
+        {
+            // Phase E requires unsupported platforms to fail closed rather
+            // than advertising a resumable descriptor-bound sweep.
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f["kind"] == "gc_sweep_marker_corrupt")
+            );
+            assert!(!findings.iter().any(|f| f["kind"] == "gc_sweep_incomplete"));
+        }
         assert_eq!(
             marker_before,
             fs::read(dir.path().join(".kio/gc/in_progress")).unwrap()
@@ -339,7 +359,12 @@ fn absent_pre_sweep_marker_cannot_authorize_retirement_against_live_index() {
         GcSweepSession::bind(Repository::open(dir.path()).unwrap().root().to_path_buf()).unwrap();
     marker = session.bind_operation_receipts(&marker).unwrap();
     marker.phase = GcSweepPhase::Sweeping;
-    session.publish_marker(&marker).unwrap();
+    // This models a forged on-disk marker.  Do not invoke the production
+    // publication primitive: Phase E keeps that descriptor-bound mutation
+    // fail-closed on unsupported platforms.
+    let marker_path = dir.path().join(".kio/gc/in_progress");
+    fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+    fs::write(&marker_path, marker.canonical_bytes().unwrap()).unwrap();
 
     // The public core mutator cannot be called from marker JSON alone: its
     // permit constructor is unsafe and reserved for the trusted index
@@ -379,7 +404,7 @@ fn absent_pre_sweep_marker_cannot_authorize_retirement_against_live_index() {
 
 #[test]
 fn mismatched_frozen_marker_is_corruption_not_recovery_pending() {
-    let (dir, commit, tree) = fixture();
+    let (dir, commit, tree) = fixture_without_index();
     let wrong_tree = format!("sha256:{}", "f".repeat(64));
     assert_ne!(tree, wrong_tree);
     write_marker(&dir, &commit, &wrong_tree, GcSweepPhase::Prepared);
@@ -403,7 +428,7 @@ fn mismatched_frozen_marker_is_corruption_not_recovery_pending() {
 
 #[test]
 fn phase_impossible_marker_is_corruption_not_recovery_pending() {
-    let (dir, commit, tree) = fixture();
+    let (dir, commit, tree) = fixture_without_index();
     // `prepared` is the only phase before receipt publication.  A matching
     // receipt with an absent tree is syntactically plausible but cannot arise
     // from the durable state machine and must not be advertised as resumable.
@@ -438,6 +463,7 @@ fn phase_impossible_marker_is_corruption_not_recovery_pending() {
 }
 
 #[test]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn final_shallow_ancestor_with_chunks_keeps_verify_and_rebuild_available() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -457,25 +483,69 @@ fn final_shallow_ancestor_with_chunks_keeps_verify_and_rebuild_available() {
     )
     .unwrap();
     json_success_at(&dir, &["index", "--offline", "--approve"], NOW);
-    json_success_at(&dir, &["gc", "--yes"], NOW);
-
     let repo = Repository::open(dir.path()).unwrap();
     let old_tree = repo.read_commit(&old_commit).unwrap().tree;
-    assert!(
-        !ObjectStore::new(repo.kio_dir())
-            .object_path(ObjectKind::Tree, &old_tree)
-            .unwrap()
-            .exists()
-    );
+    let old_tree_path = ObjectStore::new(repo.kio_dir())
+        .object_path(ObjectKind::Tree, &old_tree)
+        .unwrap();
 
-    assert_eq!(
-        json_success_at(&dir, &["repair", "verify-objects"], NOW)["status"],
-        "ok"
-    );
-    assert_eq!(
-        json_success_at(&dir, &["repair", "rebuild-db"], NOW)["status"],
-        "rebuilt"
-    );
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        json_success_at(&dir, &["gc", "--yes"], NOW);
+        assert!(!old_tree_path.exists());
+        assert_eq!(
+            json_success_at(&dir, &["repair", "verify-objects"], NOW)["status"],
+            "ok"
+        );
+        assert_eq!(
+            json_success_at(&dir, &["repair", "rebuild-db"], NOW)["status"],
+            "rebuilt"
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        // Phase E intentionally rejects descriptor-relative GC locking on
+        // unsupported platforms; a rejected sweep must not mutate storage.
+        let sqlite_path = dir.path().join(".kio/index/sqlite.db");
+        let chunks_path = dir.path().join(".kio/index/chunks.jsonl");
+        let head_path = dir.path().join(".kio/HEAD");
+        let main_ref_path = dir.path().join(".kio/refs/heads/main");
+        let gc_path = dir.path().join(".kio/gc");
+        let old_tree_before = fs::read(&old_tree_path).unwrap();
+        let sqlite_before = fs::read(&sqlite_path).unwrap();
+        let chunks_before = fs::read(&chunks_path).unwrap();
+        let head_before = fs::read(&head_path).unwrap();
+        let main_ref_before = fs::read(&main_ref_path).unwrap();
+        assert!(!gc_path.exists());
+        let output = kio(&dir, &["gc", "--yes"])
+            .env("KIO_FIXED_NOW", NOW)
+            .arg("--json")
+            .assert()
+            .code(4)
+            .get_output()
+            .stderr
+            .clone();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["error_code"], "KIO-E-STORE-CORRUPT-001");
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap()
+                .contains("descriptor-relative GC lock")
+        );
+        assert_eq!(fs::read(&old_tree_path).unwrap(), old_tree_before);
+        assert_eq!(fs::read(&sqlite_path).unwrap(), sqlite_before);
+        assert_eq!(fs::read(&chunks_path).unwrap(), chunks_before);
+        assert_eq!(fs::read(&head_path).unwrap(), head_before);
+        assert_eq!(fs::read(&main_ref_path).unwrap(), main_ref_before);
+        assert!(!dir.path().join(".kio/.lock").exists());
+        assert!(!gc_path.exists());
+        assert_eq!(
+            json_success_at(&dir, &["repair", "verify-objects"], NOW)["status"],
+            "ok"
+        );
+    }
 }
 
 #[test]
