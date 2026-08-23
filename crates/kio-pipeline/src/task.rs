@@ -737,9 +737,29 @@ fn sync_relocated_task_directory(destination_dir: &fs::File, label: &Path) -> Re
     syncable.sync_all().pipeline_io(label)
 }
 
-#[cfg(not(unix))]
+// Windows cannot flush a directory handle: `FlushFileBuffers` requires access
+// that directory handles cannot have.  Preserve the fail-closed validation
+// half of the Unix operation by requiring the retained capability to identify
+// a real, non-reparse directory; the journal file itself was synced before its
+// rename above.  This intentionally makes no POSIX-style directory-durability
+// claim on Windows.
+#[cfg(windows)]
 fn sync_relocated_task_directory(destination_dir: &fs::File, label: &Path) -> Result<()> {
-    destination_dir.sync_all().pipeline_io(label)
+    kio_core::cas::windows_directory_handle_identity(destination_dir).ok_or_else(|| {
+        PipelineError::corrupt(
+            label.display().to_string(),
+            "bound Kio store directory is not a real directory",
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_relocated_task_directory(_destination_dir: &fs::File, label: &Path) -> Result<()> {
+    Err(PipelineError::corrupt(
+        label.display().to_string(),
+        "directory durability is unsupported on this platform",
+    ))
 }
 
 fn create_relocated_task_temp(

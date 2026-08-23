@@ -4320,6 +4320,7 @@ fn validate_directory_handle(directory: &std::fs::File, display: impl AsRef<Path
 /// passed to `fsync`. Reopen exactly `.` below the retained capability with
 /// no-follow read access, verify that it is the same directory, then flush
 /// that syncable descriptor. No ambient pathname is reconstructed.
+#[cfg(unix)]
 fn sync_bound_directory(directory: &std::fs::File, label: impl AsRef<Path>) -> Result<()> {
     let label = label.as_ref();
     let expected = cap_fs::Metadata::from_file(directory).map_err(|error| ioerr(error, label))?;
@@ -4337,6 +4338,27 @@ fn sync_bound_directory(directory: &std::fs::File, label: impl AsRef<Path>) -> R
         ));
     }
     syncable.sync_all().map_err(|error| ioerr(error, label))
+}
+
+/// Windows cannot flush a directory handle (`FlushFileBuffers` rejects it),
+/// so retain the fail-closed capability validation and rely on the preceding
+/// file-level sync and NTFS metadata journaling. This deliberately does not
+/// claim POSIX directory durability on Windows.
+#[cfg(windows)]
+fn sync_bound_directory(directory: &std::fs::File, label: impl AsRef<Path>) -> Result<()> {
+    validate_directory_handle(directory, label.as_ref())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_bound_directory(directory: &std::fs::File, label: impl AsRef<Path>) -> Result<()> {
+    let _ = directory;
+    Err(ioerr(
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory durability is unsupported on this platform",
+        ),
+        label.as_ref(),
+    ))
 }
 fn names(
     d: &std::fs::File,

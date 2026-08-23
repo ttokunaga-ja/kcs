@@ -10283,28 +10283,57 @@ fn sync_chunk_ledger_dir(directory: &ChunkLedgerDir) -> Result<()> {
 }
 
 fn sync_bound_directory(directory: &std::fs::File, path: &Path) -> Result<()> {
-    let mut options = cap_fs::OpenOptions::new();
-    options
-        .read(true)
-        // `.` is deliberately resolved through the retained directory
-        // capability.  Requesting no-follow keeps this reopen on the same
-        // no-symlink boundary as the original handle (and avoids a Linux
-        // O_PATH-only resolution through the capability wrapper).
-        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
-    let syncable = cap_fs::open(directory, Path::new("."), &options)
-        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
-    let metadata = syncable
-        .metadata()
-        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
-    if !metadata.is_dir() {
-        return Err(KioError::io(
-            "bound directory changed type",
-            path.display().to_string(),
-        ));
+    #[cfg(unix)]
+    {
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            // `.` is deliberately resolved through the retained directory
+            // capability.  Requesting no-follow keeps this reopen on the same
+            // no-symlink boundary as the original handle (and avoids a Linux
+            // O_PATH-only resolution through the capability wrapper).
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let syncable = cap_fs::open(directory, Path::new("."), &options)
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+        let metadata = syncable
+            .metadata()
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?;
+        if !metadata.is_dir() {
+            return Err(KioError::io(
+                "bound directory changed type",
+                path.display().to_string(),
+            ));
+        }
+        syncable
+            .sync_all()
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))
     }
-    syncable
-        .sync_all()
-        .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))
+
+    // Windows cannot flush a directory handle: `FlushFileBuffers` requires
+    // access that a directory handle cannot have, and an ordinary reopen fails
+    // with ERROR_ACCESS_DENIED.  Retain the fail-closed security half of the
+    // POSIX operation by proving that the capability is still a real,
+    // non-reparse directory, then rely on the file-level sync performed before
+    // this call.  This deliberately does not claim POSIX directory durability.
+    #[cfg(windows)]
+    {
+        windows_directory_handle_identity(directory).ok_or_else(|| {
+            KioError::io(
+                "bound directory must be a real directory, not a reparse point",
+                path.display().to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = directory;
+        Err(KioError::io(
+            "directory durability is unsupported on this platform",
+            path.display().to_string(),
+        ))
+    }
 }
 
 /// Atomically replace the complete chunk ledger using the already-validated

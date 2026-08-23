@@ -987,9 +987,7 @@ impl Repository {
                 drop(staged);
                 if !scheduled_bound {
                     let raw_dir = self.kio_dir.join("objects/raw");
-                    File::open(&raw_dir)
-                        .and_then(|dir| dir.sync_all())
-                        .kio_io(&raw_dir)?;
+                    crate::purge::sync_directory(&raw_dir).kio_io(&raw_dir)?;
                 }
                 return Err(KioError::new(
                     "KIO-E-SNAPSHOT-AUTHORITY-CHANGED-001",
@@ -1005,9 +1003,7 @@ impl Repository {
             drop(staged);
             if !scheduled_bound {
                 let raw_dir = self.kio_dir.join("objects/raw");
-                File::open(&raw_dir)
-                    .and_then(|dir| dir.sync_all())
-                    .kio_io(&raw_dir)?;
+                crate::purge::sync_directory(&raw_dir).kio_io(&raw_dir)?;
             }
             return Err(snapshot_authority_changed(
                 "scheduled snapshot direct entries changed before CAS publication",

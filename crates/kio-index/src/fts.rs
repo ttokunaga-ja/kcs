@@ -683,6 +683,7 @@ fn gc_leaf_identity(parent: &std::fs::File, leaf: &str) -> Result<String> {
 /// neither reconstructs nor trusts an ambient pathname.  Comparing the two
 /// pinned identities makes an unexpected capability-wrapper regression fail
 /// closed before any durability claim is made.
+#[cfg(unix)]
 fn sync_bound_gc_directory(directory: &std::fs::File, context: &str) -> Result<()> {
     let expected = source_file_identity(directory)?;
     let mut options = cap_fs::OpenOptions::new();
@@ -702,6 +703,27 @@ fn sync_bound_gc_directory(directory: &std::fs::File, context: &str) -> Result<(
     syncable
         .sync_all()
         .map_err(|error| IndexError::Schema(format!("{context}: {error}")))
+}
+
+/// Windows does not support flushing directory handles.  Validate the exact
+/// retained capability is a real directory (never a reparse point), then rely
+/// on the already-synced file contents and NTFS journaling for namespace
+/// persistence; do not claim a POSIX directory-`fsync` guarantee here.
+#[cfg(windows)]
+fn sync_bound_gc_directory(directory: &std::fs::File, context: &str) -> Result<()> {
+    if kio_core::cas::windows_directory_handle_identity(directory).is_none() {
+        return Err(IndexError::Schema(format!(
+            "{context}: retained directory is not a real Windows directory"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_bound_gc_directory(_: &std::fs::File, context: &str) -> Result<()> {
+    Err(IndexError::Schema(format!(
+        "{context}: directory durability is unsupported on this platform"
+    )))
 }
 
 fn validate_gc_temp_leaf(leaf: &str) -> Result<()> {

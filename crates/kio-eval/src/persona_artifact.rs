@@ -547,17 +547,44 @@ fn observe_open_file(
 
 fn sync_parent(parent: &BoundParent) -> Result<(), PersonaArtifactError> {
     recheck_parent(parent)?;
-    let mut options = cap_fs::OpenOptions::new();
-    options
-        .read(true)
-        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
-    let syncable = cap_fs::open(&parent.handle, Path::new("."), &options)?;
-    let opened = cap_fs::Metadata::from_file(&syncable)?;
-    if !opened.is_dir() || opened.file_type().is_symlink() || !same(&parent.identity, &opened) {
-        return unsafe_state("artifact parent changed while reopening for fsync");
+
+    #[cfg(unix)]
+    {
+        let mut options = cap_fs::OpenOptions::new();
+        options
+            .read(true)
+            ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+        let syncable = cap_fs::open(&parent.handle, Path::new("."), &options)?;
+        let opened = cap_fs::Metadata::from_file(&syncable)?;
+        if !opened.is_dir() || opened.file_type().is_symlink() || !same(&parent.identity, &opened) {
+            return unsafe_state("artifact parent changed while reopening for fsync");
+        }
+        syncable.sync_all()?;
+        recheck_parent(parent)
     }
-    syncable.sync_all()?;
-    recheck_parent(parent)
+
+    // Windows has no directory fsync: an ordinary directory reopen is denied
+    // and FlushFileBuffers cannot flush the resulting directory handle.  Keep
+    // the fail-closed half of the POSIX operation by proving that the retained
+    // capability remains a real, non-reparse directory before and after the
+    // publication.  File data was synced before the rename; NTFS metadata
+    // journaling supplies the weaker directory-entry durability guarantee.
+    #[cfg(windows)]
+    {
+        kio_core::cas::windows_directory_handle_identity(&parent.handle).ok_or_else(|| {
+            PersonaArtifactError::Unsafe(
+                "artifact parent must be a real directory, not a reparse point".into(),
+            )
+        })?;
+        recheck_parent(parent)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(PersonaArtifactError::Unsafe(
+            "artifact parent durability is unsupported on this platform".into(),
+        ))
+    }
 }
 
 fn regular(metadata: &cap_fs::Metadata, maximum: usize) -> bool {
