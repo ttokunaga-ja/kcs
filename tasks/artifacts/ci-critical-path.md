@@ -3,8 +3,10 @@
 The canonical measurements are in
 [`ci-cost-baseline.json`](ci-cost-baseline.json), and the signal/duplication
 ledger is [`ci-cost-unique-signal.md`](ci-cost-unique-signal.md). All values
-are cohort-bound. The Phase F product changes end at `f50e8cc...`, tree
-`477a8d9...`, and workflow blob `bdc01e2...`. Earlier Phase C local values refer
+are cohort-bound. The current product changes end at `b849f7c...`, tree
+`3817b04...`, and workflow blob `bdc01e2...`; the clean-Linux cold/warm cost
+cohort remains bound to `f50e8cc...` / tree `477a8d9...` and is not relabeled
+as final-head cost. Earlier Phase C local values refer
 to `2a85016...` / tree `49e4887...` / workflow `049c69c...`; GitHub attempt 1
 refers to `c9f334e...` / workflow `049c69c...`. They are not combined.
 
@@ -72,10 +74,10 @@ These are termination bounds, not runtime measurements, queue time, or billing
 minutes. The Windows branch therefore remains unknown for measured critical-path
 acceptance even though it has a finite 45-minute cap.
 
-## Current Phase F local Linux path estimate
+## Phase F measured local Linux path estimate
 
-At the exact Phase F product head/tree/workflow identity, the clean Linux
-workspace test command succeeded in **394.88 seconds = 6.581333 minutes** and
+At the exact `f50e8cc...` measurement head/tree/workflow identity, the clean
+Linux workspace test command succeeded in **394.88 seconds = 6.581333 minutes** and
 its immediate warm repeat succeeded in **329.78 seconds = 5.496333 minutes**.
 Both executed all 49 test binaries and 2,216 tests with zero failures or ignored
 tests. Those two samples cover only:
@@ -110,9 +112,14 @@ minutes and the configured five-job aggregate cap is 140 minutes; caps are not
 runtime measurements.
 
 The independent Persona W0 command lane succeeded in 2.304598 minutes. The
-three known current Linux job command lanes therefore sum to 10.810880
+three measured `f50e8cc...` Linux job command lanes therefore sum to 10.810880
 runner-equivalent minutes locally. This is still not the five-job aggregate:
 current successful macOS and Windows cost operands are unknown.
+
+The later `b849f7c...` runner deadline fix kept the workflow blob unchanged and
+passed isolated Linux runner/U7/OCR, all Synthetic commands, and Persona W0
+delta validation. Its clean-Linux cold/warm cost was not remeasured, so the
+numeric path estimate above remains attached only to `f50e8cc...`.
 
 ## Matching GitHub attempt 1 (failure cohort)
 

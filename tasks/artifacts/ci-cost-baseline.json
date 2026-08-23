@@ -50,8 +50,8 @@
     "macos_manifest_sha256": "9bebfba6bd8ce402a18a675ea8c4887896f07f22addc2f6ebdfbc085aa3a9ff0"
   },
   "current_phase_f_candidate": {
-    "product_change_head": "f50e8ccdc693217bb646574f1d5a53b1eb1a311f",
-    "product_change_tree": "477a8d9b48ba6eadad73da9478e96a49f3493736",
+    "product_change_head": "b849f7cc927806fb6264f1ad5b6c696016655053",
+    "product_change_tree": "3817b04e490d4020e4fc6066bf5cdc1002bb8937",
     "candidate_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
     "workflow_path": ".github/workflows/ci.yml",
     "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e",
@@ -68,6 +68,22 @@
     "configured_dependency_cap_minutes": 45,
     "configured_aggregate_cap_minutes": 140,
     "configured_caps_are_measured_runtime": false,
+    "clean_linux_cold_warm_cost_cohort": {
+      "product_change_head": "f50e8ccdc693217bb646574f1d5a53b1eb1a311f",
+      "product_change_tree": "477a8d9b48ba6eadad73da9478e96a49f3493736",
+      "final_runner_delta_remeasured_cold_warm": false,
+      "separation_reason": "b849f7c changes the bounded runner EOF/deadline state machine and adds one regression test; the f50e8cc cold/warm values remain exact evidence for their own immutable cohort and are not relabeled as final-head measurements"
+    },
+    "final_runner_delta_validation": {
+      "product_change_head": "b849f7cc927806fb6264f1ad5b6c696016655053",
+      "linux_runner_tests": {"passed": 18, "failed": 0},
+      "linux_u7_tests": {"passed": 14, "failed": 0},
+      "linux_ocr_tests": {"passed": 10, "failed": 0},
+      "linux_synthetic_workflow_commands": {"passed": 18, "failed": 0},
+      "linux_persona_w0_elapsed_seconds": 123,
+      "linux_persona_w0_conclusion": "success",
+      "clean_linux_cold_warm_cost_remeasurement": null
+    },
     "github_matching_runs": 0,
     "github_matching_success_runs": 0
   },
@@ -196,7 +212,7 @@
     ]
   },
   "current_phase_f_linux_measurement": {
-    "classification": "successful local clean Linux cold/warm cargo-test evidence for the current product bytes; not a complete rust job, five-job workflow, GitHub run, or billing sample",
+    "classification": "successful local clean Linux cold/warm cargo-test evidence for the immutable f50e8cc measurement cohort; a later bounded-runner deadline fix is separately validated and these values are not relabeled as final-head cost; this is not a complete rust job, five-job workflow, GitHub run, or billing sample",
     "candidate": {
       "product_change_head": "f50e8ccdc693217bb646574f1d5a53b1eb1a311f",
       "product_change_tree": "477a8d9b48ba6eadad73da9478e96a49f3493736",
@@ -407,10 +423,10 @@
         ]
       },
       "prior_attempt_1_warning_count": 30,
-      "comparison": "the current local cold/warm warning counts are lower than the older GitHub attempt's 30, but host, command, and cohort differ; this is diagnostic evidence, not a formal percentage improvement"
+      "comparison": "the measured Phase F local cold/warm warning counts are lower than the older GitHub attempt's 30, but host, command, and cohort differ; this is diagnostic evidence, not a formal percentage improvement"
     },
     "critical_path_planning": {
-      "classification": "successful exact current workflow command sequences in separate fresh local Linux job containers; checkout, toolchain setup, GitHub queue, and billing excluded",
+      "classification": "successful exact current-workflow command sequences at the immutable f50e8cc measurement cohort in separate fresh local Linux job containers; checkout, toolchain setup, GitHub queue, and billing excluded",
       "local_target_minutes": 40,
       "github_target_minutes": 45,
       "measured_cold_test_operand_minutes": 6.581333,

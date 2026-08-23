@@ -1,10 +1,12 @@
 # Current five-job CI unique-signal ledger
 
-This ledger keeps three cohorts separate. The Phase F product changes end at
-`f50e8ccdc693217bb646574f1d5a53b1eb1a311f`, tree
-`477a8d9b48ba6eadad73da9478e96a49f3493736`, and use workflow blob
-`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The candidate commit containing
-this evidence is resolved with
+This ledger keeps the cohorts separate. The current product changes end at
+`b849f7cc927806fb6264f1ad5b6c696016655053`, tree
+`3817b04e490d4020e4fc6066bf5cdc1002bb8937`, and use workflow blob
+`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The clean-Linux cold/warm cost
+cohort remains bound to the earlier Phase F product head `f50e8cc...`, tree
+`477a8d9...`; it is not relabeled as a final-head measurement. The candidate
+commit containing this evidence is resolved with
 `git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json`; a commit
 cannot contain its own SHA.
 Earlier Phase C local measurements refer to product commit `2a85016...`, while
@@ -151,12 +153,12 @@ descriptor remains under the workspace after a complete claim/release
 lifecycle. Production `fsync`, nofollow, identity revalidation, create-only, and
 credential boundaries were not weakened.
 
-## Current Phase F clean-Linux cold/warm evidence
+## Phase F clean-Linux cold/warm evidence
 
-The current product bytes were copied into a writable Debian Bookworm arm64
-container with a fresh target, network disabled, a read-only preexisting Cargo
-registry, Rust 1.98.0, 14 logical CPUs, and a 14 GiB memory limit. The exact
-measurement command was:
+The immutable `f50e8cc...` measurement bytes were copied into a writable Debian
+Bookworm arm64 container with a fresh target, network disabled, a read-only
+preexisting Cargo registry, Rust 1.98.0, 14 logical CPUs, and a 14 GiB memory
+limit. The exact measurement command was:
 
 ```sh
 cargo +1.98.0 test --workspace --all-targets --locked --no-fail-fast
@@ -188,8 +190,8 @@ unknown. Post-run target and temporary-directory sizes were 8,745,391,528 and
 97,609,519 bytes respectively; they are storage sizes, not I/O throughput.
 
 The old GitHub Rust job emitted 30 warnings and later `ok` for all 30. The
-current cold/warm runs emitted 16/13 and later `ok` for every warning. The
-current cold groups were six attestation, two consumer, and eight lease tests;
+measured Phase F cold/warm runs emitted 16/13 and later `ok` for every warning.
+The cold groups were six attestation, two consumer, and eight lease tests;
 the warm groups were four, two, and seven. Ordinary Full regeneration no longer
 appears in consumer/render/schedule/scaffold warning paths, and the old
 32-lifecycle FD proxy is gone. The retained heavy signals are deliberate:
@@ -203,6 +205,15 @@ appears in consumer/render/schedule/scaffold warning paths, and the old
 The 30-to-16/13 comparison is diagnostic only because host, command, and cohort
 differ. It does not supply a formal speedup percentage or a successful GitHub
 sample.
+
+After that cost measurement, `b849f7c...` corrected the bounded runner state
+machine so EOF on both output pipes cannot fall through to an unbounded child
+`wait`, and added one Unix regression test. The workflow blob did not change.
+An isolated Linux delta validation at that exact product head passed runner
+18/18, U7 14/14, OCR 10/10, all 18 Synthetic workflow commands, and the Persona
+W0 lifecycle in about 123 seconds. No clean-Linux cold/warm cost rerun was made
+for this one-test delta, so the 49-binary / 2,216-test timings above remain
+evidence only for `f50e8cc...`.
 
 Separate fresh local Linux job containers then replayed the workflow command
 order. The `rust` sequence succeeded in 426.38 seconds by command sum (fmt
