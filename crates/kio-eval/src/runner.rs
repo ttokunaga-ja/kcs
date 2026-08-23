@@ -546,7 +546,14 @@ pub fn run_bounded_command(
                 break Err(BoundedProcessError::OutputLimit { stream, limit });
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) if finished_streams == 2 => break Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) if finished_streams == 2 => {
+                // EOF on both output pipes is not process completion. A child
+                // can close stdout/stderr and continue running, so keep
+                // polling its status under the same deadline instead of
+                // falling through to an unbounded `wait` below.
+                thread::sleep((deadline - now).min(Duration::from_millis(10)));
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break Err(BoundedProcessError::Read {
                     stream: "output",
@@ -1562,6 +1569,28 @@ mod tests {
                 vec![b'x'; 2 * 1024 * 1024],
                 2 * 1024 * 1024,
             )),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::Timeout { timeout_ms: 100 }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_closed_output_pipes_do_not_bypass_the_deadline() {
+        let mut command = shell("exec 1>&- 2>&-; sleep 5");
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(100),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            None,
         )
         .unwrap_err();
         assert!(matches!(
