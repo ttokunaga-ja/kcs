@@ -1214,7 +1214,27 @@ fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
     fs::write(dir.path().join("child/secret.txt"), "child private").unwrap();
     let child_hash = hash_bytes(b"child private");
 
+    #[cfg(not(windows))]
     json_success(&dir, ["index", "--approve"]);
+    #[cfg(windows)]
+    let index_output = json_code_stdout_with_env(&dir, ["index", "--approve"], 3, &[]);
+
+    #[cfg(windows)]
+    {
+        assert_eq!(index_output["error_code"], "KIO-E-INDEX-PARTIAL-001");
+        let child = index_output["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["path"] == "child")
+            .expect("the discovered child must be reported");
+        assert_eq!(child["status"], "skipped_error");
+        assert_eq!(child["error_code"], "KIO-E-SCOPE-BOUND-UNSUPPORTED-001");
+        assert!(
+            !dir.path().join("child/.kio").exists(),
+            "an unsupported bound child must not be initialized by a pathname fallback"
+        );
+    }
 
     let status = json_success(&dir, ["status"]);
     assert!(!status["tasks"].as_array().unwrap().iter().any(|task| {
@@ -1244,7 +1264,10 @@ fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
             .unwrap()
             .to_owned();
     let ledger = ledger_lines(&dir);
+    #[cfg(not(windows))]
     assert_eq!(ledger.len(), 2);
+    #[cfg(windows)]
+    assert_eq!(ledger.len(), 1);
     let parent_ledger = ledger
         .iter()
         .filter(|entry| entry["scope_id"] == parent_scope_id)

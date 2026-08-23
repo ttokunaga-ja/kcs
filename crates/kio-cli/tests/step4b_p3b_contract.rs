@@ -89,6 +89,29 @@ fn run(dir: &TempDir, args: &[&str]) -> (i32, Value) {
     (code, serde_json::from_slice(stream).unwrap())
 }
 
+/// Child scopes require a retained-handle launcher. Windows intentionally has
+/// no pathname-based substitute, so an otherwise successful parent index is a
+/// result-on-stdout partial failure and every planned child is reported as an
+/// explicit fail-closed error.
+#[cfg(windows)]
+fn assert_windows_bound_children_unsupported(result: &Value, paths: &[&str]) {
+    assert_eq!(result["error_code"], "KIO-E-INDEX-PARTIAL-001");
+    let children = result["child_scopes"]
+        .as_array()
+        .expect("index partial result must retain child scope rows");
+    for path in paths {
+        let row = children
+            .iter()
+            .find(|row| row["path"] == *path)
+            .unwrap_or_else(|| panic!("missing discovered child row for {path}"));
+        assert_eq!(row["status"], "skipped_error", "{path}: {row}");
+        assert_eq!(
+            row["error_code"], "KIO-E-SCOPE-BOUND-UNSUPPORTED-001",
+            "{path}: {row}"
+        );
+    }
+}
+
 fn kio_dir(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join(".kio")
 }
@@ -774,9 +797,25 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
             .iter()
             .any(|row| row["path"] == "linked-child" && row["status"] == "skipped_symlink")
     );
+    #[cfg(not(windows))]
     let indexed = success(&dir, &["index", "--offline", "--approve"]);
+    #[cfg(windows)]
+    let indexed = {
+        let (code, output) = run(&dir, &["index", "--offline", "--approve"]);
+        assert_eq!(code, 3, "{output}");
+        assert_windows_bound_children_unsupported(&output, &["ordinary", "ordinary/nested"]);
+        output
+    };
+    #[cfg(not(windows))]
     assert!(dir.path().join("ordinary/.kio").is_dir());
+    #[cfg(not(windows))]
     assert!(dir.path().join("ordinary/nested/.kio").is_dir());
+    #[cfg(windows)]
+    assert!(
+        !dir.path().join("ordinary/.kio").exists()
+            && !dir.path().join("ordinary/nested/.kio").exists(),
+        "Windows must fail closed rather than initialize a child by pathname"
+    );
     assert!(!dir.path().join("git-dir/.kio").exists());
     assert!(!dir.path().join("git-file/.kio").exists());
     assert!(!dir.path().join("ignored/.kio").exists());
@@ -802,29 +841,61 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
             .iter()
             .any(|row| row["path"] == "git-file" && row["status"] == "skipped_vcs")
     );
-    let nested = success(&dir, &["search", "nested", "--mode", "text"]);
-    assert!(
-        nested["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["title"] == "deep.md")
-    );
+    #[cfg(not(windows))]
+    {
+        let nested = success(&dir, &["search", "nested", "--mode", "text"]);
+        assert!(
+            nested["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["title"] == "deep.md")
+        );
+    }
 
     fs::write(
         kio_dir(&dir).join("config.toml"),
         "[scope]\nindex_vcs_repos = true\nignore = [\"ignored\"]\n",
     )
     .unwrap();
+    #[cfg(not(windows))]
     let opted_in = success(&dir, &["index", "--offline", "--approve"]);
+    #[cfg(windows)]
+    let opted_in = {
+        let (code, output) = run(&dir, &["index", "--offline", "--approve"]);
+        assert_eq!(code, 3, "{output}");
+        assert_windows_bound_children_unsupported(
+            &output,
+            &["ordinary", "ordinary/nested", "git-dir", "git-file/inner"],
+        );
+        output
+    };
+    #[cfg(not(windows))]
     assert!(dir.path().join("git-dir/.kio").is_dir());
+    #[cfg(not(windows))]
     assert!(dir.path().join("git-file/inner/.kio").is_dir());
+    #[cfg(windows)]
+    assert!(
+        !dir.path().join("ordinary/.kio").exists()
+            && !dir.path().join("ordinary/nested/.kio").exists()
+            && !dir.path().join("git-dir/.kio").exists()
+            && !dir.path().join("git-file/inner/.kio").exists(),
+        "VCS opt-in must not bypass the retained-handle requirement for any planned child"
+    );
     assert!(
         opted_in["child_scopes"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["path"] == "git-dir" && row["status"] == "indexed")
+            .any(|row| {
+                row["path"] == "git-dir"
+                    && row["status"]
+                        == if cfg!(windows) {
+                            "skipped_error"
+                        } else {
+                            "indexed"
+                        }
+            })
     );
     assert!(
         opted_in["child_scopes"]
@@ -852,24 +923,60 @@ fn qb15_parent_ignore_is_persisted_and_excludes_child_cas() {
     )
     .unwrap();
 
+    #[cfg(not(windows))]
     success(&dir, &["index", "--offline", "--approve"]);
+    #[cfg(windows)]
+    {
+        let (code, output) = run(&dir, &["index", "--offline", "--approve"]);
+        assert_eq!(code, 3, "{output}");
+        assert_windows_bound_children_unsupported(&output, &["project"]);
+    }
     let child_kio = dir.path().join("project/.kio");
-    let child_config = fs::read_to_string(child_kio.join("config.toml")).unwrap();
-    assert!(child_config.contains("generated_parent_policy"));
-    assert!(child_config.contains("scope_prefix = \"project\""));
-    let store = ObjectStore::new(&child_kio);
-    assert!(
-        store
-            .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
-            .unwrap()
-            .exists()
-    );
-    assert!(
-        !store
-            .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
-            .unwrap()
-            .exists()
-    );
+    #[cfg(windows)]
+    {
+        assert!(
+            !child_kio.exists(),
+            "an unsupported child must not receive a pathname-based .kio store"
+        );
+        let status = success(&dir, &["status"]);
+        assert!(status["tasks"].as_array().unwrap().iter().all(|task| {
+            !task["input_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("project/"))
+        }));
+        let parent_store = ObjectStore::new(&kio_dir(&dir));
+        assert!(
+            !parent_store
+                .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            !parent_store
+                .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
+                .unwrap()
+                .exists()
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let child_config = fs::read_to_string(child_kio.join("config.toml")).unwrap();
+        assert!(child_config.contains("generated_parent_policy"));
+        assert!(child_config.contains("scope_prefix = \"project\""));
+        let store = ObjectStore::new(&child_kio);
+        assert!(
+            store
+                .object_path(ObjectKind::Raw, &hash_bytes(b"public"))
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            !store
+                .object_path(ObjectKind::Raw, &hash_bytes(b"private"))
+                .unwrap()
+                .exists()
+        );
+    }
 }
 
 /// QB19 [regression-lock, structural]: scope-local `access.jsonl` and
