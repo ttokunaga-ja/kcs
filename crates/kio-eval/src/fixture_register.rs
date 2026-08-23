@@ -454,7 +454,7 @@ fn invoke(
         .env("LC_ALL", "C.UTF-8")
         .env("TZ", "UTC")
         .envs(env.iter().cloned());
-    let out = run_bounded_command(&mut command, BoundedProcessOptions::default())
+    let out = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)
         .map_err(|e| FixtureRegisterError::Input(format!("bounded kio subprocess failed: {e}")))?;
     let text = if out.stdout.is_empty() {
         out.stderr

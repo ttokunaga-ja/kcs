@@ -4,16 +4,20 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader},
     path::PathBuf,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 use kio_core::cas::hash_bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+
+use crate::runner::{
+    BoundedProcessError, BoundedProcessOptions, BoundedStdin, run_bounded_command,
+};
 
 pub const ADAPTER_REQUEST_SCHEMA: &str = "kio.u7.reference-embedding-request/v1";
 pub const ADAPTER_RESPONSE_SCHEMA: &str = "kio.u7.reference-embedding-response/v1";
@@ -396,10 +400,9 @@ pub fn run_adapter(
     requests: &[(ReferenceRequest, usize)],
     limits: &AdapterLimits,
 ) -> Result<Vec<Vec<f64>>, U7Error> {
-    let deadline_started = Instant::now();
     let input = encode_requests(requests)?;
     validate_adapter_command(command)?;
-    spawn_adapter(command, input, requests, limits, deadline_started)
+    spawn_adapter(command, input, requests, limits)
 }
 
 /// Validate the complete adapter input before any served-side HTTP request is
@@ -444,101 +447,29 @@ fn spawn_adapter(
     input: Vec<u8>,
     requests: &[(ReferenceRequest, usize)],
     limits: &AdapterLimits,
-    deadline_started: Instant,
 ) -> Result<Vec<Vec<f64>>, U7Error> {
     let mut process = Command::new(&command.program);
     process
         .args(&command.args)
         .env_clear()
-        .envs(&command.environment)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_process_group(&mut process);
-    let mut child = process
-        .spawn()
-        .map_err(|e| U7Error::AdapterProcess(e.to_string()))?;
-    // Drain both pipes before writing JSONL. An adapter may emit one response
-    // per input line, so delaying this until after stdin is full can deadlock.
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| U7Error::AdapterProcess("stdout unavailable".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| U7Error::AdapterProcess("stderr unavailable".into()))?;
-    let stdout_limit = limits.max_stdout_bytes;
-    let stderr_limit = limits.max_stderr_bytes;
-    let stdout_reader = std::thread::spawn(move || read_bounded(stdout, stdout_limit));
-    let stderr_reader = std::thread::spawn(move || read_bounded(stderr, stderr_limit));
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| U7Error::AdapterProcess("stdin unavailable".into()))?;
-    let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let mut timed_out = false;
-    while match child.try_wait() {
-        Ok(status) => status.is_none(),
-        Err(error) => {
-            return terminate_and_reap(
-                child,
-                stdout_reader,
-                stderr_reader,
-                writer,
-                U7Error::AdapterProcess(error.to_string()),
-            );
-        }
-    } {
-        if deadline_started.elapsed() > limits.timeout {
-            timed_out = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+        .envs(&command.environment);
+    let output = run_bounded_command(
+        &mut process,
+        BoundedProcessOptions {
+            timeout: limits.timeout,
+            max_stdout_bytes: limits.max_stdout_bytes,
+            max_stderr_bytes: limits.max_stderr_bytes,
+        },
+        Some(BoundedStdin::new(input, MAX_ADAPTER_REQUEST_BYTES)),
+    )
+    .map_err(|error| match error {
+        BoundedProcessError::Timeout { .. } => U7Error::AdapterTimeout(limits.timeout),
+        other => U7Error::AdapterProcess(other.to_string()),
+    })?;
+    if !output.status.success() {
+        return Err(U7Error::AdapterProcess(output.stderr));
     }
-    if timed_out {
-        return terminate_and_reap(
-            child,
-            stdout_reader,
-            stderr_reader,
-            writer,
-            U7Error::AdapterTimeout(limits.timeout),
-        );
-    }
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            return terminate_and_reap(
-                child,
-                stdout_reader,
-                stderr_reader,
-                writer,
-                U7Error::AdapterProcess(error.to_string()),
-            );
-        }
-    };
-    let write_result = writer
-        .join()
-        .map_err(|_| U7Error::AdapterProcess("stdin writer panicked".into()))?;
-    if let Err(error) = write_result {
-        return Err(U7Error::AdapterProcess(error.to_string()));
-    }
-    // Always join both readers before returning either reader error: the child
-    // is already reaped, and no pipe handle may outlive this boundary.
-    let stdout_join = stdout_reader.join();
-    let stderr_join = stderr_reader.join();
-    let stdout_result =
-        stdout_join.map_err(|_| U7Error::AdapterProcess("stdout reader panicked".into()))?;
-    let stderr_result =
-        stderr_join.map_err(|_| U7Error::AdapterProcess("stderr reader panicked".into()))?;
-    let stdout = stdout_result.map_err(U7Error::AdapterProcess)?;
-    let stderr = stderr_result.map_err(U7Error::AdapterProcess)?;
-    if !status.success() {
-        return Err(U7Error::AdapterProcess(
-            String::from_utf8_lossy(&stderr).into_owned(),
-        ));
-    }
-    let lines = BufReader::new(stdout.as_slice())
+    let lines = BufReader::new(output.stdout.as_bytes())
         .lines()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| U7Error::AdapterProcess(e.to_string()))?;
@@ -556,52 +487,6 @@ fn spawn_adapter(
             parse_adapter_response(line.as_bytes(), &request.identity, *dimensions)
         })
         .collect()
-}
-
-fn terminate_and_reap(
-    mut child: std::process::Child,
-    stdout_reader: std::thread::JoinHandle<Result<Vec<u8>, String>>,
-    stderr_reader: std::thread::JoinHandle<Result<Vec<u8>, String>>,
-    writer: std::thread::JoinHandle<std::io::Result<()>>,
-    error: U7Error,
-) -> Result<Vec<Vec<f64>>, U7Error> {
-    terminate_process_group(&mut child);
-    let _ = child.wait();
-    let _ = writer.join();
-    let _ = stdout_reader.join();
-    let _ = stderr_reader.join();
-    Err(error)
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_process_group(_: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_process_group(child: &mut std::process::Child) {
-    let pid = child.id() as i32;
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-    }
-    let _ = child.kill();
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
 }
 
 fn validate_adapter_command(command: &AdapterCommand) -> Result<(), U7Error> {
@@ -683,28 +568,6 @@ fn valid_base64(value: &str) -> bool {
         && bytes[bytes.len() - padding..]
             .iter()
             .all(|byte| *byte == b'=')
-}
-
-fn read_bounded(mut reader: impl Read + Send + 'static, limit: usize) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    let mut overflow = false;
-    loop {
-        let read = reader.read(&mut buffer).map_err(|e| e.to_string())?;
-        if read == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(read) > limit {
-            overflow = true;
-        } else {
-            bytes.extend_from_slice(&buffer[..read]);
-        }
-    }
-    if overflow {
-        Err("adapter output exceeds configured bound".into())
-    } else {
-        Ok(bytes)
-    }
 }
 
 fn base64(bytes: &[u8]) -> String {

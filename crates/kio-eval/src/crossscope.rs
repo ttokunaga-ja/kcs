@@ -274,7 +274,7 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
         research
             .configure_command_cwd(&mut command)
             .map_err(|e| CrossscopeError::Input(e.to_string()))?;
-        let output = run_bounded_command(&mut command, BoundedProcessOptions::default())
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)
             .map_err(crate::runner::RunnerError::from)?;
         let outcome = SearchOutcome {
             returncode: output.status.code().unwrap_or(-1),

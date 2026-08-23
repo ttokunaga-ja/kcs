@@ -386,7 +386,7 @@ fn execute_search(
     scope
         .configure_command_cwd(&mut command)
         .map_err(|error| error.to_string())?;
-    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)
         .map_err(|error| error.to_string())?;
     Ok(SearchOutcome {
         returncode: output.status.code().unwrap_or(-1),
@@ -418,7 +418,7 @@ fn execute_fixture_search(
         .env("LC_ALL", "C.UTF-8")
         .env("TZ", "UTC")
         .envs(environment.iter().cloned());
-    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)
         .map_err(|error| error.to_string())?;
     Ok(SearchOutcome {
         returncode: output.status.code().unwrap_or(-1),

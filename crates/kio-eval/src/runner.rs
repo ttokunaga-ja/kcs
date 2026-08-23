@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::{OsStr, OsString},
     fs,
-    io::Read,
+    io::{Read, Write},
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -88,6 +88,22 @@ pub struct BoundedProcessOptions {
     pub max_stderr_bytes: usize,
 }
 
+/// Owned input for a bounded evaluator subprocess.  The byte cap is checked
+/// before the child is spawned, and the bytes are written under the same
+/// deadline as process creation, output collection, waiting, and cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedStdin {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl BoundedStdin {
+    #[must_use]
+    pub fn new(bytes: Vec<u8>, max_bytes: usize) -> Self {
+        Self { bytes, max_bytes }
+    }
+}
+
 impl Default for BoundedProcessOptions {
     fn default() -> Self {
         Self {
@@ -113,6 +129,10 @@ pub enum BoundedProcessError {
     Spawn(#[source] std::io::Error),
     #[error("could not configure evaluator subprocess isolation: {0}")]
     Isolation(#[source] std::io::Error),
+    #[error("evaluator subprocess stdin exceeds input limit of {limit} bytes")]
+    InputLimit { limit: usize },
+    #[error("could not write evaluator subprocess stdin: {0}")]
+    Write(#[source] std::io::Error),
     #[error("could not read evaluator subprocess {stream}: {source}")]
     Read {
         stream: &'static str,
@@ -340,21 +360,49 @@ fn terminate_attached_tree(job: &Option<WindowsJob>) {
 #[cfg(not(windows))]
 fn terminate_attached_tree(_job: &Option<()>) {}
 
+#[cfg(windows)]
+fn close_attached_tree_before_join(job: &mut Option<WindowsJob>) {
+    drop(job.take());
+}
+
+#[cfg(not(windows))]
+fn close_attached_tree_before_join(_job: &mut Option<()>) {}
+
 /// Run a trusted Kio-under-test command under evaluator resource bounds.
 ///
 /// On Unix the child gets its own process group; on Windows it is assigned to
 /// a kill-on-close Job Object. A timeout, output overflow, or stream failure
 /// kills the ordinary child tree before returning. This is a guard against
 /// product bugs, not an operating-system sandbox for a hostile executable.
+/// Unix descendants that deliberately create a new session are outside the
+/// process-tree termination guarantee; cancellation still stops the bounded
+/// I/O workers and returns without waiting for their inherited pipe handles.
 pub fn run_bounded_command(
     command: &mut Command,
     options: BoundedProcessOptions,
+    stdin: Option<BoundedStdin>,
 ) -> Result<BoundedProcessOutput, BoundedProcessError> {
+    if let Some(input) = stdin.as_ref()
+        && input.bytes.len() > input.max_bytes
+    {
+        return Err(BoundedProcessError::InputLimit {
+            limit: input.max_bytes,
+        });
+    }
     configure_process_group(command);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    // This is deliberately before spawn: one monotonic deadline accounts for
+    // all work within this boundary, including a slow spawn and cleanup.
     let started = Instant::now();
     let mut child = command.spawn().map_err(BoundedProcessError::Spawn)?;
-    let process_tree = match attach_process_tree(&child) {
+    let mut process_tree = match attach_process_tree(&child) {
         Ok(process_tree) => process_tree,
         Err(error) => {
             terminate_process_tree(&mut child);
@@ -364,6 +412,30 @@ pub fn run_bounded_command(
     };
     let stdout = child.stdout.take().expect("stdout was configured as piped");
     let stderr = child.stderr.take().expect("stderr was configured as piped");
+    #[cfg(unix)]
+    let mut child_stdin = child.stdin.take();
+    #[cfg(unix)]
+    let mut stdin_offset = 0_usize;
+    #[cfg(unix)]
+    if let Some(handle) = child_stdin.as_ref() {
+        use std::os::fd::AsRawFd;
+        let flags = unsafe { libc::fcntl(handle.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(handle.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                < 0
+        {
+            let error = std::io::Error::last_os_error();
+            terminate_attached_tree(&process_tree);
+            terminate_process_tree(&mut child);
+            let _ = child.wait();
+            return Err(BoundedProcessError::Write(error));
+        }
+    }
+    #[cfg(not(unix))]
+    let stdin_writer = stdin.map(|input| {
+        let mut handle = child.stdin.take().expect("stdin was configured as piped");
+        thread::spawn(move || handle.write_all(&input.bytes))
+    });
     let (sender, receiver) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let stdout_reader = thread::spawn({
@@ -398,10 +470,62 @@ pub fn run_bounded_command(
     let mut stderr = None;
     let mut finished_streams = 0;
     let result = loop {
-        if status.is_none() {
-            status = child.try_wait().map_err(BoundedProcessError::Wait)?;
+        #[cfg(unix)]
+        if let (Some(input), Some(handle)) = (stdin.as_ref(), child_stdin.as_mut()) {
+            if stdin_offset < input.bytes.len() {
+                use std::os::fd::AsRawFd;
+                let mut descriptor = libc::pollfd {
+                    fd: handle.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let polled = unsafe { libc::poll(&mut descriptor, 1, 0) };
+                if polled < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        break Err(BoundedProcessError::Write(error));
+                    }
+                } else if polled > 0 && descriptor.revents & libc::POLLOUT != 0 {
+                    match handle.write(&input.bytes[stdin_offset..]) {
+                        Ok(0) => {
+                            break Err(BoundedProcessError::Write(std::io::Error::new(
+                                std::io::ErrorKind::WriteZero,
+                                "evaluator subprocess stdin accepted no bytes",
+                            )));
+                        }
+                        Ok(count) => stdin_offset += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => break Err(BoundedProcessError::Write(error)),
+                    }
+                }
+            }
+            if stdin_offset == input.bytes.len() {
+                // EOF is part of the protocol, but never wait on it outside
+                // the shared deadline.
+                child_stdin.take();
+            }
         }
-        if status.is_some() && finished_streams == 2 {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(next) => status = next,
+                Err(error) => break Err(BoundedProcessError::Wait(error)),
+            }
+        }
+        #[cfg(unix)]
+        let stdin_complete = stdin
+            .as_ref()
+            .is_none_or(|input| stdin_offset == input.bytes.len());
+        #[cfg(not(unix))]
+        let stdin_complete = stdin_writer
+            .as_ref()
+            .is_none_or(|writer| writer.is_finished());
+        if status.is_some() && !stdin_complete {
+            break Err(BoundedProcessError::Write(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "evaluator subprocess exited before consuming bounded stdin",
+            )));
+        }
+        if status.is_some() && finished_streams == 2 && stdin_complete {
             break Ok(());
         }
         let now = Instant::now();
@@ -440,11 +564,29 @@ pub fn run_bounded_command(
         cancelled.store(true, Ordering::Release);
         terminate_attached_tree(&process_tree);
         terminate_process_tree(&mut child);
+        // On Windows, dropping the Job Object is the second, independent
+        // kill-on-close boundary. Do it before joining pipe workers so a
+        // failed explicit termination call cannot leave inherited handles
+        // keeping those workers blocked.
+        close_attached_tree_before_join(&mut process_tree);
     }
     let waited = child.wait().map_err(BoundedProcessError::Wait);
+    #[cfg(not(unix))]
+    let stdin_result = stdin_writer.map(|writer| {
+        writer
+            .join()
+            .map_err(|_| {
+                BoundedProcessError::Write(std::io::Error::other("stdin writer panicked"))
+            })?
+            .map_err(BoundedProcessError::Write)
+    });
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
     result?;
+    #[cfg(not(unix))]
+    if let Some(result) = stdin_result {
+        result?;
+    }
     let status = waited?;
     let stdout = String::from_utf8(stdout.expect("stdout reader completed"))
         .map_err(|_| BoundedProcessError::NonUtf8 { stream: "stdout" })?;
@@ -494,7 +636,7 @@ pub fn run_search_with_env(
     if let Some(environment) = environment {
         command.env_clear().envs(environment.iter().cloned());
     }
-    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
     Ok(SearchOutcome {
         returncode: output.status.code().unwrap_or(-1),
         stdout: output.stdout,
@@ -1395,6 +1537,7 @@ mod tests {
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,
             },
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -1403,10 +1546,131 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_unread_large_stdin_returns_by_the_shared_deadline() {
+        let mut command = shell("sleep 5");
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(100),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            Some(BoundedStdin::new(
+                vec![b'x'; 2 * 1024 * 1024],
+                2 * 1024 * 1024,
+            )),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::Timeout { timeout_ms: 100 }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn bounded_process_rejects_oversized_stdin_before_spawn() {
+        let mut command = Command::new("definitely-not-an-evaluator");
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions::default(),
+            Some(BoundedStdin::new(vec![0; 2], 1)),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::InputLimit { limit: 1 }
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_process_timeout_terminates_a_windows_job_with_descendants() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            Storage::FileSystem::SYNCHRONIZE,
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        let marker = tempfile::NamedTempFile::new()
+            .expect("create descendant marker")
+            .into_temp_path();
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg("--exact")
+            .arg("runner::tests::windows_job_descendant_helper")
+            .arg("--nocapture")
+            .env("KIO_EVAL_WINDOWS_JOB_MARKER", &marker);
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(500),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::Timeout { timeout_ms: 500 }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = (0..50)
+            .find_map(|_| {
+                let result = fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if result.is_none() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result
+            })
+            .expect("job descendant recorded its PID before timeout");
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        assert!(!handle.is_null(), "open recorded descendant PID");
+        let waited = unsafe { WaitForSingleObject(handle, 1_000) };
+        unsafe { CloseHandle(handle) };
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "Job Object did not terminate descendant"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_descendant_helper() {
+        let Some(marker) = std::env::var_os("KIO_EVAL_WINDOWS_JOB_MARKER") else {
+            return;
+        };
+        let mut leaf = Command::new(std::env::current_exe().expect("current test binary"));
+        leaf.arg("--exact")
+            .arg("runner::tests::windows_job_leaf_helper")
+            .arg("--nocapture")
+            .env("KIO_EVAL_WINDOWS_JOB_LEAF_MARKER", marker);
+        let _leaf = leaf.spawn().expect("spawn Job Object descendant");
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_leaf_helper() {
+        let Some(marker) = std::env::var_os("KIO_EVAL_WINDOWS_JOB_LEAF_MARKER") else {
+            return;
+        };
+        fs::write(marker, std::process::id().to_string()).expect("write descendant PID");
+        thread::sleep(Duration::from_secs(30));
+    }
+
     /// This is invoked in a separate test binary by
     /// `bounded_process_timeout_does_not_wait_for_escaped_pipe_holders`.
-    /// The direct child remains in the evaluator process group while its forked
-    /// child creates a new session and keeps both inherited output pipes open.
+    /// The direct child exits after its forked child creates a new session and
+    /// retains stdin/stdout/stderr.  This models a process which escapes the
+    /// ordinary Unix process group before the direct child is reaped.
     #[cfg(unix)]
     #[test]
     fn escaped_pipe_holder_helper() {
@@ -1415,6 +1679,7 @@ mod tests {
         let Some(path) = std::env::var_os("KIO_EVAL_ESCAPED_PIPE_HOLDER") else {
             return;
         };
+        let overflow = std::env::var_os("KIO_EVAL_ESCAPED_PIPE_HOLDER_OVERFLOW").is_some();
         let path = CString::new(path.as_os_str().as_bytes()).expect("marker path has no NUL");
         let child = unsafe { libc::fork() };
         assert!(
@@ -1455,21 +1720,41 @@ mod tests {
             };
             unsafe {
                 libc::close(descriptor);
-                loop {
-                    libc::pause();
+                if overflow {
+                    let bytes = [b'x'; 8192];
+                    loop {
+                        let _ = libc::write(1, bytes.as_ptr().cast(), bytes.len());
+                    }
+                } else {
+                    loop {
+                        libc::pause();
+                    }
                 }
             }
         }
-        unsafe {
-            loop {
-                libc::pause();
-            }
-        }
+        // Returning lets the test process exit normally while the descendant
+        // keeps all three inherited pipe ends alive.
     }
 
     #[cfg(unix)]
     struct EscapedPipeHolder {
         marker: tempfile::TempPath,
+    }
+
+    #[cfg(unix)]
+    impl EscapedPipeHolder {
+        fn wait_for_pid(&self) {
+            for _ in 0..20 {
+                if fs::metadata(&self.marker)
+                    .ok()
+                    .is_some_and(|metadata| metadata.len() > 0)
+                {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("escaped pipe holder did not record its pid");
+        }
     }
 
     #[cfg(unix)]
@@ -1508,6 +1793,7 @@ mod tests {
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,
             },
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -1518,16 +1804,78 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "timeout waited for an escaped pipe holder"
         );
-        for _ in 0..20 {
-            if fs::metadata(&_holder.marker)
-                .ok()
-                .is_some_and(|metadata| metadata.len() > 0)
-            {
-                return;
+        _holder.wait_for_pid();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_stops_on_escaped_stdout_overflow() {
+        let marker = tempfile::NamedTempFile::new()
+            .expect("create marker")
+            .into_temp_path();
+        let _holder = EscapedPipeHolder { marker };
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg("--exact")
+            .arg("runner::tests::escaped_pipe_holder_helper")
+            .arg("--nocapture")
+            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker)
+            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER_OVERFLOW", "1");
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_secs(2),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::OutputLimit {
+                stream: "stdout",
+                limit: 1024
             }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("escaped pipe holder did not record its pid");
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        _holder.wait_for_pid();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_escaped_unread_stdin_returns_without_a_writer_join() {
+        let marker = tempfile::NamedTempFile::new()
+            .expect("create marker")
+            .into_temp_path();
+        let _holder = EscapedPipeHolder { marker };
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg("--exact")
+            .arg("runner::tests::escaped_pipe_holder_helper")
+            .arg("--nocapture")
+            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker);
+        let started = Instant::now();
+        let error = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(250),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            Some(BoundedStdin::new(
+                vec![b'x'; 2 * 1024 * 1024],
+                2 * 1024 * 1024,
+            )),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BoundedProcessError::Write(_) | BoundedProcessError::Timeout { .. }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        _holder.wait_for_pid();
     }
 
     #[cfg(unix)]
@@ -1541,6 +1889,7 @@ mod tests {
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,
             },
+            None,
         )
         .unwrap_err();
         assert!(matches!(
@@ -1557,7 +1906,7 @@ mod tests {
     fn bounded_process_rejects_non_utf8_stdout() {
         let mut command = shell("printf '\\377'");
         let error =
-            run_bounded_command(&mut command, BoundedProcessOptions::default()).unwrap_err();
+            run_bounded_command(&mut command, BoundedProcessOptions::default(), None).unwrap_err();
         assert!(matches!(
             error,
             BoundedProcessError::NonUtf8 { stream: "stdout" }
@@ -1569,7 +1918,7 @@ mod tests {
     fn bounded_process_collects_both_terminal_stream_events_repeatedly() {
         for _ in 0..64 {
             let mut command = shell("printf stdout; printf stderr >&2");
-            let output = run_bounded_command(&mut command, BoundedProcessOptions::default())
+            let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)
                 .expect("both reader threads must deliver their terminal event");
             assert_eq!(output.stdout, "stdout");
             assert_eq!(output.stderr, "stderr");

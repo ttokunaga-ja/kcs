@@ -1730,7 +1730,7 @@ pub fn run(options: QhardOptions) -> Result<QhardReport, QhardError> {
         ]);
         environment.apply(&mut command)?;
         cwd.configure_command_cwd(&mut command)?;
-        let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
         environment.recheck_private_directories()?;
         let titles = if output.status.success() {
             result_paths(&output.stdout, options.k)?
@@ -3034,6 +3034,7 @@ fn run_sealed_system_tool(
             max_stdout_bytes: maximum,
             max_stderr_bytes: maximum,
         },
+        None,
     )?)
 }
 
@@ -3356,6 +3357,7 @@ fn load_dyld_cache_catalog() -> Result<DyldSharedCacheCatalog, QhardError> {
                 max_stdout_bytes: MAX_DYLD_INFO_OUTPUT_BYTES,
                 max_stderr_bytes: MAX_DYLD_INFO_OUTPUT_BYTES,
             },
+            None,
         )?;
         if !output.status.success() {
             return Err(QhardError::Input(
@@ -3400,6 +3402,7 @@ fn inspect_macho(path: &Path) -> Result<MachoInspection, QhardError> {
                 max_stdout_bytes: MAX_MACHO_INSPECT_OUTPUT_BYTES,
                 max_stderr_bytes: MAX_MACHO_INSPECT_OUTPUT_BYTES,
             },
+            None,
         )?)
     };
     let load_commands = inspect("-l")?;
@@ -4615,6 +4618,7 @@ fn run_tool(path: &Path, args: &[&str]) -> Result<crate::runner::BoundedProcessO
     Ok(run_bounded_command(
         &mut cmd,
         BoundedProcessOptions::default(),
+        None,
     )?)
 }
 fn run_tool_in_directory(
@@ -4637,6 +4641,7 @@ fn run_tool_in_directory(
     Ok(run_bounded_command(
         &mut command,
         BoundedProcessOptions::default(),
+        None,
     )?)
 }
 
@@ -4672,7 +4677,7 @@ fn run_bound_rga(
     if let Some(directory) = directory {
         directory.configure_command_cwd(&mut command)?;
     }
-    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
     bound.helpers.recheck()?;
     bound.runtime.recheck(false)?;
     Ok(output)
@@ -4845,7 +4850,7 @@ fn rebuild_baseline_replica(
     command.args(["--json", "repair", "replica"]);
     environment.apply(&mut command)?;
     scope.configure_command_cwd(&mut command)?;
-    let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+    let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
     environment.recheck_private_directories()?;
     if !output.status.success() {
         return Err(QhardError::Input(format!(
@@ -5036,7 +5041,7 @@ pub fn run_baseline(options: BaselineOptions) -> Result<BaselineReport, QhardErr
             ]);
             kio_environment.apply(&mut command)?;
             kio_scope.configure_command_cwd(&mut command)?;
-            let ko = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+            let ko = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
             kio_environment.recheck_private_directories()?;
             let kt = if ko.status.success() {
                 parse_kio_titles(&ko.stdout)?

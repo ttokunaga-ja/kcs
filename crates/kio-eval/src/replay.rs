@@ -523,7 +523,7 @@ impl ReplayCommandContext<'_> {
             ));
         }
         self.subprocesses.set(next);
-        let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
         if !output.status.success() {
             return Err(ReplayError::Result {
                 command: command_name,

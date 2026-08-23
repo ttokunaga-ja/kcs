@@ -7,19 +7,20 @@
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs,
-    io::{self, Read, Write},
+    fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
+
+use crate::runner::{
+    BoundedProcessError, BoundedProcessOptions, BoundedStdin, run_bounded_command,
+};
 
 pub const GROUND_TRUTH_SCHEMA: &str = "kio.ocr.ground-truth/v1";
 pub const RESPONSE_SCHEMA: &str = "kio.ocr.response/v1";
@@ -828,7 +829,6 @@ fn invoke_adapter<T: Serialize>(
     limits: &AdapterLimits,
 ) -> Result<(Vec<u8>, Vec<u8>), OcrEvalError> {
     validate_adapter_command(command)?;
-    let started = Instant::now();
     let mut input = serde_json::to_vec(request)?;
     input.push(b'\n');
     if input.len() > limits.max_stdin_bytes {
@@ -849,121 +849,30 @@ fn invoke_adapter<T: Serialize>(
             process.env(key, value);
         }
     }
-    process
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_process_group(&mut process);
-    let mut child = process.spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(OcrEvalError::Invalid("adapter stdout unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or(OcrEvalError::Invalid("adapter stderr unavailable"))?;
-    let out_limit = limits.max_stdout_bytes;
-    let err_limit = limits.max_stderr_bytes;
-    let (overflow_tx, overflow_rx) = mpsc::channel();
-    let stdout_tx = overflow_tx.clone();
-    let out_reader = thread::spawn(move || read_bounded(stdout, out_limit, "stdout", stdout_tx));
-    let err_reader = thread::spawn(move || read_bounded(stderr, err_limit, "stderr", overflow_tx));
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or(OcrEvalError::Invalid("adapter stdin unavailable"))?;
-    let writer = thread::spawn(move || stdin.write_all(&input));
-    loop {
-        if let Ok(stream) = overflow_rx.try_recv() {
-            terminate_process_group(&mut child);
-            let _ = child.wait();
-            let _ = writer.join();
-            let _ = out_reader.join();
-            let _ = err_reader.join();
-            return Err(OcrEvalError::OutputTooLarge {
-                stream,
-                limit: if stream == "stdout" {
-                    out_limit
-                } else {
-                    err_limit
-                },
-            });
+    let output = run_bounded_command(
+        &mut process,
+        BoundedProcessOptions {
+            timeout: limits.timeout,
+            max_stdout_bytes: limits.max_stdout_bytes,
+            max_stderr_bytes: limits.max_stderr_bytes,
+        },
+        Some(BoundedStdin::new(input, limits.max_stdin_bytes)),
+    )
+    .map_err(|error| match error {
+        BoundedProcessError::Timeout { .. } => OcrEvalError::Timeout(limits.timeout),
+        BoundedProcessError::OutputLimit { stream, limit } => {
+            OcrEvalError::OutputTooLarge { stream, limit }
         }
-        match child.try_wait()? {
-            Some(status) => {
-                let writer_result = writer
-                    .join()
-                    .map_err(|_| OcrEvalError::Invalid("adapter stdin writer panicked"))?;
-                if let Err(error) = writer_result {
-                    return Err(OcrEvalError::Io(error));
-                }
-                let stdout = join_reader(out_reader)?;
-                let stderr = join_reader(err_reader)?;
-                if let Ok(stream) = overflow_rx.try_recv() {
-                    return Err(OcrEvalError::OutputTooLarge {
-                        stream,
-                        limit: if stream == "stdout" {
-                            out_limit
-                        } else {
-                            err_limit
-                        },
-                    });
-                }
-                if !status.success() {
-                    return Err(OcrEvalError::AdapterFailed {
-                        status: status.to_string(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                    });
-                }
-                return Ok((stdout, stderr));
-            }
-            None if started.elapsed() >= limits.timeout => {
-                terminate_process_group(&mut child);
-                let _ = child.wait();
-                let _ = writer.join();
-                let _ = out_reader.join();
-                let _ = err_reader.join();
-                return Err(OcrEvalError::Timeout(limits.timeout));
-            }
-            None => thread::sleep(Duration::from_millis(5)),
-        }
+        BoundedProcessError::Write(source) => OcrEvalError::Io(source),
+        other => OcrEvalError::Io(io::Error::other(other.to_string())),
+    })?;
+    if !output.status.success() {
+        return Err(OcrEvalError::AdapterFailed {
+            status: output.status.to_string(),
+            stderr: output.stderr,
+        });
     }
-}
-fn read_bounded(
-    mut stream: impl Read,
-    limit: usize,
-    label: &'static str,
-    overflow: mpsc::Sender<&'static str>,
-) -> Result<Vec<u8>, OcrEvalError> {
-    let mut bytes = Vec::new();
-    let mut overflowed = false;
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            return Ok(bytes);
-        }
-        if bytes.len().saturating_add(count) > limit {
-            if !overflowed {
-                overflowed = true;
-                let _ = overflow.send(label);
-            }
-            // Keep draining until the parent has killed and reaped the child;
-            // returning here closes the pipe and can leave it blocked forever.
-            continue;
-        }
-        if !overflowed {
-            bytes.extend_from_slice(&chunk[..count]);
-        }
-    }
-}
-fn join_reader(
-    reader: thread::JoinHandle<Result<Vec<u8>, OcrEvalError>>,
-) -> Result<Vec<u8>, OcrEvalError> {
-    reader
-        .join()
-        .map_err(|_| OcrEvalError::Invalid("adapter stream reader panicked"))?
+    Ok((output.stdout.into_bytes(), output.stderr.into_bytes()))
 }
 fn parse_provider_line(
     bytes: &[u8],
@@ -1054,33 +963,6 @@ fn validate_adapter_command(command: &AdapterCommand) -> Result<(), OcrEvalError
     Ok(())
 }
 
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-}
-#[cfg(not(unix))]
-fn configure_process_group(_: &mut Command) {}
-#[cfg(unix)]
-fn terminate_process_group(child: &mut std::process::Child) {
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
-    let _ = child.kill();
-}
-#[cfg(not(unix))]
-fn terminate_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
-}
-
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1162,6 +1044,24 @@ fn valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn adapter_test_program(body: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("program");
+        let adapter = directory.path().join("adapter.py");
+        fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&adapter, b"# explicit adapter identity\n").unwrap();
+        (
+            directory,
+            fs::canonicalize(program).unwrap(),
+            fs::canonicalize(adapter).unwrap(),
+        )
+    }
+
     fn truth() -> GroundTruth {
         parse_ground_truth(r#"{"schema":"kio.ocr.ground-truth/v1","table":{"page_index":0,"expected_cell_texts":["Alpha","Beta"]},"japanese":{"page_index":1,"full_text":"日本 語"},"images":{"page_index":2,"expected_count":2},"formula":{"page_index":3,"expected_tokens":["E=mc^2"]}}"#.as_bytes()).unwrap()
     }
@@ -1227,6 +1127,31 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.request_id, "r1");
         assert!(parse_provider_line(b"{}\n{}\n", &request, &binding).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_adapter_stdin_obeys_the_shared_lifecycle_timeout() {
+        let (_directory, program, adapter) = adapter_test_program("exec /bin/sleep 5");
+        let command = AdapterCommand {
+            python: program,
+            adapter,
+            environment: BTreeMap::new(),
+        };
+        let limits = AdapterLimits {
+            timeout: Duration::from_millis(40),
+            ..AdapterLimits::default()
+        };
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            invoke_adapter(
+                &command,
+                &serde_json::json!({"request": "bounded"}),
+                &limits
+            ),
+            Err(OcrEvalError::Timeout(_))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
     #[test]
     fn explicit_document_binding_and_create_only_report_are_enforced() {
@@ -1343,14 +1268,5 @@ mod tests {
         header.extend_from_slice(&100_000_u32.to_be_bytes());
         fs::write(&image, header).unwrap();
         assert!(png_pixels(&fs::read(&image).unwrap()).unwrap() > MAX_RENDER_IMAGE_PIXELS);
-    }
-
-    #[test]
-    fn overflowing_pipe_signals_before_drain_completes() {
-        let (sender, receiver) = mpsc::channel();
-        let bytes = vec![b'x'; 32];
-        let drained = read_bounded(std::io::Cursor::new(bytes), 8, "stdout", sender).unwrap();
-        assert!(drained.is_empty());
-        assert_eq!(receiver.try_recv().unwrap(), "stdout");
     }
 }

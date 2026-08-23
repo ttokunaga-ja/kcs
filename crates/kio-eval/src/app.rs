@@ -1180,7 +1180,7 @@ fn verify_logs(
             problems.push(format!("history log unavailable: {scope}"));
             continue;
         }
-        let output = run_bounded_command(&mut command, BoundedProcessOptions::default());
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None);
         let Ok(output) = output else {
             problems.push(format!("history log unavailable: {scope}"));
             continue;
@@ -1371,7 +1371,7 @@ fn verify_restore(
             problems.push(format!("restore failed for {}/{}: {error}", scope, file));
             continue;
         }
-        let output = run_bounded_command(&mut command, BoundedProcessOptions::default());
+        let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None);
         let Ok(output) = output else {
             problems.push(format!(
                 "restore failed for {}/{}: {}",
@@ -2008,7 +2008,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
             research
                 .configure_command_cwd(&mut command)
                 .map_err(|error| kio_eval::runner::RunnerError::Input(error.to_string()))?;
-            let output = run_bounded_command(&mut command, BoundedProcessOptions::default())?;
+            let output = run_bounded_command(&mut command, BoundedProcessOptions::default(), None)?;
             Ok(kio_eval::runner::SearchOutcome {
                 returncode: output.status.code().unwrap_or(-1),
                 stdout: output.stdout,

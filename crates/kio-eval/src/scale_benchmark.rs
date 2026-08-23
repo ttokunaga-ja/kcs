@@ -593,6 +593,7 @@ pub fn benchmark(
                     max_stdout_bytes: 1024 * 1024,
                     max_stderr_bytes: 32 * 1024,
                 },
+                None,
             )?;
             if !output.status.success() {
                 return Err(ScaleBenchmarkError::Input(format!(

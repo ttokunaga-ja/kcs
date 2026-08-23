@@ -631,6 +631,7 @@ fn run_scope(
             max_stdout_bytes: MAX_JSON_BYTES,
             max_stderr_bytes: MAX_JSON_BYTES,
         },
+        None,
     )?;
     fixture.recheck()?;
     executable.recheck_original().map_err(process_error)?;

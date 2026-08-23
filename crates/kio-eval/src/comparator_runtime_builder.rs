@@ -444,6 +444,7 @@ mod macos {
                 max_stdout_bytes: 524_288,
                 max_stderr_bytes: 524_288,
             },
+            None,
         )
         .map_err(|e| err(format!("cannot run {bin}: {e}")))?;
         if !o.status.success() {
