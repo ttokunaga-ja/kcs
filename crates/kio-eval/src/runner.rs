@@ -156,6 +156,27 @@ enum StreamEvent {
     OutputLimit(&'static str, usize),
 }
 
+fn record_stream_event(
+    event: StreamEvent,
+    stdout: &mut Option<Vec<u8>>,
+    stderr: &mut Option<Vec<u8>>,
+    finished_streams: &mut usize,
+) -> Result<(), BoundedProcessError> {
+    match event {
+        StreamEvent::Data("stdout", bytes) => *stdout = Some(bytes),
+        StreamEvent::Data("stderr", bytes) => *stderr = Some(bytes),
+        StreamEvent::Data(_, _) => unreachable!("only stdout and stderr are configured"),
+        StreamEvent::End => *finished_streams += 1,
+        StreamEvent::ReadError(stream, source) => {
+            return Err(BoundedProcessError::Read { stream, source });
+        }
+        StreamEvent::OutputLimit(stream, limit) => {
+            return Err(BoundedProcessError::OutputLimit { stream, limit });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn read_stream<R: Read + std::os::fd::AsRawFd + Send + 'static>(
     mut reader: R,
@@ -595,10 +616,19 @@ pub fn run_bounded_command(
     let mut stdout = None;
     let mut stderr = None;
     let mut finished_streams = 0;
-    let result = loop {
+    let result = 'run: loop {
+        #[cfg(unix)]
+        let mut stdin_wait_pending = false;
+        #[cfg(unix)]
+        let mut stdin_burst = 0_usize;
         #[cfg(unix)]
         if let (Some(input), Some(handle)) = (stdin.as_ref(), child_stdin.as_mut()) {
-            if stdin_offset < input.bytes.len() {
+            while stdin_offset < input.bytes.len() {
+                if Instant::now() >= deadline {
+                    break 'run Err(BoundedProcessError::Timeout {
+                        timeout_ms: options.timeout.as_millis(),
+                    });
+                }
                 use std::os::fd::AsRawFd;
                 let mut descriptor = libc::pollfd {
                     fd: handle.as_raw_fd(),
@@ -609,25 +639,52 @@ pub fn run_bounded_command(
                 if polled < 0 {
                     let error = std::io::Error::last_os_error();
                     if error.kind() != std::io::ErrorKind::Interrupted {
-                        break Err(BoundedProcessError::Write(error));
+                        break 'run Err(BoundedProcessError::Write(error));
                     }
-                } else if polled > 0 && descriptor.revents & libc::POLLOUT != 0 {
+                    continue;
+                }
+                if polled == 0 {
+                    stdin_wait_pending = true;
+                    break;
+                }
+                if descriptor.revents
+                    & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+                    != 0
+                {
                     match handle.write(&input.bytes[stdin_offset..]) {
                         Ok(0) => {
-                            break Err(BoundedProcessError::Write(std::io::Error::new(
+                            break 'run Err(BoundedProcessError::Write(std::io::Error::new(
                                 std::io::ErrorKind::WriteZero,
                                 "evaluator subprocess stdin accepted no bytes",
                             )));
                         }
-                        Ok(count) => stdin_offset += count,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(error) => break Err(BoundedProcessError::Write(error)),
+                        Ok(count) => {
+                            stdin_offset += count;
+                            stdin_burst += count;
+                            // A continuously writable pipe must not starve
+                            // output-limit/read events. Yield after a bounded
+                            // burst, but use readiness polling below so this
+                            // is not the former fixed-delay write throttle.
+                            if stdin_burst >= 1024 * 1024 {
+                                stdin_wait_pending = true;
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            stdin_wait_pending = true;
+                            break;
+                        }
+                        Err(error) => break 'run Err(BoundedProcessError::Write(error)),
                     }
+                } else {
+                    stdin_wait_pending = true;
+                    break;
                 }
             }
             if stdin_offset == input.bytes.len() {
                 // EOF is part of the protocol, but never wait on it outside
                 // the shared deadline.
+                stdin_wait_pending = false;
                 child_stdin.take();
             }
         }
@@ -660,16 +717,63 @@ pub fn run_bounded_command(
                 timeout_ms: options.timeout.as_millis(),
             });
         }
-        match receiver.recv_timeout((deadline - now).min(Duration::from_millis(10))) {
-            Ok(StreamEvent::Data("stdout", bytes)) => stdout = Some(bytes),
-            Ok(StreamEvent::Data("stderr", bytes)) => stderr = Some(bytes),
-            Ok(StreamEvent::Data(_, _)) => unreachable!("only stdout and stderr are configured"),
-            Ok(StreamEvent::End) => finished_streams += 1,
-            Ok(StreamEvent::ReadError(stream, source)) => {
-                break Err(BoundedProcessError::Read { stream, source });
+        #[cfg(unix)]
+        if stdin_wait_pending {
+            use std::os::fd::AsRawFd;
+            let mut descriptor = libc::pollfd {
+                fd: child_stdin
+                    .as_ref()
+                    .expect("stdin remains open while a write is pending")
+                    .as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // Waiting on the writable pipe prevents a fixed 10 ms delay per
+            // write phase. Output events are still consumed below when already
+            // available; otherwise the next status/output poll remains bounded
+            // to the same short interval and shared deadline.
+            let wait = (deadline - now).min(Duration::from_millis(10));
+            let wait_ms = wait
+                .as_millis()
+                .clamp(1, i32::MAX as u128)
+                .try_into()
+                .expect("clamped poll timeout fits i32");
+            let polled = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+            if polled < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    break Err(BoundedProcessError::Write(error));
+                }
             }
-            Ok(StreamEvent::OutputLimit(stream, limit)) => {
-                break Err(BoundedProcessError::OutputLimit { stream, limit });
+            match receiver.try_recv() {
+                Ok(event) => {
+                    if let Err(error) =
+                        record_stream_event(event, &mut stdout, &mut stderr, &mut finished_streams)
+                    {
+                        break Err(error);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) if finished_streams == 2 => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Err(BoundedProcessError::Read {
+                        stream: "output",
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "output reader disconnected",
+                        ),
+                    });
+                }
+            }
+            continue;
+        }
+        match receiver.recv_timeout((deadline - now).min(Duration::from_millis(10))) {
+            Ok(event) => {
+                if let Err(error) =
+                    record_stream_event(event, &mut stdout, &mut stderr, &mut finished_streams)
+                {
+                    break Err(error);
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) if finished_streams == 2 => {
@@ -1702,6 +1806,30 @@ mod tests {
             BoundedProcessError::Timeout { timeout_ms: 100 }
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_process_drains_writable_stdin_before_waiting_for_output() {
+        // `wc` consumes stdin but emits nothing until it observes EOF. A 32
+        // MiB input is small enough for a local CI regression yet materially
+        // exposes the former one-write-then-10-ms-recv loop across ordinary
+        // Unix pipe capacities; the 3 s deadline leaves startup and I/O
+        // headroom for the readiness-driven implementation.
+        let input_len = 32 * 1024 * 1024;
+        let mut command = shell("wc -c >/dev/null; printf done");
+        let output = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_secs(3),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            Some(BoundedStdin::new(vec![b'x'; input_len], input_len)),
+        )
+        .expect("the child consumes all stdin before producing output");
+        assert_eq!(output.stdout, "done");
+        assert!(output.stderr.is_empty());
     }
 
     #[cfg(unix)]
