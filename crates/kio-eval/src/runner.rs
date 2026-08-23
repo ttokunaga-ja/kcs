@@ -257,7 +257,7 @@ fn read_stream<R: Read + Send + 'static>(
 fn terminate_process_tree(child: &mut Child) {
     #[cfg(unix)]
     unsafe {
-        // `configure_process_group` makes the child the process-group leader;
+        // `configure_process_isolation` makes the child the process-group leader;
         // a negative PID targets every descendant in that group.
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
@@ -268,7 +268,7 @@ fn terminate_process_tree(child: &mut Child) {
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+fn configure_process_isolation(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     unsafe {
@@ -282,20 +282,27 @@ fn configure_process_group(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+#[cfg(windows)]
+fn configure_process_isolation(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    command.creation_flags(CREATE_SUSPENDED);
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn configure_process_isolation(_command: &mut Command) {}
 
 #[cfg(windows)]
 struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl WindowsJob {
-    fn attach(child: &Child) -> Result<Self, std::io::Error> {
-        use std::os::windows::io::AsRawHandle;
+    fn create() -> Result<Self, std::io::Error> {
         use windows_sys::Win32::{
             Foundation::CloseHandle,
             System::JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
                 SetInformationJobObject,
             },
@@ -314,7 +321,6 @@ impl WindowsJob {
                 (&raw const limits).cast(),
                 std::mem::size_of_val(&limits) as u32,
             ) == 0
-                || AssignProcessToJobObject(handle, child.as_raw_handle() as _) == 0
             {
                 let error = std::io::Error::last_os_error();
                 CloseHandle(handle);
@@ -322,6 +328,16 @@ impl WindowsJob {
             }
             Ok(Self(handle))
         }
+    }
+
+    fn attach(&self, child: &Child) -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as _) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     fn terminate(&self) {
@@ -341,9 +357,98 @@ impl Drop for WindowsJob {
 }
 
 #[cfg(windows)]
-fn attach_process_tree(child: &Child) -> Result<Option<WindowsJob>, std::io::Error> {
-    WindowsJob::attach(child).map(Some)
+fn resume_suspended_process(child: &Child) -> Result<(), std::io::Error> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = (|| {
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            if Thread32First(snapshot, &mut entry) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut owner_thread = None;
+            loop {
+                if entry.th32OwnerProcessID == child.id() {
+                    if owner_thread.replace(entry.th32ThreadID).is_some() {
+                        return Err(std::io::Error::other(
+                            "suspended evaluator created more than one thread before isolation",
+                        ));
+                    }
+                }
+                entry = THREADENTRY32 {
+                    dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                    ..Default::default()
+                };
+                if Thread32Next(snapshot, &mut entry) == 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+            let owner_thread = owner_thread.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "could not find suspended evaluator owner thread",
+                )
+            })?;
+            let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, owner_thread);
+            if thread.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let previous_count = ResumeThread(thread);
+            let resume_error = if previous_count == u32::MAX {
+                Some(std::io::Error::last_os_error())
+            } else if previous_count != 1 {
+                Some(std::io::Error::other(
+                    "evaluator owner thread was not suspended exactly once",
+                ))
+            } else {
+                None
+            };
+            CloseHandle(thread);
+            resume_error.map_or(Ok(()), Err)
+        })();
+        CloseHandle(snapshot);
+        result
+    }
 }
+
+#[cfg(all(windows, test))]
+thread_local! {
+    static WINDOWS_PRE_ATTACH_DELAY: std::cell::Cell<Option<Duration>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(all(windows, test))]
+fn delay_before_windows_job_attach_for_test() {
+    WINDOWS_PRE_ATTACH_DELAY.with(|delay| {
+        if let Some(delay) = delay.get() {
+            thread::sleep(delay);
+        }
+    });
+}
+
+#[cfg(all(windows, not(test)))]
+fn delay_before_windows_job_attach_for_test() {}
 
 #[cfg(not(windows))]
 fn attach_process_tree(_child: &Child) -> Result<Option<()>, std::io::Error> {
@@ -370,8 +475,9 @@ fn close_attached_tree_before_join(_job: &mut Option<()>) {}
 
 /// Run a trusted Kio-under-test command under evaluator resource bounds.
 ///
-/// On Unix the child gets its own process group; on Windows it is assigned to
-/// a kill-on-close Job Object. A timeout, output overflow, or stream failure
+/// On Unix the child gets its own process group; on Windows it starts
+/// suspended, joins a kill-on-close Job Object, and is resumed only after that
+/// isolation succeeds. A timeout, output overflow, or stream failure
 /// kills the ordinary child tree before returning. This is a guard against
 /// product bugs, not an operating-system sandbox for a hostile executable.
 /// Unix descendants that deliberately create a new session are outside the
@@ -389,7 +495,7 @@ pub fn run_bounded_command(
             limit: input.max_bytes,
         });
     }
-    configure_process_group(command);
+    configure_process_isolation(command);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -401,7 +507,27 @@ pub fn run_bounded_command(
     // This is deliberately before spawn: one monotonic deadline accounts for
     // all work within this boundary, including a slow spawn and cleanup.
     let started = Instant::now();
+    #[cfg(windows)]
+    let mut process_tree = Some(WindowsJob::create().map_err(BoundedProcessError::Isolation)?);
     let mut child = command.spawn().map_err(BoundedProcessError::Spawn)?;
+    #[cfg(windows)]
+    let isolation = {
+        delay_before_windows_job_attach_for_test();
+        process_tree
+            .as_ref()
+            .expect("Windows Job Object was created before spawning evaluator")
+            .attach(&child)
+            .and_then(|()| resume_suspended_process(&child))
+    };
+    #[cfg(windows)]
+    if let Err(error) = isolation {
+        terminate_attached_tree(&process_tree);
+        terminate_process_tree(&mut child);
+        close_attached_tree_before_join(&mut process_tree);
+        let _ = child.wait();
+        return Err(BoundedProcessError::Isolation(error));
+    }
+    #[cfg(not(windows))]
     let mut process_tree = match attach_process_tree(&child) {
         Ok(process_tree) => process_tree,
         Err(error) => {
@@ -1616,14 +1742,36 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn bounded_process_timeout_terminates_a_windows_job_with_descendants() {
+    struct WindowsPreAttachDelay(Option<Duration>);
+
+    #[cfg(windows)]
+    impl WindowsPreAttachDelay {
+        fn set(delay: Duration) -> Self {
+            let previous = WINDOWS_PRE_ATTACH_DELAY.with(|slot| slot.replace(Some(delay)));
+            Self(previous)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for WindowsPreAttachDelay {
+        fn drop(&mut self) {
+            WINDOWS_PRE_ATTACH_DELAY.with(|slot| slot.set(self.0));
+        }
+    }
+
+    #[cfg(windows)]
+    fn assert_windows_job_timeout_terminates_descendant(
+        delay_before_attach: Option<Duration>,
+        timeout: Duration,
+        elapsed_bound: Duration,
+    ) {
         use windows_sys::Win32::{
             Foundation::{CloseHandle, WAIT_OBJECT_0},
             Storage::FileSystem::SYNCHRONIZE,
             System::Threading::{OpenProcess, WaitForSingleObject},
         };
 
+        let _delay = delay_before_attach.map(WindowsPreAttachDelay::set);
         let marker = tempfile::NamedTempFile::new()
             .expect("create descendant marker")
             .into_temp_path();
@@ -1637,7 +1785,7 @@ mod tests {
         let error = run_bounded_command(
             &mut command,
             BoundedProcessOptions {
-                timeout: Duration::from_millis(500),
+                timeout,
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,
             },
@@ -1646,9 +1794,10 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            BoundedProcessError::Timeout { timeout_ms: 500 }
+            BoundedProcessError::Timeout { timeout_ms }
+                if timeout_ms == timeout.as_millis()
         ));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < elapsed_bound);
         let pid = (0..50)
             .find_map(|_| {
                 let result = fs::read_to_string(&marker)
@@ -1667,6 +1816,29 @@ mod tests {
         assert_eq!(
             waited, WAIT_OBJECT_0,
             "Job Object did not terminate descendant"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_process_timeout_terminates_a_windows_job_with_descendants() {
+        assert_windows_job_timeout_terminates_descendant(
+            None,
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_process_pre_attach_delay_cannot_allow_a_windows_descendant_to_escape() {
+        // The helper spawns its leaf immediately. Without CREATE_SUSPENDED,
+        // this delay would let that leaf exist before its parent joined the
+        // Job Object, so it would not inherit the kill-on-close boundary.
+        assert_windows_job_timeout_terminates_descendant(
+            Some(Duration::from_millis(500)),
+            Duration::from_secs(2),
+            Duration::from_secs(5),
         );
     }
 
