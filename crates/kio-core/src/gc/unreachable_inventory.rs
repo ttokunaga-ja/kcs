@@ -1658,7 +1658,7 @@ thread_local! {
     )>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_first_pass_test_barrier(
     barrier: Option<(
         std::sync::mpsc::SyncSender<()>,

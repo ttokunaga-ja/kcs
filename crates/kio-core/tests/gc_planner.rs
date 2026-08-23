@@ -2,10 +2,11 @@ use std::fs;
 
 use kio_core::cas::{ChunkObject, ObjectKind, ObjectStore, hash_bytes};
 use kio_core::dag::{CommitObject, CommitStats, CommitType, TreeEntry, build_tree};
+#[cfg(unix)]
+use kio_core::gc::GcPlanLimits;
 use kio_core::gc::{
-    GcAutomationConfig, GcAutomationMode, GcInProgressMarker, GcIndexState, GcPlan, GcPlanLimits,
-    GcPlanner, GcReceiptPublication, GcSweepSession, ShallowReceipt,
-    validated_final_shallow_receipts,
+    GcAutomationConfig, GcAutomationMode, GcInProgressMarker, GcIndexState, GcPlan, GcPlanner,
+    GcReceiptPublication, GcSweepSession, ShallowReceipt, validated_final_shallow_receipts,
 };
 use kio_core::scope::Repository;
 use serde_json::json;

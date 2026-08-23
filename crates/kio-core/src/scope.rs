@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::Command;
 use std::sync::Arc;
@@ -16,9 +18,11 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::ExitCode;
+#[cfg(unix)]
+use crate::cas::lower_hex;
 use crate::cas::{
     CAS_STREAM_BUFFER_BYTES, ContentObjectKind, MAX_RAW_OBJECT_BYTES, ObjectKind, ObjectStore,
-    append_jsonl, atomic_overwrite, atomic_write, canonical_json_bytes, is_hash, lower_hex,
+    append_jsonl, atomic_overwrite, atomic_write, canonical_json_bytes, is_hash,
 };
 use crate::dag::{
     CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject, build_tree,
@@ -822,6 +826,8 @@ impl Repository {
         expected_direct_entries: Option<&BTreeSet<String>>,
         expected_snapshot_policy: Option<&SnapshotAutoBinding>,
     ) -> Result<WorkingTree> {
+        #[cfg(not(unix))]
+        let _ = expected_snapshot_policy;
         let scheduled_bound = expected_raw_by_path.is_some() && {
             #[cfg(unix)]
             {
@@ -1565,6 +1571,20 @@ impl Repository {
             },
         }
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn reject_scheduled_bound_purge_state(&self) -> Result<()> {
+        // Scheduled snapshots require descriptor-relative inspection of the
+        // purge journal before any publication can occur. Do not emulate that
+        // check with path-based operations on platforms without the retained
+        // capability boundary.
+        Err(KioError::new(
+            "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+            "scheduled snapshot publication requires retained filesystem capabilities",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ))
     }
 
     #[cfg(unix)]
@@ -4945,6 +4965,7 @@ fn bound_marker_exists(kio: &File, namespace: &str, raw_hash: &str) -> Result<bo
 
 /// Debug-only synchronization seam for descriptor-replacement integration
 /// tests. Production builds never inspect the environment or wait.
+#[cfg(unix)]
 fn wait_at_bound_snapshot_auto_layout_barrier() {
     wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_BOUND_LAYOUT_READY");
 }
@@ -6030,6 +6051,7 @@ fn canonical_lock_bytes(pid: u32, token: &str) -> Result<Vec<u8>> {
     serde_json::to_vec(&lock).map_err(|error| KioError::io(error.to_string(), ".kio/.lock"))
 }
 
+#[cfg(unix)]
 fn parse_canonical_lock(bytes: &[u8]) -> Result<LockFile> {
     let lock: LockFile =
         serde_json::from_slice(bytes).map_err(|_| KioError::locked(".kio/.lock"))?;
@@ -6384,7 +6406,7 @@ fn exchange_bound_lock(left_dir: &File, left: &str, right_dir: &File, right: &st
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn exchange_bound_lock(
     _left_dir: &File,
     _left: &str,

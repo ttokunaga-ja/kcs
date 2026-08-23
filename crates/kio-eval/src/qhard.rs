@@ -5609,6 +5609,25 @@ mod tests {
     }
 
     #[test]
+    fn dyld_shared_cache_frozen_catalog_covers_cache_only_libsystem() {
+        let catalog = parse_dyld_cache_catalog(
+            "/usr/lib/libSystem.B.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC60\n    -linked_dylibs:\n        attributes     load path\n        upward         /usr/lib/libobjc.A.dylib\n/usr/lib/libobjc.A.dylib [arm64e]:\n    -uuid:\n        40277974-D20C-3EC8-B25C-43AE30D8CC61\n    -linked_dylibs:\n        attributes     load path\n",
+            "arm64e",
+            "macos:test:build:kernel:aarch64",
+            test_dyld_info_binding(),
+        )
+        .unwrap();
+        assert!(catalog.images.contains_key("/usr/lib/libSystem.B.dylib"));
+        assert_eq!(
+            catalog.images["/usr/lib/libSystem.B.dylib"].linked_dylibs,
+            vec![DyldSharedCacheEdge {
+                attributes: "upward".into(),
+                path: "/usr/lib/libobjc.A.dylib".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn dyld_shared_cache_closure_is_recursive_and_digest_sensitive() {
         let mut images = BTreeMap::new();
         images.insert(
@@ -5869,13 +5888,18 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn dyld_shared_cache_covers_cache_only_libsystem_when_absent() {
-        let path = Path::new("/usr/lib/libSystem.B.dylib");
-        if fs::symlink_metadata(path).is_ok() {
-            return;
+    fn sealed_macos_dyld_runtime_catalog_is_manual_opt_in() -> Result<(), QhardError> {
+        // This is intentionally absent from ordinary CI: it probes the sealed
+        // host runtime and requires the Apple-signed CommandLineTools
+        // `dyld_info`. Run it explicitly with
+        // `KIO_EVAL_SEALED_MACOS_DYLD_RUNTIME=1 cargo test -p kio-eval
+        // qhard::tests::sealed_macos_dyld_runtime_catalog_is_manual_opt_in`.
+        if std::env::var_os("KIO_EVAL_SEALED_MACOS_DYLD_RUNTIME") != Some(OsString::from("1")) {
+            return Ok(());
         }
-        let catalog = load_dyld_cache_catalog().unwrap();
+        let catalog = load_dyld_cache_catalog()?;
         assert!(catalog.images.contains_key("/usr/lib/libSystem.B.dylib"));
+        Ok(())
     }
 
     #[test]

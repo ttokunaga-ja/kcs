@@ -4401,7 +4401,7 @@ fn read_regular_observed(
     Ok((b, observation))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn read_regular(d: &std::fs::File, n: &str, max: u64) -> Result<Vec<u8>> {
     read_regular_observed(d, n, max).map(|(bytes, _)| bytes)
 }
@@ -4616,7 +4616,7 @@ fn file_state(metadata: &cap_fs::Metadata) -> FileState {
     let modified = metadata
         .modified()
         .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        .and_then(|time| time.into_std().duration_since(std::time::UNIX_EPOCH).ok());
     FileState {
         len: metadata.len(),
         modified_seconds: modified

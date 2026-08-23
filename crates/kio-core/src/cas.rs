@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, Write};
+#[cfg(unix)]
+use std::io::Seek;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::Arc;
@@ -703,7 +705,7 @@ impl ObjectStore {
             "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
             "scheduled snapshot publication requires retained filesystem capabilities",
             serde_json::json!({}),
-            crate::error::ExitCode::PermanentFailure,
+            crate::ExitCode::PermanentFailure,
         ))
     }
 
