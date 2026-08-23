@@ -6,12 +6,17 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Stdio;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::thread;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use kio_core::cas::{ObjectKind, ObjectStore};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use kio_core::scope::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -135,6 +140,7 @@ fn only_enabled_and_indexed_scopes_activate_on_idle_without_store_mutation() {
     assert_eq!(disabled["reason"], "disabled");
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn baseline_then_idle_boundary_reports_not_idle_and_no_candidate_noop() {
     let dir = indexed(10);
@@ -157,6 +163,7 @@ fn baseline_then_idle_boundary_reports_not_idle_and_no_candidate_noop() {
     assert_eq!(after["status"], "noop");
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn human_on_idle_output_reports_gc_and_waiting_does_not_mutate_store() {
     let dir = indexed(10);
@@ -500,6 +507,7 @@ fn parent_on_idle_does_not_consume_child_gc_state_and_child_handles_its_own_tree
     assert!(!child_tree_path.exists());
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn content_and_path_changes_reset_idle_but_ignored_inputs_do_not() {
     let dir = indexed(60);
@@ -532,6 +540,7 @@ fn content_and_path_changes_reset_idle_but_ignored_inputs_do_not() {
     assert_eq!(renamed["reason"], "working_set_changed");
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn digest_uses_content_and_paths_not_mtime_or_ignored_tier_a_inputs() {
     let dir = indexed(60);
@@ -577,6 +586,7 @@ fn digest_uses_content_and_paths_not_mtime_or_ignored_tier_a_inputs() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn rejects_noncanonical_or_incompatible_idle_state_and_clock_rollback() {
     let dir = indexed(10);
@@ -604,6 +614,28 @@ fn rejects_noncanonical_or_incompatible_idle_state_and_clock_rollback() {
     .output()
     .unwrap();
     assert_eq!(rollback.status.code(), Some(3));
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn indexed_on_idle_fails_before_scheduler_or_gc_mutation_on_unsupported_platform() {
+    let dir = indexed(10);
+    let before = bytes(&dir.path().join(".kio"));
+    let before_head = fs::read(dir.path().join(".kio/HEAD")).unwrap();
+
+    let output = kio(&dir, &["snapshot", "auto", "--json"], T0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        output_json(&output)["error_code"],
+        "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001"
+    );
+    assert_eq!(fs::read(dir.path().join(".kio/HEAD")).unwrap(), before_head);
+    assert_eq!(bytes(&dir.path().join(".kio")), before);
+    assert!(!dir.path().join(".kio/.lock").exists());
+    assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
+    assert!(!dir.path().join(".kio/gc").exists());
 }
 
 #[test]

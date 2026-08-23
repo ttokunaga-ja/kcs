@@ -1392,6 +1392,25 @@ fn run_snapshot_auto() -> Result<Value> {
             false,
         ));
     }
+    // An absent HEAD is an unmistakably unindexed scope and remains a
+    // read-only scheduler skip everywhere.  Once a validated HEAD exists, however,
+    // automatic scheduling may publish state and run on-idle GC.  Do not
+    // probe index metadata (or enter any mutation preflight) on platforms
+    // without the verified descriptor-relative writer contract.
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return match repo.head_commit_hash()? {
+            Some(_) => Err(snapshot_auto_platform_unsupported()),
+            None => Ok(snapshot_auto_output(
+                "skipped",
+                "not_indexed",
+                "not_started",
+                None,
+                None,
+                None,
+                false,
+            )),
+        };
+    }
     let first_indexed = scheduled_auto_index_metadata(&session)?.is_some();
     let second_indexed = scheduled_auto_index_metadata(&session)?.is_some();
     if first_indexed != second_indexed
@@ -1968,6 +1987,15 @@ fn scheduled_working_set_digest(preview: &ScanPreview) -> Result<String> {
         "sha256:{}",
         kio_core::cas::lower_hex(&Sha256::digest(bytes))
     ))
+}
+
+fn snapshot_auto_platform_unsupported() -> KioError {
+    KioError::new(
+        "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
+        "scheduled snapshot mutation requires a verified descriptor-relative writer lock",
+        json!({}),
+        ExitCode::PermanentFailure,
+    )
 }
 
 fn scheduled_auto_index_metadata(session: &GcSweepSession) -> Result<Option<BoundGcIndexMetadata>> {
