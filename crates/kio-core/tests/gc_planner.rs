@@ -4,9 +4,11 @@ use kio_core::cas::{ChunkObject, ObjectKind, ObjectStore, hash_bytes};
 use kio_core::dag::{CommitObject, CommitStats, CommitType, TreeEntry, build_tree};
 #[cfg(unix)]
 use kio_core::gc::GcPlanLimits;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use kio_core::gc::GcReceiptPublication;
 use kio_core::gc::{
     GcAutomationConfig, GcAutomationMode, GcInProgressMarker, GcIndexState, GcPlan, GcPlanner,
-    GcReceiptPublication, GcSweepSession, ShallowReceipt, validated_final_shallow_receipts,
+    GcSweepSession, ShallowReceipt, validated_final_shallow_receipts,
 };
 use kio_core::scope::Repository;
 use serde_json::json;
@@ -189,6 +191,7 @@ fn automation_binding_is_capability_bound_strict_and_defaults_manual() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn recovery_rejects_preexisting_receipt_timestamp_or_inode_replacement() {
     fn fixture() -> (Fixture, String, String, GcInProgressMarker, GcSweepSession) {
@@ -267,6 +270,7 @@ fn recovery_rejects_preexisting_receipt_timestamp_or_inode_replacement() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
     fn fixture() -> (
@@ -462,6 +466,7 @@ fn recovery_recomputes_retention_and_rejects_forged_marker_candidates() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn recovery_authorization_stays_bound_to_marker_start_across_retention_boundary() {
     let f = Fixture::new();
@@ -548,6 +553,7 @@ fn same_byte_ref_replacement_changes_plan_truth_binding() {
     assert_ne!(first.stable_truth_digest, second.stable_truth_digest);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn marker_owned_receipt_must_use_marker_timestamp() {
     let f = Fixture::new();
@@ -606,6 +612,7 @@ fn marker_owned_receipt_must_use_marker_timestamp() {
     assert!(session.validate_recovery_state(&marker).is_err());
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn sweeping_receipt_binding_rejects_same_bytes_inode_replacement() {
     let f = Fixture::new();
