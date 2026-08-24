@@ -1,10 +1,11 @@
 # Current five-job CI unique-signal ledger
 
-This ledger keeps the cohorts separate. The current product changes end at
-`d66b95859c983144bd3afc9469605f34b07ada86`, tree
-`8ef044c030ee7f113a0ebfccf29f298abe7c6a6b`, and use workflow blob
-`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The final-candidate clean-Linux
-cold/warm cohort is bound to that same product head/tree. The earlier
+This ledger keeps the cohorts separate. The current immutable GitHub-success
+cohort is head `4f49cce01a4fd614066f772ac9b10070a12dfd24`, tree
+`5816125ba27beeac062b424d9ddfbb552df77df5`, and workflow blob
+`bdc01e224cf952148910b6a6200b9ac1e451dd9e`. The earlier final-candidate
+clean-Linux cold/warm cohort remains bound to `d66b958...` / `8ef044c...` and
+is not relabeled as a GitHub measurement. The earlier
 `f50e8cc...` / `477a8d9...` pair and the superseded `2c7db5d...` / `7ea87a6...` pair remain separate historical cohorts. The candidate
 commit containing this evidence is resolved with
 `git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json`; a commit
@@ -16,11 +17,10 @@ machine-readable source of truth is
 [`ci-cost-baseline.json`](ci-cost-baseline.json); the current workflow is
 [`../../.github/workflows/ci.yml`](../../.github/workflows/ci.yml).
 
-The local measurement package is complete only after the Phase F cold/warm
-record below. Formal current-CI baseline acceptance remains provisional: the
-current Phase F candidate has no GitHub run and therefore zero matching
-successful runs. Prior attempt 1 failed independently on macOS and Windows; a
-successful Windows test measurement, queue time, and billing minutes remain
+The local measurement package is complete. The current GitHub-success cohort
+has one matching success (`n=1`), including a successful Windows measurement.
+Formal current-CI baseline acceptance remains provisional: one run is neither a
+distribution nor a continuous-SLO result. Queue time and billing minutes remain
 unknown.
 
 ## Signal carried by each job
@@ -58,6 +58,40 @@ fixtures are therefore either runner-local cache candidates or ephemeral job
 outputs, not reusable evidence in the current workflow.
 
 ## Cohort-separated cost evidence
+
+### Current immutable GitHub-success cohort
+
+Run [`32698672753`](https://github.com/ttokunaga-ja/kio/actions/runs/32698672753)
+is the current `CI` / `push` / attempt `1` success for head
+`4f49cce01a4fd614066f772ac9b10070a12dfd24`, tree
+`5816125ba27beeac062b424d9ddfbb552df77df5`, workflow blob
+`bdc01e224cf952148910b6a6200b9ac1e451dd9e`, Rust `1.98.0`, and the exact
+five-job topology with `rust -> synthetic-history-eval`. It is an immutable
+success-cost cohort and is not merged with the older failure or local cohorts.
+
+| Job | Result | Elapsed | GitHub job ID |
+| --- | --- | ---: | ---: |
+| `rust` | success | 13:45 | 97345631522 |
+| `persona-w0-integration` | success | 03:56 | 97345631491 |
+| `synthetic-history-eval` | success | 04:07 | 97348292728 |
+| `macos-security-r23` | success | 25:04 | 97345631515 |
+| `windows-security-r23` | success | 30:20 | 97345631370 |
+
+The workflow ran from `2026-08-24T06:46:16Z` to `2026-08-24T07:16:42Z`:
+30:26 wall-clock. Aggregate job elapsed is 4,632 seconds = 77:12 = 77.2
+runner-equivalent minutes; it is elapsed-time arithmetic, **not GitHub billing
+minutes**. The overall critical path is Windows at 30:20. The required
+`rust -> synthetic-history-eval` path is 13:45 + 00:04 dependency handoff +
+04:07 = 17:56. There were no failed, cancelled, skipped, or downstream-skipped
+jobs.
+
+This single run is below both reference values: workflow wall is below 45
+minutes and aggregate runner-equivalent is below 250 minutes. It establishes a
+current matching success sample of `n=1`, a confirmed Windows measurement, and
+a **provisional** formal current-CI baseline only; it does not claim a
+distribution or a continuous SLO. GitHub did not provide internal queue,
+billing, CPU, RSS, byte I/O, or cache telemetry: all are unknown/null and are
+not zero-filled.
 
 The successful cold local values retained from Phase C belong only to product
 commit `2a85016...` and workflow blob `049c69c...`. They are historical context,
@@ -257,7 +291,7 @@ stress, but did not reorganize the five-job topology, add a job, add a cache
 action, or upload an artifact. Full plan/source-projection semantics remain in
 ordinary Rust CI; the one-pass Full schedule/render signal has an explicit
 Rust-owned manual command documented in [`../../eval/README.md`](../../eval/README.md).
-Formal remeasurement requires matching successful runs of workflow blob
-`bdc01e224cf952148910b6a6200b9ac1e451dd9e` and a successful Windows
-measurement; queue and billing remain unknown unless GitHub exposes usable
-values.
+Formal remeasurement requires additional matching successful runs of workflow
+blob `bdc01e224cf952148910b6a6200b9ac1e451dd9e`, preserving this cohort's
+identity and topology, up to 10 samples. The Windows measurement is now
+confirmed; queue and billing remain unknown unless GitHub exposes usable values.

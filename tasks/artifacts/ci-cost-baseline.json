@@ -1,17 +1,15 @@
 {
   "schema": "kio.ci-cost-baseline/v1",
-  "captured_at": "2026-08-23T16:37:52Z",
+  "captured_at": "2026-08-24T07:16:43Z",
   "artifact_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
   "status": {
     "measurement_package": "complete",
     "formal_current_ci_baseline": "provisional",
-    "github_confirmation": "current_candidate_unpushed; prior_attempt_1_observed_failure",
+    "github_confirmation": "current_matching_push_attempt_1_success_confirmed",
     "blockers": [
-      "matching_current_github_success_runs_zero",
-      "current_candidate_has_no_github_run",
-      "windows_current_success_measurement_missing",
       "github_internal_queue_unavailable",
-      "github_billing_minutes_unavailable"
+      "github_billing_minutes_unavailable",
+      "formal_distribution_requires_additional_matching_success_samples"
     ]
   },
   "prior_phase_c_repository": {
@@ -32,11 +30,13 @@
     },
     "github": {
       "prior_attempt_matching_its_own_cohort": 1,
-      "current_phase_f_candidate_runs": 0,
-      "current_phase_f_candidate_success_runs": 0,
+      "prior_phase_f_local_candidate_runs": 0,
+      "prior_phase_f_local_candidate_success_runs": 0,
+      "current_success_cohort_runs": 1,
+      "current_success_cohort_success_runs": 1,
       "queue_seconds": null,
       "billing_minutes": null,
-      "current_job_elapsed_seconds": null
+      "prior_phase_f_local_candidate_job_elapsed_seconds": null
     },
     "units": {
       "wall_seconds": "seconds",
@@ -49,7 +49,7 @@
     "linux_manifest_sha256": "7563b02f736a81ad38185c206e873b52e230f968abea98d7e720eee8cb3544b9",
     "macos_manifest_sha256": "9bebfba6bd8ce402a18a675ea8c4887896f07f22addc2f6ebdfbc085aa3a9ff0"
   },
-  "current_phase_f_candidate": {
+  "prior_phase_f_local_candidate": {
     "product_change_head": "d66b95859c983144bd3afc9469605f34b07ada86",
     "product_change_tree": "8ef044c030ee7f113a0ebfccf29f298abe7c6a6b",
     "candidate_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
@@ -117,8 +117,8 @@
       },
       "readiness_driven_stdin_delta": "d66b958 drains immediately writable bounded stdin by readiness under the shared deadline, limits a writable burst to 1 MiB for output fairness, and adds the 32 MiB no-output-until-EOF regression; the targeted bounded-process test selection passed 11 tests."
     },
-    "github_matching_runs": 0,
-    "github_matching_success_runs": 0
+    "github_matching_runs_for_exact_head": 0,
+    "github_matching_success_runs_for_exact_head": 0
   },
   "current_topology": {
     "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e",
@@ -187,7 +187,133 @@
     ]
   },
   "github_observations": {
-    "success_cost_sample_count": 0,
+    "success_cost_sample_count": 1,
+    "success_cohorts": [
+      {
+        "cohort": {
+          "head": "4f49cce01a4fd614066f772ac9b10070a12dfd24",
+          "tree": "5816125ba27beeac062b424d9ddfbb552df77df5",
+          "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e",
+          "rust_toolchain": "1.98.0",
+          "job_count": 5,
+          "dependency_edges": [
+            {
+              "from": "rust",
+              "to": "synthetic-history-eval"
+            }
+          ]
+        },
+        "run_id": 32698672753,
+        "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32698672753",
+        "workflow": "CI",
+        "event": "push",
+        "attempt": 1,
+        "conclusion": "success",
+        "created_at": "2026-08-24T06:46:16Z",
+        "started_at": "2026-08-24T06:46:16Z",
+        "completed_at": "2026-08-24T07:16:42Z",
+        "workflow_wall_seconds": 1826,
+        "workflow_wall": "30:26",
+        "aggregate_job_elapsed_seconds": 4632,
+        "aggregate_runner_equivalent_minutes": 77.2,
+        "aggregate_elapsed_interpretation": "sum of job elapsed seconds divided by 60; runner-equivalent elapsed, not GitHub billing minutes",
+        "critical_path": {
+          "path": [
+            "windows-security-r23"
+          ],
+          "elapsed_seconds": 1820,
+          "elapsed": "30:20"
+        },
+        "rust_to_synthetic_dependency_path": {
+          "path": [
+            "rust",
+            "synthetic-history-eval"
+          ],
+          "rust_elapsed_seconds": 825,
+          "dependency_handoff_seconds": 4,
+          "synthetic_elapsed_seconds": 247,
+          "elapsed_seconds": 1076,
+          "elapsed": "17:56"
+        },
+        "jobs": [
+          {
+            "id": 97345631522,
+            "name": "rust",
+            "runner": "ubuntu-latest",
+            "conclusion": "success",
+            "started_at": "2026-08-24T06:46:19Z",
+            "completed_at": "2026-08-24T07:00:04Z",
+            "elapsed_seconds": 825,
+            "elapsed": "13:45"
+          },
+          {
+            "id": 97345631491,
+            "name": "persona-w0-integration",
+            "runner": "ubuntu-latest",
+            "conclusion": "success",
+            "started_at": "2026-08-24T06:46:19Z",
+            "completed_at": "2026-08-24T06:50:15Z",
+            "elapsed_seconds": 236,
+            "elapsed": "03:56"
+          },
+          {
+            "id": 97348292728,
+            "name": "synthetic-history-eval",
+            "runner": "ubuntu-latest",
+            "conclusion": "success",
+            "started_at": "2026-08-24T07:00:08Z",
+            "completed_at": "2026-08-24T07:04:15Z",
+            "elapsed_seconds": 247,
+            "elapsed": "04:07"
+          },
+          {
+            "id": 97345631515,
+            "name": "macos-security-r23",
+            "runner": "macos-latest",
+            "conclusion": "success",
+            "started_at": "2026-08-24T06:46:20Z",
+            "completed_at": "2026-08-24T07:11:24Z",
+            "elapsed_seconds": 1504,
+            "elapsed": "25:04"
+          },
+          {
+            "id": 97345631370,
+            "name": "windows-security-r23",
+            "runner": "windows-latest",
+            "conclusion": "success",
+            "started_at": "2026-08-24T06:46:22Z",
+            "completed_at": "2026-08-24T07:16:42Z",
+            "elapsed_seconds": 1820,
+            "elapsed": "30:20"
+          }
+        ],
+        "failure_relationship": {
+          "first_failure": null,
+          "failed_jobs": [],
+          "cancelled_jobs": [],
+          "skipped_jobs": [],
+          "downstream_skipped_jobs": []
+        },
+        "telemetry": {
+          "github_internal_queue_seconds": null,
+          "billing_minutes": null,
+          "cpu_seconds": null,
+          "maximum_resident_set_bytes": null,
+          "io_read_bytes": null,
+          "io_write_bytes": null,
+          "cache_hit_information": null,
+          "unknown_values_treated_as_zero": false
+        },
+        "threshold_comparison": {
+          "workflow_wall_45_minutes": "pass_single_run_only",
+          "aggregate_runner_equivalent_250_minutes": "pass_single_run_only",
+          "formal_distribution_or_continuous_slo": "not_claimed"
+        },
+        "eligible_for_success_cost": true,
+        "matching_success_sample_increment": 1,
+        "reason": "immutable current matching GitHub success cohort; n=1 is provisional and is not a distribution or continuous SLO"
+      }
+    ],
     "failure_cohorts": [
       {
         "cohort": {
@@ -1602,13 +1728,12 @@
   },
   "missing_and_remeasurement": {
     "required_for_formal_acceptance": [
-      "run the unchanged current workflow on GitHub and collect successful matching runs, up to 10",
-      "measure the Windows job on a matching GitHub run or equivalent Windows machine",
+      "collect additional matching successful runs, up to 10, without mixing identities",
       "capture queue and billing data if GitHub exposes usable nonzero values"
     ],
     "matching_run_requirements": [
       "workflow blob bdc01e224cf952148910b6a6200b9ac1e451dd9e",
-      "candidate head resolved by git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
+      "current cohort head 4f49cce01a4fd614066f772ac9b10070a12dfd24 and tree 5816125ba27beeac062b424d9ddfbb552df77df5",
       "exact five-job topology and rust -> synthetic dependency",
       "Rust 1.98.0",
       "same flags, tiny fixture profile, Rust persona path, and Rust evaluator path",
@@ -2413,7 +2538,7 @@
       "unknown_values_treated_as_zero": false
     }
   },
-  "current_phase_f_linux_measurement": {
+  "prior_phase_f_linux_measurement_d66b958": {
     "classification": "successful local clean Linux cold/warm cargo-test evidence for the immutable final product-change cohort d66b958; this is a test operand and diagnostic sample, not a complete rust job, five-job workflow, GitHub run, billing sample, or formal distribution",
     "candidate": {
       "product_change_head": "d66b95859c983144bd3afc9469605f34b07ada86",
@@ -3172,10 +3297,10 @@
       "local_target_comparison": "planning_estimate_below_40_minutes",
       "github_target_reference_comparison": "planning_estimate_below_45_minutes",
       "configured_aggregate_cap_minutes": 140,
-      "aggregate_250_minute_reference": "configured timeout sum is below 250, but a matching successful five-job measured aggregate remains unknown",
-      "formal_acceptance": "provisional; current matching GitHub success sample count remains zero"
+      "aggregate_250_minute_reference": "the separate immutable current GitHub success cohort records a 77.2-minute runner-equivalent aggregate below 250 minutes; this local planning record remains separate and is not billing",
+      "formal_acceptance": "historical local-only planning record; the separate current immutable GitHub success cohort has n=1 and remains provisional"
     },
-    "unavailable_or_inapplicable": {
+    "unavailable_or_inapplicable_for_exact_d66_local_cohort": {
       "github_workflow_wall_seconds": null,
       "github_aggregate_runner_equivalent_minutes": null,
       "github_dependency_critical_path_minutes": null,

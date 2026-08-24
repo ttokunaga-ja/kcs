@@ -3,16 +3,18 @@
 The canonical measurements are in
 [`ci-cost-baseline.json`](ci-cost-baseline.json), and the signal/duplication
 ledger is [`ci-cost-unique-signal.md`](ci-cost-unique-signal.md). All values
-are cohort-bound. The current product changes end at `d66b958...`, tree
-`8ef044c...`, and workflow blob `bdc01e2...`; the final-candidate clean-Linux
-cold/warm cohort is bound to the same head/tree. The older `f50e8cc...` / tree
+are cohort-bound. The current immutable GitHub-success cohort is
+`4f49cce...` / tree `5816125...` / workflow blob `bdc01e2...`; the
+final-candidate clean-Linux cold/warm cohort remains separately bound to
+`d66b958...` / `8ef044c...`. The older `f50e8cc...` / tree
 `477a8d9...` and superseded `2c7db5d...` / tree `7ea87a6...` measurements
 remain historical and are not relabeled. Earlier Phase C local values refer
 to `2a85016...` / tree `49e4887...` / workflow `049c69c...`; GitHub attempt 1
 refers to `c9f334e...` / workflow `049c69c...`. They are not combined.
 
-Status: formal current-CI baseline acceptance is **provisional / the Phase F
-candidate has no GitHub run, and a successful Windows measurement is pending**.
+Status: the current immutable GitHub-success cohort has `n=1`, including the
+Windows measurement. Formal current-CI baseline acceptance remains
+**provisional**: one success is not a distribution or continuous-SLO result.
 
 ## Prior Phase C selected measurements
 
@@ -56,6 +58,35 @@ overall critical path         = unknown
 
 This prior cohort's overall aggregate runner-equivalent time is also **unknown**
 because its Windows operand is unknown. Unknown values are never zero-filled.
+
+## Current immutable GitHub-success measurement
+
+Run [`32698672753`](https://github.com/ttokunaga-ja/kio/actions/runs/32698672753)
+is `CI` / `push` / attempt `1` / `success` for head
+`4f49cce01a4fd614066f772ac9b10070a12dfd24`, tree
+`5816125ba27beeac062b424d9ddfbb552df77df5`, workflow blob
+`bdc01e224cf952148910b6a6200b9ac1e451dd9e`, Rust `1.98.0`, and the five-job
+topology. It is a separate immutable cohort, not a relabeling of the local or
+failure data.
+
+| Job | Started | Completed | Elapsed |
+| --- | --- | --- | ---: |
+| `rust` | 06:46:19Z | 07:00:04Z | 13:45 |
+| `persona-w0-integration` | 06:46:19Z | 06:50:15Z | 03:56 |
+| `synthetic-history-eval` | 07:00:08Z | 07:04:15Z | 04:07 |
+| `macos-security-r23` | 06:46:20Z | 07:11:24Z | 25:04 |
+| `windows-security-r23` | 06:46:22Z | 07:16:42Z | 30:20 |
+
+The run began at `2026-08-24T06:46:16Z` and completed at
+`2026-08-24T07:16:42Z`: 30:26 wall-clock. Aggregate elapsed is
+825 + 236 + 247 + 1,504 + 1,820 = 4,632 seconds = 77:12 = 77.2
+runner-equivalent minutes, not billing minutes. The overall critical path is
+Windows: 1,820 seconds = 30:20. The required dependency path is
+825 + 4-second handoff + 247 = 1,076 seconds = 17:56.
+
+GitHub exposed no internal queue, billing, CPU, RSS, byte I/O, or cache
+telemetry; these values are null/unknown and not zero-filled. No job failed,
+cancelled, skipped, or was downstream-skipped.
 
 ## Phase F configured finite bounds
 
@@ -119,11 +150,11 @@ minutes along the dependency path; its independent Persona W0 lane was
 so these values are preserved rather than interpreted as a formal before/after
 percentage.
 
-The successful-current GitHub critical path and five-job aggregate remain
-unknown. The finite configured dependency cap is 45 minutes and configured
-aggregate cap is 140 minutes; caps are termination configuration, not measured
-runtime. Current successful macOS and Windows cost operands are absent, and
-unknown is never treated as zero.
+The successful-current GitHub critical path is 30:20 and five-job aggregate is
+77:12 runner-equivalent. The finite configured dependency cap is 45 minutes and
+configured aggregate cap is 140 minutes; caps are termination configuration,
+not measured runtime. Current macOS and Windows cost operands are recorded in
+the immutable success cohort; unknown telemetry is never treated as zero.
 
 ## Matching GitHub attempt 1 (failure cohort)
 
@@ -140,7 +171,7 @@ rust + synthetic-history-eval         = 50:53 + 04:06 = 54:59
 persona-w0-integration                = 03:12
 macos-security-r23                    = 23:45 (failure)
 windows-security-r23                  = 01:45 (compile failure; tests not run)
-matching successful sample count      = 0
+matching successful sample count      = 0 for this failure cohort
 ```
 
 The macOS and Windows failures were independent. `rust` succeeded, so its
@@ -151,16 +182,20 @@ RSS, I/O, and cache telemetry were unavailable and remain unknown.
 
 ## 45-minute and 250-minute targets
 
-- Critical path target: 45 minutes — **unknown** for successful-current
-  acceptance. Attempt 1 observed 54:59 under the older workflow, failed, and is
-  not a current success sample. The Phase F workflow's configured
-  `rust + synthetic` cap is 45 minutes; a cap is not a measured result.
+- Critical path target: 45 minutes — **pass for the one current success run**:
+  its overall measured critical path is Windows at 30:20. This is a single-run
+  comparison, not a distribution or continuous-SLO claim. Attempt 1 observed
+  54:59 under the older workflow, failed, and remains a separate cohort. The
+  Phase F workflow's configured `rust + synthetic` cap is configuration, not a
+  measured result.
 - Final-candidate local Linux dependency-path planning estimate: 8.892282
   minutes — **below the 40-minute local planning target**, but mixed-cohort and
   not a GitHub acceptance sample.
-- Aggregate runner-equivalent target: 250 minutes — **unknown**, because the
-  successful Windows operand is missing. Attempt 1 observed 83:41 before its
-  independent failures, but failure cost cannot establish success.
+- Aggregate runner-equivalent target: 250 minutes — **pass for the one current
+  success run**: 77:12 (77.2 minutes). This is elapsed runner-equivalent time,
+  not billing minutes, and is not a continuous-SLO claim. Attempt 1 observed
+  83:41 before its independent failures, but failure cost remains excluded from
+  successful cost.
 - Final-candidate exact cold workspace-test operand: 7.240333 minutes — one
   command only, insufficient to declare either the complete Rust job or the
   five-job aggregate.
@@ -178,11 +213,11 @@ RSS, I/O, and cache telemetry were unavailable and remain unknown.
 The prior and final-candidate local samples came from isolated validation at
 their exact product trees. Their raw evidence is ephemeral and non-authorizing;
 the acquisition method, per-binary values, and SHA-256 evidence digests are
-recorded in [`ci-cost-baseline.json`](ci-cost-baseline.json). The current Phase F candidate
-has zero matching GitHub attempts and zero matching successful runs. The one
-recorded attempt belongs to the older workflow and is a failure cohort. GitHub
-queue time and billing minutes are unknown, as are a successful Windows wall
-time and all resulting successful-current overall values.
+recorded in [`ci-cost-baseline.json`](ci-cost-baseline.json). The current
+immutable cohort has one matching GitHub attempt and one matching successful
+run. The recorded older-workflow attempt remains a separate failure cohort.
+GitHub queue and billing remain unknown, while current Windows wall time and
+successful-current overall values are recorded above.
 
 There is no workflow cache action and no persisted-artifact action. Local warm
 reuse is not a current GitHub saving. Phase F preserves the five-job topology
@@ -193,7 +228,7 @@ while changing finite timeout caps and the ordinary/manual Full-test split.
 Formal acceptance requires successful GitHub runs of workflow blob
 `bdc01e224cf952148910b6a6200b9ac1e451dd9e` that preserve the five-job
 topology, Rust 1.98.0, dependency, flags, tiny fixture, Rust persona path, and
-Rust evaluator path, plus a matching successful Windows value. Collect the
-available successful runs up to 10. Queue and billing remain unknown unless
-GitHub exposes usable values. Old 29-job, old-workflow, Rust 1.97, Python
+Rust evaluator path. Collect additional matching successful runs up to 10.
+Queue and billing remain unknown unless GitHub exposes usable values. Old
+29-job, old-workflow, Rust 1.97, Python
 evaluator, failure, and cancelled runs must not fill any gap.
