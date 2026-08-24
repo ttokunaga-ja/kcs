@@ -6820,10 +6820,20 @@ fn exchange_bound_lock(
 
 #[cfg(debug_assertions)]
 fn maybe_hold_lock_for_tests() {
-    if let Ok(value) = std::env::var("KIO_TEST_HOLD_LOCK_MS")
-        && let Ok(ms) = value.parse::<u64>()
-    {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
+    if let Some(ready) = std::env::var_os("KIO_TEST_HOLD_LOCK_READY") {
+        let ready = PathBuf::from(ready);
+        let release = ready.with_extension("release");
+        std::fs::write(&ready, b"ready").expect("test lock ready marker must be writable");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            release.exists(),
+            "test lock release marker was not published: {}",
+            release.display()
+        );
     }
 }
 

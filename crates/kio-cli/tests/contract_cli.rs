@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::thread;
+
+#[cfg(debug_assertions)]
+use std::process::{Child, Command as ProcessCommand, Stdio};
+#[cfg(debug_assertions)]
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command as AssertCommand;
@@ -17,7 +20,7 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_TEST_MISTRAL_BATCH",
     "KIO_TEST_MARKDOWNIZE_ADAPTER",
     "KIO_TEST_QUERY_EMBED_TRACE",
-    "KIO_TEST_HOLD_LOCK_MS",
+    "KIO_TEST_HOLD_LOCK_READY",
     "KIO_TEST_R13_2_AUTH",
     "KIO_TEST_R13_2_DECLARED",
     "KIO_TEST_R13_2_FALLBACK",
@@ -32,6 +35,7 @@ fn hermetic_assert_command() -> AssertCommand {
     command
 }
 
+#[cfg(debug_assertions)]
 fn hermetic_process_command(bin: &Path) -> ProcessCommand {
     let mut command = ProcessCommand::new(bin);
     for name in KIO_CHILD_ENV_DENYLIST {
@@ -40,6 +44,7 @@ fn hermetic_process_command(bin: &Path) -> ProcessCommand {
     command
 }
 
+#[cfg(debug_assertions)]
 fn assert_command_with_device_home(home: &Path) -> AssertCommand {
     let mut command = hermetic_assert_command();
     command
@@ -50,6 +55,7 @@ fn assert_command_with_device_home(home: &Path) -> AssertCommand {
     command
 }
 
+#[cfg(debug_assertions)]
 fn process_command_with_device_home(bin: &Path, home: &Path) -> ProcessCommand {
     let mut command = hermetic_process_command(bin);
     command
@@ -357,6 +363,7 @@ fn ct_snapshot_auto_config_schema_is_strict() {
     }
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn ct_lock_001_concurrent_snapshots_fail_fast() {
     let temp = tempfile::tempdir().unwrap();
@@ -372,14 +379,15 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
     let first = process_command_with_device_home(&bin, device_home.path())
         .args(["snapshot", "create", "-m", "first", "--json"])
         .env("KIO_FIXED_NOW", "2026-04-29T12:00:00Z")
-        .env("KIO_TEST_HOLD_LOCK_MS", "800")
+        .env("KIO_TEST_HOLD_LOCK_READY", temp.path().join("lock.ready"))
         .current_dir(temp.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let first = wait_for_lock_owner(first, temp.path().join(".kio/.lock").as_path());
+    let ready = temp.path().join("lock.ready");
+    let mut first = HeldLockChild::new(wait_for_lock_ready(first, &ready), &ready);
 
     let second = process_command_with_device_home(&bin, device_home.path())
         .args(["snapshot", "create", "-m", "second", "--json"])
@@ -387,7 +395,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
         .current_dir(temp.path())
         .output()
         .unwrap();
-    let first = first.wait_with_output().unwrap();
+    let first = first.release_and_wait();
 
     assert!(first.status.success());
     assert_eq!(second.status.code(), Some(3));
@@ -400,6 +408,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
 // on the same scope cannot interleave. The loser fails fast with
 // KIO-E-STORE-LOCKED-001 (exit 3) and the persisted store files remain valid
 // JSONL. Two REAL processes (not threads) so the O_EXCL contention is genuine.
+#[cfg(debug_assertions)]
 #[test]
 fn m1_concurrent_index_loser_is_locked_and_store_intact() {
     let temp = tempfile::tempdir().unwrap();
@@ -423,25 +432,26 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
     )
     .unwrap();
 
-    // Process A holds the lock across its snapshot sub-step for 1.2s, guaranteeing
-    // the contention window (the outer command lock is held the whole time).
+    // Process A holds the lock across its snapshot sub-step until this test releases
+    // it, guaranteeing the contention window without timing assumptions.
     let first = process_command_with_device_home(&bin, device_home.path())
         .args(["index", "--approve", "--json"])
-        .env("KIO_TEST_HOLD_LOCK_MS", "1200")
+        .env("KIO_TEST_HOLD_LOCK_READY", temp.path().join("lock.ready"))
         .current_dir(temp.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let first = wait_for_lock_owner(first, temp.path().join(".kio/.lock").as_path());
+    let ready = temp.path().join("lock.ready");
+    let mut first = HeldLockChild::new(wait_for_lock_ready(first, &ready), &ready);
 
     let second = process_command_with_device_home(&bin, device_home.path())
         .args(["index", "--approve", "--json"])
         .current_dir(temp.path())
         .output()
         .unwrap();
-    let first = first.wait_with_output().unwrap();
+    let first = first.release_and_wait();
 
     assert!(first.status.success(), "winner index must succeed");
     assert_eq!(second.status.code(), Some(3), "loser must exit 3 (locked)");
@@ -894,24 +904,83 @@ fn snapshot_json(dir: &std::path::Path, args: &[&str], now: &str) -> Value {
     serde_json::from_slice(&out).unwrap()
 }
 
-fn wait_for_lock_owner(mut child: Child, path: &Path) -> Child {
-    let child_pid = u64::from(child.id());
-    let deadline = Instant::now() + Duration::from_secs(5);
+#[cfg(debug_assertions)]
+struct HeldLockChild {
+    child: Option<Child>,
+    release: std::path::PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl HeldLockChild {
+    fn new(child: Child, ready: &Path) -> Self {
+        Self {
+            child: Some(child),
+            release: ready.with_extension("release"),
+        }
+    }
+
+    fn release_and_wait(&mut self) -> std::process::Output {
+        fs::write(&self.release, b"release").expect("test lock release marker must be writable");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self
+                .child
+                .as_mut()
+                .expect("held lock child must be present")
+                .try_wait()
+            {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let mut child = self.child.take().expect("held lock child must be present");
+                    let _ = child.kill();
+                    let output = child
+                        .wait_with_output()
+                        .expect("held lock child must be waitable");
+                    panic!(
+                        "timed out waiting for released lock holder (status {}): stdout={} stderr={}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(error) => panic!("failed to poll released lock holder: {error}"),
+            }
+        }
+        self.child
+            .take()
+            .expect("held lock child must be present")
+            .wait_with_output()
+            .expect("held lock child must be waitable")
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for HeldLockChild {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, b"release");
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn wait_for_lock_ready(mut child: Child, ready: &Path) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        let child_owns_lock = fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|record| record["pid"].as_u64())
-            .is_some_and(|pid| pid == child_pid);
-        if child_owns_lock {
+        if ready.exists() {
             return child;
         }
         match child.try_wait() {
             Ok(Some(_)) => {
                 let output = child.wait_with_output().unwrap();
                 panic!(
-                    "child exited before owning {} (status {}): stdout={} stderr={}",
-                    path.display(),
+                    "child exited before reaching {} (status {}): stdout={} stderr={}",
+                    ready.display(),
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
@@ -920,7 +989,7 @@ fn wait_for_lock_owner(mut child: Child, path: &Path) -> Child {
             Ok(None) => {}
             Err(error) => panic!(
                 "failed to poll child while waiting for {}: {error}",
-                path.display()
+                ready.display()
             ),
         }
         thread::sleep(Duration::from_millis(10));
@@ -928,8 +997,8 @@ fn wait_for_lock_owner(mut child: Child, path: &Path) -> Child {
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
     panic!(
-        "timed out waiting for child PID {child_pid} to own {} (child status {}): stdout={} stderr={}",
-        path.display(),
+        "timed out waiting for child to reach {} (child status {}): stdout={} stderr={}",
+        ready.display(),
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

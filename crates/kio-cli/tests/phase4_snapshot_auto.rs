@@ -41,7 +41,7 @@ fn kio(dir: &TempDir, args: &[&str], now: &str) -> Command {
         "KIO_TEST_SNAPSHOT_AUTO_BOUND_LAYOUT_READY",
         "KIO_TEST_SNAPSHOT_AUTO_PRE_CHECKPOINT_READY",
         "KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY",
-        "KIO_TEST_HOLD_LOCK_MS",
+        "KIO_TEST_HOLD_LOCK_READY",
         "KIO_TEST_PURGE_FAIL_AFTER_PHASE",
     ] {
         command.env_remove(name);
@@ -77,7 +77,7 @@ fn kio_process(dir: &TempDir, args: &[&str], now: &str) -> std::process::Command
         "KIO_TEST_SNAPSHOT_AUTO_BOUND_LAYOUT_READY",
         "KIO_TEST_SNAPSHOT_AUTO_PRE_CHECKPOINT_READY",
         "KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY",
-        "KIO_TEST_HOLD_LOCK_MS",
+        "KIO_TEST_HOLD_LOCK_READY",
         "KIO_TEST_PURGE_FAIL_AFTER_PHASE",
     ] {
         command.env_remove(name);
@@ -96,7 +96,7 @@ fn kio_process(dir: &TempDir, args: &[&str], now: &str) -> std::process::Command
 }
 
 fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !path.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
@@ -105,6 +105,107 @@ fn wait_for_path(path: &Path) {
         "test barrier was not reached: {}",
         path.display()
     );
+}
+
+#[cfg(debug_assertions)]
+fn wait_for_path_or_child_exit(path: &Path, mut child: std::process::Child) -> std::process::Child {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return child;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "child exited before reaching {} (status {}): stdout={} stderr={}",
+                    path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(None) => {}
+            Err(error) => panic!(
+                "failed to poll child while waiting for {}: {error}",
+                path.display()
+            ),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    panic!(
+        "timed out waiting for child to reach {} (child status {}): stdout={} stderr={}",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(debug_assertions)]
+struct HeldLockChild {
+    child: Option<std::process::Child>,
+    release: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl HeldLockChild {
+    fn new(child: std::process::Child, ready: &Path) -> Self {
+        Self {
+            child: Some(child),
+            release: ready.with_extension("release"),
+        }
+    }
+
+    fn release_and_wait(&mut self) -> std::process::Output {
+        fs::write(&self.release, b"release").expect("test lock release marker must be writable");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self
+                .child
+                .as_mut()
+                .expect("held lock child must be present")
+                .try_wait()
+            {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let mut child = self.child.take().expect("held lock child must be present");
+                    let _ = child.kill();
+                    let output = child
+                        .wait_with_output()
+                        .expect("held lock child must be waitable");
+                    panic!(
+                        "timed out waiting for released lock holder (status {}): stdout={} stderr={}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(error) => panic!("failed to poll released lock holder: {error}"),
+            }
+        }
+        self.child
+            .take()
+            .expect("held lock child must be present")
+            .wait_with_output()
+            .expect("held lock child must be waitable")
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for HeldLockChild {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, b"release");
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn barrier_path(dir: &TempDir, name: &str) -> PathBuf {
@@ -863,7 +964,7 @@ fn crash_after_checkpoint_before_ref_keeps_cooldown_and_head_boundary() {
     assert_ne!(head(&dir), before_head);
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(debug_assertions, any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn live_writer_lock_rejects_scheduled_snapshot_without_state_publication() {
     let dir = indexed_fixture(60, 1);
@@ -873,25 +974,10 @@ fn live_writer_lock_rejects_scheduled_snapshot_without_state_publication() {
         &["snapshot", "create", "-m", "hold lock", "--json"],
         "2026-08-14T00:00:01Z",
     );
-    first.env("KIO_TEST_HOLD_LOCK_MS", "800");
+    let ready = barrier_path(&dir, "live-writer-lock.ready");
+    first.env("KIO_TEST_HOLD_LOCK_READY", &ready);
     let first = first.spawn().unwrap();
-    let lock_path = dir.path().join(".kio/.lock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(bytes) = fs::read(&lock_path)
-            && serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|value| value["pid"].as_u64())
-                == Some(first.id() as u64)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "manual snapshot never held the store lock"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    let mut first = HeldLockChild::new(wait_for_path_or_child_exit(&ready, first), &ready);
 
     let rejected = kio(
         &dir,
@@ -900,13 +986,14 @@ fn live_writer_lock_rejects_scheduled_snapshot_without_state_publication() {
     )
     .output()
     .unwrap();
+    let first_output = first.release_and_wait();
     assert_eq!(rejected.status.code(), Some(3));
     assert_eq!(
         output_json(&rejected)["error_code"],
         "KIO-E-STORE-LOCKED-001"
     );
     assert!(!dir.path().join(".kio/snapshot-auto.json").exists());
-    assert!(first.wait_with_output().unwrap().status.success());
+    assert!(first_output.status.success());
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
