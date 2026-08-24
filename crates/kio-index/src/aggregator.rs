@@ -3835,8 +3835,14 @@ mod tests {
         let error = Aggregator::open(&path)
             .err()
             .expect("a junction must never become the cache authority");
-        assert!(error.to_string().contains("reparse"));
-        assert!(!victim.path().join("kio/aggregator.sqlite").exists());
+        assert!(
+            matches!(error, crate::IndexError::Schema(_)),
+            "junction rejection must remain a cache-schema boundary failure: {error}"
+        );
+        assert!(
+            !victim.path().join("kio").exists(),
+            "junction rejection must not create a cache directory or SQLite database in the victim"
+        );
 
         std::fs::remove_dir(&junction).unwrap();
     }
