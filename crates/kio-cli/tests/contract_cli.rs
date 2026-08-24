@@ -379,7 +379,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
         .spawn()
         .unwrap();
 
-    let first = wait_for_path(first, temp.path().join(".kio/.lock").as_path());
+    let first = wait_for_lock_owner(first, temp.path().join(".kio/.lock").as_path());
 
     let second = process_command_with_device_home(&bin, device_home.path())
         .args(["snapshot", "create", "-m", "second", "--json"])
@@ -434,7 +434,7 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
         .spawn()
         .unwrap();
 
-    let first = wait_for_path(first, temp.path().join(".kio/.lock").as_path());
+    let first = wait_for_lock_owner(first, temp.path().join(".kio/.lock").as_path());
 
     let second = process_command_with_device_home(&bin, device_home.path())
         .args(["index", "--approve", "--json"])
@@ -894,17 +894,23 @@ fn snapshot_json(dir: &std::path::Path, args: &[&str], now: &str) -> Value {
     serde_json::from_slice(&out).unwrap()
 }
 
-fn wait_for_path(mut child: Child, path: &Path) -> Child {
+fn wait_for_lock_owner(mut child: Child, path: &Path) -> Child {
+    let child_pid = u64::from(child.id());
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if path.exists() {
+        let child_owns_lock = fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|record| record["pid"].as_u64())
+            .is_some_and(|pid| pid == child_pid);
+        if child_owns_lock {
             return child;
         }
         match child.try_wait() {
             Ok(Some(_)) => {
                 let output = child.wait_with_output().unwrap();
                 panic!(
-                    "child exited before {} appeared (status {}): stdout={} stderr={}",
+                    "child exited before owning {} (status {}): stdout={} stderr={}",
                     path.display(),
                     output.status,
                     String::from_utf8_lossy(&output.stdout),
@@ -922,7 +928,7 @@ fn wait_for_path(mut child: Child, path: &Path) -> Child {
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
     panic!(
-        "timed out waiting for {} (child status {}): stdout={} stderr={}",
+        "timed out waiting for child PID {child_pid} to own {} (child status {}): stdout={} stderr={}",
         path.display(),
         output.status,
         String::from_utf8_lossy(&output.stdout),
