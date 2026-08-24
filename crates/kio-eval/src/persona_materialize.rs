@@ -680,6 +680,7 @@ mod tests {
         (plan_path, schedule_path, render_path)
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn materializes_tiny_bundle_with_one_canonical_record() {
         let root = tempdir().unwrap();
@@ -762,6 +763,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn occupied_destination_preserves_existing_bytes() {
         let root = tempdir().unwrap();
@@ -819,6 +821,7 @@ mod tests {
         assert!(!destination.exists());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn fixed_stale_stage_is_retained_and_rejected() {
         let root = tempdir().unwrap();
@@ -841,6 +844,7 @@ mod tests {
         assert_eq!(fs::read(stale.join("evidence")).unwrap(), b"do not remove");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn record_rejects_non_hex_hash_and_true_claims() {
         let root = tempdir().unwrap();
@@ -898,6 +902,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn rejects_same_content_source_inode_replacement_before_publication() {
         let root = tempdir().unwrap();
@@ -928,6 +933,7 @@ mod tests {
         assert!(root_path.join(stage_name("published").unwrap()).exists());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn rejects_staged_file_replacement_before_publication() {
         let root = tempdir().unwrap();

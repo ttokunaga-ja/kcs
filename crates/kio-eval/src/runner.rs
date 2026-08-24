@@ -1894,7 +1894,7 @@ mod tests {
         elapsed_bound: Duration,
     ) {
         use windows_sys::Win32::{
-            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0},
             Storage::FileSystem::SYNCHRONIZE,
             System::Threading::{OpenProcess, WaitForSingleObject},
         };
@@ -1938,7 +1938,17 @@ mod tests {
             })
             .expect("job descendant recorded its PID before timeout");
         let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-        assert!(!handle.is_null(), "open recorded descendant PID");
+        if handle.is_null() {
+            // A Job Object may have already terminated and reaped the leaf
+            // before this assertion observes it. `OpenProcess` reports that
+            // documented no-such-process state as ERROR_INVALID_PARAMETER.
+            assert_eq!(
+                unsafe { GetLastError() },
+                ERROR_INVALID_PARAMETER,
+                "open recorded descendant PID"
+            );
+            return;
+        }
         let waited = unsafe { WaitForSingleObject(handle, 1_000) };
         unsafe { CloseHandle(handle) };
         assert_eq!(

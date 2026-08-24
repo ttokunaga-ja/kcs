@@ -901,7 +901,11 @@ mod tests {
     #[test]
     fn bounded_reader_rejects_oversized_and_non_regular_objects() {
         let directory = tempfile::tempdir().unwrap();
-        let handle = fs::File::open(directory.path()).unwrap();
+        let handle = cap_primitives::fs::open_ambient_dir(
+            directory.path(),
+            cap_primitives::ambient_authority(),
+        )
+        .unwrap();
 
         fs::write(directory.path().join("oversized"), b"{}").unwrap();
         assert!(read_cap_regular_file(&handle, "oversized", 1).is_err());

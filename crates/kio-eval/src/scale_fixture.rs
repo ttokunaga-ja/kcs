@@ -1173,6 +1173,7 @@ mod tests {
     fn rt(t: &tempfile::TempDir) -> PathBuf {
         fs::canonicalize(t.path()).unwrap()
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn ready_noop_reset_recovery() {
         let t = tempdir().unwrap();
@@ -1242,6 +1243,7 @@ mod tests {
         assert_eq!(fs::read(out.join("victim")).unwrap(), b"keep");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn prepared_runtime_is_bindable_but_reset_refuses_to_delete_it() {
         let temp = tempdir().unwrap();
@@ -1263,6 +1265,7 @@ mod tests {
         assert!(out.join(scale_spec::PREPARE_REPORT_NAME).exists());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn public_parent_and_scope_replacement_preserve_victims() {
         let temp = tempdir().unwrap();
@@ -1290,6 +1293,7 @@ mod tests {
         assert_eq!(fs::read(scope.join("victim")).unwrap(), b"keep-scope");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn same_content_immutable_replacements_are_rejected() {
         let temp = tempdir().unwrap();
@@ -1361,6 +1365,7 @@ mod tests {
         assert!(generate(&out, ScaleProfile::Tiny, false).is_err());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_capture_reset_recovery_restores_current_ready_slot() {
         let temp = tempdir().unwrap();
@@ -1376,6 +1381,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn held_lock_rejects_named_lock_replacement() {
         let temp = tempdir().unwrap();
@@ -1394,6 +1400,7 @@ mod tests {
         assert!(guard.recheck().is_err());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn interrupted_reset_recovery_respects_live_candidate_writer_lock() {
         let temp = tempdir().unwrap();
@@ -1411,5 +1418,20 @@ mod tests {
             generate(&out, ScaleProfile::Tiny, false).unwrap(),
             GenerateOutcome::ReadyNoop
         );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn unsupported_platform_refuses_generation_before_creating_output() {
+        let temp = tempdir().unwrap();
+        let out = rt(&temp).join("scale");
+        let error = generate(&out, ScaleProfile::Tiny, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("atomic no-replace publication unsupported")
+        );
+        assert!(!out.exists());
+        assert!(!rt(&temp).join(".kio-scale-v2.tmp-tiny").exists());
     }
 }

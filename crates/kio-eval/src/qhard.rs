@@ -5583,6 +5583,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn dyld_shared_cache_catalog_is_strict_and_arch_specific() {
         let catalog = parse_dyld_cache_catalog(
@@ -5637,6 +5638,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn dyld_shared_cache_frozen_catalog_covers_cache_only_libsystem() {
         let catalog = parse_dyld_cache_catalog(
@@ -5883,6 +5885,7 @@ mod tests {
         assert!(!runtime_closure_matches(&provenance, &after_appearance));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn macho_rpath_resolves_cache_only_candidate_exactly() {
         let mut images = BTreeMap::new();
@@ -6555,6 +6558,9 @@ mod tests {
     fn snapshot_registry_paths_are_private() {
         let source = tempfile::tempdir().unwrap();
         let snapshot = tempfile::tempdir().unwrap();
+        let source_qhard = source.path().join("qhard");
+        let source_scope = source_qhard.join("a");
+        let source_kio = source_scope.join(".kio");
         let registry = snapshot
             .path()
             .join("env/qhard/xdg-data/kio/scope-registry.sqlite");
@@ -6566,10 +6572,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO scopes VALUES (?1, ?2)",
-                rusqlite::params![
-                    source.path().join("qhard/a/.kio").to_string_lossy(),
-                    source.path().join("qhard/a").to_string_lossy()
-                ],
+                rusqlite::params![source_kio.to_string_lossy(), source_scope.to_string_lossy()],
             )
             .unwrap();
         drop(connection);

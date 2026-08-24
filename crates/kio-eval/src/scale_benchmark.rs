@@ -12,6 +12,8 @@ use std::{
 };
 
 use cap_primitives::fs as cap_fs;
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle;
 #[cfg(unix)]
 use cap_primitives::fs::MetadataExt;
 use kio_index::chunking::slugify_heading;
@@ -271,7 +273,20 @@ struct MetricsSnapshot {
 fn same_file(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn same_file(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    matches!(
+        (
+            left.volume_serial_number(),
+            left.file_index(),
+            right.volume_serial_number(),
+            right.file_index(),
+        ),
+        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
+            if left_volume == right_volume && left_index == right_index
+    )
+}
+#[cfg(not(any(unix, windows)))]
 fn same_file(_: &cap_fs::Metadata, _: &cap_fs::Metadata) -> bool {
     false
 }
@@ -285,8 +300,10 @@ fn open_metrics(parent: &fs::File) -> Result<(fs::File, cap_fs::Metadata), Scale
     .map_err(|error| ScaleBenchmarkError::Input(format!("cannot inspect metrics log: {error}")))?;
     #[cfg(unix)]
     let safe_links = before.nlink() == 1;
-    #[cfg(not(unix))]
-    let safe_links = true;
+    #[cfg(windows)]
+    let safe_links = before.number_of_links() == Some(1);
+    #[cfg(not(any(unix, windows)))]
+    let safe_links = false;
     if !before.is_file()
         || before.file_type().is_symlink()
         || !safe_links
@@ -316,8 +333,11 @@ fn open_metrics(parent: &fs::File) -> Result<(fs::File, cap_fs::Metadata), Scale
     .map_err(|error| ScaleBenchmarkError::Input(format!("cannot recheck metrics log: {error}")))?;
     #[cfg(unix)]
     let opened_links_safe = opened.nlink() == 1 && after.nlink() == 1;
-    #[cfg(not(unix))]
-    let opened_links_safe = true;
+    #[cfg(windows)]
+    let opened_links_safe =
+        opened.number_of_links() == Some(1) && after.number_of_links() == Some(1);
+    #[cfg(not(any(unix, windows)))]
+    let opened_links_safe = false;
     if !opened.is_file()
         || !opened_links_safe
         || !same_file(&before, &opened)

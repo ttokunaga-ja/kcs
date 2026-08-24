@@ -156,6 +156,9 @@ mod tests {
 
     fn write_bundle(profile: PersonaProfile) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let root = tempdir().unwrap();
+        #[cfg(windows)]
+        let root_path = root.path().to_path_buf();
+        #[cfg(not(windows))]
         let root_path = fs::canonicalize(root.path()).unwrap();
         let generated = generated(profile);
         let plan_path = root_path.join("plan.json");

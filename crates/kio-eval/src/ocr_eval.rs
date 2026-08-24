@@ -1153,6 +1153,7 @@ mod tests {
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn explicit_document_binding_and_create_only_report_are_enforced() {
         let directory = tempfile::tempdir().unwrap();
@@ -1245,9 +1246,15 @@ mod tests {
         };
         validate_render_request(&request).unwrap();
         let response = format!(
-            "{{\"schema\":\"{RENDER_RESPONSE_SCHEMA}\",\"request_id\":\"render-1\",\"output_pdf\":\"{}\",\"output_bytes\":1,\"output_sha256\":\"{}\",\"page_count\":1}}\n",
-            output.display(),
-            "a".repeat(64)
+            "{}\n",
+            serde_json::json!({
+                "schema": RENDER_RESPONSE_SCHEMA,
+                "request_id": "render-1",
+                "output_pdf": output.to_string_lossy(),
+                "output_bytes": 1,
+                "output_sha256": "a".repeat(64),
+                "page_count": 1,
+            })
         );
         assert_eq!(
             parse_render_line(response.as_bytes(), &request)

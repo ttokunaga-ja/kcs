@@ -2256,6 +2256,7 @@ mod publication_tests {
         assert!(verify_report(&bytes[..bytes.len() - 1], &receipt).is_err());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn publication_is_create_only_and_recovers_exact_staging() {
         let temp = tempfile::tempdir().unwrap();

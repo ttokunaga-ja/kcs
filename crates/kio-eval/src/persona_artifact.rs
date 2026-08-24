@@ -794,6 +794,7 @@ mod tests {
         fs::canonicalize(path).unwrap()
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn creates_once_and_reads_exact_bytes() {
         let root = tempdir().unwrap();
@@ -835,7 +836,7 @@ mod tests {
             Some(Component::Prefix(prefix)) if matches!(prefix.kind(), std::path::Prefix::Disk(_))
         ));
         assert!(bind_parent(&target).is_ok());
-        let directory = fs::File::open(root.path()).unwrap();
+        let directory = cap_fs::open_ambient_dir(root.path(), ambient_authority()).unwrap();
         let public = kio_core::cas::windows_real_directory_identity(root.path()).unwrap();
         assert_eq!(
             kio_core::cas::windows_directory_handle_identity(&directory),

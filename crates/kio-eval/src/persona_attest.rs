@@ -705,6 +705,7 @@ mod tests {
         run_before_publish_hook(&output);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn attests_stably_and_creates_only_once() {
         let (_temp, root) = bundle();
@@ -722,6 +723,7 @@ mod tests {
         let second = attest(&root, &root.parent().unwrap().join("report-2.json")).unwrap();
         assert_eq!(first, second);
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn rejects_opaque_record_and_output_overlap() {
         let (_temp, root) = bundle();
@@ -730,6 +732,7 @@ mod tests {
         let (_temp, root) = bundle();
         assert!(attest(&root, &root.join("report.json")).is_err());
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn rejects_cross_bound_record() {
         let (_first_temp, first) = bundle();

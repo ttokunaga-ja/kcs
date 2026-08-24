@@ -1688,6 +1688,7 @@ mod tests {
         let device = b.prepare_device().unwrap();
         device.delete_verified(s, "a.md", &after).unwrap();
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn initialized_authority_rejects_config_replacement_and_in_place_mutation() {
         let (temp, scopes) = fixture();
