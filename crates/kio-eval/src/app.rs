@@ -2527,7 +2527,7 @@ mod tests {
     }
 
     #[test]
-    fn persona_has_only_nested_canonical_commands_and_create_only_artifacts() {
+    fn persona_has_only_nested_canonical_commands() {
         assert!(
             Args::try_parse_from([
                 "kio-eval",
@@ -2646,7 +2646,11 @@ mod tests {
             ])
             .is_err()
         );
+    }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn persona_create_only_artifacts_are_strict() {
         let root = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(root.path()).unwrap();
         let plan = root.join("plan.json");
