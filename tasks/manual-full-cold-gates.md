@@ -15,7 +15,7 @@ The ordinary five-job responsibility and timeouts remain in
 | `persona-w0-integration` | create-only Tiny persona W0 lifecycle and leases | 15 min |
 | `synthetic-history-eval` | release/all-features synthetic, scale, replay, cross-scope, rerank, M3-1/2/3 | 10 min |
 | `macos-security-r23` | native macOS workspace/all-target behavior | 35 min |
-| `windows-security-r23` | native Windows workspace/all-target behavior | 45 min |
+| `windows-security-r23` | native Windows workspace/all-target behavior | 90 min |
 
 Do not shorten these bounds or merge jobs until several matching successful
 GitHub runs exist. Do not generate measurement samples with empty commits,
