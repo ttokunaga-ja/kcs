@@ -347,7 +347,7 @@ target/release/kio-eval scale attest --corpus /tmp/kio-scale-full
 # Rust measurement lane: full だけが acceptance eligible。5 warmup + 100 samples
 # の M3-1 `search.latency_ms` p95 を判定に使う。--out は corpus 外の既存実体
 # directory にだけ原子的に書き出せる。
-cargo run -p kio-eval -- scale benchmark \
+target/release/kio-eval scale benchmark \
   --corpus /tmp/kio-scale-full --bin target/release/kio \
   --warmups 5 --samples 100 --out /tmp/kio-scale-full.latency.json
 ```
@@ -361,7 +361,7 @@ query契約を版管理する `query_workload_id=exact-reference-v1`、
 `scale-attestation.json` は次を証明する。
 
 - manifest と 4,000 source files の完全一致、isolated registry の indexed 20 scopes 完全一致
-- 本番検索と同じ `first_seen_commit` + 現行 `chunk_config_generations` + HEAD
+- 本番検索と同じ対象-tree config association、`chunk_publications`、HEAD
   `(raw_hash, tool_profile_hash, gen)` predicate による current eligible chunk 数
 - 全 section 共通 sentinel の FTS `MATCH` と FTS5 docsize shadow の双方で同数を確認
 - full では current eligible chunks が 120,000、かつ 100,000 を超えること
@@ -420,6 +420,8 @@ cargo +1.98.0 run --release --locked -p kio-eval --example persona_full_contract
 
 この command は deterministic JSON summary を出力する。これは cold/full fixture generation の固有信号であり、
 通常 CI の高速な contract lane と混同しない。example は通常 CI で compile されるが、実行はしない。
+完全なcold build、二つの独立process/environmentでの一致比較、Full scale、U7、OCRの唯一の
+manual入口は [manual full/cold gate](../tasks/manual-full-cold-gates.md) に集約する。
 
 ```bash
 target/release/kio-eval persona plan --profile tiny \

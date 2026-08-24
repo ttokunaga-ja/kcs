@@ -1188,30 +1188,101 @@ fn valid_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    // Keep test loopback servers from replying before a segmented client request
+    // has delivered its complete body. This is intentionally test-only: the
+    // production client owns its own bounded HTTP request implementation.
+    const MAX_LOOPBACK_REQUEST_HEADER_BYTES: usize = 64 * 1024;
+
+    fn loopback_request_content_length(headers: &[u8]) -> usize {
+        let header_text = std::str::from_utf8(headers).expect("loopback request headers are UTF-8");
+        let mut content_length = None;
+        for line in header_text.split("\r\n").skip(1) {
+            if line.is_empty() {
+                break;
+            }
+            let (name, value) = line
+                .split_once(':')
+                .expect("loopback request header has a colon");
+            if name.eq_ignore_ascii_case("content-length") {
+                assert!(content_length.is_none(), "duplicate Content-Length");
+                let value = value.trim_matches(|byte: char| byte.is_ascii_whitespace());
+                assert!(
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                    "Content-Length is decimal"
+                );
+                content_length = Some(value.parse::<usize>().expect("Content-Length fits usize"));
+            }
+        }
+        content_length.expect("exactly one Content-Length")
+    }
+
+    fn read_loopback_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let total_limit = MAX_LOOPBACK_REQUEST_HEADER_BYTES
+            .checked_add(MAX_PROVIDER_REQUEST_BYTES)
+            .expect("loopback request total limit fits usize");
+        let mut request = Vec::new();
+        let mut declared_total = None;
+        let mut chunk = [0_u8; 4096];
+
+        loop {
+            if let Some(total) = declared_total
+                && request.len() == total
+            {
+                return request;
+            }
+            assert!(
+                request.len() < total_limit,
+                "loopback request exceeds bound"
+            );
+            let remaining = declared_total.unwrap_or(total_limit) - request.len();
+            let read_cap = remaining.min(chunk.len());
+            let read = stream
+                .read(&mut chunk[..read_cap])
+                .expect("loopback reads request");
+            assert_ne!(read, 0, "loopback request ended before its declared body");
+            request.extend_from_slice(&chunk[..read]);
+
+            if declared_total.is_none()
+                && let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+            {
+                assert!(
+                    header_end <= MAX_LOOPBACK_REQUEST_HEADER_BYTES,
+                    "loopback request headers exceed bound"
+                );
+                let content_length = loopback_request_content_length(&request[..header_end]);
+                let total = header_end
+                    .checked_add(content_length)
+                    .expect("loopback request length fits usize");
+                assert!(total <= total_limit, "loopback request body exceeds bound");
+                assert!(request.len() <= total, "loopback read past declared body");
+                declared_total = Some(total);
+            } else if declared_total.is_none() {
+                assert!(
+                    request.len() < MAX_LOOPBACK_REQUEST_HEADER_BYTES,
+                    "loopback request headers exceed bound"
+                );
+            }
+        }
+    }
+
     fn loopback_response(
         status: &str,
         headers: Vec<(&'static str, &'static str)>,
         body: &'static str,
     ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
-        use std::{io::Read as _, io::Write as _, net::TcpListener};
+        use std::{io::Write as _, net::TcpListener};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let status = status.to_owned();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            let request = read_loopback_request(&mut stream);
             let mut response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
             for (name, value) in headers {
                 response.push_str(name);
@@ -1231,24 +1302,13 @@ mod tests {
         delay: Duration,
         replacement: Option<(PathBuf, Vec<u8>)>,
     ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
-        use std::{io::Read as _, io::Write as _, net::TcpListener};
+        use std::{io::Write as _, net::TcpListener};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut chunk).unwrap();
-                if read == 0 {
-                    break;
-                }
-                request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            let request = read_loopback_request(&mut stream);
             if let Some((path, bytes)) = replacement {
                 fs::write(path, bytes).unwrap();
             }

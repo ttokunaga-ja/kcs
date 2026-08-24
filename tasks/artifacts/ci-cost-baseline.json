@@ -1403,17 +1403,17 @@
         "synthetic-history-eval"
       ],
       "overall_five_job_aggregate_minutes": null,
-      "reason": "current successful macOS and Windows job cost operands are unavailable; unknown is not zero"
+      "reason": "the exact f50e8cc local-only cohort has no matching macOS or Windows job cost operands; the separate current GitHub cohort records both, and no unknown is zero-filled"
     },
-    "unavailable_or_inapplicable": {
+    "unavailable_or_inapplicable_for_exact_f50e8cc_local_cohort": {
       "github_workflow_wall_seconds": null,
       "github_aggregate_runner_equivalent_minutes": null,
       "github_dependency_critical_path_minutes": null,
       "github_internal_queue_seconds": null,
       "github_billing_minutes": null,
       "github_cache_information": null,
-      "windows_current_success_measurement": null,
-      "macos_current_cost_measurement": null,
+      "windows_measurement_for_exact_f50e8cc_local_cohort": null,
+      "macos_measurement_for_exact_f50e8cc_local_cohort": null,
       "unknown_values_treated_as_zero": false
     }
   },
@@ -1696,7 +1696,7 @@
     "excess_copy_fraction_of_all_run_steps": 0.0625,
     "excess_copy_fraction_within_command_group": 0.666667,
     "time_weighted_duplicate_fraction": null,
-    "time_weighted_reason": "Windows is unknown",
+    "time_weighted_reason": "GitHub success cohort exposes whole-job elapsed time, not comparable per-command test elapsed",
     "semantic_interchangeability": false,
     "reason": "the same command carries distinct Linux, macOS, and Windows platform signal"
   },
@@ -2523,18 +2523,18 @@
       "local_target_comparison": "planning_estimate_below_40_minutes",
       "github_target_reference_comparison": "planning_estimate_below_45_minutes",
       "configured_aggregate_cap_minutes": 140,
-      "aggregate_250_minute_reference": "configured timeout sum is below 250, but a matching successful five-job measured aggregate remains unknown",
-      "formal_acceptance": "provisional; current matching GitHub success sample count remains zero"
+      "aggregate_250_minute_reference": "the exact 2c7db5d local-only cohort has no matching successful five-job measured aggregate; the separate current GitHub cohort records 77.2 runner-equivalent minutes below 250",
+      "formal_acceptance": "historical 2c7db5d local-only planning record; the separate current immutable GitHub success cohort has n=1 and remains provisional"
     },
-    "unavailable_or_inapplicable": {
+    "unavailable_or_inapplicable_for_exact_2c7db5d_local_cohort": {
       "github_workflow_wall_seconds": null,
       "github_aggregate_runner_equivalent_minutes": null,
       "github_dependency_critical_path_minutes": null,
       "github_internal_queue_seconds": null,
       "github_billing_minutes": null,
       "github_cache_information": null,
-      "windows_current_success_measurement": null,
-      "macos_current_cost_measurement": null,
+      "windows_measurement_for_exact_2c7db5d_local_cohort": null,
+      "macos_measurement_for_exact_2c7db5d_local_cohort": null,
       "unknown_values_treated_as_zero": false
     }
   },
@@ -3307,8 +3307,8 @@
       "github_internal_queue_seconds": null,
       "github_billing_minutes": null,
       "github_cache_information": null,
-      "windows_current_success_measurement": null,
-      "macos_current_cost_measurement": null,
+      "windows_measurement_for_exact_d66b958_local_cohort": null,
+      "macos_measurement_for_exact_d66b958_local_cohort": null,
       "unknown_values_treated_as_zero": false
     }
   }

@@ -600,9 +600,9 @@ fn qb9_new_version_store_write_command_rejects_with_zero_writes() {
 // §B — L 領域 (QB10-QB24)
 // ===========================================================================
 
-/// QB11/QB12 contention and purge non-mutation behavior are covered by the
-/// dedicated CLI and purge contracts; this file deliberately avoids binding
-/// those public guarantees to private function placement or transaction text.
+// QB11/QB12 contention and purge non-mutation behavior are covered by the
+// dedicated CLI and purge contracts; this file deliberately avoids binding
+// those public guarantees to private function placement or transaction text.
 
 /// QB14(a): indexing one root registers that root only. An initialized sibling
 /// in another XDG registry is not discovered or copied into this registry.

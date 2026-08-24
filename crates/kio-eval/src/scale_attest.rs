@@ -304,6 +304,7 @@ struct StatsWire {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TreeWire {
+    chunking_config_hash: String,
     entries: Vec<TreeEntryWire>,
     object_type: String,
 }
@@ -814,15 +815,7 @@ fn attest_cas(
     }
     let tree_bytes = cas(kio, "trees", &commit.tree, "HEAD tree", bindings)?;
     let tree: TreeWire = exact_json(&tree_bytes, "HEAD tree")?;
-    if tree.object_type != "tree"
-        || tree.entries.len() > 10_000
-        || tree
-            .entries
-            .windows(2)
-            .any(|v| v[0].path.as_bytes() >= v[1].path.as_bytes())
-    {
-        return Err(unsafe_state("HEAD tree violates current tree contract"));
-    }
+    validate_tree_wire(&tree)?;
     if tree.entries.len() != scope.files.len() {
         return Err(unsafe_state("HEAD tree cardinality differs from manifest"));
     }
@@ -871,6 +864,20 @@ fn attest_cas(
         }
     }
     Ok(normalized_sources)
+}
+
+fn validate_tree_wire(tree: &TreeWire) -> Result<(), AttestError> {
+    if tree.object_type != "tree"
+        || tree.chunking_config_hash != scale_spec::CHUNKING_CONFIG_HASH
+        || tree.entries.len() > 10_000
+        || tree
+            .entries
+            .windows(2)
+            .any(|v| v[0].path.as_bytes() >= v[1].path.as_bytes())
+    {
+        return Err(unsafe_state("HEAD tree violates current tree contract"));
+    }
+    Ok(())
 }
 
 fn attest_normalize(
@@ -2227,6 +2234,29 @@ mod publication_tests {
         let mut bytes = canonical_json_bytes(&serde_json::to_value(report).unwrap()).unwrap();
         bytes.push(b'\n');
         bytes
+    }
+
+    #[test]
+    fn tree_wire_requires_the_exact_current_chunking_configuration() {
+        let current = format!(
+            r#"{{"chunking_config_hash":"{}","entries":[],"object_type":"tree"}}"#,
+            scale_spec::CHUNKING_CONFIG_HASH
+        );
+        let tree: TreeWire = exact_json(current.as_bytes(), "test tree").unwrap();
+        validate_tree_wire(&tree).unwrap();
+
+        let missing = r#"{"entries":[],"object_type":"tree"}"#;
+        assert!(exact_json::<TreeWire>(missing.as_bytes(), "test tree").is_err());
+
+        let wrong = r#"{"chunking_config_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","entries":[],"object_type":"tree"}"#;
+        let wrong: TreeWire = exact_json(wrong.as_bytes(), "test tree").unwrap();
+        assert!(validate_tree_wire(&wrong).is_err());
+
+        let unknown = format!(
+            r#"{{"chunking_config_hash":"{}","entries":[],"object_type":"tree","unknown":true}}"#,
+            scale_spec::CHUNKING_CONFIG_HASH
+        );
+        assert!(exact_json::<TreeWire>(unknown.as_bytes(), "test tree").is_err());
     }
 
     #[test]

@@ -103,8 +103,9 @@ configured aggregate cap     = 35 + 15 + 10 + 35 + 45 = 140 min
 ```
 
 These are termination bounds, not runtime measurements, queue time, or billing
-minutes. The Windows branch therefore remains unknown for measured critical-path
-acceptance even though it has a finite 45-minute cap.
+minutes. The immutable success cohort above separately measures Windows at
+30:20; a future cohort's runtime must be measured rather than inferred from its
+finite 45-minute cap.
 
 ## Final-candidate measured Linux operand and path estimate
 

@@ -126,6 +126,25 @@ struct SelectedInstance {
     normalize: NormalizeRef,
     raw_path: String,
     embedding_path: String,
+    /// Every authenticated ancestor-most introduction of this exact normalized
+    /// identity in the selected snapshot's bounded all-parent history.
+    introductions: Vec<String>,
+}
+
+type NormalizedIdentityKey = (String, String, u64, String);
+
+// A normal Full-scale snapshot can contain 120k chunks. This permits two
+// incomparable introductions (240k rows) while materially bounding the
+// in-memory JSONL staging batch.
+const MAX_REINDEX_PENDING_PUBLICATION_EVENTS: usize = 250_000;
+// Each multi-candidate identity receives one linear DAG propagation. Cap the
+// aggregate work while leaving single-introduction identities on a fast path.
+const MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK: u64 = 20_000_000;
+
+struct HistoryTopology {
+    order: Vec<String>,
+    children: BTreeMap<String, Vec<String>>,
+    work_per_identity: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -346,8 +365,12 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     // aliases can share `(raw, profile, gen)` yet pin distinct manifests (for
     // example, a same-generation unit retry); collapsing them would erase one
     // selected snapshot's attested body.
-    let mut selected = BTreeMap::<(String, String, u64, String), SelectedInstance>::new();
+    let mut selected = BTreeMap::<NormalizedIdentityKey, SelectedInstance>::new();
     let mut blocked_raw_hashes = BTreeSet::<String>::new();
+    // Multiple snapshot aliases can carry one raw object. The historical purge
+    // decision is raw-scoped and immutable during this store-locked command,
+    // so cache both outcomes instead of reopening its receipts per alias.
+    let mut historical_purge_decisions = BTreeMap::<String, bool>::new();
     for entry in &snapshot.tree.entries {
         // R23-10 (05-runtime.md §3.5 L813/L934, AUD-08's shrunk finding):
         // `purge.read_tombstone(...).is_some()` blocked on marker EXISTENCE
@@ -361,7 +384,15 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
         // canonical state, never on a non-public erase receipt
         // (08-evidence-pointer-spec.md §4.2's closed use-list for erase
         // receipts excludes this).
-        if purge_blocks_historical_reindex_raw(repo.kio_dir(), &entry.raw_hash)? {
+        let blocked = match historical_purge_decisions.get(&entry.raw_hash) {
+            Some(blocked) => *blocked,
+            None => {
+                let blocked = purge_blocks_historical_reindex_raw(repo.kio_dir(), &entry.raw_hash)?;
+                historical_purge_decisions.insert(entry.raw_hash.clone(), blocked);
+                blocked
+            }
+        };
+        if blocked {
             blocked_raw_hashes.insert(entry.raw_hash.clone());
             continue;
         }
@@ -419,7 +450,33 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                 normalize: normalize.clone(),
                 raw_path: entry.path.clone(),
                 embedding_path: entry.path.clone(),
+                introductions: Vec::new(),
             });
+    }
+
+    // A selected snapshot is not automatically an introduction.  In
+    // particular, reindexing an unchanged descendant must retain the
+    // ancestor's durable authority rather than minting the descendant as a new
+    // publication root.  Use the same receipt-tolerant bounded all-parent
+    // graph as other derived-history paths: the selected root itself remains
+    // strict, while a receipt-backed shallow ancestor is an intentional
+    // boundary rather than a reason to consult mutable state.
+    let (selected_graph, _) =
+        HistoryReader::new(repo.kio_dir()).all_parents_tolerant(&selected_commit)?;
+    let selected_topology = history_topology(&selected_graph)?;
+    let introductions_by_identity = selected_history_introductions(
+        &selected_graph,
+        &selected_topology,
+        &selected,
+        &config.chunking_config_hash,
+    )?;
+    for (identity, instance) in &mut selected {
+        instance.introductions = introductions_by_identity
+            .get(identity)
+            .cloned()
+            .ok_or_else(|| {
+                KioError::schema("selected normalized identity has no history introduction")
+            })?;
     }
 
     let existing = read_stored_chunks(repo.kio_dir())?;
@@ -539,7 +596,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
             }
             let chunk_id = row.chunk_id.clone();
             let chunking_config_hash = row.chunking_config_hash.clone();
-            if append_new_chunk_association(
+            let association_outcome = append_new_chunk_association(
                 repo.kio_dir(),
                 row,
                 &mut known_associations,
@@ -548,14 +605,38 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                 &mut next_association_rowid,
                 &mut appended,
                 &unit_authorities,
-            )? != AssociationAppend::Blocked
-            {
-                pending_publication_events.push(crate::ChunkPublicationEvent {
-                    event: "publication".to_owned(),
-                    chunk_id,
-                    chunking_config_hash,
-                    introduction_commit: selected_commit.clone(),
-                });
+            )?;
+            // Count Existing associations too: historical reindex must be able
+            // to re-affirm a missing durable publication for one. The checked
+            // bound is immediately before staging JSONL events; an error exits
+            // before either append-only ledger is flushed.
+            if association_outcome != AssociationAppend::Blocked {
+                let pending_after = checked_pending_publication_event_count(
+                    pending_publication_events.len(),
+                    instance.introductions.len(),
+                )?;
+                pending_publication_events
+                    .try_reserve(instance.introductions.len())
+                    .map_err(|_| {
+                        reindex_history_limit_error(
+                            "historical_reindex_publication_event_allocation",
+                            u64::try_from(pending_after).unwrap_or(u64::MAX),
+                            MAX_REINDEX_PENDING_PUBLICATION_EVENTS as u64,
+                        )
+                    })?;
+                for introduction_commit in &instance.introductions {
+                    pending_publication_events.push(crate::ChunkPublicationEvent {
+                        event: "publication".to_owned(),
+                        chunk_id: chunk_id.clone(),
+                        chunking_config_hash: chunking_config_hash.clone(),
+                        introduction_commit: introduction_commit.clone(),
+                    });
+                }
+                debug_assert_eq!(
+                    pending_after,
+                    pending_publication_events.len(),
+                    "publication-event budget must include Existing associations"
+                );
             }
         }
         projected_instances.push(instance.clone());
@@ -570,10 +651,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
             normalize: instance.normalize,
             raw_path: instance.raw_path,
             embedding_path: instance.embedding_path,
-            // A targeted `--at <commit>` reindex has exactly one explicit
-            // target commit, so its introduction is trivially single-valued
-            // (no multi-introduction ambiguity like the general rebuild path).
-            introductions: vec![selected_commit.clone()],
+            introductions: instance.introductions,
         })
         .collect::<Vec<_>>();
     project_selected_snapshot(
@@ -634,6 +712,227 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     Ok(output)
 }
 
+/// Collect introduction candidates for the composite relation of exact
+/// normalized identity and the selected chunking configuration.  One pass
+/// discovers all selected identities across paths, then each candidate is a
+/// present commit whose in-graph parents are absent from that same relation.
+/// This intentionally does not use rebuild retention filtering: historical
+/// reindex has its own narrower public-purge gate above, and an erase-only
+/// receipt must not make an otherwise selected snapshot lose its authority.
+fn selected_history_introductions(
+    graph: &kio_core::history::HistoryGraph,
+    topology: &HistoryTopology,
+    selected: &BTreeMap<NormalizedIdentityKey, SelectedInstance>,
+    chunking_config_hash: &str,
+) -> Result<BTreeMap<NormalizedIdentityKey, Vec<String>>> {
+    let mut present = selected
+        .keys()
+        .cloned()
+        .map(|identity| (identity, BTreeSet::new()))
+        .collect::<BTreeMap<_, BTreeSet<String>>>();
+    for node in graph.nodes_in_visit_order() {
+        if node.tree.chunking_config_hash != chunking_config_hash {
+            continue;
+        }
+        for entry in &node.tree.entries {
+            let Some(normalize) = &entry.normalize else {
+                continue;
+            };
+            let identity = (
+                entry.raw_hash.clone(),
+                normalize.tool_profile_hash.clone(),
+                normalize.r#gen,
+                normalize.manifest_hash.clone(),
+            );
+            if let Some(commits) = present.get_mut(&identity) {
+                commits.insert(node.commit_hash.clone());
+            }
+        }
+    }
+
+    let candidates_by_identity = present
+        .into_iter()
+        .map(|(identity, commits)| {
+            let candidates = commits
+                .iter()
+                .filter(|commit| {
+                    graph.node(commit).is_some_and(|node| {
+                        node.commit
+                            .parents
+                            .iter()
+                            .all(|parent| !commits.contains(parent))
+                    })
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            (identity, candidates)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let multi_candidate_identities = u64::try_from(
+        candidates_by_identity
+            .values()
+            .filter(|candidates| candidates.len() > 1)
+            .count(),
+    )
+    .map_err(|_| {
+        reindex_history_limit_error(
+            "historical_reindex_introduction_identities",
+            u64::MAX,
+            MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+        )
+    })?;
+    let attempted_work = multi_candidate_identities
+        .checked_mul(topology.work_per_identity)
+        .ok_or_else(|| {
+            reindex_history_limit_error(
+                "historical_reindex_introduction_work",
+                u64::MAX,
+                MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+            )
+        })?;
+    if attempted_work > MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK {
+        return Err(reindex_history_limit_error(
+            "historical_reindex_introduction_work",
+            attempted_work,
+            MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+        ));
+    }
+
+    let mut introductions_by_identity = BTreeMap::new();
+    for (identity, candidates) in candidates_by_identity {
+        let introductions = ancestor_most_candidates(topology, &candidates);
+        if introductions.is_empty() {
+            return Err(KioError::schema(
+                "selected normalized identity has no history introduction",
+            ));
+        }
+        introductions_by_identity.insert(identity, introductions);
+    }
+    Ok(introductions_by_identity)
+}
+
+fn history_topology(graph: &kio_core::history::HistoryGraph) -> Result<HistoryTopology> {
+    let mut remaining_parents = BTreeMap::<String, usize>::new();
+    let mut children = BTreeMap::<String, Vec<String>>::new();
+    let mut edges = 0_u64;
+    for node in graph.nodes_in_visit_order() {
+        let mut in_graph_parents = 0_usize;
+        for parent in &node.commit.parents {
+            if graph.node(parent).is_some() {
+                in_graph_parents = in_graph_parents.checked_add(1).ok_or_else(|| {
+                    reindex_history_limit_error(
+                        "historical_reindex_topology_parents",
+                        u64::MAX,
+                        MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+                    )
+                })?;
+                edges = edges.checked_add(1).ok_or_else(|| {
+                    reindex_history_limit_error(
+                        "historical_reindex_topology_edges",
+                        u64::MAX,
+                        MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+                    )
+                })?;
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(node.commit_hash.clone());
+            }
+        }
+        remaining_parents.insert(node.commit_hash.clone(), in_graph_parents);
+    }
+    let mut ready = remaining_parents
+        .iter()
+        .filter_map(|(commit, count)| (*count == 0).then_some(commit.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(remaining_parents.len());
+    while let Some(commit) = ready.pop_first() {
+        order.push(commit.clone());
+        if let Some(node_children) = children.get(&commit) {
+            for child in node_children {
+                let remaining = remaining_parents
+                    .get_mut(child)
+                    .expect("child was collected from a graph node");
+                *remaining = remaining
+                    .checked_sub(1)
+                    .ok_or_else(|| KioError::schema("history topology parent count underflow"))?;
+                if *remaining == 0 {
+                    ready.insert(child.clone());
+                }
+            }
+        }
+    }
+    if order.len() != remaining_parents.len() {
+        return Err(KioError::schema("history graph is cyclic"));
+    }
+    let work_per_identity = u64::try_from(order.len())
+        .ok()
+        .and_then(|nodes| nodes.checked_add(edges))
+        .ok_or_else(|| {
+            reindex_history_limit_error(
+                "historical_reindex_topology_work",
+                u64::MAX,
+                MAX_REINDEX_INTRODUCTION_TOPOLOGY_WORK,
+            )
+        })?;
+    Ok(HistoryTopology {
+        order,
+        children,
+        work_per_identity,
+    })
+}
+
+fn ancestor_most_candidates(
+    topology: &HistoryTopology,
+    candidates: &BTreeSet<String>,
+) -> Vec<String> {
+    if candidates.len() <= 1 {
+        return candidates.iter().cloned().collect();
+    }
+    let mut inherited_candidate = BTreeSet::new();
+    let mut retained = BTreeSet::new();
+    for commit in &topology.order {
+        let inherited = inherited_candidate.contains(commit);
+        let is_candidate = candidates.contains(commit);
+        if is_candidate && !inherited {
+            retained.insert(commit.clone());
+        }
+        if (inherited || is_candidate)
+            && let Some(children) = topology.children.get(commit)
+        {
+            inherited_candidate.extend(children.iter().cloned());
+        }
+    }
+    retained.into_iter().collect()
+}
+
+fn checked_pending_publication_event_count(current: usize, additional: usize) -> Result<usize> {
+    let attempted = current.checked_add(additional).ok_or_else(|| {
+        reindex_history_limit_error(
+            "historical_reindex_publication_events",
+            u64::MAX,
+            MAX_REINDEX_PENDING_PUBLICATION_EVENTS as u64,
+        )
+    })?;
+    if attempted > MAX_REINDEX_PENDING_PUBLICATION_EVENTS {
+        return Err(reindex_history_limit_error(
+            "historical_reindex_publication_events",
+            u64::try_from(attempted).unwrap_or(u64::MAX),
+            MAX_REINDEX_PENDING_PUBLICATION_EVENTS as u64,
+        ));
+    }
+    Ok(attempted)
+}
+
+fn reindex_history_limit_error(exceeded: &str, attempted: u64, limit: u64) -> KioError {
+    KioError::new(
+        "KIO-E-COMMIT-HISTORY-LIMIT-001",
+        "historical reindex bounded-work limit exceeded",
+        json!({ "exceeded": exceeded, "attempted": attempted, "limit": limit }),
+        ExitCode::PermanentFailure,
+    )
+}
+
 /// Incrementally publish only the selected snapshot's current-config chunks and
 /// exact tree projection. Rebuilding the whole ledger would be observable work on
 /// non-selected history; this narrow transaction is the enrichment-only boundary.
@@ -670,15 +969,19 @@ fn project_selected_snapshot(
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(AuthenticatedNormalizedUnit {
                         markdown: unit.markdown,
-                        introductions: BTreeSet::new(),
+                        introductions: instance.introductions.iter().cloned().collect(),
                     });
                 }
-                std::collections::btree_map::Entry::Occupied(entry) => {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
                     if entry.get().markdown != unit.markdown {
                         return Err(KioError::schema(
                             "selected pinned manifests disagree on normalized unit markdown",
                         ));
                     }
+                    entry
+                        .get_mut()
+                        .introductions
+                        .extend(instance.introductions.iter().cloned());
                 }
             }
         }
@@ -721,17 +1024,25 @@ fn project_selected_snapshot(
                 Some(chunk.association_rowid),
             )
             .map_err(index_to_kio)?;
-            // PC37 (05 §1.6 L265): a targeted historical reindex introduces
-            // (or re-affirms, idempotently) this chunk as of the explicit
-            // selected commit — the only introduction candidate this narrow,
-            // single-commit path can ever produce.
-            kio_index::fts::record_chunk_publication(
-                fts.connection(),
-                &chunk.row.chunk_id,
-                &chunk.row.chunking_config_hash,
-                selected_commit,
-            )
-            .map_err(index_to_kio)?;
+            let identity = (
+                chunk.row.raw_hash.clone(),
+                chunk.row.tool_profile_hash.clone(),
+                chunk.row.r#gen,
+                chunk.row.unit_key.clone(),
+                chunk.row.unit_content_hash.clone(),
+            );
+            let unit = selected_unit_authorities.get(&identity).ok_or_else(|| {
+                KioError::schema("selected chunk has no authenticated normalized authority")
+            })?;
+            for introduction_commit in &unit.introductions {
+                kio_index::fts::record_chunk_publication(
+                    fts.connection(),
+                    &chunk.row.chunk_id,
+                    &chunk.row.chunking_config_hash,
+                    introduction_commit,
+                )
+                .map_err(index_to_kio)?;
+            }
         }
         fts.connection()
             .execute(
@@ -796,6 +1107,24 @@ mod tests {
     use kio_core::cas::{ObjectKind, hash_bytes};
     use kio_core::dag::{CommitStats, TreeEntry, build_tree};
     use std::fs;
+
+    #[test]
+    fn pending_publication_event_budget_rejects_overflow_before_staging() {
+        assert_eq!(
+            checked_pending_publication_event_count(MAX_REINDEX_PENDING_PUBLICATION_EVENTS - 1, 1,)
+                .unwrap(),
+            MAX_REINDEX_PENDING_PUBLICATION_EVENTS
+        );
+        let error =
+            checked_pending_publication_event_count(MAX_REINDEX_PENDING_PUBLICATION_EVENTS - 1, 2)
+                .unwrap_err();
+        assert_eq!(error.error_code(), "KIO-E-COMMIT-HISTORY-LIMIT-001");
+        assert_eq!(error.exit_code(), ExitCode::PermanentFailure);
+        assert_eq!(
+            error.context()["exceeded"],
+            "historical_reindex_publication_events"
+        );
+    }
 
     #[test]
     fn multi_root_retained_instances_keep_winning_binding_and_secret_path() {

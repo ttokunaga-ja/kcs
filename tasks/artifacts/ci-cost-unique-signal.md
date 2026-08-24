@@ -49,8 +49,9 @@ platform job. The workspace test command occurs three times.
   `(3 - 1) / 32 = 6.25%` of run steps.
 - Within that one logical command group, `2 / 3 = 66.667%` are additional
   platform executions.
-- Time-weighted duplication is unknown because Windows is unknown; unknown is
-  not treated as zero.
+- Time-weighted duplication is unknown because GitHub exposes these cohort
+  values as whole-job elapsed time, not comparable per-command test elapsed;
+  unknown is not treated as zero.
 
 There is no workflow cache action and no upload/persisted-artifact action.
 Cargo registries, build outputs, generated persona material, and synthetic
@@ -100,10 +101,10 @@ non-authorizing; the retained acquisition record is its isolated measurement
 method and two manifest digests in
 [`ci-cost-baseline.json`](ci-cost-baseline.json).
 
-Linux `rust`, persona, and synthetic jobs and macOS workspace tests are green
-in their measured local equivalents. Windows remains without a successful test
-measurement, so this does not establish an overall critical path, total, or
-threshold result.
+For that prior Phase C local-only cohort, Linux `rust`, persona, and synthetic
+jobs and macOS workspace tests were green. Windows had no successful local
+measurement, so that older local package alone did not establish an overall
+critical path, total, or threshold result.
 
 The prior GitHub observation is failure cohort
 `workflow=CI / event=push / head=c9f334e957863e1c6daf8f54cc1b917a8e0ae07a /
@@ -262,7 +263,8 @@ cold/warm workspace-test values were 394.88/329.78 seconds for 2,216 passed,
 with 16/13 warnings, and its exact workflow-order `rust` and synthetic command
 lanes were 426.38 and 83.99689 seconds. Persona W0 was 138.275887 seconds.
 
-For the final candidate, combining the exact 434.42-second cold test operand
+For the separate `d66b958...` local candidate, combining the exact
+434.42-second cold test operand
 with the latest topology-identical `f50e8cc...` fmt (1.13 s), Clippy (13.99 s),
 and synthetic (83.99689 s) operands gives a planning estimate of
 **533.53689 seconds = 8.892282 minutes** for `rust -> synthetic-history-eval`.
@@ -270,12 +272,14 @@ It is below the 40-minute local target by 31.107718 minutes and the 45-minute
 reference by 36.107718 minutes. Because the operands are cohort-separated, this
 is not an exact same-run measurement, guarantee, GitHub success sample, or
 billing result. The configured five-job timeout sum is 140 minutes, below the
-250-minute reference, but the measured successful aggregate remains unknown
-without current macOS and Windows success operands.
+250-minute reference, but that local candidate has no measured successful
+five-job aggregate. The current immutable GitHub cohort above separately
+provides its own 77:12 successful aggregate and 30:20 Windows measurement.
 
-The bounded-runner delta validations remain green: Linux runner 19/19, U7
-14/14, OCR 10/10, all 18 synthetic commands, and Persona W0. Windows runtime
-remains CI-only confirmation; unknown is not substituted with zero.
+The `d66b958...` bounded-runner delta validations remain green: Linux runner
+19/19, U7 14/14, OCR 10/10, all 18 synthetic commands, and Persona W0. That
+local candidate has no native Windows runtime sample; it is not zero-filled or
+mixed with the distinct current GitHub success cohort.
 
 ## Non-current historical asset
 

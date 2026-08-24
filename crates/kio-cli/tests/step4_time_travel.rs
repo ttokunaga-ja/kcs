@@ -864,6 +864,197 @@ fn ct4_timetravel_015_historical_reindex_durably_publishes_existing_disconnected
 }
 
 #[test]
+fn ct4_timetravel_016_historical_reindex_keeps_ancestor_introduction_for_unchanged_descendant() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+
+    let content = b"# Ancestor authority\n\nancestorpublicationfixture unchanged binding\n";
+    fs::write(dir.path().join("ancestor.md"), content).unwrap();
+    let c1 = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let repo = Repository::open(dir.path()).unwrap();
+    let c1_object = repo.read_commit(&c1).unwrap();
+    let c2 = write_commit(
+        &ObjectStore::new(repo.kio_dir()),
+        &synthetic_commit(
+            c1_object.tree,
+            vec![c1.clone()],
+            "2026-07-12T01:00:00Z",
+            "unchanged descendant",
+            c1_object.tool_lock_hash,
+            CommitType::Manual,
+        ),
+    );
+
+    let chunks_path = dir.path().join(".kio/index/chunks.jsonl");
+    let creation = fs::read_to_string(&chunks_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|row| row.get("event").is_none())
+        .expect("C1 must create the durable association");
+    let chunk_id = creation["chunk_id"].as_str().unwrap();
+    let config_hash = creation["chunking_config_hash"].as_str().unwrap();
+
+    json_success(&dir, &["reindex", "--at", &c2]);
+    json_success(&dir, &["repair", "verify-objects"]);
+
+    let publications = fs::read_to_string(&chunks_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| {
+            row["event"] == "publication"
+                && row["chunk_id"] == chunk_id
+                && row["chunking_config_hash"] == config_hash
+        })
+        .map(|row| row["introduction_commit"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        publications,
+        BTreeSet::from([c1.clone()]),
+        "reindexing C2 must not mint C2 as an introduction for C1's unchanged binding"
+    );
+
+    fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "rebuild-db"]);
+    let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
+    let rebuilt_introductions = conn
+        .prepare(
+            "SELECT introduction_commit FROM chunk_publications \
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2 \
+             ORDER BY introduction_commit",
+        )
+        .unwrap()
+        .query_map(params![chunk_id, config_hash], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rebuilt_introductions, vec![c1]);
+}
+
+#[test]
+fn ct4_timetravel_017_historical_reindex_introduces_config_transition_at_descendant() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+
+    fs::write(
+        dir.path().join("config-transition.md"),
+        "# Config transition\n\nconfigtransitionfixture unchanged normalized identity\n",
+    )
+    .unwrap();
+    let c1 = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Keep the normalized identity untouched but bind C2 to a new chunking
+    // configuration.  That composite (identity, config B) relation begins at
+    // C2; borrowing C1/config A would make the new association unreachable.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
+    )
+    .unwrap();
+    let config_b = kio_index::chunking::chunking_config_hash("heading", 48).unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
+    let c1_object = repo.read_commit(&c1).unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let mut c2_tree = repo.read_tree(&c1_object.tree).unwrap();
+    c2_tree.chunking_config_hash = config_b.clone();
+    let c2_tree_hash = store
+        .write_json(ObjectKind::Tree, &serde_json::to_value(&c2_tree).unwrap())
+        .unwrap()
+        .0;
+    let c2 = write_commit(
+        &store,
+        &synthetic_commit(
+            c2_tree_hash,
+            vec![c1],
+            "2026-07-12T01:00:00Z",
+            "same normalized identity under config B",
+            c1_object.tool_lock_hash,
+            CommitType::Manual,
+        ),
+    );
+
+    json_success(&dir, &["reindex", "--at", &c2]);
+    let publications = fs::read_to_string(dir.path().join(".kio/index/chunks.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["event"] == "publication" && row["chunking_config_hash"] == config_b)
+        .map(|row| row["introduction_commit"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(publications, BTreeSet::from([c2]));
+}
+
+#[test]
+fn ct4_timetravel_018_historical_reindex_keeps_incomparable_merge_introductions() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+    fs::write(dir.path().join("base.md"), "# Base\n\nbasefixture\n").unwrap();
+    let c0 = index_at(&dir, "2026-07-12T00:00:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(
+        dir.path().join("merge-intro.md"),
+        "# Merge introduction\n\nmergeintroductionfixture\n",
+    )
+    .unwrap();
+    let c1 = index_at(&dir, "2026-07-12T00:01:00Z")["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let repo = Repository::open(dir.path()).unwrap();
+    let c1_object = repo.read_commit(&c1).unwrap();
+    let store = ObjectStore::new(repo.kio_dir());
+    let b = write_commit(
+        &store,
+        &synthetic_commit(
+            c1_object.tree.clone(),
+            vec![c0],
+            "2026-07-12T00:02:00Z",
+            "incomparable same-config introduction",
+            c1_object.tool_lock_hash.clone(),
+            CommitType::Manual,
+        ),
+    );
+    let merge = write_commit(
+        &store,
+        &synthetic_commit(
+            c1_object.tree,
+            vec![c1.clone(), b.clone()],
+            "2026-07-12T00:03:00Z",
+            "merge retains both introductions",
+            c1_object.tool_lock_hash,
+            CommitType::Manual,
+        ),
+    );
+    json_success(&dir, &["reindex", "--at", &merge]);
+    let publications = fs::read_to_string(dir.path().join(".kio/index/chunks.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["event"] == "publication")
+        .map(|row| row["introduction_commit"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert!(publications.contains(&c1));
+    assert!(publications.contains(&b));
+    assert!(
+        !publications.contains(&merge),
+        "the merge is a descendant re-affirmation, not a third introduction"
+    );
+}
+
+#[test]
 fn ct4_timetravel_003_edit_rename_aliases_twins_and_cursor_paging() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);

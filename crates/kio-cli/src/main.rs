@@ -4609,7 +4609,7 @@ fn projection_bindings_for_plan(
            )
          ORDER BY c.chunk_id, cg.chunking_config_hash";
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare(sql)
         .map_err(|error| KioError::schema(format!("aggregator binding query: {error}")))?;
     let rows = stmt
         .query_map(
@@ -9711,7 +9711,6 @@ fn stage_retained_unit_publication_events(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssociationAppend {
     Blocked,
@@ -9719,6 +9718,7 @@ enum AssociationAppend {
     Created,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_new_chunk_association(
     kio_dir: &Path,
     row: ChunkRow,

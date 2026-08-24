@@ -71,6 +71,11 @@ persona plan`, `schedule`, `render`, `materialize`, `scaffold`, `lease claim`,
 All outputs are Rust-owned, create-only records; no Python persona runtime,
 schema, or CLI participates.
 
+High-cost Full/cold validation, Full scale acceptance, U7 GPU comparison, and
+manual OCR fixture/provider commands have one explicit entry point:
+[Manual full and cold Rust gates](tasks/manual-full-cold-gates.md). None is an
+ignored-test substitute or an automatically scheduled Actions lane.
+
 Development, CI, and the workspace contract all use Rust `1.98.0` with
 Edition 2024 (see `rust-toolchain.toml` and the workspace `Cargo.toml`). Kio is
 pre-stable and does not maintain a second MSRV compatibility contract.
