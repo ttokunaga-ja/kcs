@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2540,7 +2540,7 @@ impl Repository {
         self.validate()?;
         validate_ref_operand(name)?;
         // F4: `resolve_commit` resolves the literal `HEAD` and any `sha256:` hash
-        // form BEFORE it ever consults `refs/tags` (see below), so a tag created
+        // form BEFORE it ever consults the canonical tag refs (see below), so a tag created
         // under such a name is written to disk but permanently shadowed — a dead
         // ref that `diff`/`log` can never reach. Reject it at creation rather than
         // returning a success that silently does nothing. (This check is specific
@@ -2648,7 +2648,8 @@ impl Repository {
     pub fn resolve_commit(&self, value: &str) -> Result<String> {
         // N4 (03 §3 scope boundary): a commit-ref operand is only ever `HEAD`, a
         // hash, or a tag name — none legitimately carry a path separator or a
-        // `.`/`..` component. Without this guard `refs/tags`.join(value) treats
+        // `.`/`..` component. Without this guard, constructing a tag-ref path from
+        // an unchecked operand would treat
         // `../../..` as a filesystem escape, turning `kio diff`/`kio tag <commit>`
         // into an out-of-scope file-existence oracle. Validate before any join.
         validate_ref_operand(value)?;
@@ -5293,6 +5294,13 @@ pub struct StoreLock {
     /// double-read-to-exchange race between cooperating Kio writers.
     #[cfg(unix)]
     _gate: Option<LockGate>,
+    /// Windows retains both handles. The parent is resolved component-by-
+    /// component without following reparses; the owner handle denies write,
+    /// delete, and rename sharing until the guard is released.
+    #[cfg(windows)]
+    _windows_parent: Option<File>,
+    #[cfg(windows)]
+    _windows_owner: Option<File>,
 }
 
 impl StoreLock {
@@ -5346,38 +5354,88 @@ impl StoreLock {
                 reentrant: true,
                 #[cfg(unix)]
                 _gate: None,
+                #[cfg(windows)]
+                _windows_parent: None,
+                #[cfg(windows)]
+                _windows_owner: None,
             });
         }
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).kio_io(parent)?;
+        #[cfg(windows)]
+        {
+            return Self::acquire_path_windows(path, pid);
         }
 
-        #[cfg(unix)]
-        let gate = acquire_lock_gate(&path)?;
+        #[cfg(not(windows))]
+        {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).kio_io(parent)?;
+            }
 
+            #[cfg(unix)]
+            let gate = acquire_lock_gate(&path)?;
+
+            let token = new_lock_token(pid);
+            let canonical = canonical_lock_bytes(pid, &token)?;
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(&canonical).kio_io(&path)?;
+                    file.sync_all().kio_io(&path)?;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !reclaim_stale_lock(&path, &canonical)? {
+                        return Err(KioError::locked(path.display().to_string()));
+                    }
+                }
+                Err(err) => return Err(KioError::io(err.to_string(), path.display().to_string())),
+            }
+            LOCK_DEPTH.with(|depth| depth.borrow_mut().insert(path.clone(), 1));
+            Ok(Self {
+                path,
+                pid,
+                token,
+                reentrant: false,
+                #[cfg(unix)]
+                _gate: Some(gate),
+                #[cfg(windows)]
+                _windows_parent: None,
+                #[cfg(windows)]
+                _windows_owner: None,
+            })
+        }
+    }
+
+    /// Windows ordinary writers use retained capability-relative handles rather
+    /// than the path-based token-checked fallback. A live owner shares READ
+    /// only, so a second writer cannot open it for DELETE or replace it.
+    #[cfg(windows)]
+    fn acquire_path_windows(path: PathBuf, pid: u32) -> Result<Self> {
+        let parent = open_windows_lock_parent(&path)?;
+        let leaf = windows_lock_leaf(&path)?;
         let token = new_lock_token(pid);
         let canonical = canonical_lock_bytes(pid, &token)?;
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(&canonical).kio_io(&path)?;
-                file.sync_all().kio_io(&path)?;
+        let owner = match create_windows_lock(&parent, leaf, &canonical) {
+            Ok(owner) => owner,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                reclaim_windows_stale_lock(&parent, leaf, &canonical)
+                    .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
+                    .ok_or_else(|| KioError::locked(path.display().to_string()))?
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !reclaim_stale_lock(&path, &canonical)? {
-                    return Err(KioError::locked(path.display().to_string()));
-                }
-            }
-            Err(err) => return Err(KioError::io(err.to_string(), path.display().to_string())),
-        }
+            Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+        };
         LOCK_DEPTH.with(|depth| depth.borrow_mut().insert(path.clone(), 1));
         Ok(Self {
             path,
             pid,
             token,
             reentrant: false,
-            #[cfg(unix)]
-            _gate: Some(gate),
+            _windows_parent: Some(parent),
+            _windows_owner: Some(owner),
         })
     }
 }
@@ -5395,10 +5453,14 @@ impl Drop for StoreLock {
             }
             false
         });
-        // Exchange, rather than check-then-unlink, so a hostile replacement
-        // can at worst be moved aside for forensic inspection; it is never
-        // deleted. The retained kernel gate serializes cooperating writers.
+        // macOS/Linux exchange rather than check-then-unlink. Windows validates
+        // and deletes only the retained owned handle; it never unlinks a path.
         if released && !self.reentrant {
+            #[cfg(windows)]
+            if let Some(owner) = self._windows_owner.as_ref() {
+                let _ = release_windows_owned_lock(owner, self.pid, &self.token);
+            }
+            #[cfg(not(windows))]
             let _ = release_ordinary_lock(&self.path, self.pid, &self.token);
         }
         // `gate` drops after the on-disk release operation, and the kernel
@@ -5418,11 +5480,274 @@ struct LockFile {
 /// of the on-disk protocol and must not depend on spawning a liveness probe.
 const RELEASED_LOCK_PID: u32 = u32::MAX;
 
+/// The lock record is deliberately tiny; reject an oversized leaf before
+/// deserializing so a hostile lock path cannot become an unbounded allocation.
+#[cfg(windows)]
+const MAX_WINDOWS_LOCK_BYTES: u64 = 4096;
+
+/// Resolve/create a lock parent from a filesystem root without re-resolving
+/// ambient parents afterwards. `open_dir_nofollow` rejects symlink/reparse
+/// components; the by-handle identity check also rejects junctions.
+#[cfg(windows)]
+fn open_windows_lock_parent(path: &Path) -> Result<File> {
+    use cap_primitives::{ambient_authority, fs as cap_fs};
+
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(KioError::invalid_usage(
+            "lock path must not contain parent traversal",
+        ));
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
+            .join(path)
+    };
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| KioError::invalid_usage("lock path has no parent"))?;
+    let mut root = PathBuf::new();
+    let mut components = Vec::new();
+    for component in parent.components() {
+        match component {
+            Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            Component::RootDir => root.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(component) => components.push(component.to_os_string()),
+            Component::ParentDir => {
+                return Err(KioError::invalid_usage(
+                    "lock path must not contain parent traversal",
+                ));
+            }
+        }
+    }
+    if root.as_os_str().is_empty() {
+        return Err(KioError::invalid_usage("lock path must be rooted"));
+    }
+    let mut directory = cap_fs::open_ambient_dir(&root, ambient_authority())
+        .map_err(|error| KioError::io(error.to_string(), root.display().to_string()))?;
+    if crate::cas::windows_directory_handle_identity(&directory).is_none() {
+        return Err(KioError::locked(path.display().to_string()));
+    }
+    for component in components {
+        directory = match cap_fs::open_dir_nofollow(&directory, Path::new(&component)) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let options = cap_fs::DirOptions::new();
+                match cap_fs::create_dir(&directory, Path::new(&component), &options) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(KioError::io(error.to_string(), path.display().to_string()));
+                    }
+                }
+                cap_fs::open_dir_nofollow(&directory, Path::new(&component))
+                    .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
+            }
+            Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
+        };
+        if crate::cas::windows_directory_handle_identity(&directory).is_none() {
+            return Err(KioError::locked(path.display().to_string()));
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn windows_lock_leaf(path: &Path) -> Result<&Path> {
+    let leaf = path
+        .file_name()
+        .filter(|leaf| !leaf.is_empty())
+        .map(Path::new)
+        .ok_or_else(|| KioError::invalid_usage("lock path must name a leaf"))?;
+    Ok(leaf)
+}
+
+#[cfg(windows)]
+fn windows_lock_open_options(
+    create_new: bool,
+    access_mode: u32,
+) -> cap_primitives::fs::OpenOptions {
+    use cap_primitives::fs::{FollowSymlinks, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+
+    let mut options = cap_primitives::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(create_new)
+        .create_new(create_new)
+        .access_mode(access_mode)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        ._cap_fs_ext_follow(FollowSymlinks::No);
+    options
+}
+
+#[cfg(windows)]
+fn create_windows_lock(parent: &File, leaf: &Path, bytes: &[u8]) -> std::io::Result<File> {
+    use cap_primitives::fs as cap_fs;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, SYNCHRONIZE};
+
+    let options =
+        windows_lock_open_options(true, GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE);
+    let mut file = cap_fs::open(parent, leaf, &options)?;
+    let published = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        let (record, _) = read_windows_lock(&file).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?;
+        if canonical_lock_bytes_for(&record).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })? != bytes
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "new Windows lock record differs from its canonical bytes",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = published {
+        // The create_new handle is the exact object we just created. Do not
+        // unlink a path here: a partial record must not wedge future writers,
+        // and a competing replacement must never be removed.
+        let _ = delete_windows_lock_handle(&file);
+        return Err(error);
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn read_windows_lock(file: &File) -> Result<(LockFile, crate::cas::WindowsRegularFileIdentity)> {
+    let identity = crate::cas::windows_regular_file_handle_identity(file)
+        .ok_or_else(|| KioError::locked("Windows lock leaf is not a single-link regular file"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| KioError::io(error.to_string(), ".lock"))?
+        .len();
+    if length > MAX_WINDOWS_LOCK_BYTES {
+        return Err(KioError::locked(
+            "Windows lock leaf exceeds the bounded record size",
+        ));
+    }
+    let mut reader = file
+        .try_clone()
+        .map_err(|error| KioError::io(error.to_string(), ".lock"))?;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| KioError::io(error.to_string(), ".lock"))?;
+    let mut bytes = Vec::with_capacity(length as usize);
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| KioError::io(error.to_string(), ".lock"))?;
+    if bytes.len() as u64 != length || bytes.len() as u64 > MAX_WINDOWS_LOCK_BYTES {
+        return Err(KioError::locked(
+            "Windows lock leaf changed while being read",
+        ));
+    }
+    let lock: LockFile = serde_json::from_slice(&bytes)
+        .map_err(|_| KioError::locked("Windows lock is malformed"))?;
+    if canonical_lock_bytes_for(&lock)? != bytes
+        || crate::cas::windows_regular_file_handle_identity(file) != Some(identity)
+    {
+        return Err(KioError::locked(
+            "Windows lock is not canonical or changed identity",
+        ));
+    }
+    Ok((lock, identity))
+}
+
+#[cfg(windows)]
+fn delete_windows_lock_handle(file: &File) -> std::io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+
+    let info = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    // SAFETY: `info` has the exact Win32 layout and `file` retains DELETE access.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            std::ptr::addr_of!(info).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    } == 0
+    {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Return a newly owned lock only after deleting the exact retained stale
+/// handle. If a competing writer creates the leaf in the absent interval, it
+/// wins and this caller reports contention without deleting the new object.
+#[cfg(windows)]
+fn reclaim_windows_stale_lock(
+    parent: &File,
+    leaf: &Path,
+    replacement: &[u8],
+) -> Result<Option<File>> {
+    use cap_primitives::fs as cap_fs;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, SYNCHRONIZE};
+
+    let options = windows_lock_open_options(false, GENERIC_READ | DELETE | SYNCHRONIZE);
+    let stale = match cap_fs::open(parent, leaf, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(error) => return Err(KioError::io(error.to_string(), ".lock")),
+    };
+    let (old, identity) = read_windows_lock(&stale)?;
+    if process_is_alive(old.pid) {
+        return Ok(None);
+    }
+    if crate::cas::windows_regular_file_handle_identity(&stale) != Some(identity) {
+        return Err(KioError::locked("Windows stale lock changed identity"));
+    }
+    delete_windows_lock_handle(&stale).map_err(|error| KioError::io(error.to_string(), ".lock"))?;
+    drop(stale);
+    match create_windows_lock(parent, leaf, replacement) {
+        Ok(file) => Ok(Some(file)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(KioError::io(error.to_string(), ".lock")),
+    }
+}
+
+#[cfg(windows)]
+fn release_windows_owned_lock(file: &File, pid: u32, token: &str) -> Result<()> {
+    let (owned, _) = read_windows_lock(file)?;
+    if owned.pid != pid || owned.token != token {
+        return Ok(());
+    }
+    delete_windows_lock_handle(file).map_err(|error| KioError::io(error.to_string(), ".lock"))
+}
+
 #[cfg(unix)]
 fn reclaim_stale_lock(path: &Path, replacement: &[u8]) -> Result<bool> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        return reclaim_stale_lock_legacy(path, replacement);
+        return reclaim_stale_lock_token_checked(path, replacement);
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -5485,20 +5810,20 @@ fn reclaim_stale_lock(path: &Path, replacement: &[u8]) -> Result<bool> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn reclaim_stale_lock(path: &Path, replacement: &[u8]) -> Result<bool> {
     // GC itself is rejected before marker publication on platforms without a
     // descriptor-relative sweep lock.  Ordinary StoreLock remains a supported
     // writer primitive there, so retain its established create/read/reclaim
     // behavior instead of leaving every released lock permanently live.
-    reclaim_stale_lock_legacy(path, replacement)
+    reclaim_stale_lock_token_checked(path, replacement)
 }
 
 #[cfg(unix)]
 fn release_ordinary_lock(path: &Path, pid: u32, token: &str) -> Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        return release_ordinary_lock_legacy(path, pid, token);
+        return release_ordinary_lock_token_checked(path, pid, token);
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -5548,24 +5873,24 @@ fn release_ordinary_lock(path: &Path, pid: u32, token: &str) -> Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn release_ordinary_lock(path: &Path, pid: u32, token: &str) -> Result<()> {
-    release_ordinary_lock_legacy(path, pid, token)
+    release_ordinary_lock_token_checked(path, pid, token)
 }
 
-/// Fallback for ordinary, non-GC locks on platforms without the macOS/Linux
+/// Token-checked ordinary-lock handling on platforms without the macOS/Linux
 /// exchange primitive. GC refuses to start there before marker publication;
-/// normal writers retain the pre-existing token-checked stale/release
-/// behavior so they cannot wedge after one command.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn reclaim_stale_lock_legacy(path: &Path, replacement: &[u8]) -> Result<bool> {
-    let Some(old) = read_lock_file_legacy(path)? else {
+/// normal writers retain this bounded stale/release behavior so they cannot
+/// wedge after one command.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn reclaim_stale_lock_token_checked(path: &Path, replacement: &[u8]) -> Result<bool> {
+    let Some(old) = read_lock_file_token_checked(path)? else {
         return Ok(false);
     };
     if process_is_alive(old.pid) {
         return Ok(false);
     }
-    let Some(current) = read_lock_file_legacy(path)? else {
+    let Some(current) = read_lock_file_token_checked(path)? else {
         return Ok(false);
     };
     if current != old || process_is_alive(current.pid) {
@@ -5586,9 +5911,9 @@ fn reclaim_stale_lock_legacy(path: &Path, replacement: &[u8]) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn release_ordinary_lock_legacy(path: &Path, pid: u32, token: &str) -> Result<()> {
-    let Some(owned) = read_lock_file_legacy(path)? else {
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn release_ordinary_lock_token_checked(path: &Path, pid: u32, token: &str) -> Result<()> {
+    let Some(owned) = read_lock_file_token_checked(path)? else {
         return Ok(());
     };
     if owned.pid != pid || owned.token != token {
@@ -5601,8 +5926,8 @@ fn release_ordinary_lock_legacy(path: &Path, pid: u32, token: &str) -> Result<()
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn read_lock_file_legacy(path: &Path) -> Result<Option<LockFile>> {
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn read_lock_file_token_checked(path: &Path) -> Result<Option<LockFile>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -7030,6 +7355,13 @@ mod tests {
         read_logs_retention_days, read_network_approval_pending, read_network_approvals,
         redact_context, redact_message_paths, rotate_stale_log, write_network_approval_pending,
     };
+    #[cfg(windows)]
+    use super::{
+        canonical_lock_bytes, create_windows_lock, open_windows_lock_parent, read_windows_lock,
+        release_windows_owned_lock, windows_lock_leaf,
+    };
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[cfg(unix)]
     #[test]
@@ -7625,6 +7957,174 @@ mod tests {
         assert!(!process_is_alive(RELEASED_LOCK_PID));
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    #[test]
+    fn token_checked_lock_handling_requires_canonical_bytes_and_exact_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.lock");
+        let pid = 4242;
+        let token = "token-checked-owner";
+        let bytes = canonical_lock_bytes(pid, token).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let parsed = read_lock_file_token_checked(&path).unwrap().unwrap();
+        assert_eq!(parsed.pid, pid);
+        assert_eq!(parsed.token, token);
+
+        release_ordinary_lock_token_checked(&path, pid, "different-token").unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "wrong owner must not remove"
+        );
+
+        release_ordinary_lock_token_checked(&path, pid, token).unwrap();
+        assert!(!path.exists(), "exact owner removes its own lock");
+
+        fs::write(&path, b"{\"pid\":4242}").unwrap();
+        assert!(read_lock_file_token_checked(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_leaf_rejects_parent_traversal_and_preserves_foreign_token() {
+        let traversal = PathBuf::from("safe").join("..").join("ordinary.lock");
+        assert!(open_windows_lock_parent(&traversal).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.lock");
+        let parent = open_windows_lock_parent(&path).unwrap();
+        let token = "foreign-token";
+        let bytes = canonical_lock_bytes(4242, token).unwrap();
+        let owner =
+            create_windows_lock(&parent, windows_lock_leaf(&path).unwrap(), &bytes).unwrap();
+        release_windows_owned_lock(&owner, 4242, "different-token").unwrap();
+        assert_eq!(read_windows_lock(&owner).unwrap().0.token, token);
+        release_windows_owned_lock(&owner, 4242, token).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_rejects_hardlinked_stale_leaf_without_touching_either_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.lock");
+        let alias = dir.path().join("ordinary.alias");
+        let bytes = canonical_lock_bytes(RELEASED_LOCK_PID, "retired-owner").unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+
+        assert!(StoreLock::acquire_path(path.clone()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read(&alias).unwrap(), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_concurrent_stale_reclaim_has_exactly_one_owner() {
+        use std::sync::{Arc, Barrier, Condvar, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contended.lock");
+        fs::write(
+            &path,
+            canonical_lock_bytes(RELEASED_LOCK_PID, "retired-owner").unwrap(),
+        )
+        .unwrap();
+        let start = Arc::new(Barrier::new(3));
+        // The successful owner remains live until the other worker has made
+        // its attempt, so the assertion measures overlap rather than timing.
+        let state = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let start = Arc::clone(&start);
+            let state = Arc::clone(&state);
+            let path = path.clone();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                match StoreLock::acquire_path(path) {
+                    Ok(lock) => {
+                        let (mutex, wake) = &*state;
+                        let mut state = mutex.lock().unwrap();
+                        state.0 += 1;
+                        wake.notify_all();
+                        while !state.1 {
+                            state = wake.wait(state).unwrap();
+                        }
+                        drop(lock);
+                        Ok(true)
+                    }
+                    Err(error) => {
+                        let (mutex, wake) = &*state;
+                        let mut state = mutex.lock().unwrap();
+                        state.0 += 1;
+                        wake.notify_all();
+                        Err(error.error_code().to_owned())
+                    }
+                }
+            }));
+        }
+        start.wait();
+        let timed_out = {
+            let (mutex, wake) = &*state;
+            let mut state = mutex.lock().unwrap();
+            let mut timed_out = false;
+            while state.0 != 2 {
+                let (next, timeout) = wake
+                    .wait_timeout(state, std::time::Duration::from_secs(5))
+                    .unwrap();
+                state = next;
+                if timeout.timed_out() {
+                    timed_out = true;
+                    break;
+                }
+            }
+            state.1 = true;
+            wake.notify_all();
+            timed_out
+        };
+        let outcomes: Vec<Result<bool, String>> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker must not panic"))
+            .collect();
+        assert!(!timed_out, "both workers must report their attempt");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(true)))
+                .count(),
+            1
+        );
+        for outcome in outcomes {
+            if let Err(error_code) = outcome {
+                assert_eq!(error_code, "KIO-E-STORE-LOCKED-001");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_rejects_junction_parent_without_touching_external_target() {
+        let root = tempfile::tempdir().unwrap();
+        let external = root.path().join("external");
+        let junction = root.path().join("junction");
+        fs::create_dir(&external).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&external)
+            .status()
+            .expect("create Windows junction fixture");
+        assert!(status.success(), "mklink /J must create the test junction");
+
+        let path = junction.join("nested/ordinary.lock");
+        assert!(StoreLock::acquire_path(path).is_err());
+        assert!(
+            !external.join("nested/ordinary.lock").exists(),
+            "a junction must not receive a lock parent or leaf"
+        );
+        fs::remove_dir(&junction).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_process_liveness_rejects_values_outside_the_pid_range() {
@@ -7639,10 +8139,10 @@ mod tests {
     }
 
     // F8: a device-global lock (e.g. the pre-2026-07-18 JSONL cost ledger's) is
-    // acquired via `acquire_path` at an arbitrary path outside any `.kio`. It must
-    // create the parent dir, then release with a reclaimable sentinel where the
-    // verified exchange exists (macOS/Linux) or token-checked legacy deletion
-    // elsewhere, and refuse an independently held lock file.
+    // acquired via `acquire_path` at an arbitrary path outside any `.kio`. It
+    // creates the parent dir, then uses the verified exchange on macOS/Linux,
+    // retained-handle deletion on Windows, or the token-checked fallback only
+    // on other unsupported platforms; it refuses an independently held lock.
     #[test]
     fn f8_acquire_path_is_device_global_and_excludes_a_held_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -7660,10 +8160,15 @@ mod tests {
             lock_path.exists(),
             "macOS/Linux drop leaves an atomic release sentinel"
         );
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
         assert!(
             !lock_path.exists(),
-            "platforms without verified exchange use token-checked legacy deletion"
+            "Windows releases only its retained owned handle"
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        assert!(
+            !lock_path.exists(),
+            "platforms without verified exchange use token-checked deletion"
         );
 
         let reacquired = StoreLock::acquire_path(lock_path.clone())

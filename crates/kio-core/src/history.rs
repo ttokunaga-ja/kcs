@@ -435,8 +435,8 @@ impl HistoryReader {
         let walk = self.walk_many(roots.iter().map(String::as_str), ParentMode::All)?;
         validate_acyclic(&walk.nodes)?;
         Ok(HistoryGraph {
-            // `start_commit` remains the legacy single-root accessor. For a
-            // multi-root graph it is the bytewise-first root; callers that
+            // `start_commit` is the graph's representative-root accessor. For
+            // a multi-root graph it is the bytewise-first root; callers that
             // need a particular root must use `node(root)`.
             start_commit,
             nodes: walk.nodes,

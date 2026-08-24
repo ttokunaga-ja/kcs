@@ -300,11 +300,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     dot/space without placing the logical basename on disk.
 62. New tags require one host-independent portable logical-leaf rule and use
     `refs/tags-v1/tag-<sha256(NFC + Unicode lowercase)>` as the canonical physical ref. The
-    versioned directory is disjoint from legacy `refs/tags/<logical-name>`, so an old raw tag that
-    looks like `tag-<digest64>` cannot alias another tag's canonical ref. Case/normalization variants
-    collide on every OS and `HEAD` case variants remain reserved. Existing raw-name Unix refs remain
-    a bounded, validated read fallback; multiple canonical/legacy representations must agree or the
-    store fails closed.
+    versioned directory is disjoint from the retired raw-name namespace, so a raw tag that looks
+    like `tag-<digest64>` cannot alias another tag's canonical ref. Case/normalization variants
+    collide on every OS and `HEAD` case variants remain reserved. The later pre-release cutover
+    superseded the temporary raw-name read fallback: current readers consult only the canonical
+    hashed namespace and do not reconcile a second representation.
 63. Persisted tree-entry paths are validated as logical direct-child names independently of the
     reader OS. New snapshots and future restore destinations apply the current filesystem's stricter
     materialization rule before constructing a path. This preserves Windows reads of Unix history

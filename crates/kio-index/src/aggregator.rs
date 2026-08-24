@@ -3588,8 +3588,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE agg_bindings (scope_id TEXT NOT NULL); \
              CREATE TABLE agg_projection_markers (scope_id TEXT NOT NULL); \
-             INSERT INTO agg_bindings VALUES ('legacy'); \
-             INSERT INTO agg_projection_markers VALUES ('legacy');",
+             INSERT INTO agg_bindings VALUES ('obsolete'); \
+             INSERT INTO agg_projection_markers VALUES ('obsolete');",
         )
         .unwrap();
         drop(conn);
@@ -3848,11 +3848,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("aggregator.sqlite");
-        // Simulate a cache produced by the prior WAL-based implementation.
+        // Simulate an obsolete WAL-based cache layout.
         drop(Aggregator::open(&path).unwrap());
-        let legacy = Connection::open(&path).unwrap();
-        legacy.pragma_update(None, "journal_mode", "WAL").unwrap();
-        drop(legacy);
+        let wal_writer = Connection::open(&path).unwrap();
+        wal_writer
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        drop(wal_writer);
         let wal_target = dir.path().join("wal-target");
         let shm_target = dir.path().join("shm-target");
         std::fs::write(&wal_target, b"must not be opened as a WAL").unwrap();
@@ -3864,7 +3866,7 @@ mod tests {
 
         let error = Aggregator::open(&path)
             .err()
-            .expect("ordinary open must fail rather than follow legacy WAL sidecars");
+            .expect("ordinary open must fail rather than follow obsolete WAL sidecars");
         assert!(error.to_string().contains("unable to open database file"));
 
         assert_eq!(

@@ -541,9 +541,9 @@ pub fn extract_pdf_text_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<
     // 07 §2.1 (2026-07-23 FlateDecode addendum): real-world text-layer PDFs
     // (TeX / LibreOffice output) carry compressed content streams and CID
     // glyph indices; the graph decoder inflates and maps them through each
-    // font's ToUnicode CMap. It declines (None) on anything it cannot decode
-    // confidently, so every previously-extractable PDF keeps taking the
-    // legacy scanner path below with byte-identical results.
+    // font's ToUnicode CMap. It declines (`None`) on anything it cannot decode
+    // confidently, then the bounded conservative scanner below handles the
+    // supported raw-literal subset without treating it as page authority.
     if let Some(pages) = crate::pdf_decode::decode_pdf_pages(bytes, max_pages)? {
         // Graph pages ARE the page authority: the decoder enumerates
         // /Type /Page objects INCLUDING those packed inside compressed
@@ -1031,6 +1031,27 @@ stream\nBT (/Type /Page and /PageX) Tj ET\nendstream\nendobj\n";
         assert_eq!(
             structural_pdf_page_count(b"%PDF-1.4\n/Type /Page\n", 8).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn bounded_pdf_scanner_recovers_literal_text_when_graph_declines() {
+        // This supported raw-literal subset has a structural page and a bounded
+        // uncompressed stream, but no `/Contents` reference for the graph
+        // decoder to follow. The scanner may recover its literal text without
+        // promoting a stream count to page authority.
+        let pdf = b"%PDF-1.4\n\
+1 0 obj << /Type /Pages /Count 1 >> endobj\n\
+2 0 obj << /Type /Page /Parent 1 0 R >>\n\
+stream\nBT (scanner-only literal page text) Tj ET\nendstream\nendobj\n";
+        assert!(
+            crate::pdf_decode::decode_pdf_pages(pdf, 8)
+                .expect("graph decode")
+                .is_none()
+        );
+        assert_eq!(
+            extract_pdf_text_pages_bounded(pdf, 8).expect("bounded scanner"),
+            vec!["scanner-only literal page text".to_owned()]
         );
     }
 

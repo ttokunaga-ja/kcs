@@ -501,20 +501,6 @@ fn m1c_corrupt_tasks_jsonl_is_store_corrupt_not_schema() {
     );
 }
 
-// M1(c) note (2026-07-21): this test's exact premise ("a corrupt legacy JSONL
-// charge ledger file → KIO-E-STORE-CORRUPT-001 exit 4") was retired along with
-// that JSONL ledger.
-// `cost-ledger.sqlite`'s corruption mode is entirely different (a `rusqlite`
-// open/query failure, not a JSON parse failure), and `pipeline_to_kio`'s
-// `PipelineError::Sqlite` arm currently falls through to its generic
-// `KioError::schema` mapping (exit 2 KIO-E-CONFIG-SCHEMA-001) rather than a
-// dedicated STORE-CORRUPT classification — reclassifying a corrupt/unopenable
-// `cost-ledger.sqlite` file as exit 4 (matching this retired test's intent) is
-// flagged as a follow-up item in the implementation report; it is out of this
-// session's 3-item scope (JSONL rip-out / device-row wiring / CL61) and touches
-// error-code semantics shared with legitimate BUSY/LOCKED SQLite conditions that
-// must NOT be reclassified as STORE-CORRUPT, so it needs its own careful pass.
-
 #[test]
 fn ct_lock_003_read_commands_do_not_acquire_lock() {
     let temp = tempfile::tempdir().unwrap();

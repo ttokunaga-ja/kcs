@@ -29,7 +29,7 @@ const MAX_NORMALIZED_UNIT_BYTES: u64 = MAX_NORMALIZED_UNIT_OBJECT_BYTES;
 const MAX_NORMALIZED_INSTANCE_BYTES: u64 = 256 * 1024 * 1024;
 // CT4-FSCK's invocation-wide object ceiling is also the outer bound for the
 // physical manifest/unit entries inspected before the loader can identify the
-// valid subset. Canonical and legacy representations share this one counter.
+// valid subset. Canonical and conflicting representations share this one counter.
 const MAX_NORMALIZED_INSTANCE_FILES: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy)]
@@ -1838,7 +1838,7 @@ mod tests {
             "tool_profile_hash": format!("sha256:{}", "c".repeat(64)),
             "gen": 0,
             "mode": "full",
-            "markdown": "legacy",
+            "markdown": "normalized fixture",
             "metadata": {},
             "reused_from": null,
             "generated_at": "2026-07-13T00:00:00Z"

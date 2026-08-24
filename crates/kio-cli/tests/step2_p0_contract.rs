@@ -1753,9 +1753,8 @@ fn f5_warn_at_percent_surfaces_non_blocking_warning() {
     )
     .unwrap();
     // Seed 0.9 spent this month → 90% of cap (>= 80%, but < 100% so not over cap).
-    // Seeded directly into `cost_ledger` (rather than via a legacy JSONL file +
-    // migration side effect) — CL71 forbids the retired JSONL filenames outside
-    // `ledger/migrate.rs`.
+    // Seeded directly into the current SQLite ledger; this contract test does
+    // not exercise a migration reader or an alternate ledger format.
     let ledger_path = dir.path().join(".test-data/kio/cost-ledger.sqlite");
     fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
     kio_pipeline::ledger::LedgerDb::open(&ledger_path)

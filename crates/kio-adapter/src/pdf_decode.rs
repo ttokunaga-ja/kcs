@@ -1,7 +1,7 @@
 //! Bounded decoder for FlateDecode-compressed PDF text layers (07 §2.1).
 //!
 //! Real-world text-layer PDFs (TeX / LibreOffice output) do not carry their
-//! text as raw `(...)` literals the way the legacy scanner in
+//! text as raw `(...)` literals the way the bounded conservative scanner in
 //! [`crate::deterministic`] expects: content streams are FlateDecode-
 //! compressed, glyphs are shown as subset-font *glyph indices* in hex
 //! strings, and the glyph→Unicode mapping lives in per-font ToUnicode CMaps
@@ -17,10 +17,9 @@
 //! 4. tokenize each page's (inflated) content stream, tracking the current
 //!    font through `Tf` and decoding `Tj`/`TJ`/`'`/`"` show operators.
 //!
-//! Fail-empty posture: any structural anomaly returns `None` and the caller
-//! falls back to the legacy scanner (whose behavior is unchanged), so a
-//! malformed file degrades to today's OCR routing instead of erroring. The
-//! single hard error is an inflate output that exceeds
+//! Fail-empty posture: any structural anomaly returns `None`; the caller first
+//! tries its bounded conservative scanner, and routes to OCR only when that
+//! scanner also has no text. The single hard error is an inflate output that exceeds
 //! [`MAX_INFLATED_STREAM_BYTES`] — a zip-bomb posture matching the existing
 //! `MAX_DETERMINISTIC_PDF_PAGES` ContractViolation precedent.
 
@@ -38,7 +37,7 @@ use crate::{AdapterError, Result};
 pub const MAX_INFLATED_STREAM_BYTES: usize = 16 * 1024 * 1024;
 
 /// Object-index ceiling (raw objects + ObjStm-expanded sub-objects). Beyond
-/// this the decoder declines (legacy fallback) rather than erroring: a huge
+/// this the decoder declines to the bounded conservative scanner rather than erroring: a huge
 /// object count is unusual but not hostile per se.
 const MAX_PDF_OBJECTS: usize = 8192;
 
@@ -70,7 +69,7 @@ enum FontMap {
 }
 
 /// Decode the text pages of `bytes` through the object graph. `Ok(None)`
-/// means "no confident decode" — caller must fall back to the legacy
+/// means "no confident decode" — caller may use its bounded conservative
 /// scanner. `Ok(Some(pages))` always contains at least one non-empty page.
 pub(crate) fn decode_pdf_pages(bytes: &[u8], max_pages: usize) -> Result<Option<Vec<String>>> {
     let Some(objects) = collect_objects(bytes)? else {
@@ -1027,7 +1026,7 @@ fn push_decoded(lines: &mut Vec<String>, text: Option<String>) {
     if trimmed.is_empty() {
         return;
     }
-    // Mirror the legacy literal filter: keep only strings carrying at least
+    // Mirror the bounded scanner's literal filter: keep only strings carrying at least
     // one alphanumeric or non-ASCII character.
     if trimmed
         .chars()
@@ -1057,7 +1056,7 @@ fn decode_show_string(string: &ShowString, font: Option<&FontMap>) -> Option<Str
         }
         // A font we resolved but cannot map: glyph indices, not text.
         Some(FontMap::Opaque) => None,
-        // No font context (legacy fixtures): literal bytes are the text.
+        // No font context (minimal fixtures): literal bytes are the text.
         None => match string {
             ShowString::Literal(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
             ShowString::Hex(_) => None,

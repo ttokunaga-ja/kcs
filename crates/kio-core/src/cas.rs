@@ -723,7 +723,7 @@ impl ObjectStore {
 
     /// Repair one corrupt, single-representation raw CAS slot with verified
     /// working bytes. The destination is derived only from `expected_hash`; a
-    /// canonical/legacy dual representation remains fail-closed. The caller must
+    /// noncanonical or conflicting representation remains fail-closed. The caller must
     /// hold the scope store lock for the entire operation.
     pub fn repair_raw(&self, expected_hash: &str, bytes: &[u8]) -> Result<bool> {
         if !is_hash(expected_hash) || hash_bytes(bytes) != expected_hash {
@@ -871,7 +871,8 @@ impl ObjectStore {
     }
 
     /// Read one required chunk namespace and verify semantic identity, exact
-    /// schema, text hash, bounded bytes, and canonical/legacy agreement.
+    /// schema, text hash, bounded bytes, and rejection of noncanonical or
+    /// conflicting representations.
     pub fn read_chunk(&self, hash: &str) -> Result<ChunkObject> {
         self.read_chunk_with_size(hash).map(|(chunk, _)| chunk)
     }
@@ -1324,8 +1325,8 @@ impl ObjectStore {
         })
     }
 
-    /// Verify every portable/legacy raw representation, then physically remove
-    /// it. This destructive primitive is intentionally raw-only and is consumed
+    /// Verify the single canonical raw slot, then physically remove it. This
+    /// destructive primitive is intentionally raw-only and is consumed
     /// by the purge transaction while its visibility barrier and store lock are
     /// held. Missing is an idempotent `false`; malformed links or bytes fail
     /// closed before unlink.
@@ -1365,8 +1366,8 @@ impl ObjectStore {
         Ok(true)
     }
 
-    /// Verify every portable/legacy prepared or image representation, then
-    /// physically remove it. Purge callers must first prove that no surviving
+    /// Verify the single canonical prepared or image slot, then physically
+    /// remove it. Purge callers must first prove that no surviving
     /// normalized instance references the content hash. Missing is an idempotent
     /// `false`; malformed links, bytes, or duplicate representations fail closed
     /// before the first unlink.
@@ -1478,8 +1479,7 @@ impl ObjectStore {
             .map(|(object, _)| object)
     }
 
-    /// Exact-kind read plus the total bytes verified across canonical/legacy
-    /// physical representations.
+    /// Exact-kind read plus the total bytes verified for the canonical slot.
     pub fn read_object_with_size(
         &self,
         kind: ObjectKind,
@@ -4523,7 +4523,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_object_rejects_legacy_missing_unit_content_hash() {
+    fn chunk_object_rejects_missing_unit_content_hash() {
         let mut value = serde_json::to_value(chunk_object("stable text")).unwrap();
         value.as_object_mut().unwrap().remove("unit_content_hash");
         assert!(serde_json::from_value::<ChunkObject>(value).is_err());

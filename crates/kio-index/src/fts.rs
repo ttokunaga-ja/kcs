@@ -2641,7 +2641,7 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             -- 2026-07-24 (07 §5.3 contextual-embedding addendum): the humanized
             -- filename context a chunk vector was embedded with, so a rebuild
             -- can disambiguate several rows sharing one `target_id` (text_hash).
-            -- NULL for non-contextual (legacy / symbolic-name) chunk embeddings.
+            -- NULL for non-contextual symbolic-name chunk embeddings.
             context_key TEXT
         );
         -- Keep target-type lookups bounded without scanning the corpus-sized

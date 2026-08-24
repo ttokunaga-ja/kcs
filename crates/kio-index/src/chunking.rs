@@ -24,8 +24,7 @@ pub struct NormalizedUnitInput {
     pub tool_profile_hash: String,
     pub r#gen: u64,
     pub unit_key: String,
-    /// Hash of exact normalized Markdown bytes. There is deliberately no
-    /// legacy missing-value fallback.
+    /// Hash of exact normalized Markdown bytes. A missing value is rejected.
     pub unit_content_hash: String,
     pub markdown: String,
 }
