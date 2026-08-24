@@ -16,21 +16,6 @@ owner = "eval"
 status = "active-manual"
 
 [[exception]]
-path = "experiments/ocr-verification/provider_mistral.py"
-reason = "The official Mistral Python SDK is the Python-native provider boundary for this manual OCR experiment"
-python_runtime = "CPython 3.12"
-packages = ["mistralai"]
-input_schema = "kio.ocr.provider-request/v1"
-output_schema = "kio.ocr.provider-response/v1"
-lane = "manual-ocr-provider"
-network = true
-gpu = false
-credentials = true
-reevaluate_when = "A stable supported Rust SDK satisfies the pinned Mistral OCR provider contract"
-owner = "eval"
-status = "active-manual"
-
-[[exception]]
 path = "experiments/ocr-verification/fixtures/render_native.py"
 reason = "Pillow and reportlab are the mature Python-native raster and PDF rendering boundary for explicit fixture inputs"
 python_runtime = "CPython 3.12"

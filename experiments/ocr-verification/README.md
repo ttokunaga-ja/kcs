@@ -1,42 +1,47 @@
-# OCR native adapters
+# OCR verification boundaries
 
 OCR evaluation is Rust-owned. `kio-eval` parses typed ground truth and OCR
 responses, applies table-recall/Japanese-CER/image-count thresholds,
 classifies formula output, and creates report data and verdicts. This directory
 is not an executable evaluation harness.
 
-The two Python files are deliberately narrow native-runtime boundaries:
+The Mistral provider is a Rust direct-HTTP boundary. With an explicitly set
+`MISTRAL_API_KEY`, `kio-eval` sends one bounded POST request to
+`https://api.mistral.ai/v1/ocr`, using the exact versioned model
+`mistral-ocr-4-1`. It does not retry, follow redirects, or inherit proxy
+configuration. The official Mistral API documentation is the wire reference;
+Kio makes no Python SDK parity promise.
 
-- `provider_mistral.py` calls the official `mistralai` SDK. It accepts exactly
-  one `kio.ocr.provider-request/v1` JSONL record on stdin and emits exactly one
-  `kio.ocr.provider-response/v1` record on stdout. It has no verdict,
-  reporting, fixture selection, output discovery, or dry-run mode.
-- `fixtures/render_native.py` uses Pillow and reportlab to render explicitly
-  named PNG inputs to one explicitly named create-only PDF. Its request and
-  response schemas are `kio.ocr.fixture-render.request/v1` and
-  `kio.ocr.fixture-render.response/v1`; its response binds the final PDF's
-  byte count and SHA-256. Its parent directory must already exist and output
-  creation is exclusive/nofollow, so it cannot replace an archive artifact.
+The provider request and response are bounded before parsing or publication.
+The normalized response is create-only `kio.ocr.response/v2` and binds the
+request ID, document SHA-256, and exact model. Only `image_count` is persisted;
+provider image payloads are not retained. Provider page indices must be unique
+and strictly increasing. Because official examples and retained responses
+differ on whether the first source index is zero or one, Rust converts the
+received array order to the normalized artifact's canonical zero-based
+`index`; duplicate, decreasing, or missing required fields fail closed.
 
-The Rust caller owns absolute-path authorization, adapter subprocess limits,
-timeouts, stdout/stderr byte bounds, response identity validation, and all
-filesystem/report policy. These adapters are manual lanes only: they are not
-run by push/PR CI. `MISTRAL_API_KEY` is required only for the provider and is
-never persisted by it.
+`fixtures/render_native.py` remains a distinct Python-native boundary. It uses
+Pillow and reportlab to render explicitly named PNG inputs to one explicitly
+named create-only PDF. Its request and response schemas are
+`kio.ocr.fixture-render.request/v1` and `kio.ocr.fixture-render.response/v1`;
+its response binds the final PDF's byte count and SHA-256. Its parent directory
+must already exist and output creation is exclusive/nofollow, so it cannot
+replace an archive artifact.
+
+Both lanes are manual only: normal push/PR CI makes no live provider call.
+`MISTRAL_API_KEY` is used only for the direct provider request and is never
+persisted. The renderer receives no credentials.
 
 ## Manual Rust-owned flow
 
-The interpreter, adapter, inputs, and outputs are always explicit canonical
-absolute paths. The provider command snapshots at most 16 MiB of PDF bytes in
-Rust and sends those bytes over the versioned JSONL boundary; Python never
-reopens the document path.
+Documents and outputs are explicit canonical absolute paths. A provider call
+is a paid, networked manual operation; normal CI never invokes it.
 
 ```bash
 MISTRAL_API_KEY=... kio-eval ocr provider \
-  --python /absolute/path/to/venv/bin/python3 \
-  --adapter /absolute/path/to/provider_mistral.py \
   --document /absolute/path/to/input.pdf \
-  --model mistral-ocr-latest --request-id manual-001 \
+  --model mistral-ocr-4-1 --request-id manual-001 \
   --out /absolute/path/to/normalized-response.json
 
 kio-eval ocr evaluate \
@@ -58,7 +63,7 @@ normalized OCR response, threshold verdict, and report schemas. Before the
 renderer starts, Rust descriptor-binds every PNG and copies its exact bytes to
 a private snapshot directory; the adapter never reopens caller-controlled
 input names. Per-image, aggregate-byte, aggregate-pixel, and 64 MiB output
-bounds are enforced on both sides of the JSONL boundary.
+bounds are enforced for renderer inputs and outputs.
 
 Existing PDFs, PNGs, and `out*/` response/report files are retained as
 non-authorizing archive artifacts. They are neither fixture-discovery inputs

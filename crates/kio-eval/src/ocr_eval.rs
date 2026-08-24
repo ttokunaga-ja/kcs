@@ -1,19 +1,21 @@
 //! Typed, bounded OCR evaluation primitives.
 //!
-//! Python is deliberately not an evaluation authority.  It may provide a
-//! model response through the narrow JSONL adapter protocol below, while this
-//! module owns parsing, metrics, thresholds, verdicts, and report data.
+//! Python is deliberately not an evaluation authority. Rust owns the direct
+//! provider request, response normalization, metrics, thresholds, verdicts,
+//! and report data. Python remains only the narrow fixture renderer.
 
 use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
@@ -23,19 +25,22 @@ use crate::runner::{
 };
 
 pub const GROUND_TRUTH_SCHEMA: &str = "kio.ocr.ground-truth/v1";
-pub const RESPONSE_SCHEMA: &str = "kio.ocr.response/v1";
-pub const PROVIDER_REQUEST_SCHEMA: &str = "kio.ocr.provider-request/v1";
-pub const PROVIDER_RESPONSE_SCHEMA: &str = "kio.ocr.provider-response/v1";
+pub const RESPONSE_SCHEMA: &str = "kio.ocr.response/v2";
+pub const MISTRAL_OCR_MODEL: &str = "mistral-ocr-4-1";
+pub const MISTRAL_OCR_ENDPOINT: &str = "https://api.mistral.ai/v1/ocr";
 pub const TABLE_RECALL_THRESHOLD: f64 = 0.95;
 pub const JAPANESE_CER_THRESHOLD: f64 = 0.02;
 pub const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PAGES: usize = 10_000;
 pub const MAX_MARKDOWN_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 256 * 1024 * 1024;
-/// Provider documents travel in the bounded JSONL request, not by a pathname
-/// that a credentialed child could reopen after validation.
+/// Provider documents travel in the bounded direct-HTTP JSON request, not by a
+/// pathname that a credentialed child could reopen after validation.
 pub const MAX_PROVIDER_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PROVIDER_REQUEST_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_IMAGES_PER_PAGE: usize = 10_000;
+pub const MAX_IMAGES_TOTAL: usize = 100_000;
 pub const MAX_RENDER_INPUT_IMAGES: usize = 10_000;
 pub const MAX_RENDER_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_RENDER_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
@@ -65,6 +70,8 @@ pub enum OcrEvalError {
     OutputTooLarge { stream: &'static str, limit: usize },
     #[error("OCR adapter failed with status {status}: {stderr}")]
     AdapterFailed { status: String, stderr: String },
+    #[error("Mistral OCR returned HTTP status {0}")]
+    ProviderStatus(u16),
     #[error("OCR adapter I/O: {0}")]
     Io(#[from] io::Error),
     #[error("OCR artifact publication: {0}")]
@@ -113,6 +120,9 @@ pub struct FormulaTruth {
 #[serde(deny_unknown_fields)]
 pub struct OcrResponse {
     pub schema: String,
+    pub request_id: String,
+    pub document_sha256: String,
+    pub model: String,
     pub pages: Vec<OcrPage>,
 }
 
@@ -122,10 +132,9 @@ pub struct OcrPage {
     pub index: u32,
     #[serde(default)]
     pub markdown: String,
-    /// Provider image payloads are not interpreted by evaluation; their count
-    /// is the contract.  The bounded JSON parser still owns their shape.
-    #[serde(default)]
-    pub images: Vec<serde_json::Value>,
+    /// Only the bounded provider image count is retained; payloads never cross
+    /// the evaluation boundary.
+    pub image_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -218,27 +227,117 @@ pub fn parse_response(bytes: &[u8]) -> Result<OcrResponse, OcrEvalError> {
             limit: MAX_JSON_BYTES,
         });
     }
+    reject_duplicate_json_keys(bytes)?;
     let response: OcrResponse = serde_json::from_slice(bytes)?;
     if response.schema != RESPONSE_SCHEMA {
         return Err(OcrEvalError::Invalid("unsupported OCR response schema"));
     }
     if response.pages.len() > MAX_PAGES
-        || response
-            .pages
-            .iter()
-            .any(|page| page.markdown.len() > MAX_MARKDOWN_BYTES)
+        || response.request_id.is_empty()
+        || response.request_id.len() > 256
+        || response.request_id.chars().any(char::is_control)
+        || !valid_sha256(&response.document_sha256)
+        || response.model != MISTRAL_OCR_MODEL
+        || response.pages.iter().any(|page| {
+            page.markdown.len() > MAX_MARKDOWN_BYTES || page.image_count > MAX_IMAGES_PER_PAGE
+        })
     {
         return Err(OcrEvalError::Invalid(
             "OCR response exceeds page or markdown bound",
         ));
     }
+    let image_total = response
+        .pages
+        .iter()
+        .try_fold(0_usize, |total, page| total.checked_add(page.image_count))
+        .ok_or(OcrEvalError::Invalid("OCR response image count overflow"))?;
     let mut seen = std::collections::BTreeSet::new();
-    if response.pages.iter().any(|page| !seen.insert(page.index)) {
+    if response.pages.iter().any(|page| !seen.insert(page.index))
+        || response
+            .pages
+            .iter()
+            .enumerate()
+            .any(|(index, page)| page.index != index as u32)
+        || image_total > MAX_IMAGES_TOTAL
+    {
         return Err(OcrEvalError::Invalid(
-            "OCR response has duplicate page index",
+            "OCR response has invalid page indexes or image count",
         ));
     }
     Ok(response)
+}
+
+/// `serde_json` intentionally accepts duplicate object members. Provider
+/// payloads are an external authority boundary, so reject them recursively
+/// before deserializing the typed response.
+fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), OcrEvalError> {
+    struct Scan;
+    impl<'de> Visitor<'de> for Scan {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("any JSON value without duplicate object keys")
+        }
+
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(())
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            while seq.next_element_seed(Scan)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut keys = std::collections::BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !keys.insert(key) {
+                    return Err(serde::de::Error::custom("duplicate JSON object key"));
+                }
+                map.next_value_seed(Scan)?;
+            }
+            Ok(())
+        }
+    }
+    impl<'de> DeserializeSeed<'de> for Scan {
+        type Value = ();
+        fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    Scan.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(())
 }
 
 pub fn evaluate(
@@ -278,8 +377,8 @@ pub fn evaluate(
     let image_page = page(response, truth.images.page_index)?;
     let images = ImageMetric {
         expected_count: truth.images.expected_count,
-        observed_count: image_page.images.len(),
-        passed: image_page.images.len() == truth.images.expected_count as usize,
+        observed_count: image_page.image_count,
+        passed: image_page.image_count == truth.images.expected_count as usize,
     };
 
     let formula_page = page(response, truth.formula.page_index)?;
@@ -293,7 +392,7 @@ pub fn evaluate(
         .collect();
     let classification = if matched_tokens.len() == truth.formula.expected_tokens.len() {
         FormulaClassification::Textized
-    } else if !formula_page.images.is_empty() || formula_page.markdown.contains("![") {
+    } else if formula_page.image_count != 0 || formula_page.markdown.contains("![") {
         FormulaClassification::ImageFallback
     } else {
         FormulaClassification::Missing
@@ -384,61 +483,285 @@ fn levenshtein(left: &[char], right: &[char]) -> usize {
     row[right.len()]
 }
 
-/// Request issued to the Python-only Mistral adapter.  All paths are explicit;
-/// the adapter must not discover fixtures or choose outputs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderRequest {
-    pub schema: String,
-    pub request_id: String,
-    pub model: String,
-    pub media_type: String,
-    pub document_bytes: u64,
-    pub document_sha256: String,
-    pub document_base64: String,
-    pub include_image_base64: bool,
+#[derive(Serialize)]
+struct MistralRequest<'a> {
+    model: &'a str,
+    document: MistralDocument<'a>,
+    include_image_base64: bool,
+    include_blocks: bool,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderResponse {
-    pub schema: String,
-    pub request_id: String,
-    pub document_sha256: String,
-    pub response: serde_json::Value,
+#[derive(Serialize)]
+struct MistralDocument<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    document_url: &'a str,
 }
 
-/// Convert the provider's deliberately opaque SDK payload into Kio's closed
-/// response schema.  The Python adapter never gets to decide this shape.
-pub fn normalize_provider_response(
-    provider: &ProviderResponse,
+#[derive(Debug, Clone, Copy)]
+struct ProviderLimits {
+    connect_timeout: Duration,
+    global_timeout: Duration,
+    max_response_bytes: usize,
+}
+
+impl Default for ProviderLimits {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            global_timeout: Duration::from_secs(120),
+            max_response_bytes: MAX_PROVIDER_RESPONSE_BYTES,
+        }
+    }
+}
+
+fn provider_agent(limits: ProviderLimits) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .proxy(None)
+        .timeout_connect(Some(limits.connect_timeout))
+        .timeout_global(Some(limits.global_timeout))
+        .build()
+        .into()
+}
+
+/// Direct, one-shot Mistral OCR call. The endpoint is fixed for production;
+/// `endpoint` is an intentionally private test seam for loopback mocks only.
+pub fn request_mistral_ocr(
+    request_id: &str,
+    model: &str,
+    document: &Path,
+    include_image_base64: bool,
+    api_key: &str,
+) -> Result<OcrResponse, OcrEvalError> {
+    request_mistral_ocr_at(
+        MISTRAL_OCR_ENDPOINT,
+        request_id,
+        model,
+        document,
+        include_image_base64,
+        api_key,
+    )
+}
+
+fn request_mistral_ocr_at(
+    endpoint: &str,
+    request_id: &str,
+    model: &str,
+    document: &Path,
+    include_image_base64: bool,
+    api_key: &str,
+) -> Result<OcrResponse, OcrEvalError> {
+    request_mistral_ocr_at_with_limits(
+        endpoint,
+        request_id,
+        model,
+        document,
+        include_image_base64,
+        api_key,
+        ProviderLimits::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_mistral_ocr_at_with_limits(
+    endpoint: &str,
+    request_id: &str,
+    model: &str,
+    document: &Path,
+    include_image_base64: bool,
+    api_key: &str,
+    limits: ProviderLimits,
+) -> Result<OcrResponse, OcrEvalError> {
+    if model != MISTRAL_OCR_MODEL
+        || request_id.is_empty()
+        || request_id.len() > 256
+        || request_id.chars().any(char::is_control)
+    {
+        return Err(OcrEvalError::Invalid(
+            "unsupported provider model or request id",
+        ));
+    }
+    if api_key.is_empty() || api_key.len() > 4096 || api_key.chars().any(char::is_control) {
+        return Err(OcrEvalError::Invalid("invalid Mistral API credential"));
+    }
+    let artifact = bind_strict_input(document, MAX_PROVIDER_DOCUMENT_BYTES)?;
+    let bytes = artifact.bytes();
+    let sha256 = hex_sha256(bytes);
+    let document_url = format!("data:application/pdf;base64,{}", base64_encode(bytes));
+    let request = MistralRequest {
+        model,
+        document: MistralDocument {
+            kind: "document_url",
+            document_url: &document_url,
+        },
+        include_image_base64,
+        include_blocks: false,
+    };
+    let body = serde_json::to_vec(&request)?;
+    if body.len() > MAX_PROVIDER_REQUEST_BYTES {
+        return Err(OcrEvalError::RequestTooLarge {
+            limit: MAX_PROVIDER_REQUEST_BYTES,
+        });
+    }
+    let agent = provider_agent(limits);
+    let mut response = agent
+        .post(endpoint)
+        .header("Authorization", &format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", "identity")
+        .send(&body)
+        .map_err(|error| match error {
+            ureq::Error::Timeout(_) => OcrEvalError::Timeout(limits.global_timeout),
+            _ => OcrEvalError::Invalid("Mistral OCR network request failed"),
+        })?;
+    if !response.status().is_success() {
+        return Err(OcrEvalError::ProviderStatus(response.status().as_u16()));
+    }
+    let content_types: Vec<_> = response.headers().get_all("Content-Type").iter().collect();
+    if content_types.len() != 1 {
+        return Err(OcrEvalError::Invalid(
+            "Mistral OCR response must have one content type",
+        ));
+    }
+    let content_type = content_types[0].to_str().ok().ok_or(OcrEvalError::Invalid(
+        "Mistral OCR response has invalid content type",
+    ))?;
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return Err(OcrEvalError::Invalid("Mistral OCR response is not JSON"));
+    }
+    let encodings: Vec<_> = response
+        .headers()
+        .get_all("Content-Encoding")
+        .iter()
+        .collect();
+    if encodings.len() > 1
+        || encodings.first().is_some_and(|value| {
+            value
+                .to_str()
+                .ok()
+                .is_none_or(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        })
+    {
+        return Err(OcrEvalError::Invalid(
+            "Mistral OCR response uses unsupported content encoding",
+        ));
+    }
+    let lengths: Vec<_> = response
+        .headers()
+        .get_all("Content-Length")
+        .iter()
+        .collect();
+    if lengths.len() > 1 {
+        return Err(OcrEvalError::Invalid(
+            "Mistral OCR response has conflicting content length",
+        ));
+    }
+    let declared = match lengths.first() {
+        None => None,
+        Some(value) => Some(
+            value
+                .to_str()
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or(OcrEvalError::Invalid(
+                    "Mistral OCR response has invalid content length",
+                ))?,
+        ),
+    };
+    if declared.is_some_and(|n| n > limits.max_response_bytes) {
+        return Err(OcrEvalError::InputTooLarge {
+            limit: limits.max_response_bytes,
+        });
+    }
+    let mut received = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(limits.max_response_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut received)
+        .map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) {
+                OcrEvalError::Timeout(limits.global_timeout)
+            } else {
+                OcrEvalError::Invalid("Mistral OCR response read failed")
+            }
+        })?;
+    if received.len() > limits.max_response_bytes {
+        return Err(OcrEvalError::InputTooLarge {
+            limit: limits.max_response_bytes,
+        });
+    }
+    if declared.is_some_and(|n| n != received.len()) {
+        return Err(OcrEvalError::Invalid(
+            "Mistral OCR response content length mismatch",
+        ));
+    }
+    artifact
+        .recheck()
+        .map_err(|_| OcrEvalError::DocumentBinding("document changed during OCR request"))?;
+    normalize_mistral_response(&received, request_id, &sha256, model)
+}
+
+fn normalize_mistral_response(
+    bytes: &[u8],
+    request_id: &str,
+    document_sha256: &str,
+    model: &str,
 ) -> Result<OcrResponse, OcrEvalError> {
     #[derive(Deserialize)]
     struct RawPage {
         index: u32,
-        #[serde(default)]
         markdown: String,
-        #[serde(default)]
         images: Vec<serde_json::Value>,
     }
     #[derive(Deserialize)]
-    struct RawResponse {
+    struct Raw {
+        model: String,
         pages: Vec<RawPage>,
     }
-    let raw: RawResponse = serde_json::from_value(provider.response.clone())?;
+    reject_duplicate_json_keys(bytes)?;
+    let raw: Raw = serde_json::from_slice(bytes)?;
+    if raw.model != model {
+        return Err(OcrEvalError::Invalid("Mistral OCR response model mismatch"));
+    }
+    if raw.pages.len() > MAX_PAGES
+        || raw
+            .pages
+            .windows(2)
+            .any(|pages| pages[0].index >= pages[1].index)
+    {
+        return Err(OcrEvalError::Invalid(
+            "Mistral OCR page indexes must be unique and increasing",
+        ));
+    }
     let response = OcrResponse {
         schema: RESPONSE_SCHEMA.into(),
+        request_id: request_id.into(),
+        document_sha256: document_sha256.into(),
+        model: model.into(),
         pages: raw
             .pages
             .into_iter()
-            .map(|page| OcrPage {
-                index: page.index,
+            .enumerate()
+            .map(|(index, page)| OcrPage {
+                // Provider examples and retained real responses disagree on
+                // whether the first source-page index is 0 or 1. Preserve the
+                // provider's ordering invariant, then own one canonical
+                // zero-based ordinal in the normalized Kio artifact.
+                index: index as u32,
                 markdown: page.markdown,
-                images: page.images,
+                image_count: page.images.len(),
             })
             .collect(),
     };
-    // Reparse the canonical serialization so every response invariant remains
-    // centralized in `parse_response`.
     parse_response(&serde_json::to_vec(&response)?)
 }
 
@@ -468,10 +791,9 @@ pub const RENDER_RESPONSE_SCHEMA: &str = "kio.ocr.fixture-render.response/v1";
 /// Explicit interpreter plus explicit adapter script.  The child has no
 /// inherited environment; callers must opt in to every variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterCommand {
+pub struct RendererCommand {
     pub python: PathBuf,
     pub adapter: PathBuf,
-    pub environment: BTreeMap<OsString, OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,7 +804,7 @@ pub struct DocumentBinding {
 }
 
 /// Bind an explicitly named PDF through the descriptor-retained artifact
-/// boundary. The Python provider receives only the resulting byte snapshot.
+/// boundary. The direct Rust provider receives only the resulting byte snapshot.
 pub fn bind_document(path: &Path) -> Result<DocumentBinding, OcrEvalError> {
     let artifact = bind_strict_input(path, MAX_DOCUMENT_BYTES)?;
     let bytes = artifact.bytes();
@@ -493,71 +815,6 @@ pub fn bind_document(path: &Path) -> Result<DocumentBinding, OcrEvalError> {
         path: path.to_owned(),
         bytes: bytes.len() as u64,
         sha256: hex_sha256(bytes),
-    })
-}
-
-/// Construct a provider request from a retained, bounded document snapshot.
-/// The provider adapter receives these bytes only; it never receives a file
-/// path to rediscover or reopen.
-pub fn provider_request_from_document(
-    request_id: String,
-    model: String,
-    path: &Path,
-    include_image_base64: bool,
-) -> Result<ProviderRequest, OcrEvalError> {
-    if request_id.is_empty() || request_id.len() > 256 || model.is_empty() || model.len() > 256 {
-        return Err(OcrEvalError::Invalid(
-            "provider request id or model is out of bounds",
-        ));
-    }
-    let artifact = bind_strict_input(path, MAX_PROVIDER_DOCUMENT_BYTES)?;
-    let bytes = artifact.bytes();
-    let binding = DocumentBinding {
-        path: path.to_owned(),
-        bytes: bytes.len() as u64,
-        sha256: hex_sha256(bytes),
-    };
-    artifact.recheck().map_err(|_| {
-        OcrEvalError::DocumentBinding("document changed while preparing provider payload")
-    })?;
-    Ok(ProviderRequest {
-        schema: PROVIDER_REQUEST_SCHEMA.into(),
-        request_id,
-        model,
-        media_type: "application/pdf".into(),
-        document_bytes: binding.bytes,
-        document_sha256: binding.sha256,
-        document_base64: base64_encode(bytes),
-        include_image_base64,
-    })
-}
-
-pub fn bind_provider_request(request: &ProviderRequest) -> Result<DocumentBinding, OcrEvalError> {
-    if request.schema != PROVIDER_REQUEST_SCHEMA
-        || request.request_id.is_empty()
-        || request.request_id.len() > 256
-        || request.model.is_empty()
-        || request.model.len() > 256
-        || request.media_type != "application/pdf"
-        || !valid_sha256(&request.document_sha256)
-        || request.document_bytes > MAX_PROVIDER_DOCUMENT_BYTES
-        || request.document_base64.len() > MAX_PROVIDER_REQUEST_BYTES
-    {
-        return Err(OcrEvalError::DocumentBinding(
-            "invalid provider request binding",
-        ));
-    }
-    let bytes = base64_decode(&request.document_base64)?;
-    if bytes.len() as u64 != request.document_bytes || hex_sha256(&bytes) != request.document_sha256
-    {
-        return Err(OcrEvalError::DocumentBinding(
-            "provider payload identity mismatch",
-        ));
-    }
-    Ok(DocumentBinding {
-        path: PathBuf::new(),
-        bytes: request.document_bytes,
-        sha256: request.document_sha256.clone(),
     })
 }
 
@@ -603,13 +860,13 @@ pub fn write_response_create_only(path: &Path, response: &OcrResponse) -> Result
 }
 
 #[derive(Debug, Clone)]
-pub struct AdapterLimits {
+pub struct RendererLimits {
     pub timeout: Duration,
     pub max_stdin_bytes: usize,
     pub max_stdout_bytes: usize,
     pub max_stderr_bytes: usize,
 }
-impl Default for AdapterLimits {
+impl Default for RendererLimits {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(60),
@@ -620,41 +877,14 @@ impl Default for AdapterLimits {
     }
 }
 
-pub fn invoke_provider(
-    command: &AdapterCommand,
-    request: &ProviderRequest,
-    limits: &AdapterLimits,
-) -> Result<ProviderResponse, OcrEvalError> {
-    if command
-        .environment
-        .get(OsStr::new("MISTRAL_API_KEY"))
-        .is_none_or(|value| value.is_empty())
-    {
-        return Err(OcrEvalError::Invalid(
-            "provider adapter requires explicit MISTRAL_API_KEY",
-        ));
-    }
-    if request.schema != PROVIDER_REQUEST_SCHEMA {
-        return Err(OcrEvalError::Invalid("unsupported provider request schema"));
-    }
-    let binding = bind_provider_request(request)?;
-    let output = invoke_adapter(command, request, limits)?;
-    parse_provider_line(&output.0, request, &binding)
-}
-
 /// Run the narrow renderer with explicit absolute inputs and a create-only
 /// output. The response is verified against the inode-independent bytes Rust
 /// observes after the child exits.
 pub fn invoke_renderer(
-    command: &AdapterCommand,
+    command: &RendererCommand,
     request: &RenderRequest,
-    limits: &AdapterLimits,
+    limits: &RendererLimits,
 ) -> Result<RenderResponse, OcrEvalError> {
-    if !command.environment.is_empty() {
-        return Err(OcrEvalError::Invalid(
-            "renderer adapter must have an empty environment",
-        ));
-    }
     validate_render_request(request)?;
     let output_path = PathBuf::from(&request.output_pdf);
     let mut aggregate_bytes = 0_u64;
@@ -700,7 +930,7 @@ pub fn invoke_renderer(
             .input_images
             .push(snapshot.to_string_lossy().into_owned());
     }
-    let output = invoke_adapter(command, &adapter_request, limits)?;
+    let output = invoke_renderer_command(command, &adapter_request, limits)?;
     for binding in &input_bindings {
         binding.recheck().map_err(|_| {
             OcrEvalError::DocumentBinding("renderer input changed during adapter execution")
@@ -823,12 +1053,12 @@ fn validate_render_request(request: &RenderRequest) -> Result<(), OcrEvalError> 
     Ok(())
 }
 
-fn invoke_adapter<T: Serialize>(
-    command: &AdapterCommand,
+fn invoke_renderer_command<T: Serialize>(
+    command: &RendererCommand,
     request: &T,
-    limits: &AdapterLimits,
+    limits: &RendererLimits,
 ) -> Result<(Vec<u8>, Vec<u8>), OcrEvalError> {
-    validate_adapter_command(command)?;
+    validate_renderer_command(command)?;
     let mut input = serde_json::to_vec(request)?;
     input.push(b'\n');
     if input.len() > limits.max_stdin_bytes {
@@ -842,13 +1072,6 @@ fn invoke_adapter<T: Serialize>(
         .env_clear()
         .env("PYTHONHASHSEED", "0")
         .env("PYTHONNOUSERSITE", "1");
-    // MISTRAL_API_KEY is the only useful credential and only the provider
-    // caller can explicitly put it into the otherwise empty environment.
-    for (key, value) in &command.environment {
-        if key == OsStr::new("MISTRAL_API_KEY") {
-            process.env(key, value);
-        }
-    }
     let output = run_bounded_command(
         &mut process,
         BoundedProcessOptions {
@@ -874,32 +1097,6 @@ fn invoke_adapter<T: Serialize>(
     }
     Ok((output.stdout.into_bytes(), output.stderr.into_bytes()))
 }
-fn parse_provider_line(
-    bytes: &[u8],
-    request: &ProviderRequest,
-    binding: &DocumentBinding,
-) -> Result<ProviderResponse, OcrEvalError> {
-    if bytes.is_empty()
-        || bytes.ends_with(b"\n\n")
-        || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n')
-    {
-        return Err(OcrEvalError::Invalid(
-            "adapter must emit exactly one JSONL response",
-        ));
-    }
-    let response: ProviderResponse =
-        serde_json::from_slice(bytes.strip_suffix(b"\n").unwrap_or(bytes))?;
-    if response.schema != PROVIDER_RESPONSE_SCHEMA
-        || response.request_id != request.request_id
-        || response.document_sha256 != binding.sha256
-    {
-        return Err(OcrEvalError::Invalid(
-            "adapter response schema or request identity mismatch",
-        ));
-    }
-    Ok(response)
-}
-
 fn parse_render_line(
     bytes: &[u8],
     request: &RenderRequest,
@@ -927,16 +1124,7 @@ fn parse_render_line(
     Ok(response)
 }
 
-fn validate_adapter_command(command: &AdapterCommand) -> Result<(), OcrEvalError> {
-    if command
-        .environment
-        .keys()
-        .any(|key| key != OsStr::new("MISTRAL_API_KEY"))
-    {
-        return Err(OcrEvalError::Invalid(
-            "adapter environment may only contain MISTRAL_API_KEY",
-        ));
-    }
+fn validate_renderer_command(command: &RendererCommand) -> Result<(), OcrEvalError> {
     for path in [&command.python, &command.adapter] {
         if !path.is_absolute() {
             return Err(OcrEvalError::AdapterPath(path.to_owned()));
@@ -989,51 +1177,6 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     output
 }
-fn base64_decode(value: &str) -> Result<Vec<u8>, OcrEvalError> {
-    if !value.len().is_multiple_of(4) {
-        return Err(OcrEvalError::Invalid("invalid provider base64 payload"));
-    }
-    let mut output = Vec::with_capacity(value.len() / 4 * 3);
-    for (position, chunk) in value.as_bytes().as_chunks::<4>().0.iter().enumerate() {
-        let padding = usize::from(chunk[2] == b'=') + usize::from(chunk[3] == b'=');
-        if padding > 0 && position + 1 != value.len() / 4 {
-            return Err(OcrEvalError::Invalid("invalid provider base64 padding"));
-        }
-        let decode = |byte: u8| -> Option<u8> {
-            match byte {
-                b'A'..=b'Z' => Some(byte - b'A'),
-                b'a'..=b'z' => Some(byte - b'a' + 26),
-                b'0'..=b'9' => Some(byte - b'0' + 52),
-                b'+' => Some(62),
-                b'/' => Some(63),
-                _ => None,
-            }
-        };
-        if (chunk[2] == b'=' && chunk[3] != b'=') || chunk[0] == b'=' || chunk[1] == b'=' {
-            return Err(OcrEvalError::Invalid("invalid provider base64 padding"));
-        }
-        let a = decode(chunk[0]).ok_or(OcrEvalError::Invalid("invalid provider base64 payload"))?;
-        let b = decode(chunk[1]).ok_or(OcrEvalError::Invalid("invalid provider base64 payload"))?;
-        let c = if chunk[2] == b'=' {
-            0
-        } else {
-            decode(chunk[2]).ok_or(OcrEvalError::Invalid("invalid provider base64 payload"))?
-        };
-        let d = if chunk[3] == b'=' {
-            0
-        } else {
-            decode(chunk[3]).ok_or(OcrEvalError::Invalid("invalid provider base64 payload"))?
-        };
-        output.push((a << 2) | (b >> 4));
-        if padding < 2 {
-            output.push((b << 4) | (c >> 2));
-        }
-        if padding == 0 {
-            output.push((c << 6) | d);
-        }
-    }
-    Ok(output)
-}
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -1044,6 +1187,84 @@ fn valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn loopback_response(
+        status: &str,
+        headers: Vec<(&'static str, &'static str)>,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        use std::{io::Read as _, io::Write as _, net::TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_owned();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let mut response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+            for (name, value) in headers {
+                response.push_str(name);
+                response.push_str(": ");
+                response.push_str(value);
+                response.push_str("\r\n");
+            }
+            response.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        (endpoint, handle)
+    }
+
+    fn loopback_raw_response(
+        response: Vec<u8>,
+        delay: Duration,
+        replacement: Option<(PathBuf, Vec<u8>)>,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        use std::{io::Read as _, io::Write as _, net::TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if let Some((path, bytes)) = replacement {
+                fs::write(path, bytes).unwrap();
+            }
+            std::thread::sleep(delay);
+            let _ = stream.write_all(&response);
+            request
+        });
+        (endpoint, handle)
+    }
+
+    fn provider_document() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("fixture.pdf");
+        fs::write(&document, b"fixture-pdf").unwrap();
+        (directory, document)
+    }
 
     #[cfg(unix)]
     fn adapter_test_program(body: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -1066,7 +1287,7 @@ mod tests {
         parse_ground_truth(r#"{"schema":"kio.ocr.ground-truth/v1","table":{"page_index":0,"expected_cell_texts":["Alpha","Beta"]},"japanese":{"page_index":1,"full_text":"日本 語"},"images":{"page_index":2,"expected_count":2},"formula":{"page_index":3,"expected_tokens":["E=mc^2"]}}"#.as_bytes()).unwrap()
     }
     fn response() -> OcrResponse {
-        parse_response(r#"{"schema":"kio.ocr.response/v1","pages":[{"index":0,"markdown":"| alpha | BETA |"},{"index":1,"markdown":"xx日本語yy"},{"index":2,"markdown":"","images":[{},{}]},{"index":3,"markdown":"E = mc^2"}]}"#.as_bytes()).unwrap()
+        parse_response(r#"{"schema":"kio.ocr.response/v2","request_id":"test","document_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"mistral-ocr-4-1","pages":[{"index":0,"markdown":"| alpha | BETA |","image_count":0},{"index":1,"markdown":"xx日本語yy","image_count":0},{"index":2,"markdown":"","image_count":2},{"index":3,"markdown":"E = mc^2","image_count":0}]}"#.as_bytes()).unwrap()
     }
     #[test]
     fn vectors_cover_metrics_and_verdict() {
@@ -1083,7 +1304,7 @@ mod tests {
     fn image_fallback_is_classified_without_changing_core_verdict() {
         let mut response = response();
         response.pages[3].markdown.clear();
-        response.pages[3].images.push(serde_json::json!({}));
+        response.pages[3].image_count = 1;
         let report = evaluate(&truth(), &response).unwrap();
         assert_eq!(
             report.formula.classification,
@@ -1102,56 +1323,295 @@ mod tests {
         assert!(parse_ground_truth(br#"{"schema":"v0"}"#).is_err());
     }
     #[test]
-    fn adapter_schema_is_one_line_and_identity_bound() {
-        let request = ProviderRequest {
-            schema: PROVIDER_REQUEST_SCHEMA.into(),
-            request_id: "r1".into(),
-            model: "mistral-ocr-latest".into(),
-            media_type: "application/pdf".into(),
-            document_bytes: 3,
-            document_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .into(),
-            document_base64: "YWJj".into(),
-            include_image_base64: true,
-        };
-        let binding = DocumentBinding {
-            path: PathBuf::from("/tmp/a.pdf"),
-            bytes: 3,
-            sha256: request.document_sha256.clone(),
-        };
-        let parsed = parse_provider_line(
-            b"{\"schema\":\"kio.ocr.provider-response/v1\",\"request_id\":\"r1\",\"document_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"response\":{}}\n",
-            &request,
-            &binding,
+    fn old_schema_and_mutable_model_are_rejected() {
+        assert!(parse_response(br#"{"schema":"kio.ocr.response/v1","pages":[]}"#).is_err());
+        assert!(
+            normalize_mistral_response(
+                br#"{"model":"mistral-ocr-latest","pages":[]}"#,
+                "r",
+                &"a".repeat(64),
+                MISTRAL_OCR_MODEL
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn provider_response_normalizes_increasing_source_page_indexes() {
+        let hash = "a".repeat(64);
+        assert!(
+            normalize_mistral_response(
+                br#"{"model":"mistral-ocr-4-1","model":"mistral-ocr-4-1","pages":[]}"#,
+                "r",
+                &hash,
+                MISTRAL_OCR_MODEL,
+            )
+            .is_err()
+        );
+        let normalized = normalize_mistral_response(
+            br#"{"model":"mistral-ocr-4-1","pages":[{"index":1,"markdown":"one","images":[]},{"index":2,"markdown":"two","images":[]}]}"#,
+            "r",
+            &hash,
+            MISTRAL_OCR_MODEL,
         )
         .unwrap();
-        assert_eq!(parsed.request_id, "r1");
-        assert!(parse_provider_line(b"{}\n{}\n", &request, &binding).is_err());
+        assert_eq!(
+            normalized
+                .pages
+                .iter()
+                .map(|page| page.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(
+            normalize_mistral_response(
+                br#"{"model":"mistral-ocr-4-1","pages":[{"index":2,"markdown":"","images":[]},{"index":1,"markdown":"","images":[]}]}"#,
+                "r",
+                &hash,
+                MISTRAL_OCR_MODEL,
+            )
+            .is_err()
+        );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn stalled_adapter_stdin_obeys_the_shared_lifecycle_timeout() {
-        let (_directory, program, adapter) = adapter_test_program("exec /bin/sleep 5");
-        let command = AdapterCommand {
-            python: program,
-            adapter,
-            environment: BTreeMap::new(),
+    fn provider_http_binds_the_exact_request_and_discards_image_payloads() {
+        let (_directory, document) = provider_document();
+        let body = r#"{"model":"mistral-ocr-4-1","pages":[{"index":0,"markdown":"ok","images":[{"image_base64":"never-persist"}]}]}"#;
+        let (endpoint, received) =
+            loopback_response("200 OK", vec![("Content-Type", "application/json")], body);
+        let response = request_mistral_ocr_at(
+            &endpoint,
+            "request-1",
+            MISTRAL_OCR_MODEL,
+            &document,
+            false,
+            "credential-that-must-not-leak",
+        )
+        .unwrap();
+        let request = String::from_utf8(received.join().unwrap()).unwrap();
+        let request_lower = request.to_ascii_lowercase();
+        assert!(request_lower.contains("authorization: bearer credential-that-must-not-leak"));
+        assert!(request_lower.contains("accept-encoding: identity"));
+        assert!(request.contains("\"include_image_base64\":false"));
+        assert!(request.contains("\"include_blocks\":false"));
+        assert_eq!(response.pages[0].image_count, 1);
+        let persisted = serde_json::to_string(&response).unwrap();
+        assert!(!persisted.contains("never-persist"));
+        assert!(!persisted.contains("credential-that-must-not-leak"));
+        assert_eq!(response.document_sha256, hex_sha256(b"fixture-pdf"));
+    }
+
+    #[test]
+    fn provider_agent_disables_proxy_redirects_and_status_shortcuts() {
+        let limits = ProviderLimits::default();
+        let agent = provider_agent(limits);
+        assert!(agent.config().proxy().is_none());
+        assert_eq!(agent.config().max_redirects(), 0);
+        assert!(!agent.config().http_status_as_error());
+        assert_eq!(
+            agent.config().timeouts().connect,
+            Some(limits.connect_timeout)
+        );
+        assert_eq!(
+            agent.config().timeouts().global,
+            Some(limits.global_timeout)
+        );
+    }
+
+    #[test]
+    fn provider_http_timeout_is_bounded_and_secret_free() {
+        let (_directory, document) = provider_document();
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n"
+            .to_vec();
+        let (endpoint, received) =
+            loopback_raw_response(response, Duration::from_millis(150), None);
+        let limits = ProviderLimits {
+            connect_timeout: Duration::from_millis(30),
+            global_timeout: Duration::from_millis(30),
+            max_response_bytes: 1024,
         };
-        let limits = AdapterLimits {
-            timeout: Duration::from_millis(40),
-            ..AdapterLimits::default()
+        let secret = "credential-that-must-not-leak";
+        let error = request_mistral_ocr_at_with_limits(
+            &endpoint,
+            "request-1",
+            MISTRAL_OCR_MODEL,
+            &document,
+            false,
+            secret,
+            limits,
+        )
+        .unwrap_err();
+        assert!(matches!(error, OcrEvalError::Timeout(_)));
+        assert!(!error.to_string().contains(secret));
+        received.join().unwrap();
+    }
+
+    #[test]
+    fn provider_http_rejects_declared_and_chunked_oversize_responses() {
+        let (_directory, document) = provider_document();
+        let limits = ProviderLimits {
+            connect_timeout: Duration::from_secs(1),
+            global_timeout: Duration::from_secs(1),
+            max_response_bytes: 128,
         };
-        let started = std::time::Instant::now();
+        let declared = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 129\r\nConnection: close\r\n\r\n"
+            .to_vec();
+        let oversized = vec![b'x'; 256];
+        let mut chunked = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+            oversized.len()
+        )
+        .into_bytes();
+        chunked.extend_from_slice(&oversized);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        for raw in [declared, chunked] {
+            let (endpoint, received) = loopback_raw_response(raw, Duration::ZERO, None);
+            assert!(matches!(
+                request_mistral_ocr_at_with_limits(
+                    &endpoint,
+                    "request-1",
+                    MISTRAL_OCR_MODEL,
+                    &document,
+                    false,
+                    "credential",
+                    limits,
+                ),
+                Err(OcrEvalError::InputTooLarge { limit: 128 })
+            ));
+            received.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_http_rejects_malformed_json_and_content_length_anomalies() {
+        let (_directory, document) = provider_document();
+        let cases = [
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: nope\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{".to_vec(),
+        ];
+        for raw in cases {
+            let (endpoint, received) = loopback_raw_response(raw, Duration::ZERO, None);
+            assert!(
+                request_mistral_ocr_at(
+                    &endpoint,
+                    "request-1",
+                    MISTRAL_OCR_MODEL,
+                    &document,
+                    false,
+                    "credential",
+                )
+                .is_err()
+            );
+            received.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_http_rechecks_document_identity_after_the_response() {
+        let (_directory, document) = provider_document();
+        let body = r#"{"model":"mistral-ocr-4-1","pages":[]}"#;
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let (endpoint, received) = loopback_raw_response(
+            raw,
+            Duration::ZERO,
+            Some((document.clone(), b"changed-fixture-pdf".to_vec())),
+        );
         assert!(matches!(
-            invoke_adapter(
-                &command,
-                &serde_json::json!({"request": "bounded"}),
-                &limits
+            request_mistral_ocr_at(
+                &endpoint,
+                "request-1",
+                MISTRAL_OCR_MODEL,
+                &document,
+                false,
+                "credential",
             ),
-            Err(OcrEvalError::Timeout(_))
+            Err(OcrEvalError::DocumentBinding(_))
         ));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        received.join().unwrap();
+    }
+
+    #[test]
+    fn provider_http_rejects_status_headers_duplicates_models_and_pages() {
+        let (_directory, document) = provider_document();
+        for (status, headers, body) in [
+            (
+                "401 Unauthorized",
+                vec![("Content-Type", "application/json")],
+                "{}",
+            ),
+            (
+                "500 Internal Server Error",
+                vec![("Content-Type", "application/json")],
+                "{}",
+            ),
+            (
+                "302 Found",
+                vec![("Location", "/next"), ("Content-Type", "application/json")],
+                "{}",
+            ),
+            ("200 OK", vec![("Content-Type", "text/plain")], "{}"),
+            (
+                "200 OK",
+                vec![
+                    ("Content-Type", "application/json"),
+                    ("Content-Encoding", "gzip"),
+                ],
+                "{}",
+            ),
+            (
+                "200 OK",
+                vec![("Content-Type", "application/json")],
+                r#"{"model":"mistral-ocr-4-1","model":"mistral-ocr-4-1","pages":[]}"#,
+            ),
+            (
+                "200 OK",
+                vec![("Content-Type", "application/json")],
+                r#"{"model":"mistral-ocr-latest","pages":[]}"#,
+            ),
+            (
+                "200 OK",
+                vec![("Content-Type", "application/json")],
+                r#"{"model":"mistral-ocr-4-1","pages":[{"index":1,"markdown":"","images":[]},{"index":1,"markdown":"","images":[]}]}"#,
+            ),
+        ] {
+            let (endpoint, received) = loopback_response(status, headers, body);
+            assert!(
+                request_mistral_ocr_at(
+                    &endpoint,
+                    "request-1",
+                    MISTRAL_OCR_MODEL,
+                    &document,
+                    false,
+                    "credential",
+                )
+                .is_err()
+            );
+            received.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_response_duplicate_and_old_normalized_artifacts_fail_closed() {
+        assert!(
+            normalize_mistral_response(
+                br#"{"model":"mistral-ocr-4-1","pages":[],"pages":[]}"#,
+                "r",
+                &"a".repeat(64),
+                MISTRAL_OCR_MODEL,
+            )
+            .is_err()
+        );
+        assert!(parse_response(
+            br#"{"schema":"kio.ocr.response/v2","request_id":"r","document_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"mistral-ocr-4-1","pages":[],"pages":[]}"#
+        )
+        .is_err());
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
@@ -1161,19 +1621,6 @@ mod tests {
         fs::write(&document, b"fixture-pdf").unwrap();
         let binding = bind_document(&document).unwrap();
         assert_eq!(binding.bytes, 11);
-        let request = ProviderRequest {
-            schema: PROVIDER_REQUEST_SCHEMA.into(),
-            request_id: "r2".into(),
-            model: "mistral-ocr-latest".into(),
-            media_type: "application/pdf".into(),
-            document_bytes: binding.bytes,
-            document_sha256: binding.sha256.clone(),
-            document_base64: base64_encode(b"fixture-pdf"),
-            include_image_base64: false,
-        };
-        let request_binding = bind_provider_request(&request).unwrap();
-        assert_eq!(request_binding.bytes, binding.bytes);
-        assert_eq!(request_binding.sha256, binding.sha256);
         let report = evaluate(&truth(), &response()).unwrap();
         let report_path = directory.path().join("report.json");
         write_report_create_only(&report_path, &report).unwrap();
@@ -1210,29 +1657,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_payload_is_normalized_into_the_closed_response_schema() {
-        let provider = ProviderResponse {
-            schema: PROVIDER_RESPONSE_SCHEMA.into(),
-            request_id: "r3".into(),
-            document_sha256: "a".repeat(64),
-            response: serde_json::json!({
-                "pages": [{"index": 0, "markdown": "ok", "images": [], "provider_extra": true}],
-                "model": "mistral-ocr-latest"
-            }),
-        };
-        let normalized = normalize_provider_response(&provider).unwrap();
-        assert_eq!(normalized.schema, RESPONSE_SCHEMA);
-        assert_eq!(normalized.pages[0].markdown, "ok");
-        assert!(
-            normalize_provider_response(&ProviderResponse {
-                response: serde_json::json!({"pages": [{"index": 0, "markdown": 2}]}),
-                ..provider
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
     fn renderer_response_is_identity_bound_and_create_only() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("out.pdf");
@@ -1264,6 +1688,41 @@ mod tests {
         );
         fs::write(&output, b"existing").unwrap();
         assert!(validate_render_request(&request).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renderer_child_inherits_no_provider_or_parent_credentials() {
+        use std::sync::{Mutex, OnceLock};
+
+        static ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENVIRONMENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let name = "KIO_OCR_RENDERER_SECRET_TEST";
+        let old = std::env::var_os(name);
+        // SAFETY: this test owns the unique sentinel name and restores it while
+        // holding the test-local lock before returning.
+        unsafe { std::env::set_var(name, "parent-secret") };
+        let script = format!(
+            "read _; if test -z \"${name}\" && test -z \"$MISTRAL_API_KEY\"; then printf '{{}}\\n'; else exit 9; fi"
+        );
+        let (_directory, python, adapter) = adapter_test_program(&script);
+        let output = invoke_renderer_command(
+            &RendererCommand { python, adapter },
+            &serde_json::json!({"request": "renderer-environment"}),
+            &RendererLimits::default(),
+        );
+        // SAFETY: paired with the mutation above while holding the same lock.
+        unsafe {
+            if let Some(value) = old {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(String::from_utf8(output.unwrap().0).unwrap(), "{}\n");
     }
 
     #[test]

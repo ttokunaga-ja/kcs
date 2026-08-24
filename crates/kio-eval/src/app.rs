@@ -236,17 +236,11 @@ enum RerankCommands {
 
 #[derive(Debug, Subcommand)]
 enum OcrCommands {
-    /// Invoke the official Mistral adapter and publish one normalized Rust response.
+    /// Invoke the fixed official Mistral OCR HTTP API and publish one normalized Rust response.
     Provider {
-        /// Absolute Python interpreter containing the official SDK.
-        #[arg(long)]
-        python: PathBuf,
-        /// Absolute path to the checked-in provider adapter.
-        #[arg(long)]
-        adapter: PathBuf,
         #[arg(long)]
         document: PathBuf,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_mistral_ocr_model)]
         model: String,
         #[arg(long)]
         request_id: String,
@@ -621,6 +615,17 @@ fn parse_scenario(value: &str) -> Result<String, String> {
     match value {
         "M3-1" | "M3-2" | "M3-3" => Ok(value.to_owned()),
         _ => Err("must be M3-1, M3-2, or M3-3".to_owned()),
+    }
+}
+
+fn parse_mistral_ocr_model(value: &str) -> Result<String, String> {
+    if value == kio_eval::ocr_eval::MISTRAL_OCR_MODEL {
+        Ok(value.to_owned())
+    } else {
+        Err(format!(
+            "OCR provider model must be exactly {}",
+            kio_eval::ocr_eval::MISTRAL_OCR_MODEL
+        ))
     }
 }
 
@@ -1067,37 +1072,24 @@ fn canonical_new_output(path: &Path, boundary: &str) -> Result<PathBuf, AppError
 }
 
 fn run_ocr_provider(
-    python: &Path,
-    adapter: &Path,
     document: &Path,
     model: &str,
     request_id: &str,
     include_image_base64: bool,
     out: &Path,
 ) -> Result<ExitCode, AppError> {
-    let python = canonical_explicit_path(python, "OCR", "provider Python", false)?;
-    let adapter = canonical_explicit_path(adapter, "OCR", "provider adapter", false)?;
     let document = canonical_explicit_path(document, "OCR", "document", false)?;
     let out = canonical_new_output(out, "OCR provider")?;
-    let api_key = env::var_os("MISTRAL_API_KEY")
-        .filter(|value| !value.is_empty())
+    let api_key = env::var("MISTRAL_API_KEY")
+        .ok()
         .ok_or_else(|| AppError::Input("OCR provider requires MISTRAL_API_KEY".into()))?;
-    let request = kio_eval::ocr_eval::provider_request_from_document(
-        request_id.to_owned(),
-        model.to_owned(),
+    let normalized = kio_eval::ocr_eval::request_mistral_ocr(
+        request_id,
+        model,
         &document,
         include_image_base64,
+        &api_key,
     )?;
-    let response = kio_eval::ocr_eval::invoke_provider(
-        &kio_eval::ocr_eval::AdapterCommand {
-            python,
-            adapter,
-            environment: BTreeMap::from([(OsString::from("MISTRAL_API_KEY"), api_key)]),
-        },
-        &request,
-        &kio_eval::ocr_eval::AdapterLimits::default(),
-    )?;
-    let normalized = kio_eval::ocr_eval::normalize_provider_response(&response)?;
     kio_eval::ocr_eval::write_response_create_only(&out, &normalized)?;
     println!("response: {}", out.display());
     Ok(ExitCode::Success)
@@ -1127,13 +1119,9 @@ fn run_ocr_renderer(
             .collect(),
     };
     let response = kio_eval::ocr_eval::invoke_renderer(
-        &kio_eval::ocr_eval::AdapterCommand {
-            python,
-            adapter,
-            environment: BTreeMap::new(),
-        },
+        &kio_eval::ocr_eval::RendererCommand { python, adapter },
         &request,
-        &kio_eval::ocr_eval::AdapterLimits::default(),
+        &kio_eval::ocr_eval::RendererLimits::default(),
     )?;
     println!("rendered: {}", out.display());
     println!("sha256 : {}", response.output_sha256);
@@ -1557,22 +1545,12 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
             }),
             Commands::Ocr { command } => match command {
                 OcrCommands::Provider {
-                    python,
-                    adapter,
                     document,
                     model,
                     request_id,
                     include_image_base64,
                     out,
-                } => run_ocr_provider(
-                    python,
-                    adapter,
-                    document,
-                    model,
-                    request_id,
-                    *include_image_base64,
-                    out,
-                ),
+                } => run_ocr_provider(document, model, request_id, *include_image_base64, out),
                 OcrCommands::Render {
                     python,
                     adapter,
@@ -2274,10 +2252,40 @@ mod tests {
                 "kio-eval",
                 "ocr",
                 "provider",
+                "--document",
+                "/tmp/input.pdf",
+                "--model",
+                "mistral-ocr-4-1",
+                "--request-id",
+                "manual-1",
+                "--out",
+                "/tmp/response.json",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "ocr",
+                "provider",
                 "--python",
                 "/tmp/python3",
-                "--adapter",
-                "/tmp/provider_mistral.py",
+                "--document",
+                "/tmp/input.pdf",
+                "--model",
+                "mistral-ocr-4-1",
+                "--request-id",
+                "manual-1",
+                "--out",
+                "/tmp/response.json",
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "kio-eval",
+                "ocr",
+                "provider",
                 "--document",
                 "/tmp/input.pdf",
                 "--model",
@@ -2287,7 +2295,7 @@ mod tests {
                 "--out",
                 "/tmp/response.json",
             ])
-            .is_ok()
+            .is_err()
         );
         assert!(
             Args::try_parse_from([
