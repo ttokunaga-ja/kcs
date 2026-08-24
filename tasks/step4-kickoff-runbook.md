@@ -25,7 +25,7 @@ green ~267、clippy/fmt clean)。北極星シナリオ M3-1 は実 Gemini hybrid
    (05 §4)。shallow commit からの restore は既に KIO-E-COMMIT-SHALLOW-001 で拒否済み
 2. **time-travel 検索フラグ** (`--at <commit>` / `--all-history` / `--include-deleted` / `--since`):
    05 §1.6 の chunk 集合 join 意味論。Step 3 は基盤 (tree_entries HEAD 射影 / chunks append-only /
-   first_seen_commit 刻印) を用意済みで、フラグは「受理して Step 4 エラー」の状態 → 本実装に置換
+   durable publication event) を用意済みで、フラグは「受理して Step 4 エラー」の状態 → 本実装に置換
 3. **purge 最小形**: tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ
    (05 §3 / 08 §4.1 / 10 §7)。完全な履歴書き換え (tree/commit 再結線・filename 秘匿) は v2+/Phase 4+ で範囲外
 4. **`kio evidence verify <pointer>`** (単発 CLI): 08 §4.3。resolver 内部関数は Step 3 で実装済み、
@@ -55,7 +55,7 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
   曖昧画像 15 枚。実 API 検証は実施済みで裁定も完了 (bbox_annotation 採用)
 - **decisions**: `tasks/ws1c-decisions.md` に #1〜#59 の実装判断。Step 4 の新判断は #60 以降に追記
 - **Step 3 の全コード**: chunk identity / Evidence Pointer 発行・解決 / tree_entries 射影 /
-  first_seen_commit / snapshot DAG / CAS が揃っている。time-travel はこの上に build する
+  durable publication events / snapshot DAG / CAS が揃っている。time-travel はこの上に build する
 
 ## 3. Step 1-3 で確立した進め方 (踏襲する)
 

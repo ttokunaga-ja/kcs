@@ -16,6 +16,8 @@ const RAW_NOTES: &str = "sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d9
 const RAW_REPORT: &str = "sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a";
 const TOOL_PROFILE: &str =
     "sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0";
+const CHUNKING_CONFIG: &str =
+    "sha256:7810328ffa7f0dd9a558294e166f20d8038d8d779809ee519582e3d6ba1b98ea";
 /// `sha256("manifest")` — a fixed stand-in for a normalized-instance
 /// manifest's content hash. `normalize.manifest_hash` is required (PB04), so
 /// the canonical tree vector carries one.
@@ -23,8 +25,8 @@ const MANIFEST_HASH: &str =
     "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f";
 const TOOL_LOCK: &str = "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb";
 const PARENT: &str = "sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a";
-const TREE_HASH: &str = "sha256:484102953bc67a38fed8985744899fbde1d29d84623ad6ad6c5e363b9688a11a";
-const COMMIT_HASH: &str = "sha256:ccb5e32bb3500546b148533ecb9d41d28862e5c481ee6c7c44f1246b4d969d17";
+const TREE_HASH: &str = "sha256:941c3ef6a2134651a85825bb1011adda88e73901387529a94e9d5df23df0462e";
+const COMMIT_HASH: &str = "sha256:5f07871c06c14cce80583219e932e43703074f88c632b3b3ce1a372db1d013e1";
 
 #[test]
 fn ct_hash_001_002_raw_hash_vectors() {
@@ -39,7 +41,7 @@ fn ct_hash_003_tree_jcs_vector() {
 
     assert_eq!(
         String::from_utf8(bytes.clone()).unwrap(),
-        "{\"entries\":[{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"notes.md\",\"raw_hash\":\"sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d90f9e5682ab0d72ee\",\"type\":\"file\"},{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"report.pdf\",\"raw_hash\":\"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a\",\"type\":\"file\"}],\"object_type\":\"tree\"}"
+        "{\"chunking_config_hash\":\"sha256:7810328ffa7f0dd9a558294e166f20d8038d8d779809ee519582e3d6ba1b98ea\",\"entries\":[{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"notes.md\",\"raw_hash\":\"sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d90f9e5682ab0d72ee\",\"type\":\"file\"},{\"normalize\":{\"gen\":0,\"manifest_hash\":\"sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",\"tool_profile_hash\":\"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0\"},\"path\":\"report.pdf\",\"raw_hash\":\"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a\",\"type\":\"file\"}],\"object_type\":\"tree\"}"
     );
     assert_eq!(hash_bytes(&bytes), TREE_HASH);
 }
@@ -64,7 +66,7 @@ fn ct_hash_004_commit_jcs_vector() {
     let bytes = canonical_json_bytes(&serde_json::to_value(&commit).unwrap()).unwrap();
     assert_eq!(
         String::from_utf8(bytes.clone()).unwrap(),
-        "{\"commit_type\":\"manual\",\"created_at\":\"2026-04-29T12:00:00Z\",\"message\":\"snapshot after indexing docs\",\"object_type\":\"commit\",\"parents\":[\"sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a\"],\"stats\":{\"files_added\":12,\"files_deleted\":1,\"files_modified\":3},\"tool_lock_hash\":\"sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb\",\"tree\":\"sha256:484102953bc67a38fed8985744899fbde1d29d84623ad6ad6c5e363b9688a11a\"}"
+        "{\"commit_type\":\"manual\",\"created_at\":\"2026-04-29T12:00:00Z\",\"message\":\"snapshot after indexing docs\",\"object_type\":\"commit\",\"parents\":[\"sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a\"],\"stats\":{\"files_added\":12,\"files_deleted\":1,\"files_modified\":3},\"tool_lock_hash\":\"sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb\",\"tree\":\"sha256:941c3ef6a2134651a85825bb1011adda88e73901387529a94e9d5df23df0462e\"}"
     );
     assert_eq!(hash_bytes(&bytes), COMMIT_HASH);
 }
@@ -76,9 +78,9 @@ fn ct_hash_005_fanout_path_uses_portable_digest_leaf() {
         path,
         std::path::Path::new("objects")
             .join("commits")
-            .join("cc")
-            .join("b5")
-            .join("ccb5e32bb3500546b148533ecb9d41d28862e5c481ee6c7c44f1246b4d969d17")
+            .join("5f")
+            .join("07")
+            .join("5f07871c06c14cce80583219e932e43703074f88c632b3b3ce1a372db1d013e1")
     );
 }
 
@@ -88,8 +90,8 @@ fn ct_hash_006_007_008_hash_shape_round_trip_and_key_order() {
     assert!(!kio_core::cas::is_hash("sha256:E3B0"));
     assert!(!kio_core::cas::is_hash("e3b0"));
 
-    let a = json!({"object_type":"tree","entries":[{"path":"a.pdf","type":"file","raw_hash":RAW_EMPTY}]});
-    let b = json!({"entries":[{"raw_hash":RAW_EMPTY,"type":"file","path":"a.pdf"}],"object_type":"tree"});
+    let a = json!({"object_type":"tree","chunking_config_hash":CHUNKING_CONFIG,"entries":[{"path":"a.pdf","type":"file","raw_hash":RAW_EMPTY}]});
+    let b = json!({"entries":[{"raw_hash":RAW_EMPTY,"type":"file","path":"a.pdf"}],"chunking_config_hash":CHUNKING_CONFIG,"object_type":"tree"});
     assert_eq!(hash_json(&a).unwrap(), hash_json(&b).unwrap());
 
     let temp = tempfile::tempdir().unwrap();
@@ -162,7 +164,7 @@ fn ct_tree_empty_vector_and_step1_entries_omit_normalize() {
     let tree = build_tree(Vec::new()).unwrap();
     assert_eq!(
         hash_json(&serde_json::to_value(&tree).unwrap()).unwrap(),
-        "sha256:849dc4fa25bc1a7b09b74dba30c0bb85224fb8f659c3b2b177b7189b0327a967"
+        "sha256:61a745d1087a11dde2e73252e95b8f42f6a1a28e9aa08e4b692dba69aefba718"
     );
 
     let raw_tree = build_tree(vec![TreeEntry::raw_file("notes.md", RAW_NOTES).unwrap()]).unwrap();
@@ -219,7 +221,7 @@ fn ct_commit_004_root_commit_vector() {
     assert!(commit.parents.is_empty());
     assert_eq!(
         commit_hash(&commit).unwrap(),
-        "sha256:ab368388a7daf62d5846ecaab20d0e1d60fd1303a50d6633993d6eec4276a07b"
+        "sha256:f190671b29ad34b5240087362d9088a0c6880802a28ac853db7e41e9d87e3d09"
     );
 }
 

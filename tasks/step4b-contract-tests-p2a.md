@@ -620,15 +620,12 @@ P0/P1/P2 集計は末尾 §Q。
   (`fts.rs:245-306` の `purge_raw`) によれば、この 3 条件は既に実装されている — 現状固定として
   1 本に圧縮する。
 
-### PA34 `chunk_publications` テーブルが存在しない (purge 対象を規定できない) [P1]
+### PA34 `chunk_publications` の purge 削除は対象 chunk_id に限定する [P1]
 - 正本: 05 §3.5 L716『SQLite の chunks / chunk_config_generations / **chunk_publications** 行と
   FTS エントリ』
 - 前提: purge が SQLite から削除すべき表の一覧を列挙する。
 - 操作: `sqlite_master` から `chunk_publications` テーブルの存在を確認する。
-- 期待: `chunk_publications` テーブルが存在し、対象 chunk_id に対応する行が purge で削除される。
-  **実装状態の確認**: `chunk_publications` は crates 全体で grep 0 件であり、テーブル自体が
-  存在しない (この論点は A 領域/Phase 1 の DDL 契約と隣接するが、purge 側の削除対象として本書に
-  含める — テーブルが新設された時点で purge の削除経路にも追加される必要がある)。
+- 期待: `chunk_publications` テーブルが存在し、対象 chunk_id に対応する行だけが purge で削除される。
 
 ---
 
@@ -975,17 +972,14 @@ P0/P1/P2 集計は末尾 §Q。
    「prepared で確定し以後再計算しない」という原則の適用対象であることは確実だが、具体的な永続化
    形式は実装時の裁定を要する。
 
-3. **PA34 (`chunk_publications` の purge 削除規則の詳細)**: テーブル自体が現状存在しないため
-   (A 領域/Phase 1 の DDL 契約の管轄)、purge が具体的にどの列条件で行を削除すべきか
-   (対象 chunk_id 一致のみか、対象 raw_hash 経由の間接一致も含むか) は、テーブルの DDL が確定して
-   いない現時点では規範文からの一意な導出ができない。テーブル新設時に本契約 (PA34) を具体化する
-   必要がある。
+3. **PA34 (`chunk_publications` の purge 削除規則)**: 対象 raw_hash から対象 chunk_id 集合を導出し、
+   その chunk_id に一致する publication 行だけを削除する。
 
 ## R. 裁定 (§P の解釈割れ — 実装用、2026-07-22 オーケストレータ裁定)
 
 1. **PA38**: **spec どおり警告のみ — purge は進む。現行の hard block (KIO-E-PURGE-WORKING-COPY-001) は廃止**。spec 規範文は「必ず警告する + 恒久的除外には原本削除または .kioignore 追加を案内」という「進めて案内する」設計を明記しており、同一 path/別名の区別もしない (同一 bytes 残存の全ケースで警告)。
 2. **PA46**: **sidecar 方式** — journal 本体には closure の導出済み参照 (sidecar パス + 内容 hash) を置き、実体は `.kio/purge/journal-closure` (単一 JSON・同じ temp+rename+fsync 規律) に確定保存する。MAX_PURGE_JOURNAL_BYTES (8 MiB) は torn/DoS 防御として維持。「prepared で確定・以後再計算しない」原則は sidecar 内容に適用。
-3. **PA34**: **対象 chunk_id 一致の行削除** (raw_hash 間接は chunks 表経由で chunk_id 集合に落ちるため同値)。chunk_publications テーブルの DDL 新設は P2-C (PC38-39 の時点条件実装) と同時に行い、その時点で本契約を具体化する。
+3. **PA34**: **対象 chunk_id 一致の行削除** (raw_hash 間接は chunks 表経由で chunk_id 集合に落ちるため同値)。
 
 ---
 

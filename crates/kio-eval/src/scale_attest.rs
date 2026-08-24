@@ -38,7 +38,7 @@ const REPORT_TEMP_PREFIX: &str = ".kio-scale-attest-v2.tmp-";
 const INDEX_SQL_FINGERPRINTS: &[(&str, &str)] = &[
     (
         "idx_chunk_publications_chunk_id",
-        "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id)",
+        "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id, chunking_config_hash)",
     ),
     (
         "idx_chunks_ident",
@@ -80,15 +80,15 @@ const INDEX_SQL_FINGERPRINTS: &[(&str, &str)] = &[
 const TABLE_SQL_FINGERPRINTS: &[(&str, &str)] = &[
     (
         "chunks",
-        "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, first_seen_commit TEXT, created_at TEXT NOT NULL)",
+        "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)",
     ),
     (
         "chunk_config_generations",
-        "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))",
+        "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash))",
     ),
     (
         "chunk_publications",
-        "CREATE TABLE chunk_publications (publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, introduction_commit))",
+        "CREATE TABLE chunk_publications (publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))",
     ),
     (
         "embeddings",
@@ -270,8 +270,6 @@ struct LedgerChunk {
     byte_end: u64,
     text_hash: String,
     text: String,
-    first_seen_commit: Option<String>,
-    chunking_config_introduction_commit: String,
     created_at: String,
 }
 #[derive(Debug, Deserialize)]
@@ -402,7 +400,6 @@ struct ChunkEvidence {
     byte_end: u64,
     text_hash: String,
     text: String,
-    first_seen_commit: String,
     created_at: String,
 }
 
@@ -422,7 +419,6 @@ struct DbChunkRow {
     byte_end: u64,
     text_hash: String,
     text: String,
-    first_seen_commit: Option<String>,
     created_at: String,
 }
 
@@ -673,8 +669,6 @@ fn strict_ledger_row(bytes: &[u8]) -> Result<LedgerRecord, AttestError> {
         "byte_end",
         "text_hash",
         "text",
-        "first_seen_commit",
-        "chunking_config_introduction_commit",
         "created_at",
     ]
     .into_iter()
@@ -1058,10 +1052,7 @@ fn attest_ledger(
                     || !is_hash(&row.row.tool_profile_hash)
                     || !is_hash(&row.row.unit_content_hash)
                     || !is_hash(&row.row.text_hash)
-                    || !is_hash(&row.row.chunking_config_introduction_commit)
                     || row.row.chunking_config_hash != scale_spec::CHUNKING_CONFIG_HASH
-                    || row.row.first_seen_commit.as_deref() != Some(head)
-                    || row.row.chunking_config_introduction_commit != head
                     || row.row.unit_key.is_empty()
                     || row.row.raw_path.is_empty()
                     || row.row.r#gen != 0
@@ -1112,7 +1103,6 @@ fn attest_ledger(
                     byte_end: row.row.byte_end,
                     text_hash: row.row.text_hash.clone(),
                     text: row.row.text.clone(),
-                    first_seen_commit: head.to_owned(),
                     created_at: row.row.created_at.clone(),
                 };
                 if chunks.insert(evidence.chunk_id.clone(), evidence).is_some() {
@@ -1315,9 +1305,9 @@ fn attest_index(
         return Err(unsafe_state("index row bound exceeded"));
     }
     let db_rows = db
-        .prepare("SELECT rowid,chunk_id,raw_hash,tool_profile_hash,gen,unit_key,unit_content_hash,raw_path,heading_path,section_id,byte_start,byte_end,text_hash,text,first_seen_commit,created_at FROM chunks WHERE first_seen_commit=?1 ORDER BY chunk_id LIMIT ?2")
+        .prepare("SELECT c.rowid,c.chunk_id,c.raw_hash,c.tool_profile_hash,c.gen,c.unit_key,c.unit_content_hash,c.raw_path,c.heading_path,c.section_id,c.byte_start,c.byte_end,c.text_hash,c.text,c.created_at FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
         .map_err(|error| other("index chunks", error))?
-        .query_map(rusqlite::params![head, MAX_ROWS + 1], |row| {
+        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| {
             Ok(DbChunkRow {
                 rowid: row.get(0)?,
                 chunk_id: row.get(1)?,
@@ -1333,18 +1323,17 @@ fn attest_index(
                 byte_end: row.get(11)?,
                 text_hash: row.get(12)?,
                 text: row.get(13)?,
-                first_seen_commit: row.get(14)?,
-                created_at: row.get(15)?,
+                created_at: row.get(14)?,
             })
         })
         .map_err(|error| other("index chunks", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| other("index chunks", error))?;
     let association_rows = db
-        .prepare("SELECT chunk_id,association_rowid FROM chunk_config_generations WHERE chunking_config_hash=?1 AND introduction_commit=?2 ORDER BY chunk_id LIMIT ?3")
+        .prepare("SELECT chunk_id,association_rowid FROM chunk_config_generations WHERE chunking_config_hash=?1 ORDER BY chunk_id LIMIT ?2")
         .map_err(|error| other("index chunk associations", error))?
         .query_map(
-            rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1],
+            rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, MAX_ROWS + 1],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| other("index chunk associations", error))?
@@ -1382,9 +1371,6 @@ fn attest_index(
             byte_end: row.byte_end,
             text_hash: row.text_hash,
             text: row.text,
-            first_seen_commit: row
-                .first_seen_commit
-                .ok_or_else(|| unsafe_state("index chunk lacks first_seen_commit"))?,
             created_at: row.created_at,
         });
     }
@@ -1394,9 +1380,9 @@ fn attest_index(
         ));
     }
     let fts_chunk_ids: BTreeSet<String> = db
-        .prepare("SELECT c.chunk_id FROM chunk_fts_docsize d JOIN chunks c ON c.rowid=d.id WHERE c.first_seen_commit=?1 ORDER BY c.chunk_id LIMIT ?2")
+        .prepare("SELECT c.chunk_id FROM chunk_fts_docsize d JOIN chunks c ON c.rowid=d.id WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
         .map_err(|error| other("index FTS", error))?
-        .query_map(rusqlite::params![head, MAX_ROWS + 1], |row| row.get(0))
+        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| row.get(0))
         .map_err(|error| other("index FTS", error))?
         .collect::<Result<_, _>>()
         .map_err(|error| other("index FTS", error))?;
@@ -1411,9 +1397,9 @@ fn attest_index(
     // bounded MATCH probe checks the virtual table's query semantics rather
     // than merely trusting its shadow/docsize rows.
     let match_ids: BTreeSet<String> = db
-        .prepare("SELECT c.chunk_id FROM chunk_fts f JOIN chunks c ON c.rowid=f.rowid WHERE chunk_fts MATCH 'scale' AND c.first_seen_commit=?1 ORDER BY c.chunk_id LIMIT ?2")
+        .prepare("SELECT c.chunk_id FROM chunk_fts f JOIN chunks c ON c.rowid=f.rowid WHERE chunk_fts MATCH 'scale' AND EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
         .map_err(|error| other("index FTS MATCH", error))?
-        .query_map(rusqlite::params![head, MAX_ROWS + 1], |row| row.get(0))
+        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| row.get(0))
         .map_err(|error| other("index FTS MATCH", error))?
         .collect::<Result<_, _>>()
         .map_err(|error| other("index FTS MATCH", error))?;

@@ -5,12 +5,39 @@ use std::path::{Component, Path};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::cas::{hash_json, is_hash};
 use crate::error::{KioError, Result};
 
 pub const MAX_TREE_ENTRIES: usize = 10_000;
 pub const MAX_COMMIT_PARENTS: usize = 64;
+/// The only shipped chunking strategy.  Persisted trees bind its exact
+/// configuration hash so a historical publication cannot be interpreted using
+/// a later mutable `config.toml` value.
+pub const DEFAULT_CHUNKING_STRATEGY: &str = "heading";
+pub const DEFAULT_CHUNKING_MAX_CHARS: u64 = 6_000;
+
+/// Hash the canonical current chunking configuration.  This lives in core
+/// because both tree construction and index chunking must name exactly the
+/// same immutable configuration object.
+pub fn chunking_config_hash(strategy: &str, max_chars: u64) -> Result<String> {
+    if strategy != DEFAULT_CHUNKING_STRATEGY {
+        return Err(KioError::schema(format!(
+            "unsupported chunking strategy: {strategy}"
+        )));
+    }
+    if max_chars == 0 {
+        return Err(KioError::schema(
+            "chunking max_chars must be greater than zero",
+        ));
+    }
+    hash_json(&json!({
+        "max_chars": max_chars,
+        "spec_version": 1,
+        "strategy": strategy,
+    }))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NormalizeRef {
@@ -139,6 +166,10 @@ pub fn is_materializable_direct_child(path: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreeObject {
+    /// Hash of the exact chunking configuration effective while this tree was
+    /// constructed. Required with no legacy deserialization default: a tree
+    /// without this binding cannot authoritatively select chunk publications.
+    pub chunking_config_hash: String,
     pub entries: Vec<TreeEntry>,
     pub object_type: String,
 }
@@ -152,6 +183,11 @@ impl TreeObject {
     pub fn validate(&self) -> Result<()> {
         if self.object_type != "tree" {
             return Err(KioError::schema("tree object_type must be tree"));
+        }
+        if !is_hash(&self.chunking_config_hash) {
+            return Err(KioError::schema(
+                "tree chunking_config_hash must be sha256 lowercase hex",
+            ));
         }
 
         for entry in &self.entries {
@@ -176,12 +212,24 @@ impl TreeObject {
     }
 }
 
-pub fn build_tree(mut entries: Vec<TreeEntry>) -> Result<TreeObject> {
+pub fn build_tree(entries: Vec<TreeEntry>) -> Result<TreeObject> {
+    let config_hash = chunking_config_hash(DEFAULT_CHUNKING_STRATEGY, DEFAULT_CHUNKING_MAX_CHARS)?;
+    build_tree_with_chunking_config(entries, config_hash)
+}
+
+/// Construct a tree that pins a caller-validated chunking configuration hash.
+/// The builder validates it before serialization so no mutable configuration
+/// lookup can be substituted after the tree has been constructed.
+pub fn build_tree_with_chunking_config(
+    mut entries: Vec<TreeEntry>,
+    chunking_config_hash: String,
+) -> Result<TreeObject> {
     for entry in &entries {
         entry.validate_materialization_path()?;
     }
     entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     let tree = TreeObject {
+        chunking_config_hash,
         entries,
         object_type: "tree".to_owned(),
     };
@@ -457,8 +505,9 @@ pub const fn protected(commit_type: CommitType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitObject, CommitStats, CommitType, TreeEntry, TreeObject, build_tree,
-        is_valid_created_at,
+        CommitObject, CommitStats, CommitType, DEFAULT_CHUNKING_MAX_CHARS,
+        DEFAULT_CHUNKING_STRATEGY, TreeEntry, TreeObject, build_tree,
+        build_tree_with_chunking_config, chunking_config_hash, is_valid_created_at,
     };
     use crate::error::Result;
     use serde_json::json;
@@ -471,6 +520,10 @@ mod tests {
         "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb";
     const MANIFEST_HASH: &str =
         "sha256:05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f";
+
+    fn default_config_hash() -> String {
+        chunking_config_hash(DEFAULT_CHUNKING_STRATEGY, DEFAULT_CHUNKING_MAX_CHARS).unwrap()
+    }
 
     fn commit_with_created_at(created_at: &str) -> Result<CommitObject> {
         CommitObject::new(
@@ -536,6 +589,7 @@ mod tests {
         // instead omit `normalize` entirely.
         let tree: TreeObject = serde_json::from_value(json!({
             "object_type": "tree",
+            "chunking_config_hash": default_config_hash(),
             "entries": [{
                 "path": "notes.md",
                 "type": "file",
@@ -579,6 +633,7 @@ mod tests {
         ] {
             let historical: TreeObject = serde_json::from_value(json!({
                 "object_type": "tree",
+                "chunking_config_hash": default_config_hash(),
                 "entries": [{"path":path,"type":"file","raw_hash":RAW_HASH}]
             }))
             .unwrap();
@@ -593,18 +648,22 @@ mod tests {
         let invalid_cases = [
             json!({
                 "object_type": "commit",
+                "chunking_config_hash": default_config_hash(),
                 "entries": []
             }),
             json!({
                 "object_type": "tree",
+                "chunking_config_hash": default_config_hash(),
                 "entries": [{"path":"notes.md","type":"directory","raw_hash":RAW_HASH}]
             }),
             json!({
                 "object_type": "tree",
+                "chunking_config_hash": default_config_hash(),
                 "entries": [{"path":"notes.md","type":"file","raw_hash":"not-a-hash"}]
             }),
             json!({
                 "object_type": "tree",
+                "chunking_config_hash": default_config_hash(),
                 "entries": [{
                     "path":"notes.md",
                     "type":"file",
@@ -632,6 +691,7 @@ mod tests {
         ] {
             let tree: TreeObject = serde_json::from_value(json!({
                 "object_type": "tree",
+                "chunking_config_hash": default_config_hash(),
                 "entries": [{"path":path,"type":"file","raw_hash":RAW_HASH}]
             }))
             .unwrap();
@@ -659,6 +719,11 @@ mod tests {
     #[test]
     fn semantic_tree_validation_rejects_unsorted_and_duplicate_entries() {
         let unsorted = TreeObject {
+            chunking_config_hash: chunking_config_hash(
+                DEFAULT_CHUNKING_STRATEGY,
+                DEFAULT_CHUNKING_MAX_CHARS,
+            )
+            .unwrap(),
             entries: vec![
                 valid_entry("z.txt", OTHER_RAW_HASH),
                 valid_entry("a.txt", RAW_HASH),
@@ -671,6 +736,11 @@ mod tests {
         );
 
         let duplicate = TreeObject {
+            chunking_config_hash: chunking_config_hash(
+                DEFAULT_CHUNKING_STRATEGY,
+                DEFAULT_CHUNKING_MAX_CHARS,
+            )
+            .unwrap(),
             entries: vec![
                 valid_entry("same.txt", RAW_HASH),
                 valid_entry("same.txt", OTHER_RAW_HASH),
@@ -689,6 +759,39 @@ mod tests {
         .unwrap();
         assert_eq!(sorted.entries[0].path, "a.txt");
         assert!(sorted.validate().is_ok());
+    }
+
+    #[test]
+    fn tree_requires_a_canonical_chunking_configuration_binding() {
+        assert!(
+            serde_json::from_value::<TreeObject>(json!({
+                "object_type": "tree",
+                "entries": []
+            }))
+            .is_err()
+        );
+
+        let malformed = TreeObject {
+            chunking_config_hash: "sha256:not-a-canonical-hash".to_owned(),
+            entries: Vec::new(),
+            object_type: "tree".to_owned(),
+        };
+        assert_eq!(
+            malformed.validate().unwrap_err().error_code(),
+            "KIO-E-CONFIG-SCHEMA-001"
+        );
+    }
+
+    #[test]
+    fn tree_builder_pins_distinct_configurations() {
+        let default_tree = build_tree(Vec::new()).unwrap();
+        assert_eq!(default_tree.chunking_config_hash, default_config_hash());
+
+        let configured_hash = chunking_config_hash("heading", 40).unwrap();
+        let configured_tree =
+            build_tree_with_chunking_config(Vec::new(), configured_hash.clone()).unwrap();
+        assert_eq!(configured_tree.chunking_config_hash, configured_hash);
+        assert_ne!(configured_tree, default_tree);
     }
 
     #[test]

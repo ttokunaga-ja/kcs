@@ -32,7 +32,7 @@ use crate::{ExitCode, KioError, Result};
 pub const MAX_PURGE_TARGETS: usize = 100_000;
 /// Bound on one tombstone/erase-receipt record. Bumped from the flat-schema
 /// era's 16 KiB to accommodate an append-only `events[]` array that grows by
-/// one element per retire/re-purge/legacy-conversion (LC4).
+/// one element per retire/re-purge (LC4).
 pub const MAX_PURGE_RECORD_BYTES: u64 = 64 * 1024;
 pub const MAX_PURGE_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 /// Bound on the `.kio/purge/journal-closure` sidecar (step4b-contract-tests-p2a.md
@@ -1001,8 +1001,7 @@ impl PurgeState {
 
     /// Append one lifecycle event to `raw_hash`'s tombstone, creating the
     /// record if absent (the initial `purged` case) or appending to it
-    /// (retire, re-purge — LC58). Performs the LC5 one-shot legacy migration
-    /// as a side effect of the read-modify-write. Idempotent for a retried
+    /// (retire, re-purge — LC58). Idempotent for a retried
     /// operation that already landed (`events_are_equivalent`), so a
     /// crash-resumed journal replay never double-appends. `event.epoch` must
     /// already be set by the caller for `purged`; `event.lifecycle_epoch` is
@@ -1219,9 +1218,9 @@ impl PurgeState {
         Ok(recovery_target)
     }
 
-    /// LC40(b): scan every tombstone/erase-receipt event for the greatest
-    /// recorded `epoch` (legacy rows, which never record one, are skipped —
-    /// not treated as 0, since they must not participate in this max).
+    /// LC40(b): scan every tombstone/erase-receipt opening event for the
+    /// greatest recorded purge `epoch`; `retired` events carry only the
+    /// independent lifecycle epoch and do not participate in this max.
     pub fn max_recorded_purge_epoch(&self) -> Result<Option<u64>> {
         let mut max_epoch = None;
         self.scan_all_events(|event| {
@@ -2381,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn lc15_lc19_v1_and_v2_share_one_validator_and_enforce_transition_grammar() {
+    fn lc15_lc19_current_markers_share_one_validator_and_enforce_transition_grammar() {
         // Foreign kind: an `erased` event cannot appear in a tombstone.
         let events = vec![LifecycleEvent::erased(
             NOW,

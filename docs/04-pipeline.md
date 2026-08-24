@@ -402,7 +402,6 @@ CREATE TABLE chunks (
   byte_end INTEGER NOT NULL,
   text_hash TEXT NOT NULL,
   text TEXT NOT NULL,
-  first_seen_commit TEXT,              -- 最初の publication commit (便宜列。時点条件の正本は chunk_publications)
   created_at TEXT NOT NULL
 );
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash);
@@ -411,9 +410,9 @@ CREATE TABLE chunk_publications (      -- publication relation (cache — rebuil
                                        -- current publication event 行 (03 §2)。欠落は current
                                        -- schema violation / corruption であり commit walk で補わない)
   chunk_id            TEXT NOT NULL,
-  introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。単一の first_seen_commit では
-                                       -- incomparable な複数導入 (merge の side 枝等) を表現できないため多対多
-  PRIMARY KEY (chunk_id, introduction_commit)
+  chunking_config_hash TEXT NOT NULL,  -- publication は chunk 単位ではなくこの association 単位
+  introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。複数導入を表す多対多
+  PRIMARY KEY (chunk_id, chunking_config_hash, introduction_commit)
 );                                     -- 時点条件の判定はこの relation を参照 (05 §1.6)
 
 CREATE TABLE index_metadata (          -- 単一行。05 §1.5 index_generation の保存先
@@ -433,11 +432,9 @@ CREATE TABLE chunk_config_generations (
   chunk_id TEXT NOT NULL,
   chunking_config_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  introduction_commit TEXT NOT NULL,   -- この association が公開された snapshot commit。時点指定検索は
-                                       -- association の introduction にも ancestor-or-equal を要求 (05 §1.6)
-  UNIQUE(chunk_id, chunking_config_hash, introduction_commit)
-                                       -- 3 列 UNIQUE: incomparable な別枝の複数 introduction を行として
-                                       -- 保持する (2 列 UNIQUE では第二枝の insert が矛盾する)
+  UNIQUE(chunk_id, chunking_config_hash)
+                                       -- creation/order metadata の pair。時点 authority は
+                                       -- chunk_publications の publication triple だけが持つ
 );
 ```
 
@@ -472,7 +469,7 @@ CREATE TABLE chunk_config_generations (
    unit-local の byte_start / byte_end で区別する (chunk identity は span を含むため衝突しない)
 ```
 
-**chunks 行は append-only**。ファイルの更新・リネーム・削除では既存 chunk 行を削除・変更しない。これが time-travel 検索 (`--at` / `--all-history` / `--include-deleted`、[05-runtime.md §1.6](05-runtime.md)) の実体である。chunk 行を削除する経路は `kio purge` のみ (対象 raw_hash の chunk 行・FTS エントリ・embeddings を物理削除、[05-runtime.md §3.5](05-runtime.md))。raw / chunk object は GC の削除対象外である ([05-runtime.md §2.6](05-runtime.md))。既存行への UPDATE は `first_seen_commit` の付与のみ許可する。
+**chunks 行は append-only**。ファイルの更新・リネーム・削除では既存 chunk 行を削除・変更しない。これが time-travel 検索 (`--at` / `--all-history` / `--include-deleted`、[05-runtime.md §1.6](05-runtime.md)) の実体である。chunk 行を削除する経路は `kio purge` のみ (対象 raw_hash の chunk 行・FTS エントリ・embeddings を物理削除、[05-runtime.md §3.5](05-runtime.md))。raw / chunk object は GC の削除対象外である ([05-runtime.md §2.6](05-runtime.md))。publication は `chunk_publications` / JSONL event を append して表し、既存行を UPDATE しない。
 
 同じ chunk identity が複数の chunking config で同じ境界を生む場合、`chunks` の 1 行を複製・上書きせず
 `chunk_config_generations` に association を追記する。検索の「現行 `chunking_config_hash`」filter は
@@ -518,7 +515,7 @@ CREATE TRIGGER chunks_au AFTER UPDATE OF text, heading_path ON chunks BEGIN
 END;
 ```
 
-`chunks_au` を `UPDATE OF text, heading_path` に限定するのは、`first_seen_commit` の付与 (§4.1 で唯一許可された UPDATE) で FTS が再書き込みされるのを防ぐため。
+`chunks_au` を `UPDATE OF text, heading_path` に限定するのは、association/publication relation の追記で FTS が再書き込みされるのを防ぐため。
 
 **Tokenizer**: デフォルト `trigram` (CJK 対応)。英文中心の場合のみ `unicode61 remove_diacritics 2` を選択可。`.kio/config.toml [search.fts]` で切替 (tokenizer は上記のとおり CREATE 文に固定で埋まるため、切替は FTS の再構築を伴う)。
 
@@ -618,7 +615,7 @@ CREATE TABLE tree_entries (
   raw_hash TEXT NOT NULL,
   tool_profile_hash TEXT,
   gen INTEGER,
-  manifest_hash TEXT,                  -- normalize がある entry では required (tree schema v2, 03 §8)
+  manifest_hash TEXT,                  -- normalize がある entry では required (tree schema, 03 §8)
   PRIMARY KEY (commit_hash, path)
 );
 CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_profile_hash, gen);
@@ -626,7 +623,7 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 
 規範:
 
-- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` と `manifest_hash` は tree entry の `normalize.gen` / `normalize.manifest_hash` ([03-data-model.md §8](03-data-model.md)) の射影であり、`normalize` がある current entry ではともに必須、`normalize` 自体が無い raw-only entry ではともに NULL である。`normalize.gen` / `normalize.manifest_hash` の欠落を既定値で補う既存 store reader は置かず corruption / incompatible format として fail-closed にする。時点条件は `chunk_publications` の introduction の ancestry ([05-runtime.md §1.6](05-runtime.md)。`first_seen_commit` は便宜列)
+- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` と `manifest_hash` は tree entry の `normalize.gen` / `normalize.manifest_hash` ([03-data-model.md §8](03-data-model.md)) の射影であり、`normalize` がある current entry ではともに必須、`normalize` 自体が無い raw-only entry ではともに NULL である。`normalize.gen` / `normalize.manifest_hash` の欠落を既定値で補う既存 store reader は置かず corruption / incompatible format として fail-closed にする。時点条件は `chunk_publications` の introduction の ancestry ([05-runtime.md §1.6](05-runtime.md)。scalar fallback はない)
 - **常駐必須は HEAD commit 分のみ**。commit 作成時に新 HEAD 分を挿入する。旧 HEAD 分は cache として残してよい。残る historical row は、HEAD から外れた tag-only / disconnected commit を含め、writer が replica の exact `--at` binding を publish する対象にもなる
 - `kio search --at <commit>` はこの表を展開・挿入しない。CAS で target を検証した上で、既に writer が `aggregator.sqlite` に publish した exact binding と交差する。marker / binding が無ければ source SQLite へ fallback せず fail-closed とする ([05-runtime.md §1.8](05-runtime.md))。tree を展開してこの表へ入れるのは writer / repair / local Evidence Pointer 解決だけである。`kio reindex --at <commit>` は選択 target を完全射影へ明示的に渡すため、空 tree でも completed marker を publish する
 - `kio repair rebuild-db` は source index を DDL ごと再生成し、current commit / tree / CAS object だけから historical row を再導出した後に完全 replica 射影を行う。既存 SQLite row は source にも保持対象にもならない。必要 object が無いか current schema を満たさなければ fail-closed とする。旧 HEAD 分の掃除は retention GC ([05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
@@ -636,7 +633,7 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 `[chunking]` 設定 ([03-data-model.md §11](03-data-model.md)) の変更は raw_hash / tool_profile_hash に現れないため、独立した世代判定を行う:
 
 - chunk / embedding 段の最新判定は `(raw_hash, tool_profile_hash, gen, chunking_config_hash)` の一致で行う ([03-data-model.md §5.3](03-data-model.md))。03 §6 の up_to_date 判定 (Markdownize 段) は変更しない
-- デフォルト (HEAD) 検索の対象は **HEAD tree の `chunking_config_hash` の chunk のみ** (通常 = 現行値。**config 変更後〜新 tree publish 前の移行期間は旧値のまま検索し、`kio status` が再生成中を表示する — 現行値への切替は新 tree publish 時**。移行期間に検索を欠けさせない)。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る — tree v2 が時点 config を保存する意味はここにある — 全 tree が `chunking_config_hash` を持つため、代用も注記も不要である ([05-runtime.md §1.6](05-runtime.md))
+- デフォルト (HEAD) 検索の対象は **HEAD tree の `chunking_config_hash` の chunk のみ**。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る。すべての tree はこの必須値を持ち、欠落は fail-closed とする。検索 authority は同じ config を明記した tagged publication event に限る ([05-runtime.md §1.6](05-runtime.md))
 - 設定変更を検出したら、次回 `kio index` で **HEAD (現行 tree) が参照する normalized instance** の再 chunk + 再 embedding task を積む (unpublished な新 gen が残る crash 窓は、書き込み系冒頭の task 再検出 (§5.2) が当該 instance の publication を先に完遂することで解消する)。再 chunk はローカル処理で LLM 不要。embedding のみ再課金 (§5.4 budget guardrail の対象)。**履歴 instance は対象外** — 時点指定は対象 tree の `chunking_config_hash` (旧 config) の chunk で検索するため ([05-runtime.md §1.6](05-runtime.md))、新 config での履歴再 chunk はどの tree からも到達不能な chunk と embedding 課金を作るだけになる (03 §2.1 の「新規 chunk は常に最新 gen」とも整合)
 - 開始前に再生成対象 chunk 数と embedding 概算コストを提示し確認する (`--yes` で省略)
 - 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) 用に残置する (デフォルト検索には出ない。時点指定は対象 tree の config で対象になる — [05-runtime.md §1.6](05-runtime.md))
@@ -920,7 +917,7 @@ CREATE TABLE schema_migrations (         -- current operational marker のみ（
 - `kio batch resume --override-budget` は明示的な別操作で、当月の device cap / folder cap の両方を無視して再開する。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。`--recheck-budget` も `--override-budget` も指定しない `kio batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
 - ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)
 
-**resume / retry / reindex が駆動する enrichment**: `kio batch resume` / `kio batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kio reindex --regenerate` / `kio repair rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kio batch resume` / `retry` / `kio reindex --regenerate` がオンライン成果 (normalized / chunk) を finalize したときも、`kio index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — derived 成果の変化は tree entry の `normalize.manifest_hash` / tree の `chunking_config_hash` / tree の `chunk_set_hash` (公開 chunk 集合 — chunk のみの後着でも変わる) を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、tree_hash が変わり通常の no-op 規則のまま commit が生まれる。これが無いと完成した成果が次回 `kio index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
+**resume / retry / reindex が駆動する enrichment**: `kio batch resume` / `kio batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kio reindex --regenerate` / `kio repair rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kio batch resume` / `retry` / `kio reindex --regenerate` が online 成果 (normalized / chunk) を finalize したときも、必要な snapshot と tagged publication event を同じ publication protocol で確定する**。chunk が検索対象になるのは、その event が introduction commit の tree config と exact normalized unit を認証した後だけである ([05-runtime.md §1.6](05-runtime.md))
 
 ## 5.5 冪等性
 

@@ -1016,8 +1016,7 @@ struct DerivedInventory {
     /// object...を含む"): every target instance's manifest CAS object hash
     /// (`objects/manifests/` — never shared across raws, unlike
     /// prepared/image, so no surviving/target split is needed). Absent from
-    /// this set when the instance predates `NormalizeRef::manifest_hash`
-    /// (v1 legacy — nothing to compute or delete).
+    /// this set for raw-only entries, which have no normalized instance.
     target_manifest_hashes: BTreeSet<String>,
     target_normalized_units: BTreeSet<String>,
     surviving_normalized_units: BTreeSet<String>,

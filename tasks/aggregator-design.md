@@ -33,7 +33,7 @@ I17 で導入した `global-text.sqlite` は本 DB へ吸収する (後方互換
 ## 3. 何を複製するか — 「解決済みの集合」を持つ
 
 **生テーブルを複製しない。** `chunks` / `chunk_config_generations` / `tree_entries` /
-`kio_eligible_identity` / `first_seen_commit` を全部複製して aggregator 側で eligibility 述語を
+`kio_eligible_identity` / publication scalar を全部複製して aggregator 側で eligibility 述語を
 組み直すと、**liveness 判定ロジックが 2 箇所に増える**。R1-R24 の監査で塞いだ穴の多くはこの型の
 乖離だった。
 

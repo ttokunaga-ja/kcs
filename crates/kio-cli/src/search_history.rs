@@ -255,12 +255,9 @@ pub fn plan_search_history(
 }
 
 /// PC38/PC39 (05 §1.6): the ancestor-or-equal commit set of `--at`'s target
-/// commit — the population source for the `kio_target_ancestors` temp table
-/// `install_target_ancestors` installs, which the search SQL layer joins
-/// against to enforce the "introduction is ancestor-or-equal of the target"
-/// time-point condition (against `chunks.first_seen_commit` — the practical
-/// stand-in used until a `chunk_publications` writer exists, see that table's
-/// doc comment in `kio_index::fts`). Tolerant of a shallow ancestor beyond the
+/// commit, used to enforce the "introduction is ancestor-or-equal of the
+/// target" time-point condition against durable publication events.
+/// Tolerant of a shallow ancestor beyond the
 /// target itself, exactly like [`plan_search_history`]'s `--all-history` walk
 /// (PC45's skip-and-continue policy) — `shallow_skipped` names what was
 /// skipped; a shallow-skipped commit is conservatively absent from the
@@ -278,36 +275,6 @@ pub fn at_target_ancestors(
         .map(|node| node.commit_hash.clone())
         .collect::<BTreeSet<_>>();
     Ok((ancestors, shallow_skipped))
-}
-
-/// Install (or replace) the `kio_target_ancestors` temp table the ancestor-
-/// or-equal correlated `EXISTS` clauses join against (PC38/PC41: correlated
-/// `EXISTS`, never a plain `JOIN`, per 05 §1.6's implementation rule — the
-/// callers in `main.rs` follow that rule; this only populates the lookup
-/// table they query).
-pub(super) fn install_target_ancestors(
-    conn: &Connection,
-    ancestors: &BTreeSet<String>,
-) -> Result<()> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|error| KioError::schema(error.to_string()))?;
-    tx.execute_batch(
-        "DROP TABLE IF EXISTS temp.kio_target_ancestors;
-         CREATE TEMP TABLE kio_target_ancestors (
-             commit_hash TEXT PRIMARY KEY
-         ) WITHOUT ROWID;",
-    )
-    .map_err(|error| KioError::schema(error.to_string()))?;
-    for commit_hash in ancestors {
-        tx.execute(
-            "INSERT INTO kio_target_ancestors(commit_hash) VALUES (?1)",
-            rusqlite::params![commit_hash],
-        )
-        .map_err(|error| KioError::schema(error.to_string()))?;
-    }
-    tx.commit()
-        .map_err(|error| KioError::schema(error.to_string()))
 }
 
 fn plan_all_history(graph: &HistoryGraph) -> Result<Vec<SearchHistoryBinding>> {

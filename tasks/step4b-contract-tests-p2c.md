@@ -55,9 +55,9 @@ Phase 割当は当時の inventory の「Phase 2」。
 - `crates/kio-search/src/mmr.rs` — 確認済み適合 (変更不要)
 - `crates/kio-search/src/rrf.rs` — `fuse_rrf` の `candidate_depth` 適用はマージ段のみ (確認済み、SQL 側の
   変更が本体)
-- `crates/kio-index/src/fts.rs` / `crates/kio-index/src/rows.rs` — `chunks.first_seen_commit` は単一列
-  (rows.rs:20)。`chunk_publications` 表は存在しない (grep 0 件)。`chunk_config_generations` に
-  `introduction_commit` 列なし (fts.rs:521-527)
+- `crates/kio-index/src/fts.rs` / `crates/kio-index/src/rows.rs` — current schema は
+  `chunk_publications` と pair-only の `chunk_config_generations` を持つ。non-current
+  scalar publication columns は fail-closed である。
 - `crates/kio-index/src/embedding_store.rs` — `EmbeddingTargetType::QueryCache` (L585) は文字列変換の
   1 箇所のみで書込・読出経路が存在しない
 - `crates/kio-cli/src/historical_reindex.rs` — `retained_history_instances` (L97-207) は
@@ -439,14 +439,9 @@ P0/P1/P2 集計は末尾「集計」節。
 - 操作: page 1 発行後、`--cursor <token>` (selector は自動継承で `--at Ca` のまま) で page 2 を
   replay する。
 - 期待: page 2 の比較対象は「`--at Ca` という対象 tree の config 値 `H_old`」であり、HEAD の現在値
-  `H_new` とは無関係 — 一致するため cursor は正常に continue する。**現状**:
-  `search_one_scope_inner` (main.rs L2465-2467) は選択セレクタに関わらず常に
-  `read_chunking_config(&repo)` (= config.toml から都度読む「現在値」) を使う — `--at` 時にも
-  対象 tree の config ではなく HEAD 現在の config.toml 値を使うため、上記シナリオでは page 2 の
-  比較値が `H_new` になり、page 1 発行時の (誤って現在値ベースで記録された) `H_old` と食い違って
-  誤って cursor 拒否になる、または偶然両方とも現在値ベースで一致してしまい `--at` の tree 分離
-  という設計意図自体が反映されない (どちらの経路でも「page 1 で検索対象にした tree の config」を
-  読んでいないという構造的な誤りは同一)。
+  `H_new` とは無関係 — 一致するため cursor は正常に continue する。**実装**: current tree schema の
+  必須 `chunking_config_hash` を commit/tree CAS から直接読む。live config、association 候補、byte-order
+  tie-break による代用経路は持たない。
 
 ### PC23 page 2 以降の比較は「対象時点の値」の再計算であり「current との比較」ではない [P0]
 - 正本: 05 §1.8 L463-465 (『chunking_config_hash は page 1 の当該 scope の対象 config
@@ -457,8 +452,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 操作: page 2 replay 時の `query_hash` 再計算ルーチンを直接検証する (`chunking_configs` 配列の
   値を追跡する)。
 - 期待: 再計算に使う値は「`Ca` という対象 tree の chunking_config_hash」であり、HEAD の現在値では
-  ない。**現状**: PC22 と同根 — `read_chunking_config(repo)` は tree 引数を取らず常に現在値を返す
-  (main.rs L4335 付近)、`--at` 用の tree 別解決経路が存在しない。
+  ない。実装は PC22 と同じ必須 tree field を正本とする。
 
 ### PC24 query_vector_digest を cursor token の独立フィールドとして保持し query_hash 構成要素にも含める [P0]
 - 正本: 05 §1.5 L207 (『そのdigest (= query_vector_digest) を token の独立 field として保持し、
@@ -570,25 +564,8 @@ P0/P1/P2 集計は末尾「集計」節。
   `H_new`。
 - 操作: `kio search "<query>" --at Ca --text` を実行する。
 - 期待: `chunk_config_generations.chunking_config_hash = H_old` の association を持つ chunk のみを
-  対象とする (現在値 `H_new` との照合ではない)。**現状**: `search_one_scope_inner` L2465-2467/L2492
-  (fts_scope_search 呼出時の `chunking_config_hash` 引数) が常に `read_chunking_config(&repo)`
-  (現在値) を渡す — PC22 の cursor 面と同じ根本原因が bare 検索本体の対象 chunk 集合そのものを
-  誤らせている (これは cursor の整合性問題ではなく、`--at` 検索が過去 config で chunk 化された
-  chunk を正しく返せているかどうかの**検索結果そのものの正しさ**の問題)。
-
-### PC32 config 未記録 v1 tree は ancestor-or-equal introduction の byte 順最小を決定的に代用する [P0]
-- 正本: 05 §1.6 L239 (『v1 tree は config 未記録のため現行値で代替し結果に注記 (現行値の association
-  が無い場合は、対象 commit の ancestor-or-equal な introduction を持つ association (cursor 継続時は
-  max_association_rowid 以下も条件) に限定した上で chunking_config_hash の byte 順最小を決定的に
-  代用する — 後発 association で代用値が時間変動しない。候補 0 件は注記つき空集合。HEAD 限定再 chunk
-  後の履歴 instance を --at で全脱落させない）』)
-- 前提: `--at Cv1` (config association が一切無い v1 tree 由来 commit)。当該 chunk には
-  `chunking_config_hash = Hx` (introduction_commit = Ca, ancestor of Cv1) と `Hy`
-  (introduction_commit = Cb, ancestor of Cv1) の 2 association があり、`Hx < Hy` (byte 順)。
-- 操作: `kio search "<query>" --at Cv1 --text` を実行する。
-- 期待: `Hx` (byte 順最小) を決定的に代用して対象とする。association が 0 件の場合は空集合を返し、
-  応答に注記 (`fallback_reason` 相当のフィールド) を付す。**現状**: v1 tree 用の代用ロジックは
-  grep 0 件 — 未実装 (U69 のこの部分は「部分」ではなく実質「未実装」)。
+  対象とする (現在値 `H_new` との照合ではない)。実装は対象 commit の tree field と matching
+  publication event を同時に要求する。
 
 ### PC33 --all-history / --include-deleted は各 binding tree ごとの config 値で判定する [P0]
 - 正本: 05 §1.6 L238 (『--all-history / --include-deleted は各 binding tree の値で判定する』)
@@ -596,10 +573,8 @@ P0/P1/P2 集計は末尾「集計」節。
   `Hy`, `Hx != Hy`) が同一検索に含まれる。
 - 操作: `kio search "<query>" --all-history --text` を実行する。
 - 期待: binding A は `Hx` で、binding B は `Hy` でそれぞれ独立に config フィルタを適用する (単一の
-  グローバル値ではない)。**現状**: `fts_scope_search`/`vector_scope_search` は呼出全体で単一の
-  `chunking_config_hash: &str` パラメータしか受け取らない構造 (main.rs L2797-2800,
-  L2651-2657) であり、binding 単位での config 値切替えという概念が存在しない (PC31 と同根の
-  「単一 scope 呼出=単一 config 値」という設計前提そのものが新方針と整合しない)。
+  グローバル値ではない)。writer-side projection は各 `pointer_commit` の tree fieldを直接読み、
+  matching association/publicationだけを replica binding として確定する。
 
 ---
 
@@ -651,24 +626,22 @@ P0/P1/P2 集計は末尾「集計」節。
 
 ## J. 検索の時点条件正式化 — introduction ancestor-or-equal・correlated EXISTS (05 §1.6)
 
-### PC37 chunk_publications 表を新設し、初回を含む全 introduction を追記する [P0]
-- 正本: 05 §1.6 L265 (『auto snapshot 作成時に新規 chunk 行へ first_seen_commit を刻み、
+### PC37 chunk_publications に初回を含む全 introduction を追記する [P0]
+- 正本: 05 §1.6 (『auto snapshot は creation fsync 後に
   chunk_publications へ (chunk_id, introduction_commit = 当該 commit) を追記する (既存
   publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として
   追記 — 04-pipeline.md §4.1)。新規の config association も同じ commit を introduction_commit として
   刻む』)
 - 前提: 新規 chunk (raw_hash=Ra) が auto snapshot 作成時に commit `Ca` で初めて公開される。
 - 操作: `kio index` (auto snapshot 経路) を実行する。
-- 期待: `chunks` 行に `first_seen_commit=Ca` が刻まれると同時に、`chunk_publications` へ
-  `(chunk_id, introduction_commit=Ca)` の行が追記される。**現状**: `chunk_publications` 表は
-  DDL・grep 双方で 0 件 (`chunks.first_seen_commit` (kio-index/src/rows.rs L20) が単一列として
-  唯一の記録)。
+- 期待: creation row の fsync 後に、`chunk_publications` と JSONL publication event へ
+  `(chunk_id, introduction_commit=Ca)` の行が追記される。event のない scalar field は substitute にならない。
 
 ### PC38 デフォルト/--at の対象は「chunk_publications のいずれかの introduction_commit が対象 commit の
-ancestor-or-equal である chunk」に限る — 現状は publish 済みなら時点非依存で無条件ヒット [P0]
+ancestor-or-equal である chunk」に限る [P0]
 - 正本: 05 §1.6 L266 (『時点条件 (正式化): デフォルト / --at の対象は、上記 join に加えて
   chunk_publications のいずれかの introduction_commit が対象 commit の ancestor-or-equal である
-  chunk に限る (単一の first_seen_commit では incomparable な複数導入... を表現できないため...)』)
+  chunk に限る (複数 introduction は publication relation で表現するため...)』)
 - 前提: raw_hash=Ra が commit `Ca` (root) の tree に存在するが、実際に chunk 化・公開されたのは
   その子孫 commit `Cb` (`Ca` → `Cb`) の auto snapshot 時点 (`chunk_publications.introduction_commit
   = Cb` のみ、`Ca` 時点ではまだ chunk 化されていなかった、という同一 raw_hash が commit 間で
@@ -677,10 +650,8 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   対象外)。
 - 期待: 当該 chunk は `--at Ca` の結果に**含まれない** (`introduction_commit=Cb` は `Ca` の
   ancestor-or-equal ではない — `Cb` は `Ca` の子孫)。**現状**: `fetch_live_meta`/`execute_fts_tier`
-  (main.rs L2726, L2842) の条件は `c.first_seen_commit IS NOT NULL` のみであり、`--at` の対象
-  commit との ancestor 関係を一切見ない — `kio_eligible_identity` 一時表 (PC39 参照) が
-  `(raw_hash, tool_profile_hash, gen)` の**存在**のみで判定するため、上記シナリオでは誤って
-  ヒットする。
+  の条件は publication introduction の ancestor-or-equal を `EXISTS` で確認するため、上記
+  シナリオではヒットしない。
 
 ### PC39 回帰実証: 子孫 commit でのみ introduce された chunk が祖先 --at 検索に漏れ出る現状バグ [P0]
 - 正本: PC38 と同一 (05 §1.6 L266)。本契約は「現状の具体的な誤挙動」を機械検証可能な形で固定する
@@ -690,26 +661,16 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   分岐が `entry.normalize.is_some()` のみを条件に `SearchContentKey` を作る、main.rs L216-224
   相当のロジック)。
 - 操作: `kio search "<content-specific-token>" --at Ca --text --json` を実行する。
-- 期待 (PC38 実装後): `results` は空 (0 件)。**現状の実測期待 (回帰の可視化)**: `results` に該当
-  chunk が**含まれてしまう** — `install_eligible_identities` (search_history.rs L169-196) が
-  tree の `normalize` 存在のみを鍵に `kio_eligible_identity` を構築し、`fetch_live_meta` 等が
-  `first_seen_commit IS NOT NULL` の bare 条件と AND するだけなので、`Cb` 時点で公開された chunk が
-  `Ca` 時点の検索にも紛れ込む。本契約は PC38 の fix 前後で assert を反転させる形で保持し、fix の
-  「開けた穴」再発防止 (根拠 grep 必須の教訓) に用いる。
+- 期待: `results` は空 (0 件)。`kio_eligible_identity` の tree identity と publication
+  ancestor gate の両方を満たさない `Cb` 導入は `Ca` の検索へ混入しない。
 
-### PC40 chunk_config_generations へ introduction_commit 列を追加し、同条件を適用する [P0]
-- 正本: 05 §1.6 L266 (『config association にも同条件を適用する — chunk_config_generations の
-  introduction_commit が対象 commit の ancestor-or-equal であること (再 chunk 完了前の時点へ後発
-  association が遡及出現することを防ぐ)』)
-- 前提: chunk `chunk_a` の config association が commit `Cc` (`introduction_commit=Cc`) で追加された
-  (chunking config 変更後の再 chunk による後発 association)。`Cc` の祖先 `Ca` で検索する。
+### PC40 config association は pair-only metadata、時点性は publication triple のみ [P0]
+- 正本: 05 §1.6。`chunk_config_generations` は `(chunk_id, chunking_config_hash)` の creation/order
+  metadata であり、時点適格性は `chunk_publications` の triple だけで判定する。
+- 前提: `chunk_a` に config association はあるが、その config を明記する publication event がない。
 - 操作: `kio search "<query>" --at Ca --text` を実行する。
-- 期待: この config association は `Ca` の時点ではまだ存在しない (`Cc` は `Ca` の子孫) ため、
-  当該 association 経由での chunk ヒットは成立しない。**現状**: `chunk_config_generations`
-  DDL (kio-index/src/fts.rs L521-527, L725-731) の列は `association_rowid, chunk_id,
-  chunking_config_hash, created_at` の 4 列のみ — `introduction_commit` 列が存在しない
-  (`association_rowid <= max_association_rowid` という rowid 順序による近似はあるが、これは
-  「cursor 発行後に増えた行を除く」ための境界であり、「commit 祖先関係」とは別軸)。
+- 期待: association の rowid や作成時刻から introduction を推定せず、chunk は返らない。qualifying
+  publication triple が存在するときだけ、その introduction の ancestry に従って適格になる。
 
 ### PC41 実装規範: correlated EXISTS で評価する (素の JOIN 禁止) [P0]
 - 正本: 05 §1.6 L243-246 (『実装規範: publication / association の時点条件は correlated EXISTS
@@ -721,10 +682,8 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 操作: `--at Cm` で検索した際に生成される SQL を検査する (`EXPLAIN QUERY PLAN` および実行結果の
   重複有無)。
 - 期待: `chunk_a` は結果に**1 回だけ**現れる (correlated EXISTS による判定であり、2 introduction
-  行との JOIN によるファンアウトが起きない)。**現状**: `chunk_publications` 自体が存在しないため
-  (PC37)、この重複パターンは現在発生し得ない (単一 first_seen_commit だから) が、それは
-  「多重introductionをそもそも表現できていない」ことの裏返しであり、PC37-40 実装後に素の JOIN で
-  実装すると新たにこの重複バグが生じ得る — 実装時に本契約で明示的に固定する。
+  行との JOIN によるファンアウトが起きない)。この重複パターンは publication relation で
+  発生し得るため、素の JOIN へ戻すと重複バグが生じる。本契約は correlated `EXISTS` を固定する。
 
 ### PC42 候補集合は ranking 前に (scope_id, chunk_id) で一意化する [P0]
 - 正本: 05 §1.6 L246 (『候補集合は ranking 前に (scope_id, chunk_id) で一意にする』)
@@ -735,7 +694,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   無く、対応する一意化ステップも存在しない)。
 
 ### PC43 merge 側枝の独立 import: 複数 incomparable introduction のいずれかが ancestor-or-equal なら適格 [P0]
-- 正本: 05 §1.6 L266 (『単一の first_seen_commit では incomparable な複数導入 — merge の側枝・独立
+- 正本: 05 §1.6 (『incomparable な複数導入 — merge の側枝・独立
   import — を表現できない』引用は PC38 と同一パラグラフ。具体シナリオは 05 §1.7 L346-348 の
   introduction 定義 (『「その commit に binding が存在し、利用可能な全 parent に存在しない」commit』)
   と対応する構造)
@@ -1029,35 +988,23 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 操作: rebuild 後、新 chunking_config_hash に対する `chunk_config_generations` association が
   `Ra` 由来 chunk と `Rb` 由来 chunk のそれぞれに作られたかを検査する。
 - 期待: `Ra` (HEAD 参照) には新 config の association が作られる。`Rb` (HEAD 非参照、過去 commit
-  のみ) には作られない。**現状**: `retained_history_instances` (historical_reindex.rs L97-207) は
-  `HistoryReader::new(kio_dir).all_parents(head)` (main.rs L3937, L9771 から呼出) で
-  **全履歴**の normalized instance を対象化しており、HEAD tree 限定のフィルタが存在しない —
-  `Rb` にも新 config の association が作られ、到達不能な embedding タスクが生成される。
+  のみ) には作られない。実装は retained history の読み取り集合を維持しつつ、新association作成を
+  HEAD tree が参照するidentityへ限定する。
 
 ### PC62 履歴 (非 HEAD) instance は旧 chunking_config_hash association のまま放置し、新規 embedding タスクを生まない [P1]
 - 正本: PC61 と同一引用。
 - 前提: PC61 と同一シナリオ。
 - 操作: rebuild 完了後の `TaskStore` (embedding task) を検査する。
 - 期待: `Rb` (履歴限定 instance) に対する新規 embedding task が **enqueue されない** (課金が
-  発生しない)。**現状**: PC61 と同根 — `retained_history_instances` が `Rb` を含めて返すため、
-  後続の embedding task 生成ロジック (`enqueue_embedding_tasks` 等) が到達不能な instance にも
-  タスクを積む。
+  発生しない)。実装はPC61のHEAD限定associationをembedding対象にも反映する。
 
-### PC63 [相互参照] --at 時点検索は新 config を要求せず、U69 の byte 順最小代用規則で解決される [P2]
-- 正本: PC61 と同一引用 (『履歴 instance は時点指定検索で旧 config のまま参照されるため
-  (H 領域 U69/U71)』) — U145 と U69 (PC32) の整合性確認。
+### PC63 [相互参照] --at 時点検索は対象 tree の config と publication event で解決される [P2]
+- 正本: PC61 と同一引用 (『履歴 instance は時点指定検索でその tree の config のまま参照される』)。
 - 前提: PC61 実装後 (`Rb` に新 config association が作られない状態)。`Rb` を含む過去 commit
   `Cold` に対し `--at Cold` で検索する。
 - 操作: `kio search "<query>" --at Cold --text` を実行する。
-- 期待: `Rb` は新 config の association を持たないため、PC32 の「config 未記録扱い→
-  ancestor-or-equal introduction の byte 順最小代用」規則で解決される (search が空振りにならない
-  — U145 による再 chunk 対象縮小が、U69 の代用規則と組み合わさって初めて「履歴 instance も検索
-  可能」という北極星要件を満たすことの結合確認)。**現状**: PC32 も PC61 も未実装のため、現状の
-  `--at Cold` は「常に現在値の chunking_config_hash」(PC31 の未実装) を使うため、たまたま
-  `Rb` が rebuild 時に (HEAD 限定なしで) 新 config で再 chunk される現行実装では**偶然**
-  ヒットするが、PC61 の fix を先に適用し PC32/PC69 の fix を伴わずに単独適用すると `Rb` が
-  検索から完全に脱落する回帰を生む — 実装順序上、**PC61/62 と PC31/32 は同時に適用する必要がある**
-  ことを設計上の注意として本契約に記録する。
+- 期待: `Rb` は `Cold` の tree が束縛する config の association と、同 config を明記する qualifying
+  publication event があるときだけ返る。現在の config や推定値で代用しない。
 
 ---
 

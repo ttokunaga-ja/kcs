@@ -86,8 +86,6 @@ pub struct AggChunk {
     pub byte_end: u64,
     pub unit_key: String,
     pub created_at: String,
-    /// The source index's committed-publication marker.
-    pub first_seen_commit: String,
     /// `None` means the scope resolver currently considers this row live.  A
     /// non-null value records the refresh snapshot that observed it no longer
     /// current.  Exact historical eligibility is represented by
@@ -1218,7 +1216,6 @@ impl Aggregator {
                 byte_end           INTEGER NOT NULL,
                 unit_key           TEXT NOT NULL,
                 created_at         TEXT NOT NULL,
-                first_seen_commit  TEXT NOT NULL,
                 invalidated_commit TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS agg_chunks_key
@@ -1442,7 +1439,6 @@ impl Aggregator {
                     ("byte_end", "INTEGER", true, 0),
                     ("unit_key", "TEXT", true, 0),
                     ("created_at", "TEXT", true, 0),
-                    ("first_seen_commit", "TEXT", true, 0),
                     ("invalidated_commit", "TEXT", false, 0),
                 ],
             ),
@@ -2221,9 +2217,9 @@ impl Aggregator {
                 "INSERT INTO agg_chunks(
                     scope_id, chunk_id, raw_hash, tool_profile_hash, gen,
                     text, heading_path, section_id, byte_start, byte_end,
-                    unit_key, created_at, first_seen_commit, invalidated_commit
+                    unit_key, created_at, invalidated_commit
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
                  )",
             )?;
             let mut fts =
@@ -2246,7 +2242,6 @@ impl Aggregator {
                     chunk.byte_end as i64,
                     chunk.unit_key,
                     chunk.created_at,
-                    chunk.first_seen_commit,
                     chunk.invalidated_commit,
                 ])?;
                 let rowid = tx.last_insert_rowid();
@@ -3394,7 +3389,6 @@ mod tests {
             byte_end: text.len() as u64,
             unit_key: "unit:test".to_owned(),
             created_at: "2026-01-01T00:00:00Z".to_owned(),
-            first_seen_commit: "commit:test".to_owned(),
             invalidated_commit: None,
             embedding: None,
         }

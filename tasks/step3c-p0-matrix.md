@@ -29,7 +29,7 @@ what was wrong before and what closed it.
 | CHUNK-006 | `chunking::tests::ct3_chunk_006_chunking_config_hash_vector` | unit | ok — exact hash-vector assert against A.3 |
 | CHUNK-007 | `ct3_chunk_007_chunking_config_change_appends_new_generation_chunks` + **New** `ct3_chunk_007_search_only_serves_current_chunking_config_generation` | CLI | ok (combined) — original only checked chunks.jsonl line count grew (append-only half of the contract); new test proves the other half (K8: "検索対象は現行 chunking_config_hash の chunk のみ") by showing the stale-generation chunk_hash disappears from search results while its row is still on disk |
 | CHUNK-008 | `ct3_chunk_008_deleted_file_does_not_remove_existing_chunk_rows` | CLI | ok |
-| CHUNK-009 | `ct3_chunk_009_chunks_have_first_seen_commit_after_index` | CLI | ok, with a caveat — verifies the post-condition (first_seen_commit stamped after a successful index) but not the "invisible during indexing" half of the Then clause, which needs an observable mid-index state; impractical to test synchronously in this harness without a fragile multi-process/polling rig. Flagged as residual limitation, not fixed this round. |
+| CHUNK-009 | `ct3_chunk_009_chunks_have_durable_publication_after_index` | CLI | ok — verifies the creation association has a durable publication event after successful indexing; indexing-time invisibility remains a separate concurrent-observation concern. |
 | CHUNK-010 | `ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index` (**New**) | CLI | ok — asserts the real `sqlite.db` tree_entries rows written by `kio index` (HEAD commit, gen=0) and cross-checks a live search result. (An earlier unit test targeted the `kio_index::tree_entries::project_commit_tree` scaffold, which was dead code — never called by the CLI — and has been REMOVED in the final dead-code sweep together with the module.) |
 | CHUNK-012 | `ct3_chunk_012_repair_rebuild_db_preserves_search_result` | CLI | ok — deletes sqlite.db, rebuilds, re-runs the same query, asserts identical `evidence_uri` |
 
@@ -48,7 +48,7 @@ what was wrong before and what closed it.
 | ID | Test(s) | Type | Verdict |
 | --- | --- | --- | --- |
 | FTS-001 | `fts::tests::ct3_fts_001_external_content_triggers_sync_insert_delete` | unit | ok — inserts, searches, deletes, re-searches (empty), proving `chunks_ai`/`chunks_ad` trigger sync |
-| FTS-002 | `fts::tests::ct3_fts_002_first_seen_commit_update_does_not_rewrite_fts` | unit | ok |
+| FTS-002 | publication relation append does not rewrite FTS | unit | ok |
 | FTS-003 | `fts::tests::ct3_fts_003_trigram_matches_cjk_substrings_and_short_query_skips` + CLI `ct3_fts_003_two_character_query_is_skipped_with_zero_results` | unit + CLI | ok (combined) |
 | FTS-004 | `fts::tests::ct3_fts_004_schema_can_be_rebuilt_from_chunks` (weak alone — only calls schema creation once, no prior data to prove anything survives) + CLI `ct3_fts_004_rebuild_db_reenables_fts_search` | unit + CLI | ok (combined) — the CLI test is the one doing real work: deletes sqlite.db, confirms search now hard-fails (`KIO-E-SEARCH-SCOPE-ALL-FAILED-001`), rebuilds, confirms search works again |
 
@@ -242,7 +242,7 @@ in-place, 2 renamed. `cargo test --workspace`: 224 → 230.
 3. **CT3-CHUNK-009's "chunk invisible during indexing" clause is untested** and, as far as I
    can tell, impractical to test synchronously within this integration-test harness (it would
    require observing SQLite/search state from a second process while `kio index` is
-   mid-run, or an injected pause hook). The post-condition half (first_seen_commit stamped
+   mid-run, or an injected pause hook). The post-condition half (durable publication event appended
    after success) is tested. Flagging as a residual gap rather than building a fragile
    concurrency test under this round's time budget.
 4. Several P1s referenced by the P0 acceptance criteria have no dedicated test at all

@@ -1144,15 +1144,25 @@ fn ct3_chunk_008_deleted_file_does_not_remove_existing_chunk_rows() {
 }
 
 #[test]
-fn ct3_chunk_009_chunks_have_first_seen_commit_after_index() {
+fn ct3_chunk_009_chunks_have_durable_publication_after_index() {
     let dir = indexed_scope();
     let text = fs::read_to_string(dir.path().join(".kio/index/chunks.jsonl")).unwrap();
     let row: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert!(row.get("chunking_config_introduction_commit").is_none());
     assert!(
-        row["first_seen_commit"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:")
+        text.lines().skip(1).any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .is_some_and(|value| {
+                    value["event"] == "publication"
+                        && value["chunk_id"] == row["chunk_id"]
+                        && value["chunking_config_hash"] == row["chunking_config_hash"]
+                        && value["introduction_commit"]
+                            .as_str()
+                            .is_some_and(|commit| commit.starts_with("sha256:"))
+                })
+        }),
+        "every indexed creation must have a durable publication event"
     );
 }
 
@@ -3030,7 +3040,7 @@ fn ct3_multi_020_the_replica_retains_committed_chunks_across_liveness_changes() 
     let committed = || -> i64 {
         let conn = rusqlite::Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
         conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE first_seen_commit IS NOT NULL",
+            "SELECT COUNT(*) FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id = c.chunk_id)",
             [],
             |row| row.get(0),
         )
@@ -3222,7 +3232,7 @@ fn ct3_multi_021_replica_candidates_exclude_an_active_purge_scope() {
     let raw_hash: String = rusqlite::Connection::open(a.join(".kio/index/sqlite.db"))
         .unwrap()
         .query_row(
-            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL LIMIT 1",
+            "SELECT c.raw_hash FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id = c.chunk_id) LIMIT 1",
             [],
             |row| row.get(0),
         )
@@ -3319,7 +3329,7 @@ fn ct3_multi_022_replica_response_boundary_rechecks_a_late_purge() {
     let raw_hash: String = rusqlite::Connection::open(scope.join(".kio/index/sqlite.db"))
         .unwrap()
         .query_row(
-            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL LIMIT 1",
+            "SELECT c.raw_hash FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id = c.chunk_id) LIMIT 1",
             [],
             |row| row.get(0),
         )
@@ -4156,7 +4166,7 @@ fn ct3_replica_006_index_head_advance_fails_closed_before_source_rebuild() {
     let indexed_raw_hash: String = Connection::open(dir.path().join(".kio/index/sqlite.db"))
         .unwrap()
         .query_row(
-            "SELECT raw_hash FROM chunks WHERE first_seen_commit IS NOT NULL ORDER BY rowid LIMIT 1",
+            "SELECT c.raw_hash FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id = c.chunk_id) ORDER BY c.rowid LIMIT 1",
             [],
             |row| row.get(0),
         )

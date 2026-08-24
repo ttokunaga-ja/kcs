@@ -355,7 +355,7 @@ fn plan_online_markdownize_promotion(
         })
         .map(|candidate| candidate.bbox_annotation_enabled)
         .collect::<BTreeSet<_>>();
-    let adapter_scope_id = repo.scope_id_for_adapter()?;
+    let adapter_scope_id = repo.scope_identity()?.scope_id;
     let resolved_profiles = policies_to_resolve
         .into_iter()
         .filter_map(|bbox_enabled| {

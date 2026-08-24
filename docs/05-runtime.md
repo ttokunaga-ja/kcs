@@ -360,8 +360,8 @@ history projection / include-deleted のいずれも later `latest_normalize_ref
    ではない。shallow でない tree から解決済みの live / final-deleted binding は候補・結果に残し、
    当該 shallow ancestor にしかない alias だけを除外する。削除済み alias を推測・補完せず、黙って
    欠落させない
-- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kio index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻み、**`chunk_publications` へ `(chunk_id, introduction_commit = 当該 commit)` を追記する** (既存 publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として追記 — [04-pipeline.md §4.1](04-pipeline.md))。新規の config association も同じ commit を `introduction_commit` として刻む。**初回以外の追加 introduction は chunks.jsonl へ publication event 行として同時に append する** ([03-data-model.md §2](03-data-model.md) — rebuild の正本)
-- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る** (単一の `first_seen_commit` では incomparable な複数導入 — merge の side 枝・独立 import — を表現できないため、判定は publication relation を参照する。relation 自体は SQLite cache であり commit DAG + tree から決定的に再導出できる — [04-pipeline.md §4.1](04-pipeline.md))。**config association にも同条件を適用する** — `chunk_config_generations` の `introduction_commit` が対象 commit の ancestor-or-equal であること (再 chunk 完了前の時点へ後発 association が遡及出現することを防ぐ)。same-gen partial retry の後着 chunk は tree schema v2/v3 (manifest_hash / chunk_set_hash — [03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
+- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kio index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot は新規 association の creation を fsync してから、**`chunk_publications` と chunks.jsonl の tagged publication event に `(chunk_id, chunking_config_hash, introduction_commit = 当該 commit)` を追記する**。同じ chunk の別 config association は、その config 自身の event を持つまで非適格である。event のない creation/config scalar は検索・履歴 root の authority ではない。
+- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **対象 `(chunk_id, chunking_config_hash)` の `chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る**。判定は publication relation のみを参照し、fallback はない。relation 自体は SQLite cache であり JSONL publication events + commit DAG + tree から決定的に再導出できる ([04-pipeline.md §4.1](04-pipeline.md))。event は introduction commit の tree が同一 `chunking_config_hash` を束縛し、exact pinned normalized unit を認証できる場合だけ有効である。`chunk_config_generations` は pair の creation/order metadata であり、時点性を持たない。この認証は incomparable な複数 introduction を統合せず、それぞれを独立に保持する。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
 - shallow 化済みの選択 target への `--at`（cursor replay が固定した selected snapshot を含む）は
   `KIO-E-COMMIT-SHALLOW-001` で hard-fail する (§2.2)。上の ancestor skip による partial とは異なり、
   古い replica binding で target tree を代替してはならない
@@ -493,7 +493,7 @@ Kio の主たる消費者は LLM Agent であり ([06-cli-spec.md §9](06-cli-sp
 | `related_images[]` | この chunk 本文が参照している画像の列挙。`{image_uri, order}` の配列 | **空なら field ごと省略**。かつ `result_type: "chunk"` の行のみ (image 行では列挙対象が「参照元 chunk の図」になり、その先頭は自分自身の `payload_uri` である) |
 | ~~`snippet`~~ | **廃止 (2026-08-11、§1.7.1)。**クリックで正規化 Markdown 全体を表示するため、リストに抜粋を載せる意味が無い | 返さない |
 | `title` | **検索している時点の文書名** (§1.7.1 の時点規則)。従来は `path_at_commit` の字面 | 常に必須。意味は型に依らない (どちらの行も同じ chunk pointer を指す) |
-| `changed_at` | **内容が最後に変わった commit の日時** (§1.7.1)。`chunks.first_seen_commit` の解決結果。リネームでは動かない | 常に必須 |
+| `changed_at` | **内容が最後に変わった commit の日時** (§1.7.1)。resolver が選んだ qualifying publication introduction の日時。リネームでは動かない | 常に必須 |
 
 ### 1.7.1 結果は文書単位 (2026-08-11 確定)
 
@@ -692,11 +692,9 @@ aggregator は **生テーブルを複製して eligibility を再実装しな�
 `agg_bindings` として射影する ([03-data-model.md §4](03-data-model.md) 不変条件 7)。この relation は
 `scope_id`、selector 種別、snapshot commit、chunk identity、`path_at_commit`、`pointer_commit`、
 現在 path、live フラグを持つ。config の切替、DAG の分岐・再導入、同一 chunk の複数 alias を
-**scope resolver の出力どおり**表せるため、`first_seen_commit` / `invalidated_commit` だけで履歴の
-可否を推定しない。
+**scope resolver の出力どおり**表せるため、scalar metadata だけで履歴の可否を推定しない。
 
-`agg_chunks` は全 committed chunk を一度だけ保持する単一の検索表であり、`first_seen_commit` /
-`invalidated_commit` は provenance・診断用 metadata である。候補時の可否は、query ごとの snapshot と
+`agg_chunks` は全 committed chunk を一度だけ保持する単一の検索表である。候補時の可否は、query ごとの snapshot と
 `agg_bindings` から作る eligible chunk 集合を `WHERE EXISTS` で参照して決める。alias binding を join で
 候補行へ増殖させないため、同じ chunk の複数の履歴 path が rank を重複させることはない。
 
@@ -1768,9 +1766,9 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 
 1. 明示的 `kio snapshot create` (commit_type=manual)
 2. `kio index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
-3. `kio batch resume` / `kio batch retry` / `kio reindex --regenerate` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` / **tree の `chunk_set_hash` (公開 chunk 集合の digest — chunk のみが後着した finalize でも変わる)** を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kio index` まで検索対象にならないか、manifest 反映済み snapshot が先行したケースで introduction を刻む commit を作れない (§1.6)
+3. `kio batch resume` / `kio batch retry` / `kio reindex --regenerate` が online 成果 (normalized / chunk) を finalize した成功完了時も同じ publication protocol を完了する ([04-pipeline.md §5.4](04-pipeline.md))。chunk の検索 authority は tree の集合値ではなく、introduction commit と config を明記した tagged publication event で確立する (§1.6)
 
-**no-op 規則の例外 (2026-07-18 確定)**: (a) **resurrection finalize** (erase / purge 済み raw の再 ingest) は、同一 bytes の再現で tree_hash・chunk_set_hash が HEAD と一致しても publication commit を作る — retire event と introduction を刻む commit が無いと、復活した chunk を検索対象化できないか旧 introduction へ遡及するため。(b) **no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する** — embedding profile のみの更新でも lock が変われば commit を作る (現行 vector index と HEAD の provenance を一致させる)
+**no-op 規則の例外**: resurrection finalize (erase / purge 済み raw の再 ingest) は、同一 bytes の再現でも、retire event と新しい introduction を確定する commit が必要なら publication を行う。no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する。
 
 **snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で dangling event 行が残った場合、rebuild はそれを無視し ([04-pipeline.md §5.7](04-pipeline.md) と同一条件 — 生存する creation 行 / chunk object を持たない、**または** introduction commit の **object が store に存在しない**行。commit object が存在するが ref 不達の行 (orphan / disconnected — `--at` の正当対象) は無視しない)、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
 

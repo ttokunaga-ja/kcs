@@ -84,7 +84,7 @@ ancestor gate の実装配線])。
 | --- | --- | --- |
 | QB1-QB9 (§A) | K: dead pointer 再分類・error_code 機械判定・preflight 順序・kio_format_version 検証順序 | U121-U128 |
 | QB10-QB24 (§B) | L: lock/registry/scan境界/import-export/observability/エントリ文言 | U130-U142 (U129 除く) |
-| QB25-QB49 (§C) | J: 耐久書込・unit/diff schema・SQLite DDL 精密化・tree schema v2/v3・CAS 種別・path 規則 | U95,96,98-112,114-119 |
+| QB25-QB49 (§C) | J: 耐久書込・unit/diff schema・SQLite DDL 精密化・tree schema・CAS 種別・path 規則 | U95,96,98-112,114-119 |
 | QB50-QB58 (§D) | `kio log --at/--since` 本実装 | (06§1 L61 のみが正本、他は隣接規約からの導出) |
 | QB59-QB66 (§E) | P2 繰越 (PC20/25/26/33/44 の未決配線) | (H 領域、PC20/25/26/33/44 の続き) |
 
@@ -573,15 +573,14 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB29 `chunks` / `chunk_config_generations` DDL の精密化 (パラメタ化 4 列) [P0]
 - 正本: 04-pipeline.md §4.1 L385-386 (『chunk_id TEXT NOT NULL PRIMARY KEY, -- rowid 表の TEXT PRIMARY KEY
-  は NOT NULL を含意しないため明示』) / L432-434 (『UNIQUE(chunk_id, chunking_config_hash,
-  introduction_commit) -- 3 列 UNIQUE: incomparable な別枝の複数 introduction を行として保持する
-  (2 列 UNIQUE では第二枝の insert が矛盾する)』) / 03-data-model.md §8 (`chunks.chunk_id`・
+  は NOT NULL を含意しないため明示』) / L432-434 (『UNIQUE(chunk_id, chunking_config_hash) -- pair-only
+  creation/order metadata』) / 03-data-model.md §8 (`chunks.chunk_id`・
   `embeddings.id`・`schema_migrations.name` の 3 列を `TEXT NOT NULL PRIMARY KEY` にする、U98 統合要約)
 - 前提: 現行 `sqlite_master` の DDL 文字列。
 - 操作: (a) `chunks.chunk_id` の列定義。(b) `embeddings.id` の列定義。(c)
   `chunk_config_generations` の UNIQUE 制約の列数。(d) それぞれの `sqlite_master.sql` を照会する。
-- 期待: (a)(b) は `TEXT NOT NULL PRIMARY KEY` (NOT NULL 明示)。(c) は `(chunk_id, chunking_config_hash,
-  introduction_commit)` の 3 列 UNIQUE。**現状**: (a) `fts.rs:568-590` の現行 DDL は
+- 期待: (a)(b) は `TEXT NOT NULL PRIMARY KEY` (NOT NULL 明示)。(c) は `(chunk_id, chunking_config_hash)`
+  の pair UNIQUE。**現状**: (a) `fts.rs:568-590` の現行 DDL は
   `chunk_id TEXT PRIMARY KEY` (`NOT NULL` の明示なし — SQLite の rowid 表では `TEXT PRIMARY KEY` 単独は
   NOT NULL を含意しないため、規範上は明示が必須)。(b)(c) は本契約作成時点で `embeddings`/
   `chunk_config_generations` の DDL 全文を再確認する必要がある未検証区分 (先行する 4.3 節の抜粋は
@@ -711,33 +710,17 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (`CommitObject::validate`) が唯一の検証点で SQLite `commits` テーブル自体が存在しない。本契約は
   3 件とも回帰ロックとして 1 本に圧縮する。
 
-### QB38 tree object への `chunking_config_hash` / `chunk_set_hash` フィールド新設 [P0]
-- 正本: 03-data-model.md §8 (tree schema v2/v3、コード注釈): 『tree.chunking_config_hash =
-  snapshot 時点の effective chunking config...tree.chunk_set_hash = この snapshot で公開済みの
-  chunk 集合の digest。canonical bytes = 公開 chunk の chunk_hash 完全表記
-  ("sha256:<64hex>") を UTF-8 バイト列昇順にソートし LF 連結 + 末尾 LF 1 つ、その sha256』
-- 前提: chunk が 1 件以上公開された commit を作成する。
-- 操作: 生成された tree object の JSON を検査する。
-- 期待: `tree.chunking_config_hash` (snapshot 時点の実効 chunking config の hash) と
-  `tree.chunk_set_hash` (公開 chunk 集合の digest、上記 canonical bytes 式どおり) の 2 フィールドが
-  存在する。0 件公開時の `chunk_set_hash` は LF 1 byte の sha256 と一致する。**現状**: `TreeObject`
-  (dag.rs:32-40) は `entries`/`object_type` のみを持ち、tree レベルの `chunking_config_hash`/
-  `chunk_set_hash` フィールドは grep 0 件 (entry レベルの `NormalizeRef.manifest_hash` のみ存在)。
-
 ### QB39 `kio diff` の derived-only 変化検出義務 [P1]
-- 正本: 06-cli-spec.md §1 L94 (『`kio diff` の差分種別: raw / path の差分に加え、tree schema v2/v3 が
-  生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) /
-  `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed`
-  (旧新 tool_lock_hash と変更 role) / `resurrection_published`...を差分として表示する
-  (`--json` も同種別を持つ)。**derived-only commit を「差分なし」と表示してはならない**。片側が
-  旧版 tree (該当フィールド欠落) の場合、derived 差分は `unknown` と表示する』)
+- 正本: 06-cli-spec.md §1 L94 (『`kio diff` は raw / path の差分に加え、
+  `normalize_manifest_changed` / `chunking_config_changed` / `tool_lock_changed` /
+  `resurrection_published` を差分として表示する。derived-only commit を「差分なし」と表示してはならない』)
 - 前提: 2 つの commit `Ca`/`Cb` が同一 tree_hash かつ同一 raw_hash 集合を持つが (raw/path 差分は
   0 件)、`Cb` の tree の `manifest_hash` が `Ca` と異なる (same-gen partial retry の finalize による
   derived-only commit — no-op 規則の例外扱いで別 commit が作られたケース)。
 - 操作: `kio diff Ca Cb` を実行する。
 - 期待: raw/path 差分が 0 件であっても `normalize_manifest_changed` を含む差分エントリが返り、
-  「差分なし」ではなく derived-only の変化として表示される。片側が v1 tree (該当フィールド欠落) の
-  場合は `unknown` と表示される。**現状**: `Repository::diff` (scope.rs:1339-1374) は
+  「差分なし」ではなく derived-only の変化として表示される。current tree の必須 field が欠落すれば
+  diff は fail-closed する。**現状**: `Repository::diff` (scope.rs:1339-1374) は
   `tree_map` (path→raw_hash のみ) を比較し `added`/`deleted`/`modified` のみを返す — derived-only の
   5 種変化検出は完全に未実装であり、上記シナリオでは無条件に空の差分 (=「差分なし」相当) を返す。
 
@@ -1110,10 +1093,9 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
   も保持するよう拡張した状態を仮定する。
 - 操作: `--all-history` 検索で、config 値が異なる 2 binding (`pointer_commit` が異なる 2 commit に
   由来) を含む結果セットに対し `fts_scope_search`/`vector_scope_search` 相当の filter を適用する。
-- 期待: 各 binding が自身の `pointer_commit` に対応する `chunking_config_hash` (v1 tree の場合は
-  04-pipeline.md §4.6 の ancestor-or-equal 代用規則) でフィルタされ、単一のグローバル
+- 期待: 各 binding が自身の `pointer_commit` に対応する `chunking_config_hash` でフィルタされ、単一のグローバル
   `chunking_config_hash` パラメータでは実現できない per-binding 判定が成立する。**現状**:
-  QB29/QB30 と同根で、`chunk_config_generations` の 3 列 UNIQUE 化・`chunk_publications` 経由の
+  QB29/QB30 と同根で、`chunk_config_generations` の pair UNIQUE・`chunk_publications` 経由の
   時点条件判定 (PC37-43、既に p2c.md で契約済み) が前提として先に必要 — 本契約はそれらが揃った上での
   **配線側**の end-to-end 確認として位置づける。
 
@@ -1228,7 +1210,7 @@ PC25/PC26 (p2c.md) の正本引用はいずれも単一 scope の replay を前�
 | --- | --- | --- |
 | §A K 領域 (error code / exit code 横断) | U121-U128 | QB1-QB9 (9 件: P0 6 / P1 2 / P2 1) |
 | §B L 領域 (lock/registry/scan境界/import-export/observability/文言) | U130-U142 (U129 除外) | QB10-QB24 (15 件: P0 1 / P1 10 / P2 4) |
-| §C J 領域 (耐久書込・schema・DDL・tree v2/v3・CAS・path) | U95,96,98-112,114-119 | QB25-QB49 (25 件: P0 13 / P1 11 / P2 1) |
+| §C J 領域 (耐久書込・schema・DDL・tree・CAS・path) | U95,96,98-112,114-119 | QB25-QB49 (24 件: P0 12 / P1 11 / P2 1) |
 | §D `kio log --at/--since` 本実装 | (06§1 L61 のみ正本) | QB50-QB58 (9 件: P0 4 / P1 5) |
 | §E P2 繰越 (PC20/25/26/33/44 の未決配線) | H 領域 (継続) | QB59-QB66 (8 件: P0 5 / P1 3) |
 | **合計** | | **66 件 (P0 29 / P1 31 / P2 6)** |

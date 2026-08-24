@@ -1048,8 +1048,6 @@ mod tests {
             byte_end: 4,
             text_hash: text_hash.to_owned(),
             text: "body".to_owned(),
-            first_seen_commit: None,
-            chunking_config_introduction_commit: "sha256:commit".to_owned(),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
         }
     }

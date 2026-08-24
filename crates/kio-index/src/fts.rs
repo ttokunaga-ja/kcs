@@ -2073,8 +2073,6 @@ impl SqliteFtsIndex {
     /// Fresh indexing passes `None` and lets SQLite allocate the monotonically
     /// increasing association rowid. Durable-ledger replay may pass the recorded
     /// rowid so a rebuilt database preserves cursor ordering exactly.
-    /// `row.chunking_config_introduction_commit` (PC40) is recorded exactly as
-    /// [`Self::index_chunk_with_rowids`] does — the caller must provide it.
     pub fn index_chunk_with_association_rowid(
         &mut self,
         row: &ChunkRow,
@@ -2090,16 +2088,10 @@ impl SqliteFtsIndex {
     /// chunk. Both explicit rowids are collision-checked inside one savepoint so
     /// a malformed ledger cannot partially publish either side of the relation.
     ///
-    /// `row.chunking_config_introduction_commit` (PC40, 05 §1.6 L266) is the
-    /// commit at which THIS `(chunk_id, chunking_config_hash, introduction_commit)` association
-    /// was created — read from the row rather than taken as a separate parameter
-    /// so a rebuild replaying an already-durable `chunks.jsonl` record cannot
-    /// accidentally re-stamp it with "today's HEAD" (it is stamped only when
-    /// the association triple is genuinely new, matching
-    /// `record_chunk_config_association`'s existing-row branch, which never
-    /// touches an already-existing triple's immutable columns). Chunk-level
-    /// publication events (PC37, potentially several per chunk) are a
-    /// separate, caller-driven concern — see [`record_chunk_publication`].
+    /// The association is the durable creation pair `(chunk_id,
+    /// chunking_config_hash)`. Chunk-level publication events are the sole
+    /// temporal relation and remain a separate, caller-driven concern — see
+    /// [`record_chunk_publication`].
     pub fn index_chunk_with_rowids(
         &mut self,
         row: &ChunkRow,
@@ -2107,12 +2099,6 @@ impl SqliteFtsIndex {
         association_rowid: Option<u64>,
     ) -> Result<(u64, u64)> {
         validate_unit_hash("unit_content_hash", &row.unit_content_hash)?;
-        if row.chunking_config_introduction_commit.is_empty() {
-            return Err(IndexError::Contract(
-                "chunk/config association introduction commit is required".to_owned(),
-            ));
-        }
-        let association_introduction_commit = row.chunking_config_introduction_commit.as_str();
         if chunk_rowid == Some(0) {
             return Err(IndexError::Contract(
                 "chunk rowid must be positive".to_owned(),
@@ -2188,8 +2174,8 @@ impl SqliteFtsIndex {
                                 rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
                                 unit_content_hash,
                                 raw_path, heading_path, section_id, byte_start, byte_end,
-                                text_hash, text, first_seen_commit, created_at
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                text_hash, text, created_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                             params![
                                 requested,
                                 row.chunk_id,
@@ -2205,7 +2191,6 @@ impl SqliteFtsIndex {
                                 row.byte_end,
                                 row.text_hash,
                                 indexed_text,
-                                row.first_seen_commit,
                                 row.created_at,
                             ],
                         )?;
@@ -2216,8 +2201,8 @@ impl SqliteFtsIndex {
                                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
                                 unit_content_hash,
                                 raw_path, heading_path, section_id, byte_start, byte_end,
-                                text_hash, text, first_seen_commit, created_at
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                text_hash, text, created_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                             params![
                                 row.chunk_id,
                                 row.raw_hash,
@@ -2232,7 +2217,6 @@ impl SqliteFtsIndex {
                                 row.byte_end,
                                 row.text_hash,
                                 indexed_text,
-                                row.first_seen_commit,
                                 row.created_at,
                             ],
                         )?;
@@ -2246,7 +2230,6 @@ impl SqliteFtsIndex {
                 &row.chunking_config_hash,
                 &row.created_at,
                 association_rowid,
-                association_introduction_commit,
             )?;
             Ok((sql_u64_rowid(actual_chunk_rowid)?, association_rowid))
         })
@@ -2395,33 +2378,22 @@ impl SqliteFtsIndex {
 
 /// Append a chunk/config generation association and return its stable rowid.
 ///
-/// The `(chunk_id, chunking_config_hash, introduction_commit)` relation is
-/// idempotent. A config may be introduced for the same chunk more than once on
-/// incomparable histories, and each introduction remains independently visible
-/// to time-bounded search. When an explicit rowid is supplied (during
-/// durable-ledger rebuild), the complete triple and rowid must agree with an
+/// The `(chunk_id, chunking_config_hash)` creation relation is idempotent.
+/// Temporal/history visibility is represented only by `chunk_publications`.
+/// When an explicit rowid is supplied (during durable-ledger rebuild), the pair
+/// and rowid must agree with an
 /// existing record; a collision is a contract error rather than a silent
 /// renumbering that could invalidate signed cursors.
-///
-/// `introduction_commit` (PC40, 05 §1.6 L266) is stamped only on a genuinely
-/// new association row — an already-existing triple's immutable fields never
-/// change on replay.
 pub fn record_chunk_config_association(
     conn: &Connection,
     chunk_id: &str,
     chunking_config_hash: &str,
     created_at: &str,
     association_rowid: Option<u64>,
-    introduction_commit: &str,
 ) -> Result<u64> {
     if association_rowid == Some(0) {
         return Err(IndexError::Contract(
             "chunk/config association rowid must be positive".to_owned(),
-        ));
-    }
-    if introduction_commit.is_empty() {
-        return Err(IndexError::Contract(
-            "chunk/config association introduction commit is required".to_owned(),
         ));
     }
     let chunk_exists = conn
@@ -2439,24 +2411,23 @@ pub fn record_chunk_config_association(
     }
 
     let requested_rowid = association_rowid.map(sql_rowid).transpose()?;
-    let existing_for_triple = conn
+    let existing_for_pair = conn
         .query_row(
             "SELECT association_rowid
              FROM chunk_config_generations
              WHERE chunk_id = ?1
-               AND chunking_config_hash = ?2
-               AND introduction_commit = ?3",
-            params![chunk_id, chunking_config_hash, introduction_commit],
+               AND chunking_config_hash = ?2",
+            params![chunk_id, chunking_config_hash],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
 
-    if let Some(existing_rowid) = existing_for_triple {
+    if let Some(existing_rowid) = existing_for_pair {
         if let Some(requested_rowid) = requested_rowid
             && existing_rowid != requested_rowid
         {
             return Err(IndexError::Contract(format!(
-                "chunk/config association {chunk_id}/{chunking_config_hash}/{introduction_commit} \
+                "chunk/config association {chunk_id}/{chunking_config_hash} \
                  has rowid {existing_rowid}, not requested rowid {requested_rowid}"
             )));
         }
@@ -2466,50 +2437,33 @@ pub fn record_chunk_config_association(
     if let Some(requested_rowid) = requested_rowid {
         let occupied = conn
             .query_row(
-                "SELECT chunk_id, chunking_config_hash, introduction_commit
+                "SELECT chunk_id, chunking_config_hash
                  FROM chunk_config_generations
                  WHERE association_rowid = ?1",
                 params![requested_rowid],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        if let Some((occupied_chunk, occupied_config, occupied_introduction)) = occupied {
+        if let Some((occupied_chunk, occupied_config)) = occupied {
             return Err(IndexError::Contract(format!(
                 "chunk/config association rowid {requested_rowid} is already occupied by \
-                 {occupied_chunk}/{occupied_config}/{occupied_introduction}"
+                 {occupied_chunk}/{occupied_config}"
             )));
         }
         conn.execute(
             "INSERT INTO chunk_config_generations(
-                association_rowid, chunk_id, chunking_config_hash, created_at, introduction_commit
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                requested_rowid,
-                chunk_id,
-                chunking_config_hash,
-                created_at,
-                introduction_commit
-            ],
+                association_rowid, chunk_id, chunking_config_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![requested_rowid, chunk_id, chunking_config_hash, created_at],
         )?;
         return sql_u64_rowid(requested_rowid);
     }
 
     conn.execute(
         "INSERT INTO chunk_config_generations(
-            chunk_id, chunking_config_hash, created_at, introduction_commit
-         ) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            chunk_id,
-            chunking_config_hash,
-            created_at,
-            introduction_commit
-        ],
+            chunk_id, chunking_config_hash, created_at
+         ) VALUES (?1, ?2, ?3)",
+        params![chunk_id, chunking_config_hash, created_at],
     )?;
     sql_u64_rowid(conn.last_insert_rowid())
 }
@@ -2564,13 +2518,13 @@ pub fn current_config_eligible_chunk_ids(
         "SELECT c.chunk_id
          FROM chunks c
          JOIN chunk_config_generations g ON g.chunk_id = c.chunk_id
-         WHERE c.first_seen_commit IS NOT NULL
-           AND c.rowid <= ?1
+         WHERE c.rowid <= ?1
            AND g.chunking_config_hash = ?2
            AND g.association_rowid <= ?3
            AND EXISTS (
                SELECT 1 FROM chunk_publications p
                WHERE p.chunk_id = c.chunk_id
+                 AND p.chunking_config_hash = g.chunking_config_hash
            )
          ORDER BY c.chunk_id",
     )?;
@@ -2582,36 +2536,40 @@ pub fn current_config_eligible_chunk_ids(
         .map_err(IndexError::from)
 }
 
-/// PC37 (04 §4.1 / 05 §1.6): append one `(chunk_id, introduction_commit)` row —
-/// idempotent (`INSERT OR IGNORE`, `UNIQUE(chunk_id, introduction_commit)`), so
-/// re-publishing the same chunk at the same commit (a resurrection, a repeated
-/// rebuild pass) never duplicates a row. Distinct commits for the same
-/// `chunk_id` accumulate (the multi-introduction case — merge side branches,
-/// independent imports — a single `chunks.first_seen_commit` cannot represent).
+/// PC37 (04 §4.1 / 05 §1.6): append one authenticated
+/// `(chunk_id, chunking_config_hash, introduction_commit)` publication row.
+/// The triple is idempotent, while distinct introductions for one exact
+/// association accumulate (merge side branches and independent imports).
 pub fn record_chunk_publication(
     conn: &Connection,
     chunk_id: &str,
+    chunking_config_hash: &str,
     introduction_commit: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO chunk_publications(chunk_id, introduction_commit)
-         VALUES (?1, ?2)",
-        params![chunk_id, introduction_commit],
+        "INSERT OR IGNORE INTO chunk_publications(chunk_id, chunking_config_hash, introduction_commit)
+         VALUES (?1, ?2, ?3)",
+        params![chunk_id, chunking_config_hash, introduction_commit],
     )?;
     Ok(())
 }
 
-/// Every recorded introduction commit for `chunk_id`, in byte order (PC32's
-/// deterministic tie-break for a "no directly-matching current value"
-/// fallback selects the byte-order-minimum among these). Empty when the chunk
-/// has no `chunk_publications` row yet. Such a chunk is ineligible for search;
-/// callers must not fall back to the single-valued `chunks.first_seen_commit`.
-pub fn chunk_publication_introductions(conn: &Connection, chunk_id: &str) -> Result<Vec<String>> {
+/// Every recorded introduction commit for one exact chunk/config association,
+/// in byte order. Empty means that association is ineligible; callers must not
+/// fall back to a chunk-wide creation marker or another config's publication.
+pub fn chunk_publication_introductions(
+    conn: &Connection,
+    chunk_id: &str,
+    chunking_config_hash: &str,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT introduction_commit FROM chunk_publications
-         WHERE chunk_id = ?1 ORDER BY introduction_commit",
+         WHERE chunk_id = ?1 AND chunking_config_hash = ?2
+         ORDER BY introduction_commit",
     )?;
-    let rows = stmt.query_map(params![chunk_id], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![chunk_id, chunking_config_hash], |row| {
+        row.get::<_, String>(0)
+    })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(IndexError::from)
 }
@@ -2649,7 +2607,6 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             byte_end INTEGER NOT NULL,
             text_hash TEXT NOT NULL,
             text TEXT NOT NULL,
-            first_seen_commit TEXT,
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_ident
@@ -2659,17 +2616,17 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             chunk_id TEXT NOT NULL,
             chunking_config_hash TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            introduction_commit TEXT NOT NULL,
-            UNIQUE(chunk_id, chunking_config_hash, introduction_commit)
+            UNIQUE(chunk_id, chunking_config_hash)
         );
         CREATE TABLE IF NOT EXISTS chunk_publications (
             publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
             chunk_id TEXT NOT NULL,
+            chunking_config_hash TEXT NOT NULL,
             introduction_commit TEXT NOT NULL,
-            UNIQUE(chunk_id, introduction_commit)
+            UNIQUE(chunk_id, chunking_config_hash, introduction_commit)
         );
         CREATE INDEX IF NOT EXISTS idx_chunk_publications_chunk_id
-            ON chunk_publications(chunk_id);
+            ON chunk_publications(chunk_id, chunking_config_hash);
         CREATE TABLE IF NOT EXISTS embeddings (
             -- QB29: see the `chunks.chunk_id` comment above — same rowid-table
             -- TEXT PRIMARY KEY nullability gap, closed explicitly.
@@ -2834,7 +2791,6 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
             ("byte_end", "INTEGER", true, 0),
             ("text_hash", "TEXT", true, 0),
             ("text", "TEXT", true, 0),
-            ("first_seen_commit", "TEXT", false, 0),
             ("created_at", "TEXT", true, 0),
         ],
     )?;
@@ -2847,7 +2803,6 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
             ("chunk_id", "TEXT", true, 0),
             ("chunking_config_hash", "TEXT", true, 0),
             ("created_at", "TEXT", true, 0),
-            ("introduction_commit", "TEXT", true, 0),
         ],
     )?;
     validate_exact_schema_sql(
@@ -2862,6 +2817,7 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
         &[
             ("publication_rowid", "INTEGER", false, 1),
             ("chunk_id", "TEXT", true, 0),
+            ("chunking_config_hash", "TEXT", true, 0),
             ("introduction_commit", "TEXT", true, 0),
         ],
     )?;
@@ -2949,7 +2905,7 @@ pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> R
         conn,
         "idx_chunk_publications_chunk_id",
         "chunk_publications",
-        &["chunk_id"],
+        &["chunk_id", "chunking_config_hash"],
     )?;
     validate_exact_schema_sql(
         conn,
@@ -3227,16 +3183,15 @@ fn schema_rebuild_error(detail: impl std::fmt::Display) -> IndexError {
 // WHEN clauses, or virtual-table options. These public definitions therefore
 // form the current schema fingerprint; canonicalization below intentionally
 // ignores only case, whitespace, and SQL comments.
-const CURRENT_CHUNKS_SQL: &str = "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, first_seen_commit TEXT, created_at TEXT NOT NULL)";
-const CURRENT_CHUNK_CONFIG_GENERATIONS_SQL: &str = "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))";
-const CURRENT_CHUNK_PUBLICATIONS_SQL: &str = "CREATE TABLE chunk_publications (publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, introduction_commit))";
+const CURRENT_CHUNKS_SQL: &str = "CREATE TABLE chunks (chunk_id TEXT NOT NULL PRIMARY KEY, raw_hash TEXT NOT NULL, tool_profile_hash TEXT NOT NULL, gen INTEGER NOT NULL, unit_key TEXT NOT NULL, unit_content_hash TEXT NOT NULL CHECK (length(unit_content_hash) = 71 AND substr(unit_content_hash, 1, 7) = 'sha256:' AND substr(unit_content_hash, 8) NOT GLOB '*[^0-9a-f]*'), raw_path TEXT NOT NULL, heading_path TEXT NOT NULL, section_id TEXT, byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, text_hash TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL)";
+const CURRENT_CHUNK_CONFIG_GENERATIONS_SQL: &str = "CREATE TABLE chunk_config_generations (association_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash))";
+const CURRENT_CHUNK_PUBLICATIONS_SQL: &str = "CREATE TABLE chunk_publications (publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL, chunking_config_hash TEXT NOT NULL, introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit))";
 const CURRENT_EMBEDDINGS_SQL: &str = "CREATE TABLE embeddings (id TEXT NOT NULL PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL, modality TEXT NOT NULL, vector BLOB NOT NULL, dimensions INTEGER NOT NULL, distance TEXT NOT NULL, profile_hash TEXT NOT NULL, context_key TEXT)";
 const CURRENT_TREE_ENTRIES_SQL: &str = "CREATE TABLE tree_entries (commit_hash TEXT NOT NULL, path TEXT NOT NULL, raw_hash TEXT NOT NULL, tool_profile_hash TEXT, gen INTEGER, manifest_hash TEXT, PRIMARY KEY (commit_hash, path))";
 const CURRENT_INDEX_METADATA_SQL: &str = "CREATE TABLE index_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), index_generation TEXT NOT NULL, last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0)";
 const CURRENT_GC_ROTATION_ATTESTATION_SQL: &str = "CREATE TABLE gc_rotation_attestation (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL CHECK (version = 1), sweep_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('pre_sweep', 'final')), plan_digest TEXT NOT NULL, source_generation TEXT NOT NULL, target_generation TEXT NOT NULL)";
 const CURRENT_IDX_CHUNKS_IDENT_SQL: &str = "CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash)";
-const CURRENT_IDX_CHUNK_PUBLICATIONS_SQL: &str =
-    "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id)";
+const CURRENT_IDX_CHUNK_PUBLICATIONS_SQL: &str = "CREATE INDEX idx_chunk_publications_chunk_id ON chunk_publications(chunk_id, chunking_config_hash)";
 const CURRENT_IDX_EMBEDDINGS_TYPE_SQL: &str =
     "CREATE INDEX idx_embeddings_type ON embeddings(target_type)";
 const CURRENT_IDX_TREE_ENTRIES_IDENT_SQL: &str = "CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_profile_hash, gen)";
@@ -3503,8 +3458,6 @@ mod tests {
             text_hash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .to_owned(),
             text: text.to_owned(),
-            first_seen_commit: None,
-            chunking_config_introduction_commit: "sha256:commit".to_owned(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }
@@ -3528,10 +3481,9 @@ mod tests {
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
     }
 
-    /// PC37 (04 §4.1): `chunk_publications` accepts multiple distinct
-    /// introduction commits per `chunk_id` (the multi-introduction case), is
-    /// idempotent on a repeated `(chunk_id, introduction_commit)` pair, and
-    /// reads back in byte order (PC32's deterministic tie-break input).
+    /// PC37 (04 §4.1): `chunk_publications` is scoped to a chunk/config
+    /// association, accepts multiple introductions for that exact triple, and
+    /// cannot publish a second config merely because it shares the chunk id.
     #[test]
     fn pc37_chunk_publications_records_multiple_introductions_idempotently() {
         let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
@@ -3541,19 +3493,22 @@ mod tests {
         fts.index_chunk(&row("c1", "merge introduction test"))
             .unwrap();
         let conn = fts.connection();
-        record_chunk_publication(conn, "c1", "sha256:cccccccc").unwrap();
-        record_chunk_publication(conn, "c1", "sha256:aaaaaaaa").unwrap();
-        // Re-publishing the same (chunk_id, introduction_commit) pair (a
+        let config_a = "sha256:config-a";
+        let config_b = "sha256:config-b";
+        record_chunk_publication(conn, "c1", config_a, "sha256:cccccccc").unwrap();
+        record_chunk_publication(conn, "c1", config_a, "sha256:aaaaaaaa").unwrap();
+        // Re-publishing the same association/introduction triple (a
         // resurrection or a repeated rebuild pass) does not duplicate the row.
-        record_chunk_publication(conn, "c1", "sha256:aaaaaaaa").unwrap();
+        record_chunk_publication(conn, "c1", config_a, "sha256:aaaaaaaa").unwrap();
+        record_chunk_publication(conn, "c1", config_b, "sha256:bbbbbbbb").unwrap();
 
-        let introductions = chunk_publication_introductions(conn, "c1").unwrap();
+        let introductions = chunk_publication_introductions(conn, "c1", config_a).unwrap();
         assert_eq!(
             introductions,
             vec!["sha256:aaaaaaaa".to_owned(), "sha256:cccccccc".to_owned()]
         );
         assert!(
-            chunk_publication_introductions(conn, "c-never-published")
+            chunk_publication_introductions(conn, "c-never-published", config_a)
                 .unwrap()
                 .is_empty()
         );
@@ -3796,22 +3751,6 @@ mod tests {
             1,
             "config association deletion must roll back with the chunk"
         );
-    }
-
-    #[test]
-    fn ct3_fts_002_first_seen_commit_update_does_not_rewrite_fts() {
-        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
-            tokenizer: FtsTokenizer::Trigram,
-        })
-        .unwrap();
-        fts.index_chunk(&row("c1", "認証仕様の更新")).unwrap();
-        fts.connection()
-            .execute(
-                "UPDATE chunks SET first_seen_commit = ?1 WHERE chunk_id = ?2",
-                params!["sha256:commit", "c1"],
-            )
-            .unwrap();
-        assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
     }
 
     #[test]
@@ -4533,7 +4472,7 @@ mod tests {
         conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
         conn.execute(
             "UPDATE sqlite_master
-             SET sql = replace(sql, 'UNIQUE(chunk_id, chunking_config_hash, introduction_commit)', 'UNIQUE(chunk_id, chunking_config_hash)')
+             SET sql = replace(sql, 'UNIQUE(chunk_id, chunking_config_hash)', 'introduction_commit TEXT NOT NULL, UNIQUE(chunk_id, chunking_config_hash, introduction_commit)')
              WHERE type = 'table' AND name = 'chunk_config_generations'",
             [],
         )
@@ -4553,7 +4492,8 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("chunk_config_generations definition")
+                .contains("chunk_config_generations columns do not match current schema"),
+            "{error}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -4667,16 +4607,41 @@ mod tests {
             tokenizer: FtsTokenizer::Trigram,
         })
         .unwrap();
-        let conn = fts.connection();
-        assert!(!table_has_column(conn, "chunks", "chunking_config_hash").unwrap());
-        assert!(table_has_column(conn, "chunk_config_generations", "association_rowid").unwrap());
-        assert_eq!(max_chunk_config_association_rowid(conn).unwrap(), 0);
+        assert!(!table_has_column(fts.connection(), "chunks", "chunking_config_hash").unwrap());
+        assert!(
+            table_has_column(
+                fts.connection(),
+                "chunk_config_generations",
+                "association_rowid"
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            max_chunk_config_association_rowid(fts.connection()).unwrap(),
+            0
+        );
 
-        let mut first = row("c1", "認証仕様の更新");
-        first.first_seen_commit = Some("sha256:commit".to_owned());
+        let first = row("c1", "認証仕様の更新");
         fts.index_chunk_with_association_rowid(&first, Some(17))
             .unwrap();
-        record_chunk_publication(fts.connection(), "c1", "sha256:commit").unwrap();
+        assert_eq!(
+            current_config_eligible_chunk_ids(
+                fts.connection(),
+                &first.chunking_config_hash,
+                17,
+                17
+            )
+            .unwrap(),
+            BTreeSet::new(),
+            "a chunk without an authoritative publication relation is ineligible"
+        );
+        record_chunk_publication(
+            fts.connection(),
+            "c1",
+            &first.chunking_config_hash,
+            "sha256:commit",
+        )
+        .unwrap();
         // Replaying the same durable association triple is idempotent and does
         // not burn another AUTOINCREMENT value.
         fts.index_chunk_with_association_rowid(&first, Some(17))
@@ -4724,7 +4689,8 @@ mod tests {
         assert_eq!(
             current_config_eligible_chunk_ids(conn, &next_generation.chunking_config_hash, 1, 18)
                 .unwrap(),
-            BTreeSet::from(["c1".to_owned()])
+            BTreeSet::new(),
+            "a publication for config A cannot make config B eligible"
         );
     }
 
@@ -4764,41 +4730,39 @@ mod tests {
     }
 
     #[test]
-    fn config_associations_preserve_incomparable_same_config_introductions() {
+    fn config_associations_are_idempotent_creation_pairs() {
         let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
             tokenizer: FtsTokenizer::Trigram,
         })
         .unwrap();
-        let mut first = row("c1", "same config on two branches");
-        first.chunking_config_introduction_commit = "sha256:introduction-a".to_owned();
+        let first = row("c1", "same config on two branches");
         assert_eq!(
             fts.index_chunk_with_association_rowid(&first, Some(17))
                 .unwrap(),
             17
         );
 
-        let mut incomparable = first.clone();
-        incomparable.chunking_config_introduction_commit = "sha256:introduction-b".to_owned();
+        let incomparable = first.clone();
         assert_eq!(
             fts.index_chunk_with_association_rowid(&incomparable, None)
                 .unwrap(),
-            18,
-            "a distinct introduction of the same config gets its own association row"
+            17,
+            "the same creation pair is idempotent regardless of publication history"
         );
         assert_eq!(
             fts.index_chunk_with_association_rowid(&incomparable, None)
                 .unwrap(),
-            18,
-            "an automatic replay of the exact triple does not append another row"
+            17,
+            "an automatic replay of the exact pair does not append another row"
         );
         assert_eq!(
-            fts.index_chunk_with_association_rowid(&incomparable, Some(18))
+            fts.index_chunk_with_association_rowid(&incomparable, Some(17))
                 .unwrap(),
-            18,
-            "replaying the exact triple remains idempotent"
+            17,
+            "replaying the exact pair remains idempotent"
         );
         let error = fts
-            .index_chunk_with_association_rowid(&incomparable, Some(17))
+            .index_chunk_with_association_rowid(&incomparable, Some(18))
             .unwrap_err();
         assert!(error.to_string().contains("not requested rowid"));
         assert_eq!(
@@ -4807,7 +4771,7 @@ mod tests {
                     row.get::<_, u64>(0)
                 })
                 .unwrap(),
-            2
+            1
         );
     }
 
@@ -4871,7 +4835,6 @@ mod tests {
                     byte_end INTEGER NOT NULL,
                     text_hash TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    first_seen_commit TEXT,
                     created_at TEXT NOT NULL
                 );
                 CREATE VIRTUAL TABLE chunk_fts
@@ -4899,14 +4862,14 @@ mod tests {
                 INSERT INTO chunks(
                     rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
                     chunking_config_hash, raw_path, heading_path, section_id,
-                    byte_start, byte_end, text_hash, text, first_seen_commit, created_at
+                    byte_start, byte_end, text_hash, text, created_at
                 ) VALUES
                     (7, 'c7', 'sha256:raw7', 'sha256:profile', 0, 'doc:7',
                      'sha256:cfg7', 'seven.md', '[]', NULL, 0, 16,
-                     'sha256:text7', '認証仕様の更新', 'sha256:commit7', '2026-07-01T00:00:00Z'),
+                     'sha256:text7', '認証仕様の更新', '2026-07-01T00:00:00Z'),
                     (42, 'c42', 'sha256:raw42', 'sha256:profile', 0, 'doc:42',
                      'sha256:cfg42', 'forty-two.md', '[]', NULL, 0, 18,
-                     'sha256:text42', '検索インデックス', 'sha256:commit42', '2026-07-02T00:00:00Z');
+                     'sha256:text42', '検索インデックス', '2026-07-02T00:00:00Z');
                 "#,
             )
             .unwrap();

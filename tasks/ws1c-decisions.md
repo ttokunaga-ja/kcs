@@ -369,7 +369,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 75. Chunk CAS uses one exact semantic JSON payload: `spec_version:1`, the eight identity fields
     (`raw_hash`, `tool_profile_hash`, `gen`, `unit_key`, `heading_path`, optional `section_id`, optional
     `char_start`, optional `char_end`), `text_hash`, and exact `text`. It omits its own `chunk_hash`, path,
-    first-seen/created timestamps, and `chunking_config_hash`; the latter remains generation metadata in
+    created timestamps and `chunking_config_hash`; the latter remains generation metadata in
     the append-only index/ledger and may map multiple config hashes to one chunk identity. Fsck recomputes
     the identity hash against the fan-out key and validates `text_hash` against both text and normalized
     span; it does not content-hash the JSON bytes.

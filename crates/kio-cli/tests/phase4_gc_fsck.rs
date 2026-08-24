@@ -567,16 +567,24 @@ fn unrelated_ledger_introduction_cannot_hide_an_unreachable_chunk() {
     }
     remove_files(&dir.path().join(".kio/objects/manifests"));
 
-    // The legitimate chunk row is made to point at the shallow commit, but
-    // its immutable manifest closure is deliberately absent.  The ledger is
-    // not an authorization source, so fsck must still surface the orphan.
+    // Add a tagged introduction naming the shallow commit, but leave its
+    // immutable manifest closure deliberately absent. The event cannot
+    // authenticate without that commit's tree and must not hide the orphan.
     let ledger = dir.path().join(".kio/index/chunks.jsonl");
-    let mut rows = fs::read_to_string(&ledger).unwrap();
+    let rows = fs::read_to_string(&ledger).unwrap();
     assert!(!rows.is_empty());
-    let mut value: Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
-    value["first_seen_commit"] = Value::String(commit.clone());
-    value["chunking_config_introduction_commit"] = Value::String(commit);
-    rows = format!("{}\n", serde_json::to_string(&value).unwrap());
+    let creation: Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
+    let event = serde_json::json!({
+        "event": "publication",
+        "chunk_id": creation["chunk_id"],
+        "chunking_config_hash": creation["chunking_config_hash"],
+        "introduction_commit": commit,
+    });
+    let rows = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&creation).unwrap(),
+        serde_json::to_string(&event).unwrap(),
+    );
     fs::write(&ledger, rows).unwrap();
 
     let output = kio(&dir, &["repair", "verify-objects"])

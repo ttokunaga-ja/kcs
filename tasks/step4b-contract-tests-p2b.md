@@ -57,8 +57,8 @@ canonical dispatch 全体の共有化まで踏み込んで契約化する)。
 - `crates/kio-core/src/cas.rs` — `ObjectKind` (raw/tree/commit のみ)・`ContentObjectKind`
   (prepared/image のみ) への manifest/toollock/embedding 種別追加 (`objects/manifests/`・
   `objects/toollocks/` は現状 grep 0 件)
-- `crates/kio-index/src/fts.rs` — `chunk_publications` 表の新設 (現状 grep 0 件。`chunk_config_generations`
-  のみ既存)、`index_metadata` (L546-676 済み実装 — U144 の一部は既に Phase 1 相当で充足)
+- `crates/kio-index/src/fts.rs` — current schema は `chunk_publications` relation、pair-only の
+  `chunk_config_generations`、`index_metadata` を持つ
 - `crates/kio-index/src/registry.rs` — 直接の変更対象ではない (upsert/lookup は現状のまま)。fail-closed
   判定は main.rs 側の呼び出し元が担う
 - `crates/kio-search/src/evidence.rs` — `EvidencePointer`/`ValidatedEvidencePointer` は現状すでに
@@ -390,21 +390,16 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   である。**[解釈割れ]**: 本契約は「現在そうなっている」ことの確認であり、将来の変更が既定経路を
   破らないことまでは自動テストで保証できない (§Y-2 参照)。
 
-### PB20 既存 in-place migration 例外の閉じた列挙 (chunk_config_generations 分離のみ) [P0]
+### PB20 incompatible SQLite schema は mutation なしで fail-closed [P0]
 - 正本: 10 §7.5.3 L710-718『例外として in-place migration を書いてよいのは次の場合のみ: 1. append-only
   データの保全が必要な場合 例: ... 旧 `chunks.chunking_config_hash` 列 → `chunk_config_generations`
   relation への分離 (Step 3) は in-place migration とした (実装済みの先例) 2. 起動のたびに全再構築
   するのが非現実的な大規模 store』
-- 前提: 現行実装 `migrate_legacy_chunk_config_column` (`kio-index/src/fts.rs` L682 付近) が sqlite.db
-  に対する唯一の in-place migration 関数である。
-  この関数の存在理由 (append-only chunks 行の time-travel 検索実体の保全) が L713-714 の明示例外に
-  該当する。
-- 操作: `kio-index/src/fts.rs` 内の in-place migration 関数を列挙する (grep `ALTER TABLE`)。
-- 期待: `migrate_legacy_chunk_config_column` 以外に sqlite.db への in-place migration 関数が存在しない
-  ことを regression-lock として固定する — 新しい migration 関数が追加される場合、それが L710-718 の
-  2 例外いずれかに該当することをコメントで明記していない実装は本契約違反 (この「コメントでの根拠明記」
-  要求は 10 §7.5.3 自体の直接文言ではなく、Kio spec 監査シリーズの一般原則「fix 断言句に根拠 grep を
-  課す」からの類推適用であることに留意)。
+- 前提: source index は current schema と一致しない bytes を reader として受け入れない。
+- 操作: non-current table/column を持つ sqlite.db を開き、通常の command が mutation 前に
+  `KIO-E-STORE-CONSTRAINT-001` で停止することを確認する。
+- 期待: current schema は rebuild-only である。`ALTER TABLE` migration、旧列 reader、dual-read は
+  存在しない。復旧は明示的な `kio repair --rebuild-db` だけである。
 
 ---
 
@@ -527,30 +522,20 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   crash した場合に次の書込コマンドが自己修復すること (§Y-4 で言及) を別途確認する契約として本項を
   維持する。
 
-### PB29 chunk_publications 表の新設と publication event 行からの introduction 再導出 [P0]
-- 正本: 04 §5.7 L913『**publication / association introduction の再導出は chunks.jsonl を正本とする**:
-  作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の
-  chunk_set_hash は照合のみに使う』
-- 前提: `chunks.jsonl` に (a) chunk 作成行 (`first_seen_commit` を伴う) と、対応する publication
-  event 行が揃っている。SQLite の `chunk_publications` 表は現状 crates/ 全体で grep 0 件 (`chunk_id`
-  ごとの publication introduction を保持する専用表が存在しない)。
+### PB29 chunk_publications の event-only 再導出 [P0]
+- 正本: 04 §5.7『**publication / association introduction の再導出は chunks.jsonl の tagged
+  publication event を正本とする**』
+- 前提: `chunks.jsonl` の各 durable creation association には対応する publication event が揃う。
 - 操作: `kio repair --rebuild-db` を実行する。
-- 期待: `chunk_publications` (新設表) が chunks.jsonl の publication event 行から再構築され、各
-  chunk の introduction commit が (a) のデータから正しく復元される。tree の `chunk_set_hash` は
-  再導出結果の**照合のみ**に使われ、不一致自体が corruption 判定の根拠にはならない (chunks.jsonl が
-  正本のため)。
+- 期待: `chunk_publications` が chunks.jsonl の publication event 行から再構築され、各
+  chunk の introduction commit が event から正しく復元される。各 event は introduction commit の
+  tree config と exact normalized unit の認証に通るものだけを採用する。
 
-### PB30 event 行欠落時のフォールバック: 親先行 topological order の ancestor-minimal 導出 [P0]
-- 正本: 04 §5.7 L913『event 行を欠く旧 store は fallback として全 commit を親先行 topological order で
-  走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」の
-  みを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)』
-- 前提: `chunks.jsonl` に publication event 行が (旧 store のため) 一切無い。同一 chunk が複数の
-  祖先-子孫関係にある commit から到達可能 (例: `C1` → `C2` → `C3` の直線 DAG で全て同一 chunk を
-  参照)。
-- 操作: `kio repair --rebuild-db` を 2 通りの実装 (異なる commit 走査順) でシミュレートする。
-- 期待: いずれの走査順でも、導出される introduction 集合は同一 (ancestor-minimal — この例では `C1`
-  のみが introduction として採用され、`C2`/`C3` は「既採用 introduction (`C1`) の子孫」として除外
-  される)。walk 順序に依存して異なる結果を出す実装は契約違反。
+### PB30 publication event 欠落は fail-closed [P0]
+- 前提: durable creation association はあるが、対応する tagged publication event が無い。
+- 操作: `kio repair --rebuild-db` を実行する。
+- 期待: commit walk や scalar metadata から introduction を推定せず、その association は publication
+  relation に現れない。reader は current format violation として fail-closed する。
 
 ### PB31 dangling event 行の無視条件 (creation 行/chunk object 欠如 vs introduction commit object 欠如、ref 到達不能 commit は無視しない) [P0]
 - 正本: 04 §5.7 L913『生存する creation 行 / chunk object を持たない、**または introduction commit の
@@ -777,7 +762,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   検証する ... manifest で done でも当該 commit 時点で未公開の chunk を証拠にしない (cache 参照の
   ため、association の**不在**による失敗は corruption ではなく not_found — rebuild 後に再評価
   できる)』
-- 前提: PB29 (`chunk_publications`) 実装後、chunk の introduction commit が pointer の commit の
+- 前提: chunk の publication introduction commit が pointer の commit の
   (a) ancestor-or-equal、(b) descendant (= pointer の commit より後に公開された = 未来の chunk)。
 - 操作: `kio open`/`kio view` で解決する。
 - 期待: (a) は証拠として採用 (手順 7 へ進む)。(b) は not_found (corruption ではない — introduction

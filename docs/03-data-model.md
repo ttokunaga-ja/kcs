@@ -14,7 +14,7 @@ Object 種別:
   prepared     Markdownize 前の中間表現 (page image, sheet etc.)
   image        文書内 embedded image (Markdownize 時に抽出。type は予約済み、実装は Step 2
                [09-mvp-scope.md §3.1](09-mvp-scope.md))
-  manifest     normalized instance manifest の確定版 (canonical JCS bytes — §2.1。tree v2/v3 の
+  manifest     normalized instance manifest の確定版 (canonical JCS bytes — §2.1。tree の
                normalize.manifest_hash が指す)
   toollock     tool-lock.json の確定版 (canonical JCS bytes — §5.2。commit の tool_lock_hash が指す)
   normalized_unit_object  unit 単位の完全な NormalizedUnitObject (canonical JCS bytes の CAS)。
@@ -91,11 +91,13 @@ raw / prepared / image / normalized_unit_object / chunk / embedding / manifest /
                       terminal task の行の bounded compaction あり (task 状態 = 最新行。terminal task は
                       全行を落とし、非 terminal task は最新行のみ残す) — 04 §5.1)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
-                      作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
+                      作成行 = {chunk_id, chunking_config_hash, created_at, path}。
                       path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。
                       **publication event 行** = {event:"publication", chunk_id, chunking_config_hash,
-                      introduction_commit} — 初回以外の追加 introduction (incomparable な別枝での公開、
-                      association の後発公開) を auto snapshot 時に append する。publication relation
+                      introduction_commit} — すべての durable association は creation fsync 後に
+                      対応 event を持つ。event は同じ `(chunk_id, chunking_config_hash)` creation
+                      より後にだけ置ける。追加 introduction (incomparable な別枝での公開、
+                      association の後発公開) も auto snapshot 時に append する。publication relation
                       (04 §4.1 cache) の rebuild 正本はこの ledger (digest は照合のみ)。append-only、
                       SQLite rebuild の入力 — 04-pipeline.md §4.1/§4.6、本書 §8)
   index/
@@ -326,9 +328,8 @@ device では `.kio` ごとに独立した BM25 コーパスができ、コー�
    writer / repair の完全射影時に scope resolver が解決した selector / snapshot ごとの結果を
    `agg_bindings` として持つ。binding は chunk identity と `path_at_commit` /
    `pointer_commit` を結ぶ relation であり、config 切替、DAG の分岐・再導入、
-   同一 chunk の複数 alias を scope 側の答えどおりに表す。`first_seen_commit` /
-   `invalidated_commit` は provenance 用 metadata であって、replica が eligibility を
-   推定するための唯一の規則ではない。検索時は binding から作る eligible 集合を
+   同一 chunk の複数 alias を scope 側の答えどおりに表す。replica は scalar provenance
+   metadata から eligibility を推定しない。検索時は binding から作る eligible 集合を
    `WHERE` で参照する。fresh current 検索は durable binding を使う一方、履歴 selector
    と cursor replay は CAS で再解決した exact relation を `agg_bindings` に交差させる。
    この pre-rank filter も replica 内で候補を絞るためのものであり、source SQLite を
@@ -373,7 +374,7 @@ purge を残すのは法務・秘匿の操作であり**文書名だけでも意
 | `.kio/tombstones/lifecycle-epoch` | 単調カウンタ (text) | **truth** (lifecycle 回転補完の検出源) | 欠落・不正・巻き戻りは max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値) + 1 で再作成 + 無条件 1 回転 (purge の `epoch` は参照しない — 別系統のカウンタ) ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
 | `.kio/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kio/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
-| `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
+| `.kio/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / 生成時点 path / tagged publication events — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
 | `.kio/index/sqlite.db` (**検索面ではないが aggregator の複製元である** — 2026-08-12。`kio search` は引かず、読むのは writer / repair による完全射影と scope 内保守。`.kio` 内にあることでフォルダごと移動しても移動先で再導出でなく射影で済む。[05-runtime.md §1.8](05-runtime.md)) | **SQLite** (public logical object は chunks / chunk_config_generations / chunk_publications / embeddings / tree_entries / index_metadata の 6 表、および chunk_fts / chunk_vec / image_vec の 3 virtual table、計 9。FTS5 / sqlite-vec の shadow table は含めない) | cache | 単一 scope は `kio repair rebuild-db`、device 全体は `kio repair all` (`-a`) | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kio/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kio` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.cache/kio/aggregator.sqlite` | **SQLite** (`agg_scopes` / `agg_chunks` / `agg_fts` / `agg_embeddings` / `agg_image_embeddings` / `agg_image_refs` / `agg_bindings` / `agg_projection_markers` の 8 表) | cache | writer の完全再射影、または device-global の `kio repair replica` (`-r`)。source SQLite も含めて検証・再構築する場合は `kio repair all` (`-a`)。欠落・不完全時は `kio search` が source index を読まず fail-closed | [05-runtime.md §1.8](05-runtime.md) |
@@ -636,7 +637,7 @@ created_at / finished_at
 喪失許容の運用データ、[04-pipeline.md §5.7](04-pipeline.md))。**incremental で親の raw が異なる場合
 (raw 更新をまたぐ通常 incremental) は `parent_instance = {raw_hash, tool_profile_hash, gen}` を必須で
 記録する** — `parent_gen` は同一 raw 内の局所番号であり、整数だけでは親 instance を一意に復元できない
-(full では null)。**manifest_hash** (tree schema v2 の入力 — §8) は manifest の canonical JCS bytes の
+(full では null)。**manifest_hash** (tree の入力 — §8) は manifest の canonical JCS bytes の
 sha256 とする。
 
 ## 8.1 Object hash 算出規約
@@ -743,33 +744,22 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
                      "manifest_hash": "sha256:mani..." }
     }
   ],
-  "chunking_config_hash": "sha256:cfg...",
-  "chunk_set_hash": "sha256:cs..."
+  "chunking_config_hash": "sha256:cfg..."
 }
-// tree schema v2 (2026-07-18 確定 — 実装・store 公開前の schema 確定で MAJOR bump ではない、
-// [10-operations.md §11.5](10-operations.md)):
+// current tree schema:
 //  - entry.normalize.manifest_hash = 当該 normalized instance manifest の canonical hash
 //    (JCS bytes の sha256 — §2.1)。unit の failed → done 遷移で変わるため、**derived 成果の変化が
 //    tree_hash を変える** = same-gen partial retry の finalize も通常の auto snapshot を生む
 //    ([05-runtime.md §8.1](05-runtime.md))
 //  - tree.chunking_config_hash = snapshot 時点の effective chunking config (§5.3)。再 chunk も同様に
-//    tree_hash を変える
-//  - 両フィールドとも必須。欠落した tree entry は schema violation であり、読取可の旧形式は無い
+//    tree_hash を変える。必須であり、欠落は schema violation として fail-closed する
 //  - manifest_hash は objects/manifests/ の immutable manifest object (§2.1) を指す — same-gen retry で
 //    作業コピー manifest.json が更新された後も、過去 commit の manifest bytes と、その done unit が指す
 //    normalized_unit_object CAS body はこの closure から解決できる
-// tree schema v3 (2026-07-18 確定 — 同じく実装・store 公開前の schema 確定で MAJOR bump ではない):
-//  - tree.chunk_set_hash = この snapshot で公開済みの chunk 集合の digest。canonical bytes =
-//    公開 chunk の chunk_hash 完全表記 ("sha256:<64hex>") を UTF-8 バイト列昇順にソートし LF 連結 +
-//    末尾 LF 1 つ、その sha256。「公開済み」= 本 tree の binding (raw_hash, tool_profile_hash, gen) に
-//    属し、本 tree の chunking_config_hash の association を持つ chunk object の全量 (snapshot 時点で
-//    **store に存在するもの** — 存在ベース。0 件のときの canonical bytes = LF 1 byte)。chunking の途中
-//    クラッシュで部分集合が manual snapshot に載ることは許容する — chunk は unit 単位で決定的・個々に
-//    完全であり、残りは完了時の finalize commit で introduction を得る (検索の部分性は status が可視化)
-//  - これにより chunk のみが後着した finalize でも chunk_set_hash → tree_hash が変わり、no-op 規則の
-//    まま publication commit が生まれる ([05-runtime.md §8.1](05-runtime.md) 契機 3) — manifest 反映済み
-//    snapshot が先行しても後着 chunk の introduction を刻める
-//  - chunk_set_hash も必須。検証は tree 保存バイト列の再 hash に含まれる (集合の意味的再計算は fsck 対象外)
+//  - 公開の authority は tree 上の集合 digest ではなく、chunks.jsonl の tagged publication event
+//    `(chunk_id, chunking_config_hash, introduction_commit)` である。event の introduction commit は
+//    その tree が同じ chunking_config_hash を束縛し、exact pinned normalized unit を認証できるときだけ
+//    受理する。incomparable な introduction は独立に有効である。
 
 // commit — objects/commits/9f/2c/<commit64> に JCS 形式で保存
 {
@@ -846,7 +836,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, unit_content_hash, heading_path, section_id, byte_start, byte_end)` で決まり、chunk_hash の算出式は §8.1 に定める。`unit_content_hash` は exact normalized Markdown bytes の hash。full immutable object の `unit_object_hash` は manifest entry が保持し、fsck/Evidence が tree から closure を認証する。chunk object へは複製しないため、metadata だけが異なる同一本文でも同じ chunk identity の CAS bytes は一意である。heading_path と section_id は両方 hash 入力、未設定フィールドは省略する。**`byte_start` / `byte_end` は unit-local の UTF-8 byte offset・0-based half-open**。
 
 chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
-自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。
+自身の `chunk_hash`、path、`created_at`、`chunking_config_hash` は含めない。
 `chunking_config_hash` は同一 chunk identity に複数値が対応しうる generation association として
 **append-only の `chunks.jsonl` (§2 layout / §4.1 — truth) を正本に、SQLite の別 relation (cache) へ**保持する。fsck は object bytes の content hash ではなく
 §8.1 の identity hash を再計算して保存 fan-out key と照合し、`text_hash` を object 内の `text` と

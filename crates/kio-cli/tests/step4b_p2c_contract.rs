@@ -9,11 +9,11 @@
 //!
 //! §R-ruling-2026-07-22 (P2-C 仕上げロット E) landed PC8-14 (§C tokenizer/
 //! MATCH-generation rewrite — `query_tokens`/`build_query_plan`,
-//! `execute_like_fallback`), PC22/23/31/32/40 (§F/§H tree-scoped
-//! `chunking_config_hash`, `resolve_target_chunking_config_hash`), PC37-39/
+//! `execute_like_fallback`), PC22/23/31/33/40 (§F/§H tree-scoped
+//! `chunking_config_hash` directly from each target tree), PC37-39/
 //! 41-43 (§J `chunk_publications` write side — multi-introduction via
-//! `HistoryGraph::ancestor_most_introductions`, `ancestor_gate_sql`'s
-//! correlated `EXISTS`), PC52 (§N per-scope `--vector` profile-incompat
+//! `HistoryGraph::ancestor_most_introductions` and association-scoped
+//! publication filtering), PC52 (§N per-scope `--vector` profile-incompat
 //! exclusion, `VEC_PROFILE_INCOMPATIBLE_REASON`/`VEC_PROFILE_ABSENT_REASON`),
 //! and PC61-63 (§P rebuild-only HEAD-limited re-association, scoped to
 //! `rebuild_step3_index`'s own loop per `historical_reindex.rs`'s documented
@@ -27,13 +27,8 @@
 //! rebuild and purge triggers ARE wired — `build_sqlite_index_at`'s
 //! unconditional per-rebuild mint, PB28, and
 //! `rotate_index_generation_unconditionally` called from `purge.rs`),
-//! PC33/44 (`--all-history`/`--include-deleted` PER-BINDING introduction
-//! ancestor check — needs a per-binding ancestor predicate against each
-//! binding's own `pointer_commit`, not the single shared
-//! `kio_target_ancestors` `--at` installs; see the doc comment on the
-//! `TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted`
-//! relation prepared by `prepare_scope_from_replica_header` before the
-//! replica ranks candidates).
+//! PC44's per-binding introduction ancestry is covered by the history
+//! projection tests below together with the existing deleted-history suite.
 
 use std::fs;
 
@@ -947,8 +942,8 @@ fn pc34_head_unset_scope_is_index_rebuilding_not_generic_all_failed() {
 
 /// PC38/PC39 (05 §1.6 L266, the "回帰実証" regression this contract exists to
 /// pin down): a chunk introduced only at a *descendant* commit must not leak
-/// into a `--at <ancestor>` search — `chunks.first_seen_commit` is checked for
-/// ancestor-or-equal against the target commit, not merely `IS NOT NULL`.
+/// into a `--at <ancestor>` search — a `chunk_publications` introduction is
+/// checked for ancestor-or-equal against the target commit.
 #[test]
 fn pc38_pc39_at_excludes_chunks_introduced_only_at_a_descendant_commit() {
     let dir = tempfile::tempdir().unwrap();
@@ -1464,19 +1459,15 @@ fn pc37_chunk_publications_table_exists_and_is_populated_after_index() {
 }
 
 // ---------------------------------------------------------------------------
-// §H/§J — chunk_config_generations.introduction_commit (PC40)
+// §H/§J — creation association and publication authority separation (PC40)
 // ---------------------------------------------------------------------------
 
-/// PC40 (05 §1.6 L266): a fresh `chunk_config_generations` association is
-/// stamped with the commit at which it was created, and a no-op rebuild
-/// (`repair rebuild-db` with no source change) must NOT re-stamp an
-/// already-durable association's `introduction_commit` with a later HEAD —
-/// `record_chunk_config_association`'s existing-row branch leaves it
-/// untouched, and `index_chunk_with_rowids` reads it back from the durable
-/// `chunks.jsonl` record (`ChunkRow::chunking_config_introduction_commit`)
-/// rather than re-deriving "today's HEAD" on every replay.
+/// PC40: `chunk_config_generations` is immutable creation/order metadata for
+/// one `(chunk_id, config)` pair. Rebuilding preserves that pair and its
+/// durable rowid; historical introductions live only in
+/// `chunk_publications`.
 #[test]
-fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
+fn pc40_config_association_creation_is_stable_and_publication_is_separate() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), "# A\n\nconfigintroductiontoken\n").unwrap();
     init(&dir);
@@ -1485,41 +1476,115 @@ fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
         .unwrap()
         .to_owned();
 
-    let (chunk_id, introduction) = {
+    let before = {
         let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
         conn.query_row(
-            "SELECT chunk_id, introduction_commit FROM chunk_config_generations LIMIT 1",
+            "SELECT association_rowid, chunk_id, chunking_config_hash, created_at \
+             FROM chunk_config_generations LIMIT 1",
             [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .unwrap()
     };
-    assert_eq!(introduction, ca);
 
     success(&dir, &["repair", "rebuild-db"]);
     // Reopen: `repair rebuild-db` replaces sqlite.db via temp+rename (P5),
     // so a connection opened before this would keep reading the pre-rebuild
     // inode on POSIX rather than the freshly-published file.
-    let after: String = {
+    let after = {
         let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
         conn.query_row(
-            "SELECT introduction_commit FROM chunk_config_generations WHERE chunk_id = ?1",
-            [&chunk_id],
-            |row| row.get(0),
+            "SELECT association_rowid, chunk_id, chunking_config_hash, created_at \
+             FROM chunk_config_generations WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            rusqlite::params![&before.1, &before.2],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .unwrap()
     };
-    assert_eq!(
-        after, ca,
-        "an already-durable association's introduction_commit must never change"
-    );
+    assert_eq!(after, before);
+
+    let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+    let publication: String = conn
+        .query_row(
+            "SELECT introduction_commit FROM chunk_publications \
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            rusqlite::params![&after.1, &after.2],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(publication, ca);
+}
+
+#[test]
+fn pc40_publication_cannot_backdate_a_later_config_to_an_older_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\nconfigbindingattacktoken configbindingattacktoken\n",
+    )
+    .unwrap();
+    init(&dir);
+    let old_commit = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+    )
+    .unwrap();
+    let new_commit = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new_commit, old_commit);
+
+    let ledger = dir.path().join(".kio/index/chunks.jsonl");
+    let mut replaced = false;
+    let rewritten = fs::read_to_string(&ledger)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            if !replaced
+                && value["event"] == "publication"
+                && value["introduction_commit"] == new_commit
+            {
+                value["introduction_commit"] = Value::String(old_commit.clone());
+                replaced = true;
+            }
+            serde_json::to_string(&value).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(replaced, "the new config must have a publication event");
+    fs::write(&ledger, format!("{rewritten}\n")).unwrap();
+
+    let (code, error) = run(&dir, &["repair", "rebuild-db"]);
+    assert_ne!(code, 0, "{error}");
+    assert_eq!(error["error_code"], "KIO-E-STORE-CORRUPT-001", "{error}");
 }
 
 // ---------------------------------------------------------------------------
-// §F/§H — tree-scoped chunking_config_hash (PC22/PC23/PC31/PC32)
+// §F/§H — tree-scoped chunking_config_hash (PC22/PC23/PC31/PC33)
 // ---------------------------------------------------------------------------
 
-/// PC22/PC23/PC31/PC32 (05 §1.5 L200, §1.6 L237-239): `--at <commit>`
+/// PC22/PC23/PC31 (05 §1.5 L200, §1.6 L237-239): `--at <commit>`
 /// resolves the TARGET tree's own `chunking_config_hash`, not whatever
 /// config.toml currently says. Observed indirectly through chunk SHAPE
 /// (`searched_scopes[]` does not expose the hash itself — only the cursor
@@ -1528,7 +1593,7 @@ fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
 /// chunks. HEAD/bare search must see the re-split (new-config) chunks;
 /// `--at Ca` must keep resolving Ca's own pre-split (old-config) shape.
 #[test]
-fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
+fn pc22_pc23_pc31_at_uses_the_target_trees_config_not_current() {
     let dir = tempfile::tempdir().unwrap();
     let long_body = "atreeconfigtoken ".repeat(50);
     fs::write(dir.path().join("a.md"), format!("# A\n\n{long_body}\n")).unwrap();
@@ -1565,8 +1630,8 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
     // differs from the old one — not a same-hash no-op reindex. A second
     // file is ALSO added so HEAD genuinely advances past Ca (a config-only
     // change with no tracked-content change never advances HEAD at all,
-    // which would make "Ca" and "current HEAD" the same commit and give
-    // PC32's ancestor-or-equal fallback nothing to distinguish).
+    // which would make "Ca" and "current HEAD" the same commit and leave no
+    // distinct target-tree binding to verify).
     fs::write(
         dir.path().join(".kio/config.toml"),
         "[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
@@ -1605,6 +1670,52 @@ fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
         "--at Ca must keep resolving Ca's OWN (old-config, single-chunk) shape, \
          not HEAD's current (re-split) one: {at_ca_after}"
     );
+
+    // Switch back to A and create C3, then edit the mutable config back to B
+    // without publishing another snapshot. B is now an ancestor association
+    // of C3, so any "prefer live/any reaching association" heuristic chooses
+    // B incorrectly. Only C3's required tree field can select A.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 6000\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("c.md"), "# C\n\nadvance back to config A\n").unwrap();
+    let c3 = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
+    )
+    .unwrap();
+
+    let at_c3 = success(
+        &dir,
+        &[
+            "search",
+            "atreeconfigtoken",
+            "--at",
+            &c3,
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
+    );
+    assert_eq!(
+        chunk_hash_set(&at_c3),
+        chunks_before,
+        "A -> B -> A must resolve C3's explicit A tree binding even while config.toml says B: {at_c3}"
+    );
+
+    let pointer_json = serde_json::to_string(&at_c3["results"][0]["evidence_pointer"]).unwrap();
+    let verified = success(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(
+        verified["status"], "alive",
+        "Evidence verification must use the basis commit tree config, not mutable config.toml: {verified}"
+    );
 }
 
 fn chunk_hash_set(search: &Value) -> std::collections::BTreeSet<String> {
@@ -1616,6 +1727,70 @@ fn chunk_hash_set(search: &Value) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// PC33 (05 §1.6): one history query may contain bindings whose trees pin
+/// different chunking configurations. Each alias is filtered with its own
+/// pointer commit's tree hash; the HEAD tree's config is not a scope-wide
+/// substitute.
+#[test]
+fn pc33_history_selectors_use_each_binding_trees_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "perbindingconfigtoken ".repeat(40);
+    fs::write(dir.path().join("old.md"), format!("# Old\n\n{body}\n")).unwrap();
+    init(&dir);
+    let c1 = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let at_c1 = success(
+        &dir,
+        &[
+            "search",
+            "perbindingconfigtoken",
+            "--at",
+            &c1,
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
+    );
+    let old_chunks = chunk_hash_set(&at_c1);
+    assert_eq!(old_chunks.len(), 1, "fixture must begin under config A");
+
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
+    )
+    .unwrap();
+    fs::remove_file(dir.path().join("old.md")).unwrap();
+    fs::write(
+        dir.path().join("current.md"),
+        "# Current\n\nconfig B head\n",
+    )
+    .unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    for selector in ["--all-history", "--include-deleted"] {
+        let result = success(
+            &dir,
+            &[
+                "search",
+                "perbindingconfigtoken",
+                selector,
+                "--mode",
+                "text",
+                "--scope",
+                ".",
+            ],
+        );
+        assert_eq!(
+            chunk_hash_set(&result),
+            old_chunks,
+            "{selector} must retain C1's config-A binding under a config-B HEAD: {result}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §P — rebuild-only HEAD-limited re-association (PC61/PC62/PC63)
 // ---------------------------------------------------------------------------
@@ -1625,10 +1800,8 @@ fn chunk_hash_set(search: &Value) -> std::collections::BTreeSet<String> {
 /// a history-only identity (its file was deleted before the config changed)
 /// keeps its old association only (no wasted re-chunk/re-embed of content no
 /// live tree can reach), yet a `--at` search of the commit where it was
-/// still live still finds it via PC32's byte-order-min fallback over its one
-/// remaining (old-config) association — U145's re-chunk narrowing and U69's
-/// substitution rule must both hold at once, or historical search silently
-/// regresses.
+/// still live still finds it through that commit tree's exact old-config
+/// association. There is no live-value or association-order substitution.
 #[test]
 fn pc61_pc62_pc63_head_limited_reassociation_still_leaves_at_searchable() {
     let dir = tempfile::tempdir().unwrap();
@@ -1694,7 +1867,7 @@ fn pc61_pc62_pc63_head_limited_reassociation_still_leaves_at_searchable() {
     );
     assert!(
         !at_c1["results"].as_array().unwrap().is_empty(),
-        "PC32's fallback must still resolve b.md's only (old-config) association: {at_c1}"
+        "C1's tree-bound old-config association must remain searchable: {at_c1}"
     );
 }
 

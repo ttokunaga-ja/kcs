@@ -134,13 +134,10 @@ pub(super) struct RetainedNormalizedInstance {
     pub(super) normalize: NormalizeRef,
     pub(super) raw_path: String,
     pub(super) embedding_path: String,
-    pub(super) first_seen_commit: String,
     /// PC37/PC41/PC43 (05 §1.6 L265-266): every ancestor-most (mutually
     /// incomparable) introduction commit for this content identity, sorted by
-    /// full commit hash — `first_seen_commit` is always `introductions[0]`
-    /// (the deterministic byte-order-min winner already used for display /
-    /// the legacy single-valued column). A merge side-branch or independent
-    /// import produces more than one entry; the common case has exactly one.
+    /// full commit hash. A merge side-branch or independent import produces
+    /// more than one entry; the common case has exactly one.
     pub(super) introductions: Vec<String>,
 }
 
@@ -250,7 +247,8 @@ fn retained_history_instances_from_graph<'a>(
         // incomparable introduction commits for one content identity. Keep
         // every ancestor-most one (PC37/41/43's multi-introduction case);
         // the frozen full-hash byte order both breaks ties deterministically
-        // and gives `introductions[0]` as the legacy single-valued winner.
+        // and gives a deterministic representative only where a local
+        // non-authoritative path choice is needed.
         let mut ancestor_most = commits
             .iter()
             .filter(|candidate_commit| {
@@ -267,9 +265,9 @@ fn retained_history_instances_from_graph<'a>(
                 "retained normalized instance has no introduction",
             ));
         }
-        let first_seen_commit = ancestor_most[0].clone();
+        let representative_introduction_commit = ancestor_most[0].clone();
         let binding = binding_by_commit
-            .get(&first_seen_commit)
+            .get(&representative_introduction_commit)
             .cloned()
             .ok_or_else(|| {
                 KioError::schema("retained normalized instance winner has no binding")
@@ -301,7 +299,6 @@ fn retained_history_instances_from_graph<'a>(
             },
             raw_path: binding.path,
             embedding_path,
-            first_seen_commit,
             introductions: ancestor_most,
         });
     }
@@ -338,6 +335,11 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     // shallow, per-object, no-cache semantics as `search --at`.
     let snapshot = HistoryReader::new(repo.kio_dir()).snapshot(&selected_commit)?;
     let config = read_chunking_config(repo)?;
+    if config.chunking_config_hash != snapshot.tree.chunking_config_hash {
+        return Err(KioError::invalid_usage(
+            "historical reindex requires the current chunking configuration to match the selected tree",
+        ));
+    }
 
     let mut tree_entries = Vec::<TreeEntryRow>::with_capacity(snapshot.tree.entries.len());
     // The pinned manifest is part of the immutable selected identity. Two
@@ -423,7 +425,7 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     let existing = read_stored_chunks(repo.kio_dir())?;
     truncate_torn_chunk_tail(repo.kio_dir())?;
     // A chunk identity may already exist under an older config association. Its
-    // durable metadata (notably first_seen_commit/created_at/raw_path) must remain
+    // durable metadata (notably created_at/raw_path) must remain
     // byte-for-byte stable when we append only the new config association.
     let canonical_rows = existing
         .iter()
@@ -534,21 +536,10 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                 let current_config = row.chunking_config_hash;
                 row = canonical.clone();
                 row.chunking_config_hash = current_config;
-            } else {
-                // This is the first local materialization of the semantic chunk.
-                // The selected immutable commit is its historical witness.
-                row.first_seen_commit = Some(selected_commit.clone());
             }
-            // PC40 (05 §1.6 L266): if this specific (chunk_id, config) pair is
-            // genuinely new, its association is introduced now, at the
-            // explicit selected commit — this narrow, single-target-commit
-            // path's only possible introduction. `append_new_chunk_association`
-            // discards this row entirely when the pair already exists (its
-            // `known_associations` dedup), so an already-durable association's
-            // real, earlier `chunking_config_introduction_commit` is never
-            // overwritten by this line.
-            row.chunking_config_introduction_commit = selected_commit.clone();
-            append_new_chunk_association(
+            let chunk_id = row.chunk_id.clone();
+            let chunking_config_hash = row.chunking_config_hash.clone();
+            if append_new_chunk_association(
                 repo.kio_dir(),
                 row,
                 &mut known_associations,
@@ -556,10 +547,16 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
                 &mut next_rowid,
                 &mut next_association_rowid,
                 &mut appended,
-                &mut pending_publication_events,
                 &unit_authorities,
-                true,
-            )?;
+            )? != AssociationAppend::Blocked
+            {
+                pending_publication_events.push(crate::ChunkPublicationEvent {
+                    event: "publication".to_owned(),
+                    chunk_id,
+                    chunking_config_hash,
+                    introduction_commit: selected_commit.clone(),
+                });
+            }
         }
         projected_instances.push(instance.clone());
     }
@@ -573,7 +570,6 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
             normalize: instance.normalize,
             raw_path: instance.raw_path,
             embedding_path: instance.embedding_path,
-            first_seen_commit: selected_commit.clone(),
             // A targeted `--at <commit>` reindex has exactly one explicit
             // target commit, so its introduction is trivially single-valued
             // (no multi-introduction ambiguity like the general rebuild path).
@@ -594,8 +590,12 @@ pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool)
     // `online_confirmed = false`: `kio reindex` carries no same-invocation
     // `--yes`/`--approve`-equivalent confirming flag.
     let embedding_online = embedding_online_allowed(repo, offline, online, false)?;
-    let enrichment =
-        run_historical_embedding_enrichment(repo, embedding_online, &selected_instances)?;
+    let enrichment = run_historical_embedding_enrichment(
+        repo,
+        embedding_online,
+        &selected_instances,
+        &snapshot.tree.chunking_config_hash,
+    )?;
 
     // The invariant is checked after every derived write while the store lock is
     // still held. A violated ref invariant is store corruption, never success.
@@ -728,18 +728,7 @@ fn project_selected_snapshot(
             kio_index::fts::record_chunk_publication(
                 fts.connection(),
                 &chunk.row.chunk_id,
-                selected_commit,
-            )
-            .map_err(index_to_kio)?;
-            // The creation association keeps its explicit durable rowid; an
-            // additional historical publication gets a separate, derived
-            // rowid for its `(chunk, config, introduction)` triple.
-            kio_index::fts::record_chunk_config_association(
-                fts.connection(),
-                &chunk.row.chunk_id,
                 &chunk.row.chunking_config_hash,
-                &chunk.row.created_at,
-                None,
                 selected_commit,
             )
             .map_err(index_to_kio)?;
@@ -868,7 +857,8 @@ mod tests {
         } else {
             ".env"
         };
-        assert_eq!(instance.first_seen_commit, winning_root);
+        assert!(instance.introductions.contains(&winning_root));
+        assert_eq!(instance.introductions.len(), 2);
         assert_eq!(instance.raw_path, expected_raw_path);
         assert_eq!(instance.normalize.manifest_hash, normalize.manifest_hash);
         assert_eq!(

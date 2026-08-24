@@ -807,19 +807,29 @@ fn ct4_timetravel_015_historical_reindex_durably_publishes_existing_disconnected
         published_at_b, 1,
         "B publication must survive SQLite rebuild"
     );
-    let config_introduced_at_b: i64 = conn
+    let publication_count: i64 = conn
         .query_row(
-            "SELECT count(*) FROM chunk_config_generations \
-             WHERE chunk_id = ?1 \
-               AND chunking_config_hash = ?2 \
-               AND introduction_commit = ?3",
-            params![chunk_id, config_hash, b],
+            "SELECT count(*) FROM chunk_publications \
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            params![chunk_id, config_hash],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(
-        config_introduced_at_b, 1,
-        "B config association must survive SQLite rebuild"
+        publication_count, 2,
+        "the incomparable A and B publication introductions must both survive"
+    );
+    let association_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM chunk_config_generations \
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            params![chunk_id, config_hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        association_count, 1,
+        "creation association remains one pair"
     );
     drop(conn);
 
@@ -1502,12 +1512,12 @@ fn ct4_timetravel_006_cursor_rejects_write_through_visible_append() {
 }
 
 #[test]
-fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
+fn ct4_timetravel_011_historical_reindex_rejects_config_drift_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(
         dir.path().join("history.md"),
-        "# Historical selected\n\nhistoricalselectedmarker belongs only to C1. This paragraph is deliberately long so the smaller current chunk configuration creates fresh text spans and embeddings.\n",
+        "# Historical selected\n\nhistoricalselectedmarker belongs only to C1. This paragraph is deliberately long enough to produce a stable historical search result.\n",
     )
     .unwrap();
     let c1 = json_success_embed(&dir, &["index", "--approve"])["commit_hash"]
@@ -1517,7 +1527,7 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
 
     fs::write(
         dir.path().join("history.md"),
-        "# Current nonselected\n\ncurrentnonselectedmarker belongs only to C2. This paragraph is also deliberately long and must not receive the new current-config association from reindexing C1.\n",
+        "# Current nonselected\n\ncurrentnonselectedmarker belongs only to C2. This paragraph is also deliberately long and must retain its own tree-bound configuration.\n",
     )
     .unwrap();
     let c2 = json_success_embed(&dir, &["index", "--approve"])["commit_hash"]
@@ -1545,7 +1555,6 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
         .unwrap();
     let c1_raw = c1_entry.raw_hash.clone();
     let c2_raw = c2_entry.raw_hash.clone();
-    let c1_gen = c1_entry.normalize.as_ref().unwrap().r#gen;
     let head_before = fs::read(dir.path().join(".kio/HEAD")).unwrap();
     let branch_before = fs::read(dir.path().join(".kio/refs/heads/main")).unwrap();
 
@@ -1577,48 +1586,27 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
     assert_eq!(count_associations(&c1_raw), 0);
     assert_eq!(count_associations(&c2_raw), 0);
 
-    let output = json_success_embed(&dir, &["reindex", "--at", &c1]);
-    assert_eq!(output["status"], "reindexed");
-    assert_eq!(output["snapshot_at"], c1);
-    assert_eq!(output["head_commit"], c2);
-    assert!(output["rebuilt_chunks"].as_u64().unwrap() > 0);
-    assert!(output["embedding_tasks_executed"].as_u64().unwrap() > 0);
+    // A historical tree binds the exact config that created its associations.
+    // The hash alone is not a reversible descriptor for a different live
+    // config, and publishing freshly chunked rows under C1 would forge C1's
+    // tree/config provenance. Reject before touching either durable ledger or
+    // its SQLite projection.
+    let chunks_path = dir.path().join(".kio/index/chunks.jsonl");
+    let sqlite_path = dir.path().join(".kio/index/sqlite.db");
+    let chunks_before = fs::read(&chunks_path).unwrap();
+    let sqlite_before = fs::read(&sqlite_path).unwrap();
+    let output = json_failure(&dir, &["reindex", "--at", &c1], 2);
+    assert_eq!(output["error_code"], "KIO-E-CONFIG-USAGE-001");
+    assert_eq!(fs::read(&chunks_path).unwrap(), chunks_before);
+    assert_eq!(fs::read(&sqlite_path).unwrap(), sqlite_before);
 
     assert_eq!(fs::read(dir.path().join(".kio/HEAD")).unwrap(), head_before);
     assert_eq!(
         fs::read(dir.path().join(".kio/refs/heads/main")).unwrap(),
         branch_before
     );
-    assert!(count_associations(&c1_raw) > 0);
-    assert_eq!(
-        count_associations(&c2_raw),
-        0,
-        "historical reindex must not enrich non-selected history"
-    );
-
-    let conn = Connection::open(dir.path().join(".kio/index/sqlite.db")).unwrap();
-    let (selected_vectors, min_gen, max_gen): (i64, i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(e.id), MIN(c.gen), MAX(c.gen)
-               FROM chunks c
-               JOIN chunk_config_generations cg ON cg.chunk_id = c.chunk_id
-               LEFT JOIN embeddings e
-                 ON e.target_type = 'chunk' AND e.target_id = c.text_hash
-              WHERE c.raw_hash = ?1 AND cg.chunking_config_hash = ?2",
-            params![c1_raw, current_config],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert!(
-        selected_vectors > 0,
-        "selected current-config chunks need embeddings"
-    );
-    assert_eq!(min_gen, c1_gen as i64);
-    assert_eq!(
-        max_gen, c1_gen as i64,
-        "historical reindex must not bump gen"
-    );
-    drop(conn);
+    assert_eq!(count_associations(&c1_raw), 0);
+    assert_eq!(count_associations(&c2_raw), 0);
 
     let selected_search = json_success(
         &dir,
@@ -1645,10 +1633,7 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
             "text",
         ],
     );
-    assert!(
-        results(&nonselected_search).is_empty(),
-        "C2 must remain missing under the new config: {nonselected_search}"
-    );
+    assert!(!results(&nonselected_search).is_empty());
 
     let force_at = json_failure(&dir, &["reindex", "--regenerate", "--yes", "--at", &c1], 2);
     assert_eq!(force_at["error_code"], "KIO-E-CONFIG-USAGE-001");

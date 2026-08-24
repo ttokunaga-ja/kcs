@@ -48,12 +48,8 @@ pub fn default_chunking_config() -> Result<ChunkingConfig> {
 }
 
 pub fn chunking_config_hash(strategy: &str, max_chars: u64) -> Result<String> {
-    let value = json!({
-        "max_chars": max_chars,
-        "spec_version": 1,
-        "strategy": strategy,
-    });
-    hash_jcs(&value)
+    kio_core::dag::chunking_config_hash(strategy, max_chars)
+        .map_err(|error| IndexError::Contract(error.to_string()))
 }
 
 pub fn chunk_hash(row: &ChunkRow) -> Result<String> {
@@ -242,8 +238,6 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     byte_end: byte_end as u64,
                     text_hash: hash_bytes(text.as_bytes()),
                     text,
-                    first_seen_commit: None,
-                    chunking_config_introduction_commit: String::new(),
                     created_at: input.created_at.clone(),
                 };
                 row.chunk_id = chunk_hash(&row)?;
@@ -466,8 +460,6 @@ mod tests {
             byte_end: 1500,
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
-            first_seen_commit: None,
-            chunking_config_introduction_commit: String::new(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }
@@ -507,8 +499,6 @@ mod tests {
             byte_end: 600,
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
-            first_seen_commit: None,
-            chunking_config_introduction_commit: String::new(),
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
         let omitted = chunk_hash(&row).unwrap();

@@ -3367,40 +3367,9 @@ fn authenticated_history_roots(repo: &Repository, state: &mut State) -> Result<B
             continue;
         }
         let mut authenticated = false;
-        for creation in &creations {
-            let creation_introductions = [
-                creation.row.first_seen_commit.as_deref(),
-                (!creation.row.chunking_config_introduction_commit.is_empty())
-                    .then_some(creation.row.chunking_config_introduction_commit.as_str()),
-            ];
-            for introduction_commit in creation_introductions.into_iter().flatten() {
-                if introduction_commit != candidate {
-                    continue;
-                }
-                let event = ChunkPublicationEvent {
-                    event: "publication".to_owned(),
-                    chunk_id: creation.row.chunk_id.clone(),
-                    chunking_config_hash: creation.row.chunking_config_hash.clone(),
-                    introduction_commit: candidate.clone(),
-                };
-                match authenticate_publication_event_cached(
-                    repo,
-                    repo.kio_dir(),
-                    &event,
-                    creation,
-                    &mut authentication_cache,
-                ) {
-                    Ok(true) => authenticated = true,
-                    Ok(false) => {}
-                    Err(error) => state.finding(
-                        "chunk_publication_corrupt",
-                        &candidate,
-                        &error.to_string(),
-                        &[],
-                    ),
-                }
-            }
-        }
+        // Creation and config-association scalar fields are not publication
+        // authority. Only authenticated tagged publication events can retain
+        // a disconnected root.
         for event in events
             .iter()
             .filter(|event| event.introduction_commit == candidate)
@@ -4374,7 +4343,10 @@ fn recover_raw(path: &Path, expected_hash: &str, remaining_bytes: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kio_core::dag::{CommitStats, CommitType, TreeEntry};
+    use kio_core::dag::{
+        CommitStats, CommitType, DEFAULT_CHUNKING_MAX_CHARS, DEFAULT_CHUNKING_STRATEGY, TreeEntry,
+        chunking_config_hash,
+    };
     use kio_pipeline::markdownize::{
         MarkdownizeMode, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
     };
@@ -4732,6 +4704,11 @@ mod tests {
         let trees = BTreeMap::from([(
             bad_tree_hash.clone(),
             TreeObject {
+                chunking_config_hash: chunking_config_hash(
+                    DEFAULT_CHUNKING_STRATEGY,
+                    DEFAULT_CHUNKING_MAX_CHARS,
+                )
+                .unwrap(),
                 entries: vec![TreeEntry::raw_file("unrelated.txt", other_raw.clone()).unwrap()],
                 object_type: "tree".to_owned(),
             },
@@ -4767,6 +4744,11 @@ mod tests {
         trees_with_good.insert(
             good_tree_hash.clone(),
             TreeObject {
+                chunking_config_hash: chunking_config_hash(
+                    DEFAULT_CHUNKING_STRATEGY,
+                    DEFAULT_CHUNKING_MAX_CHARS,
+                )
+                .unwrap(),
                 entries: vec![TreeEntry::raw_file("resurrected.txt", target_raw.clone()).unwrap()],
                 object_type: "tree".to_owned(),
             },

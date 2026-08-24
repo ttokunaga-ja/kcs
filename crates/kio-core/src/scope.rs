@@ -23,7 +23,8 @@ use crate::cas::{
     append_jsonl, atomic_overwrite, atomic_write, canonical_json_bytes, is_hash,
 };
 use crate::dag::{
-    CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject, build_tree,
+    CommitObject, CommitStats, CommitType, DEFAULT_CHUNKING_MAX_CHARS, DEFAULT_CHUNKING_STRATEGY,
+    NormalizeRef, TreeEntry, TreeObject, build_tree_with_chunking_config, chunking_config_hash,
     is_materializable_direct_child,
 };
 use crate::error::{IoResultExt, KioError, Result};
@@ -738,6 +739,7 @@ impl Repository {
                 "archive max_file_bytes exceeds the raw CAS object limit",
             ));
         }
+        let chunking_config_hash = self.effective_chunking_config_hash()?;
 
         let candidates = self.working_file_candidates(
             excluded_paths,
@@ -762,6 +764,7 @@ impl Repository {
                 None,
                 None,
                 None,
+                &chunking_config_hash,
             );
         }
         let mut entries = Vec::new();
@@ -809,7 +812,7 @@ impl Repository {
             entries.push(tree_entry);
         }
         Ok(WorkingTree {
-            tree: build_tree(entries)?,
+            tree: build_tree_with_chunking_config(entries, chunking_config_hash)?,
         })
     }
 
@@ -823,6 +826,7 @@ impl Repository {
         expected_raw_by_path: Option<&BTreeMap<String, String>>,
         expected_direct_entries: Option<&BTreeSet<String>>,
         expected_snapshot_policy: Option<&SnapshotAutoBinding>,
+        chunking_config_hash: &str,
     ) -> Result<WorkingTree> {
         #[cfg(not(unix))]
         let _ = expected_snapshot_policy;
@@ -941,7 +945,7 @@ impl Repository {
                 entries.push(tree_entry);
             }
             return Ok(WorkingTree {
-                tree: build_tree(entries)?,
+                tree: build_tree_with_chunking_config(entries, chunking_config_hash.to_owned())?,
             });
         }
         // The caller holds `.kio/.lock`, so no live Kio writer can own an
@@ -1076,7 +1080,7 @@ impl Repository {
             entries.push(tree_entry);
         }
         Ok(WorkingTree {
-            tree: build_tree(entries)?,
+            tree: build_tree_with_chunking_config(entries, chunking_config_hash.to_owned())?,
         })
     }
 
@@ -1985,6 +1989,7 @@ impl Repository {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kio_dir)?;
         maybe_hold_lock_for_tests();
+        let chunking_config_hash = self.effective_chunking_config_hash()?;
 
         // Validate the base before archiving any working-tree bytes.  A normal
         // snapshot needs its parent tree to compute stats and write a coherent
@@ -2074,6 +2079,7 @@ impl Repository {
                 expected_raw_by_path,
                 expected_direct_entries,
                 expected_snapshot_policy,
+                &chunking_config_hash,
             )?
         }
         .tree;
@@ -2840,28 +2846,59 @@ impl Repository {
     /// `kio_format_version` is a `.kio/scope.json`-only concept. A config file
     /// carrying that retired key is rejected by the strict config schema.
     fn validate_config(&self) -> Result<()> {
+        self.validated_config_value()?;
+        Ok(())
+    }
+
+    fn validated_config_value(&self) -> Result<Value> {
         #[cfg(unix)]
-        let value = if let Some(kio) = self.bound_kio.as_deref() {
+        let text = if let Some(kio) = self.bound_kio.as_deref() {
             read_bound_regular_text_at(kio, "config.toml", MAX_BOUND_CONFIG_BYTES)?
         } else {
             let path = self.kio_dir.join("config.toml");
             fs::read_to_string(&path).kio_io(&path)?
         };
         #[cfg(not(unix))]
-        let value = {
+        let text = {
             let path = self.kio_dir.join("config.toml");
             fs::read_to_string(&path).kio_io(&path)?
         };
         let toml: toml::Value =
-            toml::from_str(&value).map_err(|err| KioError::schema(err.to_string()))?;
-        let json_value =
-            serde_json::to_value(&toml).map_err(|err| KioError::schema(err.to_string()))?;
-        validate_json_schema(SchemaKind::Config, &json_value)?;
+            toml::from_str(&text).map_err(|error| KioError::schema(error.to_string()))?;
+        let value =
+            serde_json::to_value(&toml).map_err(|error| KioError::schema(error.to_string()))?;
+        validate_json_schema(SchemaKind::Config, &value)?;
         // R12-2 / R12-1: reject documented-but-unwired values the schema can only
         // type-check (e.g. `allowed_scope != "."`) LOUDLY, so a scope config never
         // silently ignores a policy the user set.
-        enforce_config_semantics(&json_value)?;
-        Ok(())
+        enforce_config_semantics(&value)?;
+        Ok(value)
+    }
+
+    /// Read, validate, and freeze the chunking configuration used to construct
+    /// one tree. The returned hash is derived from the exact parsed
+    /// descriptor-bound `config.toml` bytes, never a later mutable lookup.
+    fn effective_chunking_config_hash(&self) -> Result<String> {
+        let value = self.validated_config_value()?;
+
+        let chunking = value.get("chunking").and_then(Value::as_object);
+        let strategy = chunking
+            .and_then(|chunking| chunking.get("strategy"))
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CHUNKING_STRATEGY);
+        let max_chars = match chunking.and_then(|chunking| chunking.get("max_chars")) {
+            None => DEFAULT_CHUNKING_MAX_CHARS,
+            Some(number) => number
+                .as_u64()
+                .filter(|value| *value > 0)
+                .and_then(|value| usize::try_from(value).ok().map(|_| value))
+                .ok_or_else(|| {
+                    KioError::schema(
+                        "chunking.max_chars must be a positive integer representable on this platform",
+                    )
+                })?,
+        };
+        chunking_config_hash(strategy, max_chars)
     }
 
     fn validate_scope(&self) -> Result<()> {
@@ -7336,6 +7373,53 @@ mod tests {
 
         let error = Repository::open(scope.path()).unwrap_err();
         assert_eq!(error.error_code(), "KIO-E-CONFIG-SCHEMA-001");
+    }
+
+    #[test]
+    fn working_tree_pins_the_validated_chunking_config() {
+        let scope = tempfile::tempdir().unwrap();
+        let repo = Repository::init(scope.path()).unwrap();
+        fs::write(scope.path().join("note.md"), b"body").unwrap();
+
+        let default_tree = repo.build_working_tree(false).unwrap().tree;
+        assert_eq!(
+            default_tree.chunking_config_hash,
+            super::chunking_config_hash("heading", 6_000).unwrap()
+        );
+
+        fs::write(
+            repo.kio_dir().join("config.toml"),
+            "[chunking]\nstrategy = \"heading\"\nmax_chars = 40\n",
+        )
+        .unwrap();
+        let configured_tree = repo.build_working_tree(false).unwrap().tree;
+        assert_eq!(
+            configured_tree.chunking_config_hash,
+            super::chunking_config_hash("heading", 40).unwrap()
+        );
+        assert_ne!(
+            configured_tree.chunking_config_hash,
+            default_tree.chunking_config_hash
+        );
+
+        fs::write(
+            repo.kio_dir().join("config.toml"),
+            "[chunking]\nmax_chars = 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.build_working_tree(false).unwrap_err().error_code(),
+            "KIO-E-CONFIG-SCHEMA-001"
+        );
+        fs::write(
+            repo.kio_dir().join("config.toml"),
+            "[chunking]\nmax_chars = \"40\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.build_working_tree(false).unwrap_err().error_code(),
+            "KIO-E-CONFIG-SCHEMA-001"
+        );
     }
 
     #[test]

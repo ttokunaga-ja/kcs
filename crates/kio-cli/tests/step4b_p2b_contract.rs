@@ -949,11 +949,11 @@ fn pb15_prune_orphans_blocked_by_active_purge_journal() {
 // §G — SQLite schema-change regression locks (U45).
 // ===========================================================================
 
-/// PB20: a legacy derived schema is rejected before Kio can create, alter, or
+/// PB20: a non-current derived schema is rejected before Kio can create, alter, or
 /// rebuild any SQLite object. The bytes are the contract: the operator must
 /// choose `kio repair rebuild-db`, not receive a silent in-place migration.
 #[test]
-fn pb20_legacy_sqlite_is_fail_closed_without_mutation() {
+fn pb20_incompatible_sqlite_schema_is_fail_closed_without_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sqlite.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -971,7 +971,7 @@ fn pb20_legacy_sqlite_is_fail_closed_without_mutation() {
         },
     )
     .err()
-    .expect("legacy schema must fail closed");
+    .expect("non-current schema must fail closed");
     assert!(error.to_string().contains("kio repair rebuild-db"));
     assert_eq!(fs::read(&path).unwrap(), before);
 }
@@ -1342,21 +1342,25 @@ fn pb45_historical_reindex_reads_the_pinned_manifest_not_the_working_copy() {
     // retry can leave it.
     let commit = successor_with_failed_pinned_manifest(&dir, &pointer);
 
-    // A changed chunking config is what gives `reindex --at` real work: it
-    // appends the missing current-config associations. Without the pinned
-    // manifest the units all read `done` from the working copy and chunks would
-    // be appended under `commit`.
-    fs::write(
-        kio_dir(&dir).join("config.toml"),
-        "[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
-    )
-    .unwrap();
+    let chunks_path = kio_dir(&dir).join("index/chunks.jsonl");
+    let publication_for_commit = || {
+        fs::read_to_string(&chunks_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|row| row["event"] == "publication" && row["introduction_commit"] == commit)
+    };
+    assert!(!publication_for_commit());
 
     let reindex = success(&dir, &["reindex", "--at", &commit]);
     assert_eq!(
         reindex["rebuilt_chunks"], 0,
         "a unit the pinned manifest calls unfinished must not be chunked into \
          this commit: {reindex}"
+    );
+    assert!(
+        !publication_for_commit(),
+        "working-copy Done units must not mint publication authority for the pinned Failed manifest"
     );
 }
 
