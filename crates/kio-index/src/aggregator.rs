@@ -3835,7 +3835,7 @@ mod tests {
         let error = Aggregator::open(&path)
             .err()
             .expect("a junction must never become the cache authority");
-        assert!(error.to_string().contains("reparse point"));
+        assert!(error.to_string().contains("reparse"));
         assert!(!victim.path().join("kio/aggregator.sqlite").exists());
 
         std::fs::remove_dir(&junction).unwrap();

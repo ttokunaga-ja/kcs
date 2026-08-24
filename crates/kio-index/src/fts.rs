@@ -1611,19 +1611,27 @@ pub fn rotate_bound_gc_index_generation(
     expected_current: Option<(&str, &str)>,
     config: &FtsSchemaConfig,
 ) -> Result<Option<BoundGcIndexMetadata>> {
-    let index = cap_fs::open_dir_nofollow(kio_dir, Path::new("index")).map_err(|error| {
-        IndexError::Schema(format!(
-            "open GC index directory below retained capability: {error}"
-        ))
-    })?;
-    rotate_bound_gc_index_leaf(
-        &index,
-        "sqlite.db",
-        generation,
-        expected_current,
-        None,
-        config,
-    )
+    #[cfg(not(unix))]
+    {
+        let _ = (kio_dir, generation, expected_current, config);
+        return unsupported_bound_gc_index_rotation();
+    }
+    #[cfg(unix)]
+    {
+        let index = cap_fs::open_dir_nofollow(kio_dir, Path::new("index")).map_err(|error| {
+            IndexError::Schema(format!(
+                "open GC index directory below retained capability: {error}"
+            ))
+        })?;
+        rotate_bound_gc_index_leaf(
+            &index,
+            "sqlite.db",
+            generation,
+            expected_current,
+            None,
+            config,
+        )
+    }
 }
 
 fn rotate_bound_gc_index_leaf(
@@ -1880,31 +1888,39 @@ fn open_bound_gc_index(
     writable: bool,
 ) -> Result<Option<(BoundSourceIndex, Connection)>> {
     // The Unix descriptor VFS below makes SQLite open the exact retained
-    // primary-file descriptor.  On Windows rusqlite currently accepts only a
-    // pathname here; retaining a no-share-delete file handle is not enough to
-    // prove that SQLite adopted that same handle.  Refuse GC rotation rather
-    // than silently re-opening `index/sqlite.db` through the ambient cwd.
-    #[cfg(windows)]
+    // primary-file descriptor. On non-Unix targets rusqlite only accepts a
+    // pathname here; retaining a separate file handle is not enough to prove
+    // that SQLite adopted that same handle. Refuse GC rotation rather than
+    // silently re-opening `index/sqlite.db` through the ambient cwd.
+    #[cfg(not(unix))]
     {
         let _ = (kio_dir, config, writable);
-        return Err(IndexError::Schema(
-            "capability-bound GC SQLite rotation is unsupported on Windows".to_owned(),
-        ));
+        return unsupported_bound_gc_index_rotation();
     }
-    crate::vec::ensure_registered();
-    let root = kio_dir
-        .try_clone()
-        .map_err(|e| IndexError::Schema(format!("retain GC .kio capability: {e}")))?;
-    let parent = match cap_fs::open_dir_nofollow(&root, Path::new("index")) {
-        Ok(parent) => parent,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(IndexError::Schema(format!(
-                "open GC index directory below retained capability: {error}"
-            )));
-        }
-    };
-    open_bound_gc_index_leaf(&parent, "sqlite.db", config, writable)
+    #[cfg(unix)]
+    {
+        crate::vec::ensure_registered();
+        let root = kio_dir
+            .try_clone()
+            .map_err(|e| IndexError::Schema(format!("retain GC .kio capability: {e}")))?;
+        let parent = match cap_fs::open_dir_nofollow(&root, Path::new("index")) {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(IndexError::Schema(format!(
+                    "open GC index directory below retained capability: {error}"
+                )));
+            }
+        };
+        open_bound_gc_index_leaf(&parent, "sqlite.db", config, writable)
+    }
+}
+
+#[cfg(not(unix))]
+fn unsupported_bound_gc_index_rotation<T>() -> Result<T> {
+    Err(IndexError::Schema(
+        "capability-bound GC SQLite rotation is unsupported on this platform".to_owned(),
+    ))
 }
 
 fn open_bound_gc_index_leaf(
@@ -4014,6 +4030,44 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bound_gc_rotation_is_unsupported_without_touching_retained_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let kio = directory.path().join(".kio");
+        let index = kio.join("index");
+        std::fs::create_dir_all(&index).unwrap();
+        let path = index.join("sqlite.db");
+        let config = FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        };
+        drop(SqliteFtsIndex::open(&path, config.clone()).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        ensure_index_metadata(&conn, "01J00000000000000000000000", 7).unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let kio_handle = cap_fs::open_ambient_dir(&kio, cap_primitives::ambient_authority())
+            .expect("open retained .kio test capability");
+
+        let error = rotate_bound_gc_index_generation(
+            &kio_handle,
+            "01J00000000000000000000001",
+            None,
+            &config,
+        )
+        .expect_err("Windows must fail closed before attempting retained GC rotation");
+        assert_eq!(
+            error.to_string(),
+            "index schema error: capability-bound GC SQLite rotation is unsupported on this platform"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let conn = Connection::open(&path).unwrap();
+        let metadata = read_index_metadata(&conn).unwrap().unwrap();
+        assert_eq!(metadata.index_generation, "01J00000000000000000000000");
+        assert_eq!(metadata.last_lifecycle_epoch, 7);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn bound_gc_rotation_stays_on_retained_kio_capability_and_reports_missing() {
         let directory = tempfile::tempdir().unwrap();
@@ -4064,6 +4118,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn bound_gc_rotation_rejects_an_unexpected_initial_generation_without_writing() {
         let directory = tempfile::tempdir().unwrap();
@@ -4321,6 +4376,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bound_source_leaf_blocks_rename_and_delete_until_connection_drops() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sqlite.db");
         let config = FtsSchemaConfig {
@@ -4331,10 +4388,16 @@ mod tests {
 
         let rename_error = std::fs::rename(&path, &moved)
             .expect_err("the retained no-delete-share leaf must block rename");
-        assert_eq!(rename_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            rename_error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
         let delete_error = std::fs::remove_file(&path)
             .expect_err("the retained no-delete-share leaf must block deletion");
-        assert_eq!(delete_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            delete_error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
 
         drop(index);
         std::fs::rename(&path, &moved)
