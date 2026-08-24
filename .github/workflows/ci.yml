@@ -196,9 +196,10 @@ jobs:
 
   windows-security-r23:
     runs-on: windows-latest
-    # Attempt 1 stopped at compile time (01:45), so successful runtime remains
-    # unknown. Use the workflow target itself rather than treating unknown as 0.
-    timeout-minutes: 45
+    # Run 32740699426 reached step4b_selfheal_contract at 44:39; matching
+    # Linux/macOS logs show another 17:37-25:00 of ordered suite work remained.
+    # Keep a finite cap with enough margin to finish the measured Windows lane.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v7
