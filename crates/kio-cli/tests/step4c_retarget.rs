@@ -296,12 +296,30 @@ fn retarget_ignores_forged_optional_heading_but_requires_exact_at() {
     latest.code(2);
 
     let oversized = "x".repeat(64 * 1024 + 1);
+    #[cfg(not(windows))]
     failure(
         &dir,
         &["evidence", "retarget", &oversized, "--at", &target],
         2,
         "KIO-E-CONFIG-USAGE-001",
     );
+    #[cfg(windows)]
+    {
+        let output = kio(&dir, &["evidence", "retarget", "-", "--at", &target])
+            .arg("--json")
+            .write_stdin(oversized)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(
+            output.stdout.is_empty(),
+            "retarget must not publish partial stdout on failure: {output:?}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stderr).unwrap()["error_code"],
+            "KIO-E-CONFIG-USAGE-001"
+        );
+    }
 }
 
 #[test]
