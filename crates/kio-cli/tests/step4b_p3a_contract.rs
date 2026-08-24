@@ -37,6 +37,7 @@ use kio_core::scope::{
     Repository, network_approvals_initialized, publish_network_approval, revoke_network_approval,
     tier_a_template_text, write_network_approval_pending,
 };
+use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_pipeline::scan::TIER_B_NEEDLES;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -101,6 +102,10 @@ fn init(dir: &TempDir) {
 
 fn scope_json(dir: &TempDir) -> Value {
     serde_json::from_str(&fs::read_to_string(dir.path().join(".kio/scope.json")).unwrap()).unwrap()
+}
+
+fn registry_path(dir: &TempDir) -> std::path::PathBuf {
+    dir.path().join(".test-data/kio/scope-registry.sqlite")
 }
 
 // ===========================================================================
@@ -846,23 +851,28 @@ fn make_registry_duplicate(dir_a: &TempDir, scope_id: &str) -> TempDir {
     let mut value: Value = serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
     value["scope_id"] = json!(scope_id);
     fs::write(&scope_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-    // XDG_DATA_HOME is per-TempDir (dir_a/dir_b each have their own
-    // `.test-data`), but the scope-registry is keyed by `XDG_DATA_HOME`, so
-    // point dir_b's registry writes (`index`) at dir_a's data home to make
-    // the two `.kio` clones share one live registry (mirrors
-    // step4b_p3b_contract.rs's `make_registry_duplicate`).
-    let mut command = Command::cargo_bin("kio").unwrap();
-    for name in KIO_CHILD_ENV_DENYLIST {
-        command.env_remove(name);
-    }
-    command
-        .current_dir(dir_b.path())
-        .env("XDG_CONFIG_HOME", dir_a.path().join(".test-config"))
-        .env("XDG_DATA_HOME", dir_a.path().join(".test-data"))
-        .env("XDG_CACHE_HOME", dir_a.path().join(".test-cache"))
-        .args(["index", "--offline", "--approve"])
-        .assert()
-        .success();
+
+    let registry = RegistryDb::open(registry_path(dir_a)).unwrap();
+    registry
+        .upsert(&RegistryEntry {
+            scope_id: scope_id.to_owned(),
+            kio_path: dir_a.path().join(".kio").display().to_string(),
+            root_path: dir_a.path().display().to_string(),
+            participates_in_global_search: true,
+            indexed: true,
+            last_seen_at: "2020-01-01T00:00:00Z".to_owned(),
+        })
+        .unwrap();
+    registry
+        .upsert(&RegistryEntry {
+            scope_id: scope_id.to_owned(),
+            kio_path: dir_b.path().join(".kio").display().to_string(),
+            root_path: dir_b.path().display().to_string(),
+            participates_in_global_search: true,
+            indexed: true,
+            last_seen_at: "2099-01-01T00:00:00Z".to_owned(),
+        })
+        .unwrap();
     dir_b
 }
 
