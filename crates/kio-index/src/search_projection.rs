@@ -26,9 +26,10 @@
 //! | inside an inline code span | 16 |
 //! | plain body text | 23 |
 //!
-//! 416 of the fenced ones are in `eval/fixtures/normalized-corpus/`, which is
-//! the corpus the eval suite actually indexes and searches. A blanket unescape
-//! would rewrite 455 sequences of genuine code — `find … -exec … \;`,
+//! 416 of the fenced ones were measured in the retained, non-authorizing paid
+//! OCR archive at `eval/fixtures/normalized-corpus/`. That archive supplied the
+//! frozen regression examples but is not a current evaluator manifest input.
+//! A blanket unescape would rewrite 455 sequences of genuine code — `find … -exec … \;`,
 //! `\(\s*\)`, `AppData\Local\Temp`, JSON `\"` — to repair 23. Inside code a
 //! backslash is not an escape and a reader sees it, so the projection keeps it.
 //!

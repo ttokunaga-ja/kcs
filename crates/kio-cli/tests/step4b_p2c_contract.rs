@@ -2296,9 +2296,10 @@ fn f3_escaped_punctuation_is_findable_by_the_plain_query_and_shown_unescaped() {
 /// The other half of F3, and the reason the projection exempts code instead of
 /// unescaping everything: inside a fence a backslash is content, not escaping.
 /// Counted across this repository's tracked Markdown, 439 of the 478
-/// `\`-before-punctuation sequences are inside fences (416 of those in
-/// `eval/fixtures/normalized-corpus/`, the corpus the eval suite searches), so
-/// a blanket unescape would rewrite the corpus to repair 23 body-text escapes.
+/// `\`-before-punctuation sequences are inside fences (416 of those in the
+/// retained non-authorizing `eval/fixtures/normalized-corpus/` archive), so a
+/// blanket unescape would rewrite genuine archived code to repair 23 body-text
+/// escapes. The runtime vector below carries the same distinct behavior signal.
 #[test]
 fn f3_fenced_code_keeps_the_backslashes_the_corpus_actually_contains() {
     let dir = tempfile::tempdir().unwrap();

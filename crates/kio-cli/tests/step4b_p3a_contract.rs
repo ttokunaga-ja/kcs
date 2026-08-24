@@ -10,7 +10,7 @@
 //! covered by inline `#[cfg(test)]` unit tests in `kio-pipeline`/`kio-adapter`
 //! instead of duplicated here — this file covers the CLI-process-level
 //! wiring: config/schema behavior, `kio status`/`kio index` end-to-end
-//! effects, and cross-crate structural checks that need a real build tree.
+//! effects, and cross-crate behavior/type boundaries that need a real build.
 //!
 //! Coverage is partial by design: several QA items (§E QA14/15 cost-ledger
 //! backup/restore/orphan detection, §O Batch trait, §Q streaming, §U Batch
@@ -26,7 +26,6 @@
 //! the CLI-to-Adapter-boundary wiring).
 
 use std::fs;
-use std::path::Path;
 
 use assert_cmd::Command;
 use kio_adapter::bbox_annotation::mistral_markdownize_profile;
@@ -766,55 +765,6 @@ fn qa35_tool_lock_hash_ignores_capabilities_and_mode() {
         tool_lock_hash(&base).unwrap(),
         tool_lock_hash(&changed).unwrap()
     );
-}
-
-// ===========================================================================
-// §N SQL 正本 regression-lock (U88/U89/U90, QA51)
-// ===========================================================================
-
-/// QA51 [regression-lock]: the `embeddings`/`chunk_vec` SQLite schema's
-/// single source of truth is `kio-index` (04-pipeline.md §4.3) — no
-/// duplicate `CREATE TABLE` for either name exists under `kio-adapter/src`.
-#[test]
-fn qa51_embeddings_and_chunk_vec_ddl_has_no_duplicate_in_kio_adapter() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let adapter_src = manifest_dir
-        .parent()
-        .unwrap()
-        .join("kio-adapter")
-        .join("src");
-    let mut offenders = Vec::new();
-    for entry in walk_rs_files(&adapter_src) {
-        let text = fs::read_to_string(&entry).unwrap();
-        if text.contains("CREATE TABLE")
-            && (text.contains("embeddings") || text.contains("chunk_vec"))
-        {
-            offenders.push(entry);
-        }
-    }
-    assert!(
-        offenders.is_empty(),
-        "embeddings/chunk_vec DDL must live only in kio-index (04 §4.3): {offenders:?}"
-    );
-}
-
-fn walk_rs_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                out.push(path);
-            }
-        }
-    }
-    out
 }
 
 // ===========================================================================

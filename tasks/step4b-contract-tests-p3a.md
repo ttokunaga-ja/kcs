@@ -922,16 +922,14 @@
   現状 (タスク間並列も未実装) が spec 違反かどうかを断定しない — 少なくとも「単一タスク内
   直列」は現状で満たされていることのみを regression-lock として固定する。
 
-### QA51 [regression-lock] embeddings/chunk_vec の SQL 正本は既に 04-pipeline.md §4.3 に一本化されている [P2]
+### QA51 embeddings/chunk_vec SQL authority の重複テストは統合済み [P2]
 - 正本: 07 §5.3 L464-466『embedding の SQLite schema (embeddings/chunk_vec) の正本は
   04-pipeline.md §4.3 とする...SQL 定義の重複記載は 2026-07-14 に解消し、本節から参照する』
-- 前提: `embeddings`/`chunk_vec` の `CREATE TABLE` は `crates/kio-index/src/fts.rs` にのみ存在し、
-  `crates/kio-adapter/` 側には重複定義が無い（historical inventory 記載の「適合済みの可能性」を本書作成時に
-  再確認済み)。
-- 操作: `crates/kio-adapter/src/` 全体で `CREATE TABLE.*embeddings\|CREATE TABLE.*chunk_vec` を
-  grep する。
-- 期待: 0 件 (SQL 定義が `kio-index` 側に一本化されている)。現行は既に満たしている —
-  regression-lock として固定する。
+- 判定: production Rust source を走査して `CREATE TABLE` 文字列の不在を固定する旧テストは、
+  リファクタリングで壊れる一方で runtime failure を検出する固有 signal を持たないため削除した。
+- 現行 coverage: `step4b_p3b_contract::qb31_chunk_fts_and_chunk_vec_schema_is_executable`が実際に
+  index DB を生成し、`embeddings`/`chunk_vec`を含む現行 schema を SQLite に実行・照合する。
+  authority は public schema behavior で検査し、module 内の SQL 文字列の個数や配置はテスト契約にしない。
 
 ---
 
@@ -1350,5 +1348,5 @@
 P2=8、目安 50-70 をやや超過するが、内 10 件は regression-lock (新規実装ではなく現状固定) であり
 実質的な新規ギャップ契約は 61 件)。
 **解釈割れ注記**: 8 件 (§V)。**regression-lock (現状固定・回帰防止のみ)**: QA28, QA32, QA35, QA43,
-QA51, QA57, QA61 (部分), QA62, QA65, QA68 = 10 件（historical inventory の「適合済みの可能性」再精査により
+QA57, QA61 (部分), QA62, QA65, QA68 = 9 件（QA51 は runtime schema coverage へ統合。historical inventory の「適合済みの可能性」再精査により
 U84・U90・一部 U81/U83/U86/U92/U94/U143 を契約 1 本ずつに圧縮する方針を確定)。

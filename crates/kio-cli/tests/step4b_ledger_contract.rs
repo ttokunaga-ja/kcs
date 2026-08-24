@@ -2923,7 +2923,7 @@ fn cl64_abandon_cli_confirmation_records_estimated_charge_and_terminal_state() {
 }
 
 // ---------------------------------------------------------------------------
-// §K — cross-cutting (CL69, CL70; CL71 is the rename-grep scan below)
+// §K — cross-cutting (CL69, CL70; CL71 is covered by runtime rejection)
 // ---------------------------------------------------------------------------
 
 /// CL69: a CHECK violation that bypasses this module's own pre-validation
@@ -2982,61 +2982,6 @@ fn cl70_device_global_path_and_wal_busy_timeout() {
         .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
         .unwrap();
     assert!(timeout > 0);
-}
-
-/// CL71: the retired JSONL ledger names must appear only in the fail-closed
-/// detector and this regression test.
-///
-/// 2026-07-21: the JSONL rip-out is complete — `budget::CostLedger`/
-/// `ReservationLedger` (the old JSONL read-write path) and every one of their
-/// ~40 call sites across `main.rs` (F8 reservation/charge flow), plus
-/// `purge.rs`'s reservation-close call site, are retired in favor of
-/// `kio_pipeline::ledger` (`cost-ledger.sqlite`). `budget.rs` now holds only
-/// the ledger-storage-independent config/decision pieces. This contract is no
-/// longer `#[ignore]`d — it is a live regression guard from here on.
-#[test]
-fn cl71_legacy_jsonl_names_are_limited_to_rejection_detector_and_tests() {
-    let legacy_names = [
-        "cost-ledger.jsonl",
-        "cost-ledger-reservations.jsonl",
-        "cost-ledger-reclaimed.jsonl",
-        "cost-ledger.lock",
-        "cost-ledger.jsonl.migrated",
-        "cost-ledger-reservations.jsonl.migrated",
-        "cost-ledger-reclaimed.jsonl.migrated",
-        "cost-ledger.lock.migrated",
-    ];
-    // The rejection detector must retain the names in order to preserve the old
-    // files byte-for-byte and report them. This test references them for the same
-    // reason; no migration path may retain them.
-    let allowed_files = [
-        "ledger/schema.rs",
-        "kio-cli/tests/step4b_ledger_contract.rs",
-    ];
-    let crates_dir = workspace_root().join("crates");
-    let mut offending = Vec::new();
-    walk_rust_files(&crates_dir, &mut |path, contents| {
-        let relative = path
-            .strip_prefix(&crates_dir)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if allowed_files
-            .iter()
-            .any(|allowed| relative.ends_with(allowed))
-        {
-            return;
-        }
-        for name in legacy_names {
-            if contents.contains(name) {
-                offending.push(format!("{relative}: {name}"));
-            }
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "legacy JSONL ledger names must not appear outside the rejection detector/test: {offending:?}"
-    );
 }
 
 #[test]
@@ -3249,34 +3194,6 @@ fn legacy_rejection_does_not_change_existing_sqlite_bytes_or_rows() {
         .query_row("SELECT COUNT(*) FROM batch_requests", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1, "legacy rejection must not change existing rows");
-}
-
-fn workspace_root() -> PathBuf {
-    // `CARGO_MANIFEST_DIR` for this test crate is `<repo>/crates/kio-cli`.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("workspace root is two levels up from crates/kio-cli")
-        .to_path_buf()
-}
-
-fn walk_rust_files(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path, &str)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().and_then(|name| name.to_str()) == Some("target") {
-                continue;
-            }
-            walk_rust_files(&path, visit);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-            && let Ok(contents) = std::fs::read_to_string(&path)
-        {
-            visit(&path, &contents);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

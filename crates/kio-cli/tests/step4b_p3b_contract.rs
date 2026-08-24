@@ -41,7 +41,7 @@ use std::str::FromStr;
 use assert_cmd::Command;
 use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
-use kio_core::scope::Repository;
+use kio_core::scope::{Repository, StoreLock};
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -80,6 +80,21 @@ fn success(dir: &TempDir, args: &[&str]) -> Value {
 /// failure (matches `step4b_p2c_contract.rs`'s `run`).
 fn run(dir: &TempDir, args: &[&str]) -> (i32, Value) {
     let output = kio(dir, args).arg("--json").output().unwrap();
+    let code = output.status.code().unwrap();
+    let stream: &[u8] = if !output.stdout.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    (code, serde_json::from_slice(stream).unwrap())
+}
+
+fn run_with_env(dir: &TempDir, args: &[&str], key: &str, value: &str) -> (i32, Value) {
+    let output = kio(dir, args)
+        .env(key, value)
+        .arg("--json")
+        .output()
+        .unwrap();
     let code = output.status.code().unwrap();
     let stream: &[u8] = if !output.stdout.is_empty() {
         &output.stdout
@@ -294,34 +309,35 @@ fn qb2_success_exit_is_independent_of_error_code_value() {
         "expected a non-null degrade error_code, got {value}"
     );
     assert_eq!(value["error_code"], "KIO-E-SEARCH-VEC-UNAVAIL-001");
-
-    // Structural half of the claim: `take_exit_override` is the ONE place
-    // that turns a success payload into a non-zero exit, and it reads only
-    // the private `__exit_code` marker — never `error_code`.
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
-    let take_exit_override = source
-        .split("fn take_exit_override")
-        .nth(1)
-        .and_then(|rest| rest.split("\n}\n").next())
-        .expect("take_exit_override body");
-    assert!(
-        !take_exit_override.contains("\"error_code\""),
-        "take_exit_override must not branch on error_code"
-    );
 }
 
 /// QB3(a) [regression-lock]: a non-multimodal embedding profile is rejected
 /// at tool-lock materialize time with `KIO-E-EMBED-MODALITY-001` / exit 2.
 #[test]
 fn qb3a_non_multimodal_embedding_profile_rejected_exit_2() {
-    let source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-adapter/src/tool_lock.rs"
-    ))
-    .unwrap();
+    use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.md"), "# document\n").unwrap();
+    success(&dir, &["init"]);
+    let tool_lock_path = kio_dir(&dir).join("tool-lock.json");
+    let tool_lock_before = fs::read(&tool_lock_path).unwrap();
+    let (code, error) = run_with_env(
+        &dir,
+        &["index", "--approve"],
+        TEST_ADOPTED_EMBEDDING_ENV,
+        "non_multimodal",
+    );
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["error_code"], "KIO-E-EMBED-MODALITY-001");
+    assert_eq!(
+        fs::read(&tool_lock_path).unwrap(),
+        tool_lock_before,
+        "rejected materialization must not replace the existing tool lock"
+    );
     assert!(
-        source.contains("KIO-E-EMBED-MODALITY-001"),
-        "tool_lock.rs must still reject non-multimodal profiles"
+        !kio_dir(&dir).join("index/sqlite.db").exists(),
+        "rejected materialization must not publish an index"
     );
 }
 
@@ -330,13 +346,51 @@ fn qb3a_non_multimodal_embedding_profile_rejected_exit_2() {
 /// values.
 #[test]
 fn qb3b_fallback_reason_is_open_vocabulary_string() {
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.md"), "# document\n").unwrap();
+    success(&dir, &["init"]);
+    kio(&dir, &["index", "--approve"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    let tasks_path = kio_dir(&dir).join("tasks.jsonl");
+    let arbitrary = "provider_defined/fallback:v2026-08";
+    let mut rows = fs::read_to_string(&tasks_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
     assert!(
-        source.contains("fallback_reason"),
-        "fallback_reason field must exist"
+        !rows.is_empty(),
+        "mock embedding index must create task rows"
     );
-    // No enum type named after fallback_reason exists to constrain it.
-    assert!(!source.contains("enum FallbackReason"));
+    let selected = rows
+        .iter()
+        .position(|row| row["type"] == "embedding")
+        .expect("mock embedding index must create an embedding task row");
+    rows[selected]["fallback_reason"] = Value::String(arbitrary.to_owned());
+    fs::write(
+        &tasks_path,
+        rows.iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let status = success(&dir, &["status"]);
+    assert!(
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["fallback_reason"] == arbitrary),
+        "status must preserve an arbitrary provider-defined fallback_reason: {status}"
+    );
 }
 
 /// QB3(c) [regression-lock]: config schema validation failures always report
@@ -546,154 +600,45 @@ fn qb9_new_version_store_write_command_rejects_with_zero_writes() {
 // §B — L 領域 (QB10-QB24)
 // ===========================================================================
 
-/// QB11 [regression-lock, structural]: `.kio/.lock` (`repo.lock_store()`) is
-/// acquired at the top of the scoped `run_index_for_repo` writer path, after
-/// the bounded automatic-GC preflight, and at the top of the repair dispatcher/
-/// each device-repair scope/`run_reindex`/
-/// `run_batch` (covering batch resume/retry/abandon, which share `run_batch`'s
-/// one lock guard across their dispatch) and nowhere in the `open`/`view`
-/// resolution paths. A functional two-process race for one representative
-/// pair (`reindex` vs `open`) backs this structural read.
+/// QB11/QB12 contention and purge non-mutation behavior are covered by the
+/// dedicated CLI and purge contracts; this file deliberately avoids binding
+/// those public guarantees to private function placement or transaction text.
+
+/// QB14(a): indexing one root registers that root only. An initialized sibling
+/// in another XDG registry is not discovered or copied into this registry.
 #[test]
-fn qb11_lock_store_call_sites_are_write_commands_only() {
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
-    for needle in [
-        "fn run_index_for_repo(",
-        "fn run_repair(",
-        "fn run_one_device_repair(",
-        "fn run_reindex(",
-        "fn run_batch(",
-    ] {
-        let body = source
-            .split(needle)
-            .nth(1)
-            .unwrap_or_else(|| panic!("{needle} not found"));
-        // Device-global dispatch and registry-prune now precede the scoped
-        // repository path, so bound this structural scan generously while
-        // still keeping it near the dispatcher rather than searching the
-        // entire file.
-        let head = &body[..body.len().min(3000)];
-        assert!(
-            head.contains("lock_store()"),
-            "{needle} must acquire the store lock near its top"
-        );
-    }
-    let index_body = source
-        .split("fn run_index_for_repo(")
-        .nth(1)
-        .expect("fn run_index_for_repo( not found");
-    let index_head = &index_body[..index_body.len().min(3000)];
-    let automatic_preflight = index_head
-        .find("gc::preflight_automatic(")
-        .expect("index writer must run the bounded automatic-GC preflight");
-    let writer_lock = index_head
-        .find("lock_store()")
-        .expect("index writer must acquire the store lock");
-    assert!(
-        automatic_preflight < writer_lock,
-        "automatic GC recovery must finish before the ordinary writer lock"
-    );
-    for needle in [
-        "fn resolve_pointer_for_cli(",
-        "fn resolve_object_uri(",
-        "fn resolve_short_hash_command(",
-    ] {
-        let body = source
-            .split(needle)
-            .nth(1)
-            .unwrap_or_else(|| panic!("{needle} not found"));
-        // Stop at the next top-level `fn` to bound the search to this function.
-        let end = body.find("\nfn ").unwrap_or(body.len());
-        assert!(
-            !body[..end].contains("lock_store()"),
-            "{needle} (open/view resolution) must not acquire the store lock"
-        );
-    }
-}
+fn qb14a_index_registers_only_the_requested_root() {
+    let primary = tempfile::tempdir().unwrap();
+    let sibling = tempfile::tempdir().unwrap();
+    fs::write(primary.path().join("primary.md"), "# primary\n").unwrap();
+    fs::write(sibling.path().join("sibling.md"), "# sibling\n").unwrap();
 
-/// QB12 [regression-lock, structural]: `kio purge`'s lock acquisition order
-/// is scope-store -> purge-publication -> device-scrub -> scope-access
-/// (`execute_phase_machine` acquires the first two and stays in scope
-/// through `execute_visible_phases` -> `scrub_logs`, which acquires the
-/// latter two — genuine nesting, not just textual sequence). 裁定3(a):
-/// cost-ledger's `BEGIN IMMEDIATE` Tx (`kio_pipeline::ledger::ops`) never
-/// acquires a scope `StoreLock` while open — `kio-pipeline` has no
-/// `StoreLock` dependency at all, so the forbidden reverse order (Tx held ->
-/// store lock taken) is structurally impossible from within that crate, and
-/// none of `kio-cli`'s 4 `with_immediate_transaction` call sites nest a
-/// `StoreLock`/`lock_store` acquisition inside the transaction closure.
-#[test]
-fn qb12_purge_lock_order_and_no_reverse_cost_ledger_acquisition() {
-    let purge_source =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/purge.rs")).unwrap();
-    let store_lock_pos = purge_source
-        .find("let _store_lock = repo.lock_store()?;")
-        .unwrap();
-    let publication_lock_pos = purge_source
-        .find("let _publication_lock = StoreLock::acquire_path(purge_publication_lock_path")
-        .unwrap();
-    let device_lock_pos = purge_source
-        .find("let _device_lock = StoreLock::acquire_path(device_root.join(\"scrub.lock\"))")
-        .unwrap();
-    let scope_lock_pos = purge_source
-        .find("let _scope_lock = StoreLock::acquire_path(scope_root.join(\"access.scrub.lock\"))")
-        .unwrap();
-    assert!(
-        store_lock_pos < publication_lock_pos,
-        "store before publication"
-    );
-    assert!(
-        publication_lock_pos < device_lock_pos,
-        "publication before device-scrub"
-    );
-    assert!(
-        device_lock_pos < scope_lock_pos,
-        "device-scrub before scope-access"
-    );
+    // Initialize the sibling with isolated device state: it is a real Kio
+    // scope, but is deliberately unregistered in primary's observable registry.
+    Command::cargo_bin("kio")
+        .unwrap()
+        .current_dir(sibling.path())
+        .env("XDG_CONFIG_HOME", sibling.path().join("xdg/config"))
+        .env("XDG_DATA_HOME", sibling.path().join("xdg/data"))
+        .env("XDG_CACHE_HOME", sibling.path().join("xdg/cache"))
+        .args(["init", "--json"])
+        .assert()
+        .success();
+    success(&primary, &["init"]);
+    success(&primary, &["index", "--offline", "--approve"]);
 
-    // 裁定3(a): kio-pipeline (the cost-ledger crate) never references StoreLock.
-    let ledger_source = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../kio-pipeline/src/ledger/ops.rs"
-    ))
-    .unwrap();
-    assert!(!ledger_source.contains("StoreLock"));
-
-    // None of main.rs's `with_immediate_transaction` call sites nest a
-    // StoreLock acquisition inside the closure — checked by bounding each
-    // call site to the next top-level `}` at column 0 (the closure/statement
-    // end) and confirming no known StoreLock call text occurs before it.
-    let main_source =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
-    let mut search_from = 0;
-    let mut found = 0;
-    while let Some(offset) = main_source[search_from..].find("with_immediate_transaction(") {
-        let start = search_from + offset;
-        let end = main_source[start..]
-            .find("\n}\n")
-            .map(|relative| start + relative)
-            .unwrap_or(main_source.len());
-        let span = &main_source[start..end];
-        assert!(
-            !span.contains("StoreLock") && !span.contains("lock_store()"),
-            "with_immediate_transaction at byte {start} must not nest a StoreLock acquisition"
-        );
-        found += 1;
-        search_from = start + "with_immediate_transaction(".len();
-    }
-    assert!(found >= 4, "expected at least 4 call sites, found {found}");
-}
-
-/// QB14(a) [regression-lock]: no full-disk-walk crate (`walkdir` or similar
-/// recursive-descent dependency) is linked into the workspace — registry
-/// re-registration can only happen one `kio index` root at a time.
-#[test]
-fn qb14a_no_full_disk_walk_dependency() {
-    let lockfile =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")).unwrap();
-    assert!(
-        !lockfile.contains("name = \"walkdir\""),
-        "no crate may perform an unbounded recursive filesystem walk"
+    let entries = RegistryDb::open(registry_path(&primary))
+        .unwrap()
+        .all_entries()
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "index must not scan or register siblings: {entries:?}"
+    );
+    assert_eq!(
+        entries[0].root_path,
+        primary.path().canonicalize().unwrap().to_str().unwrap()
     );
 }
 
@@ -723,6 +668,46 @@ fn qb14b_xdg_data_home_fallback_resolves_under_home() {
             .exists(),
         "registry must fall back to $HOME/.local/share/kio/, not a CWD-relative path"
     );
+
+    for args in [
+        &["index", "--offline", "--approve", "--json"][..],
+        &["search", "body", "--mode", "text", "--json"][..],
+    ] {
+        Command::cargo_bin("kio")
+            .unwrap()
+            .current_dir(scope_dir.path())
+            .env("HOME", home.path())
+            .env_remove("XDG_DATA_HOME")
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_CACHE_HOME", home.path().join("cache"))
+            .env_remove("GEMINI_API_KEY")
+            .env_remove("MISTRAL_API_KEY")
+            .args(args)
+            .assert()
+            .success();
+    }
+    let metrics = home.path().join(".local/share/kio/logs/metrics.jsonl");
+    let metrics_before = fs::metadata(&metrics).unwrap().len();
+    let scrub =
+        StoreLock::acquire_path(home.path().join(".local/share/kio/logs/scrub.lock")).unwrap();
+    Command::cargo_bin("kio")
+        .unwrap()
+        .current_dir(scope_dir.path())
+        .env("HOME", home.path())
+        .env_remove("XDG_DATA_HOME")
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("XDG_CACHE_HOME", home.path().join("cache"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .args(["search", "body", "--mode", "text", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::metadata(&metrics).unwrap().len(),
+        metrics_before,
+        "the HOME-fallback scrub lock must suppress the matching device-log append"
+    );
+    drop(scrub);
 }
 
 /// QB15: parent scopes remain direct-file-only, while bounded child discovery
@@ -979,28 +964,38 @@ fn qb15_parent_ignore_is_persisted_and_excludes_child_cas() {
     }
 }
 
-/// QB19 [regression-lock, structural]: scope-local `access.jsonl` and
-/// device-global `metrics.jsonl` both append through the SAME rotating
-/// writer (`append_jsonl_cli` -> `kio_core::scope::append_jsonl_rotating`) —
-/// access.jsonl does not have a separate, rotation-less code path.
+/// QB19: a purge's device/scope scrub exclusions suppress only the matching
+/// best-effort search log append. Search itself remains successful; after each
+/// lock is released its corresponding log starts growing again.
 #[test]
-fn qb19_access_jsonl_shares_device_global_rotation_writer() {
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+fn qb19_scrub_lock_contention_suppresses_only_matching_search_log_append() {
+    let (dir, _pointer) = fixture();
+    let metrics = dir.path().join(".test-data/kio/logs/metrics.jsonl");
+    let access = kio_dir(&dir).join("logs/access.jsonl");
+    let metrics_before = fs::metadata(&metrics).unwrap().len();
+    let access_before = fs::metadata(&access).unwrap().len();
+
+    let device_lock =
+        StoreLock::acquire_path(dir.path().join(".test-data/kio/logs/scrub.lock")).unwrap();
+    success(&dir, &["search", "3600", "--mode", "text"]);
+    assert_eq!(fs::metadata(&metrics).unwrap().len(), metrics_before);
+    assert!(fs::metadata(&access).unwrap().len() > access_before);
+    drop(device_lock);
+    success(&dir, &["search", "3600", "--mode", "text"]);
+    let metrics_after_device_release = fs::metadata(&metrics).unwrap().len();
+    assert!(metrics_after_device_release > metrics_before);
+
+    let access_before_scope_lock = fs::metadata(&access).unwrap().len();
+    let scope_lock = StoreLock::acquire_path(kio_dir(&dir).join("logs/access.scrub.lock")).unwrap();
+    success(&dir, &["search", "3600", "--mode", "text"]);
+    assert!(fs::metadata(&metrics).unwrap().len() > metrics_after_device_release);
     assert_eq!(
-        source.matches("fn append_jsonl_cli(").count(),
-        1,
-        "exactly one rotating-jsonl writer function"
+        fs::metadata(&access).unwrap().len(),
+        access_before_scope_lock
     );
-    let append_search_logs = source
-        .split("fn append_search_logs(")
-        .nth(1)
-        .and_then(|rest| rest.split("\nfn ").next())
-        .expect("append_search_logs body");
-    assert!(append_search_logs.contains("kio/logs/metrics.jsonl"));
-    assert!(append_search_logs.contains("logs/access.jsonl"));
-    // Both writes go through `append_jsonl_cli` (grep count == 2 within this
-    // one function: one for metrics, one for access).
-    assert_eq!(append_search_logs.matches("append_jsonl_cli(").count(), 2);
+    drop(scope_lock);
+    success(&dir, &["search", "3600", "--mode", "text"]);
+    assert!(fs::metadata(&access).unwrap().len() > access_before_scope_lock);
 }
 
 /// QB20: a symlink inside the scope is never ingested.
@@ -1069,10 +1064,10 @@ fn qb31_chunk_fts_and_chunk_vec_schema_is_executable() {
     assert!(table_sql("image_vec").contains("embedding float[768]"));
 }
 
-/// QB37: retired tables stay absent, while unit and commit-type contracts are
+/// QB37: non-current tables stay absent, while unit and commit-type contracts are
 /// enforced by their public runtime APIs.
 #[test]
-fn qb37_legacy_tables_are_absent_from_runtime_schema() {
+fn qb37_non_current_tables_are_absent_from_runtime_schema() {
     let dir = tempfile::tempdir().unwrap();
     success(&dir, &["init"]);
     success(&dir, &["index", "--offline", "--approve"]);

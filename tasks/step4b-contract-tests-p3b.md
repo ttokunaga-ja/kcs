@@ -129,12 +129,8 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   `KIO-E-SEARCH-VEC-UNAUTHORIZED-001` 等の非 null 値が入りつつ結果は正常に返る)。
 - 操作: プロセスの exit code と、出力 JSON の `error_code` フィールドの両方を機械的に取得する。
 - 期待: exit code は **0** であり、`error_code` が非 null であることは exit code の値に一切影響しない
-  (`error_code` の値をどう変えても exit 0 のまま — 構造的な分離を主張する)。この分離は実装上
-  `take_exit_override` (main.rs:400-409) が出力 JSON の `__exit_code` マーカーのみを読み `error_code`
-  フィールドを一切参照しないことで保証されている — `error_code` を読んで exit を決定するコードパスが
-  **存在しないこと** も併せて確認する (grep で `error_code` を条件式に使う exit 分岐が無いことを示す)。
-  **現状**: 構造的に既に分離済み (`step3_p0_contract.rs:272-277` が exit 0 + 非 null `error_code` の
-  組合せを実地で検証済み) — 本契約は回帰ロックとして固定する。
+  （非 null 値を持つ実応答で exit 0 を観測する）。private marker や実装位置の文字列探索は正本にせず、
+  公開応答の exit と JSON を組で固定する。
 
 ### QB3 軽量規範 3 件の現状固定確認 (EMBED domain 適用時点・fallback_reason 自由語彙・CONFIG-SCHEMA-001 確定) [P2]
 - 正本: (a) 03-data-model.md §7 (『**modality は `"multimodal"` に固定する**...採用不可であり、tool-lock への
@@ -142,14 +138,11 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (b) 06-cli-spec.md §9 L429-431 (『fallback_reason は自由語彙 — 閉 enum にしない。機械判定は error_code 側が
   正であり、Agent は未知の fallback_reason 値を無視してよい』) /
   (c) 06-cli-spec.md §11 L503 (『validation 失敗は **exit 2** + `KIO-E-CONFIG-SCHEMA-001`』)
-- 前提: (a) 非 multimodal embedding profile を tool-lock materialize 時に登録しようとする。(b) search
-  応答の `fallback_reason` フィールドの型定義。(c) config schema validation 失敗時に返る error_code。
-- 操作: (a) `modality != "multimodal"` の profile で materialize を実行。(b) `ResolvedMode.fallback_reason`
-  (main.rs:1149-1162) の型を確認。(c) 不正な config.toml で任意コマンドを実行。
-- 期待: (a) `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否 (tool_lock.rs:468 で既存実装確認)。(b) 型は
-  `Option<String>` であり閉 enum ではない (schema/コード上の制約なし)。(c) 常に `KIO-E-CONFIG-SCHEMA-001`
-  (NNN プレースホルダは残らない、grep 0 件)。**現状**: 3 件とも既に適合（historical inventory の「適合済みの可能性」
-  判定を確定) — 本契約は現状固定の回帰ロック。
+- 操作: (a) `TEST_ADOPTED_EMBEDDING_ENV=non_multimodal` で `kio index --approve` を起動する。(b) 現行 task
+  wire に provider-defined の任意文字列を `fallback_reason` として入れ、公開 `kio status` で読む。(c) 不正な
+  config.toml で任意コマンドを実行。
+- 期待: (a) exit 2 / `KIO-E-EMBED-MODALITY-001`、tool-lock/index は未公開。(b) unknown 値を拒否・変換せず
+  同値で返す。(c) 常に `KIO-E-CONFIG-SCHEMA-001`。型名・enum・実装ファイル探索は行わない。
 
 ### QB4 preflight (0)-(4) 同時違反優先順位マトリクス [P0]
 - 正本: 10-operations.md §3 L300-305 (『**複合状態の優先順位 (全コマンド共通の preflight 順序)**: (0)
@@ -272,38 +265,21 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   読むのみで、`<path> --at <commit>` という 2 引数 (位置引数 + flag) の組合せを明示的に処理する分岐は
   未確認 — 本契約が実際の受理形式を固定する。
 
-### QB11 `.kio/.lock` 対象コマンド一覧の現状確認 (パラメタ化) [P1]
+### QB11 writer/read contention の既存 behavior coverage [P1]
 - 正本: 05-runtime.md §6 L1034-1038 (『`.kio/.lock` を取得するコマンド (書き込み系): kio index /
   kio snapshot ... / kio batch resume / kio batch retry / kio batch abandon / kio reindex /
   kio adapter revoke』) / 同 L1052 (『読み取り系 (search / log / view / open / inspect / evidence verify /
   restore / status / diff) は `.kio/.lock` を取得しない』)
-- 前提: `kio batch resume` / `kio batch retry` / `kio batch abandon` / `kio reindex` / `kio open` の
-  5 コマンドでパラメタ化する。
-- 操作: 各コマンドを、`.kio/.lock` の取得有無を計測できる形 (lock ファイルの mtime・並行 2 プロセスの
-  排他確認) で実行する。
-- 期待: 前 4 者は `.kio/.lock` を取得する。`kio open` は取得しない。**現状**: `run_batch` (main.rs:8889-8905)
-  が `lock_store()` を関数冒頭で 1 回取得しコマンド分岐全体を覆うため resume/retry/abandon の 3 者は
-  既に充足。`run_reindex` (main.rs:4383-4387) も充足。`kio open` はいずれの呼出経路にも `lock_store()`
-  呼出が無く既に充足。**`kio adapter revoke` はコマンド自体が存在しない** (`Command` enum に `Adapter`
-  variant 無し) ため本契約のパラメータから除外する (I 領域の管轄、対象外)。本契約は 4 コマンド分の
-  **回帰ロック**として機能する (既に正しいことの確認)。
+- 操作・期待: 実際の writer/read 排他は `contract_cli::m1_concurrent_index...`、batch resume は
+  `step3::o3_batch_resume...`、reindex/search は P10 の runtime contract が担当する。本書は private call-site
+  数や位置を正本化しない。
 
-### QB12 複合 lock 順序の実装確認と cost-ledger.sqlite の位置づけ [P1]
+### QB12 purge competition の runtime coverage [P1]
 - 正本: 05-runtime.md §6 L1058 (『複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device
   observability → scope access とし、逆順取得を禁止する』)
-- 前提: `kio purge` の実行 (scope store lock → purge publication lock → device scrub.lock → scope
-  access scrub.lock の順に取得する経路を持つ、purge.rs:283-301/1474-1483/1542-1544)。
-- 操作: `kio purge` を対象 raw_hash 指定で実行し、各 lock の取得順序をコードパス上で追跡する。
-- 期待: 取得順序が scope-store → (purge publication は scope store の下位に位置する scope 固有 lock として)
-  → device-scrub → scope-access の順で、逆順取得が発生しない。**現状**: `purge.rs` の実装順序は
-  scope-store-lock → purge-publication-lock → device-scrub.lock → scope-access.scrub.lock で規範の
-  順序と整合する。**cost-ledger.sqlite は `StoreLock` 系に一切参加しない** (`BEGIN IMMEDIATE` Tx による
-  独自シリアライズ、scope.rs:3345-3351 のコメントが明示) — 規範文の「scope store → cost-ledger.sqlite
-  (Tx)」という順序表現は、cost-ledger の Tx 取得が scope store lock の**保持中に**行われるべきという
-  意味か、それとも「両者は独立した別の直列化機構であり相互の待機順序は規定しない」という意味かは
-  spec 単独では確定しない ([解釈割れ] §Z 参照)。本契約は既存の file-lock 系 (scope-store→publication→
-  device-scrub→scope-access) の現状固定に限定し、cost-ledger との相対順序は §Z の解釈割れとして
-  切り出す。
+- 操作・期待: `step4_purge::ct4_purge_acquires_publication_lock_before_publishing_barrier` ほかの実競合と
+  non-mutation assertion を採用する。source offset・transaction count・cost-ledger との未実証の相対順序は
+  主張しない。
 
 ### QB13 scope 由来 log append の scrub lock + 3 点検査 同一 critical section 化 [P1]
 - 正本: 05-runtime.md §6 L1058 (『**scope 由来 log の append 順序**: 読取系が対象の path / query /
@@ -327,18 +303,14 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で
   全ディスクを走査することはしない』) / (b) 同 L1058 (『device logs では
   `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`』)
-- 前提: (a) `scope-registry.sqlite` が破損・削除された状態。(b) `XDG_DATA_HOME` 環境変数が未設定の
-  実行環境。
-- 操作: (a) registry 削除後に `kio status` 等を実行し、全ディスク走査が発生しないことを確認する。
-  (b) `XDG_DATA_HOME` 未設定のまま `kio purge` を実行し `scrub.lock` の実パスを観測する。
-- 期待: (a) Kio は既知の root 以外を自発的に走査しない (=「全ディスク走査を行う」コードパスが存在しない
-  ことの確認 — 各 `.kio` は個別の `kio index` 実行でのみ再登録される)。(b) `scrub.lock` は
-  `$HOME/.local/share/kio/logs/scrub.lock` に解決され、カレントディレクトリ相対のような不正パスには
-  ならない。**現状**: (a) 全ディスク走査を行う実装 (`WalkDir` 等の再帰クレート使用) はそもそも存在しない
-  ため構造的に充足。(b) `data_home()` (scope.rs:2696-2704) は `xdg_dir("XDG_DATA_HOME")` が失敗した
-  場合に `home_dir().join(".local/share")` へ正しくフォールバックする (`xdg.rs` の単体テストで検証済み)
-  — historical inventory が疑っていた「不正パス生成バグ」は現行実装には存在しない。本契約は両サブクレームとも
-  現状固定の回帰ロック。
+- 前提: (a) 別 XDG state で初期化済みだがこの registry には未登録の sibling scope。(b) `XDG_DATA_HOME`
+  環境変数が未設定の実行環境。
+- 操作: (a) primary root の `kio index` 後に observable registry rows を読む。(b) `XDG_DATA_HOME` 未設定で
+  search log を生成し、`$HOME/.local/share/kio/logs/scrub.lock` を保持したまま再検索する。
+- 期待: (a) primary だけが登録され、sibling を発見・登録しない（recursive/full-disk scan は実行しないことを
+  registry の結果で確認）。(b) `scrub.lock` は
+  `$HOME/.local/share/kio/logs/scrub.lock` に解決され、保持中は対応する metrics append が抑止される。
+  カレントディレクトリ相対の不正パスにはならない。Cargo.lock/dependency の文字列検査を正本にしない。
 
 ### QB15 VCS リポジトリ root 配下の子 `.kio` 生成除外 [P1]
 - 正本: 03-data-model.md §3 L267 (『**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ)
@@ -396,22 +368,15 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   を含めているかの確認から行う (このサブクレーム自体は概ね充足している可能性が高いが、schema レベルで
   required 化されているかは未確認)。
 
-### QB19 scope-local `access.jsonl` の retention_days 適用確認 (現状固定) [P2]
+### QB19 scrub lock 下の search log append behavior [P2]
 - 正本: 10-operations.md §12.6 L1041-1045 (『**scope-local の `.kio/logs/access.jsonl` も同じ規範の
   対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 — 無操作でも検索対象であり続ける scope
   の unbounded 成長を防ぐ。purge の scrub は**全保持世代**に適用する — rotation は scrub の対象範囲を
   狭めない)』)
-- 前提: `.kio/logs/access.jsonl` が既定保持日数を超えて存在する scope。
-- 操作: 保持日数超過後に任意のコマンドを実行し (rotation は書込系コマンド実行時に発火する前提)、
-  `access.jsonl` の rotation 挙動を観測する。同時に、rotation 済みの複数世代ファイルが存在する状態で
-  `kio purge` を実行し scrub が全世代に及ぶかを確認する。
-- 期待: `access.jsonl` は device-global の `events.jsonl` 等と同じ rotation/保持ロジックの対象になる。
-  purge のログ scrub は現行世代だけでなく rotation 済みの過去世代ファイルも対象にする。**現状**:
-  `access.jsonl` の append は `append_jsonl_cli` → `kio_core::scope::append_jsonl_rotating` を経由し、
-  device-global ログと**同一のローテーション実装**を共有する (main.rs:6593-6607/6621-6622) —
-  scope-local ログが device-global と別の (rotation の無い) 経路を持つという懸念は現行実装には
-  当たらない。本契約は現状固定の回帰ロック。scrub の全世代適用については別途 purge.rs の scrub 対象
-  ファイル列挙ロジックでの確認を要する (未検証区分として残す)。
+- 前提・操作: device `scrub.lock`、scope `access.scrub.lock` をそれぞれ保持して search を実行し、対応する
+  metrics/access log の bytes を前後比較する。解除後に再検索する。
+- 期待: search は成功し、保持中は該当 log append だけが抑止され、解除後はそれぞれ再開する。writer 定義数や
+  source scan は採用しない。
 
 ### QB20 ingest 走査時の symlink TOCTOU 対策 (現状固定) [P0]
 - 正本: 10-operations.md §4 L359-363 (『symlink lstat 基準で検出し、**追跡しない**...**判定と open の
@@ -691,24 +656,25 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   `write_content_object` の呼出元は grep 0 件 (fsck の読み手 `verify_embeddings` のみが存在) — 本契約が
   指す書込側の bytes 構築は完全に未実装。
 
-### QB37 files/normalization_runs/prepared_units 非採用 + UTF-8 preimage 規則 + commit_type 検証機構の
+### QB37 non-current tables 非採用 + UTF-8 preimage 規則 + commit_type 検証機構の
   記述訂正 (複合 regression confirmation、パラメタ化 3 件) [P2]
 - 正本: (a) 03-data-model.md §4.1 L321 (『旧 spec が SQLite テーブルとして定義していた `files` /
   `normalization_runs` / `prepared_units` は採用しない』)。(b) 03-data-model.md §8.1 (『文字列を
   preimage とする hash...は、規定の正規化を適用した後の UTF-8 バイト列に対して sha256 を計算する』)。
   (c) 05-runtime.md §2.1 (『**enum の強制点は commit object の schema 検証 (publication 時の loader)**
   である...commit は CAS JSON object であり SQLite に commit 表は存在しない』)
-- 前提: (a) 現行 SQLite schema 全体。(b) `unit_ref` 等の文字列 preimage hash 算出箇所。(c) commit
-  publish 時の `commit_type` 検証コード。
-- 操作: (a) `sqlite_master` に `files`/`normalization_runs`/`prepared_units`/`commits` の各テーブルが
-  存在しないことを確認する。(b) `unit_ref` の算出が `unit_key.as_bytes()` (Rust `&str` の UTF-8
-  バイト列) を直接ハッシュしていることを確認する。(c) `CommitObject::validate()` が `commit_type` を
-  検証する唯一の箇所であり、SQLite CHECK 制約による強制が存在しないことを確認する。
-- 期待: (a)(b)(c) いずれも既に規範と一致する。**現状**: (a) 4 テーブルとも `CREATE TABLE` grep 0 件
-  (`commits` は元より CAS のみ)。(b) `prepare.rs:219-222` は `unit_key.as_bytes()` を直接ハッシュ —
-  Rust の `&str` が常に UTF-8 保証であるため構造的に規則を満たす。(c) `dag.rs:288-336`
-  (`CommitObject::validate`) が唯一の検証点で SQLite `commits` テーブル自体が存在しない。本契約は
-  3 件とも回帰ロックとして 1 本に圧縮する。
+- 前提: (a) 初期化・index 後の現行 SQLite schema。(b) 公開 `unit_ref` API。(c) public commit object boundary。
+- 操作: (a) `sqlite_master` で `files`/`normalization_runs`/`prepared_units`/`commits` が不在であることを
+  観測する。(b) Unicode input に対する frozen `unit_ref` を照合する。(c) 不正な purged commit object を
+  public validation boundary に渡す。
+- 期待: (a)(b)(c) は runtime/API 境界で規範と一致する。DDL/関数位置/grep を正本にしない。
+
+#### Fixture reachability audit
+
+M3-3 の `legacy-format-v0.md` と `deprecated-approach.md` は Rust manifest/test から到達し、固有の
+deleted-history signal を作るため保持する。current Rust/manual manifests から到達しない tracked evaluator
+fixtures は 0 件である。`normalized-corpus` は current fixture ではなく、意図的に非 authorizing な paid OCR
+archive として保持する。歴史 measurement outputs も fixture producer ではないため、この cleanup の削除対象外である。
 
 ### QB39 `kio diff` の derived-only 変化検出義務 [P1]
 - 正本: 06-cli-spec.md §1 L94 (『`kio diff` は raw / path の差分に加え、
@@ -1148,7 +1114,11 @@ config.toml 側のこのフィールドの規範的地位に触れていない�
 同じ順序規範の対象、のどちらであるべきかは裁定を要する。QB8 は scope.json のみを対象とし、本項目は
 config.toml 側の扱いを保留する。
 
-### Z3. 複合 lock 順序における cost-ledger.sqlite の位置づけ (QB12 関連)
+### Z3. QB12 の境界
+QB12 は purge の公開競合・non-mutation behavior だけを扱う。cost-ledger の相対 lock 順序について、
+この Phase の runtime evidence からは結論を出さない。
+
+<!-- historical analysis retained below; it is not a current contract claim.
 05-runtime.md §6 L1058 の『複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device
 observability → scope access とし、逆順取得を禁止する』という文言は、cost-ledger.sqlite が
 `.kio/.lock` (`StoreLock`) 系とは別の `BEGIN IMMEDIATE` Tx による独自シリアライズ機構を持つという
@@ -1157,7 +1127,7 @@ observability → scope access とし、逆順取得を禁止する』という�
 という具体的な待機順序制約、(b) 「両者は独立した直列化機構であり、列挙順は概念上の相対的な粗さの
 表現に過ぎず具体的な待機順序を強制しない」という緩い解釈、のどちらを意図するか確定しない。QB12 は
 `StoreLock` 系の実装順序 (scope-store→publication→device-scrub→scope-access) のみを現状固定し、
-cost-ledger との相対順序は本項目として保留する。
+cost-ledger との相対順序は本項目として保留する。 -->
 
 ### Z4. `eval/` の Recall@10 射影実装確認の要否 (QB24 関連)
 U142 の Recall@10 射影変更 (`(raw_hash, section)` → `(raw_hash, section, path_at_commit)`) は

@@ -990,19 +990,15 @@ P0/P1 集計は末尾「集計」節。
   (既存行保全) のみが許される — rebuild 相当のコマンドが `cost-ledger.sqlite` を re-create しない
   ことを確認する。
 
-### CL71 旧 JSONL 3 ファイル構成の名称が実装から消えていること (rename grep 契約) [P1]
+### CL71 非 current JSONL ledger の runtime fail-closed 契約 [P1]
 - 正本: 10 §12.7 L1070 (リネーム表: 『cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) |
   cost-ledger.sqlite（cost_ledger / batch_requests / schema_migrations の 3 表）| 04-pipeline.md
   §5.4』)
-- 前提: 移行完了後のソースツリー。
-- 操作: `crates/` 配下を `cost-ledger.jsonl` / `cost-ledger-reservations.jsonl` /
-  `cost-ledger-reclaimed.jsonl` / `cost-ledger.lock` の文字列で grep する (`.migrated` への
-  rename ロジック自体が旧名を**文字列として**参照するのは移行コード内でのみ許容 — CL09-CL12 の
-  移行ルーチン実装ファイルを除く)。
-- 期待: 移行ルーチン以外のコード (通常の記帳・予約・回収・abandon の経路) に旧 4 ファイル名への
-  参照が **0 件**。`crates/kio-pipeline/src/budget.rs` の `CostLedger`/`ReservationLedger` が
-  JSONL の `OpenOptions::new().append(true)` で読み書きする現行コードパスが、SQLite 接続 +
-  トランザクションベースの経路に置き換わっていること。
+- 前提: current `cost-ledger.sqlite` と、旧 4 名および `.migrated` 名の非 current ファイルを用意する。
+- 操作: `LedgerDb::open` を実行し、DB と非 current ファイルの bytes を前後比較する。
+- 期待: `KIO-E-LEDGER-LEGACY-JSONL-001` で書込み前に失敗し、全 bytes が不変。非 current 形式の
+  migration/rename/read path は存在しない。production source 内の文字列位置を走査する旧テストは、
+  runtime failure を検出する固有 signal がないため `retired_jsonl_files_fail_closed_without_modification`へ統合した。
 
 ---
 
