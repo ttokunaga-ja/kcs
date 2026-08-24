@@ -3917,10 +3917,25 @@ mod tests {
             "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
         candidate.raw_path = "docs/overflow.md".to_owned();
         candidate.heading_path = Some(vec!["Overflow".to_owned()]);
-        for number in 0..=RETARGET_CANDIDATE_LIMIT {
-            candidate.chunk_id = format!("retarget-{number:05}");
-            candidate.unit_key = format!("doc:{number}");
-            index.index_chunk(&candidate).unwrap();
+        index.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
+        let insert_candidates = (|| -> Result<()> {
+            // Keep every public index_chunk call: each one exercises the
+            // row validation and nested-savepoint path. The outer transaction
+            // only avoids 4,097 separate SQLite durable commits for this
+            // overflow-classification fixture.
+            for number in 0..=RETARGET_CANDIDATE_LIMIT {
+                candidate.chunk_id = format!("retarget-{number:05}");
+                candidate.unit_key = format!("doc:{number}");
+                index.index_chunk(&candidate)?;
+            }
+            Ok(())
+        })();
+        match insert_candidates {
+            Ok(()) => index.connection().execute_batch("COMMIT").unwrap(),
+            Err(error) => {
+                let _ = index.connection().execute_batch("ROLLBACK");
+                panic!("overflow fixture insertion must roll back on failure: {error}");
+            }
         }
         drop(index);
 

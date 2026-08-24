@@ -245,17 +245,23 @@ fn pc5_online_and_offline_are_mutually_exclusive() {
 #[test]
 fn pc15_pc17_candidate_depth_configuration_is_not_hardcoded_to_200() {
     let dir = tempfile::tempdir().unwrap();
-    // 210 distinct documents all matching the same term — more than the old
-    // literal LIMIT 200, so a raised candidate_depth is the only way every
-    // one of them can appear in the ranked pool.
-    for i in 0..210 {
-        fs::write(
-            dir.path().join(format!("doc{i}.md")),
-            format!("# Doc {i}\n\ndepthprobeterm unique marker {i}\n"),
-        )
-        .unwrap();
-    }
+    // One document deliberately contains 210 distinct, nonempty heading
+    // records. The indexer still has to parse, chunk, persist, and search all
+    // 210 real Markdown chunks, without paying filesystem setup/teardown for
+    // 210 separate paths.
+    let document = (0..210)
+        .map(|i| format!("## Depth probe {i}\n\ndepthprobeterm unique marker {i}\n\n"))
+        .collect::<String>();
+    fs::write(dir.path().join("depth-probe.md"), document).unwrap();
     init(&dir);
+    // One raw Markdown object intentionally produces all chunks in this
+    // bounded fixture. Disable raw-hash diversification so it does not mask
+    // the candidate-depth pool that this contract measures.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[search.diversify]\nenabled = false\n",
+    )
+    .unwrap();
     success(&dir, &["index", "--offline", "--approve"]);
 
     // `--limit` itself caps at 100 (unrelated, pre-existing), so probe the
@@ -282,7 +288,7 @@ fn pc15_pc17_candidate_depth_configuration_is_not_hardcoded_to_200() {
 
     fs::write(
         dir.path().join(".kio/config.toml"),
-        "[search.rrf]\ncandidate_depth = 205\n",
+        "[search.rrf]\ncandidate_depth = 205\n\n[search.diversify]\nenabled = false\n",
     )
     .unwrap();
     let raised = success(
