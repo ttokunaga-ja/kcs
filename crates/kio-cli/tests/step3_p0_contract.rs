@@ -138,6 +138,42 @@ fn json_success_path(path: &Path, data_home: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output).unwrap()
 }
 
+/// Child-scope failures are reported as a partial result on stdout, rather
+/// than an error document on stderr. Keep that transport distinction explicit
+/// in cross-platform child-scope contracts.
+#[cfg(windows)]
+fn json_code_stdout_path(path: &Path, data_home: &Path, args: &[&str], code: i32) -> Value {
+    let output = hermetic_kio_command()
+        .current_dir(path)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(args)
+        .arg("--json")
+        .assert()
+        .code(code)
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[cfg(windows)]
+fn assert_windows_bound_child_unsupported(result: &Value, path: &str) {
+    assert_eq!(result["error_code"], "KIO-E-INDEX-PARTIAL-001");
+    let child = result["child_scopes"]
+        .as_array()
+        .expect("partial index output must retain child scope rows")
+        .iter()
+        .find(|row| row["path"] == path)
+        .unwrap_or_else(|| panic!("missing discovered child row for {path}"));
+    assert_eq!(child["status"], "skipped_error", "{child}");
+    assert_eq!(
+        child["error_code"], "KIO-E-SCOPE-BOUND-UNSUPPORTED-001",
+        "{child}"
+    );
+}
+
 fn read_scope_id(path: &Path) -> String {
     let scope: Value =
         serde_json::from_str(&fs::read_to_string(path.join(".kio/scope.json")).unwrap()).unwrap();
@@ -2600,14 +2636,28 @@ fn ct3_multi_012_a_narrowed_search_does_not_prune_the_replica() {
     ] {
         fs::write(dir.join("hit.md"), format!("# H\n\n## Sec\n{body}\n")).unwrap();
     }
-    for dir in [&nest, &sub, &other] {
+    // Leave `sub` uninitialized for the parent's first index. This proves
+    // child discovery itself is fail-closed on Windows, then the test directly
+    // creates each independent scope before exercising the search contract.
+    for dir in [&nest, &other] {
         json_success_path(dir, &data_home, &["init"]);
     }
-    // `nest`'s own index must not pull `sub` in: scopes are non-recursive, and
-    // this test needs them to be two separate members of the collection.
-    for dir in [&nest, &sub, &other] {
-        json_success_path(dir, &data_home, &["index", "--approve"]);
+    #[cfg(not(windows))]
+    json_success_path(&nest, &data_home, &["index", "--approve"]);
+    #[cfg(windows)]
+    {
+        let indexed = json_code_stdout_path(&nest, &data_home, &["index", "--approve"], 3);
+        assert_windows_bound_child_unsupported(&indexed, "sub");
+        assert!(
+            !sub.join(".kio").exists(),
+            "Windows must not initialize a child through a pathname fallback"
+        );
     }
+    // `nest`'s own index must not pull `sub` in: scopes are non-recursive, and
+    // this test needs them to be three independently indexed collection members.
+    json_success_path(&sub, &data_home, &["init"]);
+    json_success_path(&sub, &data_home, &["index", "--approve"]);
+    json_success_path(&other, &data_home, &["index", "--approve"]);
     let replica_path = data_home.join("cache/kio/aggregator.sqlite");
 
     let all = json_success_path(
@@ -2842,10 +2892,25 @@ fn ct3_multi_016_a_narrowed_search_is_ranked_among_the_scopes_it_searched() {
     ] {
         fs::write(dir.join("hit.md"), format!("# H\n\n## Sec\n{body}\n")).unwrap();
     }
-    for dir in [&nest, &sub, &loud] {
+    // Leave the nested child uninitialized for the parent's first index so the
+    // Windows retained-handle boundary is tested before direct child setup.
+    for dir in [&nest, &loud] {
         json_success_path(dir, &data_home, &["init"]);
-        json_success_path(dir, &data_home, &["index", "--approve"]);
     }
+    #[cfg(not(windows))]
+    json_success_path(&nest, &data_home, &["index", "--approve"]);
+    #[cfg(windows)]
+    {
+        let indexed = json_code_stdout_path(&nest, &data_home, &["index", "--approve"], 3);
+        assert_windows_bound_child_unsupported(&indexed, "sub");
+        assert!(
+            !sub.join(".kio").exists(),
+            "Windows must not initialize a child through a pathname fallback"
+        );
+    }
+    json_success_path(&sub, &data_home, &["init"]);
+    json_success_path(&sub, &data_home, &["index", "--approve"]);
+    json_success_path(&loud, &data_home, &["index", "--approve"]);
     // Multi-scope search resolves `[search]` from the DEVICE layer (05 §1.8
     // step 5), so a small depth has to be set there, not in a folder config.
     let user_config = data_home.join("config/kio");
