@@ -5167,6 +5167,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn snapshot_auto_state_is_canonical_durable_and_monotonic() {
         let legacy = parse_snapshot_auto_state(
@@ -5270,6 +5271,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn snapshot_auto_state_retires_only_verified_crash_temporaries() {
         let root = tempfile::tempdir().unwrap();

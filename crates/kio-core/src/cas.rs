@@ -4585,12 +4585,42 @@ mod tests {
                 .unwrap(),
             bytes
         );
-        assert!(
-            store
-                .content_path(ContentObjectKind::NormalizedUnit, &hash)
-                .unwrap()
-                .to_string_lossy()
-                .contains("objects/normalized_unit_objects")
+        let path = store
+            .content_path(ContentObjectKind::NormalizedUnit, &hash)
+            .unwrap();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            hash.strip_prefix("sha256:")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            hash.strip_prefix("sha256:").map(|digest| &digest[2..4])
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            hash.strip_prefix("sha256:").map(|digest| &digest[..2])
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some("normalized_unit_objects")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some("objects")
         );
     }
 

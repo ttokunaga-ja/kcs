@@ -7556,8 +7556,9 @@ mod tests {
 
     // F8: a device-global lock (e.g. the pre-2026-07-18 JSONL cost ledger's) is
     // acquired via `acquire_path` at an arbitrary path outside any `.kio`. It must
-    // create the parent dir, publish a reclaimable release sentinel on drop, and
-    // refuse to acquire while a lock file already holds the path.
+    // create the parent dir, then release with a reclaimable sentinel where the
+    // verified exchange exists (macOS/Linux) or token-checked legacy deletion
+    // elsewhere, and refuse an independently held lock file.
     #[test]
     fn f8_acquire_path_is_device_global_and_excludes_a_held_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -7570,11 +7571,21 @@ mod tests {
                 "lock file must be created under a fresh dir"
             );
         }
-        assert!(lock_path.exists(), "drop leaves an atomic release sentinel");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert!(
-            StoreLock::acquire_path(lock_path.clone()).is_ok(),
-            "next writer atomically reclaims the release sentinel"
+            lock_path.exists(),
+            "macOS/Linux drop leaves an atomic release sentinel"
         );
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert!(
+            !lock_path.exists(),
+            "platforms without verified exchange use token-checked legacy deletion"
+        );
+
+        let reacquired = StoreLock::acquire_path(lock_path.clone())
+            .expect("next writer reacquires after release");
+        assert!(lock_path.exists(), "reacquired writer owns the lock path");
+        drop(reacquired);
 
         // A pre-existing lock file at the path blocks a fresh acquisition with
         // STORE-LOCKED, proving acquire_path honors a held device-global lock.
