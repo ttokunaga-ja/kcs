@@ -1,244 +1,74 @@
 {
   "schema": "kio.ci-cost-baseline/v1",
-  "captured_at": "2026-08-24T21:17:22Z",
+  "captured_at": "2026-08-25T04:34:48Z",
   "artifact_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
   "status": {
     "measurement_package": "complete",
     "github_current_activation": "confirmed",
     "formal_current_ci_baseline": "provisional",
     "current_matching_success_samples": 1,
-    "blockers": [
-      "formal_distribution_requires_additional_matching_success_samples",
-      "github_internal_queue_unavailable",
-      "github_billing_minutes_unavailable"
-    ]
+    "blockers": ["formal_distribution_requires_additional_exact_topology_success_samples", "github_internal_queue_unavailable", "github_billing_minutes_unavailable"]
   },
   "current_topology": {
     "workflow_path": ".github/workflows/ci.yml",
     "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6",
     "rust_toolchain": "1.98.0",
     "job_count": 5,
-    "dependency_edges": [
-      {
-        "from": "rust",
-        "to": "synthetic-history-eval"
-      }
-    ],
+    "dependency_edges": [{"from": "rust", "to": "synthetic-history-eval"}],
     "critical_path_formula": "max(rust + synthetic-history-eval, persona-w0-integration, macos-security-r23, windows-security-r23)",
-    "timeout_minutes": {
-      "rust": 35,
-      "persona-w0-integration": 15,
-      "synthetic-history-eval": 10,
-      "macos-security-r23": 35,
-      "windows-security-r23": 90
-    },
+    "timeout_minutes": {"rust": 35, "persona-w0-integration": 15, "synthetic-history-eval": 10, "macos-security-r23": 35, "windows-security-r23": 90},
     "configured_dependency_cap_minutes": 45,
     "configured_aggregate_cap_minutes": 185,
     "configured_caps_are_measured_runtime": false,
     "workflow_cache_action": false,
     "persisted_artifact_action": false,
     "jobs": [
-      {
-        "name": "rust",
-        "runner": "ubuntu-latest",
-        "needs": [],
-        "signal": "format, warnings-denied lint, complete workspace/all-target tests, and Full-example compilation"
-      },
-      {
-        "name": "persona-w0-integration",
-        "runner": "ubuntu-latest",
-        "needs": [],
-        "signal": "Rust Tiny persona lifecycle, create-only preservation, leases, and filesystem attestation"
-      },
-      {
-        "name": "synthetic-history-eval",
-        "runner": "ubuntu-latest",
-        "needs": ["rust"],
-        "signal": "release/all-features scale, history, cross-scope, rerank, and M3 recall gates"
-      },
-      {
-        "name": "macos-security-r23",
-        "runner": "macos-latest",
-        "needs": [],
-        "signal": "complete workspace/all-target tests under macOS security and filesystem semantics"
-      },
-      {
-        "name": "windows-security-r23",
-        "runner": "windows-latest",
-        "needs": [],
-        "signal": "complete workspace/all-target tests under Windows portability and security semantics"
-      }
+      {"name": "rust", "runner": "ubuntu-latest", "needs": [], "signal": "format, warnings-denied lint, complete workspace/all-target tests"},
+      {"name": "persona-w0-integration", "runner": "ubuntu-latest", "needs": [], "signal": "Rust Tiny persona lifecycle, create-only preservation, leases, and filesystem attestation"},
+      {"name": "synthetic-history-eval", "runner": "ubuntu-latest", "needs": ["rust"], "signal": "release/all-features scale, history, cross-scope, rerank, and M3 recall gates"},
+      {"name": "macos-security-r23", "runner": "macos-latest", "needs": [], "signal": "complete workspace/all-target tests under macOS security and filesystem semantics"},
+      {"name": "windows-security-r23", "runner": "windows-latest", "needs": [], "signal": "complete workspace/all-target tests under Windows portability and security semantics"}
     ]
   },
   "current_success_cohort": {
     "cohort": {
-      "head": "1bbae928adf2a2fdbf04b1114665cddf40631c5d",
-      "tree": "22ad7bc8001347a4510422dfbf6e43d0215400a9",
+      "head": "1258f5165ce9098c011223ea3fb6543ed06d7490",
+      "tree": "4df488bb524fb7d6f4384aeabbe0646ea69e8436",
       "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6",
       "rust_toolchain": "1.98.0",
       "job_count": 5,
-      "dependency_edges": [
-        {
-          "from": "rust",
-          "to": "synthetic-history-eval"
-        }
-      ]
+      "dependency_edges": [{"from": "rust", "to": "synthetic-history-eval"}],
+      "runner_contract": ["ubuntu-latest", "ubuntu-latest", "ubuntu-latest", "macos-latest", "windows-latest"]
     },
-    "run_id": 32747140652,
-    "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32747140652",
+    "run_id": 32807583550,
+    "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32807583550",
     "workflow": "CI",
     "event": "push",
     "attempt": 1,
     "conclusion": "success",
-    "created_at": "2026-08-24T15:48:52Z",
-    "started_at": "2026-08-24T15:48:52Z",
-    "completed_at": "2026-08-24T16:18:35Z",
-    "workflow_wall_seconds": 1783,
-    "workflow_wall": "29:43",
-    "aggregate_job_elapsed_seconds": 5007,
-    "aggregate_runner_equivalent_minutes": 83.45,
+    "created_at": "2026-08-25T04:04:55Z",
+    "started_at": "2026-08-25T04:04:55Z",
+    "completed_at": "2026-08-25T04:34:48Z",
+    "workflow_wall_seconds": 1793,
+    "workflow_wall": "29:53",
+    "aggregate_job_elapsed_seconds": 5167,
+    "aggregate_runner_equivalent_minutes": 86.116667,
     "aggregate_elapsed_interpretation": "sum of job elapsed seconds divided by 60; runner-equivalent elapsed, not GitHub billing minutes",
-    "critical_path": {
-      "path": ["windows-security-r23"],
-      "elapsed_seconds": 1778,
-      "elapsed": "29:38"
-    },
-    "rust_to_synthetic_dependency_path": {
-      "path": ["rust", "synthetic-history-eval"],
-      "rust_elapsed_seconds": 1430,
-      "dependency_handoff_seconds": 3,
-      "synthetic_elapsed_seconds": 246,
-      "elapsed_seconds": 1679,
-      "elapsed": "27:59"
-    },
+    "critical_path": {"path": ["rust", "synthetic-history-eval"], "elapsed_seconds": 1787, "elapsed": "29:47"},
+    "rust_to_synthetic_dependency_path": {"path": ["rust", "synthetic-history-eval"], "rust_elapsed_seconds": 1503, "dependency_handoff_seconds": 4, "synthetic_elapsed_seconds": 280, "elapsed_seconds": 1787, "elapsed": "29:47"},
     "jobs": [
-      {
-        "id": 97495261887,
-        "name": "rust",
-        "runner": "ubuntu-latest",
-        "conclusion": "success",
-        "started_at": "2026-08-24T15:48:57Z",
-        "completed_at": "2026-08-24T16:12:47Z",
-        "elapsed_seconds": 1430,
-        "elapsed": "23:50"
-      },
-      {
-        "id": 97495262074,
-        "name": "persona-w0-integration",
-        "runner": "ubuntu-latest",
-        "conclusion": "success",
-        "started_at": "2026-08-24T15:48:57Z",
-        "completed_at": "2026-08-24T15:52:59Z",
-        "elapsed_seconds": 242,
-        "elapsed": "04:02"
-      },
-      {
-        "id": 97502852808,
-        "name": "synthetic-history-eval",
-        "runner": "ubuntu-latest",
-        "conclusion": "success",
-        "started_at": "2026-08-24T16:12:50Z",
-        "completed_at": "2026-08-24T16:16:56Z",
-        "elapsed_seconds": 246,
-        "elapsed": "04:06"
-      },
-      {
-        "id": 97495262123,
-        "name": "macos-security-r23",
-        "runner": "macos-latest",
-        "conclusion": "success",
-        "started_at": "2026-08-24T15:48:57Z",
-        "completed_at": "2026-08-24T16:10:48Z",
-        "elapsed_seconds": 1311,
-        "elapsed": "21:51"
-      },
-      {
-        "id": 97495262075,
-        "name": "windows-security-r23",
-        "runner": "windows-latest",
-        "conclusion": "success",
-        "started_at": "2026-08-24T15:48:56Z",
-        "completed_at": "2026-08-24T16:18:34Z",
-        "elapsed_seconds": 1778,
-        "elapsed": "29:38"
-      }
+      {"id": 97680591307, "name": "rust", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T04:05:00Z", "completed_at": "2026-08-25T04:30:03Z", "elapsed_seconds": 1503, "elapsed": "25:03", "cargo_test_elapsed_seconds": 1440, "cargo_test_elapsed": "24:00", "post_checkout_elapsed_seconds": 0, "post_checkout_conclusion": "success", "annotations": 0},
+      {"id": 97680591373, "name": "persona-w0-integration", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T04:04:59Z", "completed_at": "2026-08-25T04:09:50Z", "elapsed_seconds": 291, "elapsed": "04:51", "post_checkout_elapsed_seconds": 0, "post_checkout_conclusion": "success", "annotations": 0},
+      {"id": 97685151117, "name": "synthetic-history-eval", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T04:30:07Z", "completed_at": "2026-08-25T04:34:47Z", "elapsed_seconds": 280, "elapsed": "04:40", "post_checkout_elapsed_seconds": 1, "post_checkout_conclusion": "success", "annotations": 0},
+      {"id": 97680591378, "name": "macos-security-r23", "runner": "macos-latest", "conclusion": "success", "started_at": "2026-08-25T04:05:00Z", "completed_at": "2026-08-25T04:28:44Z", "elapsed_seconds": 1424, "elapsed": "23:44", "cargo_test_elapsed_seconds": 1406, "cargo_test_elapsed": "23:26", "post_checkout_elapsed_seconds": 1, "post_checkout_conclusion": "success", "annotations": 0},
+      {"id": 97680591455, "name": "windows-security-r23", "runner": "windows-latest", "conclusion": "success", "started_at": "2026-08-25T04:05:00Z", "completed_at": "2026-08-25T04:32:49Z", "elapsed_seconds": 1669, "elapsed": "27:49", "cargo_test_elapsed_seconds": 1642, "cargo_test_elapsed": "27:22", "post_checkout_elapsed_seconds": 3, "post_checkout_conclusion": "success", "annotations": 0}
     ],
-    "failure_relationship": {
-      "first_failure": null,
-      "failed_jobs": [],
-      "cancelled_jobs": [],
-      "skipped_jobs": [],
-      "downstream_skipped_jobs": []
-    },
-    "windows_harness_evidence": {
-      "result_blocks": 49,
-      "passed": 1947,
-      "failed": 0,
-      "ignored": 0,
-      "longest_harness_elapsed_seconds": 452.7,
-      "over_60_second_warning_count": 11,
-      "warned_tests_terminal_ok_count": 11,
-      "warned_tests_terminal_non_ok_count": 0,
-      "per_harness": [
-        {"target": "kio_adapter lib", "passed": 270, "elapsed_seconds": 1.21},
-        {"target": "real_layout_parsing_captures", "passed": 7, "elapsed_seconds": 0.11},
-        {"target": "token_recall", "passed": 2, "elapsed_seconds": 0.12},
-        {"target": "kio CLI bin", "passed": 133, "elapsed_seconds": 2.57},
-        {"target": "contract_cli", "passed": 14, "elapsed_seconds": 5.82},
-        {"target": "phase4_gc_after_index", "passed": 9, "elapsed_seconds": 12.77},
-        {"target": "phase4_gc_dry_run", "passed": 4, "elapsed_seconds": 0.55},
-        {"target": "phase4_gc_fsck", "passed": 8, "elapsed_seconds": 7.72},
-        {"target": "phase4_gc_on_idle", "passed": 3, "elapsed_seconds": 2.36},
-        {"target": "phase4_gc_sweep", "passed": 0, "elapsed_seconds": 0.0},
-        {"target": "phase4_gc_unreachable_inventory", "passed": 0, "elapsed_seconds": 0.0},
-        {"target": "phase4_snapshot_auto", "passed": 2, "elapsed_seconds": 1.13},
-        {"target": "security_r23", "passed": 4, "elapsed_seconds": 4.87},
-        {"target": "step2_p0_contract", "passed": 104, "elapsed_seconds": 86.62},
-        {"target": "step3_p0_contract", "passed": 274, "elapsed_seconds": 452.7},
-        {"target": "step4_promotion", "passed": 7, "elapsed_seconds": 15.52},
-        {"target": "step4_purge", "passed": 14, "elapsed_seconds": 26.01},
-        {"target": "step4_purge_resurrection", "passed": 3, "elapsed_seconds": 5.31},
-        {"target": "step4_restore", "passed": 10, "elapsed_seconds": 5.15},
-        {"target": "step4_time_travel", "passed": 16, "elapsed_seconds": 31.6},
-        {"target": "step4_verify", "passed": 18, "elapsed_seconds": 18.39},
-        {"target": "step4b_batch_lane_contract", "passed": 5, "elapsed_seconds": 5.94},
-        {"target": "step4b_flate_contract", "passed": 3, "elapsed_seconds": 2.9},
-        {"target": "step4b_ledger_contract", "passed": 65, "elapsed_seconds": 7.59},
-        {"target": "step4b_ledger_reconcile_contract", "passed": 4, "elapsed_seconds": 8.61},
-        {"target": "step4b_octet_text_contract", "passed": 1, "elapsed_seconds": 1.44},
-        {"target": "step4b_office_contract", "passed": 7, "elapsed_seconds": 10.9},
-        {"target": "step4b_p2a_contract", "passed": 32, "elapsed_seconds": 36.0},
-        {"target": "step4b_p2b_contract", "passed": 44, "elapsed_seconds": 52.97},
-        {"target": "step4b_p2c_contract", "passed": 40, "elapsed_seconds": 103.9},
-        {"target": "step4b_p3a_contract", "passed": 35, "elapsed_seconds": 29.75},
-        {"target": "step4b_p3b_contract", "passed": 33, "elapsed_seconds": 39.2},
-        {"target": "step4b_selfheal_contract", "passed": 4, "elapsed_seconds": 2.79},
-        {"target": "step4c_retarget", "passed": 17, "elapsed_seconds": 29.68},
-        {"target": "step5_embedding_batch_lane", "passed": 17, "elapsed_seconds": 21.03},
-        {"target": "step5_local_ocr", "passed": 11, "elapsed_seconds": 9.24},
-        {"target": "step5_local_ocr_secrets", "passed": 2, "elapsed_seconds": 1.59},
-        {"target": "windows_portability", "passed": 3, "elapsed_seconds": 2.87},
-        {"target": "kio_core lib", "passed": 158, "elapsed_seconds": 13.17},
-        {"target": "contract_vectors", "passed": 14, "elapsed_seconds": 0.71},
-        {"target": "gc_planner", "passed": 13, "elapsed_seconds": 1.41},
-        {"target": "unreachable_inventory_vectors", "passed": 0, "elapsed_seconds": 0.0},
-        {"target": "kio_eval lib", "passed": 193, "elapsed_seconds": 366.64},
-        {"target": "kio_eval bin", "passed": 9, "elapsed_seconds": 0.02},
-        {"target": "generate_corpus_cli", "passed": 3, "elapsed_seconds": 13.21},
-        {"target": "persona_full_contract example", "passed": 0, "elapsed_seconds": 0.0},
-        {"target": "kio_index lib", "passed": 118, "elapsed_seconds": 88.71},
-        {"target": "kio_pipeline lib", "passed": 164, "elapsed_seconds": 4.87},
-        {"target": "kio_search lib", "passed": 50, "elapsed_seconds": 0.01}
-      ],
-      "per_harness_failure_ignored_and_measured_counts_are_zero": true,
-      "per_harness_elapsed_source": "Cargo terminal test-result lines in GitHub job 97495262075; these are test-binary wall times, not additive job, CPU, billing, or I/O measurements",
-      "warning_semantics": "Cargo still-running progress warnings; every warned test later emitted terminal ok",
-      "phase_3_candidates": "inventory by failure mode, fixture, subprocess, SQLite, and CAS-rebuild signal; consolidate only duplicate signals with bounded immutable inputs",
-      "failure_signal": "a non-ok terminal result, timeout, cancellation, or missing terminal result"
-    },
+    "failure_relationship": {"first_failure": null, "failed_jobs": [], "cancelled_jobs": [], "skipped_jobs": [], "downstream_skipped_jobs": []},
     "telemetry": {
       "github_internal_queue_seconds": null,
       "billing_minutes": null,
+      "billing_api_duration_ms_by_os": {"ubuntu": 0, "macos": 0, "windows": 0},
+      "billing_api_zero_interpretation": "GitHub returned zero raw duration values; this is not interpretable as free, CPU time, or billing minutes, so billing_minutes remains null",
       "cpu_seconds": null,
       "maximum_resident_set_bytes": null,
       "io_read_bytes": null,
@@ -247,23 +77,14 @@
       "harness_elapsed_is_billing_cpu_or_io": false,
       "unknown_values_treated_as_zero": false
     },
-    "threshold_comparison": {
-      "workflow_wall_45_minutes": "pass_single_run_only",
-      "aggregate_runner_equivalent_250_minutes": "pass_single_run_only",
-      "formal_distribution_or_continuous_slo": "not_claimed"
-    },
+    "threshold_comparison": {"workflow_wall_45_minutes": "pass_single_run_only", "aggregate_runner_equivalent_250_minutes": "pass_single_run_only", "formal_distribution_or_continuous_slo": "not_claimed"},
+    "security_diff_scan": {"scan_id": "362c7120-a14d-4154-8c92-d809b76d4adf", "repair_base": "8ba72640744b02a81e31ecd9545a23161e347727", "head": "1258f5165ce9098c011223ea3fb6543ed06d7490", "findings": 0},
     "eligible_for_success_cost": true,
     "matching_success_sample_increment": 1
   },
   "cancelled_cohorts": [
     {
-      "cohort": {
-        "head": "0584667837bee12afe125ecd7d6cf395ac673298",
-        "tree": "7c9eac59bac28b736bca884c493fcb308af90c3b",
-        "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e",
-        "rust_toolchain": "1.98.0",
-        "job_count": 5
-      },
+      "cohort": {"head": "0584667837bee12afe125ecd7d6cf395ac673298", "tree": "7c9eac59bac28b736bca884c493fcb308af90c3b", "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e", "rust_toolchain": "1.98.0", "job_count": 5},
       "run_id": 32740699426,
       "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32740699426",
       "workflow": "CI",
@@ -279,57 +100,51 @@
       "workflow_wall": "45:20",
       "aggregate_job_elapsed_seconds": 6494,
       "aggregate_runner_equivalent_minutes": 108.233333,
-      "rust_to_synthetic_dependency_path": {
-        "elapsed_seconds": 2052,
-        "elapsed": "34:12"
-      },
+      "rust_to_synthetic_dependency_path": {"elapsed_seconds": 2052, "elapsed": "34:12"},
       "jobs": [
-        {"id": 97474184762, "name": "rust", "conclusion": "success", "started_at": "2026-08-24T14:45:48Z", "completed_at": "2026-08-24T15:15:44Z", "elapsed_seconds": 1796, "elapsed": "29:56"},
-        {"id": 97474184992, "name": "persona-w0-integration", "conclusion": "success", "started_at": "2026-08-24T14:45:48Z", "completed_at": "2026-08-24T14:50:35Z", "elapsed_seconds": 287, "elapsed": "04:47"},
-        {"id": 97484238065, "name": "synthetic-history-eval", "conclusion": "success", "started_at": "2026-08-24T15:15:49Z", "completed_at": "2026-08-24T15:20:00Z", "elapsed_seconds": 251, "elapsed": "04:11"},
-        {"id": 97474184829, "name": "macos-security-r23", "conclusion": "success", "started_at": "2026-08-24T14:45:50Z", "completed_at": "2026-08-24T15:09:55Z", "elapsed_seconds": 1445, "elapsed": "24:05"},
-        {"id": 97474184582, "name": "windows-security-r23", "conclusion": "cancelled", "started_at": "2026-08-24T14:45:49Z", "completed_at": "2026-08-24T15:31:04Z", "elapsed_seconds": 2715, "elapsed": "45:15"}
+        {"id": 97474184762, "name": "rust", "conclusion": "success", "elapsed_seconds": 1796, "elapsed": "29:56"},
+        {"id": 97474184992, "name": "persona-w0-integration", "conclusion": "success", "elapsed_seconds": 287, "elapsed": "04:47"},
+        {"id": 97484238065, "name": "synthetic-history-eval", "conclusion": "success", "elapsed_seconds": 251, "elapsed": "04:11"},
+        {"id": 97474184829, "name": "macos-security-r23", "conclusion": "success", "elapsed_seconds": 1445, "elapsed": "24:05"},
+        {"id": 97474184582, "name": "windows-security-r23", "conclusion": "cancelled", "elapsed_seconds": 2715, "elapsed": "45:15", "cargo_test_elapsed_seconds": 2679, "cargo_test_elapsed": "44:39"}
       ],
       "eligible_for_success_cost": false,
       "matching_success_sample_increment": 0,
-      "reason": "cancelled cohort; diagnostic only and never mixed into successful cost"
+      "reason": "45-minute Windows-timeout diagnostic cohort; never mixed into successful cost"
     }
   ],
   "historical_cohorts_preserved": [
+    {"classification": "prior GitHub failure cohort", "head": "c9f334e957863e1c6daf8f54cc1b917a8e0ae07a", "tree": "532ec6bb594a65e806837459a7141c16b2abe0ae", "workflow_blob": "049c69c0e867d74c49535a74543510460ca70615", "run_id": 32626254306, "conclusion": "failure", "eligible_for_success_cost": false},
+    {"classification": "superseded GitHub success cohort", "head": "4f49cce01a4fd614066f772ac9b10070a12dfd24", "tree": "5816125ba27beeac062b424d9ddfbb552df77df5", "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e", "run_id": 32698672753, "conclusion": "success", "eligible_for_current_success_cost": false},
     {
-      "classification": "prior GitHub failure cohort",
-      "head": "c9f334e957863e1c6daf8f54cc1b917a8e0ae07a",
-      "tree": "532ec6bb594a65e806837459a7141c16b2abe0ae",
-      "workflow_blob": "049c69c0e867d74c49535a74543510460ca70615",
-      "run_id": 32626254306,
-      "conclusion": "failure",
-      "eligible_for_success_cost": false
-    },
-    {
-      "classification": "superseded GitHub success cohort",
-      "head": "4f49cce01a4fd614066f772ac9b10070a12dfd24",
-      "tree": "5816125ba27beeac062b424d9ddfbb552df77df5",
-      "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e",
-      "run_id": 32698672753,
+      "classification": "prior success with same workflow blob but different test topology",
+      "head": "1bbae928adf2a2fdbf04b1114665cddf40631c5d",
+      "tree": "22ad7bc8001347a4510422dfbf6e43d0215400a9",
+      "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6",
+      "run_id": 32747140652,
+      "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32747140652",
+      "workflow": "CI",
+      "event": "push",
+      "attempt": 1,
       "conclusion": "success",
+      "created_at": "2026-08-24T15:48:52Z",
+      "started_at": "2026-08-24T15:48:52Z",
+      "completed_at": "2026-08-24T16:18:35Z",
+      "workflow_wall_seconds": 1783,
+      "aggregate_job_elapsed_seconds": 5007,
+      "aggregate_runner_equivalent_minutes": 83.45,
+      "rust_to_synthetic_dependency_path": {"elapsed_seconds": 1679, "elapsed": "27:59"},
+      "jobs": [
+        {"id": 97495261887, "name": "rust", "runner": "ubuntu-latest", "elapsed_seconds": 1430},
+        {"id": 97495262074, "name": "persona-w0-integration", "runner": "ubuntu-latest", "elapsed_seconds": 242},
+        {"id": 97502852808, "name": "synthetic-history-eval", "runner": "ubuntu-latest", "elapsed_seconds": 246},
+        {"id": 97495262123, "name": "macos-security-r23", "runner": "macos-latest", "elapsed_seconds": 1311},
+        {"id": 97495262075, "name": "windows-security-r23", "runner": "windows-latest", "elapsed_seconds": 1778}
+      ],
+      "reason": "different test topology; preserved as a prior success and excluded from the exact current cohort",
       "eligible_for_current_success_cost": false
     },
-    {
-      "classification": "historical local-only cohorts",
-      "heads": [
-        "2a85016fe29421ceafa28924f43ec39bc497d23e",
-        "d66b95859c983144bd3afc9469605f34b07ada86",
-        "f50e8cc...",
-        "2c7db5d..."
-      ],
-      "reason": "local or different-workflow evidence; retained as historical context and not current CI measurements"
-    }
+    {"classification": "historical local-only cohorts", "heads": ["2a85016fe29421ceafa28924f43ec39bc497d23e", "d66b95859c983144bd3afc9469605f34b07ada86", "f50e8cc...", "2c7db5d..."], "reason": "local or different-workflow evidence; retained as historical context and not current CI measurements"}
   ],
-  "measurement_limits": {
-    "no_dummy_pushes_reruns_or_dispatches": true,
-    "current_success_sample_count": 1,
-    "current_baseline_is_provisional": true,
-    "unknown_not_zero": true,
-    "future_matching_requirements": "same workflow blob, topology, toolchain, flags, and runner contract; cancelled, failed, rerun, and different-workflow samples do not enter the current success cohort"
-  }
+  "measurement_limits": {"no_dummy_pushes_reruns_or_dispatches": true, "current_success_sample_count": 1, "current_baseline_is_provisional": true, "unknown_not_zero": true, "future_matching_requirements": "same workflow blob, exact test topology, toolchain, flags, and runner contract; cancelled, failed, rerun, and topology-different samples do not enter the current success cohort"}
 }

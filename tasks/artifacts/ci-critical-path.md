@@ -1,20 +1,20 @@
 # Current five-job CI critical path
 
-Canonical measurements are in [ci-cost-baseline.json](ci-cost-baseline.json), with job-signal rationale in [ci-cost-unique-signal.md](ci-cost-unique-signal.md).
+Canonical measurements are in [ci-cost-baseline.json](ci-cost-baseline.json), with gate rationale in [ci-cost-unique-signal.md](ci-cost-unique-signal.md).
 
-The current matching success is [run 32747140652](https://github.com/ttokunaga-ja/kio/actions/runs/32747140652): head `1bbae928adf2a2fdbf04b1114665cddf40631c5d`, tree `22ad7bc8001347a4510422dfbf6e43d0215400a9`, workflow blob `07ae8f90747c9bce4e0d9508af2a967ffd8bbed6`, Rust `1.98.0`, `CI`/`push`, attempt `1`, and five jobs. It is the sole current success sample (`n=1`), so the baseline is provisional.
+The current exact-topology success is [run 32807583550](https://github.com/ttokunaga-ja/kio/actions/runs/32807583550): head `1258f5165ce9098c011223ea3fb6543ed06d7490`, tree `4df488bb524fb7d6f4384aeabbe0646ea69e8436`, workflow blob `07ae8f90747c9bce4e0d9508af2a967ffd8bbed6`, Rust `1.98.0`, `CI`/`push`, attempt `1`, and five jobs. It is the sole exact matching success sample (`n=1`), so the baseline is provisional.
 
 ## Measured result
 
 | Job | Started | Completed | Elapsed |
 | --- | --- | --- | ---: |
-| `rust` | 15:48:57Z | 16:12:47Z | 23:50 |
-| `persona-w0-integration` | 15:48:57Z | 15:52:59Z | 04:02 |
-| `synthetic-history-eval` | 16:12:50Z | 16:16:56Z | 04:06 |
-| `macos-security-r23` | 15:48:57Z | 16:10:48Z | 21:51 |
-| `windows-security-r23` | 15:48:56Z | 16:18:34Z | 29:38 |
+| `rust` | 04:05:00Z | 04:30:03Z | 25:03 |
+| `persona-w0-integration` | 04:04:59Z | 04:09:50Z | 04:51 |
+| `synthetic-history-eval` | 04:30:07Z | 04:34:47Z | 04:40 |
+| `macos-security-r23` | 04:05:00Z | 04:28:44Z | 23:44 |
+| `windows-security-r23` | 04:05:00Z | 04:32:49Z | 27:49 |
 
-The workflow started at `2026-08-24T15:48:52Z` and completed at `2026-08-24T16:18:35Z`: 29:43 wall-clock. Aggregate elapsed is 1,430 + 242 + 246 + 1,311 + 1,778 = 5,007 seconds = 83:27 = 83.45 runner-equivalent minutes; it is not billing time.
+The workflow started at `2026-08-25T04:04:55Z` and completed at `2026-08-25T04:34:48Z`: 29:53 wall-clock. Aggregate elapsed is 1,503 + 291 + 280 + 1,424 + 1,669 = 5,167 seconds = 86:07 = 86.116667 runner-equivalent minutes; it is not billing time.
 
 ```text
 max(
@@ -24,11 +24,11 @@ max(
   windows-security-r23
 )
 
-rust + synthetic-history-eval = 23:50 + 00:03 handoff + 04:06 = 27:59
-overall critical path         = windows-security-r23 = 29:38
+rust + synthetic-history-eval = 25:03 + 00:04 handoff + 04:40 = 29:47
+overall critical path         = rust -> synthetic-history-eval = 29:47
 ```
 
-No job failed, cancelled, skipped, or was downstream-skipped. GitHub provided no internal queue, billing, CPU, RSS, byte I/O, or cache telemetry; these are null/unknown, not zero.
+No job failed, cancelled, skipped, or was downstream-skipped. All five check-run annotation endpoints were empty. Post-checkout completed successfully in 0s, 0s, 1s, 3s, and 1s respectively for rust, persona, macOS, Windows, and synthetic.
 
 ## Finite workflow bounds
 
@@ -42,8 +42,8 @@ configured dependency cap    = 35 + 10 = 45 min
 configured aggregate cap     = 35 + 15 + 10 + 35 + 90 = 185 min
 ```
 
-These are termination bounds, not runtime, queue, or billing measurements. The measured current run is below the 45-minute workflow-wall reference and the 250-minute aggregate reference, but `n=1` is not a continuous-SLO claim.
+These are termination bounds, not runtime, queue, or billing measurements. The measured current run is below the 45-minute workflow-wall reference and the 250-minute aggregate reference, but `n=1` is not a continuous-SLO claim. GitHub did not expose internal queue, CPU, RSS, byte I/O, or cache telemetry. Raw billing duration values were zero but are not interpretable as billing minutes; billing therefore remains null/unknown rather than zero.
 
 ## Historical separation
 
-Cancelled [run 32740699426](https://github.com/ttokunaga-ja/kio/actions/runs/32740699426) (head `0584667837bee12afe125ecd7d6cf395ac673298`, blob `bdc01e224cf952148910b6a6200b9ac1e451dd9e`) ended at 45:20 with aggregate 108:14 and a 34:12 `rust -> synthetic-history-eval` path. It is not a successful-cost sample. Older local and failed cohorts remain separately recorded in the JSON artifact and are never combined with the current result.
+Prior-success [run 32747140652](https://github.com/ttokunaga-ja/kio/actions/runs/32747140652), head `1bbae928adf2a2fdbf04b1114665cddf40631c5d`, shares the workflow blob but has a different test topology. It remains separate and is not combined with this exact cohort. Cancelled [run 32740699426](https://github.com/ttokunaga-ja/kio/actions/runs/32740699426) is the separate 45-minute Windows-timeout diagnostic: Windows was cancelled at 45:15, and the run remains ineligible for successful-cost arithmetic.
