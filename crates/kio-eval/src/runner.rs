@@ -2005,83 +2005,139 @@ mod tests {
         thread::sleep(Duration::from_secs(30));
     }
 
-    /// This is invoked in a separate test binary by
-    /// `bounded_process_timeout_does_not_wait_for_escaped_pipe_holders`.
-    /// The direct child exits after its forked child creates a new session and
-    /// retains stdin/stdout/stderr.  This models a process which escapes the
-    /// ordinary Unix process group before the direct child is reaped.
+    /// This is invoked in a separate test binary by the escaped-pipe tests.
+    /// The actual escaped holder is installed by their `pre_exec` hook, before
+    /// this helper is executed. Keeping this body empty prevents a second,
+    /// racy fork after the deterministic handshake has completed.
     #[cfg(unix)]
     #[test]
-    fn escaped_pipe_holder_helper() {
-        use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-        let Some(path) = std::env::var_os("KIO_EVAL_ESCAPED_PIPE_HOLDER") else {
-            return;
-        };
-        let overflow = std::env::var_os("KIO_EVAL_ESCAPED_PIPE_HOLDER_OVERFLOW").is_some();
-        let path = CString::new(path.as_os_str().as_bytes()).expect("marker path has no NUL");
-        let child = unsafe { libc::fork() };
-        assert!(
-            child >= 0,
-            "fork failed: {}",
-            std::io::Error::last_os_error()
-        );
-        if child == 0 {
-            if unsafe { libc::setsid() } < 0 {
-                unsafe { libc::_exit(127) };
-            }
-            let descriptor = unsafe {
-                libc::open(
-                    path.as_ptr(),
-                    libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
-                )
-            };
-            if descriptor < 0 {
-                unsafe { libc::_exit(127) };
-            }
-            let mut digits = [0_u8; 20];
-            let mut number = unsafe { libc::getpid() as u64 };
-            let mut start = digits.len();
-            loop {
-                start -= 1;
-                digits[start] = b'0' + (number % 10) as u8;
-                number /= 10;
-                if number == 0 {
-                    break;
-                }
-            }
-            let _ = unsafe {
-                libc::write(
-                    descriptor,
-                    digits[start..].as_ptr().cast(),
-                    digits.len() - start,
-                )
-            };
-            unsafe {
-                libc::close(descriptor);
-                if overflow {
-                    let bytes = [b'x'; 8192];
-                    loop {
-                        let _ = libc::write(1, bytes.as_ptr().cast(), bytes.len());
-                    }
-                } else {
-                    loop {
-                        libc::pause();
-                    }
-                }
-            }
-        }
-        // Returning lets the test process exit normally while the descendant
-        // keeps all three inherited pipe ends alive.
-    }
+    fn escaped_pipe_holder_helper() {}
 
     #[cfg(unix)]
     struct EscapedPipeHolder {
         marker: tempfile::TempPath,
+        marker_file: fs::File,
+        release_reader: fs::File,
+        release_writer: Option<fs::File>,
+    }
+
+    #[cfg(unix)]
+    struct EscapedPipeProgram {
+        shell: std::ffi::CString,
+        shell_name: std::ffi::CString,
+        command_flag: std::ffi::CString,
+        script: std::ffi::CString,
+    }
+
+    #[cfg(unix)]
+    impl EscapedPipeProgram {
+        fn new(overflow: bool, shell: &str) -> Self {
+            let script = if overflow {
+                format!(
+                    "printf A >&4; exec 4>&-; printf '{}'; read _ <&5; exec 5<&-",
+                    "x".repeat(2_048)
+                )
+            } else {
+                "printf A >&4; exec 4>&-; read _ <&5; exec 5<&-".to_owned()
+            };
+            Self {
+                shell: std::ffi::CString::new(shell).expect("shell path has no NUL"),
+                shell_name: std::ffi::CString::new("sh").expect("shell name has no NUL"),
+                command_flag: std::ffi::CString::new("-c").expect("command flag has no NUL"),
+                script: std::ffi::CString::new(script).expect("script has no NUL"),
+            }
+        }
     }
 
     #[cfg(unix)]
     impl EscapedPipeHolder {
+        fn new() -> Self {
+            use std::os::fd::FromRawFd;
+
+            let marker = tempfile::NamedTempFile::new()
+                .expect("create marker")
+                .into_temp_path();
+            let marker_file = fs::OpenOptions::new()
+                .write(true)
+                .open(&marker)
+                .expect("open marker for pre-exec holder");
+            let mut release = [-1; 2];
+            assert_eq!(
+                unsafe { libc::pipe(release.as_mut_ptr()) },
+                0,
+                "create release pipe"
+            );
+            for fd in release {
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0,
+                    "set release pipe CLOEXEC"
+                );
+            }
+            Self {
+                marker,
+                marker_file,
+                // SAFETY: `release` was created above and each ownership is
+                // transferred into exactly one File for the test lifetime.
+                release_reader: unsafe { fs::File::from_raw_fd(release[0]) },
+                release_writer: Some(unsafe { fs::File::from_raw_fd(release[1]) }),
+            }
+        }
+
+        fn install_pre_exec_holder(&self, command: &mut Command, overflow: bool) {
+            self.install_pre_exec_holder_with_options(command, overflow, "/bin/sh", 30_000, false);
+        }
+
+        fn install_pre_exec_holder_with_shell(
+            &self,
+            command: &mut Command,
+            overflow: bool,
+            shell: &str,
+        ) {
+            self.install_pre_exec_holder_with_options(command, overflow, shell, 30_000, false);
+        }
+
+        fn install_pre_exec_holder_with_options(
+            &self,
+            command: &mut Command,
+            overflow: bool,
+            shell: &str,
+            ack_timeout_millis: libc::c_int,
+            stall_after_marker: bool,
+        ) {
+            use std::{os::fd::AsRawFd, os::unix::process::CommandExt};
+
+            let marker_fd = self.marker_file.as_raw_fd();
+            let release_fd = self.release_reader.as_raw_fd();
+            let program = EscapedPipeProgram::new(overflow, shell);
+            // SAFETY: after fork this closure calls only the async-signal-safe
+            // libc routines in `spawn_escaped_pipe_holder_pre_exec`. It does
+            // not allocate, lock, access Rust I/O, or return through a
+            // fallible Rust operation. The finite ACK wait exits the child on
+            // failure, so `Command::spawn` cannot wait indefinitely here.
+            unsafe {
+                command.pre_exec(move || {
+                    let argv = [
+                        program.shell_name.as_ptr(),
+                        program.command_flag.as_ptr(),
+                        program.script.as_ptr(),
+                        std::ptr::null(),
+                    ];
+                    let envp = [std::ptr::null()];
+                    spawn_escaped_pipe_holder_pre_exec(
+                        marker_fd,
+                        release_fd,
+                        program.shell.as_ptr(),
+                        argv.as_ptr(),
+                        envp.as_ptr(),
+                        ack_timeout_millis,
+                        stall_after_marker,
+                    );
+                    Ok(())
+                });
+            }
+        }
+
         fn wait_for_pid(&self) {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
@@ -2101,33 +2157,271 @@ mod tests {
     }
 
     #[cfg(unix)]
+    unsafe fn close_or_exit(fd: libc::c_int) {
+        if unsafe { libc::close(fd) } < 0 {
+            unsafe { libc::_exit(127) };
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe fn dup_to_or_exit(source: libc::c_int, target: libc::c_int) {
+        if source != target {
+            if unsafe { libc::dup2(source, target) } < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { close_or_exit(source) };
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe fn duplicate_cloexec_or_exit(fd: libc::c_int) -> libc::c_int {
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 16) };
+        if duplicate < 0 {
+            unsafe { libc::_exit(127) };
+        }
+        duplicate
+    }
+
+    #[cfg(unix)]
+    unsafe fn write_all_or_exit(fd: libc::c_int, bytes: &[u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let written =
+                unsafe { libc::write(fd, bytes[offset..].as_ptr().cast(), bytes.len() - offset) };
+            if written > 0 {
+                offset += written as usize;
+            } else if written < 0 && unsafe { errno() } == libc::EINTR {
+                continue;
+            } else {
+                unsafe { libc::_exit(127) };
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe fn errno() -> libc::c_int {
+        unsafe { *libc::__errno_location() }
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn errno() -> libc::c_int {
+        unsafe { *libc::__error() }
+    }
+
+    #[cfg(unix)]
+    unsafe fn write_pid_or_exit(marker_fd: libc::c_int) {
+        if unsafe { libc::setsid() } < 0
+            || unsafe { libc::ftruncate(marker_fd, 0) } < 0
+            || unsafe { libc::lseek(marker_fd, 0, libc::SEEK_SET) } < 0
+        {
+            unsafe { libc::_exit(127) };
+        }
+        let mut digits = [0_u8; 20];
+        let mut number = unsafe { libc::getpid() as u64 };
+        let mut start = digits.len();
+        loop {
+            start -= 1;
+            digits[start] = b'0' + (number % 10) as u8;
+            number /= 10;
+            if number == 0 {
+                break;
+            }
+        }
+        unsafe { write_all_or_exit(marker_fd, &digits[start..]) };
+    }
+
+    #[cfg(unix)]
+    unsafe fn wait_for_ack(read_fd: libc::c_int, timeout_millis: libc::c_int) -> bool {
+        let mut started = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut started) } < 0 {
+            return false;
+        }
+        let mut deadline_secs = started.tv_sec + (timeout_millis / 1_000) as libc::time_t;
+        let mut deadline_nsecs =
+            started.tv_nsec + (timeout_millis % 1_000) as libc::c_long * 1_000_000;
+        if deadline_nsecs >= 1_000_000_000 {
+            deadline_secs += 1;
+            deadline_nsecs -= 1_000_000_000;
+        }
+        loop {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } < 0 {
+                return false;
+            }
+            if now.tv_sec > deadline_secs
+                || (now.tv_sec == deadline_secs && now.tv_nsec >= deadline_nsecs)
+            {
+                return false;
+            }
+            let mut remaining_secs = deadline_secs - now.tv_sec;
+            let mut remaining_nsecs = deadline_nsecs - now.tv_nsec;
+            if remaining_nsecs < 0 {
+                remaining_secs -= 1;
+                remaining_nsecs += 1_000_000_000;
+            }
+            let remaining_ms = remaining_secs * 1_000 + (remaining_nsecs + 999_999) / 1_000_000;
+            let mut pollfd = libc::pollfd {
+                fd: read_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout_ms = if remaining_ms > libc::c_int::MAX as libc::time_t {
+                libc::c_int::MAX
+            } else {
+                remaining_ms as libc::c_int
+            };
+            let polled = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+            if polled == 0 {
+                return false;
+            }
+            if polled < 0 {
+                if unsafe { errno() } == libc::EINTR {
+                    continue;
+                }
+                return false;
+            }
+            let mut ack = 0_u8;
+            let read = unsafe { libc::read(read_fd, (&mut ack as *mut u8).cast(), 1) };
+            if read == 1 && ack == b'A' {
+                return true;
+            }
+            if read < 0 && unsafe { errno() } == libc::EINTR {
+                continue;
+            }
+            return false;
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe fn reap_killed_holder_or_exit(child: libc::pid_t) {
+        let mut started = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut started) } < 0 {
+            unsafe { libc::_exit(127) };
+        }
+        let deadline_secs = started.tv_sec + 30;
+        loop {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+            if waited == child || (waited < 0 && unsafe { errno() } == libc::ECHILD) {
+                return;
+            }
+            if waited < 0 && unsafe { errno() } != libc::EINTR {
+                unsafe { libc::_exit(127) };
+            }
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } < 0
+                || now.tv_sec > deadline_secs
+                || (now.tv_sec == deadline_secs && now.tv_nsec >= started.tv_nsec)
+            {
+                unsafe { libc::_exit(127) };
+            }
+            let slept = unsafe { libc::poll(std::ptr::null_mut(), 0, 10) };
+            if slept < 0 && unsafe { errno() } != libc::EINTR {
+                unsafe { libc::_exit(127) };
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe fn abort_unacknowledged_holder_or_exit(child: libc::pid_t, read_fd: libc::c_int) {
+        let _ = unsafe { libc::close(read_fd) };
+        let killed = unsafe { libc::kill(child, libc::SIGKILL) };
+        if killed < 0 && unsafe { errno() } != libc::ESRCH {
+            unsafe { libc::_exit(127) };
+        }
+        unsafe { reap_killed_holder_or_exit(child) };
+        unsafe { libc::_exit(127) };
+    }
+
+    #[cfg(unix)]
+    unsafe fn spawn_escaped_pipe_holder_pre_exec(
+        marker_fd: libc::c_int,
+        release_fd: libc::c_int,
+        shell: *const libc::c_char,
+        argv: *const *const libc::c_char,
+        envp: *const *const libc::c_char,
+        ack_timeout_millis: libc::c_int,
+        stall_after_marker: bool,
+    ) {
+        let mut handshake = [-1; 2];
+        if unsafe { libc::pipe(handshake.as_mut_ptr()) } < 0
+            || unsafe { libc::fcntl(handshake[0], libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            || unsafe { libc::fcntl(handshake[1], libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            unsafe { libc::_exit(127) };
+        }
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            unsafe { libc::_exit(127) };
+        }
+        if child == 0 {
+            unsafe { close_or_exit(handshake[0]) };
+            // Keep only stdio plus these fixed descriptors. The grandchild
+            // must retain stdout/stderr. Executing the prepared shell below
+            // closes Command::spawn's private CLOEXEC exec-status pipe before
+            // the shell sends the readiness ACK on descriptor 4.
+            let marker_copy = unsafe { duplicate_cloexec_or_exit(marker_fd) };
+            let ack_copy = unsafe { duplicate_cloexec_or_exit(handshake[1]) };
+            let release_copy = unsafe { duplicate_cloexec_or_exit(release_fd) };
+            unsafe { dup_to_or_exit(marker_copy, 3) };
+            unsafe { dup_to_or_exit(ack_copy, 4) };
+            unsafe { dup_to_or_exit(release_copy, 5) };
+            if unsafe { libc::fcntl(4, libc::F_SETFD, 0) } < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            if unsafe { libc::fcntl(5, libc::F_SETFD, 0) } < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { write_pid_or_exit(3) };
+            if stall_after_marker && unsafe { libc::kill(libc::getpid(), libc::SIGSTOP) } < 0 {
+                unsafe { libc::_exit(127) };
+            }
+            unsafe { close_or_exit(3) };
+            unsafe { libc::execve(shell, argv, envp) };
+            unsafe { libc::_exit(127) };
+        }
+        if unsafe { libc::close(handshake[1]) } < 0 {
+            unsafe { abort_unacknowledged_holder_or_exit(child, handshake[0]) };
+        }
+        if !unsafe { wait_for_ack(handshake[0], ack_timeout_millis) }
+            || unsafe { libc::close(handshake[0]) } < 0
+        {
+            unsafe { abort_unacknowledged_holder_or_exit(child, handshake[0]) };
+        }
+    }
+
+    #[cfg(unix)]
     impl Drop for EscapedPipeHolder {
         fn drop(&mut self) {
-            let Ok(pid) = fs::read_to_string(&self.marker) else {
-                return;
-            };
-            let Ok(pid) = pid.trim().parse::<i32>() else {
-                return;
-            };
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            // EOF is an identity-safe release for the exact shell that owns
+            // descriptor 5; unlike a recorded numeric PID it cannot target a
+            // later, unrelated process after PID reuse.
+            self.release_writer.take();
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn bounded_process_timeout_does_not_wait_for_escaped_pipe_holders() {
-        let marker = tempfile::NamedTempFile::new()
-            .expect("create marker")
-            .into_temp_path();
-        let _holder = EscapedPipeHolder { marker };
+        let _holder = EscapedPipeHolder::new();
         let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        _holder.install_pre_exec_holder(&mut command, false);
         command
             .arg("--exact")
             .arg("runner::tests::escaped_pipe_holder_helper")
-            .arg("--nocapture")
-            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker);
+            .arg("--nocapture");
         let started = Instant::now();
         let error = run_bounded_command(
             &mut command,
@@ -2153,17 +2447,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bounded_process_stops_on_escaped_stdout_overflow() {
-        let marker = tempfile::NamedTempFile::new()
-            .expect("create marker")
-            .into_temp_path();
-        let _holder = EscapedPipeHolder { marker };
+        let _holder = EscapedPipeHolder::new();
         let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        _holder.install_pre_exec_holder(&mut command, true);
         command
             .arg("--exact")
             .arg("runner::tests::escaped_pipe_holder_helper")
-            .arg("--nocapture")
-            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker)
-            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER_OVERFLOW", "1");
+            .arg("--nocapture");
         let started = Instant::now();
         let error = run_bounded_command(
             &mut command,
@@ -2189,16 +2479,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bounded_process_escaped_unread_stdin_returns_without_a_writer_join() {
-        let marker = tempfile::NamedTempFile::new()
-            .expect("create marker")
-            .into_temp_path();
-        let _holder = EscapedPipeHolder { marker };
+        let _holder = EscapedPipeHolder::new();
         let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        _holder.install_pre_exec_holder(&mut command, false);
         command
             .arg("--exact")
             .arg("runner::tests::escaped_pipe_holder_helper")
-            .arg("--nocapture")
-            .env("KIO_EVAL_ESCAPED_PIPE_HOLDER", &_holder.marker);
+            .arg("--nocapture");
         let started = Instant::now();
         let error = run_bounded_command(
             &mut command,
@@ -2218,6 +2505,56 @@ mod tests {
             BoundedProcessError::Write(_) | BoundedProcessError::Timeout { .. }
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
+        _holder.wait_for_pid();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escaped_holder_pre_exec_failure_reaps_before_spawn_can_return() {
+        let _holder = EscapedPipeHolder::new();
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        _holder.install_pre_exec_holder_with_shell(&mut command, false, "/definitely/not/a/shell");
+        let started = Instant::now();
+        let output = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_millis(100),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            None,
+        )
+        .expect("pre-exec cleanup must let spawn return");
+        assert_eq!(output.status.code(), Some(127));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "unacknowledged escaped holder delayed spawn completion"
+        );
+        _holder.wait_for_pid();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_pre_exec_holder_is_killed_and_reaped_before_spawn_can_return() {
+        let _holder = EscapedPipeHolder::new();
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        _holder.install_pre_exec_holder_with_options(&mut command, false, "/bin/sh", 250, true);
+        let started = Instant::now();
+        let output = run_bounded_command(
+            &mut command,
+            BoundedProcessOptions {
+                timeout: Duration::from_secs(2),
+                max_stdout_bytes: 1024,
+                max_stderr_bytes: 1024,
+            },
+            None,
+        )
+        .expect("stalled pre-exec holder must be cleaned before spawn returns");
+        assert_eq!(output.status.code(), Some(127));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "stalled pre-exec holder delayed spawn completion"
+        );
         _holder.wait_for_pid();
     }
 
