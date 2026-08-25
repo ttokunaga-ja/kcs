@@ -1,5 +1,9 @@
 # Step 4b 完了時 backlog と MVP Done 判定 (2026-07-22)
 
+> **Historical, non-authorizing evidence ledger.** 各行は記録時点の測定・裁定・実装結果を
+> 保持するが、現在の未完了作業や実装権限を示さない。現行 authority は canonical `docs/`、
+> Rust implementation/tests、CI workflow である。固有の監査証拠を持つため本文は保持する。
+
 ## 0. MVP Done 判定 (09-mvp-scope.md §4.3)
 
 **Done 条件「synthetic で各シナリオ Recall@10 >= 0.8」を達成** (commit `58cea60` 時点、
@@ -260,7 +264,8 @@ enrichment ドライバ (下記「残作業」)** — これが入るまで実�
 
 ## 3.5-old Embedding のコスト記帳 (2026-07-24 追加 — dogfood 索引化計画の調査で判明)
 
-根拠と再現は [dogfood-index-phase-plan.md §6](dogfood-index-phase-plan.md)。公式ドキュメントで
+当時の根拠と再現結果は、縮約した
+[dogfood-index-phase-plan.md](dogfood-index-phase-plan.md) に historical evidence として残す。公式ドキュメントで
 `gemini-embedding-2` = 標準 $0.20/1M text・**Batch $0.10/1M (50% off)** を確認済み。
 
 1. **[P1] 単価定数が別モデルの価格** — `estimate_embedding_cost()` (`kio-cli/src/main.rs:14651`)

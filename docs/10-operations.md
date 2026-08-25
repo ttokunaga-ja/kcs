@@ -361,6 +361,12 @@ kio index は対象ファイルや子scopeを発見した時点で必要な .kio
 履歴やobjectを持たない .kio は repair / cleanup で整理可能にする
 ```
 
+現行の子 scope 自動生成は macOS / Linux の retained-handle launcher に限る。Windows では
+探索と preview は read-only のまま実行するが、child mutation は
+`KIO-E-SCOPE-BOUND-UNSUPPORTED-001` の structured partial failure として返し、子 `.kio` を
+作らない。junction / reparse point / directory replacement を pathname fallback で追わず、
+retained identity へ全 mutation を拘束できる経路が無い限り fail-closed を維持する。
+
 走査境界の既定 (2026-07-18 確定 — いずれも安全側。緩和は config で明示的に行う):
 
 ```text

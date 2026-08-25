@@ -172,6 +172,12 @@ stateを残し、ref不達objectを履歴authorityとして扱わない。
 
 `kio init` は指定フォルダ (省略時 = カレント) の `.kio` を 1 つだけ作成する (子孫には作らない)。子フォルダの `.kio` は `kio index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既存子 scope を grandfather する分岐は置かない — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kio search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。また `kio init` は生成する `.kio/config.toml` の `[chunking] unicode_version` に実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する ([03-data-model.md §5.3](03-data-model.md) — 省略不可・default なし。schema でも required — [10-operations.md §11.3](10-operations.md))。
 
+子 scope の自動 mutation は retained directory capability から child process を起動できる
+macOS / Linux で実装済みである。Windows は read-only preview までは行うが、現行の process
+API と SQLite 経路では retained handle を child の全 mutation sink へ連鎖できないため、各 planned
+child を `KIO-E-SCOPE-BOUND-UNSUPPORTED-001` として構造化報告し、子 `.kio` 作成前に
+fail-closed する。public pathname の再検証後に `current_dir(path)` へ戻る fallback は持たない。
+
 `<pointer>` 引数の受理形式 (URI / inline JSON / stdin / hash 短縮形) は [08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) を正本とする。
 
 本節が CLI コマンドの **正本一覧** である。他 spec が新しいコマンド・フラグに言及する場合、本節への追加を伴う (破壊的変更扱い)。

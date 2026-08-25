@@ -7,7 +7,7 @@ the plan and Rust records remain authoritative.
 ```text
 このリポジトリで `<PERSONA_ID>` 1人分の完全合成 corpus production を担当してください。
 最初に tasks/persona-skill-corpus/README.md、COMMON_RULES.md、BATCH_PROTOCOL.md、
-PERSONA_INDEX.md、SESSION_HANDOFF.md、tasks/persona-pc-eval-contract.md を読んでください。
+PERSONA_INDEX.md、SESSION_HANDOFF.md を読んでください。
 accepted Rust plan と Rust が作成した workspace-owner record だけを persona、scope ID、
 home path、配分の authority としてください。別の runtime で plan を解析・再生成・scaffold
 してはいけません。

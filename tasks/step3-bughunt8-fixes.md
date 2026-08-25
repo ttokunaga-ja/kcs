@@ -149,9 +149,9 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
   アーキ変更。「そもそも online markdownize task を Step 3 で走らせるべきか (課金するのに使えない)」も含め設計判断。
 - **選択肢**: (A) 昇格ロジックを実装 (online 成果物を検索可能に)、(B) 昇格が Step 4 なら Step 3 では online
   markdownize task を作らない/走らせない (無駄な課金を止める)、(C) 既知の Step 4 保留として明文化し今回は非対応。
-- **→ ユーザー裁定 (2026-07-05): (C) Step 4 保留として明文化**。今回は code 変更せず、Step 4 の既知項目として記録
-  (`tasks/step4-kickoff-runbook.md` に追記)。online 成果物は Step 4 の promotion 実装まで検索不可のまま
-  (それまで online markdownize task は走るが成果物は未使用=課金には注意)。
+- **→ ユーザー裁定 (2026-07-05): (C) Step 4 保留として明文化**。この記述は当時の裁定であり、
+  その後の実装状態を表さない。旧 Step 4 着手計画は current contract と重複するため削除済みで、
+  現行挙動の authority は canonical docs、実装、behavior tests である。
 
 ---
 
