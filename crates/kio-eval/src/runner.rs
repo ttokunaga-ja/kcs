@@ -2518,7 +2518,12 @@ mod tests {
         let output = run_bounded_command(
             &mut command,
             BoundedProcessOptions {
-                timeout: Duration::from_millis(100),
+                // This checks the pre-exec failure path, not the product
+                // timeout boundary. A loaded CI worker can spend more than
+                // 100 ms scheduling the test binary after `spawn` has safely
+                // returned. Keep the independent <2 s assertion below so a
+                // stuck pre-exec cleanup remains a deterministic failure.
+                timeout: Duration::from_secs(3),
                 max_stdout_bytes: 1024,
                 max_stderr_bytes: 1024,
             },
