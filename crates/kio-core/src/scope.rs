@@ -5416,14 +5416,8 @@ impl StoreLock {
         let canonical = canonical_lock_bytes(pid, &token)?;
         let owner = match create_windows_lock(&parent, leaf, &canonical) {
             Ok(owner) => owner,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                reclaim_windows_stale_lock(&parent, leaf, &canonical)
-                    .map_err(|error| KioError::io(error.to_string(), path.display().to_string()))?
+            Err(error) if is_windows_lock_contention(&error) => {
+                reclaim_windows_stale_lock(&parent, leaf, &canonical)?
                     .ok_or_else(|| KioError::locked(path.display().to_string()))?
             }
             Err(error) => return Err(KioError::io(error.to_string(), path.display().to_string())),
@@ -5567,6 +5561,22 @@ fn windows_lock_leaf(path: &Path) -> Result<&Path> {
     Ok(leaf)
 }
 
+/// Classify only create/open errors that prove another Windows lock owner may
+/// still control the leaf. Delete failures intentionally remain I/O errors:
+/// they do not establish that a competing lock exists.
+#[cfg(windows)]
+fn is_windows_lock_contention(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+    ) || matches!(
+        error.raw_os_error(),
+        Some(code) if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32
+    )
+}
+
 #[cfg(windows)]
 fn windows_lock_open_options(
     create_new: bool,
@@ -5708,7 +5718,7 @@ fn reclaim_windows_stale_lock(
     let stale = match cap_fs::open(parent, leaf, &options) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(error) if is_windows_lock_contention(&error) => return Ok(None),
         Err(error) => return Err(KioError::io(error.to_string(), ".lock")),
     };
     let (old, identity) = read_windows_lock(&stale)?;
@@ -5722,14 +5732,7 @@ fn reclaim_windows_stale_lock(
     drop(stale);
     match create_windows_lock(parent, leaf, replacement) {
         Ok(file) => Ok(Some(file)),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            Ok(None)
-        }
+        Err(error) if is_windows_lock_contention(&error) => Ok(None),
         Err(error) => Err(KioError::io(error.to_string(), ".lock")),
     }
 }
@@ -7367,8 +7370,8 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        canonical_lock_bytes, create_windows_lock, open_windows_lock_parent, read_windows_lock,
-        release_windows_owned_lock, windows_lock_leaf,
+        canonical_lock_bytes, create_windows_lock, is_windows_lock_contention,
+        open_windows_lock_parent, read_windows_lock, release_windows_owned_lock, windows_lock_leaf,
     };
     #[cfg(windows)]
     use std::path::PathBuf;
@@ -8015,6 +8018,45 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_lock_contention_classifier_is_limited_to_lock_create_open_conflicts() {
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+
+        for raw_code in [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION] {
+            assert!(is_windows_lock_contention(
+                &std::io::Error::from_raw_os_error(raw_code as i32)
+            ));
+        }
+        for raw_code in [2, 87, 112] {
+            assert!(!is_windows_lock_contention(
+                &std::io::Error::from_raw_os_error(raw_code)
+            ));
+        }
+        assert!(is_windows_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+        assert!(is_windows_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_rejects_malformed_existing_leaf_without_touching_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary.lock");
+        let bytes = b"malformed Windows lock record";
+        fs::write(&path, bytes).unwrap();
+
+        let error = match StoreLock::acquire_path(path.clone()) {
+            Ok(_) => panic!("malformed lock must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_code(), "KIO-E-STORE-LOCKED-001");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_lock_rejects_hardlinked_stale_leaf_without_touching_either_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ordinary.lock");
@@ -8023,7 +8065,11 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         fs::hard_link(&path, &alias).unwrap();
 
-        assert!(StoreLock::acquire_path(path.clone()).is_err());
+        let error = match StoreLock::acquire_path(path.clone()) {
+            Ok(_) => panic!("hardlinked lock must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_code(), "KIO-E-STORE-LOCKED-001");
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(fs::read(&alias).unwrap(), bytes);
     }
