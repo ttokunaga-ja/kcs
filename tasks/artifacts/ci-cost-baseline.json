@@ -1,15 +1,15 @@
 {
-  "schema": "kio.ci-cost-baseline/v1",
-  "captured_at": "2026-08-25T13:10:46Z",
+  "schema": "kio.ci-cost-baseline/v2",
+  "captured_at": "2026-08-25T20:26:49Z",
   "artifact_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
   "status": {
     "measurement_package": "complete",
-    "github_current_activation": "measured_exact_cohort_n1",
-    "formal_current_ci_baseline": "single_natural_push_success_not_a_distribution_or_slo",
-    "current_matching_success_samples": 1,
+    "github_observation_status": "latest_observed_exact_success_n1",
+    "formal_ci_baseline": "single_natural_push_success_not_a_distribution_or_slo",
+    "latest_observed_binding_success_samples": 1,
     "blockers": ["formal_distribution_requires_at_least_three_natural_exact_topology_success_samples", "github_internal_queue_unavailable", "github_billing_minutes_unavailable"]
   },
-  "current_topology": {
+  "observed_topology": {
     "workflow_path": ".github/workflows/ci.yml",
     "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6",
     "rust_toolchain": "1.98.0",
@@ -33,16 +33,16 @@
       {"name": "windows-security-r23", "runner": "windows-latest", "needs": [], "signal": "complete workspace/all-target tests under Windows portability and security semantics"}
     ]
   },
-  "current_exact_cohort": {
+  "latest_observed_exact_success": {
     "measurement_state": "measured_exact_success_n1",
-    "reason": "Natural push run 32848763996 is the sole exact current sample. It is a single successful observation, not a distribution or continuous-SLO result.",
+    "reason": "Natural push run 32890496534 is the latest exact success observed at captured_at. This time-fixed label is bound to its tested Git objects and does not claim that any later commit is measured.",
     "matching_success_samples": 1,
     "formal_baseline": "single_run_provisional_not_a_distribution_or_slo",
-    "next_measurement_requirement": "at least three natural push successes with the final workflow blob, test topology, Rust toolchain, flags, and runner contract before timeout optimization or an SLO declaration",
+    "next_measurement_requirement": "at least three natural push successes with an identical workflow blob, tested Git tree, Rust toolchain, flags, and runner contract before timeout optimization or an SLO declaration",
     "cohort": {
-      "head": "049288af26515edba125925a7f496fe77a8ff90f",
-      "tree": "25975f5da1a8e39f999e1282600d2ebc088a2f70",
-      "test_topology_binding": {"kind": "complete_tested_git_tree", "tree": "25975f5da1a8e39f999e1282600d2ebc088a2f70", "interpretation": "The complete tested checkout, including product sources, test sources, fixtures, workspace manifests, and workflow, is bound by this Git tree object."},
+      "head": "55b87e05bc59adbfa33d80af02de37e7fda3de95",
+      "tree": "39f738fd4a6b8cfe5d5ba72e729c4fdf10fb9570",
+      "test_topology_binding": {"kind": "complete_tested_git_tree", "tree": "39f738fd4a6b8cfe5d5ba72e729c4fdf10fb9570", "interpretation": "The complete tested checkout, including product sources, test sources, fixtures, workspace manifests, and workflow, is bound by this Git tree object."},
       "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6",
       "rust_toolchain": "1.98.0",
       "rust_toolchain_blob": "a866dcb591b370cb890dcc8176659069a2357369",
@@ -56,28 +56,28 @@
         {"job": "windows-security-r23", "runner": "windows-latest"}
       ]
     },
-    "run_id": 32848763996,
-    "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32848763996",
+    "run_id": 32890496534,
+    "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32890496534",
     "workflow": "CI",
     "event": "push",
     "attempt": 1,
     "conclusion": "success",
-    "created_at": "2026-08-25T12:39:05Z",
-    "started_at": "2026-08-25T12:39:05Z",
-    "completed_at": "2026-08-25T13:10:46Z",
-    "workflow_wall_seconds": 1901,
-    "workflow_wall": "31:41",
-    "aggregate_job_elapsed_seconds": 5179,
-    "aggregate_runner_equivalent_minutes": 86.316667,
+    "created_at": "2026-08-25T19:36:10Z",
+    "started_at": "2026-08-25T19:36:10Z",
+    "completed_at": "2026-08-25T20:03:49Z",
+    "workflow_wall_seconds": 1659,
+    "workflow_wall": "27:39",
+    "aggregate_job_elapsed_seconds": 4927,
+    "aggregate_runner_equivalent_minutes": 82.116667,
     "aggregate_elapsed_interpretation": "sum of job elapsed seconds divided by 60; runner-equivalent elapsed, not GitHub billing minutes",
-    "critical_path": {"path": ["windows-security-r23"], "elapsed_seconds": 1897, "elapsed": "31:37"},
-    "rust_to_synthetic_dependency_path": {"path": ["rust", "synthetic-history-eval"], "rust_elapsed_seconds": 1494, "dependency_handoff_seconds": 4, "synthetic_elapsed_seconds": 252, "elapsed_seconds": 1750, "elapsed": "29:10"},
+    "critical_path": {"path": ["rust", "synthetic-history-eval"], "elapsed_seconds": 1655, "elapsed": "27:35"},
+    "rust_to_synthetic_dependency_path": {"path": ["rust", "synthetic-history-eval"], "rust_elapsed_seconds": 1406, "dependency_handoff_seconds": 5, "synthetic_elapsed_seconds": 244, "elapsed_seconds": 1655, "elapsed": "27:35"},
     "jobs": [
-      {"id": 97804508199, "name": "rust", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T12:39:09Z", "completed_at": "2026-08-25T13:04:03Z", "elapsed_seconds": 1494, "elapsed": "24:54"},
-      {"id": 97804508156, "name": "persona-w0-integration", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T12:39:09Z", "completed_at": "2026-08-25T12:42:29Z", "elapsed_seconds": 200, "elapsed": "03:20"},
-      {"id": 97812083653, "name": "synthetic-history-eval", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T13:04:07Z", "completed_at": "2026-08-25T13:08:19Z", "elapsed_seconds": 252, "elapsed": "04:12"},
-      {"id": 97804508002, "name": "macos-security-r23", "runner": "macos-latest", "conclusion": "success", "started_at": "2026-08-25T12:39:09Z", "completed_at": "2026-08-25T13:01:25Z", "elapsed_seconds": 1336, "elapsed": "22:16"},
-      {"id": 97804508264, "name": "windows-security-r23", "runner": "windows-latest", "conclusion": "success", "started_at": "2026-08-25T12:39:09Z", "completed_at": "2026-08-25T13:10:46Z", "elapsed_seconds": 1897, "elapsed": "31:37"}
+      {"id": 97941041405, "name": "rust", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T19:36:13Z", "completed_at": "2026-08-25T19:59:39Z", "elapsed_seconds": 1406, "elapsed": "23:26"},
+      {"id": 97941041236, "name": "persona-w0-integration", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T19:36:13Z", "completed_at": "2026-08-25T19:40:37Z", "elapsed_seconds": 264, "elapsed": "04:24"},
+      {"id": 97948194442, "name": "synthetic-history-eval", "runner": "ubuntu-latest", "conclusion": "success", "started_at": "2026-08-25T19:59:44Z", "completed_at": "2026-08-25T20:03:48Z", "elapsed_seconds": 244, "elapsed": "04:04"},
+      {"id": 97941041299, "name": "macos-security-r23", "runner": "macos-latest", "conclusion": "success", "started_at": "2026-08-25T19:36:13Z", "completed_at": "2026-08-25T19:59:28Z", "elapsed_seconds": 1395, "elapsed": "23:15"},
+      {"id": 97941041411, "name": "windows-security-r23", "runner": "windows-latest", "conclusion": "success", "started_at": "2026-08-25T19:36:15Z", "completed_at": "2026-08-25T20:03:13Z", "elapsed_seconds": 1618, "elapsed": "26:58"}
     ],
     "failure_relationship": {"first_failure": null, "failed_jobs": [], "cancelled_jobs": [], "skipped_jobs": [], "downstream_skipped_jobs": []},
     "github_metrics": {"internal_queue_seconds": null, "billing_minutes": null, "cpu_seconds": null, "maximum_resident_set_bytes": null, "io_read_bytes": null, "io_write_bytes": null, "cache_hit_information": null, "unknown_values_treated_as_zero": false},
@@ -142,7 +142,7 @@
     ],
     "over_60_second_test_warnings": {"count": 7, "all_terminal_conclusions": "success", "interpretation": "distinct Tiny/Pilot signals, not unfinished tests or checkout cleanup"},
     "security_diff_scan": {"scan_id": "362c7120-a14d-4154-8c92-d809b76d4adf", "repair_base": "8ba72640744b02a81e31ecd9545a23161e347727", "head": "1258f5165ce9098c011223ea3fb6543ed06d7490", "findings": 0},
-    "eligible_for_current_success_cost": false,
+    "eligible_for_exact_success_cost": false,
     "matching_success_sample_increment": 0,
     "reason": "last observed pre-consolidation success; retained for harness evidence but excluded from the unmeasured final topology"
   },
@@ -172,14 +172,16 @@
         {"id": 97474184829, "name": "macos-security-r23", "conclusion": "success", "elapsed_seconds": 1445, "elapsed": "24:05"},
         {"id": 97474184582, "name": "windows-security-r23", "conclusion": "cancelled", "elapsed_seconds": 2715, "elapsed": "45:15", "cargo_test_elapsed_seconds": 2679, "cargo_test_elapsed": "44:39"}
       ],
-      "eligible_for_success_cost": false,
+      "eligible_for_exact_success_cost": false,
       "matching_success_sample_increment": 0,
       "reason": "45-minute Windows-timeout diagnostic cohort; never mixed into successful cost"
     }
   ],
-  "historical_cohorts_preserved": [
-    {"classification": "prior GitHub failure cohort", "head": "c9f334e957863e1c6daf8f54cc1b917a8e0ae07a", "tree": "532ec6bb594a65e806837459a7141c16b2abe0ae", "workflow_blob": "049c69c0e867d74c49535a74543510460ca70615", "run_id": 32626254306, "conclusion": "failure", "eligible_for_success_cost": false},
-    {"classification": "superseded GitHub success cohort", "head": "4f49cce01a4fd614066f772ac9b10070a12dfd24", "tree": "5816125ba27beeac062b424d9ddfbb552df77df5", "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e", "run_id": 32698672753, "conclusion": "success", "eligible_for_current_success_cost": false},
+  "historical_cohorts": [
+    {"classification": "previous exact success observation", "head": "049288af26515edba125925a7f496fe77a8ff90f", "tree": "25975f5da1a8e39f999e1282600d2ebc088a2f70", "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6", "run_id": 32848763996, "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32848763996", "event": "push", "attempt": 1, "conclusion": "success", "workflow_wall_seconds": 1901, "aggregate_job_elapsed_seconds": 5179, "eligible_for_exact_success_cost": false, "reason": "superseded by the later observed exact success; retained as a time-fixed historical cohort"},
+    {"classification": "Windows junction optional-diagnostic contract failure", "head": "ef26bc59a1babf96909059c62741ee30f18b38ae", "tree": "5732fa6f38ea84a9f9b3735253d88f471b29a777", "workflow_blob": "07ae8f90747c9bce4e0d9508af2a967ffd8bbed6", "run_id": 32884825839, "run_url": "https://github.com/ttokunaga-ja/kio/actions/runs/32884825839", "event": "push", "attempt": 1, "conclusion": "failure", "failed_jobs": ["windows-security-r23"], "eligible_for_exact_success_cost": false, "reason": "the Windows junction test over-specified an optional diagnostic reason; retained as failure evidence and never included in successful-cost arithmetic"},
+    {"classification": "prior GitHub failure cohort", "head": "c9f334e957863e1c6daf8f54cc1b917a8e0ae07a", "tree": "532ec6bb594a65e806837459a7141c16b2abe0ae", "workflow_blob": "049c69c0e867d74c49535a74543510460ca70615", "run_id": 32626254306, "conclusion": "failure", "eligible_for_exact_success_cost": false},
+    {"classification": "superseded GitHub success cohort", "head": "4f49cce01a4fd614066f772ac9b10070a12dfd24", "tree": "5816125ba27beeac062b424d9ddfbb552df77df5", "workflow_blob": "bdc01e224cf952148910b6a6200b9ac1e451dd9e", "run_id": 32698672753, "conclusion": "success", "eligible_for_exact_success_cost": false},
     {
       "classification": "prior success with same workflow blob but different test topology",
       "head": "1bbae928adf2a2fdbf04b1114665cddf40631c5d",
@@ -205,11 +207,11 @@
         {"id": 97495262123, "name": "macos-security-r23", "runner": "macos-latest", "elapsed_seconds": 1311},
         {"id": 97495262075, "name": "windows-security-r23", "runner": "windows-latest", "elapsed_seconds": 1778}
       ],
-      "reason": "different test topology; preserved as a prior success and excluded from the exact current cohort",
-      "eligible_for_current_success_cost": false
+      "reason": "different test topology; preserved as a prior success and excluded from the latest observed exact success",
+      "eligible_for_exact_success_cost": false
     },
-    {"classification": "historical local-only cohorts", "heads": ["2a85016fe29421ceafa28924f43ec39bc497d23e", "d66b95859c983144bd3afc9469605f34b07ada86", "f50e8cc...", "2c7db5d..."], "reason": "local or different-workflow evidence; retained as historical context and not current CI measurements"}
+    {"classification": "historical local-only cohorts", "heads": ["2a85016fe29421ceafa28924f43ec39bc497d23e", "d66b95859c983144bd3afc9469605f34b07ada86", "f50e8cc...", "2c7db5d..."], "reason": "local or different-workflow evidence; retained as historical context and not exact CI measurements"}
   ],
-  "recording_commit_boundary": {"tested_head": "049288af26515edba125925a7f496fe77a8ff90f", "later_phase_a_docs_only_record_is_measured": false, "product_test_and_workflow_blobs_changed_after_tested_head": false, "interpretation": "A later docs-only Phase A record commit is not a new CI measurement; the exact cohort remains bound to tested_head and its product, test, and workflow blobs."},
-  "measurement_limits": {"no_dummy_pushes_reruns_or_dispatches": true, "current_success_sample_count": 1, "current_baseline_is_provisional": true, "unknown_not_zero": true, "future_matching_requirements": "at least three natural push successes with the final workflow blob, exact post-consolidation test topology, toolchain, flags, and runner contract; cancelled, failed, rerun, and topology-different samples do not enter the current success cohort", "timeout_or_slo_optimization_before_three_natural_successes": false}
+  "observation_recording_boundary": {"observed_head": "55b87e05bc59adbfa33d80af02de37e7fda3de95", "observed_tree": "39f738fd4a6b8cfe5d5ba72e729c4fdf10fb9570", "observed_run_id": 32890496534, "later_commits_are_measured": false, "interpretation": "This record measures only the exact observed head, tree, workflow blob, toolchain, topology, flags, and runner contract. The recording commit and every later commit require a distinct exact cohort before they may be described as measured."},
+  "measurement_limits": {"no_dummy_pushes_reruns_or_dispatches": true, "latest_observed_binding_success_sample_count": 1, "observed_baseline_is_provisional": true, "unknown_not_zero": true, "future_matching_requirements": "at least three natural push successes with an identical workflow blob, tested Git tree, toolchain, flags, and runner contract; cancelled, failed, rerun, and topology-different samples do not enter the exact success cohort", "timeout_or_slo_optimization_before_three_natural_successes": false}
 }
