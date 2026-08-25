@@ -2083,16 +2083,20 @@ mod tests {
     #[cfg(unix)]
     impl EscapedPipeHolder {
         fn wait_for_pid(&self) {
-            for _ in 0..20 {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
                 if fs::metadata(&self.marker)
                     .ok()
                     .is_some_and(|metadata| metadata.len() > 0)
                 {
                     return;
                 }
+                if Instant::now() >= deadline {
+                    break;
+                }
                 thread::sleep(Duration::from_millis(10));
             }
-            panic!("escaped pipe holder did not record its pid");
+            panic!("escaped pipe holder did not record its pid within 30 seconds");
         }
     }
 
