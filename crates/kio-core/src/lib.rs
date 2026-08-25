@@ -10,6 +10,8 @@ pub mod portable;
 pub mod purge;
 pub mod schema;
 pub mod scope;
+#[cfg(debug_assertions)]
+pub mod test_control;
 pub mod xdg;
 
 pub use error::{KioError, Result};

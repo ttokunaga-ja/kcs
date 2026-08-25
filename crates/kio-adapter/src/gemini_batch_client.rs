@@ -36,8 +36,10 @@
 //! the hermetic suite (`docs/07-adapter-spec.md` §5.3); the contract is covered through the mock
 //! seam ([`TEST_GEMINI_BATCH_ENV`]).
 
+#[cfg(debug_assertions)]
 use std::io::Write as _;
 
+#[cfg(debug_assertions)]
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -48,6 +50,7 @@ use crate::{AdapterError, Result};
 
 /// Hermetic test seam: an inline JSON [`MockGeminiBatchScript`]. When set, the
 /// resolver returns the mock client and no network call is ever made.
+#[cfg(debug_assertions)]
 pub const TEST_GEMINI_BATCH_ENV: &str = "KIO_TEST_GEMINI_BATCH";
 
 /// Provider-scope override, mirroring `KIO_MISTRAL_WORKSPACE_ID`.
@@ -677,6 +680,7 @@ fn http_status_error(response: &HttpResponse) -> AdapterError {
 /// Inline mock script, mirroring [`crate::batch_client::MockBatchScript`]
 /// minus the upload phase.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg(debug_assertions)]
 pub struct MockGeminiBatchScript {
     #[serde(default = "default_scope")]
     pub provider_scope_id: String,
@@ -709,20 +713,25 @@ pub struct MockGeminiBatchScript {
     pub capture_path: Option<String>,
 }
 
+#[cfg(debug_assertions)]
 fn default_scope() -> String {
     "mock-gemini-project".to_owned()
 }
+#[cfg(debug_assertions)]
 fn default_job() -> String {
     "batches/mock-embed-job-1".to_owned()
 }
+#[cfg(debug_assertions)]
 fn default_sequence() -> Vec<String> {
     vec!["BATCH_STATE_SUCCEEDED".to_owned()]
 }
 
+#[cfg(debug_assertions)]
 pub struct MockGeminiBatchClient {
     script: MockGeminiBatchScript,
 }
 
+#[cfg(debug_assertions)]
 impl MockGeminiBatchClient {
     pub fn from_env_value(raw: &str) -> Result<Self> {
         let script: MockGeminiBatchScript = serde_json::from_str(raw).map_err(|error| {
@@ -788,6 +797,7 @@ impl MockGeminiBatchClient {
     }
 }
 
+#[cfg(debug_assertions)]
 impl GeminiBatchClient for MockGeminiBatchClient {
     fn provider_scope_id(&self) -> Result<String> {
         Ok(self.script.provider_scope_id.clone())
@@ -870,8 +880,12 @@ impl GeminiBatchClient for MockGeminiBatchClient {
 /// is resolvable from declared `tools.toml [embedding] auth`.
 /// `None` means the lane is unavailable and the caller must not send.
 pub fn resolve_gemini_batch_client() -> Result<Option<Box<dyn GeminiBatchClient>>> {
-    if let Ok(raw) = std::env::var(TEST_GEMINI_BATCH_ENV) {
-        return Ok(Some(Box::new(MockGeminiBatchClient::from_env_value(&raw)?)));
+    #[cfg(debug_assertions)]
+    {
+        use kio_core::test_control::Selector;
+        if let Selector::Known(raw) = crate::debug_test_control().adapters.gemini_batch {
+            return Ok(Some(Box::new(MockGeminiBatchClient::from_env_value(&raw)?)));
+        }
     }
     if crate::tool_lock::resolve_role_api_key("embedding")?.is_some() {
         return Ok(Some(Box::new(EnvGeminiBatchClient::new())));
@@ -879,7 +893,7 @@ pub fn resolve_gemini_batch_client() -> Result<Option<Box<dyn GeminiBatchClient>
     Ok(None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 

@@ -22,10 +22,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kio_adapter::catalog::TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV;
-use kio_adapter::office_convert::{OFFICE_CONVERTER_ENV, TEST_OFFICE_CONVERT_ENV};
+use kio_adapter::office_convert::OFFICE_CONVERTER_ENV;
 use serde_json::Value;
 use tempfile::TempDir;
+
+const TEST_OFFICE_CONVERT_ENV: &str = "KIO_TEST_OFFICE_CONVERT";
+const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "GEMINI_API_KEY",

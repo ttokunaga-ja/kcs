@@ -17,6 +17,8 @@ use crate::historical_reindex::{
 use crate::ocr_discovery::{prepared_units_from_ocr_discovery, supports_ocr_from_scratch};
 use crate::online_task::targets_standard_online_markdownize;
 
+#[cfg(debug_assertions)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, IsTerminal, Read, Write};
@@ -40,13 +42,16 @@ use kio_adapter::catalog::{
     run_standard_online_markdownize_with_bytes, standard_online_markdownize_profile,
     standard_online_markdownize_profile_with_bbox,
 };
+#[cfg(debug_assertions)]
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::local_ocr_markdownize::LocalOcrExecution;
 use kio_adapter::office_convert::{is_office_media, resolve_office_converter};
 use kio_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
 use kio_adapter::traits::{MarkdownizeAdapter, PreferredRequestKind};
+#[cfg(debug_assertions)]
+use kio_adapter::types::AdapterKind;
 use kio_adapter::types::{
-    AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, ExecutionMode, MarkdownUnit,
+    AdapterProfile, EmbeddingInputType, EmbeddingItem, ExecutionMode, MarkdownUnit,
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
@@ -69,6 +74,10 @@ use kio_core::scope::{
     DEFAULT_MAX_ARCHIVE_SCOPE_BYTES, InspectedObject, PendingNormalizeRef, Repository,
     SnapshotOutcome, StoreLock, append_error_log, append_event_log, append_warn_log, new_ulid,
     now_utc_seconds, parse_utc_seconds,
+};
+#[cfg(debug_assertions)]
+use kio_core::test_control::{
+    AggregatorProjectionFault, DebugTestControl, MarkdownizeAdapterMode, ReplicaFault,
 };
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::chunking::{
@@ -772,6 +781,40 @@ fn main() {
     process::exit(exit_code.code());
 }
 
+#[cfg(debug_assertions)]
+thread_local! {
+    static DEBUG_TEST_CONTROL: RefCell<Option<DebugTestControl>> = const { RefCell::new(None) };
+}
+
+/// Snapshot process test controls once, after argument parsing and before the
+/// command dispatch.  All production seams consume this snapshot rather than
+/// independently parsing the ambient environment.
+#[cfg(debug_assertions)]
+fn install_debug_test_control() {
+    let control = DebugTestControl::from_env();
+    kio_core::test_control::install(control.clone());
+    DEBUG_TEST_CONTROL.with(|slot| *slot.borrow_mut() = Some(control));
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn debug_test_control() -> Option<DebugTestControl> {
+    DEBUG_TEST_CONTROL.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(debug_assertions)]
+fn current_scope_delay_test_control() -> multi_scope::ScopeDelayTestControl {
+    let control = debug_test_control().expect("command dispatch installs debug test control");
+    multi_scope::ScopeDelayTestControl::new(
+        control.cli.scope_search_delay_scope_id.known().cloned(),
+        control.cli.scope_search_delay_ms.known().copied(),
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn current_scope_delay_test_control() -> multi_scope::ScopeDelayTestControl {
+    multi_scope::ScopeDelayTestControl
+}
+
 /// R11-1: `clap::Parser::parse()` calls `process::exit()` itself on a usage error,
 /// bypassing the `--json` contract (docs/06 §4: *every* CLI has `--json` and errors
 /// return `{error_code, message, context}`). Roughly half the commands take the
@@ -928,6 +971,8 @@ fn exit_override_error_code(code: ExitCode) -> &'static str {
 }
 
 fn run(cli: Cli) -> Result<Value> {
+    #[cfg(debug_assertions)]
+    install_debug_test_control();
     // R13-6: refuse to run if device-global state cannot resolve to an absolute
     // base dir (no absolute $HOME and no absolute $XDG_*), before any command
     // reads or writes the registry / logs / cost ledger / cursor-key.
@@ -1368,7 +1413,24 @@ impl ScheduledIdleObservation {
     }
 }
 
+macro_rules! snapshot_auto_test_barrier {
+    ($control:expr, $field:ident) => {{
+        #[cfg(debug_assertions)]
+        {
+            $control
+                .as_ref()
+                .and_then(|control| control.cli.$field.as_deref())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None::<&Path>
+        }
+    }};
+}
+
 fn run_snapshot_auto() -> Result<Value> {
+    #[cfg(debug_assertions)]
+    let test_control = debug_test_control();
     let repo = Repository::open_current_without_head_repair()?;
     let session = GcSweepSession::bind_repository(&repo)?;
     let first_gc = session.automation_binding()?;
@@ -1431,7 +1493,10 @@ fn run_snapshot_auto() -> Result<Value> {
             false,
         ));
     }
-    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_PRE_GC_PREFLIGHT_READY");
+    wait_at_snapshot_auto_test_barrier(snapshot_auto_test_barrier!(
+        test_control,
+        snapshot_pre_gc_preflight_ready
+    ));
     let (recovered_gc, gc_binding) = match gc::preflight_automatic_bound(
         &session,
         &first_gc,
@@ -1497,7 +1562,10 @@ fn run_snapshot_auto() -> Result<Value> {
             recovered_gc,
         ));
     }
-    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_PRELOCK_READY");
+    wait_at_snapshot_auto_test_barrier(snapshot_auto_test_barrier!(
+        test_control,
+        snapshot_prelock_ready
+    ));
     let lock = session.acquire_snapshot_auto_store_lock()?;
     let bound_repo = Repository::open_bound_existing(
         repo.canonical_root().to_path_buf(),
@@ -1510,14 +1578,20 @@ fn run_snapshot_auto() -> Result<Value> {
             "scheduled snapshot authority changed during locked eligibility handoff",
         ));
     }
-    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_LOCKED_READY");
+    wait_at_snapshot_auto_test_barrier(snapshot_auto_test_barrier!(
+        test_control,
+        snapshot_locked_ready
+    ));
     let final_observation = observe_scheduled_auto(&bound_repo, &session, &now)?;
     if final_observation != locked || final_observation.gc != gc_binding {
         return Err(snapshot_auto_authority_changed(
             "scheduled snapshot authority changed immediately before publication",
         ));
     }
-    wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_BEFORE_PUBLICATION_READY");
+    wait_at_snapshot_auto_test_barrier(snapshot_auto_test_barrier!(
+        test_control,
+        snapshot_before_publication_ready
+    ));
     let publication_observation = observe_scheduled_auto(&bound_repo, &session, &now)?;
     if publication_observation != final_observation || publication_observation.gc != gc_binding {
         return Err(snapshot_auto_authority_changed(
@@ -1531,7 +1605,10 @@ fn run_snapshot_auto() -> Result<Value> {
         let expected_raw_by_path = scheduled_auto_expected_raw(&publication_observation.preview)?;
         session.prepare_snapshot_auto_state_publication(&publication_observation.state)?;
         session.assert_public_identity()?;
-        wait_at_snapshot_auto_test_barrier("KIO_TEST_SNAPSHOT_AUTO_WRITER_BOUNDARY_READY");
+        wait_at_snapshot_auto_test_barrier(snapshot_auto_test_barrier!(
+            test_control,
+            snapshot_writer_boundary_ready
+        ));
         session.assert_public_identity()?;
         // This closure runs only after immutable snapshot preparation and
         // before any scheduled ref/manifest publication. A failed conditional
@@ -1780,15 +1857,11 @@ fn snapshot_auto_authority_changed(message: &str) -> KioError {
     )
 }
 
-fn wait_at_snapshot_auto_test_barrier(variable: &str) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(ready_path) = std::env::var_os(variable) else {
+fn wait_at_snapshot_auto_test_barrier(ready_path: Option<&Path>) {
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = PathBuf::from(ready_path);
-    if fs::write(&ready_path, b"ready").is_err() {
+    if fs::write(ready_path, b"ready").is_err() {
         return;
     }
     let release_path = ready_path.with_extension("release");
@@ -4958,7 +5031,7 @@ fn write_through_projection_inner(
     };
     // Keep the projection-failure contract testable without weakening the
     // replica's strict schema gate through a SQLite trigger fixture.
-    if std::env::var("KIO_TEST_AGGREGATOR_PROJECTION_FAULT").as_deref() == Ok("refresh") {
+    if aggregator_projection_refresh_fault_enabled() {
         return Err("injected aggregator projection refresh failure".to_owned());
     }
     let request = kio_index::aggregator::AggProjectionRequest {
@@ -5091,7 +5164,7 @@ fn mark_replica_rebuilding_or_log(kio_dir: &Path, snapshot_commit: &str) {
 /// the narrow cross-store interval; the phase name without that suffix proves
 /// the marker itself remains fail-closed before the source rebuild begins.
 fn maybe_inject_replica_after_head_fault(phase: &str) -> Result<()> {
-    if std::env::var("KIO_TEST_REPLICA_AFTER_HEAD_FAULT").as_deref() == Ok(phase) {
+    if replica_after_head_fault_enabled(phase) {
         return Err(KioError::new(
             "KIO-E-REPLICA-AFTER-HEAD-FAULT-001",
             "injected replica post-HEAD publication fault",
@@ -5100,6 +5173,47 @@ fn maybe_inject_replica_after_head_fault(phase: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn aggregator_projection_refresh_fault_enabled() -> bool {
+    matches!(
+        debug_test_control()
+            .as_ref()
+            .expect("command dispatch installs debug test control")
+            .cli
+            .aggregator_projection_fault
+            .known(),
+        Some(AggregatorProjectionFault::Refresh)
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn aggregator_projection_refresh_fault_enabled() -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn replica_after_head_fault_enabled(phase: &str) -> bool {
+    let expected = match phase {
+        "index_before_marker" => ReplicaFault::IndexBeforeMarker,
+        "index" => ReplicaFault::Index,
+        "reindex_before_marker" => ReplicaFault::ReindexBeforeMarker,
+        "reindex" => ReplicaFault::Reindex,
+        _ => return false,
+    };
+    debug_test_control()
+        .as_ref()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .replica_after_head_fault
+        .known()
+        == Some(&expected)
+}
+
+#[cfg(not(debug_assertions))]
+fn replica_after_head_fault_enabled(_: &str) -> bool {
+    false
 }
 
 /// Fail closed without guessing a replacement snapshot.  This is used after a
@@ -5970,6 +6084,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // Candidate-scope barriers are opened only after the replica has selected
     // rows; unselected scopes do not participate in the purge read barrier.
     let mut late_barriers = Vec::<(usize, usize, ReadBarrierCheckpoint)>::new();
+    let scope_delay_control = current_scope_delay_test_control();
 
     let replica_selector = aggregator_selector(&time_selector);
     let scope_executions =
@@ -5982,6 +6097,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                 &time_selector,
                 since_cutoff.as_deref(),
                 deadline,
+                &scope_delay_control,
             )
         });
     for (idx, execution) in scope_executions.into_iter().enumerate() {
@@ -7328,8 +7444,9 @@ fn prepare_scope_from_replica_header(
     time_selector: &TimeSelector,
     since_cutoff: Option<&str>,
     deadline: multi_scope::ScopeDeadline,
+    scope_delay_control: &multi_scope::ScopeDelayTestControl,
 ) -> std::result::Result<ReplicaScopeResolution, ScopeSearchError> {
-    multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, deadline);
+    multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, deadline, scope_delay_control);
     scope_deadline_check(deadline)?;
     // `Repository::open_for_search` validates only the scope store; it does
     // not open the per-scope search index. A format-version incompatibility is
@@ -14375,10 +14492,18 @@ fn gc_marker_active_for_scopes(searched_scopes: &[SearchedScopeInfo]) -> Result<
 /// extension.  It is deliberately inert unless the explicitly test-named
 /// variable is set.
 fn maybe_wait_at_test_search_response_barrier() {
-    let Some(ready_path) = std::env::var_os("KIO_TEST_SEARCH_RESPONSE_BARRIER_READY") else {
+    #[cfg(debug_assertions)]
+    let ready_path = debug_test_control()
+        .as_ref()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .search_response_barrier_ready
+        .clone();
+    #[cfg(not(debug_assertions))]
+    let ready_path: Option<PathBuf> = None;
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = PathBuf::from(ready_path);
     if fs::write(&ready_path, b"ready").is_err() {
         return;
     }
@@ -18550,13 +18675,22 @@ fn local_query_embedding(
 /// Append the query to the file named by `KIO_TEST_QUERY_EMBED_TRACE`, if set, at
 /// the point the query embedding is sent (O2 test seam only; no-op in production).
 fn record_query_embed_trace(query: &str) {
-    if let Some(path) = std::env::var_os("KIO_TEST_QUERY_EMBED_TRACE") {
+    #[cfg(debug_assertions)]
+    let trace_path = debug_test_control()
+        .as_ref()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .query_embed_trace
+        .clone();
+    #[cfg(not(debug_assertions))]
+    let trace_path: Option<PathBuf> = None;
+    if let Some(path) = trace_path {
         let mut line = query.to_owned();
         line.push('\n');
         let _ = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(PathBuf::from(path))
+            .open(path)
             .and_then(|mut file| file.write_all(line.as_bytes()));
     }
 }
@@ -21984,38 +22118,41 @@ fn online_markdownize_profile_for(repo: &Repository) -> Result<AdapterProfile> {
     ))
 }
 
+#[cfg(debug_assertions)]
 fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
-    match std::env::var("KIO_TEST_MARKDOWNIZE_ADAPTER")
-        .ok()
-        .as_deref()
-    {
-        Some("incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
+    match markdownize_test_mode() {
+        Some(MarkdownizeTestMode::Incremental) => Box::new(TestIncrementalMarkdownizeAdapter {
             reject_incremental: false,
             reject_full: false,
         }),
-        Some("reject_incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
-            reject_incremental: true,
-            reject_full: false,
-        }),
-        Some("reject_incremental_and_full") => Box::new(TestIncrementalMarkdownizeAdapter {
-            reject_incremental: true,
-            reject_full: true,
-        }),
+        Some(MarkdownizeTestMode::RejectIncremental) => {
+            Box::new(TestIncrementalMarkdownizeAdapter {
+                reject_incremental: true,
+                reject_full: false,
+            })
+        }
+        Some(MarkdownizeTestMode::RejectIncrementalAndFull) => {
+            Box::new(TestIncrementalMarkdownizeAdapter {
+                reject_incremental: true,
+                reject_full: true,
+            })
+        }
         _ => builtin_offline_markdownize_adapter(),
     }
 }
 
+#[cfg(not(debug_assertions))]
+fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
+    builtin_offline_markdownize_adapter()
+}
+
+#[cfg(debug_assertions)]
 fn offline_markdownize_from_verified_bytes(
     adapter: &dyn MarkdownizeAdapter,
     request: MarkdownizeRequest,
     verified_raw_bytes: &[u8],
 ) -> kio_adapter::Result<kio_adapter::types::MarkdownizeResponse> {
-    if matches!(
-        std::env::var("KIO_TEST_MARKDOWNIZE_ADAPTER")
-            .ok()
-            .as_deref(),
-        Some("incremental" | "reject_incremental" | "reject_incremental_and_full")
-    ) {
+    if markdownize_test_mode().is_some() {
         return adapter.markdownize(request);
     }
     // 07 §5.1: DOCX/PPTX get an offline baseline too, sourced from the SAME
@@ -22036,6 +22173,50 @@ fn offline_markdownize_from_verified_bytes(
     kio_adapter::deterministic::markdownize_from_bytes(request, verified_raw_bytes)
 }
 
+#[cfg(not(debug_assertions))]
+fn offline_markdownize_from_verified_bytes(
+    adapter: &dyn MarkdownizeAdapter,
+    request: MarkdownizeRequest,
+    verified_raw_bytes: &[u8],
+) -> kio_adapter::Result<kio_adapter::types::MarkdownizeResponse> {
+    let _ = adapter;
+    if let Some(unit_kind) = office_unit_kind(&request.media_type) {
+        let converted = convert_office_to_pdf(verified_raw_bytes, &request.media_type)?;
+        return kio_adapter::deterministic::markdownize_converted_office(
+            request, &converted, unit_kind,
+        );
+    }
+    kio_adapter::deterministic::markdownize_from_bytes(request, verified_raw_bytes)
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+enum MarkdownizeTestMode {
+    Incremental,
+    RejectIncremental,
+    RejectIncrementalAndFull,
+}
+
+#[cfg(debug_assertions)]
+fn markdownize_test_mode() -> Option<MarkdownizeTestMode> {
+    match debug_test_control()
+        .as_ref()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .markdownize_adapter
+        .known()
+    {
+        Some(MarkdownizeAdapterMode::Incremental) => Some(MarkdownizeTestMode::Incremental),
+        Some(MarkdownizeAdapterMode::RejectIncremental) => {
+            Some(MarkdownizeTestMode::RejectIncremental)
+        }
+        Some(MarkdownizeAdapterMode::RejectIncrementalAndFull) => {
+            Some(MarkdownizeTestMode::RejectIncrementalAndFull)
+        }
+        None => None,
+    }
+}
+
 /// 07-adapter-spec.md §5.1: which `UnitKind` an Office media type's
 /// converted-PDF units use -- DOCX enumerates `page:N` (the converted PDF's
 /// pages themselves), PPTX enumerates `slide:N` (1 converted-PDF page = 1
@@ -22054,12 +22235,14 @@ fn office_unit_kind(media_type: &str) -> Option<UnitKind> {
     }
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 struct TestIncrementalMarkdownizeAdapter {
     reject_incremental: bool,
     reject_full: bool,
 }
 
+#[cfg(debug_assertions)]
 impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
     fn profile(&self) -> AdapterProfile {
         let profile = json!({
@@ -22161,6 +22344,7 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
     }
 }
 
+#[cfg(debug_assertions)]
 fn test_markdown_unit(hint: &PreparedUnitHint, prefix: &str) -> MarkdownUnit {
     MarkdownUnit {
         unit_key: hint.unit_key.clone(),
@@ -24314,11 +24498,28 @@ fn batch_job_model() -> String {
     // is expected from the adapter-side EnvMistralBatchClient (in progress);
     // until it lands `configured_mistral_batch_client()` returns None in
     // production, so the alias fallback below can only reach a mock.
-    if std::env::var(kio_adapter::batch_client::TEST_MISTRAL_BATCH_ENV).is_ok() {
+    if mistral_batch_mock_enabled() {
         "mistral-ocr-2505".to_owned()
     } else {
         declared
     }
+}
+
+#[cfg(debug_assertions)]
+fn mistral_batch_mock_enabled() -> bool {
+    matches!(
+        debug_test_control()
+            .as_ref()
+            .expect("command dispatch installs debug test control")
+            .adapters
+            .mistral_batch,
+        kio_core::test_control::Selector::Known(_)
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn mistral_batch_mock_enabled() -> bool {
+    false
 }
 
 /// `next_retry_at` for the next batch poll (`now + 60s`, KIO_FIXED_NOW-aware

@@ -342,6 +342,7 @@ impl<C> GeminiEmbeddingAdapter<C> {
     /// [`crate::types::ProviderIdempotency`]. The real, shipped Gemini
     /// embedding adapter never calls this (it stays at the `::new()`
     /// default, `NotProvided`) — only a test-seam profile does.
+    #[cfg(debug_assertions)]
     #[must_use]
     pub fn with_provider_idempotency(
         mut self,
@@ -517,7 +518,7 @@ fn http_status_error(response: &HttpResponse) -> AdapterError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use crate::types::EmbeddingInputType;

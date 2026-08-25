@@ -29,7 +29,6 @@ use std::fs;
 
 use assert_cmd::Command;
 use kio_adapter::bbox_annotation::mistral_markdownize_profile;
-use kio_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV};
 use kio_adapter::identity::tool_profile_hash;
 use kio_adapter::tool_lock::{canonical_tool_lock_value, tool_lock_hash};
 use kio_core::scope::{
@@ -40,6 +39,9 @@ use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_pipeline::scan::TIER_B_NEEDLES;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "GEMINI_API_KEY",

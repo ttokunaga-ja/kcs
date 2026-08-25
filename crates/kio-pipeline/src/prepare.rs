@@ -793,47 +793,10 @@ mod tests {
     }
 
     // ---- Office (DOCX/PPTX) prepare via converted-PDF intermediate ----------
-    // 07 §5.1 (2026-07-23 addendum). This crate had no env-var-mutating test
-    // yet, so this adds the first local guard/mutex pair (mirrors the
-    // pattern already used in `kio_adapter::office_convert`'s own tests —
-    // duplicated here, not shared, since these are different crates).
-
-    static OFFICE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // FIXME: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // FIXME: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                // FIXME: Audit that the environment access only happens in single-threaded code.
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                // FIXME: Audit that the environment access only happens in single-threaded code.
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
+    #[cfg(debug_assertions)]
     const DOCX_MEDIA_TYPE: &str =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    #[cfg(debug_assertions)]
     const PPTX_MEDIA_TYPE: &str =
         "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
@@ -843,6 +806,7 @@ mod tests {
     /// `kio-adapter`'s `verified_pdf_bytes_are_reused_for_all_hints`) — a
     /// structural `/Type /Page` marker per page plus a literal `(text) Tj`
     /// content stream the deterministic extractor can read directly.
+    #[cfg(debug_assertions)]
     fn multi_page_fixture_pdf(pages: &[&str]) -> Vec<u8> {
         let mut pdf = format!(
             "%PDF-1.4\n1 0 obj << /Type /Pages /Count {} >> endobj\n",
@@ -861,17 +825,21 @@ mod tests {
         pdf
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn office_docx_seam_prepares_page_units_from_converted_pdf() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("converted.pdf");
         let fixture_pdf =
             multi_page_fixture_pdf(&["First converted page", "Second converted page"]);
         std::fs::write(&fixture_path, &fixture_pdf).unwrap();
-        let _seam = EnvVarGuard::set(
-            kio_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
-            &fixture_path.display().to_string(),
+        let _seam = kio_core::test_control::TestEnvGuard::set(
+            "KIO_TEST_OFFICE_CONVERT",
+            fixture_path.display().to_string(),
+        );
+        let _control = kio_core::test_control::install_scoped(
+            kio_core::test_control::DebugTestControl::from_env(),
         );
 
         let raw_docx = b"fake docx bytes (content irrelevant under the seam)";
@@ -916,16 +884,20 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn office_pptx_seam_prepares_slide_units_from_converted_pdf() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("converted.pdf");
         let fixture_pdf = multi_page_fixture_pdf(&["First slide", "Second slide", "Third slide"]);
         std::fs::write(&fixture_path, &fixture_pdf).unwrap();
-        let _seam = EnvVarGuard::set(
-            kio_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
-            &fixture_path.display().to_string(),
+        let _seam = kio_core::test_control::TestEnvGuard::set(
+            "KIO_TEST_OFFICE_CONVERT",
+            fixture_path.display().to_string(),
+        );
+        let _control = kio_core::test_control::install_scoped(
+            kio_core::test_control::DebugTestControl::from_env(),
         );
 
         let raw_pptx = b"fake pptx bytes (content irrelevant under the seam)";
@@ -954,16 +926,22 @@ mod tests {
         assert_eq!(output.prepared_units[0].prepared_hash, expected_slide1_hash);
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn office_converter_absent_yields_empty_output_not_an_error() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
-        let _clear_seam = EnvVarGuard::remove(kio_adapter::office_convert::TEST_OFFICE_CONVERT_ENV);
-        let _clear_explicit =
-            EnvVarGuard::remove(kio_adapter::office_convert::OFFICE_CONVERTER_ENV);
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _clear_seam = kio_core::test_control::TestEnvGuard::remove("KIO_TEST_OFFICE_CONVERT");
+        let _clear_explicit = kio_core::test_control::TestEnvGuard::remove(
+            kio_adapter::office_convert::OFFICE_CONVERTER_ENV,
+        );
         // This dev machine has a real soffice on PATH — scrub PATH so this
         // test exercises "no converter available" regardless of environment
         // (also matches CI without LibreOffice installed).
-        let _scrub_path = EnvVarGuard::set("PATH", "/nonexistent-kio-test-path");
+        let _scrub_path =
+            kio_core::test_control::TestEnvGuard::set("PATH", "/nonexistent-kio-test-path");
+        let _control = kio_core::test_control::install_scoped(
+            kio_core::test_control::DebugTestControl::from_env(),
+        );
 
         let raw_docx = b"fake docx bytes, no converter available";
         let raw_hash = hash_bytes(raw_docx);
@@ -983,17 +961,21 @@ mod tests {
         assert!(output.image_object_hashes.is_empty());
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn office_conversion_failure_surfaces_as_a_prepare_contract_error() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
         // The seam "converter" points at a fixture path that does not exist:
         // convert_to_pdf's file read fails with AdapterError::ContractViolation,
         // which prepare.rs must map into its OWN KIO-E-PREPARE-OFFICE-CONVERT-001
         // contract error (07 §5.1: joins contract_violation semantics) rather
         // than panicking or silently succeeding.
-        let _seam = EnvVarGuard::set(
-            kio_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
+        let _seam = kio_core::test_control::TestEnvGuard::set(
+            "KIO_TEST_OFFICE_CONVERT",
             "/definitely/not/a/real/kio-fixture-path.pdf",
+        );
+        let _control = kio_core::test_control::install_scoped(
+            kio_core::test_control::DebugTestControl::from_env(),
         );
 
         let raw_docx = b"fake docx bytes";

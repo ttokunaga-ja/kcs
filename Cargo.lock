@@ -792,6 +792,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
+ "kio-core",
  "miniz_oxide",
  "quick-xml",
  "serde",

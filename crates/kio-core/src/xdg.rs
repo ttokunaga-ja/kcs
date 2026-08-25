@@ -86,7 +86,11 @@ fn windows_profile_dir() -> Option<PathBuf> {
     use windows_sys::Win32::UI::Shell::{FOLDERID_Profile, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     #[cfg(debug_assertions)]
-    if let Some(profile) = home_dir_from(std::env::var_os("KIO_TEST_WINDOWS_PROFILE")) {
+    if let Some(profile) = crate::test_control::current_or_default()
+        .core
+        .windows_profile
+        .and_then(|profile| home_dir_from(Some(profile.into_os_string())))
+    {
         return Some(profile);
     }
 

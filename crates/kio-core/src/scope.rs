@@ -50,6 +50,70 @@ const MAX_TAG_REF_BYTES: u64 = 128;
 #[cfg(unix)]
 const MAX_BOUND_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// One operation-local snapshot of the debug-only core controls.  This stays
+/// private so release builds expose neither test-control schema nor parser.
+struct SnapshotTestControl {
+    #[cfg(debug_assertions)]
+    core: crate::test_control::CoreTestControl,
+}
+
+impl SnapshotTestControl {
+    #[cfg(debug_assertions)]
+    fn capture() -> Self {
+        Self {
+            // Snapshot entrypoints are library operation roots. Reuse an
+            // installed CLI snapshot when present; otherwise capture exactly
+            // once for this operation.
+            core: crate::test_control::capture_for_operation().core,
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn capture() -> Self {
+        Self {}
+    }
+
+    #[cfg(debug_assertions)]
+    fn authority_capture_ready(&self) -> Option<&Path> {
+        self.core.snapshot_authority_capture_ready.as_deref()
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn authority_capture_ready(&self) -> Option<&Path> {
+        None
+    }
+
+    #[cfg(debug_assertions)]
+    fn pre_checkpoint_ready(&self) -> Option<&Path> {
+        self.core.snapshot_pre_checkpoint_ready.as_deref()
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn pre_checkpoint_ready(&self) -> Option<&Path> {
+        None
+    }
+
+    #[cfg(debug_assertions)]
+    fn after_state_write_ready(&self) -> Option<&Path> {
+        self.core.snapshot_after_state_write_ready.as_deref()
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn after_state_write_ready(&self) -> Option<&Path> {
+        None
+    }
+
+    #[cfg(debug_assertions)]
+    fn hold_lock_ready(&self) -> Option<&Path> {
+        self.core.hold_lock_ready.as_deref()
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn hold_lock_ready(&self) -> Option<&Path> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveLimits {
     pub max_file_bytes: u64,
@@ -1317,6 +1381,7 @@ impl Repository {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1364,6 +1429,7 @@ impl Repository {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1382,7 +1448,10 @@ impl Repository {
     /// ordinary open path: an empty HEAD with a populated branch ref is
     /// corruption here, not an opportunity for automatic repair.
     #[cfg(unix)]
-    fn validate_scheduled_auto_prerequisites(&self) -> Result<ScheduledSnapshotAuthority> {
+    fn validate_scheduled_auto_prerequisites(
+        &self,
+        test_control: &SnapshotTestControl,
+    ) -> Result<ScheduledSnapshotAuthority> {
         if self.bound_kio.is_none() {
             return Err(KioError::invalid_usage(
                 "scheduled snapshot publication requires a retained .kio capability",
@@ -1393,7 +1462,7 @@ impl Repository {
                 "scheduled snapshot publication requires a retained scope capability",
             ));
         }
-        let authority = self.capture_scheduled_snapshot_authority()?;
+        let authority = self.capture_scheduled_snapshot_authority(test_control)?;
         let head = authority.head.trim();
         let branch = authority.branch.trim();
         match (head.is_empty(), branch.is_empty()) {
@@ -1432,13 +1501,16 @@ impl Repository {
     /// snapshot's parent and tool identity.  Values alone are not enough: a
     /// same-byte inode replacement is an authority change too.
     #[cfg(unix)]
-    fn capture_scheduled_snapshot_authority(&self) -> Result<ScheduledSnapshotAuthority> {
+    fn capture_scheduled_snapshot_authority(
+        &self,
+        test_control: &SnapshotTestControl,
+    ) -> Result<ScheduledSnapshotAuthority> {
         let kio = self.bound_kio.as_deref().ok_or_else(|| {
             KioError::invalid_usage("scheduled snapshot requires retained .kio capability")
         })?;
         let (head, head_observation) =
             read_bound_regular_text_observed_at(kio, "HEAD", MAX_BOUND_CONFIG_BYTES)?;
-        wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_AUTHORITY_CAPTURE_READY");
+        wait_at_bound_snapshot_auto_barrier(test_control.authority_capture_ready());
         let (branch, branch_observation) =
             read_bound_regular_text_observed_at(kio, "refs/heads/main", MAX_BOUND_CONFIG_BYTES)?;
         let (tool_lock, tool_lock_observation) =
@@ -1460,10 +1532,13 @@ impl Repository {
     fn recheck_scheduled_snapshot_authority(
         &self,
         expected: &ScheduledSnapshotAuthority,
+        test_control: &SnapshotTestControl,
     ) -> Result<()> {
-        let actual = self.capture_scheduled_snapshot_authority().map_err(|_| {
-            snapshot_authority_changed("scheduled snapshot metadata authority changed")
-        })?;
+        let actual = self
+            .capture_scheduled_snapshot_authority(test_control)
+            .map_err(|_| {
+                snapshot_authority_changed("scheduled snapshot metadata authority changed")
+            })?;
         if actual != *expected {
             return Err(snapshot_authority_changed(
                 "scheduled snapshot HEAD, branch ref, or tool lock changed",
@@ -1478,10 +1553,13 @@ impl Repository {
         expected: &ScheduledSnapshotAuthority,
         published: &ScheduledSnapshotAuthority,
         commit_hash: &str,
+        test_control: &SnapshotTestControl,
     ) -> Result<()> {
-        let actual = self.capture_scheduled_snapshot_authority().map_err(|_| {
-            snapshot_authority_changed("scheduled snapshot metadata authority changed")
-        })?;
+        let actual = self
+            .capture_scheduled_snapshot_authority(test_control)
+            .map_err(|_| {
+                snapshot_authority_changed("scheduled snapshot metadata authority changed")
+            })?;
         if actual.head.trim() != commit_hash
             || actual.branch.trim() != commit_hash
             || actual.head_observation != published.head_observation
@@ -1497,7 +1575,10 @@ impl Repository {
     }
 
     #[cfg(not(unix))]
-    fn capture_scheduled_snapshot_authority(&self) -> Result<ScheduledSnapshotAuthority> {
+    fn capture_scheduled_snapshot_authority(
+        &self,
+        _: &SnapshotTestControl,
+    ) -> Result<ScheduledSnapshotAuthority> {
         Err(KioError::new(
             "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
             "scheduled snapshot publication requires retained filesystem capabilities",
@@ -1507,7 +1588,11 @@ impl Repository {
     }
 
     #[cfg(not(unix))]
-    fn recheck_scheduled_snapshot_authority(&self, _: &ScheduledSnapshotAuthority) -> Result<()> {
+    fn recheck_scheduled_snapshot_authority(
+        &self,
+        _: &ScheduledSnapshotAuthority,
+        _: &SnapshotTestControl,
+    ) -> Result<()> {
         unreachable!("scheduled snapshots are unsupported without descriptor capabilities")
     }
 
@@ -1517,12 +1602,16 @@ impl Repository {
         _: &ScheduledSnapshotAuthority,
         _: &ScheduledSnapshotAuthority,
         _: &str,
+        _: &SnapshotTestControl,
     ) -> Result<()> {
         unreachable!("scheduled snapshots are unsupported without descriptor capabilities")
     }
 
     #[cfg(not(unix))]
-    fn validate_scheduled_auto_prerequisites(&self) -> Result<ScheduledSnapshotAuthority> {
+    fn validate_scheduled_auto_prerequisites(
+        &self,
+        _: &SnapshotTestControl,
+    ) -> Result<ScheduledSnapshotAuthority> {
         Err(KioError::new(
             "KIO-E-SNAPSHOT-PLATFORM-UNSUPPORTED-001",
             "scheduled snapshot publication requires retained filesystem capabilities",
@@ -1653,6 +1742,7 @@ impl Repository {
         expected_snapshot_policy: &SnapshotAutoBinding,
         before_ref_publication: &mut dyn FnMut() -> Result<SnapshotAutoStateBinding>,
     ) -> Result<SnapshotOutcome> {
+        let test_control = SnapshotTestControl::capture();
         // Freeze HEAD and its normalization references in the same writer
         // critical section as the eventual snapshot. Otherwise a concurrent
         // promotion on unchanged raw bytes could be replaced by the older
@@ -1662,7 +1752,7 @@ impl Repository {
         // constructed by the scheduler handoff.  In particular, do not apply
         // the ordinary empty-HEAD recovery here: a scheduled writer must never
         // turn a replaceable mutable ref into a new authority for publication.
-        let scheduled_authority = self.validate_scheduled_auto_prerequisites()?;
+        let scheduled_authority = self.validate_scheduled_auto_prerequisites(&test_control)?;
         self.store.validate_bound_layout()?;
         expected_snapshot_policy.recheck(
             self.bound_root.as_deref().expect("scheduled bound root"),
@@ -1705,6 +1795,7 @@ impl Repository {
             Some(expected_snapshot_policy),
             Some(&scheduled_authority),
             Some(before_ref_publication),
+            Some(&test_control),
         )
     }
 
@@ -1920,6 +2011,7 @@ impl Repository {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1980,7 +2072,16 @@ impl Repository {
         expected_snapshot_policy: Option<&SnapshotAutoBinding>,
         expected_scheduled_authority: Option<&ScheduledSnapshotAuthority>,
         before_ref_publication: Option<&mut dyn FnMut() -> Result<SnapshotAutoStateBinding>>,
+        operation_test_control: Option<&SnapshotTestControl>,
     ) -> Result<SnapshotOutcome> {
+        let captured_test_control;
+        let test_control = match operation_test_control {
+            Some(control) => control,
+            None => {
+                captured_test_control = SnapshotTestControl::capture();
+                &captured_test_control
+            }
+        };
         // A retained repository is also used by the existing child-index
         // subprocess.  Bound descriptors plus `commit_type=auto` therefore do
         // not identify a scheduled publication by themselves.  The scheduler
@@ -1988,7 +2089,7 @@ impl Repository {
         let scheduled_bound = expected_scheduled_authority.is_some();
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kio_dir)?;
-        maybe_hold_lock_for_tests();
+        maybe_hold_lock_for_tests(test_control.hold_lock_ready());
         let chunking_config_hash = self.effective_chunking_config_hash()?;
 
         // Validate the base before archiving any working-tree bytes.  A normal
@@ -2141,10 +2242,10 @@ impl Repository {
             // this point. Publish their scheduler checkpoint before returning
             // so a failed state CAS can never follow an already-advanced ref.
             if scheduled_bound {
-                wait_at_bound_snapshot_auto_pre_checkpoint_barrier();
+                wait_at_bound_snapshot_auto_barrier(test_control.pre_checkpoint_ready());
                 self.store.validate_bound_layout()?;
                 if let Some(authority) = expected_scheduled_authority {
-                    self.recheck_scheduled_snapshot_authority(authority)?;
+                    self.recheck_scheduled_snapshot_authority(authority, test_control)?;
                 }
                 if let Some(policy) = expected_snapshot_policy {
                     policy.recheck(
@@ -2168,10 +2269,10 @@ impl Repository {
                         )?;
                     }
                     checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
-                    wait_at_bound_snapshot_auto_after_state_write_barrier();
+                    wait_at_bound_snapshot_auto_barrier(test_control.after_state_write_ready());
                     self.store.validate_bound_layout()?;
                     if let Some(authority) = expected_scheduled_authority {
-                        self.recheck_scheduled_snapshot_authority(authority)?;
+                        self.recheck_scheduled_snapshot_authority(authority, test_control)?;
                     }
                     if let Some(policy) = expected_snapshot_policy {
                         policy.recheck(
@@ -2262,10 +2363,10 @@ impl Repository {
         // has moved yet.  If its conditional state publication fails, return
         // without making the object reachable.
         if scheduled_bound {
-            wait_at_bound_snapshot_auto_pre_checkpoint_barrier();
+            wait_at_bound_snapshot_auto_barrier(test_control.pre_checkpoint_ready());
             self.store.validate_bound_layout()?;
             if let Some(authority) = expected_scheduled_authority {
-                self.recheck_scheduled_snapshot_authority(authority)?;
+                self.recheck_scheduled_snapshot_authority(authority, test_control)?;
             }
             if let Some(policy) = expected_snapshot_policy {
                 policy.recheck(
@@ -2294,7 +2395,7 @@ impl Repository {
         let published_authority = if scheduled_bound {
             self.store.validate_bound_layout()?;
             if let Some(authority) = expected_scheduled_authority {
-                self.recheck_scheduled_snapshot_authority(authority)?;
+                self.recheck_scheduled_snapshot_authority(authority, test_control)?;
             }
             if let Some(policy) = expected_snapshot_policy {
                 policy.recheck(
@@ -2305,10 +2406,10 @@ impl Repository {
             if let Some(checkpoint) = checkpoint.as_ref() {
                 checkpoint.recheck(self.bound_kio.as_deref().expect("scheduled bound kio"))?;
             }
-            wait_at_bound_snapshot_auto_after_state_write_barrier();
+            wait_at_bound_snapshot_auto_barrier(test_control.after_state_write_ready());
             self.store.validate_bound_layout()?;
             if let Some(authority) = expected_scheduled_authority {
-                self.recheck_scheduled_snapshot_authority(authority)?;
+                self.recheck_scheduled_snapshot_authority(authority, test_control)?;
             }
             if let Some(policy) = expected_snapshot_policy {
                 policy.recheck(
@@ -2324,7 +2425,7 @@ impl Repository {
                 working.entries.iter().map(|entry| &entry.raw_hash),
             )?;
             self.publish_scheduled_bound_refs(&commit_hash)?;
-            Some(self.capture_scheduled_snapshot_authority()?)
+            Some(self.capture_scheduled_snapshot_authority(test_control)?)
         } else {
             atomic_overwrite(
                 &self.kio_dir.join("refs/heads/main"),
@@ -2343,6 +2444,7 @@ impl Repository {
                         .as_ref()
                         .expect("scheduled published authority binding"),
                     &commit_hash,
+                    test_control,
                 )?;
             }
             if let Some(policy) = expected_snapshot_policy {
@@ -4997,31 +5099,24 @@ fn bound_marker_exists(kio: &File, namespace: &str, raw_hash: &str) -> Result<bo
 
 /// Debug-only synchronization seam for descriptor-replacement integration
 /// tests. Production builds never inspect the environment or wait.
-#[cfg(unix)]
+#[cfg(all(unix, debug_assertions))]
 fn wait_at_bound_snapshot_auto_layout_barrier() {
-    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_BOUND_LAYOUT_READY");
+    // This helper can run inside an already captured snapshot operation. It
+    // must not consult ambient environment variables midway through that
+    // operation, or a test barrier could change after the writer lock.
+    let test_control = crate::test_control::current_or_default().core;
+    wait_at_bound_snapshot_auto_barrier(test_control.snapshot_bound_layout_ready.as_deref());
 }
 
-/// Debug-only synchronization seams for scheduled-writer race tests.  The
-/// ready/release protocol is intentionally identical across seams so tests can
-/// mutate one authority input at a precisely named boundary.
-fn wait_at_bound_snapshot_auto_pre_checkpoint_barrier() {
-    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_PRE_CHECKPOINT_READY");
-}
+#[cfg(all(unix, not(debug_assertions)))]
+fn wait_at_bound_snapshot_auto_layout_barrier() {}
 
-fn wait_at_bound_snapshot_auto_after_state_write_barrier() {
-    wait_at_bound_snapshot_auto_barrier("KIO_TEST_SNAPSHOT_AUTO_AFTER_STATE_WRITE_READY");
-}
-
-fn wait_at_bound_snapshot_auto_barrier(variable: &str) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(ready_path) = std::env::var_os(variable) else {
+#[cfg(debug_assertions)]
+fn wait_at_bound_snapshot_auto_barrier(ready_path: Option<&Path>) {
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = PathBuf::from(ready_path);
-    if fs::write(&ready_path, b"ready").is_err() {
+    if fs::write(ready_path, b"ready").is_err() {
         return;
     }
     let release_path = ready_path.with_extension("release");
@@ -5030,6 +5125,9 @@ fn wait_at_bound_snapshot_auto_barrier(variable: &str) {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
+
+#[cfg(not(debug_assertions))]
+fn wait_at_bound_snapshot_auto_barrier(_: Option<&Path>) {}
 
 fn attach_pending_normalize(
     tree_entry: &mut TreeEntry,
@@ -6822,11 +6920,10 @@ fn exchange_bound_lock(
 }
 
 #[cfg(debug_assertions)]
-fn maybe_hold_lock_for_tests() {
-    if let Some(ready) = std::env::var_os("KIO_TEST_HOLD_LOCK_READY") {
-        let ready = PathBuf::from(ready);
+fn maybe_hold_lock_for_tests(ready: Option<&Path>) {
+    if let Some(ready) = ready {
         let release = ready.with_extension("release");
-        std::fs::write(&ready, b"ready").expect("test lock ready marker must be writable");
+        std::fs::write(ready, b"ready").expect("test lock ready marker must be writable");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !release.exists() && std::time::Instant::now() < deadline {
@@ -6841,7 +6938,7 @@ fn maybe_hold_lock_for_tests() {
 }
 
 #[cfg(not(debug_assertions))]
-fn maybe_hold_lock_for_tests() {}
+fn maybe_hold_lock_for_tests(_: Option<&Path>) {}
 
 fn unix_nanos() -> u128 {
     SystemTime::now()
@@ -6924,7 +7021,10 @@ pub fn now_utc_seconds() -> String {
 /// environment.
 #[cfg(debug_assertions)]
 fn fixed_now_override() -> Option<String> {
-    std::env::var("KIO_FIXED_NOW").ok()
+    crate::test_control::current_or_default()
+        .fixed_now
+        .known()
+        .cloned()
 }
 
 #[cfg(not(debug_assertions))]
@@ -8851,6 +8951,7 @@ mod tests {
                 &[],
                 true,
                 Some(&expected),
+                None,
                 None,
                 None,
                 None,

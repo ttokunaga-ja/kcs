@@ -47,6 +47,8 @@ use rusqlite::OptionalExtension;
 use serde_json::Value;
 use tempfile::TempDir;
 
+const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -291,8 +293,6 @@ fn qb1_scope_unreachable_is_exit_3_across_open_view_restore() {
 /// with a non-null `error_code`.
 #[test]
 fn qb2_success_exit_is_independent_of_error_code_value() {
-    use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
-
     let (dir, _pointer) = fixture();
     let output = kio(&dir, &["search", "3600"])
         .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
@@ -315,8 +315,6 @@ fn qb2_success_exit_is_independent_of_error_code_value() {
 /// at tool-lock materialize time with `KIO-E-EMBED-MODALITY-001` / exit 2.
 #[test]
 fn qb3a_non_multimodal_embedding_profile_rejected_exit_2() {
-    use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
-
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.md"), "# document\n").unwrap();
     success(&dir, &["init"]);
@@ -346,8 +344,6 @@ fn qb3a_non_multimodal_embedding_profile_rejected_exit_2() {
 /// values.
 #[test]
 fn qb3b_fallback_reason_is_open_vocabulary_string() {
-    use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
-
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.md"), "# document\n").unwrap();
     success(&dir, &["init"]);

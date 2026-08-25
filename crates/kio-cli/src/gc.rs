@@ -14,6 +14,8 @@ use kio_core::gc::{
 use kio_core::scope::{
     Repository, format_utc_seconds, new_ulid, now_utc_seconds, parse_utc_seconds,
 };
+#[cfg(debug_assertions)]
+use kio_core::test_control::GcFault;
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{
     BoundGcIndexMetadata, FtsSchemaConfig, FtsTokenizer, GcIndexRotationAttestation,
@@ -394,10 +396,13 @@ fn config_changed_after_publication() -> KioError {
 
 #[cfg(debug_assertions)]
 fn wait_at_post_publication_test_barrier() {
-    let Some(ready_path) = std::env::var_os("KIO_TEST_GC_POST_PUBLICATION_READY") else {
+    let ready_path = crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .gc_post_publication_ready;
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = std::path::PathBuf::from(ready_path);
     if std::fs::write(&ready_path, b"ready").is_err() {
         return;
     }
@@ -1215,10 +1220,12 @@ fn runtime_limit_value(marker: &GcInProgressMarker) -> Value {
 
 #[cfg(debug_assertions)]
 fn test_runtime_checkpoint_limit() -> Option<u64> {
-    std::env::var("KIO_TEST_GC_RUNTIME_CHECKPOINTS")
-        .ok()?
-        .parse()
-        .ok()
+    crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .gc_runtime_checkpoints
+        .known()
+        .copied()
 }
 
 #[cfg(not(debug_assertions))]
@@ -1292,7 +1299,7 @@ fn confirm<T: Serialize>(
 }
 
 fn inject_fault(point: &str) -> Result<()> {
-    if std::env::var("KIO_TEST_GC_FAULT").ok().as_deref() == Some(point) {
+    if gc_fault_enabled(point) {
         return Err(KioError::new(
             "KIO-E-GC-TEST-INTERRUPTED-001",
             "GC test fault injection interrupted the sweep",
@@ -1303,11 +1310,52 @@ fn inject_fault(point: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+fn gc_fault_enabled(point: &str) -> bool {
+    let expected = match point {
+        "after_marker_fsync" => GcFault::AfterMarkerFsync,
+        "after_first_receipt" => GcFault::AfterFirstReceipt,
+        "after_all_receipts_before_tree_delete" => GcFault::AfterAllReceiptsBeforeTreeDelete,
+        "after_pre_sweep_rotation" => GcFault::AfterPreSweepRotation,
+        "after_first_tree_delete" => GcFault::AfterFirstTreeDelete,
+        "after_all_trees_before_final_rotation" => GcFault::AfterAllTreesBeforeFinalRotation,
+        "after_final_rotation_before_marker_removal" => {
+            GcFault::AfterFinalRotationBeforeMarkerRemoval
+        }
+        "after_private_prepare" => GcFault::AfterPrivatePrepare,
+        "after_rotation_marker_persist" => GcFault::AfterRotationMarkerPersist,
+        "after_index_exchange" => GcFault::AfterIndexExchange,
+        "after_temp_cleanup_before_marker_advance" => GcFault::AfterTempCleanupBeforeMarkerAdvance,
+        "after_marker_stage_fsync" => GcFault::AfterMarkerStageFsync,
+        "after_receipt_stage_fsync" => GcFault::AfterReceiptStageFsync,
+        "after_tree_quarantine" => GcFault::AfterTreeQuarantine,
+        "after_tree_retirement_capture" => GcFault::AfterTreeRetirementCapture,
+        _ => return false,
+    };
+    crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .core
+        .gc_fault
+        .known()
+        == Some(&expected)
+}
+
+#[cfg(not(debug_assertions))]
+fn gc_fault_enabled(_: &str) -> bool {
+    false
+}
+
 fn maybe_wait_at_test_prelock_barrier() {
-    let Some(ready_path) = std::env::var_os("KIO_TEST_GC_PRELOCK_READY") else {
+    #[cfg(debug_assertions)]
+    let ready_path = crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .gc_prelock_ready;
+    #[cfg(not(debug_assertions))]
+    let ready_path: Option<std::path::PathBuf> = None;
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = std::path::PathBuf::from(ready_path);
     if std::fs::write(&ready_path, b"ready").is_err() {
         return;
     }

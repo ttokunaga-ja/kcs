@@ -702,6 +702,8 @@ pub struct GcSweepSession {
     root: PathBuf,
     scope: std::fs::File,
     kio: std::fs::File,
+    #[cfg(debug_assertions)]
+    test_control: crate::test_control::CoreTestControl,
 }
 
 /// How the CLI may invoke bounded automatic shallow GC.
@@ -827,6 +829,11 @@ impl GcSweepSession {
             root: canonical,
             scope,
             kio,
+            #[cfg(debug_assertions)]
+            // Binding a sweep is a library operation root. Capture once here so
+            // every later checkpoint observes the same controls, even when no
+            // CLI composition root installed a snapshot.
+            test_control: crate::test_control::capture_for_operation().core,
         })
     }
     /// Bind an automatic sweep to the exact repository capability already
@@ -853,6 +860,44 @@ impl GcSweepSession {
         }
         Ok(session)
     }
+
+    fn inject_gc_tree_fault(&self, _point: GcTreeFaultPoint) -> Result<()> {
+        #[cfg(debug_assertions)]
+        if self
+            .test_control
+            .gc_fault
+            .known()
+            .is_some_and(|fault| _point.matches(*fault))
+        {
+            return Err(KioError::new(
+                "KIO-E-GC-TEST-INTERRUPTED-001",
+                "GC test fault injection interrupted the sweep",
+                json!({"point": _point.label()}),
+                ExitCode::Interrupted,
+            ));
+        }
+        Ok(())
+    }
+
+    fn wait_at_gc_tree_quarantine_barrier(&self) {
+        #[cfg(debug_assertions)]
+        wait_at_gc_test_barrier(self.test_control.gc_tree_quarantine_ready.as_deref());
+    }
+
+    fn wait_at_gc_before_state_write_barrier(&self) {
+        #[cfg(debug_assertions)]
+        wait_at_gc_test_barrier(
+            self.test_control
+                .snapshot_before_state_write_ready
+                .as_deref(),
+        );
+    }
+
+    fn wait_at_gc_pre_quarantine_barrier(&self) {
+        #[cfg(debug_assertions)]
+        wait_at_gc_test_barrier(self.test_control.gc_pre_quarantine_ready.as_deref());
+    }
+
     pub fn read_marker(&self) -> Result<Option<GcInProgressMarker>> {
         read_active_marker_bound(&self.kio)
     }
@@ -1037,7 +1082,7 @@ impl GcSweepSession {
             retire_snapshot_state_temporary(&self.kio, &temporary, &bytes, &temporary_observation)?;
             return Err(snapshot_auto_state_changed());
         }
-        wait_at_gc_test_barrier("KIO_TEST_SNAPSHOT_AUTO_BEFORE_STATE_WRITE_READY");
+        self.wait_at_gc_before_state_write_barrier();
         match expected.observation.as_ref() {
             None => {
                 if let Err(error) =
@@ -1404,7 +1449,7 @@ impl GcSweepSession {
         // create-new, fully written and fsynced before a no-clobber atomic
         // rename publishes `in_progress` in one namespace operation.
         create_new_bound(&markers, &staged, &bytes, MAX_MARKER_BYTES)?;
-        inject_gc_tree_fault("after_marker_stage_fsync")?;
+        self.inject_gc_tree_fault(GcTreeFaultPoint::MarkerStageFsync)?;
         rename_noreplace_between(&markers, &staged, &gc, "in_progress")?;
         sync_bound_directory(&gc, "in_progress")?;
         sync_bound_directory(&markers, &staged)?;
@@ -1533,7 +1578,7 @@ impl GcSweepSession {
                 // record before its final receipt name exists. A crash during
                 // staging leaves no malformed authorization at `shallowed/`.
                 create_new_bound(&receipts, &staged, &bytes, MAX_METADATA)?;
-                inject_gc_tree_fault("after_receipt_stage_fsync")?;
+                self.inject_gc_tree_fault(GcTreeFaultPoint::ReceiptStageFsync)?;
                 rename_noreplace_between(&receipts, &staged, &shallowed, leaf)?;
                 sync_bound_directory(&shallowed, leaf)?;
                 sync_bound_directory(&receipts, &staged)?;
@@ -1647,7 +1692,7 @@ impl GcSweepSession {
                 if final_observation != before || final_bytes != bytes {
                     return Err(corrupt("tree changed immediately before GC quarantine"));
                 }
-                wait_at_gc_test_barrier("KIO_TEST_GC_PRE_QUARANTINE_READY");
+                self.wait_at_gc_pre_quarantine_barrier();
                 // The index generation/identity is part of the irreversible
                 // deletion authority, not merely an executor preflight.  Bind
                 // it again at the final namespace transition after the longer
@@ -1733,8 +1778,8 @@ impl GcSweepSession {
         if hash_bytes(&bytes) != tree_hash {
             return Err(corrupt("tree bytes changed during GC quarantine"));
         }
-        inject_gc_tree_fault("after_tree_quarantine")?;
-        wait_at_gc_tree_quarantine_barrier();
+        self.inject_gc_tree_fault(GcTreeFaultPoint::TreeQuarantine)?;
+        self.wait_at_gc_tree_quarantine_barrier();
         // The test seam is deliberately before this final check. Rebind both
         // authorities immediately before capture: a marker replacement must
         // stop the erase, and a renamed archive victim is captured under a
@@ -1766,7 +1811,7 @@ impl GcSweepSession {
                 "GC tree archive",
             )?
         };
-        inject_gc_tree_fault("after_tree_retirement_capture")?;
+        self.inject_gc_tree_fault(GcTreeFaultPoint::TreeRetirementCapture)?;
         // Unlink only the private captured name, then require the retained
         // object to have no remaining names before truncating it. A same-UID
         // hardlink inserted at any point leaves nlink > 0 and aborts without
@@ -2311,31 +2356,52 @@ fn open_verified_file_handle(
     Ok(file)
 }
 
-fn inject_gc_tree_fault(point: &str) -> Result<()> {
-    if std::env::var("KIO_TEST_GC_FAULT").ok().as_deref() == Some(point) {
-        return Err(KioError::new(
-            "KIO-E-GC-TEST-INTERRUPTED-001",
-            "GC test fault injection interrupted the sweep",
-            json!({"point": point}),
-            ExitCode::Interrupted,
-        ));
-    }
-    Ok(())
+#[derive(Clone, Copy)]
+enum GcTreeFaultPoint {
+    MarkerStageFsync,
+    ReceiptStageFsync,
+    TreeQuarantine,
+    TreeRetirementCapture,
 }
 
-fn wait_at_gc_tree_quarantine_barrier() {
-    wait_at_gc_test_barrier("KIO_TEST_GC_TREE_QUARANTINE_READY");
+impl GcTreeFaultPoint {
+    #[cfg(debug_assertions)]
+    fn matches(self, fault: crate::test_control::GcFault) -> bool {
+        matches!(
+            (self, fault),
+            (
+                Self::MarkerStageFsync,
+                crate::test_control::GcFault::AfterMarkerStageFsync
+            ) | (
+                Self::ReceiptStageFsync,
+                crate::test_control::GcFault::AfterReceiptStageFsync
+            ) | (
+                Self::TreeQuarantine,
+                crate::test_control::GcFault::AfterTreeQuarantine
+            ) | (
+                Self::TreeRetirementCapture,
+                crate::test_control::GcFault::AfterTreeRetirementCapture
+            )
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    fn label(self) -> &'static str {
+        match self {
+            Self::MarkerStageFsync => "after_marker_stage_fsync",
+            Self::ReceiptStageFsync => "after_receipt_stage_fsync",
+            Self::TreeQuarantine => "after_tree_quarantine",
+            Self::TreeRetirementCapture => "after_tree_retirement_capture",
+        }
+    }
 }
 
-fn wait_at_gc_test_barrier(variable: &str) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let Some(ready_path) = std::env::var_os(variable) else {
+#[cfg(debug_assertions)]
+fn wait_at_gc_test_barrier(ready_path: Option<&Path>) {
+    let Some(ready_path) = ready_path else {
         return;
     };
-    let ready_path = PathBuf::from(ready_path);
-    if std::fs::write(&ready_path, b"ready").is_err() {
+    if std::fs::write(ready_path, b"ready").is_err() {
         return;
     }
     let release_path = ready_path.with_extension("release");

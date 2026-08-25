@@ -8,9 +8,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::deterministic::DeterministicAdapter;
-use crate::gemini_embedding::{
-    ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN, GeminiEmbeddingAdapter, GeminiEmbeddingClient,
-};
+#[cfg(debug_assertions)]
+use crate::gemini_embedding::GeminiEmbeddingClient;
+use crate::gemini_embedding::{ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN, GeminiEmbeddingAdapter};
 use crate::local_embedding::{
     LOCAL_EMBEDDING_DEFAULT_MODEL, LocalEmbeddingAdapter, LocalEmbeddingExecution,
 };
@@ -28,25 +28,104 @@ use crate::types::{
 };
 use crate::{AdapterError, Result};
 
+// This module deliberately translates the typed, debug-only core control at
+// the adapter boundary.  No production adapter parses KIO_TEST_* directly.
+#[cfg(debug_assertions)]
+mod test_control {
+    use kio_core::test_control::{LocalOcrMode, MistralOcrMode, Selector};
+    use std::path::PathBuf;
+
+    fn known<T>(
+        selector: Selector<T>,
+        render: impl FnOnce(T) -> &'static str,
+    ) -> Option<&'static str> {
+        match selector {
+            Selector::Known(value) => Some(render(value)),
+            Selector::Unset | Selector::Unknown(_) => None,
+        }
+    }
+    pub fn mistral_ocr() -> Option<&'static str> {
+        known(
+            crate::debug_test_control().adapters.mistral_ocr,
+            |v| match v {
+                MistralOcrMode::AuthError => "auth_error",
+                MistralOcrMode::RateLimit => "rate_limit",
+                MistralOcrMode::RateLimitAfter => "rate_limit_after",
+                MistralOcrMode::NetworkError => "network_error",
+                MistralOcrMode::Mock => "mock",
+                MistralOcrMode::Partial => "partial",
+                MistralOcrMode::MockLinkImage => "mock_link_image",
+                MistralOcrMode::IncrementalIncomplete => "incr_incomplete",
+                MistralOcrMode::PinChanged => "pin_changed",
+                MistralOcrMode::NoChangeNoSend => "no_change_no_send",
+                MistralOcrMode::RequireIdempotencyToken => "require_idempotency_token",
+            },
+        )
+    }
+    pub fn local_ocr() -> Option<&'static str> {
+        known(
+            crate::debug_test_control().adapters.local_ocr,
+            |v| match v {
+                LocalOcrMode::Mock => "mock",
+            },
+        )
+    }
+    pub fn mistral_ocr_with_capture() -> (Option<&'static str>, Option<PathBuf>) {
+        let adapters = crate::debug_test_control().adapters;
+        let mode = known(adapters.mistral_ocr, |v| match v {
+            MistralOcrMode::AuthError => "auth_error",
+            MistralOcrMode::RateLimit => "rate_limit",
+            MistralOcrMode::RateLimitAfter => "rate_limit_after",
+            MistralOcrMode::NetworkError => "network_error",
+            MistralOcrMode::Mock => "mock",
+            MistralOcrMode::Partial => "partial",
+            MistralOcrMode::MockLinkImage => "mock_link_image",
+            MistralOcrMode::IncrementalIncomplete => "incr_incomplete",
+            MistralOcrMode::PinChanged => "pin_changed",
+            MistralOcrMode::NoChangeNoSend => "no_change_no_send",
+            MistralOcrMode::RequireIdempotencyToken => "require_idempotency_token",
+        });
+        (mode, adapters.capture_sent_media)
+    }
+}
+#[cfg(not(debug_assertions))]
+mod test_control {
+    use std::path::PathBuf;
+    pub fn mistral_ocr() -> Option<&'static str> {
+        None
+    }
+    pub fn local_ocr() -> Option<&'static str> {
+        None
+    }
+    pub fn mistral_ocr_with_capture() -> (Option<&'static str>, Option<PathBuf>) {
+        (None, None)
+    }
+}
+
+#[cfg(debug_assertions)]
 pub const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
+#[cfg(debug_assertions)]
 pub const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
 /// The offline embedding seam. Separate from `TEST_ADOPTED_EMBEDDING_ENV` on
 /// purpose: that one names Gemini's seams and is read at 21 call sites across
 /// 17 test files, none of which should change meaning because a second
 /// implementation appeared.
+#[cfg(debug_assertions)]
 pub const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
 /// The offline markdownize seam, separate from both of the above for the same
 /// reason they are separate from each other: a test that drives local OCR must
 /// not accidentally switch the embedding backend, or vice versa.
+#[cfg(debug_assertions)]
 pub const TEST_LOCAL_OCR_ENV: &str = "KIO_TEST_LOCAL_OCR";
 
 /// Re-exported so the index path can gate image enrichment without naming the
 /// concrete local adapter module (which stays private, like `gemini_embedding`).
 pub use crate::local_embedding::IMAGE_OBJECT_CAPABILITY;
 
+#[cfg(debug_assertions)]
+use crate::local_ocr_markdownize::MockLocalOcrClient;
 use crate::local_ocr_markdownize::{
     EnvLocalOcrClient, LayoutFileType, LocalOcrExecution, LocalOcrMarkdownizeAdapter,
-    MockLocalOcrClient,
 };
 
 /// Whether the local OCR pipeline can handle this media type at all.
@@ -94,8 +173,11 @@ pub fn builtin_offline_markdownize_adapter() -> Box<dyn MarkdownizeAdapter> {
 /// Markdown into a real archive.
 #[must_use]
 pub fn active_local_ocr_execution() -> Option<LocalOcrExecution> {
-    match std::env::var(TEST_LOCAL_OCR_ENV).ok().as_deref() {
+    match test_control::local_ocr() {
+        #[cfg(debug_assertions)]
         Some("mock") => Some(LocalOcrExecution::Mock),
+        #[cfg(not(debug_assertions))]
+        Some("mock") => None,
         Some(_) => None,
         None => declared_offline_markdownize().then_some(LocalOcrExecution::Real),
     }
@@ -120,10 +202,13 @@ pub fn local_ocr_markdownize_adapter(
     verified_raw_bytes: &[u8],
 ) -> Result<Box<dyn MarkdownizeAdapter>> {
     let adapter = match execution {
-        LocalOcrExecution::Mock => {
-            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, scope_id)
-                .into_boxed(kio_dir, verified_raw_bytes)
-        }
+        #[cfg(debug_assertions)]
+        LocalOcrExecution::Mock => LocalOcrMarkdownizeAdapter::new(
+            MockLocalOcrClient::from_test_control(),
+            LocalOcrExecution::Mock,
+            scope_id,
+        )
+        .into_boxed(kio_dir, verified_raw_bytes),
         LocalOcrExecution::Real => {
             let declared =
                 crate::tool_lock::registered_declared_adapter("markdown").ok_or_else(|| {
@@ -226,6 +311,9 @@ pub fn run_standard_online_markdownize_with_bytes(
     request: StandardOnlineMarkdownizeRequest<'_>,
     verified_raw_bytes: &[u8],
 ) -> Result<StandardOnlineMarkdownizeOutcome> {
+    // Test controls are process-global. Snapshot them before any request work so
+    // an individual request cannot observe a mid-flight environment mutation.
+    let (test_mode, capture_sent_media) = test_control::mistral_ocr_with_capture();
     let actual_hash = crate::identity::hash_bytes(verified_raw_bytes);
     if actual_hash != request.raw_hash {
         return Err(AdapterError::ContractViolation(format!(
@@ -306,10 +394,7 @@ pub fn run_standard_online_markdownize_with_bytes(
         // profile declares one.
         idempotency_token: request.idempotency_token,
     };
-    match std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-        .ok()
-        .as_deref()
-    {
+    match test_mode {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
         // QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): a rate limit WITH a
@@ -337,7 +422,10 @@ pub fn run_standard_online_markdownize_with_bytes(
         | Some("incr_incomplete")
         | Some("pin_changed")
         | Some("no_change_no_send") => {
-            let client = MockStandardOnlineMarkdownizeClient;
+            let client = MockStandardOnlineMarkdownizeClient {
+                test_mode,
+                capture_sent_media,
+            };
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
                 .with_image_store(request.kio_dir)
@@ -359,17 +447,10 @@ pub fn run_standard_online_markdownize_with_bytes(
             // Test-only Kio response seams run after the provider page mapping has
             // passed its exact-bijection checks. This preserves partial/fallback
             // lifecycle coverage without weakening the OCR transport contract.
-            if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-                .ok()
-                .as_deref()
-                == Some("partial")
-            {
+            if test_mode == Some("partial") {
                 response.updated_units.pop();
             }
-            if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-                .ok()
-                .as_deref()
-                == Some("incr_incomplete")
+            if test_mode == Some("incr_incomplete")
                 && response_mode == MarkdownizeMode::Incremental
                 && response.updated_units.len() > 1
             {
@@ -389,7 +470,10 @@ pub fn run_standard_online_markdownize_with_bytes(
         // like "mock" does. Never true for the real, shipped Mistral profile
         // (`MistralOcrMarkdownizeAdapter::default` stays `NotProvided`).
         Some("require_idempotency_token") => {
-            let client = MockStandardOnlineMarkdownizeClient;
+            let client = MockStandardOnlineMarkdownizeClient {
+                test_mode,
+                capture_sent_media,
+            };
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
                 .with_image_store(request.kio_dir)
@@ -548,10 +632,8 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
     scope_id: &str,
     bbox_annotation_enabled: bool,
 ) -> Result<AdapterProfile> {
-    match std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-        .ok()
-        .as_deref()
-    {
+    let test_mode = test_control::mistral_ocr();
+    match test_mode {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
         // QA3: keep the seam arms in sync with `run_standard_online_markdownize`.
@@ -571,7 +653,10 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
         | Some("incr_incomplete")
         | Some("pin_changed")
         | Some("no_change_no_send") => {
-            let client = MockStandardOnlineMarkdownizeClient;
+            let client = MockStandardOnlineMarkdownizeClient {
+                test_mode,
+                capture_sent_media: None,
+            };
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             return Ok(
                 MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id)
@@ -581,7 +666,10 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
         }
         // QA13: keep the seam arms in sync with `run_standard_online_markdownize`.
         Some("require_idempotency_token") => {
-            let client = MockStandardOnlineMarkdownizeClient;
+            let client = MockStandardOnlineMarkdownizeClient {
+                test_mode,
+                capture_sent_media: None,
+            };
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             return Ok(
                 MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id)
@@ -604,18 +692,17 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
 }
 
 #[derive(Debug, Clone)]
-struct MockStandardOnlineMarkdownizeClient;
+struct MockStandardOnlineMarkdownizeClient {
+    test_mode: Option<&'static str>,
+    capture_sent_media: Option<std::path::PathBuf>,
+}
 
 impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
     fn resolve_model_pin(&self, _configured_model: &str) -> Result<String> {
         // R14-6: the `pin_changed` seam simulates a model-pin change between runs so the
         // incremental gate sees a resolved tool_profile different from the prior instance
         // (which was created under the default `mistral-ocr-2505`).
-        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-            .ok()
-            .as_deref()
-            == Some("pin_changed")
-        {
+        if self.test_mode == Some("pin_changed") {
             return Ok("mistral-ocr-2599".to_owned());
         }
         Ok("mistral-ocr-2505".to_owned())
@@ -637,7 +724,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         // original OOXML bytes). Gated behind this env var so it never
         // perturbs the exact-match markdown-TEXT assertions other existing
         // tests already make against this mock's ordinary output.
-        if let Ok(capture_path) = std::env::var("KIO_TEST_CAPTURE_SENT_MEDIA") {
+        if let Some(capture_path) = &self.capture_sent_media {
             let _ = std::fs::write(
                 capture_path,
                 format!(
@@ -651,10 +738,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         // the gate resolves the changed pin first and falls back to Full. If one is
         // attempted (a regression that sends before gating), fail loudly so the test
         // catches it. A Full send under the same seam is the expected fallback and works.
-        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-            .ok()
-            .as_deref()
-            == Some("pin_changed")
+        if self.test_mode == Some("pin_changed")
             && request.mode == crate::types::MarkdownizeMode::Incremental
         {
             return Err(AdapterError::ContractViolation(
@@ -666,10 +750,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         // `pin_changed`, the model pin is left stable so incremental actually FIRES (the
         // gate passes) — the only incremental send this seam sees is the regression it
         // guards. Fail loudly so the test catches any send.
-        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-            .ok()
-            .as_deref()
-            == Some("no_change_no_send")
+        if self.test_mode == Some("no_change_no_send")
             && request.mode == crate::types::MarkdownizeMode::Incremental
         {
             return Err(AdapterError::ContractViolation(
@@ -704,10 +785,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                 let index = hint.order as usize;
                 OcrPage {
                     index,
-                    markdown: if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-                        .ok()
-                        .as_deref()
-                        == Some("mock_link_image")
+                    markdown: if self.test_mode == Some("mock_link_image")
                     {
                         format!(
                             "[source](https://example.com/{index}) mock ocr {} ![img-{index}](img-{index}.png)\n",
@@ -748,27 +826,35 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdoptedEmbeddingExecution {
+    #[cfg(debug_assertions)]
     Mock,
+    #[cfg(debug_assertions)]
     IncompatibleProfile,
+    #[cfg(debug_assertions)]
     NonMultimodal,
+    #[cfg(debug_assertions)]
     AuthError,
+    #[cfg(debug_assertions)]
     RateLimit,
     /// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): a rate limit WITH a
     /// provider `Retry-After` header (30s) — proves `retry_after_ms` wiring
     /// into `next_retry_at`, unlike `RateLimit` above (headerless, synthetic
     /// +2s backoff).
+    #[cfg(debug_assertions)]
     RateLimitAfter,
     /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): behaves like
     /// `Mock`, but the adapter declares `ProviderIdempotency::HttpHeader` —
     /// proving the CLI threads `EmbeddingRequest.idempotency_token`
     /// end-to-end (a missing token surfaces as `ContractViolation`). Never
     /// true for the real, shipped Gemini profile.
+    #[cfg(debug_assertions)]
     RequireIdempotencyToken,
     /// I12: behaves like `Mock`, but the response carries no
     /// `usageMetadata` — the one case where a settle site must fall back to
     /// the reservation estimate. Kept as its own variant because `Mock` now
     /// reports a token count like the live endpoint does, so without this the
     /// degrade path would have no coverage at all.
+    #[cfg(debug_assertions)]
     NoUsageReport,
     Real,
 }
@@ -826,17 +912,42 @@ impl EmbeddingExecution {
 /// resolve to `Option`, let `None` mean "this lane is unavailable, degrade".
 #[must_use]
 pub fn active_embedding_execution() -> Option<EmbeddingExecution> {
-    if let Some(local) = active_local_embedding_execution() {
+    #[cfg(debug_assertions)]
+    let adapters = crate::debug_test_control().adapters;
+    if let Some(local) = active_local_embedding_execution(
+        #[cfg(debug_assertions)]
+        Some(&adapters),
+    ) {
         return Some(EmbeddingExecution::Offline(local));
     }
-    active_adopted_embedding_execution().map(EmbeddingExecution::Online)
+    active_adopted_embedding_execution_from(
+        #[cfg(debug_assertions)]
+        Some(&adapters),
+    )
+    .map(EmbeddingExecution::Online)
 }
 
 /// The offline test seam. Mirrors `KIO_TEST_GEMINI_EMBED`'s shape so hermetic
 /// tests drive the offline path the same way they drive the online one.
-fn active_local_embedding_execution() -> Option<LocalEmbeddingExecution> {
-    match std::env::var(TEST_LOCAL_EMBEDDING_ENV).ok().as_deref() {
+fn active_local_embedding_execution(
+    #[cfg(debug_assertions)] adapters: Option<&kio_core::test_control::AdapterTestControl>,
+) -> Option<LocalEmbeddingExecution> {
+    #[cfg(debug_assertions)]
+    let test_mode = adapters.and_then(|adapters| match &adapters.local_embed {
+        kio_core::test_control::Selector::Known(kio_core::test_control::LocalEmbedMode::Mock) => {
+            Some("mock")
+        }
+        kio_core::test_control::Selector::Unset | kio_core::test_control::Selector::Unknown(_) => {
+            None
+        }
+    });
+    #[cfg(not(debug_assertions))]
+    let test_mode: Option<&str> = None;
+    match test_mode {
+        #[cfg(debug_assertions)]
         Some("mock") => Some(LocalEmbeddingExecution::Mock),
+        #[cfg(not(debug_assertions))]
+        Some("mock") => None,
         Some(_) => None,
         // A declared `offline_api` adapter activates with no auth of its own:
         // there is nothing to authenticate to. `real_embedding_activation`'s
@@ -866,6 +977,7 @@ fn declared_offline_embedding() -> bool {
 /// model catalog and `outputDimensionality` and describe no other provider.
 pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn EmbeddingAdapter>> {
     match execution {
+        #[cfg(debug_assertions)]
         EmbeddingExecution::Offline(LocalEmbeddingExecution::Mock) => {
             Ok(Box::new(LocalEmbeddingAdapter::mock()))
         }
@@ -919,6 +1031,7 @@ pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn Em
                 ADOPTED_DIMENSIONS,
             )))
         }
+        #[cfg(debug_assertions)]
         EmbeddingExecution::Online(AdoptedEmbeddingExecution::RequireIdempotencyToken) => {
             Ok(Box::new(
                 GeminiEmbeddingAdapter::new(
@@ -933,6 +1046,7 @@ pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn Em
                 )),
             ))
         }
+        #[cfg(debug_assertions)]
         EmbeddingExecution::Online(other) => Ok(Box::new(GeminiEmbeddingAdapter::new(
             MockAdoptedEmbeddingClient { execution: other },
             ADOPTED_MODEL_PIN,
@@ -943,24 +1057,62 @@ pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn Em
 
 #[must_use]
 pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution> {
-    match std::env::var(TEST_ADOPTED_EMBEDDING_ENV).ok().as_deref() {
-        Some("mock") => Some(AdoptedEmbeddingExecution::Mock),
-        Some("incompatible_profile") => Some(AdoptedEmbeddingExecution::IncompatibleProfile),
-        Some("non_multimodal") => Some(AdoptedEmbeddingExecution::NonMultimodal),
-        Some("auth_error") => Some(AdoptedEmbeddingExecution::AuthError),
-        Some("rate_limit") => Some(AdoptedEmbeddingExecution::RateLimit),
-        Some("rate_limit_after") => Some(AdoptedEmbeddingExecution::RateLimitAfter),
-        Some("require_idempotency_token") => {
+    #[cfg(debug_assertions)]
+    let adapters = crate::debug_test_control().adapters;
+    active_adopted_embedding_execution_from(
+        #[cfg(debug_assertions)]
+        Some(&adapters),
+    )
+}
+
+fn active_adopted_embedding_execution_from(
+    #[cfg(debug_assertions)] adapters: Option<&kio_core::test_control::AdapterTestControl>,
+) -> Option<AdoptedEmbeddingExecution> {
+    #[cfg(debug_assertions)]
+    match adapters.and_then(|adapters| match &adapters.gemini_embed {
+        kio_core::test_control::Selector::Known(mode) => Some(*mode),
+        kio_core::test_control::Selector::Unset | kio_core::test_control::Selector::Unknown(_) => {
+            None
+        }
+    }) {
+        Some(kio_core::test_control::GeminiEmbedMode::Mock) => {
+            Some(AdoptedEmbeddingExecution::Mock)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::IncompatibleProfile) => {
+            Some(AdoptedEmbeddingExecution::IncompatibleProfile)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::NonMultimodal) => {
+            Some(AdoptedEmbeddingExecution::NonMultimodal)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::AuthError) => {
+            Some(AdoptedEmbeddingExecution::AuthError)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::RateLimit) => {
+            Some(AdoptedEmbeddingExecution::RateLimit)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::RateLimitAfter) => {
+            Some(AdoptedEmbeddingExecution::RateLimitAfter)
+        }
+        Some(kio_core::test_control::GeminiEmbedMode::RequireIdempotencyToken) => {
             Some(AdoptedEmbeddingExecution::RequireIdempotencyToken)
         }
-        Some("no_usage_report") => Some(AdoptedEmbeddingExecution::NoUsageReport),
-        Some(_) => None,
+        Some(kio_core::test_control::GeminiEmbedMode::NoUsageReport) => {
+            Some(AdoptedEmbeddingExecution::NoUsageReport)
+        }
         // The declared tools.toml credential is the sole activation authority.
         None => real_embedding_activation(
             crate::tool_lock::registered_declared_adapter("embedding")
                 .and_then(|declared| declared.auth)
                 .is_some(),
         ),
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        real_embedding_activation(
+            crate::tool_lock::registered_declared_adapter("embedding")
+                .and_then(|declared| declared.auth)
+                .is_some(),
+        )
     }
 }
 
@@ -1008,6 +1160,7 @@ pub fn declared_adopted_embedding_profile(
 ) -> DeclaredEmbeddingProfile {
     let adopted = adopted_embedding_profile();
     match execution {
+        #[cfg(debug_assertions)]
         AdoptedEmbeddingExecution::IncompatibleProfile => DeclaredEmbeddingProfile {
             tool_id: "test_embedding_incompatible".to_owned(),
             dimensions: ADOPTED_DIMENSIONS as u64,
@@ -1016,6 +1169,7 @@ pub fn declared_adopted_embedding_profile(
             profile_hash: "sha256:00000000000000000000000000000000000000000000000000000000incompat"
                 .to_owned(),
         },
+        #[cfg(debug_assertions)]
         AdoptedEmbeddingExecution::NonMultimodal => DeclaredEmbeddingProfile {
             tool_id: "test_text_embedding".to_owned(),
             dimensions: ADOPTED_DIMENSIONS as u64,
@@ -1088,6 +1242,7 @@ pub fn embedding_adapter_profile(execution: EmbeddingExecution) -> Result<Adapte
     Ok(embedding_adapter_for(execution)?.profile())
 }
 
+#[cfg(debug_assertions)]
 pub fn run_adopted_embedding(
     execution: AdoptedEmbeddingExecution,
     items: Vec<EmbeddingItem>,
@@ -1145,6 +1300,22 @@ pub fn run_adopted_embedding(
     })
 }
 
+#[cfg(not(debug_assertions))]
+pub fn run_adopted_embedding(
+    execution: AdoptedEmbeddingExecution,
+    items: Vec<EmbeddingItem>,
+    input_type: EmbeddingInputType,
+    idempotency_token: Option<String>,
+) -> Result<AdoptedEmbeddingOutcome> {
+    debug_assert_eq!(execution, AdoptedEmbeddingExecution::Real);
+    run_embedding(
+        EmbeddingExecution::Online(AdoptedEmbeddingExecution::Real),
+        items,
+        input_type,
+        idempotency_token,
+    )
+}
+
 #[must_use]
 pub fn deterministic_embedding_vector(seed: &str, dimensions: usize) -> Vec<f32> {
     let mut values = Vec::with_capacity(dimensions);
@@ -1173,10 +1344,12 @@ pub fn deterministic_embedding_vector(seed: &str, dimensions: usize) -> Vec<f32>
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(debug_assertions)]
 struct MockAdoptedEmbeddingClient {
     execution: AdoptedEmbeddingExecution,
 }
 
+#[cfg(debug_assertions)]
 impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
     fn resolve_model_pin(&self, _configured_model: &str) -> Result<String> {
         Ok(ADOPTED_MODEL_PIN.to_owned())
@@ -1237,12 +1410,10 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use crate::types::AdapterKind;
-
-    static MARKDOWNIZE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn adopted_profiles_are_catalog_owned() {
@@ -1342,62 +1513,66 @@ mod tests {
 
     #[test]
     fn standard_online_markdownize_mock_runs() {
-        let _env_lock = MARKDOWNIZE_ENV_LOCK.lock().unwrap();
+        let _env_lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("input.pdf");
         let input_bytes = b"%PDF mock";
         std::fs::write(&input, input_bytes).unwrap();
         let input_hash = crate::identity::hash_bytes(input_bytes);
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock") };
-        let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-            scope_id: "01H00000000000000000000000",
-            kio_dir: temp.path(),
-            raw_hash: &input_hash,
-            path: &input,
-            media_type: "application/pdf",
-            prepared_unit_hints: vec![PreparedUnitHint {
-                unit_key: "page:1".to_owned(),
-                prepared_hash:
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                        .to_owned(),
-                unit_kind: crate::types::UnitKind::Page,
-                order: 0,
-            }],
-            mode: MarkdownizeMode::Full,
-            previous: None,
-            hints: None,
-            restrict_to_hint_pages: false,
-            bbox_annotation_enabled: false,
-            idempotency_token: None,
-        })
-        .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
+        let outcome = {
+            let _mode = kio_core::test_control::TestEnvGuard::set(
+                TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
+                "mock",
+            );
+            run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+                scope_id: "01H00000000000000000000000",
+                kio_dir: temp.path(),
+                raw_hash: &input_hash,
+                path: &input,
+                media_type: "application/pdf",
+                prepared_unit_hints: vec![PreparedUnitHint {
+                    unit_key: "page:1".to_owned(),
+                    prepared_hash:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    unit_kind: crate::types::UnitKind::Page,
+                    order: 0,
+                }],
+                mode: MarkdownizeMode::Full,
+                previous: None,
+                hints: None,
+                restrict_to_hint_pages: false,
+                bbox_annotation_enabled: false,
+                idempotency_token: None,
+            })
+            .unwrap()
+        };
         assert_eq!(outcome.profile.adapter_kind, AdapterKind::Markdownize);
         assert_eq!(outcome.response.updated_units.len(), 1);
 
         // A test-only missing output must not shrink the Prepared manifest. Capture
         // the complete provider-discovered set before the seam removes page:1.
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial") };
-        let partial = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-            scope_id: "01H00000000000000000000000",
-            kio_dir: temp.path(),
-            raw_hash: &input_hash,
-            path: &input,
-            media_type: "application/pdf",
-            prepared_unit_hints: Vec::new(),
-            mode: MarkdownizeMode::Full,
-            previous: None,
-            hints: None,
-            restrict_to_hint_pages: false,
-            bbox_annotation_enabled: false,
-            idempotency_token: None,
-        })
-        .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
+        let partial = {
+            let _mode = kio_core::test_control::TestEnvGuard::set(
+                TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
+                "partial",
+            );
+            run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+                scope_id: "01H00000000000000000000000",
+                kio_dir: temp.path(),
+                raw_hash: &input_hash,
+                path: &input,
+                media_type: "application/pdf",
+                prepared_unit_hints: Vec::new(),
+                mode: MarkdownizeMode::Full,
+                previous: None,
+                hints: None,
+                restrict_to_hint_pages: false,
+                bbox_annotation_enabled: false,
+                idempotency_token: None,
+            })
+            .unwrap()
+        };
         assert!(partial.response.updated_units.is_empty());
         assert_eq!(partial.effective_prepared_unit_hints.len(), 1);
         assert_eq!(partial.effective_prepared_unit_hints[0].unit_key, "page:1");
@@ -1409,38 +1584,40 @@ mod tests {
 
     #[test]
     fn ct4_bbox_003_and_006_catalog_mock_persists_profile_metadata_and_search_text() {
-        let _env_lock = MARKDOWNIZE_ENV_LOCK.lock().unwrap();
+        let _env_lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("chart.pdf");
         let input_bytes = b"%PDF bbox mock";
         std::fs::write(&input, input_bytes).unwrap();
         let input_hash = crate::identity::hash_bytes(input_bytes);
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock") };
-        let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-            scope_id: "01H00000000000000000000000",
-            kio_dir: temp.path(),
-            raw_hash: &input_hash,
-            path: &input,
-            media_type: "application/pdf",
-            prepared_unit_hints: vec![PreparedUnitHint {
-                unit_key: "page:1".to_owned(),
-                prepared_hash:
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                        .to_owned(),
-                unit_kind: crate::types::UnitKind::Page,
-                order: 0,
-            }],
-            mode: MarkdownizeMode::Full,
-            previous: None,
-            hints: None,
-            restrict_to_hint_pages: false,
-            bbox_annotation_enabled: true,
-            idempotency_token: None,
-        })
-        .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV) };
+        let outcome = {
+            let _mode = kio_core::test_control::TestEnvGuard::set(
+                TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
+                "mock",
+            );
+            run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+                scope_id: "01H00000000000000000000000",
+                kio_dir: temp.path(),
+                raw_hash: &input_hash,
+                path: &input,
+                media_type: "application/pdf",
+                prepared_unit_hints: vec![PreparedUnitHint {
+                    unit_key: "page:1".to_owned(),
+                    prepared_hash:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    unit_kind: crate::types::UnitKind::Page,
+                    order: 0,
+                }],
+                mode: MarkdownizeMode::Full,
+                previous: None,
+                hints: None,
+                restrict_to_hint_pages: false,
+                bbox_annotation_enabled: true,
+                idempotency_token: None,
+            })
+            .unwrap()
+        };
 
         assert_eq!(
             outcome.profile.tool_profile_hash,

@@ -90,6 +90,7 @@ pub struct ProviderInventory {
 /// Env var naming a JSON fixture file (`Vec<ProviderInventory>`, serde) that
 /// stands in for [`configured_inventories`]'s real provider calls in tests —
 /// see that function's doc comment.
+#[cfg(debug_assertions)]
 pub const TEST_BATCH_INVENTORY_ENV: &str = "KIO_TEST_BATCH_INVENTORY";
 
 /// `kio ledger reconcile`'s (QA15) provider-side job/upload listing for
@@ -114,14 +115,16 @@ pub const TEST_BATCH_INVENTORY_ENV: &str = "KIO_TEST_BATCH_INVENTORY";
 /// the configured client when set), which is how the metadata→attribution
 /// mapping is tested hermetically.
 pub fn configured_inventories() -> Result<Vec<ProviderInventory>> {
-    if let Ok(fixture_path) = std::env::var(TEST_BATCH_INVENTORY_ENV) {
+    #[cfg(debug_assertions)]
+    if let Some(fixture_path) = crate::debug_test_control().adapters.batch_inventory {
         let text =
             std::fs::read_to_string(&fixture_path).map_err(|err| crate::AdapterError::Io {
-                path: fixture_path.clone(),
+                path: fixture_path.display().to_string(),
                 message: err.to_string(),
             })?;
-        return serde_json::from_str(&text)
-            .map_err(|err| crate::AdapterError::ConfigSchema(format!("{fixture_path}: {err}")));
+        return serde_json::from_str(&text).map_err(|err| {
+            crate::AdapterError::ConfigSchema(format!("{}: {err}", fixture_path.display()))
+        });
     }
     let mut inventories = Vec::new();
     if let Some(client) = crate::batch_client::configured_mistral_batch_client()? {
@@ -222,23 +225,9 @@ fn provider_job_record(job: BatchJobRecord) -> ProviderJobRecord {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// `std::env::set_var`/`remove_var` are process-global, and `cargo test`
-    /// runs a crate's `#[test]` functions on multiple threads by default.
-    /// This module's tests share `TEST_BATCH_INVENTORY_ENV` and
-    /// `KIO_TEST_MISTRAL_BATCH` with `batch_client`'s own tests — so the lock must
-    /// be the CRATE-wide one (`batch_client::test_env_lock`), not a
-    /// module-local mutex a sibling module's tests would never contend on.
-    /// Held for each test's full body so the env state one test observes
-    /// cannot change out from under it mid-test.
-    fn env_lock() -> &'static Mutex<()> {
-        crate::batch_client::test_env_lock()
-    }
 
     /// Production wiring (no fixture seam): one inventory per configured
     /// Batch client, jobs attributed through the 5-key metadata schema and
@@ -246,9 +235,10 @@ mod tests {
     /// client here is the hermetic `KIO_TEST_MISTRAL_BATCH` mock listing.
     #[test]
     fn configured_client_listing_maps_metadata_and_filename_attribution() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
+        let _guard = kio_core::test_control::test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _fixture = kio_core::test_control::TestEnvGuard::remove(TEST_BATCH_INVENTORY_ENV);
         let script = serde_json::json!({
             "provider_scope_id": "ws-live",
             "jobs_listing": [
@@ -276,16 +266,11 @@ mod tests {
                 { "upload_id": "file-stray", "filename": "notes.bin" }
             ]
         });
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe {
-            std::env::set_var(
-                crate::batch_client::TEST_MISTRAL_BATCH_ENV,
-                script.to_string(),
-            )
-        };
+        let _script = kio_core::test_control::TestEnvGuard::set(
+            crate::batch_client::TEST_MISTRAL_BATCH_ENV,
+            script.to_string(),
+        );
         let inventories = configured_inventories().unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(crate::batch_client::TEST_MISTRAL_BATCH_ENV) };
 
         assert_eq!(inventories.len(), 1);
         let inventory = &inventories[0];
@@ -322,7 +307,9 @@ mod tests {
     /// `filename_token` deserialize to `None`, not a schema error).
     #[test]
     fn test_seam_parses_a_well_formed_fixture() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = kio_core::test_control::test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("inventory.json");
         std::fs::write(
@@ -351,11 +338,11 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path) };
+        let _fixture = kio_core::test_control::TestEnvGuard::set(
+            TEST_BATCH_INVENTORY_ENV,
+            fixture_path.as_os_str(),
+        );
         let inventories = configured_inventories().unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
 
         assert_eq!(inventories.len(), 1);
         let inventory = &inventories[0];
@@ -388,12 +375,14 @@ mod tests {
     /// the env var expected fixture content to be honored.
     #[test]
     fn missing_fixture_file_is_a_loud_error() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, "/nonexistent/path/inventory.json") };
+        let _guard = kio_core::test_control::test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _fixture = kio_core::test_control::TestEnvGuard::set(
+            TEST_BATCH_INVENTORY_ENV,
+            "/nonexistent/path/inventory.json",
+        );
         let result = configured_inventories();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
         assert!(result.is_err());
     }
 
@@ -401,15 +390,17 @@ mod tests {
     /// silent empty inventory.
     #[test]
     fn malformed_fixture_json_is_a_config_schema_error() {
-        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _guard = kio_core::test_control::test_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("bad.json");
         std::fs::write(&fixture_path, "{ not valid json").unwrap();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var(TEST_BATCH_INVENTORY_ENV, &fixture_path) };
+        let _fixture = kio_core::test_control::TestEnvGuard::set(
+            TEST_BATCH_INVENTORY_ENV,
+            fixture_path.as_os_str(),
+        );
         let result = configured_inventories();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var(TEST_BATCH_INVENTORY_ENV) };
         match result {
             Err(crate::AdapterError::ConfigSchema(_)) => {}
             other => panic!("expected ConfigSchema error, got {other:?}"),

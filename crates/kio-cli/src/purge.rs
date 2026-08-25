@@ -28,6 +28,8 @@ use kio_core::purge::{
 use kio_core::scope::{
     Repository, StoreLock, append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds,
 };
+#[cfg(debug_assertions)]
+use kio_core::test_control::PurgeFault;
 use kio_core::{ExitCode, KioError, Result};
 use kio_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
 use kio_pipeline::ledger::ops::{
@@ -2481,15 +2483,36 @@ fn incomplete_report(
 }
 
 fn maybe_inject_fault(phase: &str) -> Result<()> {
-    #[cfg(debug_assertions)]
-    if std::env::var("KIO_TEST_PURGE_FAIL_AFTER_PHASE").as_deref() == Ok(phase) {
+    if purge_fault_enabled(phase) {
         return Err(KioError::io(
             format!("injected purge failure after {phase}"),
             "purge fault seam",
         ));
     }
-    let _ = phase;
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn purge_fault_enabled(phase: &str) -> bool {
+    let expected = match phase {
+        "prepared" => PurgeFault::Prepared,
+        "prepared_visible" => PurgeFault::PreparedVisible,
+        "tombstoned" => PurgeFault::Tombstoned,
+        "deleted" => PurgeFault::Deleted,
+        "committed" => PurgeFault::Committed,
+        _ => return false,
+    };
+    crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .purge_fail_after_phase
+        .known()
+        == Some(&expected)
+}
+
+#[cfg(not(debug_assertions))]
+fn purge_fault_enabled(_: &str) -> bool {
+    false
 }
 
 fn atomic_private_replace(path: &Path, bytes: &[u8]) -> Result<()> {

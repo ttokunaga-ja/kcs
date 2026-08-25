@@ -2,9 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV;
 use kio_core::cas::hash_bytes;
 use serde_json::{Value, json};
+
+const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "GEMINI_API_KEY",

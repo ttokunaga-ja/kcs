@@ -12,6 +12,24 @@ pub(crate) const MAX_PARALLELISM: usize = 4;
 pub(crate) const DEFAULT_PER_SCOPE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+#[cfg(debug_assertions)]
+#[derive(Clone, Default)]
+pub(crate) struct ScopeDelayTestControl {
+    scope_id: Option<String>,
+    delay_ms: Option<u64>,
+}
+
+#[cfg(debug_assertions)]
+impl ScopeDelayTestControl {
+    pub(crate) fn new(scope_id: Option<String>, delay_ms: Option<u64>) -> Self {
+        Self { scope_id, delay_ms }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[derive(Clone, Default)]
+pub(crate) struct ScopeDelayTestControl;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MultiScopeSettings {
     pub(crate) parallelism: usize,
@@ -203,18 +221,15 @@ where
 /// It is unavailable in release builds and wakes in short intervals so the same
 /// scope deadline still bounds the injected delay.
 #[cfg(debug_assertions)]
-pub(crate) fn maybe_delay_scope_for_test(scope_id: &str, deadline: ScopeDeadline) {
-    const DELAY_SCOPE_ID_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID";
-    const DELAY_MS_ENV: &str = "KIO_TEST_SCOPE_SEARCH_DELAY_MS";
-
-    if std::env::var(DELAY_SCOPE_ID_ENV).as_deref() != Ok(scope_id) {
+pub(crate) fn maybe_delay_scope_for_test(
+    scope_id: &str,
+    deadline: ScopeDeadline,
+    control: &ScopeDelayTestControl,
+) {
+    if control.scope_id.as_deref() != Some(scope_id) {
         return;
     }
-    let Some(delay) = std::env::var(DELAY_MS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_millis)
-    else {
+    let Some(delay) = control.delay_ms.map(Duration::from_millis) else {
         return;
     };
     let started = Instant::now();
@@ -236,7 +251,12 @@ pub(crate) fn maybe_delay_scope_for_test(scope_id: &str, deadline: ScopeDeadline
 }
 
 #[cfg(not(debug_assertions))]
-pub(crate) fn maybe_delay_scope_for_test(_scope_id: &str, _deadline: ScopeDeadline) {}
+pub(crate) fn maybe_delay_scope_for_test(
+    _scope_id: &str,
+    _deadline: ScopeDeadline,
+    _control: &ScopeDelayTestControl,
+) {
+}
 
 #[cfg(test)]
 mod tests {

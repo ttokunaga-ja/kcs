@@ -1666,16 +1666,18 @@ auth = "env:MISTRAL_API_KEY"
 
     // Auth resolution: env resolves and plain is literal; all other forms are
     // schema errors.
+    #[cfg(debug_assertions)]
     #[test]
     fn resolve_auth_accepts_only_env_and_plain() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("KIO_TEST_R13_2_AUTH", "resolved-key") };
-        assert_eq!(
-            resolve_auth("env:KIO_TEST_R13_2_AUTH").unwrap(),
-            Some("resolved-key".to_owned())
-        );
-        // FIXME: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::remove_var("KIO_TEST_R13_2_AUTH") };
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        {
+            let _auth =
+                kio_core::test_control::TestEnvGuard::set("KIO_TEST_R13_2_AUTH", "resolved-key");
+            assert_eq!(
+                resolve_auth("env:KIO_TEST_R13_2_AUTH").unwrap(),
+                Some("resolved-key".to_owned())
+            );
+        }
         assert_eq!(resolve_auth("env:KIO_TEST_R13_2_AUTH").unwrap(), None);
         assert_eq!(
             resolve_auth("plain:abc123").unwrap(),

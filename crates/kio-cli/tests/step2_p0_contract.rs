@@ -3,10 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kio_adapter::catalog::{
-    TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, builtin_prepare_profile,
-    standard_online_markdownize_profile,
-};
+use kio_adapter::catalog::{builtin_prepare_profile, standard_online_markdownize_profile};
 use kio_adapter::identity::{prompt_template_hash, tool_profile_hash};
 use kio_adapter::tool_lock::tool_lock_hash;
 use kio_pipeline::budget::{BudgetCapKind, BudgetEstimate, evaluate_budget_with_caps};
@@ -25,6 +22,8 @@ use kio_pipeline::task::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "GEMINI_API_KEY",

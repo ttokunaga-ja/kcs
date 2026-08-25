@@ -29,8 +29,10 @@ pub fn now_millis() -> i64 {
 
 #[cfg(debug_assertions)]
 fn fixed_now_override_millis() -> Option<i64> {
-    let value = std::env::var("KIO_FIXED_NOW").ok()?;
-    parse_utc_seconds(&value).map(|secs| secs * 1000)
+    // Ledger calls may happen repeatedly within one CLI operation; read the
+    // installed snapshot rather than reparsing ambient environment state.
+    let control = kio_core::test_control::current_or_default();
+    parse_utc_seconds(control.fixed_now.known()?).map(|secs| secs * 1000)
 }
 
 #[cfg(not(debug_assertions))]

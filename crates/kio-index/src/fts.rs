@@ -1410,11 +1410,13 @@ pub fn prepare_bound_gc_index_rotation(
 
 #[cfg(debug_assertions)]
 fn wait_at_bound_gc_index_copy_barrier() {
-    let Some(ready_path) = std::env::var_os("KIO_TEST_GC_INDEX_COPY_READY") else {
+    // This is a mid-operation barrier, not an operation root. Only an
+    // already-installed CLI snapshot may enable it.
+    let control = kio_core::test_control::current_or_default();
+    let Some(ready_path) = control.core.gc_index_copy_ready.as_deref() else {
         return;
     };
-    let ready_path = PathBuf::from(ready_path);
-    if std::fs::write(&ready_path, b"ready").is_err() {
+    if std::fs::write(ready_path, b"ready").is_err() {
         return;
     }
     let release_path = ready_path.with_extension("release");

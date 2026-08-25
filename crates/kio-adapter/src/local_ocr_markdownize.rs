@@ -90,6 +90,7 @@ pub const LOCAL_OCR_MAX_PAGES: usize = 4096;
 /// model that only `Real` needs are read where the adapter is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalOcrExecution {
+    #[cfg(debug_assertions)]
     Mock,
     Real,
 }
@@ -1068,6 +1069,7 @@ pub fn profile_value_for(execution: LocalOcrExecution) -> Value {
         .as_object_mut()
         .expect("profile literal is an object");
     match execution {
+        #[cfg(debug_assertions)]
         LocalOcrExecution::Mock => {
             fields.insert(
                 "model_version_pin".to_owned(),
@@ -1401,11 +1403,13 @@ fn encode_base64(bytes: &[u8]) -> String {
 
 /// The mock's figure. A PNG signature and nothing after it: `sniff_media_type`
 /// reads the signature, and no consumer of an image object decodes the pixels.
+#[cfg(debug_assertions)]
 const MOCK_FIGURE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock figure";
 
 /// The mock's decoration, for the `decorated` body below. Distinct bytes from
 /// [`MOCK_FIGURE_PNG`] on purpose: identical bytes are one content-addressed
 /// object, and a test about telling two images apart cannot use one image.
+#[cfg(debug_assertions)]
 const MOCK_ICON_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock icon";
 
 /// Test-only body selector for [`MockLocalOcrClient`]. `decorated` answers with
@@ -1426,17 +1430,37 @@ const MOCK_ICON_PNG: &[u8] = b"\x89PNG\r\n\x1a\nkio local ocr mock icon";
 /// (Until 2026-08-06 this body was a plain `<table><tr><td>` — which the
 /// converter now rewrites, so it would have stopped testing a refusal while
 /// still passing.)
+#[cfg(debug_assertions)]
 pub const TEST_LOCAL_OCR_BODY_ENV: &str = "KIO_TEST_LOCAL_OCR_BODY";
 
 /// The CI backend. Returns a fixed, well-formed `/layout-parsing` body so the
 /// offline Markdownize *semantics* — no consent gate, no ledger charge, no
 /// batch lane — can be exercised on a runner that has no GPU and never will.
 #[derive(Debug, Clone, Default)]
-pub struct MockLocalOcrClient;
+#[cfg(debug_assertions)]
+pub struct MockLocalOcrClient {
+    body_mode: Option<kio_core::test_control::LocalOcrBodyMode>,
+}
 
+#[cfg(debug_assertions)]
+impl MockLocalOcrClient {
+    /// Capture the selected response body with the adapter operation, so the
+    /// request cannot observe an environment mutation after construction.
+    pub fn from_test_control() -> Self {
+        Self {
+            body_mode: crate::debug_test_control()
+                .adapters
+                .local_ocr_body
+                .known()
+                .copied(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
 impl LocalOcrClient for MockLocalOcrClient {
     fn layout_parse(&self, _file_base64: &str, _file_type: LayoutFileType) -> Result<Value> {
-        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("nonconforming") {
+        if self.body_mode == Some(kio_core::test_control::LocalOcrBodyMode::Nonconforming) {
             // Parses fine — the refusal under test is the acceptance check's,
             // not this module's, so the page has to get all the way through
             // here to reach it.
@@ -1455,7 +1479,7 @@ impl LocalOcrClient for MockLocalOcrClient {
                 }
             }));
         }
-        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("table") {
+        if self.body_mode == Some(kio_core::test_control::LocalOcrBodyMode::Table) {
             // The shape three real captures share: `border=1`, single-quoted
             // `style` on every cell, no `<th>` anywhere, and a figure sitting
             // inside a cell. `Handwritten board` appears nowhere but that cell,
@@ -1485,7 +1509,7 @@ impl LocalOcrClient for MockLocalOcrClient {
                 }
             }));
         }
-        if std::env::var(TEST_LOCAL_OCR_BODY_ENV).as_deref() == Ok("decorated") {
+        if self.body_mode == Some(kio_core::test_control::LocalOcrBodyMode::Decorated) {
             // A figure and a sticker, in the proportions the real service
             // returns: on the measured infographic the decoration ran to about
             // a tenth of the largest figure's area, and here it is 1/68th.
@@ -1566,7 +1590,7 @@ impl LocalOcrClient for MockLocalOcrClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 
@@ -2223,7 +2247,7 @@ mod tests {
 
     #[test]
     fn the_mock_client_body_parses() {
-        let body = MockLocalOcrClient
+        let body = MockLocalOcrClient::default()
             .layout_parse("", LayoutFileType::Image)
             .unwrap();
         let pages = parse_layout_parsing(&body).unwrap();
@@ -2413,9 +2437,12 @@ mod tests {
     fn the_adapter_refuses_bbox_annotation_rather_than_ignoring_it() {
         let mut request = request("image/png");
         request.bbox_annotation_enabled = true;
-        let adapter =
-            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, "scope-1")
-                .with_verified_raw_bytes(b"png".to_vec());
+        let adapter = LocalOcrMarkdownizeAdapter::new(
+            MockLocalOcrClient::default(),
+            LocalOcrExecution::Mock,
+            "scope-1",
+        )
+        .with_verified_raw_bytes(b"png".to_vec());
         let error = adapter.markdownize(request).unwrap_err().to_string();
         assert!(error.contains("bbox_annotation"), "{error}");
     }
@@ -2424,8 +2451,11 @@ mod tests {
     fn the_adapter_will_not_run_without_verified_bytes() {
         // Re-reading a path here would re-open bytes the caller already
         // verified, which is the hole the verified-bytes API exists to close.
-        let adapter =
-            LocalOcrMarkdownizeAdapter::new(MockLocalOcrClient, LocalOcrExecution::Mock, "scope-1");
+        let adapter = LocalOcrMarkdownizeAdapter::new(
+            MockLocalOcrClient::default(),
+            LocalOcrExecution::Mock,
+            "scope-1",
+        );
         assert!(adapter.markdownize(request("image/png")).is_err());
     }
 
@@ -2457,7 +2487,7 @@ mod tests {
     #[test]
     fn a_hint_naming_a_page_the_service_did_not_return_fails() {
         let client = RecordingClient {
-            body: MockLocalOcrClient
+            body: MockLocalOcrClient::default()
                 .layout_parse("", LayoutFileType::Image)
                 .unwrap(),
             seen: std::sync::Arc::new(std::sync::Mutex::new(None)),

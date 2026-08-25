@@ -12,6 +12,8 @@ use kio_adapter::tool_lock::{canonical_tool_lock_value, load_tool_lock, tool_loc
 use kio_core::cas::{
     ContentObjectKind, ObjectStore, canonical_json_bytes, is_hash, read_bounded_regular_file,
 };
+#[cfg(debug_assertions)]
+use kio_core::test_control::PromotionFault;
 use kio_core::{ExitCode, KioError};
 use kio_pipeline::markdownize::{UnitStatus, load_validated_normalized_instance};
 use kio_pipeline::task::{TaskDescriptor, TaskOutputRef, TaskStatus, validate_task_output_ref};
@@ -131,7 +133,7 @@ pub(crate) fn clear_promotion_state(kio_dir: &Path) -> kio_core::Result<()> {
 }
 
 pub(crate) fn maybe_inject_promotion_fault(phase: &str) -> kio_core::Result<()> {
-    if std::env::var("KIO_TEST_PROMOTION_FAULT").as_deref() == Ok(phase) {
+    if promotion_fault_enabled(phase) {
         return Err(KioError::new(
             "KIO-E-PROMOTION-FAULT-001",
             "injected promotion publication fault",
@@ -140,6 +142,27 @@ pub(crate) fn maybe_inject_promotion_fault(phase: &str) -> kio_core::Result<()> 
         ));
     }
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn promotion_fault_enabled(phase: &str) -> bool {
+    let expected = match phase {
+        "before_head" => PromotionFault::BeforeHead,
+        "after_head" => PromotionFault::AfterHead,
+        "after_index_swap" => PromotionFault::AfterIndexSwap,
+        _ => return false,
+    };
+    crate::debug_test_control()
+        .expect("command dispatch installs debug test control")
+        .cli
+        .promotion_fault
+        .known()
+        == Some(&expected)
+}
+
+#[cfg(not(debug_assertions))]
+fn promotion_fault_enabled(_: &str) -> bool {
+    false
 }
 
 fn validate_promotion_state(state: &PromotionState) -> kio_core::Result<()> {

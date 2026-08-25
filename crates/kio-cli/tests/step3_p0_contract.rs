@@ -4,9 +4,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use kio_adapter::catalog::{
-    TEST_ADOPTED_EMBEDDING_ENV, TEST_LOCAL_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
-};
 use kio_core::scope::Repository;
 use kio_core::{
     cas::{ContentObjectKind, ObjectKind, ObjectStore},
@@ -18,6 +15,10 @@ use kio_index::aggregator::{AggIndexStatus, Aggregator};
 use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
+
+const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
+const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "GEMINI_API_KEY",

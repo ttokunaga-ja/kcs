@@ -21,8 +21,10 @@
 //! progression persists in an explicit `state_path` file, so a submit run
 //! and a later collect run see a coherent QUEUED → … → SUCCESS sequence.
 
+#[cfg(debug_assertions)]
 use std::io::Write;
 
+#[cfg(debug_assertions)]
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -35,6 +37,7 @@ use crate::{AdapterError, Result};
 
 /// Inline-JSON mock script env var (per-Command in tests; see
 /// `catalog::TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV` for the house style).
+#[cfg(debug_assertions)]
 pub const TEST_MISTRAL_BATCH_ENV: &str = "KIO_TEST_MISTRAL_BATCH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,6 +614,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// persisted in `state_path` (REQUIRED when the sequence has more than one
 /// entry — separate CLI invocations must observe the progression).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg(debug_assertions)]
 pub struct MockBatchScript {
     #[serde(default = "default_scope")]
     pub provider_scope_id: String,
@@ -640,23 +644,29 @@ pub struct MockBatchScript {
     pub capture_path: Option<String>,
 }
 
+#[cfg(debug_assertions)]
 fn default_scope() -> String {
     "mock-workspace".to_owned()
 }
+#[cfg(debug_assertions)]
 fn default_upload() -> String {
     "file-mock-upload-1".to_owned()
 }
+#[cfg(debug_assertions)]
 fn default_job() -> String {
     "batch-mock-job-1".to_owned()
 }
+#[cfg(debug_assertions)]
 fn default_sequence() -> Vec<String> {
     vec!["SUCCESS".to_owned()]
 }
 
+#[cfg(debug_assertions)]
 pub struct MockBatchClient {
     script: MockBatchScript,
 }
 
+#[cfg(debug_assertions)]
 impl MockBatchClient {
     pub fn from_env_value(raw: &str) -> Result<Self> {
         let script: MockBatchScript = serde_json::from_str(raw).map_err(|error| {
@@ -713,6 +723,7 @@ impl MockBatchClient {
     }
 }
 
+#[cfg(debug_assertions)]
 impl MistralBatchClient for MockBatchClient {
     fn provider_scope_id(&self) -> Result<String> {
         Ok(self.script.provider_scope_id.clone())
@@ -826,10 +837,14 @@ impl MistralBatchClient for MockBatchClient {
 /// A declared credential with an invalid runtime target stays a loud error here,
 /// exactly as it is on the sync path.
 pub fn configured_mistral_batch_client() -> Result<Option<Box<dyn MistralBatchClient>>> {
-    if let Ok(raw) = std::env::var(TEST_MISTRAL_BATCH_ENV)
-        && !raw.trim().is_empty()
+    #[cfg(debug_assertions)]
     {
-        return Ok(Some(Box::new(MockBatchClient::from_env_value(&raw)?)));
+        use kio_core::test_control::Selector;
+        if let Selector::Known(raw) = crate::debug_test_control().adapters.mistral_batch
+            && !raw.trim().is_empty()
+        {
+            return Ok(Some(Box::new(MockBatchClient::from_env_value(&raw)?)));
+        }
     }
     if crate::tool_lock::resolve_role_api_key("markdown")?.is_some() {
         return Ok(Some(Box::new(EnvMistralBatchClient::new())));
@@ -843,9 +858,8 @@ pub fn configured_mistral_batch_client() -> Result<Option<Box<dyn MistralBatchCl
 /// / `batch_inventory::TEST_BATCH_INVENTORY_ENV` must hold THIS lock (a
 /// module-local lock cannot serialize against another module's tests over the
 /// same variables — batch_client and batch_inventory share all four).
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     static DECLARED_ADAPTER: std::sync::Once = std::sync::Once::new();
     DECLARED_ADAPTER.call_once(|| {
         crate::tool_lock::register_declared_adapters(std::collections::HashMap::from([(
@@ -856,10 +870,10 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
             },
         )]));
     });
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    kio_core::test_control::test_env_lock()
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
 

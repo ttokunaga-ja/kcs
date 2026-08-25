@@ -32,6 +32,7 @@
 
 use serde_json::{Value, json};
 
+#[cfg(debug_assertions)]
 use crate::catalog::deterministic_embedding_vector;
 use crate::http_policy::{
     EMBEDDING_RESPONSE_MAX_BYTES, HttpPolicy, HttpResponse, authenticated_agent, read_json_bounded,
@@ -93,7 +94,7 @@ pub const LOCAL_EMBEDDING_PROMPT_TEMPLATE_HASH: &str =
 /// Byte identity of the archived accepted V4 profile.  The executable
 /// experiment is retired; this frozen Rust witness is the reproduction
 /// boundary for the adopted profile.
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 const LOCAL_EMBEDDING_V4_RESULT_DIGEST: &str =
     "sha256:b5ff0d6fa325c48a4e6143d4e975b96380dd602d5b63e1700e2a14821cb4bb8a";
 
@@ -118,6 +119,7 @@ pub const IMAGE_OBJECT_CAPABILITY: &str = "image_object";
 /// the online `Real` arm reads its configured model there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalEmbeddingExecution {
+    #[cfg(debug_assertions)]
     Mock,
     Real,
 }
@@ -324,6 +326,7 @@ fn violation(message: impl Into<String>) -> AdapterError {
 /// Which implementation an adapter instance holds. `Mock` carries no client
 /// because it makes no request.
 enum Backend<C> {
+    #[cfg(debug_assertions)]
     Mock,
     Real(C),
 }
@@ -336,6 +339,7 @@ pub struct LocalEmbeddingAdapter<C = EnvLocalEmbeddingClient> {
 
 impl LocalEmbeddingAdapter<EnvLocalEmbeddingClient> {
     /// The CI-only backend. Deterministic vectors, its own profile identity.
+    #[cfg(debug_assertions)]
     #[must_use]
     pub fn mock() -> Self {
         Self {
@@ -361,6 +365,7 @@ impl<C> LocalEmbeddingAdapter<C> {
     #[must_use]
     fn execution(&self) -> LocalEmbeddingExecution {
         match self.backend {
+            #[cfg(debug_assertions)]
             Backend::Mock => LocalEmbeddingExecution::Mock,
             Backend::Real(_) => LocalEmbeddingExecution::Real,
         }
@@ -405,6 +410,7 @@ pub fn profile_value_for(execution: LocalEmbeddingExecution) -> Value {
         // rather than borrowing a real model's and minting vectors under it.
         // Omitting the template fields is the honest record: there is no
         // template to hash.
+        #[cfg(debug_assertions)]
         LocalEmbeddingExecution::Mock => {
             fields.insert(
                 "model_version_pin".to_owned(),
@@ -474,6 +480,7 @@ impl<C: LocalEmbeddingClient> EmbeddingAdapter for LocalEmbeddingAdapter<C> {
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let vectors = match &self.backend {
+            #[cfg(debug_assertions)]
             Backend::Mock => request
                 .items
                 .iter()
@@ -538,7 +545,7 @@ impl<C: LocalEmbeddingClient> EmbeddingAdapter for LocalEmbeddingAdapter<C> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use crate::types::{EmbeddingInputType, EmbeddingItem};

@@ -40,6 +40,8 @@ use kio_core::gc::ShallowReceipt;
 use serde_json::Value;
 use tempfile::TempDir;
 
+const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+
 // ---------------------------------------------------------------------------
 // Harness (mirrors crates/kio-cli/tests/step4b_p2b_contract.rs / step3_p0_contract.rs).
 // ---------------------------------------------------------------------------
@@ -726,11 +728,11 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
         .unwrap();
     }
     kio(&dir, &["init"])
-        .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .assert()
         .success();
     kio(&dir, &["index", "--approve"])
-        .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .assert()
         .success();
 
@@ -746,7 +748,7 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
             "1",
         ],
     )
-    .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
     .arg("--json")
     .assert()
@@ -785,7 +787,7 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
             &cursor,
         ],
     )
-    .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
     .arg("--json")
     .assert()
@@ -830,11 +832,11 @@ fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
         .unwrap();
     }
     kio(&dir, &["init"])
-        .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .assert()
         .success();
     kio(&dir, &["index", "--approve"])
-        .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .assert()
         .success();
 
@@ -850,7 +852,7 @@ fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
             "1",
         ],
     )
-    .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
     .arg("--json")
     .assert()
@@ -882,7 +884,7 @@ fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
             &cursor,
         ],
     )
-    .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
     .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
     .arg("--json")
     .assert()
@@ -1904,7 +1906,7 @@ fn pc52_explicit_vector_excludes_only_the_incompatible_scope() {
             .env("XDG_CONFIG_HOME", data_home.join("config"))
             .env("XDG_DATA_HOME", data_home.join("data"))
             .env("XDG_CACHE_HOME", data_home.join("cache"))
-            .env(kio_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, embed)
+            .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
             .env_remove("KIO_FIXED_NOW");
         command
     }

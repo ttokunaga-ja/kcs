@@ -28,6 +28,7 @@ use crate::{AdapterError, Result};
 /// [`OfficeConverter::convert_to_pdf`] skips normalization for this backend.
 /// `version()` reports `"test-converter"`. Checked before
 /// [`OFFICE_CONVERTER_ENV`].
+#[cfg(debug_assertions)]
 pub const TEST_OFFICE_CONVERT_ENV: &str = "KIO_TEST_OFFICE_CONVERT";
 /// Explicit converter binary path, checked before the `soffice` PATH lookup.
 pub const OFFICE_CONVERTER_ENV: &str = "KIO_OFFICE_CONVERTER";
@@ -51,6 +52,7 @@ pub fn is_office_media(media_type: &str) -> bool {
 enum ConverterBackend {
     /// Test seam: [`OfficeConverter::convert_to_pdf`] returns this file's
     /// bytes verbatim for ANY input.
+    #[cfg(debug_assertions)]
     Seam { fixture_path: PathBuf },
     /// A real `soffice`-compatible binary invoked via [`Command`].
     Real { program: PathBuf },
@@ -87,6 +89,7 @@ impl OfficeConverter {
     /// (04 §5.3: retried once for the same input).
     pub fn convert_to_pdf(&self, input: &[u8], media_type: &str) -> Result<Vec<u8>> {
         match &self.backend {
+            #[cfg(debug_assertions)]
             ConverterBackend::Seam { fixture_path } => std::fs::read(fixture_path).map_err(|err| {
                 AdapterError::ContractViolation(format!(
                     "office converter test seam fixture unreadable at {}: {err}",
@@ -112,14 +115,14 @@ impl OfficeConverter {
 /// enqueueing rather than crash).
 #[must_use]
 pub fn resolve_office_converter() -> Option<OfficeConverter> {
-    if let Ok(fixture_path) = std::env::var(TEST_OFFICE_CONVERT_ENV) {
+    #[cfg(debug_assertions)]
+    if let Some(fixture_path) = crate::debug_test_control().adapters.office_convert {
         if fixture_path.is_empty() {
             return None;
         }
         return Some(OfficeConverter {
-            backend: ConverterBackend::Seam {
-                fixture_path: PathBuf::from(fixture_path),
-            },
+            #[cfg(debug_assertions)]
+            backend: ConverterBackend::Seam { fixture_path },
             version: "test-converter".to_owned(),
         });
     }
@@ -530,52 +533,10 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use base64::Engine;
-
-    static OFFICE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII helper: temporarily set/remove a process env var for the
-    /// duration of a test, restoring the PRIOR value (or absence) on drop —
-    /// including on panic, so one failing test cannot corrupt env state for
-    /// whichever other test in this process happens to run next. Env vars
-    /// are process-global; `OFFICE_ENV_LOCK` above serializes this file's
-    /// own env-touching tests against EACH OTHER (nothing else in this
-    /// crate touches `PATH` or the office-converter env vars, confirmed
-    /// before adding this).
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            // FIXME: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // FIXME: Audit that the environment access only happens in single-threaded code.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                // FIXME: Audit that the environment access only happens in single-threaded code.
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                // FIXME: Audit that the environment access only happens in single-threaded code.
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
 
     // ---- is_office_media -------------------------------------------------
 
@@ -598,13 +559,16 @@ mod tests {
 
     #[test]
     fn seam_converter_returns_fixture_bytes_verbatim_for_any_input() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("fixture.pdf");
         let fixture_bytes = b"%PDF-1.4\nfixture content\n%%EOF";
         std::fs::write(&fixture_path, fixture_bytes).unwrap();
 
-        let _seam = EnvVarGuard::set(TEST_OFFICE_CONVERT_ENV, &fixture_path.display().to_string());
+        let _seam = kio_core::test_control::TestEnvGuard::set(
+            TEST_OFFICE_CONVERT_ENV,
+            fixture_path.as_os_str(),
+        );
         let converter = resolve_office_converter().expect("seam converter resolves");
         assert_eq!(converter.version(), "test-converter");
 
@@ -620,31 +584,38 @@ mod tests {
 
     #[test]
     fn resolution_order_prefers_seam_over_explicit_path() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fixture_path = dir.path().join("fixture.pdf");
         std::fs::write(&fixture_path, b"seam-bytes").unwrap();
 
-        let _explicit = EnvVarGuard::set(OFFICE_CONVERTER_ENV, "/does/not/matter/for/this/case");
-        let _seam = EnvVarGuard::set(TEST_OFFICE_CONVERT_ENV, &fixture_path.display().to_string());
+        let _explicit = kio_core::test_control::TestEnvGuard::set(
+            OFFICE_CONVERTER_ENV,
+            "/does/not/matter/for/this/case",
+        );
+        let _seam = kio_core::test_control::TestEnvGuard::set(
+            TEST_OFFICE_CONVERT_ENV,
+            fixture_path.as_os_str(),
+        );
         let converter = resolve_office_converter().expect("seam must win over explicit");
         assert_eq!(converter.version(), "test-converter");
     }
 
     #[test]
     fn no_converter_available_resolves_to_none() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
-        let _clear_seam = EnvVarGuard::remove(TEST_OFFICE_CONVERT_ENV);
-        let _clear_explicit = EnvVarGuard::remove(OFFICE_CONVERTER_ENV);
-        let _scrub_path = EnvVarGuard::set("PATH", "/nonexistent-kio-test-path");
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _clear_seam = kio_core::test_control::TestEnvGuard::remove(TEST_OFFICE_CONVERT_ENV);
+        let _clear_explicit = kio_core::test_control::TestEnvGuard::remove(OFFICE_CONVERTER_ENV);
+        let _scrub_path =
+            kio_core::test_control::TestEnvGuard::set("PATH", "/nonexistent-kio-test-path");
         assert!(resolve_office_converter().is_none());
     }
 
     #[test]
     fn explicit_converter_pointing_at_missing_binary_resolves_to_none() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
-        let _clear_seam = EnvVarGuard::remove(TEST_OFFICE_CONVERT_ENV);
-        let _explicit = EnvVarGuard::set(
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _clear_seam = kio_core::test_control::TestEnvGuard::remove(TEST_OFFICE_CONVERT_ENV);
+        let _explicit = kio_core::test_control::TestEnvGuard::set(
             OFFICE_CONVERTER_ENV,
             "/definitely/not/a/real/kio-office-converter-binary",
         );
@@ -829,8 +800,8 @@ mod tests {
     /// 26.2.4.2).
     #[test]
     fn office_real_soffice_docx_converts_deterministically() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
-        let _clear_seam = EnvVarGuard::remove(TEST_OFFICE_CONVERT_ENV);
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _clear_seam = kio_core::test_control::TestEnvGuard::remove(TEST_OFFICE_CONVERT_ENV);
         let Some(converter) = resolve_office_converter() else {
             eprintln!(
                 "skipping office_real_soffice_docx_converts_deterministically: \
@@ -878,8 +849,8 @@ mod tests {
     /// machine, so this is included rather than falling back to docx-only.
     #[test]
     fn office_real_soffice_pptx_converts_deterministically() {
-        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
-        let _clear_seam = EnvVarGuard::remove(TEST_OFFICE_CONVERT_ENV);
+        let _lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _clear_seam = kio_core::test_control::TestEnvGuard::remove(TEST_OFFICE_CONVERT_ENV);
         let Some(converter) = resolve_office_converter() else {
             eprintln!(
                 "skipping office_real_soffice_pptx_converts_deterministically: \
