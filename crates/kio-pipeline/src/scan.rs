@@ -675,6 +675,17 @@ fn discover_child_scopes_inner(
                 continue;
             }
         };
+        // `open_dir_nofollow` gives us the capability that all later probes
+        // and recursion use. On Windows, reject a handle for anything other
+        // than a real directory here: a junction/reparse point is never a
+        // child-scope candidate, and must not be followed by discovery.
+        #[cfg(windows)]
+        if kio_core::cas::windows_directory_handle_identity(&child).is_none() {
+            let mut row = child_status(relative, "skipped_symlink");
+            row.reason = Some("windows_reparse_point".to_owned());
+            result.push(row);
+            continue;
+        }
         if !index_vcs_repos && is_vcs_root(&child) {
             result.push(child_status(relative, "skipped_vcs"));
             continue;

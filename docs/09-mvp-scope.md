@@ -29,6 +29,28 @@
 - kio evidence verify <pointer> / kio evidence verify --batch <pointers.jsonl> (Phase 4 milestone 6 の implemented target/current)
 ```
 
+## 1.2 RC platform support policy
+
+本表が RC の platform support level と、子 scope 生成経路が RC 対象かどうかの
+**唯一の正本**である。他の spec は個々の実装・CLI・運用上の帰結だけを定め、
+support level を別に定義しない。
+
+| platform | RC support level | ユーザーが直接選択した scope の `init` / `index` | 親 scope からの再帰的な子 scope 自動 mutation |
+| --- | --- | --- | --- |
+| macOS | supported | RC 対象 | RC 対象 (retained-handle launcher) |
+| Linux | supported | RC 対象 | RC 対象 (retained-handle launcher) |
+| Windows | experimental | RC 対象 | RC 対象外。preview は planned child を報告するが、approve は mutation 前に `KIO-E-SCOPE-BOUND-UNSUPPORTED-001` の structured partial failure として fail-closed する |
+
+Windows で新しい scope を導入する正式な手動手順は次の 3 ステップに限る。
+
+1. `kio init <child-path>` を実行する。
+2. `<child-path>` をプロセスの cwd とする。
+3. その cwd で `kio index --approve --offline` を実行する。
+
+これはユーザーが直接選択した独立 scope への操作であり、親 scope の discovery 結果から
+public pathname を再解決する fallback ではない。Windows の自動子 scope に
+`current_dir(path)` 型の handoff を追加せず、junction / reparse point も追跡しない。
+
 # 2. 将来ロードマップ（非規範・非承認）
 
 以下は実装を許可せず、CLI syntax、schema、error code、default、互換性を定めない名称だけの記録である。

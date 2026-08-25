@@ -42,6 +42,8 @@ use assert_cmd::Command;
 use kio_core::cas::{ObjectKind, ObjectStore, hash_bytes};
 use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::{Repository, StoreLock};
+#[cfg(windows)]
+use kio_index::aggregator::Aggregator;
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -104,6 +106,27 @@ fn run_with_env(dir: &TempDir, args: &[&str], key: &str, value: &str) -> (i32, V
         &output.stderr
     };
     (code, serde_json::from_slice(stream).unwrap())
+}
+
+#[cfg(windows)]
+fn success_in(dir: &TempDir, cwd: &std::path::Path, args: &[&str]) -> Value {
+    let output = Command::cargo_bin("kio")
+        .unwrap()
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("KIO_FIXED_NOW")
+        .args(args)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
 }
 
 /// Child scopes require a retained-handle launcher. Windows intentionally has
@@ -839,6 +862,31 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
         "[scope]\nindex_vcs_repos = true\nignore = [\"ignored\"]\n",
     )
     .unwrap();
+    let opted_in_preview = success(&dir, &["index", "--preview", "--offline"]);
+    for path in ["git-dir", "git-file/inner"] {
+        assert!(
+            opted_in_preview["child_scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["path"] == path && row["status"] == "planned"),
+            "VCS opt-in preview must plan {path}: {opted_in_preview}"
+        );
+    }
+    assert!(
+        opted_in_preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "ignored" && row["status"] == "skipped_ignored"),
+        "inherited ignore must remain effective during VCS opt-in preview: {opted_in_preview}"
+    );
+    for path in ["git-dir", "git-file/inner", "ignored"] {
+        assert!(
+            !dir.path().join(path).join(".kio").exists(),
+            "VCS opt-in preview must not initialize {path}"
+        );
+    }
     #[cfg(not(windows))]
     let opted_in = success(&dir, &["index", "--offline", "--approve"]);
     #[cfg(windows)]
@@ -889,6 +937,179 @@ fn qb15_child_scopes_vcs_default_opt_in_and_preview() {
         !dir.path().join("git-file/.kio").exists(),
         "a gitfile marker alone is not file-bearing"
     );
+}
+
+/// Windows has no safe retained-handle child launcher. Automatic discovery
+/// therefore remains a typed partial failure, while an operator may explicitly
+/// initialize and index one chosen child scope. The two paths must never be
+/// conflated through a pathname fallback.
+#[cfg(windows)]
+#[test]
+fn windows_child_scope_auto_is_fail_closed_but_explicit_manual_scope_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = dir.path().join("manual-child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(dir.path().join("parent.md"), "parent scope stable evidence").unwrap();
+    fs::write(child.join("manual.md"), "manual scope unique evidence").unwrap();
+    success(&dir, &["init"]);
+
+    let preview = success(&dir, &["index", "--preview", "--offline"]);
+    assert!(
+        preview["child_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["path"] == "manual-child" && row["status"] == "planned"),
+        "preview must expose the planned child without initializing it: {preview}"
+    );
+    assert!(
+        !child.join(".kio").exists(),
+        "preview must not mutate a planned child scope"
+    );
+
+    let (code, partial) = run(&dir, &["index", "--approve", "--offline"]);
+    assert_eq!(code, 3, "{partial}");
+    assert_windows_bound_children_unsupported(&partial, &["manual-child"]);
+    assert!(
+        !child.join(".kio").exists(),
+        "automatic child handling must fail closed before creating .kio"
+    );
+    let parent_status = success(&dir, &["status"]);
+    assert!(parent_status.get("error_code").is_none(), "{parent_status}");
+    let parent_root = dir.path().canonicalize().unwrap().display().to_string();
+    let entries = RegistryDb::open(registry_path(&dir))
+        .unwrap()
+        .all_entries()
+        .unwrap();
+    let parent_entry = entries
+        .iter()
+        .find(|entry| entry.root_path == parent_root)
+        .expect("the partial parent index must retain its registry publication");
+    assert!(parent_entry.indexed);
+    let replica_path = dir.path().join(".test-cache/kio/aggregator.sqlite");
+    assert!(
+        replica_path.is_file(),
+        "the partial parent index must retain a readable replica"
+    );
+    assert!(
+        Aggregator::open(&replica_path)
+            .unwrap()
+            .scope_ids()
+            .unwrap()
+            .contains(&parent_entry.scope_id),
+        "the child failure must not discard the parent's replica publication"
+    );
+    let parent_search = success(
+        &dir,
+        &["search", "parent scope stable evidence", "--mode", "text"],
+    );
+    assert!(
+        !parent_search["results"].as_array().unwrap().is_empty(),
+        "the parent must remain searchable after the child partial failure: {parent_search}"
+    );
+
+    // This is the documented Windows path: an explicit path selected by the
+    // operator, followed by indexing from that child's own working directory.
+    success(&dir, &["init", "manual-child"]);
+    assert!(child.join(".kio").is_dir());
+    let first_index = success_in(&dir, &child, &["index", "--approve", "--offline"]);
+    assert_eq!(first_index["status"], "indexed", "{first_index}");
+    let head_before_noop = fs::read(child.join(".kio/HEAD")).unwrap();
+    let second_index = success_in(&dir, &child, &["index", "--approve", "--offline"]);
+    assert_eq!(second_index["status"], "noop", "{second_index}");
+    assert!(second_index["commit_hash"].is_null(), "{second_index}");
+    assert_eq!(
+        fs::read(child.join(".kio/HEAD")).unwrap(),
+        head_before_noop,
+        "a no-op reindex must not advance the manually selected scope"
+    );
+
+    let entries = RegistryDb::open(registry_path(&dir))
+        .unwrap()
+        .all_entries()
+        .unwrap();
+    let child_root = child.canonicalize().unwrap().display().to_string();
+    let child_entry = entries
+        .iter()
+        .find(|entry| entry.root_path == child_root)
+        .expect("manual child index must publish its registry entry");
+    assert!(child_entry.indexed);
+    assert!(
+        Aggregator::open(&replica_path)
+            .unwrap()
+            .scope_ids()
+            .unwrap()
+            .contains(&child_entry.scope_id),
+        "manual child index must publish into the device replica"
+    );
+    let direct_search = success_in(
+        &dir,
+        &child,
+        &[
+            "search",
+            "manual scope unique evidence",
+            "--mode",
+            "text",
+            "--scope",
+            ".",
+        ],
+    );
+    assert!(
+        !direct_search["results"].as_array().unwrap().is_empty(),
+        "the manually indexed scope must be queryable through its published replica: {direct_search}"
+    );
+}
+
+/// A Windows junction is a reparse point, so child discovery must neither
+/// plan it as a normal directory nor mutate the target during preview/approve.
+#[cfg(windows)]
+#[test]
+fn windows_child_scope_junction_is_not_followed_or_mutated() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    fs::write(victim.path().join("victim.md"), "junction victim").unwrap();
+    let junction = dir.path().join("junction-child");
+    let status = std::process::Command::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(victim.path())
+        .status()
+        .expect("cmd must create the Windows-only junction fixture");
+    assert!(status.success(), "mklink /J must create the fixture");
+    success(&dir, &["init"]);
+
+    let preview = success(&dir, &["index", "--preview", "--offline"]);
+    let preview_junction = preview["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == "junction-child")
+        .expect("preview must report the rejected junction child");
+    assert!(
+        preview_junction["status"] == "skipped_symlink"
+            && preview_junction["reason"] == "windows_reparse_point",
+        "preview must reject a junction as a Windows reparse point: {preview}"
+    );
+    assert!(!victim.path().join(".kio").exists());
+
+    let indexed = success(&dir, &["index", "--approve", "--offline"]);
+    let indexed_junction = indexed["child_scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == "junction-child")
+        .expect("approve must report the rejected junction child");
+    assert!(
+        indexed_junction["status"] == "skipped_symlink"
+            && indexed_junction["reason"] == "windows_reparse_point",
+        "approve must reject a junction before any pathname handoff: {indexed}"
+    );
+    assert!(!victim.path().join(".kio").exists());
+    assert_eq!(
+        fs::read_to_string(victim.path().join("victim.md")).unwrap(),
+        "junction victim"
+    );
+    fs::remove_dir(&junction).unwrap();
 }
 
 #[test]

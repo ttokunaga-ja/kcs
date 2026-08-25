@@ -170,9 +170,10 @@ stateを残し、ref不達objectを履歴authorityとして扱わない。
 
 **`kio diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed` (旧新 tool_lock_hash と変更 role) / `resurrection_published` (no-op 例外 (a) の publication commit — [05-runtime.md §8.1](05-runtime.md)) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。current tree の required field が欠落する場合は `unknown` へ縮退せず corruption / incompatible format として fail-closed にする。
 
-`kio init` は指定フォルダ (省略時 = カレント) の `.kio` を 1 つだけ作成する (子孫には作らない)。子フォルダの `.kio` は `kio index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既存子 scope を grandfather する分岐は置かない — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kio search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。また `kio init` は生成する `.kio/config.toml` の `[chunking] unicode_version` に実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する ([03-data-model.md §5.3](03-data-model.md) — 省略不可・default なし。schema でも required — [10-operations.md §11.3](10-operations.md))。
+`kio init` は指定フォルダ (省略時 = カレント) の `.kio` を 1 つだけ作成する (子孫には作らない)。自動子 scope mutation が RC 対象の platform では、子フォルダの `.kio` は `kio index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既存子 scope を grandfather する分岐は置かない — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kio search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。また `kio init` は生成する `.kio/config.toml` の `[chunking] unicode_version` に実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する ([03-data-model.md §5.3](03-data-model.md) — 省略不可・default なし。schema でも required — [10-operations.md §11.3](10-operations.md))。
 
-子 scope の自動 mutation は retained directory capability から child process を起動できる
+子 scope 経路を含む RC platform support policy の正本は [09-mvp-scope.md §1.2](09-mvp-scope.md)
+である。子 scope の自動 mutation は retained directory capability から child process を起動できる
 macOS / Linux で実装済みである。Windows は read-only preview までは行うが、現行の process
 API と SQLite 経路では retained handle を child の全 mutation sink へ連鎖できないため、各 planned
 child を `KIO-E-SCOPE-BOUND-UNSUPPORTED-001` として構造化報告し、子 `.kio` 作成前に

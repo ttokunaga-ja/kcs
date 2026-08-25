@@ -356,12 +356,13 @@ scope registry は共有 `.kio` の正本ではない。フォルダ移動や外
 
 ```text
 kio init は現在フォルダの .kio だけを作る
-kio index は対象ファイルや子scopeを発見した時点で必要な .kio を作る
+自動子 scope mutation が RC 対象の platform では、kio index が対象ファイルや子scopeを発見した時点で必要な .kio を作る
 空フォルダには .kio を作らない
 履歴やobjectを持たない .kio は repair / cleanup で整理可能にする
 ```
 
-現行の子 scope 自動生成は macOS / Linux の retained-handle launcher に限る。Windows では
+子 scope 経路を含む RC platform support policy の正本は [09-mvp-scope.md §1.2](09-mvp-scope.md)
+である。現行の子 scope 自動生成は macOS / Linux の retained-handle launcher に限る。Windows では
 探索と preview は read-only のまま実行するが、child mutation は
 `KIO-E-SCOPE-BOUND-UNSUPPORTED-001` の structured partial failure として返し、子 `.kio` を
 作らない。junction / reparse point / directory replacement を pathname fallback で追わず、

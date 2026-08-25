@@ -476,13 +476,6 @@ impl Repository {
         Ok(repo)
     }
 
-    #[cfg(windows)]
-    pub fn init_bound_current(canonical_root: PathBuf) -> Result<Self> {
-        let mut repo = Self::init(Path::new("."))?;
-        repo.canonical_root = canonical_root;
-        Ok(repo)
-    }
-
     /// Enter an already-initialized repository through retained scope and
     /// `.kio` capabilities. This is the scheduler counterpart to the bound
     /// child-index constructor: after the caller owns the descriptor-relative
