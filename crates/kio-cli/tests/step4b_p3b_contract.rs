@@ -1060,14 +1060,17 @@ fn windows_child_scope_auto_is_fail_closed_but_explicit_manual_scope_indexes() {
     );
 }
 
-/// A Windows junction is a reparse point, so child discovery must neither
-/// plan it as a normal directory nor mutate the target during preview/approve.
+/// Windows discovery skips entries reported as symlink/reparse immediately;
+/// directory-shaped entries are admitted only when their opened handle proves
+/// they are real directories. A junction must not be planned, indexed, or
+/// mutate its target through either phase.
 #[cfg(windows)]
 #[test]
 fn windows_child_scope_junction_is_not_followed_or_mutated() {
     let dir = tempfile::tempdir().unwrap();
     let victim = tempfile::tempdir().unwrap();
     fs::write(victim.path().join("victim.md"), "junction victim").unwrap();
+    let victim_bytes = fs::read(victim.path().join("victim.md")).unwrap();
     let junction = dir.path().join("junction-child");
     let status = std::process::Command::new("cmd")
         .args(["/D", "/C", "mklink", "/J"])
@@ -1085,12 +1088,19 @@ fn windows_child_scope_junction_is_not_followed_or_mutated() {
         .iter()
         .find(|row| row["path"] == "junction-child")
         .expect("preview must report the rejected junction child");
+    assert_eq!(
+        preview_junction["status"], "skipped_symlink",
+        "preview must reject a junction without planning or indexing it: {preview}"
+    );
     assert!(
-        preview_junction["status"] == "skipped_symlink"
-            && preview_junction["reason"] == "windows_reparse_point",
-        "preview must reject a junction as a Windows reparse point: {preview}"
+        preview_junction["status"] != "planned" && preview_junction["status"] != "indexed",
+        "preview must not plan or index a junction: {preview}"
     );
     assert!(!victim.path().join(".kio").exists());
+    assert_eq!(
+        fs::read(victim.path().join("victim.md")).unwrap(),
+        victim_bytes
+    );
 
     let indexed = success(&dir, &["index", "--approve", "--offline"]);
     let indexed_junction = indexed["child_scopes"]
@@ -1099,15 +1109,18 @@ fn windows_child_scope_junction_is_not_followed_or_mutated() {
         .iter()
         .find(|row| row["path"] == "junction-child")
         .expect("approve must report the rejected junction child");
+    assert_eq!(
+        indexed_junction["status"], "skipped_symlink",
+        "approve must reject a junction without planning or indexing it: {indexed}"
+    );
     assert!(
-        indexed_junction["status"] == "skipped_symlink"
-            && indexed_junction["reason"] == "windows_reparse_point",
-        "approve must reject a junction before any pathname handoff: {indexed}"
+        indexed_junction["status"] != "planned" && indexed_junction["status"] != "indexed",
+        "approve must not plan or index a junction: {indexed}"
     );
     assert!(!victim.path().join(".kio").exists());
     assert_eq!(
-        fs::read_to_string(victim.path().join("victim.md")).unwrap(),
-        "junction victim"
+        fs::read(victim.path().join("victim.md")).unwrap(),
+        victim_bytes
     );
     fs::remove_dir(&junction).unwrap();
 }
