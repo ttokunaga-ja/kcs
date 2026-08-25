@@ -63,7 +63,8 @@ RRF・MMR・FTS5 の**ライブラリ実装自体** (凍結ベクタ一致の正
 - **K8 [minor]**: metrics の code を `KIO-M-SEARCH-001` / component "search" に (05 §7 —
   現状 KIO-I-SEARCH-LATENCY-001)。検索対象を現行 chunking_config_hash の chunk に限定 (04 §4.4)。
   rebuild-db テストを「SQLite が実検索に使われる」前提で実体化 (K2 後に自然に成立)。
-  (c) open の JSON 返却は tasks/ws1c-decisions.md に記録
+  (c) open の JSON 返却は `docs/06-cli-spec.md` §1.1、pointer 解決は
+  `docs/08-evidence-pointer-spec.md` §3.2 に規定
 
 ## 受け入れ条件 (K ラウンド)
 

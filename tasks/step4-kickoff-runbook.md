@@ -53,7 +53,8 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
   (M3-1:18 / M3-2:16 / M3-3:16、凍結済み・変更禁止)・Rust `kio-eval` (`--scenario` 対応)
 - **bbox_annotation 検証 fixture**: `experiments/ocr-verification/` に境界調査 fixture 18 ページ +
   曖昧画像 15 枚。実 API 検証は実施済みで裁定も完了 (bbox_annotation 採用)
-- **decisions**: `tasks/ws1c-decisions.md` に #1〜#59 の実装判断。Step 4 の新判断は #60 以降に追記
+- **decisions**: 実装判断は canonical docs と対応する Rust behavior tests に反映する。Step 4 の新判断も
+  historical task log へ追記せず、正本を更新してその根拠となるテストを置く
 - **Step 3 の全コード**: chunk identity / Evidence Pointer 発行・解決 / tree_entries 射影 /
   durable publication events / snapshot DAG / CAS が揃っている。time-travel はこの上に build する
 
@@ -61,7 +62,7 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
 
 1. **契約テスト先行** (step4a): 実装より先にテストを固定する仕様書を書く。ID 体系 (CT4-RESTORE /
    CT4-TIMETRAVEL / CT4-PURGE / CT4-VERIFY / CT4-BBOX 等)、P0/P1、Given-When-Then、実計算テストベクタ、
-   全テストに docs 根拠 §。step3a-contract-tests.md が体裁の手本
+   全テストに docs 根拠 §。現行 Rust behavior tests と canonical docs が体裁と根拠の手本
 2. **scaffold** (必要なら): 新規型・trait の骨格のみ (ロジックは todo!)
 3. **発注書** (step4c): 実装範囲・受け入れ条件・spec 未定義の暫定判断を明記
 4. **実装の委譲**: 別セッションの Claude Code か Codex APP に発注 (どちらでもよい。前者は
@@ -71,7 +72,8 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
 6. **探索型監査を各チェックポイントで実施**: 契約検証型が全 green でも、探索型は毎ラウンド別の鉱脈から
    実バグを出してきた (R1 並行/異常系、R2 秘匿漏出/パス/資源、R3 検索境界)。Step 4 でも
    restore/purge のような破壊的操作は特に念入りに
-7. **push はユーザーに依頼** (直接 push しない)。docs 変更は最小限、矛盾は decisions に記録
+7. **push はユーザーに依頼** (直接 push しない)。docs 変更は最小限、矛盾は canonical docs と
+   behavior tests に反映
 
 ## 4. Step 4 で繰り返してはいけないバグクラス (Step 1-3 の教訓)
 
@@ -91,8 +93,8 @@ purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2
 
 ## 5. 具体的な最初のアクション
 
-1. 現状確認 (§0)、docs/05 §1.6/§3/§4、08 §4、10 §7、07 §5.2 と `tasks/step3a-contract-tests.md` の
-   §D (Step 4 除外リスト) を読む
+1. 現状確認 (§0)、docs/05 §1.6/§3/§4、08 §4、10 §7、07 §5.2 と `docs/09-mvp-scope.md` の
+   現行の Phase 境界を読む
 2. **step4a 契約テスト設計を発注** (Agent opus、抽象度を保ちつつ CT4 の ID 体系・P0・ベクタ・
    docs 根拠を要求)。M3-2/M3-3 の eval 結線契約も含める
 3. 上がってきた step4a を 4 エンジンでクロスレビュー → 裁定 → r2

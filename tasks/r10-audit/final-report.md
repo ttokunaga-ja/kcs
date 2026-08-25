@@ -137,7 +137,7 @@ J01〜J20 / K01・K03〜K26: すべて fixed または superseded (対応表ど�
 
 ## Fable 報告との差分
 
-本監査は Fable 5 系統の監査報告 (`tasks/folder-history-r10-audit-fable.md`) を参照せず独立に実施した。結果の比較:
+本監査は、元の historical source を保持しない Fable 5 系統監査を参照せず独立に実施した。結果の比較:
 
 - **一致した検出**: L01〜L07 (fatal 1 + major 6)・L08〜L10 (minor 3)・L13 (proposal 相当)・K02 partially-fixed — 独立検証で同一の結論に到達
 - **本監査の追加検出**: L11 (backfill 優先度未定義)・L12 (NFC→case 折り畳み順序) — Fable 未指摘

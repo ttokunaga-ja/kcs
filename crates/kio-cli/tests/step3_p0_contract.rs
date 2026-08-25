@@ -872,6 +872,17 @@ fn ct3_open_001_open_prefers_working_tree_raw_hash() {
     assert_eq!(opened["status"], "opened");
     assert_eq!(opened["temporary"], false);
     assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
+
+    let human = kio(&dir, &["open", uri])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(human).unwrap().trim_end(),
+        opened["path"].as_str().unwrap()
+    );
 }
 
 #[test]
@@ -5039,7 +5050,8 @@ fn ct3_evidence_004_resolves_through_pointer_commit_tree() {
 // 08 §3.2 step 6/7 failure contract: scope, commit, and raw_hash all resolve but
 // the pointer's chunk_hash has no materialized chunk row in this scope (a
 // different tool_profile_hash produced it) → retarget required, exit 8
-// (06 §7), for BOTH view and open. Decision #33 (tasks/ws1c-decisions.md).
+// (06 §7), for BOTH view and open; the canonical pointer-resolution contract
+// is 08 §3.2.
 #[test]
 fn ct3_evidence_004_missing_chunk_row_requires_retarget() {
     let dir = indexed_scope();

@@ -5,8 +5,9 @@
 > 正本 spec は `docs/` の 03〜10。**本書は spec を写経・補間せず、各テストに根拠 § を必ず付す**。
 > spec に記述がない挙動は勝手に契約化せず、末尾 §C「未定義事項」に切り出す。
 >
-> 手本は `tasks/ws1a-contract-tests.md` (Step 1)。ID 体系・ベクタの書き方・§C の未定義リストの
-> 扱い方を踏襲する。Step 1 から持ち越した **CT-COMMIT-008** (`kio index` 成功完了時 commit_type=auto)
+> Step 1 の現行 Rust behavior tests (`crates/kio-core/tests/contract_vectors.rs` と
+> `crates/kio-cli/tests/`) の ID 体系・ベクタの書き方・未定義事項の切り出し方を踏襲する。Step 1 から
+> 持ち越した **CT-COMMIT-008** (`kio index` 成功完了時 commit_type=auto)
 > は本書 CT2-INDEX-* に取り込む (2026-07-03 監査裁定で Step 2 ゲートへ移動済み)。
 >
 > 改訂 r2 (2026-07-03): Codex クロスレビュー反映。ベクタ 6 件 + 変化率 4 件は再計算一致につき不変
@@ -149,7 +150,7 @@ tool_lock_hash = sha256:e24d8b76742e441e894181f9210453e0da60a6e84c663560214d10ae
 
 `cmd`/`args`/`url`/`config_hash`/`capabilities` は入力に含めない (`03 §5.2` / `07 §6`)。
 本ベクタも A 節冒頭の注記どおり**計算規約検証用 fixture** である (`gemini_multimodal_embedding` は
-`07 §5.3` の例示 profile)。commit object の `tool_lock_hash` (WS1a CT-HASH-004 ではダミー値) は Step 2 で
+`07 §5.3` の例示 profile)。commit object の `tool_lock_hash` (Step 1 の historical CT-HASH-004 ではダミー値) は Step 2 で
 **実装の実 tool-lock.json から同じ規約で算出した値**が注入される (CT2-INDEX-002) — 本 fixture 値との
 一致は要求しない。
 
@@ -186,7 +187,7 @@ unchanged 10 + added 1 に分解して回避することを示す (`04 §2.2` �
 ### A.6 normalized instance レイアウトベクタ (`03 §2.1` / `04 §2`)
 
 `raw_hash = sha256:bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59`
-(WS1a A.1 RAW-2 の値を流用)、`tool_profile_hash = sha256:24bd…81ed` (A.1 PROFILE-1)、`gen=0` のとき:
+(本書 A.1 RAW-2 の値を流用)、`tool_profile_hash = sha256:24bd…81ed` (A.1 PROFILE-1)、`gen=0` のとき:
 
 ```text
 instance dir: .kio/objects/normalized_units/bb/e1/
@@ -540,7 +541,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: 各エラー種別。
 - When: retry を評価。
 - Then:
-  - `network_error` retryable, max 5, exp(base=2s, cap=60s) full jitter, `KIO-E-BATCH-NET-001`
+  - `network_error` retryable, max 5, deterministic exp(base=2s, cap=60s), `KIO-E-BATCH-NET-001`
   - `rate_limit` retryable, max ∞, honor Retry-After, `KIO-E-BATCH-RATE-001`
   - `auth_error` max 0 (user action), `KIO-E-BATCH-AUTH-001`
   - `quota_exceeded` retryable, max 3, fixed 1h, `KIO-E-BATCH-QUOTA-001`
@@ -984,9 +985,9 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: `kio index` 成功完了。
 - Then: 同一プロセス内で `commit_type=auto` の commit が 1 つ作られる。commit object は Step 1 の schema
   (`03 §8`) に従い、`tool_lock_hash` には**実装の実 tool-lock.json から `03 §5.2` の規約で算出した値**が
-  注入される (WS1a CT-HASH-004 のダミー値からの差分。A.3 は算出規約の fixture であり、実運用値が
+  注入される (Step 1 historical CT-HASH-004 のダミー値からの差分。A.3 は算出規約の fixture であり、実運用値が
   A.3 の値と一致することは要求しない)。
-- 根拠: `05 §8.1` (契機 2) / `09 §1.1` / `03 §8.1` (commit schema) / WS1a CT-COMMIT-008 (Step 2 ゲートへ移動)。
+- 根拠: `05 §8.1` (契機 2) / `09 §1.1` / `03 §8.1` (commit schema)。旧 Step 1 の auto-commit case を本書の Step 2 ゲートへ移したもの。
 
 **CT2-INDEX-003** — P0 — tree 不変なら auto snapshot は no-op
 - Given: index 実行後、tree_hash が現在の HEAD の tree と一致 (working tree 実質不変)。
@@ -1013,7 +1014,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: `kio index`。
 - Then: 警告を表示 (サブフォルダ分割 or ignore を提案) するが処理は継続 (エラーにしない)。
 - 根拠: `03 §8.2` (「超過時 kio index は警告を表示し … 処理自体は継続する」)。
-- 補足: WS1a CT-TREE-006 では Step 1 に kio index が無く P2 だったが、Step 2 で index 実装につき本書で検証する。
+- 補足: Step 1 には `kio index` が無く P2 だったが、Step 2 で index 実装につき本書で検証する。
 
 **CT2-INDEX-007** — P1 — 対象ファイルを含むサブフォルダに子 .kio を生成 (ignore サブツリーには生成しない)
 - Given: 対象ファイルを含むサブフォルダと、ignore されたサブフォルダ。
@@ -1103,7 +1104,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 | 定期 auto snapshot / Downloads watch / OS スケジューラ委譲 / on_idle | `05 §8.2`, `09 §3.1`: Phase 4+。Step 2 の auto 契機は **index 完了時のみ** (CT2-INDEX-002) |
 | 観測ログのうち `metrics.jsonl` / `access.jsonl` | `09 §3.1`: Step 3。Step 2 が新規に依存するのは events/errors (Step 1 で担保済み) + cost-ledger のみ |
 | multimodal embedding profile の**ベンダー実地検証** (次元数/料金/deprecation) | `07 §5.3` リスク注記: Step 2 着手**前**の実地検証タスクであり、契約テストではなく採用判断。緩和 (text 単一 Embedding) 適用時も M3 Done 条件に影響しない |
-| Step 1 で担保済みの CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | WS1a (`tasks/ws1a-contract-tests.md`) で担保。本書は commit の `tool_lock_hash` を**実 tool-lock.json からの算出値**で注入する点 (CT2-INDEX-002。A.3 は算出規約の fixture) のみ Step 1 から差分追加 |
+| Step 1 で担保済みの CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | 現行の `crates/kio-core/tests/contract_vectors.rs` と CLI behavior tests で担保。本書は commit の `tool_lock_hash` を**実 tool-lock.json からの算出値**で注入する点 (CT2-INDEX-002。A.3 は算出規約の fixture) のみ Step 1 から差分追加 |
 | export / import (`.kioz`) / `kio move` / agent API 外部公開 / MCP | `09 §3.1`: Phase 4-5 (`06 §10`, `05 §6`, `06 §9`) |
 
 ---

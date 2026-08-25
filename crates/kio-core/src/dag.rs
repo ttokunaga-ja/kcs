@@ -388,7 +388,7 @@ pub fn commit_hash(commit: &CommitObject) -> Result<String> {
 /// digit positions, separators, and calendar validity (month-aware day count
 /// including leap years). Leap seconds (`:60`) are rejected — Kio only emits
 /// second-precision timestamps derived from Unix time, which never produce
-/// `:60` (WS1d cross-review ruling).
+/// `:60`.
 fn is_valid_created_at(value: &str) -> bool {
     let Some(body) = value.strip_suffix('Z') else {
         return false;

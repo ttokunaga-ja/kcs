@@ -89,7 +89,7 @@ kio snapshot auto                        # Phase 4 milestone 4–5: OS scheduler
 kio log [--at <commit>] [--since <dur>]
 kio diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kio search "<query>" [options]          # 詳細 §3
-kio open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く。解決規則は §1.1
+kio open <pointer|chunk_hash|raw_hash>  # 原本を解決し path を返す。OS アプリは起動しない。§1.1
 kio view <pointer|path> [--at <commit>]  # 全文 view のパス + view-local span を返す (05 §1.7.2)。本文は返さない
 kio inspect <hash>                      # object を JSON で表示
 kio restore <evidence|path|commit> --to <dir> [--force] # 詳細 §5
@@ -187,7 +187,10 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 
 ## 1.1 open の原本解決
 
-`kio open <pointer|chunk_hash|raw_hash>` は以下の順で「開く対象」を決める:
+`kio open <pointer|chunk_hash|raw_hash>` は以下の順で原本を解決し、OS アプリを起動せず
+path を返す。human mode は path を1行で出力し、`--json` の pointer 成功時の必須形は
+`{status:"opened", path, raw_hash, chunk_hash, temporary, commit_shallow, manifest_missing}` である。
+object URI / hash 短縮形は同じ `status` / `path` / `temporary` に `object_type` と該当 identity を加える。
 
 ```text
 1. pointer を解決して raw_hash を得る (08-evidence-pointer-spec.md §3)
@@ -197,13 +200,13 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
    宣言された scope_id を通常解決する。別 scope に同じ image_hash の bytes が存在しても
    scope authority を差し替えない。scope が到達不能なら `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001`
    (exit 3) で拒否する。image object を `~/.cache/kio/open/image/<image_hash digest64>/` へ
-   read-only materialize して開く (dir キーは image_hash — **`image/` の type segment で raw 系 dir と
+   read-only materialize し、その path を返す (dir キーは image_hash — **`image/` の type segment で raw 系 dir と
    分離する**。raw と image は同一バイト列で同一 digest になり得るため ([03-data-model.md §1](03-data-model.md)
    のバイト列 content hash — CAS は `objects/<type>/` が分離を担うが cache は担わない)、segment なしの
    平坦 namespace では衝突する)。**materialize の書込・照合は raw の一時展開 (下記) と同じ規約に従う** —
    private temp → no-replace publish・EEXIST は image_hash の再計算照合・不一致は同じ fail-closed
    終端 (KIO-E-STORE-CORRUPT-001 / exit 4)・拒否時 cleanup (dir key と照合キーは image_hash)。
-   **barrier は journal barrier (active purge 進行中の拒否) のみ** — tombstone は raw_hash 単位の
+   **返却直前の barrier は journal barrier (active purge 進行中の拒否) のみ** — tombstone は raw_hash 単位の
    marker であり image には適用しない (同一バイト列の無関係 raw の tombstone に image_hash で
    照合しない)。image の purge 帰結は object の物理削除 (live 参照 0 — [05-runtime.md §3.5](05-runtime.md))
    そのものが表し、object 不在は手順 5 と同じ not_found / exit 4。purge closure には「closure で
@@ -215,16 +218,16 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
    (canonical が `retired` (退役) なら対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
 3. working tree 解決:
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
-   異なる path でもよい。リネーム済みケース)、その実ファイルを OS 規定アプリで開く
+   異なる path でもよい。リネーム済みケース)、その実ファイルの path を返す (`temporary=false`)
 4. 一時展開 (working tree に存在しない = 削除済み・過去版・raw_hash 直指定):
    raw object を ~/.cache/kio/open/<raw_hash digest64>/<basename から導出した portable leaf> に
-   read-only で展開し、それを OS 規定アプリで開く。basename の拡張子により OS の
-   アプリ関連付けを機能させるが、元 basename 自体は物理名に使用しない
+   read-only で展開し、その path を返す (`temporary=true`)。basename の拡張子は caller が
+   OS のアプリ関連付けを利用できるよう保持するが、元 basename 自体は物理名に使用しない
    (path_at_commit が無い場合は kind から推定した拡張子)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (**照合 = 既存 cache leaf の内容 sha256 が dir key の raw_hash と一致することの再計算** — 展開 leaf は raw object の byte 列そのもの。**不一致は改変・破損の残骸として KIO-E-STORE-CORRUPT-001 / exit 4 で fail-closed に終端する** (§7 の「4 = 再試行で進展しない」— 回復はユーザーの cache 削除。context に cache path と「削除後の再実行で回復」を載せる)。既存 cache には触れず自 temp も残さない。この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。**起動直前検査で拒否した場合の終端は拒否理由の code に従う** — tombstone 検出は手順 2 と同じ §7 規約どおり exit 4、active journal は KIO-E-PURGE-JOURNAL-ACTIVE-001 (exit 3 — 回復後に再試行可)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kio repair verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、tree-only の `on_idle` GC 対象には含めない。必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kio restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kio restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、path 返却直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ返す — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に返却直前の最終検査以降を続行する (**照合 = 既存 cache leaf の内容 sha256 が dir key の raw_hash と一致することの再計算** — 展開 leaf は raw object の byte 列そのもの。**不一致は改変・破損の残骸として KIO-E-STORE-CORRUPT-001 / exit 4 で fail-closed に終端する** (§7 の「4 = 再試行で進展しない」— 回復はユーザーの cache 削除。context に cache path と「削除後の再実行で回復」を載せる)。既存 cache には触れず自 temp も残さない。この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。**返却直前検査で拒否した場合の終端は拒否理由の code に従う** — tombstone 検出は手順 2 と同じ §7 規約どおり exit 4、active journal は KIO-E-PURGE-JOURNAL-ACTIVE-001 (exit 3 — 回復後に再試行可)。publish 後検査により purge 完遂後の平文 cache path の**返却**を閉じる (publish と検査の間の crash による cache 残存は返却には至らず、`kio repair verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は caller が既に開いた path と同格)。展開先はキャッシュであり、tree-only の `on_idle` GC 対象には含めない。必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kio restore <pointer> --to <dir>` を使う。caller は `temporary=true` を、一時展開であり永続コピーには `restore --to` が必要という機械判定に使う。
 
 ---
 
@@ -580,6 +583,12 @@ DOMAIN:
 ```
 
 GC planner 固有の `KIO-E-GC-PLAN-LIMIT-001` は commit / tree entry / verified byte / ref / receipt / directory entry / path depth / graph traversal cap 超過を表し、exit 4 とする (§6.1)。`KIO-E-GC-RUNTIME-LIMIT-001` はbounded automatic sliceが安全なcheckpointで期限へ達したことを表すretryable exit 3であり、corruptionではない。`KIO-E-GC-CONFIG-CHANGED-001` はautomatic writer開始時に固定した`[gc]` authorityがpublication-to-GC handoff中に変化したため、publicationを保持したままGCを開始しなかったことを表すretryable exit 3である。
+
+Evidence 解決の現行 code は、purged raw の tombstone 応答を
+`KIO-E-PURGE-TOMBSTONED-001` (exit 4)、raw/chunk の両方に一致する短縮 hash を
+`KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (exit 2)、同一 profile の chunk 未実体化を
+`KIO-E-EVIDENCE-RETARGET-REQUIRED-001` (exit 8) とする。live scope 重複は別の
+`KIO-E-REGISTRY-DUP-001` (exit 4) である。
 
 例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-COMMIT-HISTORY-LIMIT-001` (bounded history walk の aggregate cap 超過、単独操作 exit 4 / multi-scope は既存 partial 規則、[05-runtime.md §1.6](05-runtime.md)), `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反 — **読み取り系** preflight の拒否 (書き込み系は journal 回復を再開 — [05-runtime.md §3.5](05-runtime.md)、直列化は `.kio/.lock` が担う)。**restore の rename 後再検査による publish 後巻き戻し終端にも用いる** (05 §3.5)、retryable exit 3), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しの no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む、retryable exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要、exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (Adapter spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KIO-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KIO-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md))、`KIO-E-REGISTRY-DUP-001` (同一 scope_id の複数 live clone — 検索 skip・解決 error、[10-operations.md §3](10-operations.md))、`KIO-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kio repair verify-objects`、[10-operations.md §7.5](10-operations.md))、`KIO-E-STORE-LOCKED-001` (`.kio/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KIO-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KIO-E-STORE-PATH-001` とは区別する)、`KIO-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kio` scope 外での実行、不正 hash 引数。schema violation の `KIO-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KIO-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)、`KIO-E-SEARCH-VEC-UNAUTHORIZED-001` (query embedding の embedding 承認なし — auto/`--mode hybrid` は text fallback、`--mode vector` 明示時のみ error、[05-runtime.md §1.1](05-runtime.md))、`KIO-E-STORE-VERSION-001` (`KIO_FORMAT_VERSION` と完全一致しない `kio_format_version` — 欠落・非 string・非 parseable・older/newer/unknown を current schema 検証前に reader / search / repair / historical を含む全 command で即時拒否し、multi-scope search も command 全体を停止、store bytes 不変。正本 [10-operations.md §11.5](10-operations.md)。exit 8)、`KIO-E-PURGE-REPLICA-001` (purge 後の device replica 再射影に失敗 — 本文が cache root に読める状態で成功と報告しないための fail-closed 終端。exit 1、[05-runtime.md §3.5](05-runtime.md))、`KIO-E-CONFIG-OFFLINE-URL-001` (`execution_mode = "offline_api"` の Adapter の `url` が loopback リテラル以外 — tool-lock materialize / adapter 登録時に検証、[07-adapter-spec.md §3](07-adapter-spec.md)。exit 2)。
 

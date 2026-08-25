@@ -6,7 +6,7 @@
 //! profile is the single multimodal profile fixed on 2026-07-03: `gemini-embedding-2`
 //! (GA, pinned at startup) / 768 dims (MRL) / cosine / `modality="multimodal"`.
 //!
-//! The live HTTP path is not exercised in the hermetic test suite (decision #28);
+//! The live HTTP path is not exercised in the hermetic test suite (`docs/07-adapter-spec.md` §5.3);
 //! the wire format below is documentation-accurate best effort and the contract is
 //! covered by the CLI mock seam. `profile()` never performs network I/O.
 

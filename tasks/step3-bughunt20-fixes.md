@@ -112,7 +112,7 @@ auth_error タスクは reconcile で `retired_non_live` に退役するが recl
 → markdownize task status=done, unit_keys=["page:1"]
 → chunks テーブル: raw_path=scan.pdf, text=(67 バイトの制御文字/replacement char のゴミ)  ← 索引・検索可能
 ```
-期待 = テキストレイヤ無し画像 PDF は pending 化して AI 強化 (OCR) 待ちへ (ws1c-decisions #24)。実際 = 現実的サイズのスキャン PDF はほぼ確実にこの誤検知を踏み、`status:done`・`kio status` は健全表示、エラー・警告ゼロで完全なノイズが「正しく抽出された証拠」として索引される。
+期待 = テキストレイヤ無し画像 PDF は pending 化して AI 強化 (OCR) 待ちへ (`docs/07-adapter-spec.md` §2.1)。実際 = 現実的サイズのスキャン PDF はほぼ確実にこの誤検知を踏み、`status:done`・`kio status` は健全表示、エラー・警告ゼロで完全なノイズが「正しく抽出された証拠」として索引される。
 
 **修正案**: 生バイト列全体への部分文字列マッチを廃し、`kio_adapter::deterministic::pdf_stream_text_pages` が抽出した content-stream (`stream`...`endstream` の中身) テキストに対して `BT`/`ET` 演算子を判定する。抽出テキストが空なら「テキストレイヤ無し」= R20-5 の pending 経路へ正しく落とす。
 
@@ -132,7 +132,7 @@ auth_error タスクは reconcile で `retired_non_live` に退役するが recl
 → tasks.jsonl 3 行、distinct input_hash=1、distinct task_id=3、output_ref すべて "pending:scanned_pdf_without_text_layer"
 → KIO_TEST_MISTRAL_OCR=mock で batch resume / index --online → tasks_attempted:0 (永久 pending、OCR 未到達)
 ```
-期待 = ws1c-decisions #24「file を pending (AI 強化待ち) とし、いずれ online OCR へ遷移」。実際 = 重複が無限累積し `compute_index_status` の分母を肥大化させ scope 全体の `enriched_ratio` を単調に 0 へ劣化 + スキャン PDF は OCR に一度も到達しない (Step 2 以来 dead-end)。
+期待 = `docs/07-adapter-spec.md` §2.1 のとおり file を pending (AI 強化待ち) とし、online OCR へ遷移。実際 = 重複が無限累積し `compute_index_status` の分母を肥大化させ scope 全体の `enriched_ratio` を単調に 0 へ劣化 + スキャン PDF は OCR に一度も到達しない (Step 2 以来 dead-end)。
 
 **修正案**: この分岐を `enqueue_online_placeholder_task` 相当のヘルパー (もしくは `online_output_ref(&online_markdownize_profile().adapter_id)` を使う task) へ合流させ、既存の実行系・idempotency・online OCR 経路をそのまま継承させる。
 

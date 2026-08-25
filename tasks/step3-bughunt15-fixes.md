@@ -219,7 +219,7 @@ device budget cap を silent bypass (F8 予約が過少)。R11-6 (retry 按分) 
 - **Spark 検証1 (a)(b)(c) 全て「該当なし」**: R14-2 の execute_online_markdownize_task 入口 hash 検証で遅延経路が保護済みを確認 (健全性確認着地)。
   embedding task 再実行 (`live_chunks_without_embedding` が HEAD の DB row から都度再導出・content-addressed)、reindex/repair の
   normalize 世代コピー (committed CAS を辿るのみ・live file 再読込なし) も stale-identity 不成立を複数エンジンが確認 (R15 焦点1 の健全性確認)。
-- **Spark 検証2(c) / Gemini live HTTP mock 依存**: decision #28 で既知の意図的スコープ (Gemini live HTTP は hermetic テスト非exercise・
+- **Spark 検証2(c) / Gemini live HTTP mock 依存**: `docs/07-adapter-spec.md` §5.3 の意図的スコープ (Gemini live HTTP は hermetic テスト非exercise・
   text-only MVP)。mock/実クライアント乖離は Mistral (R15-5/R15-6) に限定、Gemini adapter には R14-4 型乖離なし (複数エンジン確認)。
 - **Opus の snapshot orphan「問題なし」判定**: 反証済み (R15-1、実機再現)。エンジンの不採択判断も裁定対象 (R13 の Opus doc-gap 型)。
 - **query embedding が budget 非計測** (Sonnet-A): main.rs:6224-6226 で "not metered in the MVP (negligible)" と明示裁定済み = 既知トレードオフ。

@@ -768,7 +768,7 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
 ## 5.3 エラー種別と Retry Budget
 
 ```
-network_error      retryable             max_attempts=5,  exp(base=2s, cap=60s), jitter=full
+network_error      retryable             max_attempts=5,  exp(base=2s, cap=60s), jitter=none (deterministic)
                                          KIO-E-BATCH-NET-001
 rate_limit         retryable later       max_attempts=∞,  honor "Retry-After" header
                                          KIO-E-BATCH-RATE-001
@@ -784,6 +784,10 @@ contract_violation retryable             max_attempts=1 (同一 mode で 1 回�
                                          KIO-E-ADAPTER-CONTRACT-001
 budget_exceeded    paused                KIO-E-BATCH-BUDGET-001
 ```
+
+`network_error` の待機時間は各 retry attempt に対して決定論的に
+`min(2s * 2^(attempts-1), 60s)` とする。現在の serial CLI は jitter を加えないため、
+`next_retry_at` は再現可能である。並行実行時の jitter は、この契約を変更する別フェーズでのみ導入できる。
 
 エラーコード namespace は [10-operations.md §11.1](10-operations.md)。
 

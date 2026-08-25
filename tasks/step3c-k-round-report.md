@@ -56,7 +56,8 @@ lift は本ラウンドでは測定不能 (モックで 0.389 に低下するの
 - **K6** (75d0c6d): 08 §3.1 の解決順を完全実装 (scope 2 段解決 → commit → shallow 判定 →
   tree gate → tombstone → chunk/raw)。tombstoned / not_found / scope_unreachable の
   3 値実区別、`kio://<scope>/object/<type>/<hash>` URI 受理。誤解を招く kio-search の
-  resolver スタブは削除。新 error code 2 件は ws1c-decisions #32
+  resolver スタブは削除。新 error code 2 件の正本は `docs/06-cli-spec.md` §7 と
+  `docs/08-evidence-pointer-spec.md` §3.2
 - **K4** (07948af): GeminiEmbeddingAdapter (Mistral 方式 client trait、429 backoff、
   起動時 pin 解決) + KIO_TEST_GEMINI_EMBED モック seam + TaskType::Embedding 生成/実行
   (network opt-in・budget・cost ledger 接続) + sqlite-vec 0.1.6 で chunk_vec を vec0 実体化
@@ -67,7 +68,8 @@ lift は本ラウンドでは測定不能 (モックで 0.389 に低下するの
   pending_enrichment_tasks, budget_paused} を search --json に常時付与
 - **K8** (d243359 ほか): metrics = KIO-M-SEARCH-001 / component "search" / 05 §7 envelope。
   検索対象は現行 chunking_config_hash のみ。rebuild-db テストは「SQLite が実検索に使われる」
-  前提で実体化 (ct3_fts_004 / ct3_embed_005)。open の JSON 返却は ws1c-decisions #31 に記録
+  前提で実体化 (ct3_fts_004 / ct3_embed_005)。open の JSON 返却は
+  `docs/06-cli-spec.md` §1.1、pointer 解決は `docs/08-evidence-pointer-spec.md` §3.2 に規定
 - **K1** (de7b379): P0 60/60 の契約⇔テスト対応を確立 (tasks/step3c-p0-matrix.md)。
   常真 3 件 (HYBRID-002 / EMBED-002 / EMBED-003) は KIO_TEST_GEMINI_EMBED seam で
   compatible / incompatible / 未生成の embedding 状態を実際に作り分けて実体化。
@@ -84,7 +86,7 @@ kio-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (079
 
 ## 未実装・限界の明示 (過小開示の禁止に基づく全数開示)
 
-1. **実 Gemini HTTP は未検証** (hermetic 方針、ws1c-decisions #28 踏襲)。wire format
+1. **実 Gemini HTTP は未検証** (hermetic 方針、`docs/07-adapter-spec.md` §5.3)。wire format
    (:batchEmbedContents / x-goog-api-key / outputDimensionality) はドキュメント準拠の
    ベストエフォートで、モックで contract のみ検証。実 API 検証は発注側
 2. **hybrid の品質 lift は未実測** (モックは意味信号なし)。配線と契約のみ保証
@@ -106,15 +108,17 @@ kio-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (079
 
 ## 主要な設計判断の記録先
 
-ws1c-decisions #31 (open の JSON 返却) / #32 (新 error code 2 件)。その他は各コミット
-メッセージと tasks/step3c-p0-matrix.md の判定列。
+open の JSON 返却は `docs/06-cli-spec.md` §1.1、pointer 解決は
+`docs/08-evidence-pointer-spec.md` §3.2、error code は `docs/06-cli-spec.md` §7 /
+`docs/08-evidence-pointer-spec.md` §3.2 を正本とする。
+その他は各コミットメッセージと tasks/step3c-p0-matrix.md の判定列。
 
 ## 追補: 4 エンジン再監査と修正 (2026-07-04、コミット 2d13784)
 
 納品後の 4 エンジン クロスチェック (tasks/step3c-reaudit-4engine.md) で major 2 /
 minor 4 の findings が出た (統合裁定 fix-required)。全件を同日修正済み:
 HYBRID-003 の実装+テスト是正 (auto「両方不可」= VEC-UNAVAIL-001 exit 1)、
-Evidence の retarget 契約 (RETARGET-REQUIRED-001 exit 8、decisions #33)、
+Evidence の retarget 契約 (RETARGET-REQUIRED-001 exit 8、`docs/08-evidence-pointer-spec.md` §3.2)、
 cursor 消失 scope の excluded 化、fallback_reason 実因分岐、FtsIndex trait 解消、
 HYBRID-002 ペア化。本報告の「Evidence resolver 完全化」「P0 60/60」の主張は
 上記修正を織り込んだ現状 (229 green) に対して読み替えること。

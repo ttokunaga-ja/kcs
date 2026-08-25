@@ -1419,7 +1419,7 @@ pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {
             error_kind,
             retryable: true,
             max_attempts: Some(5),
-            backoff: "exp(base=2s,cap=60s,full_jitter)".to_owned(),
+            backoff: "exp(base=2s,cap=60s,jitter=none)".to_owned(),
             error_code: "KIO-E-BATCH-NET-001".to_owned(),
             paused: false,
         },
@@ -1811,6 +1811,10 @@ mod tests {
         assert_eq!(
             retry_policy(RetryErrorKind::NetworkError).max_attempts,
             Some(5)
+        );
+        assert_eq!(
+            retry_policy(RetryErrorKind::NetworkError).backoff,
+            "exp(base=2s,cap=60s,jitter=none)"
         );
         assert_eq!(retry_policy(RetryErrorKind::RateLimit).max_attempts, None);
         assert!(retry_policy(RetryErrorKind::BudgetExceeded).paused);

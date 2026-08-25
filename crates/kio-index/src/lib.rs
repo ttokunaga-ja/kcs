@@ -1,7 +1,7 @@
-//! Step 3 index crate contracts.
+//! Durable local index implementation.
 //!
-//! This crate intentionally contains only types and trait skeletons for the
-//! chunking, FTS, embedding, tree projection, and rebuild layers.
+//! This crate owns chunking, FTS, embedding storage, tree projection, and
+//! rebuild primitives used by the Kio pipeline and CLI.
 
 pub mod aggregator;
 pub mod chunking;

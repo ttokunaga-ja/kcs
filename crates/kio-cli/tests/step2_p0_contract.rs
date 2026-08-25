@@ -3366,7 +3366,8 @@ fn r15_6_zero_change_incremental_reuses_without_calling_adapter() {
 
     // v2: append a trailing PDF comment. The raw bytes (raw_hash) change — so re-index
     // enqueues a fresh online task — but the page stream text is byte-identical, so every
-    // unit maps `unchanged` (change_rate 0). `pdf_text_pages` ignores bytes after %%EOF.
+    // unit maps `unchanged` (change_rate 0). The bounded PDF page extractor ignores bytes
+    // after %%EOF.
     let v2 = format!("{v1}%kio-metadata-only-change\n");
     assert_ne!(hash_bytes(v2.as_bytes()), hash_bytes(v1.as_bytes()));
     fs::write(dir.path().join("report.pdf"), &v2).unwrap();

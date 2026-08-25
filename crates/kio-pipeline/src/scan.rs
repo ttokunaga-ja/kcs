@@ -614,10 +614,7 @@ fn discover_child_scopes_inner(
     }) {
         Ok(entries) => entries,
         Err(_) if !relative_dir.as_os_str().is_empty() => {
-            let mut row = child_status(
-                relative_scope_path(root, relative_dir),
-                "skipped_unreadable",
-            );
+            let mut row = child_status(relative_scope_path(relative_dir), "skipped_unreadable");
             row.reason = Some("read_dir_failed".to_owned());
             result.push(row);
             return Ok(());
@@ -630,7 +627,7 @@ fn discover_child_scopes_inner(
         }
     };
     if entries.len() > MAX_CHILD_SCOPE_DIRECTORIES {
-        let mut row = child_status(relative_scope_path(root, relative_dir), "skipped_limit");
+        let mut row = child_status(relative_scope_path(relative_dir), "skipped_limit");
         row.reason = Some("directory_entry_cap".to_owned());
         result.push(row);
         return Ok(());
@@ -646,7 +643,7 @@ fn discover_child_scopes_inner(
             Err(_) => continue,
         };
         let relative_path = relative_dir.join(&name);
-        let relative = relative_scope_path(root, &relative_path);
+        let relative = relative_scope_path(&relative_path);
         if file_type.is_symlink() {
             result.push(child_status(relative, "skipped_symlink"));
             continue;
@@ -744,10 +741,7 @@ fn discover_child_scopes_inner(
     Ok(())
 }
 
-fn relative_scope_path(root: &Path, path: &Path) -> String {
-    // The retained-handle walk supplies one leaf at a time; `root` is only
-    // retained for the public root-path API's compatibility.
-    let _ = root;
+fn relative_scope_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -764,7 +758,7 @@ fn directory_has_includable_regular_file(
     case_insensitive: bool,
 ) -> Result<RegularFileProbe> {
     let entries = cap_fs::read_base_dir(path).map_err(|err| crate::PipelineError::Io {
-        path: relative_scope_path(Path::new(""), relative_dir),
+        path: relative_scope_path(relative_dir),
         message: err.to_string(),
     })?;
     for (index, entry) in entries.enumerate() {
@@ -772,7 +766,7 @@ fn directory_has_includable_regular_file(
             return Ok(RegularFileProbe::LimitExceeded);
         }
         let entry = entry.map_err(|err| crate::PipelineError::Io {
-            path: relative_scope_path(Path::new(""), relative_dir),
+            path: relative_scope_path(relative_dir),
             message: err.to_string(),
         })?;
         let name = entry.file_name();
@@ -782,12 +776,12 @@ fn directory_has_includable_regular_file(
             && entry
                 .file_type()
                 .map_err(|err| crate::PipelineError::Io {
-                    path: relative_scope_path(Path::new(""), relative_dir),
+                    path: relative_scope_path(relative_dir),
                     message: err.to_string(),
                 })?
                 .is_file()
         {
-            let relative = relative_scope_path(Path::new(""), &relative_dir.join(&name));
+            let relative = relative_scope_path(&relative_dir.join(&name));
             let secret = classify_secret(&relative);
             let ignored = try_ignored_by_rules(&relative, false, rules, case_insensitive)?
                 || secret == Some(SecretTier::TierA)
@@ -1909,18 +1903,6 @@ fn probe_bound_case_insensitive(kio: &File) -> bool {
     insensitive
 }
 
-#[must_use]
-pub fn ignored_by_rules(
-    path: &str,
-    is_dir: bool,
-    rules: &[IgnoreRule],
-    case_insensitive: bool,
-) -> bool {
-    // This compatibility API cannot surface a malformed/over-budget rule. Fail
-    // closed; scan construction uses the fallible variant below and reports it.
-    try_ignored_by_rules(path, is_dir, rules, case_insensitive).unwrap_or(true)
-}
-
 fn try_ignored_by_rules(
     path: &str,
     is_dir: bool,
@@ -2427,8 +2409,37 @@ mod tests {
         ];
         assert_eq!(classify_secret(".env"), Some(SecretTier::TierA));
         assert_eq!(classify_secret("api_token.txt"), Some(SecretTier::TierB));
-        assert!(ignored_by_rules("debug.log", false, &rules, false));
-        assert!(!ignored_by_rules("keep.log", false, &rules, false));
+        assert!(try_ignored_by_rules("debug.log", false, &rules, false).unwrap());
+        assert!(!try_ignored_by_rules("keep.log", false, &rules, false).unwrap());
+    }
+
+    #[test]
+    fn ignore_rule_evaluation_reports_malformed_and_over_budget_rules() {
+        let malformed = [IgnoreRule {
+            pattern: String::new(),
+            negated: false,
+            scope_prefix: None,
+        }];
+        let malformed_error =
+            try_ignored_by_rules("document.md", false, &malformed, false).unwrap_err();
+        assert!(
+            malformed_error
+                .to_string()
+                .contains("ignore pattern is empty or exceeds the policy limit")
+        );
+
+        let over_budget = [IgnoreRule {
+            pattern: "a".repeat(MAX_GENERATED_PARENT_IGNORE_PATTERN_BYTES),
+            negated: false,
+            scope_prefix: None,
+        }];
+        let budget_error =
+            try_ignored_by_rules(&"a".repeat(24), false, &over_budget, false).unwrap_err();
+        assert!(
+            budget_error
+                .to_string()
+                .contains("KIO-E-SCAN-IGNORE-BUDGET-001")
+        );
     }
 
     #[test]
@@ -2457,12 +2468,12 @@ mod tests {
         }];
 
         // NFC pattern excludes an NFD on-disk name, and vice versa.
-        assert!(ignored_by_rules(nfd_name, false, &nfc_rule, false));
-        assert!(ignored_by_rules(nfc_name, false, &nfd_rule, false));
+        assert!(try_ignored_by_rules(nfd_name, false, &nfc_rule, false).unwrap());
+        assert!(try_ignored_by_rules(nfc_name, false, &nfd_rule, false).unwrap());
         // The same-form case still works.
-        assert!(ignored_by_rules(nfc_name, false, &nfc_rule, false));
+        assert!(try_ignored_by_rules(nfc_name, false, &nfc_rule, false).unwrap());
         // A genuinely different name is still not excluded.
-        assert!(!ignored_by_rules("other.md", false, &nfc_rule, false));
+        assert!(!try_ignored_by_rules("other.md", false, &nfc_rule, false).unwrap());
     }
 
     #[test]
@@ -2477,32 +2488,22 @@ mod tests {
             scope_prefix: None,
         }];
         // Insensitive volume: case-different name is excluded.
-        assert!(ignored_by_rules("CaseFixture.md", false, &rule, true));
+        assert!(try_ignored_by_rules("CaseFixture.md", false, &rule, true).unwrap());
         // Sensitive volume: case-different name is NOT excluded.
-        assert!(!ignored_by_rules("CaseFixture.md", false, &rule, false));
+        assert!(!try_ignored_by_rules("CaseFixture.md", false, &rule, false).unwrap());
         // Exact-case name is excluded on either volume.
-        assert!(ignored_by_rules("casefixture.md", false, &rule, false));
-        assert!(ignored_by_rules("casefixture.md", false, &rule, true));
+        assert!(try_ignored_by_rules("casefixture.md", false, &rule, false).unwrap());
+        assert!(try_ignored_by_rules("casefixture.md", false, &rule, true).unwrap());
         // A genuinely different name is never excluded, even when folding.
-        assert!(!ignored_by_rules("other.md", false, &rule, true));
+        assert!(!try_ignored_by_rules("other.md", false, &rule, true).unwrap());
         // Unicode-aware fold: an uppercase-É (U+00C9) pattern folds to match an é name.
         let unicode_rule = vec![IgnoreRule {
             pattern: "CAF\u{00c9}.md".to_owned(),
             negated: false,
             scope_prefix: None,
         }];
-        assert!(ignored_by_rules(
-            "caf\u{00e9}.md",
-            false,
-            &unicode_rule,
-            true
-        ));
-        assert!(!ignored_by_rules(
-            "caf\u{00e9}.md",
-            false,
-            &unicode_rule,
-            false
-        ));
+        assert!(try_ignored_by_rules("caf\u{00e9}.md", false, &unicode_rule, true).unwrap());
+        assert!(!try_ignored_by_rules("caf\u{00e9}.md", false, &unicode_rule, false).unwrap());
         // Negation (`!keep`) unignores across case on an insensitive volume too.
         let negation = vec![
             IgnoreRule {
@@ -2554,11 +2555,11 @@ mod tests {
         }];
         for name in ["a.txt", "é.txt", "e\u{301}.txt", "😀.txt"] {
             assert!(
-                ignored_by_rules(name, false, &rules, false),
+                try_ignored_by_rules(name, false, &rules, false).unwrap(),
                 "one-scalar name should be ignored: {name:?}"
             );
         }
-        assert!(!ignored_by_rules("ab.txt", false, &rules, false));
+        assert!(!try_ignored_by_rules("ab.txt", false, &rules, false).unwrap());
         assert!(!wildcard_match("?", "/").unwrap());
     }
 

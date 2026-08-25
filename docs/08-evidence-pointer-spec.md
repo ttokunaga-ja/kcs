@@ -121,7 +121,8 @@ CLI の `<pointer>` 引数はすべて以下の受理規則に従う (優先順�
 3. "{"          inline JSON (§2 schema)
 4. "sha256:"    短縮形 (kio open / kio view のみ): object store を照会して種別を判別し、
                 chunk_hash なら chunk、raw_hash なら raw として、カレント .kio + HEAD を
-                文脈に解決する。複数種別に該当し多義なら候補一覧を error で返す
+                文脈に解決する。raw_hash と chunk_hash の両方に該当し多義なら
+                KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001 (exit 2) を返す
 5. その他       parse 失敗 → exit 2 (invalid usage)
 ```
 
@@ -307,6 +308,9 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 ## 4.1 Tombstone レスポンス
 
 raw_hash の canonical final event が `purged` の場合 (§3.1 手順 5 の全 marker 正本化 — 個別 tombstone の末尾 event だけで判定しない。= purge 済みだが履歴上は記録。canonical が `retired` なら該当しない)。レスポンス body の `status` は §4.3 の union と同じ語彙 (`tombstoned`) を使う — purge の事実は `purged_*` フィールドが表す:
+
+単発 `open` / `view` / `restore` は `KIO-E-PURGE-TOMBSTONED-001` (exit 4) とし、
+以下の body を error context に保持する。
 
 ```json
 {

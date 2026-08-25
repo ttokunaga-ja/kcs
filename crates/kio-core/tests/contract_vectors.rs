@@ -302,9 +302,9 @@ fn s2_manifest_retains_deleted_rows_and_recovers() {
 
 #[test]
 fn s2_stale_manifest_cannot_lose_a_deletion() {
-    // WS1d cross-review: the previous state must come from the prior HEAD tree,
-    // not the manifest. A stale manifest that lost b.pdf's live row must not
-    // prevent the deleted row (with the tree's raw_hash) from being recorded.
+    // The previous state must come from the prior HEAD tree, not the manifest.
+    // A stale manifest that lost b.pdf's live row must not prevent the deleted
+    // row (with the tree's raw_hash) from being recorded.
     let temp = tempfile::tempdir().unwrap();
     let repo = Repository::init(temp.path()).unwrap();
     fs::write(temp.path().join("a.pdf"), b"one").unwrap();

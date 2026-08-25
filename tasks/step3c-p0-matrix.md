@@ -3,9 +3,11 @@
 Base commit verified before starting: `07948af` (Step3c K4 embedding wiring), branch
 `step3c-impl`, main working tree (no worktree/branch ops used).
 
-Source of the P0 list: `tasks/step3a-contract-tests.md` §0/§B/末尾集計. Counted directly
-from the doc: **60 P0** (CHUNK 11 / EMBED 5 / FTS 4 / HYBRID 6 / MMR 4 / CURSOR 5 / MULTI 5 /
-EVIDENCE 7 / URI 3 / OPEN 4 / REINDEX 3 / OBS 3 = 60). Matches the doc's own tally.
+The historical 60-P0 tally is preserved here as a review receipt; its current executable
+authority is the behavior-test set headed by `crates/kio-cli/tests/step3_p0_contract.rs` and
+the named `kio-index`/`kio-search` module tests below. The recorded split was CHUNK 11 /
+EMBED 5 / FTS 4 / HYBRID 6 / MMR 4 / CURSOR 5 / MULTI 5 / EVIDENCE 7 / URI 3 / OPEN 4 /
+REINDEX 3 / OBS 3 = **60 P0**.
 
 Legend — Type: `CLI` = `crates/kio-cli/tests/step3_p0_contract.rs` integration test;
 `unit` = `#[cfg(test)]` in the named `kio-index`/`kio-search` module. Verdict: `ok` = would
@@ -290,7 +292,7 @@ and the kio-search lib placeholder test were all removed as dead scaffold code
 The 4-engine re-audit (tasks/step3c-reaudit-4engine.md) found the HYBRID-003 row's
 original judgment to be a false positive (inert deletion step) — fixed as noted in the
 row above. Additions: `ct3_evidence_004_missing_chunk_row_requires_retarget`
-(EVIDENCE-004 series; 08 §3.2 retarget contract, exit 8, decisions #33) and
+(EVIDENCE-004 series; `docs/08-evidence-pointer-spec.md` §3.2 retarget contract, exit 8) and
 `ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial` (MULTI-005 series;
 cursor replay with a vanished scope → excluded + exit 3, not CURSOR-001).
 Final totals after fixes: 229 workspace tests green.

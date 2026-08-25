@@ -563,13 +563,6 @@ fn bytes_are_text(bytes: &[u8]) -> bool {
     }
 }
 
-#[must_use]
-pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
-    // Compatibility for callers that cannot surface a prepare error. The primary
-    // prepare path uses the fallible API below and reports an oversized PDF.
-    pdf_text_pages_bounded(bytes).unwrap_or_default()
-}
-
 pub fn pdf_text_pages_bounded(bytes: &[u8]) -> Result<Vec<String>> {
     if !bytes.starts_with(b"%PDF") {
         return Ok(vec![String::from_utf8_lossy(bytes).into_owned()]);

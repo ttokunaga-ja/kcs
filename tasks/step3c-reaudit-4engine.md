@@ -32,7 +32,7 @@ GPT-5.5 / GPT-5.3-Codex-Spark (codex exec、read-only sandbox、静的監査)。
    → 全 scope 除外かつ全理由が index 不能 (index_missing/corrupt) なら
    KIO-E-SEARCH-VEC-UNAVAIL-001 exit 1。到達不能系全滅は exit 4 を維持。テスト書換 + 対照 assert
 2. [major] Evidence 手順 6/7 (GPT-5.5): chunk 行未実体化のポインタで view が空テキスト成功
-   → KIO-E-EVIDENCE-RETARGET-REQUIRED-001 exit 8 (08 §3.2 / 06 §7、decisions #33)。
+   → KIO-E-EVIDENCE-RETARGET-REQUIRED-001 exit 8 (`docs/08-evidence-pointer-spec.md` §3.2 / `docs/06-cli-spec.md` §7)。
    tree entry の profile 等値は強制しない (Step 1 raw-only tree / chunk_hash 自己証明性のため)
 3. [minor] cursor 消失 scope (GPT-5.5): query_hash 検証を cursor 自身の scope 集合で行い、
    未解決 scope は excluded + exit 3。consumed skip も解決可能 scope のみに補正

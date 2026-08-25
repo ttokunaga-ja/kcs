@@ -34,11 +34,12 @@ pub struct FtsSchemaConfig {
     pub tokenizer: FtsTokenizer,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FtsMatch {
-    pub chunk_id: String,
-    pub rank: u64,
-    pub bm25_score: f64,
+struct FtsMatch {
+    chunk_id: String,
+    rank: u64,
+    bm25_score: f64,
 }
 
 /// Rows removed from the derived index for one purged raw object.
@@ -1605,7 +1606,8 @@ pub fn exchange_prepared_bound_gc_index(
 /// Rotate the fixed `index/sqlite.db` generation below a retained `.kio`
 /// capability and return the metadata read from the *same pinned connection*
 /// after the write commits.  No ambient pathname is accepted by this API.
-pub fn rotate_bound_gc_index_generation(
+#[cfg(test)]
+fn rotate_bound_gc_index_generation(
     kio_dir: &std::fs::File,
     generation: &str,
     expected_current: Option<(&str, &str)>,
@@ -2044,7 +2046,8 @@ impl SqliteFtsIndex {
         })
     }
 
-    pub fn in_memory(config: FtsSchemaConfig) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn in_memory(config: FtsSchemaConfig) -> Result<Self> {
         crate::vec::ensure_registered();
         let conn = Connection::open_in_memory()?;
         ensure_schema_on_connection(&conn, config)?;
@@ -2059,10 +2062,6 @@ impl SqliteFtsIndex {
         &self.conn
     }
 
-    pub fn ensure_schema(&mut self, config: FtsSchemaConfig) -> Result<()> {
-        ensure_schema_on_connection(&self.conn, config)
-    }
-
     pub fn index_chunk(&mut self, row: &ChunkRow) -> Result<()> {
         self.index_chunk_with_association_rowid(row, None)
             .map(|_| ())
@@ -2073,7 +2072,7 @@ impl SqliteFtsIndex {
     /// Fresh indexing passes `None` and lets SQLite allocate the monotonically
     /// increasing association rowid. Durable-ledger replay may pass the recorded
     /// rowid so a rebuilt database preserves cursor ordering exactly.
-    pub fn index_chunk_with_association_rowid(
+    fn index_chunk_with_association_rowid(
         &mut self,
         row: &ChunkRow,
         association_rowid: Option<u64>,
@@ -2349,7 +2348,8 @@ impl SqliteFtsIndex {
     /// kio-cli's `execute_fts_tier`, which layers the liveness filters
     /// (tree_entries join, current chunking_config_hash, `rowid <= max_rowid`)
     /// and column-weighted BM25 on the same index.
-    pub fn search(&self, query: &str, limit: u64) -> Result<Vec<FtsMatch>> {
+    #[cfg(test)]
+    fn search(&self, query: &str, limit: u64) -> Result<Vec<FtsMatch>> {
         if query.chars().count() < 2 {
             return Ok(Vec::new());
         }
@@ -2384,7 +2384,7 @@ impl SqliteFtsIndex {
 /// and rowid must agree with an
 /// existing record; a collision is a contract error rather than a silent
 /// renumbering that could invalidate signed cursors.
-pub fn record_chunk_config_association(
+fn record_chunk_config_association(
     conn: &Connection,
     chunk_id: &str,
     chunking_config_hash: &str,
@@ -2481,7 +2481,8 @@ pub fn max_chunk_config_association_rowid(conn: &Connection) -> Result<u64> {
 
 /// Whether a chunk had an association with the effective config at the frozen
 /// association maximum.
-pub fn chunk_has_current_config_association(
+#[cfg(test)]
+fn chunk_has_current_config_association(
     conn: &Connection,
     chunk_id: &str,
     chunking_config_hash: &str,
@@ -2506,7 +2507,8 @@ pub fn chunk_has_current_config_association(
 /// Return chunks satisfying the shared row/config cursor eligibility filter.
 /// Snapshot/tree liveness is intentionally layered on by the caller because it
 /// differs between default, `--at`, all-history, and include-deleted modes.
-pub fn current_config_eligible_chunk_ids(
+#[cfg(test)]
+fn current_config_eligible_chunk_ids(
     conn: &Connection,
     chunking_config_hash: &str,
     max_chunk_rowid: u64,
@@ -2574,7 +2576,7 @@ pub fn chunk_publication_introductions(
         .map_err(IndexError::from)
 }
 
-pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -> Result<()> {
+fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -> Result<()> {
     // A derived database is disposable, but it is not a migration target.  Do
     // this read-only fingerprint before *any* DDL: a partial or older sqlite.db
     // must be rebuilt from the durable commit/tree/CAS sources, never repaired
@@ -2723,7 +2725,7 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
     Ok(())
 }
 
-/// Verify a pre-existing public derived-index schema without modifying it.
+/// Verify a pre-existing derived-index schema without modifying it.
 ///
 /// `Ok(false)` means this connection contains no Kio index objects and can be
 /// initialized as a fresh store. `Ok(true)` means every required current object
@@ -2731,7 +2733,7 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
 /// shape returns [`IndexError::Schema`] with rebuild guidance. Callers that
 /// intentionally open SQLite directly (notably repair) can use this check
 /// before selecting from the database.
-pub fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> Result<bool> {
+fn validate_current_schema(conn: &Connection, config: &FtsSchemaConfig) -> Result<bool> {
     const REQUIRED_OBJECTS: &[&str] = &[
         "chunks",
         "chunk_config_generations",

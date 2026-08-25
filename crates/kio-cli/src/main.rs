@@ -8737,7 +8737,7 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, V
         .collect::<Vec<_>>();
     for sub in &cursor.scopes {
         // O7: resolve through the shared registry resolver so a scope_id that a
-        // `.kio` copy made ambiguous is reported KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001
+        // `.kio` copy made ambiguous is reported KIO-E-REGISTRY-DUP-001
         // (like Evidence), not silently pinned to whichever row sorted first.
         match resolve_scope_id_in_registry(&sub.scope_id)? {
             Some(target) => exec.push(ExecScope {
@@ -21653,8 +21653,8 @@ fn rate_limit_retry_at(now: &str, retry_after_ms: Option<u64>) -> String {
 
 /// Backoff delay (seconds) for a failed task's next retry, derived from the
 /// `RetryPolicy.backoff` descriptor in `crates/kio-pipeline/src/task.rs`.
-/// Jitter is intentionally omitted for deterministic scheduling / testing
-/// (see `tasks/ws1c-decisions.md` #29). `attempts` is the post-increment
+/// The canonical contract intentionally uses deterministic scheduling without
+/// jitter (see `docs/04-pipeline.md` §5.3). `attempts` is the post-increment
 /// attempt count (>= 1).
 fn retry_backoff_seconds(backoff: &str, attempts: u32) -> i64 {
     // exp(base=Ns,cap=Ms,...): min(base * 2^(attempts-1), cap).
@@ -27097,9 +27097,15 @@ fn print_output(value: Value, json_mode: bool) {
     } else if let Some(view_path) = value.get("view_path").and_then(Value::as_str) {
         // 05 §1.7.2: the path IS `view`'s output, so print it. Falling through
         // to the bare "viewed" status would leave a non-`--json` caller with
-        // nothing to open. `open` legitimately prints only its status because
-        // it has already acted on the file; `view` has no such side effect.
+        // nothing to consume.
         println!("{}", terminal_safe_text(view_path, false));
+    } else if value.get("status").and_then(Value::as_str) == Some("opened")
+        && let Some(path) = value.get("path").and_then(Value::as_str)
+    {
+        // `open` resolves an original but intentionally does not launch an OS
+        // application. Its human-mode result is therefore the resolved path;
+        // `--json` retains the complete typed resolution record.
+        println!("{}", terminal_safe_text(path, false));
     } else if value.get("operation").and_then(Value::as_str) == Some("unreachable_object_inventory")
     {
         // Milestone 8's report is the requested human artifact. Preserve the

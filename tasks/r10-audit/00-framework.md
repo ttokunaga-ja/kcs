@@ -14,5 +14,5 @@
 5. [ ] 最終報告書の生成
 
 ## 既存監査
-- `tasks/folder-history-r10-audit-fable.md` (Fable 5系統) が不合格判定
+- 先行した Fable 5 系統監査は不合格判定だった（元の historical source は保持しない）
 - 本監査は独立した目で検証し、Fableの指摘の確認 + 新規発見を行う

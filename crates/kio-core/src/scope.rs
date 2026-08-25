@@ -2283,13 +2283,14 @@ impl Repository {
             None => None,
         };
 
-        // Known limitation (WS1c S6, 2026-07-03): refs/heads/main and HEAD are
+        // Known durability limitation: refs/heads/main and HEAD are
         // advanced by two separate atomic renames. Each rename is individually
         // crash-safe (temp file + rename, never a torn value), but a power loss
         // *between* them can leave refs/heads/main advanced while HEAD still
         // points at the parent. The commit object is already durable in the CAS,
         // so recovery is a matter of re-pointing HEAD; no data is lost. A single
-        // atomic multi-ref transaction is deferred (single-user Step 1 scope).
+        // atomic multi-ref transaction is outside the current single-user
+        // publication model.
         let published_authority = if scheduled_bound {
             self.store.validate_bound_layout()?;
             if let Some(authority) = expected_scheduled_authority {
@@ -2998,14 +2999,13 @@ impl Repository {
     /// Merge the current working tree into `manifest.json`, preserving rows for
     /// paths that vanished (`03 §8`: never DELETE a files row; set
     /// `status="deleted"` and keep the last observed `raw_hash`). A path that
-    /// reappears recovers from `deleted` to `modified`/`unchanged`
-    /// (ws1a CT-STATE-003/004).
+    /// reappears recovers from `deleted` to `modified`/`unchanged`; this is
+    /// exercised by `s2_manifest_retains_deleted_rows_and_recovers`.
     ///
     /// The previous state is sourced from the prior HEAD tree (the durable
     /// truth, `03 §2`) merged with the prior manifest's `deleted` rows (older
     /// deletions that no tree carries). The manifest's live rows are never
-    /// trusted: a stale or hand-edited manifest cannot lose a deletion this way
-    /// (WS1d cross-review ruling).
+    /// trusted: a stale or hand-edited manifest cannot lose a deletion this way.
     fn write_manifest(&self, tree: &TreeObject, prior_tree: Option<&TreeObject>) -> Result<()> {
         let mut previous: BTreeMap<String, String> = prior_tree
             .map(|prior| {
@@ -6921,7 +6921,7 @@ pub fn now_utc_seconds() -> String {
 /// Debug-only override for the current time via `KIO_FIXED_NOW`. The contract
 /// tests (which build in debug) use it to pin `created_at`. It is compiled out
 /// of release binaries so a production timestamp cannot be forged through the
-/// environment (WS1c S4).
+/// environment.
 #[cfg(debug_assertions)]
 fn fixed_now_override() -> Option<String> {
     std::env::var("KIO_FIXED_NOW").ok()

@@ -33,7 +33,7 @@
 //! walk's 発見キー (04 §5.8 / 10 §7.5.2).
 //!
 //! Like the sibling embedding adapter, the live HTTP path is not exercised in
-//! the hermetic suite (decision #28); the contract is covered through the mock
+//! the hermetic suite (`docs/07-adapter-spec.md` §5.3); the contract is covered through the mock
 //! seam ([`TEST_GEMINI_BATCH_ENV`]).
 
 use std::io::Write as _;

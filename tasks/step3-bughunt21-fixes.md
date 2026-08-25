@@ -99,7 +99,7 @@ batch resume (KIO_TEST_MISTRAL_OCR=mock) → exit 4, tasks_executed:0, status=fa
 index --online → batch resume を 3 サイクル → online task 行が毎回再生成 (計 6 行)、adapter は一度も呼ばれず
 search → index_status: enriched_ratio=1.0, pending_enrichment_tasks=0 (偽の "完全 enrich 済")
 ```
-期待 = R20-5/R20-6 設計通り「非 text-native は online OCR で AI 強化」(docs/07:75, ws1c-decisions #24)。実際 = enqueue 側の穴 (R20-4/5/6) は直ったが送信側 precondition が未更新で全タスクを初回試行で永久死。スキャン PDF/画像/OOXML は Step 2 以来一度も OCR に到達せず、R20 の 340 行後もなお到達しない。`KIO_TEST_MISTRAL_OCR` を実駆動するテストがリポジトリに 1 つも無い (`rg KIO_TEST_MISTRAL_OCR --type rust` = catalog.rs の定数宣言のみ) ことが 20 ラウンド素通りの理由。
+期待 = R20-5/R20-6 設計および `docs/07-adapter-spec.md` §2.1 のとおり「非 text-native は online OCR で AI 強化」。実際 = enqueue 側の穴 (R20-4/5/6) は直ったが送信側 precondition が未更新で全タスクを初回試行で永久死。スキャン PDF/画像/OOXML は Step 2 以来一度も OCR に到達せず、R20 の 340 行後もなお到達しない。`KIO_TEST_MISTRAL_OCR` を実駆動するテストがリポジトリに 1 つも無い (`rg KIO_TEST_MISTRAL_OCR --type rust` = catalog.rs の定数宣言のみ) ことが 20 ラウンド素通りの理由。
 
 **修正案**: `online_markdownize_precondition_ok` (6441) と `execute_online_markdownize_task` (6493) の「prepared_units 空=無効」判定を、task の output_ref が online placeholder (`online:{adapter_id}`) の場合は**除外** (空は正常な「全文書 OCR 送信」シグナル)。既存の text-native チェック (6429) と hash 一致チェック (6418) で stale 検出は維持。docs 変更禁止・既存エラーコードのみ。
 

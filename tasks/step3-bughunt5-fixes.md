@@ -19,7 +19,7 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
   search は現行 config で HIT する (5 クエリ全命中)。残渣は旧 config chunk の蓄積 (append-only、GC は Step4 明記) で minor 相当・非採用。
 - **Spark 検証1(a) lossy→identity** = 偽陽性。identity/fingerprint は raw **bytes** を hash (prepare.rs:74
   `hash_bytes(&bytes)`, `prepared_unit_hashes: vec![raw_hash]`)。from_utf8_lossy は表示/チャンク text 専用で identity に非関与。
-- **Spark 検証2 #1 (HEAD/refs 二段 rename 窓)** = 既知 (scope.rs:411 に WS1c S6 の限界コメントあり)。
+- **Spark 検証2 #1 (HEAD/refs 二段 rename 窓)** = 既知 (`scope.rs` の publication 経路に耐久性の限界コメントあり)。
 - **Spark 検証2 #5/#6 (append_jsonl / 親 dir の fsync 欠如)** = minor 耐久性、既知の許容トレードオフ。ただし Q1 の torn line の
   遠因 (fsync 無し) として関連 (Q1 の修正は読取寛容化が主、fsync は副次)。
 
