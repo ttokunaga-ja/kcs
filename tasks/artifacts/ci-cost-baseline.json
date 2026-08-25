@@ -4,10 +4,10 @@
   "artifact_revision_resolver": "git log -1 --format=%H -- tasks/artifacts/ci-cost-baseline.json",
   "status": {
     "measurement_package": "complete",
-    "github_current_activation": "confirmed",
-    "formal_current_ci_baseline": "provisional",
-    "current_matching_success_samples": 1,
-    "blockers": ["formal_distribution_requires_additional_exact_topology_success_samples", "github_internal_queue_unavailable", "github_billing_minutes_unavailable"]
+    "github_current_activation": "pending_post_consolidation_push",
+    "formal_current_ci_baseline": "provisional_pending_post_consolidation_measurement",
+    "current_matching_success_samples": 0,
+    "blockers": ["post_consolidation_topology_has_not_been_pushed_or_measured_on_github", "formal_distribution_requires_at_least_three_natural_exact_topology_success_samples", "github_internal_queue_unavailable", "github_billing_minutes_unavailable"]
   },
   "current_topology": {
     "workflow_path": ".github/workflows/ci.yml",
@@ -22,6 +22,9 @@
     "configured_caps_are_measured_runtime": false,
     "workflow_cache_action": false,
     "persisted_artifact_action": false,
+    "schedule_trigger": false,
+    "python_push_or_pull_request_evaluator": false,
+    "manual_coverage_outside_ci": ["Full", "cold", "GPU", "external OCR"],
     "jobs": [
       {"name": "rust", "runner": "ubuntu-latest", "needs": [], "signal": "format, warnings-denied lint, complete workspace/all-target tests"},
       {"name": "persona-w0-integration", "runner": "ubuntu-latest", "needs": [], "signal": "Rust Tiny persona lifecycle, create-only preservation, leases, and filesystem attestation"},
@@ -30,7 +33,15 @@
       {"name": "windows-security-r23", "runner": "windows-latest", "needs": [], "signal": "complete workspace/all-target tests under Windows portability and security semantics"}
     ]
   },
-  "current_success_cohort": {
+  "current_exact_cohort": {
+    "measurement_state": "unmeasured",
+    "reason": "Phase 2 through Phase 4 changed the test-control and test topology but have not been pushed; no GitHub Actions run may be represented as an exact current sample.",
+    "matching_success_samples": 0,
+    "formal_baseline": "provisional_pending",
+    "next_measurement_requirement": "at least three natural push successes with the final workflow blob, test topology, Rust toolchain, flags, and runner contract before timeout optimization or an SLO declaration",
+    "github_metrics": {"internal_queue_seconds": null, "billing_minutes": null, "cpu_seconds": null, "maximum_resident_set_bytes": null, "io_read_bytes": null, "io_write_bytes": null, "cache_hit_information": null, "unknown_values_treated_as_zero": false}
+  },
+  "last_observed_pre_consolidation_success_cohort": {
     "cohort": {
       "head": "1258f5165ce9098c011223ea3fb6543ed06d7490",
       "tree": "4df488bb524fb7d6f4384aeabbe0646ea69e8436",
@@ -78,9 +89,20 @@
       "unknown_values_treated_as_zero": false
     },
     "threshold_comparison": {"workflow_wall_45_minutes": "pass_single_run_only", "aggregate_runner_equivalent_250_minutes": "pass_single_run_only", "formal_distribution_or_continuous_slo": "not_claimed"},
+    "windows_harness_evidence": [
+      {"harness": "kio_eval", "tests": 193, "elapsed_seconds": 329.39},
+      {"harness": "step3", "tests": 274, "elapsed_seconds": 473.76},
+      {"harness": "step2", "tests": 104, "elapsed_seconds": 89.55},
+      {"harness": "p2c", "tests": 40, "elapsed_seconds": 58.19},
+      {"harness": "p2b", "tests": 44, "elapsed_seconds": 54.77},
+      {"harness": "p3b", "tests": 33, "elapsed_seconds": 41.06},
+      {"harness": "p2a", "tests": 32, "elapsed_seconds": 37.46}
+    ],
+    "over_60_second_test_warnings": {"count": 7, "all_terminal_conclusions": "success", "interpretation": "distinct Tiny/Pilot signals, not unfinished tests or checkout cleanup"},
     "security_diff_scan": {"scan_id": "362c7120-a14d-4154-8c92-d809b76d4adf", "repair_base": "8ba72640744b02a81e31ecd9545a23161e347727", "head": "1258f5165ce9098c011223ea3fb6543ed06d7490", "findings": 0},
-    "eligible_for_success_cost": true,
-    "matching_success_sample_increment": 1
+    "eligible_for_current_success_cost": false,
+    "matching_success_sample_increment": 0,
+    "reason": "last observed pre-consolidation success; retained for harness evidence but excluded from the unmeasured final topology"
   },
   "cancelled_cohorts": [
     {
@@ -146,5 +168,5 @@
     },
     {"classification": "historical local-only cohorts", "heads": ["2a85016fe29421ceafa28924f43ec39bc497d23e", "d66b95859c983144bd3afc9469605f34b07ada86", "f50e8cc...", "2c7db5d..."], "reason": "local or different-workflow evidence; retained as historical context and not current CI measurements"}
   ],
-  "measurement_limits": {"no_dummy_pushes_reruns_or_dispatches": true, "current_success_sample_count": 1, "current_baseline_is_provisional": true, "unknown_not_zero": true, "future_matching_requirements": "same workflow blob, exact test topology, toolchain, flags, and runner contract; cancelled, failed, rerun, and topology-different samples do not enter the current success cohort"}
+  "measurement_limits": {"no_dummy_pushes_reruns_or_dispatches": true, "current_success_sample_count": 0, "current_baseline_is_provisional": true, "unknown_not_zero": true, "future_matching_requirements": "at least three natural push successes with the final workflow blob, exact post-consolidation test topology, toolchain, flags, and runner contract; cancelled, failed, rerun, and topology-different samples do not enter the current success cohort", "timeout_or_slo_optimization_before_three_natural_successes": false}
 }

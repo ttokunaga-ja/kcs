@@ -2,9 +2,9 @@
 
 Canonical measurements are in [ci-cost-baseline.json](ci-cost-baseline.json), with gate rationale in [ci-cost-unique-signal.md](ci-cost-unique-signal.md).
 
-The current exact-topology success is [run 32807583550](https://github.com/ttokunaga-ja/kio/actions/runs/32807583550): head `1258f5165ce9098c011223ea3fb6543ed06d7490`, tree `4df488bb524fb7d6f4384aeabbe0646ea69e8436`, workflow blob `07ae8f90747c9bce4e0d9508af2a967ffd8bbed6`, Rust `1.98.0`, `CI`/`push`, attempt `1`, and five jobs. It is the sole exact matching success sample (`n=1`), so the baseline is provisional.
+The Phase 2–4 final test topology has not been pushed, so its exact GitHub cohort is `n=0` and its formal baseline is provisional/pending. [Run 32807583550](https://github.com/ttokunaga-ja/kio/actions/runs/32807583550), head `1258f5165ce9098c011223ea3fb6543ed06d7490`, tree `4df488bb524fb7d6f4384aeabbe0646ea69e8436`, workflow blob `07ae8f90747c9bce4e0d9508af2a967ffd8bbed6`, Rust `1.98.0`, `CI`/`push`, attempt `1`, and five jobs, is retained as the last observed pre-consolidation success, not an exact sample of the final topology.
 
-## Measured result
+## Last observed pre-consolidation measurement
 
 | Job | Started | Completed | Elapsed |
 | --- | --- | --- | ---: |
@@ -42,7 +42,7 @@ configured dependency cap    = 35 + 10 = 45 min
 configured aggregate cap     = 35 + 15 + 10 + 35 + 90 = 185 min
 ```
 
-These are termination bounds, not runtime, queue, or billing measurements. The measured current run is below the 45-minute workflow-wall reference and the 250-minute aggregate reference, but `n=1` is not a continuous-SLO claim. GitHub did not expose internal queue, CPU, RSS, byte I/O, or cache telemetry. Raw billing duration values were zero but are not interpretable as billing minutes; billing therefore remains null/unknown rather than zero.
+These are termination bounds, not runtime, queue, or billing measurements. The observed pre-consolidation run is below the 45-minute workflow-wall reference and the 250-minute aggregate reference, but it is not a current final-topology sample. GitHub did not expose internal queue, CPU, RSS, byte I/O, or cache telemetry. Raw billing duration values were zero but are not interpretable as billing minutes; billing therefore remains null/unknown rather than zero. Keep the Windows bound at 90 minutes and make no timeout/SLO optimization until at least three natural push successes match the final topology.
 
 ## Historical separation
 

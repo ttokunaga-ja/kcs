@@ -52,7 +52,7 @@ what was wrong before and what closed it.
 | FTS-001 | `fts::tests::ct3_fts_001_external_content_triggers_sync_insert_delete` | unit | ok — inserts, searches, deletes, re-searches (empty), proving `chunks_ai`/`chunks_ad` trigger sync |
 | FTS-002 | publication relation append does not rewrite FTS | unit | ok |
 | FTS-003 | `fts::tests::ct3_fts_003_trigram_matches_cjk_substrings_and_short_query_skips` + CLI `ct3_fts_003_two_character_query_is_skipped_with_zero_results` | unit + CLI | ok (combined) |
-| FTS-004 | `fts::tests::ct3_fts_004_schema_can_be_rebuilt_from_chunks` (weak alone — only calls schema creation once, no prior data to prove anything survives) + CLI `ct3_fts_004_rebuild_db_reenables_fts_search` | unit + CLI | ok (combined) — the CLI test is the one doing real work: deletes sqlite.db, confirms search now hard-fails (`KIO-E-SEARCH-SCOPE-ALL-FAILED-001`), rebuilds, confirms search works again |
+| FTS-004 | CLI `ct3_fts_004_replica_serves_search_while_source_fts_is_rebuilt` | CLI | ok — deletes the source `sqlite.db`, proves the already-published replica continues serving search during repair, runs `repair rebuild-db`, then proves search remains available after the rebuild |
 
 ## CT3-HYBRID (6 P0)
 

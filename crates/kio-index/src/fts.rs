@@ -3769,18 +3769,6 @@ mod tests {
     }
 
     #[test]
-    fn ct3_fts_004_schema_can_be_rebuilt_from_chunks() {
-        let conn = Connection::open_in_memory().unwrap();
-        ensure_schema_on_connection(
-            &conn,
-            FtsSchemaConfig {
-                tokenizer: FtsTokenizer::Trigram,
-            },
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn index_metadata_reader_requires_the_current_table() {
         let non_current = Connection::open_in_memory().unwrap();
         let error = read_index_metadata(&non_current)
