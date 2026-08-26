@@ -63,7 +63,6 @@ finite_selector!(GeminiEmbedMode {
     "require_idempotency_token" => RequireIdempotencyToken,
     "no_usage_report" => NoUsageReport,
 });
-finite_selector!(LocalEmbedMode { "mock" => Mock });
 finite_selector!(LocalOcrMode { "mock" => Mock });
 finite_selector!(LocalOcrBodyMode {
     "nonconforming" => Nonconforming, "table" => Table, "decorated" => Decorated,
@@ -137,7 +136,6 @@ fn u64_selector(name: &str) -> Selector<u64> {
 pub struct AdapterTestControl {
     pub mistral_ocr: Selector<MistralOcrMode>,
     pub gemini_embed: Selector<GeminiEmbedMode>,
-    pub local_embed: Selector<LocalEmbedMode>,
     pub local_ocr: Selector<LocalOcrMode>,
     pub local_ocr_body: Selector<LocalOcrBodyMode>,
     pub mistral_batch: Selector<String>,
@@ -289,7 +287,6 @@ impl DebugTestControl {
             adapters: AdapterTestControl {
                 mistral_ocr: selector("KIO_TEST_MISTRAL_OCR", MistralOcrMode::parse),
                 gemini_embed: selector("KIO_TEST_GEMINI_EMBED", GeminiEmbedMode::parse),
-                local_embed: selector("KIO_TEST_LOCAL_EMBED", LocalEmbedMode::parse),
                 local_ocr: selector("KIO_TEST_LOCAL_OCR", LocalOcrMode::parse),
                 local_ocr_body: selector("KIO_TEST_LOCAL_OCR_BODY", LocalOcrBodyMode::parse),
                 mistral_batch: text("KIO_TEST_MISTRAL_BATCH"),

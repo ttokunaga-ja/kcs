@@ -1,4 +1,4 @@
-//! Independent, descriptor-bound attestation for a prepared scale-v2 corpus.
+//! Independent, descriptor-bound attestation for a prepared scale-v3 corpus.
 //!
 //! This deliberately does not call `ScopeRepository` or the product verifier:
 //! mutable projections are evidence only after the immutable CAS graph and the
@@ -8,14 +8,16 @@ use crate::{
     scale_fixture::ValidatedFixture,
     scale_spec::{self, SCOPES, ScaleScope},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 #[cfg(windows)]
 use cap_primitives::fs::_WindowsByHandle;
 #[cfg(unix)]
 use cap_primitives::fs::MetadataExt;
 use cap_primitives::{ambient_authority, fs as cap_fs};
-use kio_core::cas::{canonical_json_bytes, hash_bytes, is_hash};
+use kio_core::cas::{canonical_json_bytes, hash_bytes, is_hash, lower_hex};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -33,7 +35,18 @@ const MAX_SQLITE_TOTAL: u64 = 1024 << 20;
 const MAX_ROWS: u64 = 250_000;
 const MAX_REGISTRY_ROWS: usize = SCOPES.len() + 1;
 const MAX_REPORT_BYTES: usize = 1024 * 1024;
-const REPORT_TEMP_PREFIX: &str = ".kio-scale-attest-v2.tmp-";
+const REPORT_TEMP_PREFIX: &str = ".kio-scale-attest-v3.tmp-";
+const REFERENCE_ANCHOR_DOMAIN: &[u8] = b"kio-eval-reference-anchor-v1\0";
+const REFERENCE_ANCHOR_FEATURES: u32 = 64;
+const REFERENCE_ANCHOR_WEIGHT: f32 = 16.0;
+const DETERMINISTIC_EMBEDDING_PROFILE_HASH: &str =
+    "sha256:2b5ed5b97d35496e611ccd22589c80fe6da7333bc2e7061b85eca910a1d5c497";
+const DETERMINISTIC_MARKDOWN_PROFILE_HASH: &str =
+    "sha256:c38c275574491ae2635459184f027b064cb6363cc2470dbacfa00dfe2727a68b";
+const DETERMINISTIC_PREPARE_PROFILE_HASH: &str =
+    "sha256:6f33f9331916e3bcbe7a5a2aeeb51a6e9fe159f9da1e78076c3db5c5315e4428";
+const DETERMINISTIC_TOOL_LOCK_HASH: &str =
+    "sha256:4e486424845a4c6c7c5ed6a1f2ad6a26a78e8b4ccebad29ad9985d927579dadc";
 
 const INDEX_SQL_FINGERPRINTS: &[(&str, &str)] = &[
     (
@@ -157,6 +170,7 @@ impl BoundRegular {
 struct CasBinding {
     kind: String,
     hash: String,
+    content_addressed: bool,
     observation: FileObservation,
 }
 
@@ -180,22 +194,34 @@ pub enum AttestError {
 pub struct ScopeEvidence {
     pub name: String,
     pub scope_id: String,
+    pub base_head: Option<String>,
+    pub base_tree: Option<String>,
     pub head: String,
+    pub tree: String,
     pub source_files: usize,
     pub current_chunks: u64,
     pub physical_chunks: u64,
     pub embedded_chunks: u64,
+    pub historical_only_chunks: u64,
+    pub deleted_chunks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusEvidence {
     pub scopes: Vec<ScopeEvidence>,
     pub registry_rows: usize,
+    pub edit_operations: usize,
+    pub rename_operations: usize,
+    pub delete_operations: usize,
     pub current_chunks: u64,
+    pub historical_only_chunks: u64,
+    pub deleted_chunks: u64,
+    pub physical_chunks: u64,
+    pub embedded_chunks: u64,
 }
 
 /// The only public product of the independent scale attestor.  It is an
-/// exact, current-v2 receipt rather than a compatibility envelope.
+/// exact v3 receipt rather than a compatibility envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationReport {
@@ -203,12 +229,21 @@ pub struct AttestationReport {
     pub attestor: String,
     pub fixture_id: String,
     pub profile: scale_spec::ScaleProfile,
+    pub lane: scale_spec::ScaleLane,
     pub manifest_hash: String,
-    pub content_root_hash: String,
+    pub base_content_root_hash: String,
+    pub overlay_content_root_hash: String,
     pub corpus: String,
     pub scopes: Vec<ScopeEvidence>,
     pub registry_rows: usize,
+    pub edit_operations: usize,
+    pub rename_operations: usize,
+    pub delete_operations: usize,
     pub current_chunks: u64,
+    pub historical_only_chunks: u64,
+    pub deleted_chunks: u64,
+    pub physical_chunks: u64,
+    pub embedded_chunks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +307,23 @@ struct LedgerChunk {
     text: String,
     created_at: String,
 }
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChunkObjectWire {
+    spec_version: u64,
+    raw_hash: String,
+    tool_profile_hash: String,
+    r#gen: u64,
+    unit_key: String,
+    unit_content_hash: String,
+    heading_path: Vec<String>,
+    section_id: Option<String>,
+    byte_start: u64,
+    byte_end: u64,
+    text_hash: String,
+    text: String,
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicationEvent {
@@ -293,6 +345,40 @@ struct CommitWire {
     tree: String,
     #[serde(default)]
     purged_raws: Vec<String>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkingToolLockWire {
+    spec_version: u64,
+    prepare: WorkingPrepareLockWire,
+    markdown: WorkingMarkdownLockWire,
+    embedding: WorkingEmbeddingLockWire,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkingPrepareLockWire {
+    tool_id: String,
+    profile_hash: String,
+    kind: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkingMarkdownLockWire {
+    tool_id: String,
+    profile_hash: String,
+    kind: String,
+    capabilities: Vec<String>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkingEmbeddingLockWire {
+    tool_id: String,
+    profile_hash: String,
+    dimensions: u64,
+    distance: String,
+    modality: String,
+    kind: String,
+    mode: String,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -370,18 +456,47 @@ struct ReusedWire {
     unit_key: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedUnitEvidence {
     content_hash: String,
     markdown: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedSourceEvidence {
     tool_profile_hash: String,
     r#gen: u64,
     manifest_hash: String,
     units: BTreeMap<String, NormalizedUnitEvidence>,
+}
+
+#[derive(Debug)]
+struct ScopeCasEvidence {
+    normalized: BTreeMap<String, NormalizedSourceEvidence>,
+    base_head: Option<String>,
+    base_tree: Option<String>,
+    final_tree: String,
+    base_sources: BTreeMap<String, String>,
+    final_sources: BTreeMap<String, String>,
+    expected_chunks_by_raw: BTreeMap<String, usize>,
+}
+
+#[derive(Debug)]
+struct LedgerEvidence {
+    chunks: Vec<ChunkEvidence>,
+    publications: BTreeSet<(String, String, String)>,
+    binding: BoundRegular,
+}
+
+type TreeProjectionRow = (String, String, Option<String>, Option<u64>, Option<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PopulationEvidence {
+    current: u64,
+    historical_only: u64,
+    deleted: u64,
+    physical: u64,
+    embedded: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -721,16 +836,51 @@ fn cas(
     bindings.push(CasBinding {
         kind: kind.to_owned(),
         hash: hash.to_owned(),
+        content_addressed: true,
         observation,
     });
     Ok(bytes)
 }
 
+fn semantic_cas(
+    parent: &fs::File,
+    kind: &str,
+    hash: &str,
+    label: &str,
+    bindings: &mut Vec<CasBinding>,
+) -> Result<Vec<u8>, AttestError> {
+    let (bytes, observation) = observe_semantic_cas(parent, kind, hash, label)?;
+    bindings.push(CasBinding {
+        kind: kind.to_owned(),
+        hash: hash.to_owned(),
+        content_addressed: false,
+        observation,
+    });
+    Ok(bytes)
+}
+
+fn observe_semantic_cas(
+    parent: &fs::File,
+    kind: &str,
+    hash: &str,
+    label: &str,
+) -> Result<(Vec<u8>, FileObservation), AttestError> {
+    let (a, b, leaf) = hash_leaf(hash)?;
+    let objects = required_dir(parent, "objects", "CAS objects")?;
+    let kind = required_dir(&objects, kind, "CAS kind")?;
+    let a = required_dir(&kind, a, "CAS fanout")?;
+    let b = required_dir(&a, b, "CAS fanout")?;
+    observed_regular(&b, leaf, MAX_CAS, label)
+}
+
 fn recheck_cas(parent: &fs::File, bindings: &[CasBinding]) -> Result<(), AttestError> {
     for binding in bindings {
-        let (_, observation) =
+        let (_, observation) = if binding.content_addressed {
             observe_cas(parent, &binding.kind, &binding.hash, "attested CAS object")
-                .map_err(corruption)?;
+        } else {
+            observe_semantic_cas(parent, &binding.kind, &binding.hash, "attested CAS object")
+        }
+        .map_err(corruption)?;
         if observation != binding.observation {
             return Err(unsafe_state("CAS object changed during attestation"));
         }
@@ -779,10 +929,43 @@ fn check_config(kio: &fs::File) -> Result<BoundRegular, AttestError> {
     let (raw, binding) = bind_regular(kio, "config.toml", MAX_METADATA, "scope config")?;
     if !raw.is_empty() {
         return Err(unsafe_state(
-            "scale-v2 scope config.toml must be exactly empty",
+            "scale-v3 scope config.toml must be exactly empty",
         ));
     }
     Ok(binding)
+}
+
+fn check_working_tool_lock(kio: &fs::File) -> Result<BoundRegular, AttestError> {
+    let (raw, binding) = bind_regular(kio, "tool-lock.json", MAX_METADATA, "working tool-lock")?;
+    validate_working_tool_lock(&raw)?;
+    Ok(binding)
+}
+
+fn validate_working_tool_lock(raw: &[u8]) -> Result<(), AttestError> {
+    let lock: WorkingToolLockWire = typed_json(raw, "working tool-lock")?;
+    if lock.spec_version != 1
+        || lock.prepare.tool_id != "prepare_default"
+        || lock.prepare.profile_hash != DETERMINISTIC_PREPARE_PROFILE_HASH
+        || lock.prepare.kind != "deterministic_library"
+        || lock.markdown.tool_id != "deterministic_builtin"
+        || lock.markdown.profile_hash != DETERMINISTIC_MARKDOWN_PROFILE_HASH
+        || lock.markdown.kind != "deterministic_library"
+        || lock.markdown.capabilities.len() != 2
+        || lock.markdown.capabilities[0] != "baseline"
+        || lock.markdown.capabilities[1] != "text_passthrough"
+        || lock.embedding.tool_id != "kio_eval_deterministic_embedding"
+        || lock.embedding.profile_hash != DETERMINISTIC_EMBEDDING_PROFILE_HASH
+        || lock.embedding.dimensions != 768
+        || lock.embedding.distance != "cosine"
+        || lock.embedding.modality != "multimodal"
+        || lock.embedding.kind != "deterministic_library"
+        || lock.embedding.mode != "deterministic"
+    {
+        return Err(unsafe_state(
+            "working tool-lock differs from the frozen deterministic adapter set",
+        ));
+    }
+    Ok(())
 }
 
 fn attest_cas(
@@ -790,39 +973,203 @@ fn attest_cas(
     head: &str,
     scope: &ScaleScope,
     bindings: &mut Vec<CasBinding>,
-) -> Result<BTreeMap<String, NormalizedSourceEvidence>, AttestError> {
+) -> Result<ScopeCasEvidence, AttestError> {
     let commit_bytes = cas(kio, "commits", head, "HEAD commit", bindings)?;
     let commit: CommitWire = exact_json(&commit_bytes, "HEAD commit")?;
-    if commit.object_type != "commit"
-        || commit.commit_type != "auto"
-        || !is_hash(&commit.tree)
-        || !is_hash(&commit.tool_lock_hash)
-        || commit.parents.len() > 64
-        || commit.created_at.len() < 20
-        || commit.message.is_empty()
-        || !commit.purged_raws.is_empty()
-        || commit.stats.files_added > 1_000_000
-        || commit.stats.files_modified > 1_000_000
-        || commit.stats.files_deleted > 1_000_000
-        || commit.parents.iter().any(|h| !is_hash(h))
+    validate_auto_commit(&commit)?;
+    attest_deterministic_tool_lock(kio, &commit.tool_lock_hash, bindings)?;
+    let history = scope.expected_base_chunks != scope.expected_current_chunks;
+    if history {
+        if commit.parents.len() != 1
+            || commit.stats.files_added != 1
+            || commit.stats.files_modified != 1
+            || commit.stats.files_deleted != 2
+        {
+            return Err(unsafe_state(
+                "history overlay HEAD commit differs from the frozen operation plan",
+            ));
+        }
+    } else if !commit.parents.is_empty()
+        || commit.stats.files_added != scope.files.len() as u64
+        || commit.stats.files_modified != 0
+        || commit.stats.files_deleted != 0
     {
         return Err(unsafe_state(
-            "HEAD commit violates current auto-commit contract",
+            "current-text HEAD commit differs from the frozen root snapshot",
         ));
-    }
-    if commit.commit_type != "auto" {
-        return Err(unsafe_state("scale commit_type must be auto"));
     }
     let tree_bytes = cas(kio, "trees", &commit.tree, "HEAD tree", bindings)?;
     let tree: TreeWire = exact_json(&tree_bytes, "HEAD tree")?;
-    validate_tree_wire(&tree)?;
-    if tree.entries.len() != scope.files.len() {
-        return Err(unsafe_state("HEAD tree cardinality differs from manifest"));
-    }
     let mut normalized_sources = BTreeMap::new();
-    for (entry, expected) in tree.entries.iter().zip(&scope.files) {
-        if entry.path != expected.path
-            || entry.entry_type != "file"
+    let final_sources =
+        attest_snapshot_tree(kio, &tree, scope, "HEAD", &mut normalized_sources, bindings)?;
+    let mut expected_chunks_by_raw = BTreeMap::new();
+    extend_expected_chunks(&mut expected_chunks_by_raw, scope)?;
+
+    let (base_head, base_tree, base_sources) = if history {
+        let base_manifest =
+            scale_spec::frozen_manifest(scope_profile(scope)?, scale_spec::ScaleLane::CurrentText)
+                .map_err(|error| unsafe_state(format!("cannot rebuild base manifest: {error}")))?;
+        let base_scope = base_manifest
+            .scopes
+            .iter()
+            .find(|candidate| candidate.name == scope.name)
+            .ok_or_else(|| unsafe_state("base manifest omitted history scope"))?;
+        let parent_hash = commit.parents[0].clone();
+        let parent_bytes = cas(
+            kio,
+            "commits",
+            &parent_hash,
+            "history base commit",
+            bindings,
+        )?;
+        let parent: CommitWire = exact_json(&parent_bytes, "history base commit")?;
+        validate_auto_commit(&parent)?;
+        attest_deterministic_tool_lock(kio, &parent.tool_lock_hash, bindings)?;
+        if !parent.parents.is_empty()
+            || parent.stats.files_added != base_scope.files.len() as u64
+            || parent.stats.files_modified != 0
+            || parent.stats.files_deleted != 0
+        {
+            return Err(unsafe_state(
+                "history base commit differs from the frozen root snapshot",
+            ));
+        }
+        let parent_tree_bytes = cas(kio, "trees", &parent.tree, "history base tree", bindings)?;
+        let parent_tree: TreeWire = exact_json(&parent_tree_bytes, "history base tree")?;
+        let sources = attest_snapshot_tree(
+            kio,
+            &parent_tree,
+            base_scope,
+            "history base",
+            &mut normalized_sources,
+            bindings,
+        )?;
+        extend_expected_chunks(&mut expected_chunks_by_raw, base_scope)?;
+        (Some(parent_hash), Some(parent.tree), sources)
+    } else {
+        (None, None, BTreeMap::new())
+    };
+
+    Ok(ScopeCasEvidence {
+        normalized: normalized_sources,
+        base_head,
+        base_tree,
+        final_tree: commit.tree,
+        base_sources,
+        final_sources,
+        expected_chunks_by_raw,
+    })
+}
+
+fn scope_profile(scope: &ScaleScope) -> Result<scale_spec::ScaleProfile, AttestError> {
+    match scope.expected_base_chunks {
+        9 => Ok(scale_spec::ScaleProfile::Tiny),
+        6000 => Ok(scale_spec::ScaleProfile::Full),
+        _ => Err(unsafe_state("scope shape cannot bind a frozen profile")),
+    }
+}
+
+fn validate_auto_commit(commit: &CommitWire) -> Result<(), AttestError> {
+    if commit.object_type != "commit"
+        || commit.commit_type != "auto"
+        || commit.message != "kio index auto snapshot"
+        || !is_hash(&commit.tree)
+        || !is_hash(&commit.tool_lock_hash)
+        || commit.parents.len() > 1
+        || !scale_spec::is_canonical_utc_second(&commit.created_at)
+        || !commit.purged_raws.is_empty()
+        || commit.parents.iter().any(|parent| !is_hash(parent))
+    {
+        return Err(unsafe_state(
+            "scale auto commit violates the frozen wire contract",
+        ));
+    }
+    Ok(())
+}
+
+fn deterministic_tool_lock_bytes() -> Result<Vec<u8>, AttestError> {
+    canonical_json_bytes(&serde_json::json!({
+        "embedding": {
+            "dimensions": 768,
+            "distance": "cosine",
+            "modality": "multimodal",
+            "profile_hash": DETERMINISTIC_EMBEDDING_PROFILE_HASH,
+            "tool_id": "kio_eval_deterministic_embedding"
+        },
+        "markdown": {
+            "profile_hash": DETERMINISTIC_MARKDOWN_PROFILE_HASH,
+            "tool_id": "deterministic_builtin"
+        },
+        "prepare": {
+            "profile_hash": DETERMINISTIC_PREPARE_PROFILE_HASH,
+            "tool_id": "prepare_default"
+        },
+        "spec_version": 1
+    }))
+    .map_err(|error| other("deterministic tool-lock", error))
+}
+
+fn attest_deterministic_tool_lock(
+    kio: &fs::File,
+    hash: &str,
+    bindings: &mut Vec<CasBinding>,
+) -> Result<(), AttestError> {
+    let expected = deterministic_tool_lock_bytes()?;
+    if hash != DETERMINISTIC_TOOL_LOCK_HASH || hash_bytes(&expected) != hash {
+        return Err(unsafe_state(
+            "commit tool-lock identity differs from the frozen deterministic adapter set",
+        ));
+    }
+    let actual = cas(kio, "toollocks", hash, "deterministic tool-lock", bindings)?;
+    if actual != expected {
+        return Err(unsafe_state(
+            "tool-lock CAS differs from the independently reconstructed adapter set",
+        ));
+    }
+    Ok(())
+}
+
+fn extend_expected_chunks(
+    expected: &mut BTreeMap<String, usize>,
+    scope: &ScaleScope,
+) -> Result<(), AttestError> {
+    for source in &scope.files {
+        match expected.insert(source.raw_hash.clone(), source.expected_chunks) {
+            Some(previous) if previous != source.expected_chunks => {
+                return Err(unsafe_state(
+                    "one raw source has conflicting frozen chunk populations",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn attest_snapshot_tree(
+    kio: &fs::File,
+    tree: &TreeWire,
+    expected_scope: &ScaleScope,
+    label: &str,
+    normalized_sources: &mut BTreeMap<String, NormalizedSourceEvidence>,
+    bindings: &mut Vec<CasBinding>,
+) -> Result<BTreeMap<String, String>, AttestError> {
+    validate_tree_wire(tree)?;
+    if tree.entries.len() != expected_scope.files.len() {
+        return Err(unsafe_state(format!(
+            "{label} tree cardinality differs from the frozen manifest"
+        )));
+    }
+    let expected_by_path = expected_files_by_path(expected_scope, label)?;
+    let mut sources = BTreeMap::new();
+    for entry in &tree.entries {
+        let Some(expected) = expected_by_path.get(entry.path.as_str()) else {
+            return Err(unsafe_state(format!(
+                "{label} tree differs from the frozen manifest or lacks normalization"
+            )));
+        };
+        if entry.entry_type != "file"
             || entry.path.is_empty()
             || entry.path.contains('/')
             || entry.path.contains('\0')
@@ -830,9 +1177,9 @@ fn attest_cas(
             || entry.raw_hash != expected.raw_hash
             || entry.normalize.is_none()
         {
-            return Err(unsafe_state(
-                "HEAD tree differs from manifest or lacks normalize reference",
-            ));
+            return Err(unsafe_state(format!(
+                "{label} tree differs from the frozen manifest or lacks normalization"
+            )));
         }
         let normalize = entry.normalize.as_ref().expect("checked");
         let manifest = cas(
@@ -844,7 +1191,7 @@ fn attest_cas(
         )?;
         let normalized: NormalizedManifestWire =
             exact_json(&manifest, "normalized-instance manifest")?;
-        let normalized_evidence = attest_normalize(
+        let evidence = attest_normalize(
             kio,
             &normalized,
             &entry.raw_hash,
@@ -853,17 +1200,48 @@ fn attest_cas(
             bindings,
         )?;
         if normalized_sources
-            .insert(entry.raw_hash.clone(), normalized_evidence)
+            .get(&entry.raw_hash)
+            .is_some_and(|existing| existing != &evidence)
+        {
+            return Err(unsafe_state(
+                "one raw source has conflicting normalized CAS evidence",
+            ));
+        }
+        normalized_sources
+            .entry(entry.raw_hash.clone())
+            .or_insert(evidence);
+        let raw = cas(kio, "raw", &entry.raw_hash, "scale raw object", bindings)?;
+        if raw.len() != expected.bytes || hash_bytes(&raw) != expected.raw_hash {
+            return Err(unsafe_state(format!(
+                "{label} raw object differs from the frozen renderer"
+            )));
+        }
+        if sources
+            .insert(entry.path.clone(), entry.raw_hash.clone())
             .is_some()
         {
-            return Err(unsafe_state("duplicate normalized source identity"));
-        }
-        let raw = cas(kio, "raw", &entry.raw_hash, "HEAD raw object", bindings)?;
-        if raw.len() != expected.bytes || hash_bytes(&raw) != expected.raw_hash {
-            return Err(unsafe_state("HEAD raw object differs from manifest"));
+            return Err(unsafe_state("duplicate path in attested snapshot tree"));
         }
     }
-    Ok(normalized_sources)
+    Ok(sources)
+}
+
+fn expected_files_by_path<'a>(
+    expected_scope: &'a ScaleScope,
+    label: &str,
+) -> Result<BTreeMap<&'a str, &'a scale_spec::ScaleFile>, AttestError> {
+    let mut expected_by_path = BTreeMap::new();
+    for expected in &expected_scope.files {
+        if expected_by_path
+            .insert(expected.path.as_str(), expected)
+            .is_some()
+        {
+            return Err(unsafe_state(format!(
+                "{label} frozen manifest contains a duplicate path"
+            )));
+        }
+    }
+    Ok(expected_by_path)
 }
 
 fn validate_tree_wire(tree: &TreeWire) -> Result<(), AttestError> {
@@ -898,7 +1276,7 @@ fn attest_normalize(
         || manifest.units.is_empty()
         || manifest
             .parent_gen
-            .is_some_and(|parent| parent >= manifest.r#gen)
+            .is_some_and(|parent| parent > manifest.r#gen)
     {
         return Err(unsafe_state(
             "normalized manifest identity differs from tree reference",
@@ -998,19 +1376,27 @@ fn unit_ref(unit_key: &str) -> String {
 }
 
 fn attest_ledger(
+    kio: &fs::File,
     index: &fs::File,
     head: &str,
-    scope: &ScaleScope,
-    normalized: &BTreeMap<String, NormalizedSourceEvidence>,
-) -> Result<(Vec<ChunkEvidence>, BoundRegular), AttestError> {
+    cas_evidence: &ScopeCasEvidence,
+    cas_bindings: &mut Vec<CasBinding>,
+) -> Result<LedgerEvidence, AttestError> {
     let (bytes, binding) = bind_regular(index, "chunks.jsonl", MAX_LEDGER, "chunks ledger")?;
     if !bytes.ends_with(b"\n") {
         return Err(unsafe_state("chunks ledger is not newline terminated"));
     }
-    let mut counts: BTreeMap<&str, u64> = scope
-        .files
-        .iter()
-        .map(|f| (f.raw_hash.as_str(), 0))
+    let creation_paths =
+        creation_source_paths(&cas_evidence.base_sources, &cas_evidence.final_sources)?;
+    let base_raws = cas_evidence
+        .base_sources
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut counts: BTreeMap<String, u64> = cas_evidence
+        .expected_chunks_by_raw
+        .keys()
+        .map(|raw| (raw.clone(), 0))
         .collect();
     let mut rows = 0u64;
     let mut associations = BTreeSet::new();
@@ -1032,11 +1418,7 @@ fn attest_ledger(
                 }
             }
             LedgerRecord::Creation(row) => {
-                let expected_source = scope
-                    .files
-                    .iter()
-                    .find(|source| source.path == row.row.raw_path);
-                let normalized_source = normalized.get(&row.row.raw_hash);
+                let normalized_source = cas_evidence.normalized.get(&row.row.raw_hash);
                 let normalized_unit =
                     normalized_source.and_then(|source| source.units.get(&row.row.unit_key));
                 let text_range = usize::try_from(row.row.byte_start)
@@ -1072,8 +1454,8 @@ fn attest_ledger(
                     || row.row.created_at.len() < 20
                     || row.row.byte_start > row.row.byte_end
                     || hash_bytes(row.row.text.as_bytes()) != row.row.text_hash
-                    || !counts.contains_key(row.row.raw_hash.as_str())
-                    || expected_source.is_none_or(|source| source.raw_hash != row.row.raw_hash)
+                    || !counts.contains_key(&row.row.raw_hash)
+                    || creation_paths.get(&row.row.raw_hash) != Some(&row.row.raw_path)
                     || normalized_source.is_none_or(|source| {
                         source.tool_profile_hash != row.row.tool_profile_hash
                             || source.r#gen != row.row.r#gen
@@ -1084,7 +1466,7 @@ fn attest_ledger(
                     || chunk_identity(&row.row)? != row.row.chunk_id
                 {
                     return Err(unsafe_state(
-                        "chunks ledger record is not a current scale chunk",
+                        "chunks ledger record is not in the attested base/final source union",
                     ));
                 }
                 if !associations.insert((
@@ -1093,7 +1475,7 @@ fn attest_ledger(
                 )) {
                     return Err(unsafe_state("duplicate chunk/config association"));
                 }
-                *counts.get_mut(row.row.raw_hash.as_str()).expect("checked") += 1;
+                *counts.get_mut(&row.row.raw_hash).expect("checked") += 1;
                 let evidence = ChunkEvidence {
                     rowid: row.rowid,
                     association_rowid: row.association_rowid,
@@ -1115,6 +1497,7 @@ fn attest_ledger(
                 if chunks.insert(evidence.chunk_id.clone(), evidence).is_some() {
                     return Err(unsafe_state("duplicate chunk identity"));
                 }
+                attest_chunk_object(kio, &row.row, cas_bindings)?;
                 rows += 1;
                 if rows > MAX_ROWS {
                     return Err(unsafe_state("chunks ledger row bound exceeded"));
@@ -1122,29 +1505,83 @@ fn attest_ledger(
             }
         }
     }
-    if publications.len() != associations.len()
-        || publications.iter().any(|(chunk, config, introduction)| {
-            !associations.contains(&(chunk.clone(), config.clone())) || introduction != head
+    let expected_publications = chunks
+        .values()
+        .map(|chunk| {
+            let introduction = if base_raws.contains(&chunk.raw_hash) {
+                cas_evidence.base_head.as_deref().ok_or_else(|| {
+                    unsafe_state("base chunk has no attested base introduction commit")
+                })?
+            } else {
+                head
+            };
+            Ok((
+                chunk.chunk_id.clone(),
+                scale_spec::CHUNKING_CONFIG_HASH.to_owned(),
+                introduction.to_owned(),
+            ))
+        })
+        .collect::<Result<BTreeSet<_>, AttestError>>()?;
+    if publications != expected_publications || publications.len() != associations.len() {
+        return Err(unsafe_state(
+            "ledger publication introductions differ from the attested commit graph",
+        ));
+    }
+    let expected_rows =
+        cas_evidence
+            .expected_chunks_by_raw
+            .values()
+            .try_fold(0_u64, |total, count| {
+                total
+                    .checked_add(*count as u64)
+                    .ok_or_else(|| unsafe_state("frozen chunk population overflow"))
+            })?;
+    if rows != expected_rows
+        || counts.iter().any(|(raw, count)| {
+            cas_evidence
+                .expected_chunks_by_raw
+                .get(raw)
+                .is_none_or(|expected| *count != *expected as u64)
         })
     {
         return Err(unsafe_state(
-            "publication event lacks a current creation association",
+            "chunks ledger does not exactly cover the base/final source union",
         ));
     }
-    if rows != scope.expected_current_chunks as u64
-        || counts.iter().any(|(raw, n)| {
-            scope
-                .files
-                .iter()
-                .find(|f| f.raw_hash == **raw)
-                .is_none_or(|f| *n != f.expected_chunks as u64)
-        })
-    {
+    Ok(LedgerEvidence {
+        chunks: chunks.into_values().collect(),
+        publications,
+        binding,
+    })
+}
+
+fn attest_chunk_object(
+    kio: &fs::File,
+    row: &LedgerChunk,
+    bindings: &mut Vec<CasBinding>,
+) -> Result<(), AttestError> {
+    let bytes = semantic_cas(kio, "chunks", &row.chunk_id, "chunk CAS object", bindings)?;
+    let actual: ChunkObjectWire = exact_json(&bytes, "chunk CAS object")?;
+    let expected = ChunkObjectWire {
+        spec_version: 1,
+        raw_hash: row.raw_hash.clone(),
+        tool_profile_hash: row.tool_profile_hash.clone(),
+        r#gen: row.r#gen,
+        unit_key: row.unit_key.clone(),
+        unit_content_hash: row.unit_content_hash.clone(),
+        heading_path: row.heading_path.clone().unwrap_or_default(),
+        section_id: row.section_id.clone(),
+        byte_start: row.byte_start,
+        byte_end: row.byte_end,
+        text_hash: row.text_hash.clone(),
+        text: row.text.clone(),
+    };
+    if actual != expected {
         return Err(unsafe_state(
-            "chunks ledger does not exactly cover manifest chunks",
+            "chunk CAS object differs from its authenticated ledger creation",
         ));
     }
-    Ok((chunks.into_values().collect(), binding))
+    Ok(())
 }
 
 fn chunk_identity(row: &LedgerChunk) -> Result<String, AttestError> {
@@ -1252,12 +1689,14 @@ fn recheck_sqlite(
 }
 
 fn attest_index(
+    kio: &fs::File,
     index: &fs::File,
     head: &str,
     scope: &ScaleScope,
-    chunks: &[ChunkEvidence],
-    normalized: &BTreeMap<String, NormalizedSourceEvidence>,
-) -> Result<(u64, u64, u64), AttestError> {
+    ledger: &LedgerEvidence,
+    cas_evidence: &ScopeCasEvidence,
+    cas_bindings: &mut Vec<CasBinding>,
+) -> Result<PopulationEvidence, AttestError> {
     let (db, _snapshot, sources) = sqlite_snapshot(index, "sqlite.db", "scope index")?;
     attest_index_schema(&db)?;
     let schema: BTreeSet<(String, String)> = db
@@ -1312,9 +1751,9 @@ fn attest_index(
         return Err(unsafe_state("index row bound exceeded"));
     }
     let db_rows = db
-        .prepare("SELECT c.rowid,c.chunk_id,c.raw_hash,c.tool_profile_hash,c.gen,c.unit_key,c.unit_content_hash,c.raw_path,c.heading_path,c.section_id,c.byte_start,c.byte_end,c.text_hash,c.text,c.created_at FROM chunks c WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
+        .prepare("SELECT c.rowid,c.chunk_id,c.raw_hash,c.tool_profile_hash,c.gen,c.unit_key,c.unit_content_hash,c.raw_path,c.heading_path,c.section_id,c.byte_start,c.byte_end,c.text_hash,c.text,c.created_at FROM chunks c ORDER BY c.chunk_id LIMIT ?1")
         .map_err(|error| other("index chunks", error))?
-        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| {
+        .query_map([MAX_ROWS + 1], |row| {
             Ok(DbChunkRow {
                 rowid: row.get(0)?,
                 chunk_id: row.get(1)?,
@@ -1381,20 +1820,37 @@ fn attest_index(
             created_at: row.created_at,
         });
     }
-    if associations.len() != chunks.len() || actual_chunks != chunks {
+    if associations.len() != ledger.chunks.len() || actual_chunks != ledger.chunks {
         return Err(unsafe_state(
             "index chunks/config associations differ from the chunks ledger",
         ));
     }
+    let publication_rows = db
+        .prepare("SELECT chunk_id,chunking_config_hash,introduction_commit FROM chunk_publications ORDER BY chunk_id,chunking_config_hash,introduction_commit LIMIT ?1")
+        .map_err(|error| other("index publications", error))?
+        .query_map([MAX_ROWS + 1], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| other("index publications", error))?
+        .collect::<Result<BTreeSet<(String, String, String)>, _>>()
+        .map_err(|error| other("index publications", error))?;
+    if publication_rows != ledger.publications {
+        return Err(unsafe_state(
+            "index publication projection differs from the authenticated ledger",
+        ));
+    }
     let fts_chunk_ids: BTreeSet<String> = db
-        .prepare("SELECT c.chunk_id FROM chunk_fts_docsize d JOIN chunks c ON c.rowid=d.id WHERE EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
+        .prepare("SELECT c.chunk_id FROM chunk_fts_docsize d JOIN chunks c ON c.rowid=d.id ORDER BY c.chunk_id LIMIT ?1")
         .map_err(|error| other("index FTS", error))?
-        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| row.get(0))
+        .query_map([MAX_ROWS + 1], |row| row.get(0))
         .map_err(|error| other("index FTS", error))?
         .collect::<Result<_, _>>()
         .map_err(|error| other("index FTS", error))?;
-    let expected_chunk_ids: BTreeSet<String> =
-        chunks.iter().map(|chunk| chunk.chunk_id.clone()).collect();
+    let expected_chunk_ids: BTreeSet<String> = ledger
+        .chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id.clone())
+        .collect();
     if fts_chunk_ids != expected_chunk_ids {
         return Err(unsafe_state(
             "index current chunks/FTS differ from manifest",
@@ -1404,9 +1860,9 @@ fn attest_index(
     // bounded MATCH probe checks the virtual table's query semantics rather
     // than merely trusting its shadow/docsize rows.
     let match_ids: BTreeSet<String> = db
-        .prepare("SELECT c.chunk_id FROM chunk_fts f JOIN chunks c ON c.rowid=f.rowid WHERE chunk_fts MATCH 'scale' AND EXISTS (SELECT 1 FROM chunk_publications p WHERE p.chunk_id=c.chunk_id AND p.chunking_config_hash=?1 AND p.introduction_commit=?2) ORDER BY c.chunk_id LIMIT ?3")
+        .prepare("SELECT c.chunk_id FROM chunk_fts f JOIN chunks c ON c.rowid=f.rowid WHERE chunk_fts MATCH 'scale' ORDER BY c.chunk_id LIMIT ?1")
         .map_err(|error| other("index FTS MATCH", error))?
-        .query_map(rusqlite::params![scale_spec::CHUNKING_CONFIG_HASH, head, MAX_ROWS + 1], |row| row.get(0))
+        .query_map([MAX_ROWS + 1], |row| row.get(0))
         .map_err(|error| other("index FTS MATCH", error))?
         .collect::<Result<_, _>>()
         .map_err(|error| other("index FTS MATCH", error))?;
@@ -1415,10 +1871,116 @@ fn attest_index(
             "index FTS MATCH does not cover current scale chunks",
         ));
     }
-    let tree_rows = db
+    attest_index_tree_projection(&db, head, scope, &cas_evidence.normalized)?;
+    let mut expected_tree_rows = scope.files.len() as u64;
+    if let Some(base_head) = cas_evidence.base_head.as_deref() {
+        let base_manifest =
+            scale_spec::frozen_manifest(scope_profile(scope)?, scale_spec::ScaleLane::CurrentText)
+                .map_err(|error| unsafe_state(format!("cannot rebuild base manifest: {error}")))?;
+        let base_scope = base_manifest
+            .scopes
+            .iter()
+            .find(|candidate| candidate.name == scope.name)
+            .ok_or_else(|| unsafe_state("base manifest omitted history scope"))?;
+        attest_index_tree_projection(&db, base_head, base_scope, &cas_evidence.normalized)?;
+        expected_tree_rows += base_scope.files.len() as u64;
+    }
+    let tree_row_count: u64 = db
+        .query_row("SELECT COUNT(*) FROM tree_entries", [], |row| row.get(0))
+        .map_err(|error| other("index tree entries", error))?;
+    if tree_row_count != expected_tree_rows {
+        return Err(unsafe_state(
+            "index contains missing or extra commit tree projections",
+        ));
+    }
+
+    let embedding_rows = attest_embedding_rows(&db, ledger, cas_evidence, kio, cas_bindings)?;
+    let image_vectors: u64 = db
+        .query_row("SELECT COUNT(*) FROM image_vec", [], |row| row.get(0))
+        .map_err(|error| other("index image vectors", error))?;
+    let vector_rows = db
+        .prepare("SELECT chunk_id,embedding FROM chunk_vec ORDER BY chunk_id LIMIT ?1")
+        .map_err(|error| other("index chunk vectors", error))?
+        .query_map([MAX_ROWS + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| other("index chunk vectors", error))?
+        .collect::<Result<BTreeMap<String, Vec<u8>>, _>>()
+        .map_err(|error| other("index chunk vectors", error))?;
+    let final_paths_by_raw = reverse_source_paths(&cas_evidence.final_sources)?;
+    let base_paths_by_raw = reverse_source_paths(&cas_evidence.base_sources)?;
+    let expected_vectors = ledger
+        .chunks
+        .iter()
+        .map(|chunk| {
+            let path = final_paths_by_raw
+                .get(&chunk.raw_hash)
+                .or_else(|| base_paths_by_raw.get(&chunk.raw_hash))
+                .ok_or_else(|| unsafe_state("chunk vector has no attested source path"))?;
+            let context = scale_embedding_context(path)?;
+            Ok((
+                chunk.chunk_id.clone(),
+                scale_embedding_vector(&chunk.text, &context),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, AttestError>>()?;
+    let chunk_vectors = vector_rows.len() as u64;
+    if embedding_rows == 0
+        || chunk_vectors != physical
+        || vector_rows != expected_vectors
+        || image_vectors != 0
+    {
+        return Err(unsafe_state("embedding/vector population is inconsistent"));
+    }
+    let final_raws = cas_evidence
+        .final_sources
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let final_paths = cas_evidence
+        .final_sources
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let deleted_raws = cas_evidence
+        .base_sources
+        .iter()
+        .filter(|(path, raw)| !final_paths.contains(*path) && !final_raws.contains(*raw))
+        .map(|(_, raw)| raw.clone())
+        .collect::<BTreeSet<_>>();
+    let current = ledger
+        .chunks
+        .iter()
+        .filter(|chunk| final_raws.contains(&chunk.raw_hash))
+        .count() as u64;
+    let deleted = ledger
+        .chunks
+        .iter()
+        .filter(|chunk| deleted_raws.contains(&chunk.raw_hash))
+        .count() as u64;
+    let historical_only = physical
+        .checked_sub(current)
+        .ok_or_else(|| unsafe_state("history population underflow"))?;
+    recheck_sqlite(index, &sources, "scope index")?;
+    Ok(PopulationEvidence {
+        current,
+        historical_only,
+        deleted,
+        physical,
+        embedded: chunk_vectors,
+    })
+}
+
+fn attest_index_tree_projection(
+    db: &Connection,
+    commit: &str,
+    scope: &ScaleScope,
+    normalized: &BTreeMap<String, NormalizedSourceEvidence>,
+) -> Result<(), AttestError> {
+    let rows = db
         .prepare("SELECT path,raw_hash,tool_profile_hash,gen,manifest_hash FROM tree_entries WHERE commit_hash=?1 ORDER BY path LIMIT ?2")
         .map_err(|error| other("index tree entries", error))?
-        .query_map(rusqlite::params![head, scope.files.len() as u64 + 1], |row| {
+        .query_map(rusqlite::params![commit, scope.files.len() as u64 + 1], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1430,40 +1992,291 @@ fn attest_index(
         .map_err(|error| other("index tree entries", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| other("index tree entries", error))?;
-    if tree_rows.len() != scope.files.len()
-        || tree_rows.iter().zip(&scope.files).any(
-            |((path, raw, tool, generation, manifest), expected)| {
-                let normalized = normalized.get(raw);
-                path != &expected.path
-                    || raw != &expected.raw_hash
-                    || normalized.is_none_or(|evidence| {
-                        tool.as_deref() != Some(evidence.tool_profile_hash.as_str())
-                            || *generation != Some(evidence.r#gen)
-                            || manifest.as_deref() != Some(evidence.manifest_hash.as_str())
-                    })
-            },
-        )
+    validate_index_tree_projection_rows(&rows, scope, normalized)
+}
+
+fn validate_index_tree_projection_rows(
+    rows: &[TreeProjectionRow],
+    scope: &ScaleScope,
+    normalized: &BTreeMap<String, NormalizedSourceEvidence>,
+) -> Result<(), AttestError> {
+    if rows.len() != scope.files.len() {
+        return Err(unsafe_state(
+            "index tree projection differs from immutable commit CAS",
+        ));
+    }
+    let expected_by_path = expected_files_by_path(scope, "index tree projection")?;
+    let mut seen_paths = BTreeSet::new();
+    for (path, raw, tool, generation, manifest) in rows {
+        if !seen_paths.insert(path.as_str()) {
+            return Err(unsafe_state(
+                "index tree projection contains a duplicate path",
+            ));
+        }
+        let Some(expected) = expected_by_path.get(path.as_str()) else {
+            return Err(unsafe_state(
+                "index tree projection differs from immutable commit CAS",
+            ));
+        };
+        let evidence = normalized.get(raw);
+        if raw != &expected.raw_hash
+            || evidence.is_none_or(|evidence| {
+                tool.as_deref() != Some(evidence.tool_profile_hash.as_str())
+                    || *generation != Some(evidence.r#gen)
+                    || manifest.as_deref() != Some(evidence.manifest_hash.as_str())
+            })
+        {
+            return Err(unsafe_state(
+                "index tree projection differs from immutable commit CAS",
+            ));
+        }
+    }
+    if seen_paths.len() != expected_by_path.len() {
+        return Err(unsafe_state(
+            "index tree projection differs from immutable commit CAS",
+        ));
+    }
+    Ok(())
+}
+
+fn attest_embedding_rows(
+    db: &Connection,
+    ledger: &LedgerEvidence,
+    cas_evidence: &ScopeCasEvidence,
+    kio: &fs::File,
+    cas_bindings: &mut Vec<CasBinding>,
+) -> Result<u64, AttestError> {
+    let source_union = cas_evidence
+        .base_sources
+        .iter()
+        .chain(&cas_evidence.final_sources)
+        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut expected = BTreeMap::new();
+    for chunk in &ledger.chunks {
+        for (path, _) in source_union
+            .iter()
+            .filter(|(_, raw)| raw == &chunk.raw_hash)
+        {
+            let context = scale_embedding_context(path)?;
+            let id = scale_embedding_id(&chunk.text_hash, &context)?;
+            let vector = scale_embedding_vector(&chunk.text, &context);
+            let pair = (chunk.text_hash.clone(), context, vector);
+            if expected
+                .insert(id, pair.clone())
+                .is_some_and(|previous| previous != pair)
+            {
+                return Err(unsafe_state(
+                    "frozen embedding identity has conflicting content",
+                ));
+            }
+        }
+    }
+    let rows = db
+        .prepare("SELECT id,target_type,target_id,modality,dimensions,distance,profile_hash,context_key,vector FROM embeddings ORDER BY id LIMIT ?1")
+        .map_err(|error| other("index embeddings", error))?
+        .query_map([MAX_ROWS + 1], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+            ))
+        })
+        .map_err(|error| other("index embeddings", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| other("index embeddings", error))?;
+    if rows.len() != expected.len() {
+        return Err(unsafe_state(
+            "embedding source-of-truth population differs from frozen contexts",
+        ));
+    }
+    for (id, (target, context, vector)) in &expected {
+        let actual = semantic_cas(kio, "embeddings", id, "embedding CAS object", cas_bindings)?;
+        let expected_object = scale_embedding_object(target, context, vector)?;
+        if actual != expected_object {
+            return Err(unsafe_state(
+                "embedding CAS object differs from the independently recomputed vector",
+            ));
+        }
+    }
+    for (id, target_type, target_id, modality, dimensions, distance, profile, context, vector) in
+        &rows
+    {
+        if expected
+            .get(id)
+            .map(|(target, context, vector)| (target.as_str(), context.as_str(), vector.as_slice()))
+            != Some((
+                target_id.as_str(),
+                context.as_deref().unwrap_or(""),
+                vector.as_slice(),
+            ))
+            || target_type != "chunk"
+            || modality != "multimodal"
+            || *dimensions != 768
+            || distance != "cosine"
+            || profile != DETERMINISTIC_EMBEDDING_PROFILE_HASH
+            || context.as_ref().is_none_or(String::is_empty)
+        {
+            return Err(unsafe_state(
+                "embedding row differs from the deterministic adapter contract",
+            ));
+        }
+    }
+    Ok(rows.len() as u64)
+}
+
+fn scale_embedding_object(
+    target_hash: &str,
+    context: &str,
+    vector: &[u8],
+) -> Result<Vec<u8>, AttestError> {
+    let identity = serde_json::json!({
+        "context": context,
+        "dimensions": 768,
+        "distance": "cosine",
+        "modality": "multimodal",
+        "profile_hash": DETERMINISTIC_EMBEDDING_PROFILE_HASH,
+        "spec_version": 1,
+        "target_hash": target_hash,
+        "target_type": "chunk",
+    });
+    let mut bytes =
+        canonical_json_bytes(&identity).map_err(|error| other("embedding CAS identity", error))?;
+    bytes.push(b'\n');
+    bytes.extend_from_slice(BASE64.encode(vector).as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(lower_hex(&Sha256::digest(vector)).as_bytes());
+    Ok(bytes)
+}
+
+fn reverse_source_paths(
+    sources: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, AttestError> {
+    let mut paths = BTreeMap::new();
+    for (path, raw) in sources {
+        if paths
+            .insert(raw.clone(), path.clone())
+            .is_some_and(|previous| previous != *path)
+        {
+            return Err(unsafe_state(
+                "one raw source has multiple paths in one attested snapshot",
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+fn creation_source_paths(
+    base: &BTreeMap<String, String>,
+    final_sources: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, AttestError> {
+    let mut paths = reverse_source_paths(base)?;
+    for (raw, path) in reverse_source_paths(final_sources)? {
+        paths.entry(raw).or_insert(path);
+    }
+    Ok(paths)
+}
+
+/// Independently reimplement the evaluator adapter's frozen token and first
+/// reference anchor hashing. The attestor intentionally does not call the
+/// issuing adapter.
+fn scale_embedding_vector(text: &str, context: &str) -> Vec<u8> {
+    let input = format!("{context}\n\n{text}");
+    let tokens = input
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let mut vector = vec![0.0_f32; 768];
+    if tokens.is_empty() {
+        scale_add_token_features(&mut vector, input.as_bytes());
+    } else {
+        let anchor = tokens
+            .iter()
+            .position(|token| scale_is_reference_anchor(token));
+        for (index, token) in tokens.into_iter().enumerate() {
+            scale_add_token_features(&mut vector, token.as_bytes());
+            if anchor == Some(index) {
+                scale_add_reference_anchor_features(&mut vector, token.as_bytes());
+            }
+        }
+    }
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    for value in &mut vector {
+        *value /= norm;
+    }
+    vector.into_iter().flat_map(f32::to_le_bytes).collect()
+}
+
+fn scale_is_reference_anchor(token: &str) -> bool {
+    token.len() == 12
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn scale_add_reference_anchor_features(vector: &mut [f32], token: &[u8]) {
+    for feature in 0..REFERENCE_ANCHOR_FEATURES {
+        let mut hasher = Sha256::new();
+        hasher.update(REFERENCE_ANCHOR_DOMAIN);
+        hasher.update(token);
+        hasher.update(feature.to_le_bytes());
+        let digest = hasher.finalize();
+        let bucket = u16::from_le_bytes([digest[0], digest[1]]) as usize % vector.len();
+        vector[bucket] += if digest[2] & 1 == 0 {
+            REFERENCE_ANCHOR_WEIGHT
+        } else {
+            -REFERENCE_ANCHOR_WEIGHT
+        };
+    }
+}
+
+fn scale_add_token_features(vector: &mut [f32], token: &[u8]) {
+    for feature in 0_u32..4 {
+        let mut hasher = Sha256::new();
+        hasher.update(token);
+        hasher.update(feature.to_le_bytes());
+        let digest = hasher.finalize();
+        let bucket = u16::from_le_bytes([digest[0], digest[1]]) as usize % vector.len();
+        vector[bucket] += if digest[2] & 1 == 0 { 1.0 } else { -1.0 };
+    }
+}
+
+fn scale_embedding_context(path: &str) -> Result<String, AttestError> {
+    let stem = path
+        .strip_suffix(".md")
+        .ok_or_else(|| unsafe_state("scale embedding path is not markdown"))?;
+    if stem.is_empty()
+        || stem
+            .bytes()
+            .any(|byte| !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
     {
         return Err(unsafe_state(
-            "index tree projection differs from immutable HEAD tree",
+            "scale embedding path violates the frozen alphabet",
         ));
     }
-    let embedded: u64 = db
-        .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
-        .map_err(|error| other("index embeddings", error))?;
-    let chunk_vectors: u64 = db
-        .query_row("SELECT COUNT(*) FROM chunk_vec", [], |row| row.get(0))
-        .map_err(|error| other("index chunk vectors", error))?;
-    let image_vectors: u64 = db
-        .query_row("SELECT COUNT(*) FROM image_vec", [], |row| row.get(0))
-        .map_err(|error| other("index image vectors", error))?;
-    if embedded != 0 || chunk_vectors != 0 || image_vectors != 0 {
-        return Err(unsafe_state(
-            "offline scale index contains embedding/vector rows",
-        ));
-    }
-    recheck_sqlite(index, &sources, "scope index")?;
-    Ok((physical, chunks.len() as u64, embedded))
+    Ok(stem.replace('-', " "))
+}
+
+fn scale_embedding_id(text_hash: &str, context: &str) -> Result<String, AttestError> {
+    let value = serde_json::json!({
+        "context": context,
+        "dimensions": 768,
+        "distance": "cosine",
+        "modality": "multimodal",
+        "profile_hash": DETERMINISTIC_EMBEDDING_PROFILE_HASH,
+        "spec_version": 1,
+        "target_hash": text_hash,
+        "target_type": "chunk",
+    });
+    let bytes = canonical_json_bytes(&value).map_err(|error| other("embedding identity", error))?;
+    Ok(hash_bytes(&bytes))
 }
 
 fn canonical_sql(sql: &str) -> String {
@@ -1590,6 +2403,7 @@ fn attest_scope_inner(
         return Err(incomplete("scope has no HEAD"));
     }
     let config_binding = check_config(&kio).map_err(corruption)?;
+    let tool_lock_binding = check_working_tool_lock(&kio).map_err(corruption)?;
     let refs = required_dir(&kio, "refs", "refs").map_err(corruption)?;
     let refs_before = cap_fs::stat(&kio, Path::new("refs"), cap_fs::FollowSymlinks::No)
         .map_err(|error| other("refs", error))?;
@@ -1610,7 +2424,26 @@ fn attest_scope_inner(
     let identity: ScopeIdentity = typed_json(&identity_bytes, "scope identity")?;
     let expected_scope_path = fixture.root().join(&scope.name);
     let expected_scope_path = expected_scope_path.to_string_lossy();
-    let expected_source_bytes = scope.files.iter().map(|source| source.bytes).sum::<usize>();
+    let approval_manifest = (scope.expected_base_chunks != scope.expected_current_chunks)
+        .then(|| {
+            scale_spec::frozen_manifest(scope_profile(scope)?, scale_spec::ScaleLane::CurrentText)
+                .map_err(|error| unsafe_state(format!("cannot rebuild approval manifest: {error}")))
+        })
+        .transpose()?;
+    let approval_scope = approval_manifest
+        .as_ref()
+        .and_then(|manifest| {
+            manifest
+                .scopes
+                .iter()
+                .find(|candidate| candidate.name == scope.name)
+        })
+        .unwrap_or(scope);
+    let expected_source_bytes = approval_scope
+        .files
+        .iter()
+        .map(|source| source.bytes)
+        .sum::<usize>();
     let approval = &identity.scan_approval;
     if identity.scope_id.is_empty()
         || identity.kio_format_version != env!("CARGO_PKG_VERSION")
@@ -1622,7 +2455,7 @@ fn attest_scope_inner(
         || approval.approval_method != "yes"
         || approval.kio_version != env!("CARGO_PKG_VERSION")
         || !is_hash(&approval.effective_ignore_hash)
-        || approval.estimated_file_count != scope.files.len()
+        || approval.estimated_file_count != approval_scope.files.len()
         || approval.estimated_total_bytes != expected_source_bytes
         || approval.estimated_markdownize_usd != 0.0
         || approval.estimated_embedding_usd != 0.0
@@ -1630,20 +2463,29 @@ fn attest_scope_inner(
         return Err(unsafe_state("scope identity does not bind this corpus"));
     }
     let mut cas_bindings = Vec::with_capacity(scope.files.len().saturating_mul(3) + 2);
-    let normalized = attest_cas(&kio, &head, scope, &mut cas_bindings).map_err(corruption)?;
+    let cas_evidence = attest_cas(&kio, &head, scope, &mut cas_bindings).map_err(corruption)?;
     let index = required_dir(&kio, "index", "scope index").map_err(corruption)?;
     let index_before = cap_fs::stat(&kio, Path::new("index"), cap_fs::FollowSymlinks::No)
         .map_err(|e| other("scope index", e))?;
-    let (chunks, ledger_binding) =
-        attest_ledger(&index, &head, scope, &normalized).map_err(corruption)?;
-    let (physical, current, embedded) =
-        attest_index(&index, &head, scope, &chunks, &normalized).map_err(corruption)?;
+    let ledger =
+        attest_ledger(&kio, &index, &head, &cas_evidence, &mut cas_bindings).map_err(corruption)?;
+    let population = attest_index(
+        &kio,
+        &index,
+        &head,
+        scope,
+        &ledger,
+        &cas_evidence,
+        &mut cas_bindings,
+    )
+    .map_err(corruption)?;
     no_runtime(&kio)?;
     config_binding.recheck()?;
+    tool_lock_binding.recheck()?;
     head_binding.recheck()?;
     branch_binding.recheck()?;
     identity_binding.recheck()?;
-    ledger_binding.recheck()?;
+    ledger.binding.recheck()?;
     recheck_cas(&kio, &cas_bindings)?;
     unchanged(&refs, "heads", &heads_before, "refs/heads")?;
     unchanged(&kio, "refs", &refs_before, "refs")?;
@@ -1657,11 +2499,16 @@ fn attest_scope_inner(
     Ok(ScopeEvidence {
         name: scope.name.clone(),
         scope_id: identity.scope_id,
+        base_head: cas_evidence.base_head,
+        base_tree: cas_evidence.base_tree,
         head,
+        tree: cas_evidence.final_tree,
         source_files: scope.files.len(),
-        current_chunks: current,
-        physical_chunks: physical,
-        embedded_chunks: embedded,
+        current_chunks: population.current,
+        physical_chunks: population.physical,
+        embedded_chunks: population.embedded,
+        historical_only_chunks: population.historical_only,
+        deleted_chunks: population.deleted,
     })
 }
 
@@ -1820,7 +2667,63 @@ pub fn attest_ready(fixture: &ValidatedFixture) -> Result<CorpusEvidence, Attest
     let scopes = attest_scopes(fixture)?;
     let registry_rows = attest_registry(fixture, &scopes)?;
     let current_chunks = scopes.iter().map(|s| s.current_chunks).sum();
-    if current_chunks < fixture.profile().minimum_current_chunks() as u64 {
+    let historical_only_chunks = scopes.iter().map(|s| s.historical_only_chunks).sum();
+    let deleted_chunks = scopes.iter().map(|s| s.deleted_chunks).sum();
+    let physical_chunks = scopes.iter().map(|s| s.physical_chunks).sum();
+    let embedded_chunks = scopes.iter().map(|s| s.embedded_chunks).sum();
+    let edit_operations = fixture
+        .manifest()
+        .history_operations
+        .iter()
+        .filter(|operation| operation.kind == scale_spec::HistoryOperationKind::Edit)
+        .count();
+    let rename_operations = fixture
+        .manifest()
+        .history_operations
+        .iter()
+        .filter(|operation| operation.kind == scale_spec::HistoryOperationKind::Rename)
+        .count();
+    let delete_operations = fixture
+        .manifest()
+        .history_operations
+        .iter()
+        .filter(|operation| operation.kind == scale_spec::HistoryOperationKind::Delete)
+        .count();
+    let expected = &fixture.manifest().expected_population;
+    if current_chunks != expected.current_chunks as u64
+        || historical_only_chunks != expected.historical_only_chunks as u64
+        || deleted_chunks != expected.deleted_chunks as u64
+        || physical_chunks != expected.physical_cas_chunks as u64
+        || embedded_chunks != expected.physical_cas_chunks as u64
+        || edit_operations != expected.edit_operations
+        || rename_operations != expected.rename_operations
+        || delete_operations != expected.delete_operations
+        || match fixture.lane() {
+            scale_spec::ScaleLane::CurrentText => {
+                edit_operations != 0
+                    || rename_operations != 0
+                    || delete_operations != 0
+                    || scopes
+                        .iter()
+                        .any(|scope| scope.base_head.is_some() || scope.base_tree.is_some())
+            }
+            scale_spec::ScaleLane::HistoryOverlay => {
+                edit_operations != scopes.len()
+                    || rename_operations != scopes.len()
+                    || delete_operations != scopes.len()
+                    || scopes
+                        .iter()
+                        .any(|scope| scope.base_head.is_none() || scope.base_tree.is_none())
+            }
+        }
+    {
+        return Err(unsafe_state(
+            "prepared population differs from frozen manifest",
+        ));
+    }
+    if current_chunks < fixture.profile().minimum_current_chunks() as u64
+        && fixture.lane() == scale_spec::ScaleLane::CurrentText
+    {
         return Err(unsafe_state(
             "prepared corpus is below the frozen workload threshold",
         ));
@@ -1828,11 +2731,18 @@ pub fn attest_ready(fixture: &ValidatedFixture) -> Result<CorpusEvidence, Attest
     Ok(CorpusEvidence {
         scopes,
         registry_rows,
+        edit_operations,
+        rename_operations,
+        delete_operations,
         current_chunks,
+        historical_only_chunks,
+        deleted_chunks,
+        physical_chunks,
+        embedded_chunks,
     })
 }
 
-/// Bind a ready Rust-v2 fixture, independently re-attest it under the fixture
+/// Bind a ready Rust-v3 fixture, independently re-attest it under the fixture
 /// lock, and create one canonical receipt.  Publication is intentionally
 /// create-only: an existing (including old-format) receipt is never adopted.
 pub fn attest_and_publish(
@@ -1848,13 +2758,22 @@ pub fn attest_and_publish(
         attestor: scale_spec::ATTESTOR_ID.to_owned(),
         fixture_id: scale_spec::FIXTURE_ID.to_owned(),
         profile: fixture.profile(),
+        lane: fixture.lane(),
         manifest_hash: scale_spec::manifest_hash(fixture.manifest())
             .map_err(|error| unsafe_state(format!("cannot bind manifest: {error}")))?,
-        content_root_hash: fixture.manifest().content_root_hash.clone(),
+        base_content_root_hash: fixture.manifest().base_content_root_hash.clone(),
+        overlay_content_root_hash: fixture.manifest().overlay_content_root_hash.clone(),
         corpus: fixture.root().to_string_lossy().into_owned(),
         scopes: evidence.scopes.clone(),
         registry_rows: evidence.registry_rows,
+        edit_operations: evidence.edit_operations,
+        rename_operations: evidence.rename_operations,
+        delete_operations: evidence.delete_operations,
         current_chunks: evidence.current_chunks,
+        historical_only_chunks: evidence.historical_only_chunks,
+        deleted_chunks: evidence.deleted_chunks,
+        physical_chunks: evidence.physical_chunks,
+        embedded_chunks: evidence.embedded_chunks,
     };
     let mut bytes = canonical_json_bytes(
         &serde_json::to_value(&report)
@@ -1872,7 +2791,7 @@ pub fn attest_and_publish(
         Some(path) if exact_clean_path(path, &official)? && is_official_output(path, &fixture)? => {
             publish_official(&fixture, &bytes)?
         }
-        Some(path) => publish_external(path, &fixture, &bytes)?,
+        Some(path) => publish_external(path, &[&fixture], &bytes)?,
     };
     fixture.recheck()?;
     Ok(AttestationSummary {
@@ -1896,7 +2815,7 @@ fn verify_report(bytes: &[u8], expected: &AttestationReport) -> Result<(), Attes
         return Err(unsafe_state("attestation is not canonical JCS plus LF"));
     }
     let actual: AttestationReport = serde_json::from_slice(bytes)
-        .map_err(|error| unsafe_state(format!("attestation violates v2 schema: {error}")))?;
+        .map_err(|error| unsafe_state(format!("attestation violates v3 schema: {error}")))?;
     if &actual != expected {
         return Err(unsafe_state("attestation does not bind current evidence"));
     }
@@ -1914,13 +2833,22 @@ pub(crate) fn validate_benchmark_attestation(
         attestor: scale_spec::ATTESTOR_ID.to_owned(),
         fixture_id: scale_spec::FIXTURE_ID.to_owned(),
         profile: fixture.profile(),
+        lane: fixture.lane(),
         manifest_hash: scale_spec::manifest_hash(fixture.manifest())
             .map_err(|e| unsafe_state(format!("cannot bind manifest: {e}")))?,
-        content_root_hash: fixture.manifest().content_root_hash.clone(),
+        base_content_root_hash: fixture.manifest().base_content_root_hash.clone(),
+        overlay_content_root_hash: fixture.manifest().overlay_content_root_hash.clone(),
         corpus: fixture.root().to_string_lossy().into_owned(),
         scopes: evidence.scopes.clone(),
         registry_rows: evidence.registry_rows,
+        edit_operations: evidence.edit_operations,
+        rename_operations: evidence.rename_operations,
+        delete_operations: evidence.delete_operations,
         current_chunks: evidence.current_chunks,
+        historical_only_chunks: evidence.historical_only_chunks,
+        deleted_chunks: evidence.deleted_chunks,
+        physical_chunks: evidence.physical_chunks,
+        embedded_chunks: evidence.embedded_chunks,
     };
     let root = fixture.try_clone_root()?;
     let (bytes, _) = observed_regular(
@@ -2020,9 +2948,14 @@ fn publish_official(fixture: &ValidatedFixture, bytes: &[u8]) -> Result<PathBuf,
 
 fn publish_external(
     path: &Path,
-    fixture: &ValidatedFixture,
+    fixtures: &[&ValidatedFixture],
     bytes: &[u8],
 ) -> Result<PathBuf, AttestError> {
+    if fixtures.is_empty() {
+        return Err(unsafe_state(
+            "external attestation output has no protected corpus boundary",
+        ));
+    }
     if !path.is_absolute() {
         return Err(unsafe_state("external attestation output must be absolute"));
     }
@@ -2035,10 +2968,15 @@ fn publish_external(
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .ok_or_else(|| unsafe_state("external output has an unsafe leaf"))?;
-    let corpus = fixture.try_clone_root()?;
-    let corpus_identity = crate::boundary::directory_identity_from_file(&corpus)
-        .map_err(|error| other("corpus", error))?
-        .ok_or_else(|| unsafe_state("corpus root is not a real directory"))?;
+    let corpus_identities = fixtures
+        .iter()
+        .map(|fixture| {
+            let corpus = fixture.try_clone_root()?;
+            crate::boundary::directory_identity_from_file(&corpus)
+                .map_err(|error| other("corpus", error))?
+                .ok_or_else(|| unsafe_state("corpus root is not a real directory"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut handle = cap_fs::open_ambient_dir(Path::new("/"), ambient_authority())
         .map_err(|error| other("external output root", error))?;
     let mut retained_path = PathBuf::from("/");
@@ -2062,7 +3000,7 @@ fn publish_external(
             if public_identity != Some(retained_identity) {
                 return Err(unsafe_state("external output parent changed while binding"));
             }
-            if retained_identity == corpus_identity {
+            if corpus_identities.contains(&retained_identity) {
                 return Err(unsafe_state(
                     "external attestation output aliases the corpus",
                 ));
@@ -2085,15 +3023,15 @@ fn publish_external(
     Ok(retained_path.join(name))
 }
 
-/// Shared strict external artifact publication for scale v2 consumers.  The
+/// Shared strict external artifact publication for scale v3 consumers.  The
 /// caller supplies canonical bytes; this routine owns all nofollow/alias and
 /// create-only publication checks.
 pub(crate) fn publish_external_artifact(
     path: &Path,
-    fixture: &ValidatedFixture,
+    fixtures: &[&ValidatedFixture],
     bytes: &[u8],
 ) -> Result<PathBuf, AttestError> {
-    publish_external(path, fixture, bytes)
+    publish_external(path, fixtures, bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2209,24 +3147,38 @@ mod publication_tests {
 
     fn report() -> AttestationReport {
         AttestationReport {
-            schema_version: 2,
+            schema_version: scale_spec::SCHEMA_VERSION,
             attestor: scale_spec::ATTESTOR_ID.to_owned(),
             fixture_id: scale_spec::FIXTURE_ID.to_owned(),
             profile: scale_spec::ScaleProfile::Tiny,
+            lane: scale_spec::ScaleLane::CurrentText,
             manifest_hash: format!("sha256:{}", "a".repeat(64)),
-            content_root_hash: format!("sha256:{}", "b".repeat(64)),
+            base_content_root_hash: format!("sha256:{}", "b".repeat(64)),
+            overlay_content_root_hash: format!("sha256:{}", "c".repeat(64)),
             corpus: "/tmp/fixture".to_owned(),
             scopes: vec![ScopeEvidence {
                 name: "research-papers".to_owned(),
                 scope_id: "scope".to_owned(),
+                base_head: None,
+                base_tree: None,
                 head: format!("sha256:{}", "c".repeat(64)),
+                tree: format!("sha256:{}", "d".repeat(64)),
                 source_files: 1,
                 current_chunks: 3,
                 physical_chunks: 3,
                 embedded_chunks: 0,
+                historical_only_chunks: 0,
+                deleted_chunks: 0,
             }],
             registry_rows: 1,
+            edit_operations: 0,
+            rename_operations: 0,
+            delete_operations: 0,
             current_chunks: 3,
+            historical_only_chunks: 0,
+            deleted_chunks: 0,
+            physical_chunks: 3,
+            embedded_chunks: 0,
         }
     }
 
@@ -2260,7 +3212,194 @@ mod publication_tests {
     }
 
     #[test]
-    fn report_is_strict_canonical_lf_v2() {
+    fn history_creation_provenance_retains_the_introduction_path() {
+        let raw = format!("sha256:{}", "a".repeat(64));
+        let new_raw = format!("sha256:{}", "b".repeat(64));
+        let base = BTreeMap::from([("document-0001.md".to_owned(), raw.clone())]);
+        let final_sources = BTreeMap::from([
+            ("renamed-document-0001.md".to_owned(), raw.clone()),
+            ("document-0000.md".to_owned(), new_raw.clone()),
+        ]);
+        let paths = creation_source_paths(&base, &final_sources).unwrap();
+        assert_eq!(
+            paths.get(&raw).map(String::as_str),
+            Some("document-0001.md")
+        );
+        assert_eq!(
+            paths.get(&new_raw).map(String::as_str),
+            Some("document-0000.md")
+        );
+    }
+
+    #[test]
+    fn expected_snapshot_paths_are_matched_independently_of_manifest_order() {
+        let expected_scope = ScaleScope {
+            name: "scope".to_owned(),
+            persona: "persona".to_owned(),
+            use_case: "use-case".to_owned(),
+            expected_files: 3,
+            expected_base_chunks: 0,
+            expected_current_chunks: 0,
+            // Full history manifests are ordered by their edit operations, while
+            // production trees are lexicographically ordered by pathname.
+            files: vec![
+                scale_spec::ScaleFile {
+                    path: "renamed-document-0001.md".to_owned(),
+                    raw_hash: format!("sha256:{}", "a".repeat(64)),
+                    bytes: 1,
+                    expected_chunks: 0,
+                },
+                scale_spec::ScaleFile {
+                    path: "document-0000.md".to_owned(),
+                    raw_hash: format!("sha256:{}", "b".repeat(64)),
+                    bytes: 1,
+                    expected_chunks: 0,
+                },
+                scale_spec::ScaleFile {
+                    path: "document-0003.md".to_owned(),
+                    raw_hash: format!("sha256:{}", "c".repeat(64)),
+                    bytes: 1,
+                    expected_chunks: 0,
+                },
+            ],
+        };
+
+        let expected_by_path = expected_files_by_path(&expected_scope, "history").unwrap();
+        let production_tree_order = [
+            "document-0000.md",
+            "document-0003.md",
+            "renamed-document-0001.md",
+        ];
+        assert_eq!(
+            production_tree_order
+                .iter()
+                .map(|path| expected_by_path.get(*path).unwrap().raw_hash.as_str())
+                .collect::<Vec<_>>(),
+            [
+                format!("sha256:{}", "b".repeat(64)),
+                format!("sha256:{}", "c".repeat(64)),
+                format!("sha256:{}", "a".repeat(64)),
+            ]
+        );
+
+        let tool_profile_hash = format!("sha256:{}", "d".repeat(64));
+        let manifest_hash = format!("sha256:{}", "e".repeat(64));
+        let normalized = expected_scope
+            .files
+            .iter()
+            .map(|expected| {
+                (
+                    expected.raw_hash.clone(),
+                    NormalizedSourceEvidence {
+                        tool_profile_hash: tool_profile_hash.clone(),
+                        r#gen: 1,
+                        manifest_hash: manifest_hash.clone(),
+                        units: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect();
+        let rows = production_tree_order
+            .iter()
+            .map(|path| {
+                let expected = expected_by_path.get(*path).unwrap();
+                (
+                    (*path).to_owned(),
+                    expected.raw_hash.clone(),
+                    Some(tool_profile_hash.clone()),
+                    Some(1),
+                    Some(manifest_hash.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_index_tree_projection_rows(&rows, &expected_scope, &normalized).unwrap();
+
+        let mut duplicate_substitution = rows.clone();
+        duplicate_substitution[2] = duplicate_substitution[0].clone();
+        assert!(
+            validate_index_tree_projection_rows(
+                &duplicate_substitution,
+                &expected_scope,
+                &normalized
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auto_commit_timestamp_requires_a_real_utc_second() {
+        assert!(scale_spec::is_canonical_utc_second("2026-08-26T12:34:56Z"));
+        for malformed in [
+            "aaaa-aa-aaTaa:aa:aaZ",
+            "2026-99-99T99:99:99Z",
+            "2026-02-29T12:34:56Z",
+            "2026/08/26T12:34:56Z",
+            "2026-08-26 12:34:56Z",
+            "2026-08-26T12:34:56+00:00",
+        ] {
+            assert!(
+                !scale_spec::is_canonical_utc_second(malformed),
+                "{malformed}"
+            );
+        }
+        assert!(scale_spec::is_canonical_utc_second("2024-02-29T23:59:59Z"));
+    }
+
+    #[test]
+    fn independent_scale_vector_is_stable_and_exact_width() {
+        let first = scale_embedding_vector("body needle", "document 0001");
+        let second = scale_embedding_vector("body needle", "document 0001");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 768 * 4);
+        assert_ne!(
+            first,
+            scale_embedding_vector("body haystack", "document 0001")
+        );
+    }
+
+    #[test]
+    fn deterministic_tool_lock_preimage_matches_the_frozen_identity() {
+        assert_eq!(
+            hash_bytes(&deterministic_tool_lock_bytes().unwrap()),
+            DETERMINISTIC_TOOL_LOCK_HASH
+        );
+    }
+
+    #[test]
+    fn working_tool_lock_requires_deterministic_display_provenance() {
+        let lock = |kind: &str, mode: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "spec_version": 1,
+                "prepare": {
+                    "tool_id": "prepare_default",
+                    "profile_hash": DETERMINISTIC_PREPARE_PROFILE_HASH,
+                    "kind": "deterministic_library"
+                },
+                "markdown": {
+                    "tool_id": "deterministic_builtin",
+                    "profile_hash": DETERMINISTIC_MARKDOWN_PROFILE_HASH,
+                    "kind": "deterministic_library",
+                    "capabilities": ["baseline", "text_passthrough"]
+                },
+                "embedding": {
+                    "tool_id": "kio_eval_deterministic_embedding",
+                    "profile_hash": DETERMINISTIC_EMBEDDING_PROFILE_HASH,
+                    "dimensions": 768,
+                    "distance": "cosine",
+                    "modality": "multimodal",
+                    "kind": kind,
+                    "mode": mode
+                }
+            }))
+            .unwrap()
+        };
+        validate_working_tool_lock(&lock("deterministic_library", "deterministic")).unwrap();
+        assert!(validate_working_tool_lock(&lock("online_api", "deterministic")).is_err());
+        assert!(validate_working_tool_lock(&lock("deterministic_library", "online")).is_err());
+    }
+
+    #[test]
+    fn report_is_strict_canonical_lf_v3() {
         let receipt = report();
         let bytes = canonical(&receipt);
         verify_report(&bytes, &receipt).unwrap();
@@ -2321,15 +3460,39 @@ mod publication_tests {
         let temp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(temp.path()).unwrap();
         let corpus = base.join("corpus");
-        crate::scale_fixture::generate(&corpus, scale_spec::ScaleProfile::Tiny, false).unwrap();
+        crate::scale_fixture::generate(
+            &corpus,
+            scale_spec::ScaleProfile::Tiny,
+            scale_spec::ScaleLane::CurrentText,
+            false,
+        )
+        .unwrap();
         let fixture = crate::scale_fixture::bind_ready(&corpus).unwrap();
+        let history = base.join("history");
+        crate::scale_fixture::generate(
+            &history,
+            scale_spec::ScaleProfile::Tiny,
+            scale_spec::ScaleLane::HistoryOverlay,
+            false,
+        )
+        .unwrap();
+        let history_fixture = crate::scale_fixture::bind_ready(&history).unwrap();
         let bytes = canonical(&report());
-        assert!(publish_external(&corpus.join("unexpected.json"), &fixture, &bytes).is_err());
+        assert!(publish_external(&corpus.join("unexpected.json"), &[&fixture], &bytes).is_err());
+        assert!(
+            publish_external(
+                &history.join("cross-lane.json"),
+                &[&fixture, &history_fixture],
+                &bytes,
+            )
+            .is_err()
+        );
         let alias = base.join("alias");
         symlink(&corpus, &alias).unwrap();
-        assert!(publish_external(&alias.join("receipt.json"), &fixture, &bytes).is_err());
+        assert!(publish_external(&alias.join("receipt.json"), &[&fixture], &bytes).is_err());
         assert!(!corpus.join("unexpected.json").exists());
         assert!(!corpus.join("receipt.json").exists());
+        assert!(!history.join("cross-lane.json").exists());
     }
 
     #[cfg(unix)]

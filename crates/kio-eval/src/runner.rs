@@ -27,10 +27,10 @@ use thiserror::Error;
 
 use crate::{
     RecallResult, ResultKey,
+    attestation::parse_pointer_wire,
     manifest::{HistoryOperation, frozen_history_plan},
     recall_at_k,
 };
-use kio_search::EvidencePointer;
 
 pub const RECALL_K: usize = 10;
 pub const HISTORY_QUERY_COUNT: usize = 16;
@@ -964,66 +964,18 @@ fn optional_string(value: Option<&Value>, field: &str) -> Result<Option<String>,
 }
 
 fn parse_pointer(value: &Value) -> Result<EvidencePointerRecord, String> {
-    let pointer: EvidencePointer = serde_json::from_value(value.clone())
-        .map_err(|error| format!("invalid evidence_pointer: {error}"))?;
-    pointer
-        .validate()
-        .map_err(|error| format!("invalid evidence_pointer: {error}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "evidence_pointer is not an object".to_owned())?;
-    let schema_version = object
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "missing or invalid Evidence schema_version".to_owned())?;
-    if schema_version != 1 {
-        return Err("invalid Evidence schema_version".to_owned());
-    }
-    let heading_path = match object.get("heading_path") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(values)) => Some(
-            values
-                .iter()
-                .map(|value| nonempty_string(value, "heading_path"))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some(_) => return Err("invalid Evidence field: heading_path".to_owned()),
-    };
+    let pointer =
+        parse_pointer_wire(value).map_err(|error| format!("invalid evidence_pointer: {error}"))?;
     Ok(EvidencePointerRecord {
-        commit: nonempty_string(
-            object
-                .get("commit")
-                .ok_or_else(|| "missing Evidence field: commit".to_owned())?,
-            "commit",
-        )?,
-        tree: optional_string(object.get("tree"), "tree")?,
-        raw_hash: nonempty_string(
-            object
-                .get("raw_hash")
-                .ok_or_else(|| "missing Evidence field: raw_hash".to_owned())?,
-            "raw_hash",
-        )?,
-        tool_profile_hash: nonempty_string(
-            object
-                .get("tool_profile_hash")
-                .ok_or_else(|| "missing Evidence field: tool_profile_hash".to_owned())?,
-            "tool_profile_hash",
-        )?,
-        chunk_hash: nonempty_string(
-            object
-                .get("chunk_hash")
-                .ok_or_else(|| "missing Evidence field: chunk_hash".to_owned())?,
-            "chunk_hash",
-        )?,
-        path_at_commit: optional_string(object.get("path_at_commit"), "path_at_commit")?,
-        section_id: optional_string(object.get("section_id"), "section_id")?,
-        heading_path,
-        scope_id: nonempty_string(
-            object
-                .get("scope_id")
-                .ok_or_else(|| "missing Evidence field: scope_id".to_owned())?,
-            "scope_id",
-        )?,
+        commit: pointer.commit,
+        tree: pointer.tree,
+        raw_hash: pointer.raw_hash,
+        tool_profile_hash: pointer.tool_profile_hash,
+        chunk_hash: pointer.chunk_hash,
+        path_at_commit: pointer.path_at_commit,
+        section_id: pointer.section_id,
+        heading_path: pointer.heading_path,
+        scope_id: pointer.scope_id,
     })
 }
 
@@ -1745,7 +1697,7 @@ mod tests {
 
     fn pointer() -> Value {
         let hash = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
-        serde_json::json!({"schema_version":1,"commit":hash('c'),"raw_hash":hash('a'),"tool_profile_hash":hash('b'),"chunk_hash":hash('d'),"scope_id":"scope","path_at_commit":"a.md","section_id":"heading"})
+        serde_json::json!({"schema_version":1,"commit":hash('c'),"raw_hash":hash('a'),"tool_profile_hash":hash('b'),"chunk_hash":hash('d'),"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","path_at_commit":"a.md","section_id":"heading"})
     }
     fn outcome(code: i32, stdout: Value) -> SearchOutcome {
         SearchOutcome {

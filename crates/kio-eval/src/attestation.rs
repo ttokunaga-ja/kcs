@@ -10,14 +10,13 @@ use std::{collections::HashMap, fs, io::Read, path::Path};
 use cap_primitives::fs as cap_fs;
 use kio_core::{
     cas::{
-        ChunkObject, MAX_CHUNK_OBJECT_BYTES, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES,
-        ObjectKind, canonical_json_bytes, hash_bytes, is_hash,
+        MAX_CHUNK_OBJECT_BYTES, MAX_COMMIT_OBJECT_BYTES, MAX_TREE_OBJECT_BYTES,
+        canonical_json_bytes, hash_bytes, is_hash,
     },
-    dag::{CommitObject, MAX_TREE_ENTRIES, TreeObject},
     scope::KIO_FORMAT_VERSION,
 };
-use kio_search::EvidencePointer;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::boundary::BoundCorpus;
@@ -30,6 +29,178 @@ const MAX_SCOPE_RECORD_BYTES: u64 = 64 * 1024;
 /// Current rerank dumps have a stricter source-render budget than generic
 /// historical attestation, so reject a large chunk before JSON parsing.
 const MAX_CURRENT_CHUNK_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TREE_ENTRIES: usize = 10_000;
+const MAX_COMMIT_PARENTS: usize = 64;
+
+/// Evaluator-owned wire contract for a returned Evidence Pointer.
+///
+/// Acceptance deliberately does not deserialize the production issuer's type
+/// or call its validator. This shape is frozen here so a shared bug cannot make
+/// both issuance and independent acceptance agree on malformed evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PointerWire {
+    pub(crate) schema_version: u64,
+    pub(crate) commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tree: Option<String>,
+    pub(crate) raw_hash: String,
+    pub(crate) tool_profile_hash: String,
+    pub(crate) chunk_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path_at_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) heading_path: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) section_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) byte_start: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) byte_end: Option<u64>,
+    pub(crate) scope_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scope_path: Option<String>,
+}
+
+impl PointerWire {
+    fn validate(&self) -> AttestationResult<()> {
+        if self.schema_version != 1 {
+            return Err(PointerAttestationError::new(
+                "unsupported evaluator pointer schema version",
+            ));
+        }
+        for (field, hash) in [
+            ("commit", self.commit.as_str()),
+            ("raw_hash", self.raw_hash.as_str()),
+            ("tool_profile_hash", self.tool_profile_hash.as_str()),
+            ("chunk_hash", self.chunk_hash.as_str()),
+        ] {
+            if !is_hash(hash) {
+                return Err(PointerAttestationError::new(format!(
+                    "pointer {field} is not a canonical SHA-256 hash"
+                )));
+            }
+        }
+        if self.tree.as_deref().is_some_and(|tree| !is_hash(tree)) {
+            return Err(PointerAttestationError::new(
+                "pointer tree is not a canonical SHA-256 hash",
+            ));
+        }
+        if !is_ulid(&self.scope_id) {
+            return Err(PointerAttestationError::new(
+                "pointer scope_id is not a canonical ULID",
+            ));
+        }
+        if self
+            .path_at_commit
+            .as_deref()
+            .is_some_and(|path| !is_logical_direct_child(path))
+        {
+            return Err(PointerAttestationError::new(
+                "pointer path_at_commit is not a logical direct child",
+            ));
+        }
+        if self.heading_path.as_ref().is_some_and(|headings| {
+            headings.is_empty() || headings.len() > 64 || headings.iter().any(String::is_empty)
+        }) {
+            return Err(PointerAttestationError::new(
+                "pointer heading_path is invalid",
+            ));
+        }
+        if self.section_id.as_ref().is_some_and(String::is_empty)
+            || self.scope_path.as_ref().is_some_and(String::is_empty)
+        {
+            return Err(PointerAttestationError::new(
+                "pointer contains an empty optional string",
+            ));
+        }
+        match (self.byte_start, self.byte_end) {
+            (None, None) => {}
+            (Some(start), Some(end)) if start <= end => {}
+            _ => {
+                return Err(PointerAttestationError::new(
+                    "pointer byte range must be an ordered complete pair",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn parse_pointer_wire(value: &Value) -> AttestationResult<PointerWire> {
+    let pointer: PointerWire = serde_json::from_value(value.clone())
+        .map_err(|_| PointerAttestationError::new("result has invalid evidence_pointer"))?;
+    pointer.validate()?;
+    Ok(pointer)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitWire {
+    commit_type: String,
+    created_at: String,
+    message: String,
+    object_type: String,
+    parents: Vec<String>,
+    stats: CommitStatsWire,
+    tool_lock_hash: String,
+    tree: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    purged_raws: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitStatsWire {
+    files_added: u64,
+    files_modified: u64,
+    files_deleted: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TreeWire {
+    chunking_config_hash: String,
+    entries: Vec<TreeEntryWire>,
+    object_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TreeEntryWire {
+    path: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+    raw_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normalize: Option<NormalizeWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NormalizeWire {
+    tool_profile_hash: String,
+    r#gen: u64,
+    manifest_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChunkWire {
+    spec_version: u64,
+    raw_hash: String,
+    tool_profile_hash: String,
+    r#gen: u64,
+    unit_key: String,
+    unit_content_hash: String,
+    heading_path: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    section_id: Option<String>,
+    byte_start: u64,
+    byte_end: u64,
+    text_hash: String,
+    text: String,
+}
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("{message}")]
@@ -73,8 +244,8 @@ struct ObjectKey {
 
 #[derive(Debug, Clone)]
 enum CachedObject {
-    Commit(CommitObject),
-    Tree(TreeObject),
+    Commit(CommitWire),
+    Tree(TreeWire),
     Failure(PointerAttestationError),
 }
 
@@ -147,13 +318,8 @@ impl PointerAttestor {
         &mut self,
         value: &Value,
         require_normalize: bool,
-    ) -> AttestationResult<ChunkObject> {
-        let pointer: EvidencePointer = serde_json::from_value(value.clone())
-            .map_err(|_| PointerAttestationError::new("result has invalid evidence_pointer"))?;
-        let validated = pointer
-            .validate()
-            .map_err(|error| PointerAttestationError::new(error.to_string()))?;
-        let pointer = validated.as_pointer();
+    ) -> AttestationResult<ChunkWire> {
+        let pointer = parse_pointer_wire(value)?;
         let path = pointer
             .path_at_commit
             .as_deref()
@@ -223,6 +389,23 @@ impl PointerAttestor {
                 "chunk generation does not match tree path",
             ));
         }
+        if pointer
+            .heading_path
+            .as_ref()
+            .is_some_and(|headings| headings != &chunk.heading_path)
+            || pointer
+                .section_id
+                .as_ref()
+                .is_some_and(|section| chunk.section_id.as_ref() != Some(section))
+            || pointer
+                .byte_start
+                .is_some_and(|start| start != chunk.byte_start)
+            || pointer.byte_end.is_some_and(|end| end != chunk.byte_end)
+        {
+            return Err(PointerAttestationError::new(
+                "pointer fields do not match the immutable chunk object",
+            ));
+        }
         // Chunk reads may be large enough for a writer to advance HEAD while
         // they are in progress. Recheck the retained authority records before
         // handing current-tree text to the dump consumer.
@@ -269,7 +452,7 @@ impl PointerAttestor {
             .collect()
     }
 
-    fn read_commit(&mut self, scope_id: &str, hash: &str) -> AttestationResult<CommitObject> {
+    fn read_commit(&mut self, scope_id: &str, hash: &str) -> AttestationResult<CommitWire> {
         match self.read_object(scope_id, AttestedObjectKind::Commit, hash)? {
             CachedObject::Commit(commit) => Ok(commit),
             _ => Err(PointerAttestationError::new("commit cache type mismatch")),
@@ -290,7 +473,7 @@ impl PointerAttestor {
         read_current_head(&kio_dir)
     }
 
-    fn read_tree(&mut self, scope_id: &str, hash: &str) -> AttestationResult<TreeObject> {
+    fn read_tree(&mut self, scope_id: &str, hash: &str) -> AttestationResult<TreeWire> {
         match self.read_object(scope_id, AttestedObjectKind::Tree, hash)? {
             CachedObject::Tree(tree) => Ok(tree),
             _ => Err(PointerAttestationError::new("tree cache type mismatch")),
@@ -302,7 +485,7 @@ impl PointerAttestor {
         scope_id: &str,
         hash: &str,
         max_bytes: u64,
-    ) -> AttestationResult<ChunkObject> {
+    ) -> AttestationResult<ChunkWire> {
         // Chunk text can be very large. Do not cache or clone it: the caller
         // either validates it once or moves it directly into the dump.
         let kio_dir = self
@@ -374,31 +557,21 @@ impl PointerAttestor {
         }
         match kind {
             AttestedObjectKind::Commit | AttestedObjectKind::Tree => {
-                let object_kind = match kind {
-                    AttestedObjectKind::Commit => ObjectKind::Commit,
-                    AttestedObjectKind::Tree => ObjectKind::Tree,
+                let kind_dir = match kind {
+                    AttestedObjectKind::Commit => "commits",
+                    AttestedObjectKind::Tree => "trees",
                     AttestedObjectKind::Chunk => unreachable!(),
                 };
-                let bytes = self.read_cas_object(&kio_dir, object_kind, hash)?;
+                let bytes = self.read_cas_object(&kio_dir, kind_dir, hash, kind.max_bytes())?;
                 match kind {
                     AttestedObjectKind::Commit => {
-                        let commit: CommitObject =
-                            serde_json::from_slice(&bytes).map_err(|_| {
-                                PointerAttestationError::new("commit object is not valid JSON")
-                            })?;
-                        commit.validate().map_err(core_error)?;
+                        let commit: CommitWire = exact_canonical_json(&bytes, "commit object")?;
+                        validate_commit_wire(&commit)?;
                         Ok(CachedObject::Commit(commit))
                     }
                     AttestedObjectKind::Tree => {
-                        let tree: TreeObject = serde_json::from_slice(&bytes).map_err(|_| {
-                            PointerAttestationError::new("tree object is not valid JSON")
-                        })?;
-                        tree.validate().map_err(core_error)?;
-                        if tree.entries.len() > MAX_TREE_ENTRIES {
-                            return Err(PointerAttestationError::new(
-                                "tree entries exceed attestation bound",
-                            ));
-                        }
+                        let tree: TreeWire = exact_canonical_json(&bytes, "tree object")?;
+                        validate_tree_wire(&tree)?;
                         Ok(CachedObject::Tree(tree))
                     }
                     AttestedObjectKind::Chunk => unreachable!(),
@@ -413,15 +586,11 @@ impl PointerAttestor {
     fn read_cas_object(
         &mut self,
         kio_dir: &fs::File,
-        object_kind: ObjectKind,
+        kind_dir: &str,
         hash: &str,
+        max_bytes: u64,
     ) -> AttestationResult<Vec<u8>> {
-        let result = read_cap_cas_file(
-            kio_dir,
-            object_kind.directory(),
-            hash,
-            object_kind.max_bytes(),
-        );
+        let result = read_cap_cas_file(kio_dir, kind_dir, hash, max_bytes);
         let (bytes, consumed) = match result {
             Ok(value) => value,
             Err(error) => {
@@ -441,7 +610,7 @@ impl PointerAttestor {
         kio_dir: &fs::File,
         hash: &str,
         max_bytes: u64,
-    ) -> AttestationResult<ChunkObject> {
+    ) -> AttestationResult<ChunkWire> {
         let result = read_cap_cas_file(kio_dir, "chunks", hash, max_bytes);
         let (bytes, consumed) = match result {
             Ok(value) => value,
@@ -451,22 +620,11 @@ impl PointerAttestor {
             }
         };
         self.charge(consumed)?;
-        let chunk: ChunkObject = serde_json::from_slice(&bytes)
-            .map_err(|_| PointerAttestationError::new("chunk object schema is invalid"))?;
-        chunk.validate().map_err(core_error)?;
-        if chunk.identity_hash().map_err(core_error)? != hash {
+        let chunk: ChunkWire = exact_canonical_json(&bytes, "chunk object")?;
+        validate_chunk_wire(&chunk)?;
+        if chunk_identity_hash(&chunk)? != hash {
             return Err(PointerAttestationError::new(
                 "chunk semantic identity does not match its fan-out key",
-            ));
-        }
-        let canonical = canonical_json_bytes(
-            &serde_json::to_value(&chunk)
-                .map_err(|_| PointerAttestationError::new("chunk object schema is invalid"))?,
-        )
-        .map_err(core_error)?;
-        if canonical != bytes {
-            return Err(PointerAttestationError::new(
-                "chunk object is not canonical JSON",
             ));
         }
         Ok(chunk)
@@ -486,8 +644,180 @@ impl PointerAttestor {
     }
 }
 
-fn core_error(error: kio_core::KioError) -> PointerAttestationError {
-    PointerAttestationError::new(error.to_string())
+fn exact_canonical_json<T>(bytes: &[u8], label: &str) -> AttestationResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| PointerAttestationError::new(format!("{label} is not valid JSON")))?;
+    let canonical = canonical_json_bytes(&value)
+        .map_err(|_| PointerAttestationError::new(format!("{label} cannot be canonicalized")))?;
+    if canonical != bytes {
+        return Err(PointerAttestationError::new(format!(
+            "{label} is not canonical JSON"
+        )));
+    }
+    serde_json::from_value(value)
+        .map_err(|_| PointerAttestationError::new(format!("{label} schema is invalid")))
+}
+
+fn validate_commit_wire(commit: &CommitWire) -> AttestationResult<()> {
+    if commit.object_type != "commit"
+        || !matches!(
+            commit.commit_type.as_str(),
+            "manual" | "auto" | "repaired" | "purged"
+        )
+        || !is_hash(&commit.tree)
+        || !is_hash(&commit.tool_lock_hash)
+        || commit.parents.len() > MAX_COMMIT_PARENTS
+        || commit.parents.iter().any(|parent| !is_hash(parent))
+        || !is_valid_created_at(&commit.created_at)
+    {
+        return Err(PointerAttestationError::new(
+            "commit object violates evaluator wire invariants",
+        ));
+    }
+    if commit.commit_type == "purged" {
+        if commit.purged_raws.is_empty()
+            || commit.purged_raws.iter().any(|raw| !is_hash(raw))
+            || commit
+                .purged_raws
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+        {
+            return Err(PointerAttestationError::new(
+                "purged commit has invalid raw identity set",
+            ));
+        }
+    } else if !commit.purged_raws.is_empty() {
+        return Err(PointerAttestationError::new(
+            "non-purged commit contains purged raw identities",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tree_wire(tree: &TreeWire) -> AttestationResult<()> {
+    if tree.object_type != "tree"
+        || !is_hash(&tree.chunking_config_hash)
+        || tree.entries.len() > MAX_TREE_ENTRIES
+    {
+        return Err(PointerAttestationError::new(
+            "tree object violates evaluator wire invariants",
+        ));
+    }
+    let mut previous: Option<&str> = None;
+    for entry in &tree.entries {
+        if previous.is_some_and(|path| path.as_bytes() >= entry.path.as_bytes())
+            || !is_logical_direct_child(&entry.path)
+            || entry.entry_type != "file"
+            || !is_hash(&entry.raw_hash)
+            || entry.normalize.as_ref().is_some_and(|normalize| {
+                !is_hash(&normalize.tool_profile_hash) || !is_hash(&normalize.manifest_hash)
+            })
+        {
+            return Err(PointerAttestationError::new(
+                "tree entry violates evaluator wire invariants",
+            ));
+        }
+        previous = Some(&entry.path);
+    }
+    Ok(())
+}
+
+fn validate_chunk_wire(chunk: &ChunkWire) -> AttestationResult<()> {
+    if chunk.spec_version != 1
+        || !is_hash(&chunk.raw_hash)
+        || !is_hash(&chunk.tool_profile_hash)
+        || !is_hash(&chunk.unit_content_hash)
+        || !is_hash(&chunk.text_hash)
+        || chunk.unit_key.is_empty()
+        || chunk.byte_start > chunk.byte_end
+        || hash_bytes(chunk.text.as_bytes()) != chunk.text_hash
+    {
+        return Err(PointerAttestationError::new(
+            "chunk object violates evaluator wire invariants",
+        ));
+    }
+    Ok(())
+}
+
+fn chunk_identity_hash(chunk: &ChunkWire) -> AttestationResult<String> {
+    let mut identity = Map::new();
+    identity.insert("byte_end".into(), Value::from(chunk.byte_end));
+    identity.insert("byte_start".into(), Value::from(chunk.byte_start));
+    identity.insert("gen".into(), Value::from(chunk.r#gen));
+    identity.insert(
+        "heading_path".into(),
+        serde_json::to_value(&chunk.heading_path)
+            .map_err(|_| PointerAttestationError::new("chunk identity is not serializable"))?,
+    );
+    identity.insert("raw_hash".into(), Value::from(chunk.raw_hash.clone()));
+    if let Some(section_id) = chunk.section_id.as_ref().filter(|value| !value.is_empty()) {
+        identity.insert("section_id".into(), Value::from(section_id.clone()));
+    }
+    identity.insert("spec_version".into(), Value::from(1));
+    identity.insert(
+        "tool_profile_hash".into(),
+        Value::from(chunk.tool_profile_hash.clone()),
+    );
+    identity.insert("unit_key".into(), Value::from(chunk.unit_key.clone()));
+    identity.insert(
+        "unit_content_hash".into(),
+        Value::from(chunk.unit_content_hash.clone()),
+    );
+    let canonical = canonical_json_bytes(&Value::Object(identity))
+        .map_err(|_| PointerAttestationError::new("chunk identity cannot be canonicalized"))?;
+    Ok(hash_bytes(&canonical))
+}
+
+fn is_logical_direct_child(path: &str) -> bool {
+    !path.is_empty() && path != "." && path != ".." && !path.contains('/') && !path.contains('\0')
+}
+
+fn is_valid_created_at(value: &str) -> bool {
+    let Some(body) = value.strip_suffix('Z') else {
+        return false;
+    };
+    let datetime = match body.split_once('.') {
+        Some((head, fraction))
+            if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            head
+        }
+        Some(_) => return false,
+        None => body,
+    };
+    let bytes = datetime.as_bytes();
+    if bytes.len() != 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| !matches!(index, 4 | 7 | 10 | 13 | 16) && !byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let field = |start: usize, end: usize| datetime[start..end].parse::<u32>().unwrap_or(u32::MAX);
+    let year = field(0, 4);
+    let month = field(5, 7);
+    let day = field(8, 10);
+    let hour = field(11, 13);
+    let minute = field(14, 16);
+    let second = field(17, 19);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
 }
 
 fn read_scope_id(kio_dir: &fs::File) -> AttestationResult<String> {
@@ -665,7 +995,7 @@ mod tests {
 
     use crate::boundary::BoundCorpus;
 
-    use super::{PointerAttestor, read_cap_regular_file};
+    use super::{PointerAttestor, parse_pointer_wire, read_cap_regular_file};
 
     const RAW_HASH: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
@@ -675,12 +1005,34 @@ mod tests {
         "sha256:3333333333333333333333333333333333333333333333333333333333333333";
     const TOOL_LOCK_HASH: &str =
         "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    const FROZEN_VALID_POINTER: &str = r#"{"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:6666666666666666666666666666666666666666666666666666666666666666","path_at_commit":"document.md","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":1,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888","tree":"sha256:9999999999999999999999999999999999999999999999999999999999999999"}"#;
+    const FROZEN_MALFORMED_POINTERS: [&str; 5] = [
+        r#"{"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:6666666666666666666666666666666666666666666666666666666666666666","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":2,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888"}"#,
+        r#"{"byte_start":1,"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:6666666666666666666666666666666666666666666666666666666666666666","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":1,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888"}"#,
+        r#"{"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":1,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888"}"#,
+        r#"{"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:6666666666666666666666666666666666666666666666666666666666666666","path_at_commit":"../victim.md","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":1,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888"}"#,
+        r#"{"chunk_hash":"sha256:5555555555555555555555555555555555555555555555555555555555555555","commit":"sha256:6666666666666666666666666666666666666666666666666666666666666666","raw_hash":"sha256:7777777777777777777777777777777777777777777777777777777777777777","schema_version":1,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","tool_profile_hash":"sha256:8888888888888888888888888888888888888888888888888888888888888888","unexpected":true}"#,
+    ];
 
     struct Fixture {
         root: TempDir,
         scope: String,
         pointer: Value,
         chunk: ChunkObject,
+    }
+
+    #[test]
+    fn evaluator_pointer_wire_accepts_frozen_valid_and_rejects_malformed_vectors() {
+        let value: Value = serde_json::from_str(FROZEN_VALID_POINTER).unwrap();
+        parse_pointer_wire(&value).unwrap();
+        assert_eq!(
+            kio_core::cas::canonical_json_bytes(&value).unwrap(),
+            FROZEN_VALID_POINTER.as_bytes()
+        );
+        for malformed in FROZEN_MALFORMED_POINTERS {
+            let value: Value = serde_json::from_str(malformed).unwrap();
+            assert!(parse_pointer_wire(&value).is_err(), "accepted {malformed}");
+        }
     }
 
     fn fixture() -> Fixture {
@@ -755,6 +1107,17 @@ mod tests {
             }),
             chunk,
         }
+    }
+
+    fn write_raw_cas(scope_root: &std::path::Path, kind: &str, hash: &str, bytes: &[u8]) {
+        let digest = hash.strip_prefix("sha256:").unwrap();
+        let parent = scope_root
+            .join(".kio/objects")
+            .join(kind)
+            .join(&digest[..2])
+            .join(&digest[2..4]);
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(parent.join(digest), bytes).unwrap();
     }
 
     #[test]
@@ -879,6 +1242,15 @@ mod tests {
         wrong_profile["tool_profile_hash"] =
             json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         assert!(attestor.attest(&wrong_profile).is_err());
+
+        let mut wrong_range = fixture.pointer.clone();
+        wrong_range["byte_start"] = json!(1);
+        wrong_range["byte_end"] = json!(fixture.chunk.byte_end);
+        assert!(attestor.attest(&wrong_range).is_err());
+
+        let mut wrong_heading = fixture.pointer.clone();
+        wrong_heading["heading_path"] = json!(["forged heading"]);
+        assert!(attestor.attest(&wrong_heading).is_err());
     }
 
     #[test]
@@ -891,6 +1263,33 @@ mod tests {
             .unwrap();
         let mut pointer = fixture.pointer.clone();
         pointer["chunk_hash"] = json!(chunk_hash);
+
+        let mut attestor =
+            PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))
+                .unwrap();
+        assert!(attestor.attest(&pointer).is_err());
+    }
+
+    #[test]
+    fn rejects_hash_matching_but_noncanonical_commit_bytes() {
+        let fixture = fixture();
+        let scope_root = fixture.root.path().join(&fixture.scope);
+        let commit = fixture.pointer["commit"].as_str().unwrap();
+        let digest = commit.strip_prefix("sha256:").unwrap();
+        let canonical = fs::read(
+            scope_root
+                .join(".kio/objects/commits")
+                .join(&digest[..2])
+                .join(&digest[2..4])
+                .join(digest),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&canonical).unwrap();
+        let noncanonical = serde_json::to_vec_pretty(&value).unwrap();
+        let noncanonical_hash = hash_bytes(&noncanonical);
+        write_raw_cas(&scope_root, "commits", &noncanonical_hash, &noncanonical);
+        let mut pointer = fixture.pointer.clone();
+        pointer["commit"] = json!(noncanonical_hash);
 
         let mut attestor =
             PointerAttestor::new(fixture.root.path(), std::slice::from_ref(&fixture.scope))

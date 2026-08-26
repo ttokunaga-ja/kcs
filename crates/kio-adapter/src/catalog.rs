@@ -8,6 +8,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::deterministic::DeterministicAdapter;
+use crate::deterministic_embedding::{
+    DETERMINISTIC_EVAL_EMBEDDING_PROFILE, DeterministicEmbeddingAdapter,
+};
 #[cfg(debug_assertions)]
 use crate::gemini_embedding::GeminiEmbeddingClient;
 use crate::gemini_embedding::{ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN, GeminiEmbeddingAdapter};
@@ -106,12 +109,11 @@ mod test_control {
 pub const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 #[cfg(debug_assertions)]
 pub const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
-/// The offline embedding seam. Separate from `TEST_ADOPTED_EMBEDDING_ENV` on
-/// purpose: that one names Gemini's seams and is read at 21 call sites across
-/// 17 test files, none of which should change meaning because a second
-/// implementation appeared.
-#[cfg(debug_assertions)]
-pub const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
+/// Exact activation for the evaluator's deterministic scale embedding adapter.
+///
+/// This is deliberately not a test control: it is available in release builds
+/// so the evaluator uses the same index/search adapter wire as production.
+pub const DETERMINISTIC_EVAL_EMBEDDING_ENV: &str = "KIO_EVAL_DETERMINISTIC_EMBED";
 /// The offline markdownize seam, separate from both of the above for the same
 /// reason they are separate from each other: a test that drives local OCR must
 /// not accidentally switch the embedding backend, or vice versa.
@@ -874,6 +876,9 @@ pub enum EmbeddingExecution {
     Online(AdoptedEmbeddingExecution),
     /// The `offline_api` adapter, reached over loopback (07 §3).
     Offline(LocalEmbeddingExecution),
+    /// The Rust-only evaluator adapter, selected only by the exact evaluator
+    /// environment contract.
+    DeterministicEvaluator,
 }
 
 impl EmbeddingExecution {
@@ -882,6 +887,7 @@ impl EmbeddingExecution {
         match self {
             Self::Online(_) => ExecutionMode::OnlineApi,
             Self::Offline(_) => ExecutionMode::OfflineApi,
+            Self::DeterministicEvaluator => ExecutionMode::DeterministicLibrary,
         }
     }
 
@@ -899,7 +905,7 @@ impl EmbeddingExecution {
     pub fn online_seam(self) -> Option<AdoptedEmbeddingExecution> {
         match self {
             Self::Online(seam) => Some(seam),
-            Self::Offline(_) => None,
+            Self::Offline(_) | Self::DeterministicEvaluator => None,
         }
     }
 }
@@ -912,12 +918,19 @@ impl EmbeddingExecution {
 /// resolve to `Option`, let `None` mean "this lane is unavailable, degrade".
 #[must_use]
 pub fn active_embedding_execution() -> Option<EmbeddingExecution> {
+    match std::env::var_os(DETERMINISTIC_EVAL_EMBEDDING_ENV) {
+        Some(value) if value == DETERMINISTIC_EVAL_EMBEDDING_PROFILE => {
+            return Some(EmbeddingExecution::DeterministicEvaluator);
+        }
+        // A supplied but unknown evaluator selector must not silently select a
+        // live or declared backend. The public resolver currently represents
+        // unavailability as `None`, so this is its fail-closed outcome.
+        Some(_) => return None,
+        None => {}
+    }
     #[cfg(debug_assertions)]
     let adapters = crate::debug_test_control().adapters;
-    if let Some(local) = active_local_embedding_execution(
-        #[cfg(debug_assertions)]
-        Some(&adapters),
-    ) {
+    if let Some(local) = active_local_embedding_execution() {
         return Some(EmbeddingExecution::Offline(local));
     }
     active_adopted_embedding_execution_from(
@@ -927,36 +940,8 @@ pub fn active_embedding_execution() -> Option<EmbeddingExecution> {
     .map(EmbeddingExecution::Online)
 }
 
-/// The offline test seam. Mirrors `KIO_TEST_GEMINI_EMBED`'s shape so hermetic
-/// tests drive the offline path the same way they drive the online one.
-fn active_local_embedding_execution(
-    #[cfg(debug_assertions)] adapters: Option<&kio_core::test_control::AdapterTestControl>,
-) -> Option<LocalEmbeddingExecution> {
-    #[cfg(debug_assertions)]
-    let test_mode = adapters.and_then(|adapters| match &adapters.local_embed {
-        kio_core::test_control::Selector::Known(kio_core::test_control::LocalEmbedMode::Mock) => {
-            Some("mock")
-        }
-        kio_core::test_control::Selector::Unset | kio_core::test_control::Selector::Unknown(_) => {
-            None
-        }
-    });
-    #[cfg(not(debug_assertions))]
-    let test_mode: Option<&str> = None;
-    match test_mode {
-        #[cfg(debug_assertions)]
-        Some("mock") => Some(LocalEmbeddingExecution::Mock),
-        #[cfg(not(debug_assertions))]
-        Some("mock") => None,
-        Some(_) => None,
-        // A declared `offline_api` adapter activates with no auth of its own:
-        // there is nothing to authenticate to. `real_embedding_activation`'s
-        // `auth.is_some()` signal is meaningless here, so the declaration
-        // itself is the signal — and what it selects is the real backend. The
-        // mock is reachable only through the env seam above, so a declaration
-        // can never silently mint mock vectors into a real corpus.
-        None => declared_offline_embedding().then_some(LocalEmbeddingExecution::Real),
-    }
+fn active_local_embedding_execution() -> Option<LocalEmbeddingExecution> {
+    declared_offline_embedding().then_some(LocalEmbeddingExecution::Real)
 }
 
 /// Whether `tools.toml` declares the embedding role as `offline_api`.
@@ -977,10 +962,7 @@ fn declared_offline_embedding() -> bool {
 /// model catalog and `outputDimensionality` and describe no other provider.
 pub fn embedding_adapter_for(execution: EmbeddingExecution) -> Result<Box<dyn EmbeddingAdapter>> {
     match execution {
-        #[cfg(debug_assertions)]
-        EmbeddingExecution::Offline(LocalEmbeddingExecution::Mock) => {
-            Ok(Box::new(LocalEmbeddingAdapter::mock()))
-        }
+        EmbeddingExecution::DeterministicEvaluator => Ok(Box::new(DeterministicEmbeddingAdapter)),
         // Same shape as the online `Real` arm below: the declaration is
         // revalidated here rather than trusted from load time, and the parts
         // only the real backend needs (url, model) are read at the point of
@@ -1146,6 +1128,18 @@ pub fn declared_embedding_profile_for(execution: EmbeddingExecution) -> Declared
             DeclaredEmbeddingProfile {
                 tool_id: profile.adapter_id,
                 dimensions: u64::from(crate::local_embedding::LOCAL_EMBEDDING_DIMENSIONS),
+                distance: "cosine".to_owned(),
+                modality: "multimodal".to_owned(),
+                profile_hash: profile.tool_profile_hash,
+            }
+        }
+        EmbeddingExecution::DeterministicEvaluator => {
+            let profile = DeterministicEmbeddingAdapter.profile();
+            DeclaredEmbeddingProfile {
+                tool_id: profile.adapter_id,
+                dimensions: u64::from(
+                    crate::deterministic_embedding::DETERMINISTIC_EVAL_EMBEDDING_DIMENSIONS,
+                ),
                 distance: "cosine".to_owned(),
                 modality: "multimodal".to_owned(),
                 profile_hash: profile.tool_profile_hash,
@@ -1450,6 +1444,31 @@ mod tests {
 
         let other = deterministic_embedding_vector("別のクエリ", 768);
         assert_ne!(a, other);
+    }
+
+    #[test]
+    fn deterministic_evaluator_activation_is_exact_and_fail_closed() {
+        let _env_lock = kio_core::test_control::test_env_lock().lock().unwrap();
+        let _selector = kio_core::test_control::TestEnvGuard::set(
+            DETERMINISTIC_EVAL_EMBEDDING_ENV,
+            DETERMINISTIC_EVAL_EMBEDDING_PROFILE,
+        );
+        assert_eq!(
+            active_embedding_execution(),
+            Some(EmbeddingExecution::DeterministicEvaluator)
+        );
+        let adapter = embedding_adapter_for(EmbeddingExecution::DeterministicEvaluator).unwrap();
+        assert_eq!(
+            adapter.profile().execution_mode,
+            ExecutionMode::DeterministicLibrary
+        );
+        drop(_selector);
+
+        let _invalid = kio_core::test_control::TestEnvGuard::set(
+            DETERMINISTIC_EVAL_EMBEDDING_ENV,
+            "not-a-profile",
+        );
+        assert_eq!(active_embedding_execution(), None);
     }
 
     #[test]

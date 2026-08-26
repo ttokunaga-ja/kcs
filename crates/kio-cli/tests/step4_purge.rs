@@ -23,7 +23,7 @@ const CHILD_ENV_DENYLIST: &[&str] = &[
     // Set per-command by the embedded fixtures only, so an ambient value cannot
     // silently turn the `--offline` fixtures into embedding ones.
     "KIO_TEST_GEMINI_EMBED",
-    "KIO_TEST_LOCAL_EMBED",
+    "KIO_EVAL_DETERMINISTIC_EMBED",
     "KIO_TEST_MISTRAL_OCR",
 ];
 
@@ -1066,9 +1066,9 @@ fn ct4_purge_deletes_the_image_vector_of_a_locally_embedded_document() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("figures.pdf"), "%PDF-1.4\ntest\n").unwrap();
     json_success(&dir, &["init"]);
-    let local = [("KIO_TEST_LOCAL_EMBED", "mock")];
+    let local = [("KIO_EVAL_DETERMINISTIC_EMBED", "scale-v3")];
     let both = [
-        ("KIO_TEST_LOCAL_EMBED", "mock"),
+        ("KIO_EVAL_DETERMINISTIC_EMBED", "scale-v3"),
         ("KIO_TEST_MISTRAL_OCR", "mock_link_image"),
     ];
     json_success_with_env(&dir, &["index", "--approve"], &local);

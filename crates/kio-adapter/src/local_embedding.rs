@@ -21,19 +21,12 @@
 //! the identity describe a token stream the adapter does not produce, which is
 //! precisely the failure 07 §5.3 exists to prevent. See the dated ruling there.
 //!
-//! # Two backends, two identities
-//!
-//! [`LocalEmbeddingExecution::Real`] talks to the measured model.
-//! [`LocalEmbeddingExecution::Mock`] is how the offline path's *semantics* (no
-//! consent gate, no ledger charge, no batch lane) are exercised in CI, which
-//! has no GPU and never will. They deliberately hash to **different** profiles:
-//! a mock vector and a real one are not interchangeable, and 03 §7 has only the
-//! profile hash to tell them apart with.
+//! The sole backend talks to the measured local model. Evaluator-only
+//! deterministic embeddings live in their own adapter module, so this runtime
+//! can never silently mint evaluator vectors under a local-model identity.
 
 use serde_json::{Value, json};
 
-#[cfg(debug_assertions)]
-use crate::catalog::deterministic_embedding_vector;
 use crate::http_policy::{
     EMBEDDING_RESPONSE_MAX_BYTES, HttpPolicy, HttpResponse, authenticated_agent, read_json_bounded,
     require_success,
@@ -119,8 +112,6 @@ pub const IMAGE_OBJECT_CAPABILITY: &str = "image_object";
 /// the online `Real` arm reads its configured model there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalEmbeddingExecution {
-    #[cfg(debug_assertions)]
-    Mock,
     Real,
 }
 
@@ -323,11 +314,8 @@ fn violation(message: impl Into<String>) -> AdapterError {
     AdapterError::ContractViolation(message.into())
 }
 
-/// Which implementation an adapter instance holds. `Mock` carries no client
-/// because it makes no request.
+/// The measured local backend carried by an adapter instance.
 enum Backend<C> {
-    #[cfg(debug_assertions)]
-    Mock,
     Real(C),
 }
 
@@ -335,18 +323,6 @@ enum Backend<C> {
 pub struct LocalEmbeddingAdapter<C = EnvLocalEmbeddingClient> {
     backend: Backend<C>,
     dimensions: u32,
-}
-
-impl LocalEmbeddingAdapter<EnvLocalEmbeddingClient> {
-    /// The CI-only backend. Deterministic vectors, its own profile identity.
-    #[cfg(debug_assertions)]
-    #[must_use]
-    pub fn mock() -> Self {
-        Self {
-            backend: Backend::Mock,
-            dimensions: LOCAL_EMBEDDING_DIMENSIONS,
-        }
-    }
 }
 
 impl<C: LocalEmbeddingClient> LocalEmbeddingAdapter<C> {
@@ -365,8 +341,6 @@ impl<C> LocalEmbeddingAdapter<C> {
     #[must_use]
     fn execution(&self) -> LocalEmbeddingExecution {
         match self.backend {
-            #[cfg(debug_assertions)]
-            Backend::Mock => LocalEmbeddingExecution::Mock,
             Backend::Real(_) => LocalEmbeddingExecution::Real,
         }
     }
@@ -377,11 +351,6 @@ impl<C> LocalEmbeddingAdapter<C> {
 /// `runtime_kind` is `"local"` and carries no serving backend: 07 §5.3 (3)
 /// forbids naming one here, so that the same weights served two ways stay one
 /// profile and a backend swap costs no re-embed.
-///
-/// The mock and the real backend differ in exactly the fields that say *which
-/// model produced this vector*. That is what makes their hashes differ, which
-/// is what stops a corpus embedded by the mock from being searched with real
-/// query vectors.
 ///
 /// Free-standing because callers that only need the identity — 03 §7's
 /// compatibility gate, the tool-lock entry — must not have to conjure a
@@ -405,33 +374,19 @@ pub fn profile_value_for(execution: LocalEmbeddingExecution) -> Value {
     let fields = profile
         .as_object_mut()
         .expect("profile literal is an object");
-    match execution {
-        // The mock has no weights and no template, so it pins its own identity
-        // rather than borrowing a real model's and minting vectors under it.
-        // Omitting the template fields is the honest record: there is no
-        // template to hash.
-        #[cfg(debug_assertions)]
-        LocalEmbeddingExecution::Mock => {
-            fields.insert(
-                "model_version_pin".to_owned(),
-                json!("kio-local-embedding-mock-1.0.0"),
-            );
-        }
-        LocalEmbeddingExecution::Real => {
-            fields.insert(
-                "model_version_pin".to_owned(),
-                json!(LOCAL_EMBEDDING_MODEL_VERSION_PIN),
-            );
-            fields.insert(
-                "prompt_template_hash".to_owned(),
-                json!(LOCAL_EMBEDDING_PROMPT_TEMPLATE_HASH),
-            );
-            fields.insert(
-                "prompt_template_id".to_owned(),
-                json!(LOCAL_EMBEDDING_PROMPT_TEMPLATE_ID),
-            );
-        }
-    }
+    let _ = execution;
+    fields.insert(
+        "model_version_pin".to_owned(),
+        json!(LOCAL_EMBEDDING_MODEL_VERSION_PIN),
+    );
+    fields.insert(
+        "prompt_template_hash".to_owned(),
+        json!(LOCAL_EMBEDDING_PROMPT_TEMPLATE_HASH),
+    );
+    fields.insert(
+        "prompt_template_id".to_owned(),
+        json!(LOCAL_EMBEDDING_PROMPT_TEMPLATE_ID),
+    );
     profile
 }
 
@@ -480,26 +435,6 @@ impl<C: LocalEmbeddingClient> EmbeddingAdapter for LocalEmbeddingAdapter<C> {
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let vectors = match &self.backend {
-            #[cfg(debug_assertions)]
-            Backend::Mock => request
-                .items
-                .iter()
-                .map(|item| {
-                    Ok(EmbeddingVector {
-                        id: item.id.clone(),
-                        // An image item carries no `text`; seeding on the empty
-                        // string would give every image in a corpus the same
-                        // vector, and vector search would rank them all
-                        // identically. The id of an image item is its content
-                        // hash, so it distinguishes images exactly as far as
-                        // their bytes do.
-                        vector: deterministic_embedding_vector(
-                            item.text.as_deref().unwrap_or(item.id.as_str()),
-                            self.dimensions as usize,
-                        ),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?,
             // One request per item, in order. 07 §5.3 (2) forbids the batching
             // form, and the local server's continuous batching is what absorbs
             // the cost — so this loop is the design, not a naive first draft.
@@ -579,7 +514,7 @@ mod tests {
 
     #[test]
     fn profile_declares_the_offline_posture() {
-        let profile = LocalEmbeddingAdapter::mock().profile();
+        let profile = LocalEmbeddingAdapter::with_client(RecordingClient::new()).profile();
         assert_eq!(profile.execution_mode, ExecutionMode::OfflineApi);
         assert_eq!(profile.adapter_id, LOCAL_EMBEDDING_ADAPTER_ID);
         // The three properties the offline forks key off (07 §3 / 07 §5.5).
@@ -596,7 +531,7 @@ mod tests {
     /// `multimodal` is not the same claim.
     #[test]
     fn declares_the_image_object_capability_that_the_online_adapter_does_not() {
-        let local = LocalEmbeddingAdapter::mock().profile();
+        let local = LocalEmbeddingAdapter::with_client(RecordingClient::new()).profile();
         assert!(
             local
                 .capability_flags
@@ -614,40 +549,12 @@ mod tests {
         );
     }
 
-    /// An image item has no `text`. Seeding on the empty string would collapse
-    /// every image in a corpus onto one vector.
-    #[test]
-    fn image_items_embed_distinctly_without_text() {
-        let adapter = LocalEmbeddingAdapter::mock();
-        let items = ["sha256:aaa", "sha256:bbb"]
-            .iter()
-            .map(|hash| EmbeddingItem {
-                id: (*hash).to_owned(),
-                text: None,
-                path: Some(format!("/cache/{hash}")),
-                mime: Some("image/png".to_owned()),
-            })
-            .collect::<Vec<_>>();
-        let response = adapter
-            .embed(EmbeddingRequest {
-                input_type: EmbeddingInputType::ImageObject,
-                items,
-                idempotency_token: None,
-            })
-            .unwrap();
-        assert_eq!(response.vectors.len(), 2);
-        assert_ne!(response.vectors[0].vector, response.vectors[1].vector);
-        for vector in &response.vectors {
-            validate_cosine_vector(&vector.vector, LOCAL_EMBEDDING_DIMENSIONS).unwrap();
-        }
-    }
-
     /// 07 §5.3: the serving backend must not appear anywhere in the hashed
     /// profile, so that the same weights served two ways stay one vector space
     /// and a backend swap does not force a re-embed.
     #[test]
     fn profile_identity_names_no_serving_backend() {
-        let value = profile_value_for(LocalEmbeddingExecution::Mock);
+        let value = profile_value_for(LocalEmbeddingExecution::Real);
         let rendered = value.to_string().to_ascii_lowercase();
         for backend in ["vllm", "sglang", "llama.cpp", "llamacpp", "ollama", "mlx"] {
             assert!(
@@ -663,7 +570,7 @@ mod tests {
     /// it only has the profile hash to do it with.
     #[test]
     fn local_profile_hash_differs_from_the_online_one() {
-        let local = LocalEmbeddingAdapter::mock().profile();
+        let local = LocalEmbeddingAdapter::with_client(RecordingClient::new()).profile();
         let online = crate::catalog::adopted_embedding_profile();
         assert_ne!(local.tool_profile_hash, online.tool_profile_hash);
         // Same width and metric, though — `chunk_vec` is one table (04 §4.3),
@@ -673,7 +580,7 @@ mod tests {
 
     #[test]
     fn embed_returns_one_usable_vector_per_input_in_order() {
-        let adapter = LocalEmbeddingAdapter::mock();
+        let adapter = LocalEmbeddingAdapter::with_client(RecordingClient::new());
         let response = adapter.embed(request(&["alpha", "beta", "gamma"])).unwrap();
         assert_eq!(response.vectors.len(), 3);
         assert_eq!(response.dimensions, LOCAL_EMBEDDING_DIMENSIONS);
@@ -694,7 +601,7 @@ mod tests {
 
     #[test]
     fn embed_reports_no_usage_because_there_is_no_invoice() {
-        let response = LocalEmbeddingAdapter::mock()
+        let response = LocalEmbeddingAdapter::with_client(RecordingClient::new())
             .embed(request(&["alpha"]))
             .unwrap();
         assert!(response.usage.is_none());
@@ -706,7 +613,7 @@ mod tests {
     fn prefers_the_sync_lane() {
         use crate::traits::PreferredRequestKind;
         assert_eq!(
-            LocalEmbeddingAdapter::mock().preferred_request_kind(),
+            LocalEmbeddingAdapter::with_client(RecordingClient::new()).preferred_request_kind(),
             PreferredRequestKind::Sync
         );
     }
@@ -964,20 +871,11 @@ mod tests {
         );
     }
 
-    /// A mock vector and a measured one are not interchangeable, and 03 §7 has
-    /// only the profile hash to notice with.
     #[test]
-    fn the_mock_and_the_measured_backend_are_different_vector_spaces() {
-        let mock = profile_value_for(LocalEmbeddingExecution::Mock);
-        let real = profile_value_for(LocalEmbeddingExecution::Real);
-        assert_ne!(
-            profile_for(LocalEmbeddingExecution::Mock).tool_profile_hash,
-            profile_for(LocalEmbeddingExecution::Real).tool_profile_hash
-        );
-        // The mock names no template because it has none. Recording one would
-        // be the same lie as recording an instruction Kio does not send.
-        assert!(mock.get("prompt_template_hash").is_none());
-        assert!(real.get("prompt_template_hash").is_some());
+    fn local_embedding_identity_always_names_the_measured_template() {
+        let profile = profile_value_for(LocalEmbeddingExecution::Real);
+        assert!(profile.get("prompt_template_hash").is_some());
+        assert!(profile.get("prompt_template_id").is_some());
     }
 
     /// The transport itself, against a socket. The fake client above proves

@@ -1,4 +1,4 @@
-//! Descriptor-bound preparation for a generated scale v2 corpus.
+//! Descriptor-bound preparation for a generated scale v3 corpus.
 //!
 //! This deliberately does not infer a fixture shape from the filesystem.  The
 //! generator-bound manifest is the authority and every child is executed from
@@ -36,12 +36,22 @@ const DEVICE_SUBDIRS: [&str; 6] = ["home", "config", "cache", "data", "state", "
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const OFFLINE_INDEX_ARGS: [&str; 4] = ["--json", "index", "--offline", "--yes"];
-const PREPARE_REPORT_TEMP_NAME: &str = ".kio-scale-prepare-v2.tmp";
+const PREPARE_REPORT_TEMP_NAME: &str = ".kio-scale-prepare-v3.tmp";
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum IndexExpectation {
-    Repair { files: usize },
-    RegistryNoop { files: usize },
+    Repair {
+        files: usize,
+        embeddings: usize,
+    },
+    Overlay {
+        files: usize,
+        embeddings: usize,
+        parent: String,
+    },
+    RegistryNoop {
+        files: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,12 +286,17 @@ struct PrepareReport {
     preparer: String,
     fixture_id: String,
     profile: scale_spec::ScaleProfile,
+    lane: scale_spec::ScaleLane,
     manifest_hash: String,
     corpus: String,
     binary: BinaryBinding,
     scopes: Vec<PreparedScopeReceipt>,
     registry_rows: usize,
     current_chunks: u64,
+    historical_only_chunks: u64,
+    deleted_chunks: u64,
+    physical_chunks: u64,
+    embedded_chunks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +311,10 @@ struct BinaryBinding {
 struct PreparedScopeReceipt {
     name: String,
     scope_id: String,
-    head: String,
+    base_head: Option<String>,
+    final_head: String,
+    base_tree: Option<String>,
+    final_tree: String,
     source_files: usize,
     current_chunks: u64,
     physical_chunks: u64,
@@ -377,10 +395,18 @@ pub fn prepare(corpus: &Path, bin: &Path) -> Result<PrepareSummary, ScalePrepare
     DescriptorExecutable::preflight_platform().map_err(process_error)?;
     let bin = absolutize_binary(bin)?;
     let executable = DescriptorExecutable::bind_build_artifact(&bin).map_err(process_error)?;
-    let fixture = bind_ready(corpus)?;
-    let _lock = fixture.lock()?;
+    let mut fixture = bind_ready(corpus)?;
+    let lock = fixture.lock()?;
     fixture.recheck()?;
     executable.recheck_original().map_err(process_error)?;
+
+    // A history fixture is deliberately prepared in two explicit snapshots.
+    // The source overlay is applied only after every base scope has gone
+    // through the ordinary CLI init/index path; neither the index nor CAS is
+    // written by this evaluator.
+    if fixture.lane() == scale_spec::ScaleLane::HistoryOverlay {
+        return prepare_history_overlay(corpus, &executable, &mut fixture, &lock);
+    }
 
     let root = fixture.try_clone_root()?;
     // Classify every declared scope before creating the device or spawning a
@@ -567,6 +593,7 @@ pub fn prepare(corpus: &Path, bin: &Path) -> Result<PrepareSummary, ScalePrepare
             &output,
             IndexExpectation::Repair {
                 files: scope.expected_files,
+                embeddings: scope.expected_current_chunks,
             },
         )?;
         indexed.push(scope.name.clone());
@@ -626,6 +653,10 @@ fn run_scope(
         ],
     )
     .map_err(process_error)?;
+    // Environment sealing above clears ambient variables. Add the evaluator's
+    // exact deterministic adapter selector only after that boundary is fixed.
+    // It still travels through the production CLI adapter wire.
+    command.env("KIO_EVAL_DETERMINISTIC_EMBED", "scale-v3");
     let output = run_bounded_command(
         &mut command,
         BoundedProcessOptions {
@@ -658,6 +689,164 @@ fn run_scope(
         ));
     }
     Ok(value)
+}
+
+/// The history lane has no resumable half-overlay state: a bound fixture is
+/// either still the exact base sources or is fully overlaid.  In the latter
+/// case the independent attestor decides whether both snapshots are present.
+fn prepare_history_overlay(
+    corpus: &Path,
+    executable: &DescriptorExecutable,
+    fixture: &mut crate::scale_fixture::ValidatedFixture,
+    lock: &crate::scale_fixture::FixtureLock,
+) -> Result<PrepareSummary, ScalePrepareError> {
+    if fixture.source_state() != scale_spec::SourceState::Base {
+        return Err(ScalePrepareError::Input(
+            "history fixture is already overlaid; refuse to infer a resumable snapshot".into(),
+        ));
+    }
+    let root = fixture.try_clone_root()?;
+    let device = DeviceBoundary::bind_or_create(&root, corpus)?;
+    let mut initialized = 0usize;
+    let mut base = Vec::with_capacity(fixture.manifest().scopes.len());
+    for scope in &fixture.manifest().scopes {
+        fixture.recheck()?;
+        let scope_handle = open_dir(&root, &scope.name, corpus)?;
+        if cap_fs::stat(&scope_handle, Path::new(".kio"), cap_fs::FollowSymlinks::No).is_ok() {
+            return Err(ScalePrepareError::Input(
+                "history base scope already has .kio; refuse partial recovery".into(),
+            ));
+        }
+        let init = run_scope(
+            executable,
+            fixture,
+            &scope_handle,
+            &device,
+            &["--json", "init", "."],
+        )?;
+        validate_init_output(&init, corpus.join(&scope.name))?;
+        initialized += 1;
+        let boundary = ScopeBoundary::bind(&root, &scope.name, corpus)?;
+        let index = run_scope(
+            executable,
+            fixture,
+            &boundary.scope,
+            &device,
+            &OFFLINE_INDEX_ARGS,
+        )?;
+        validate_index_output(
+            &index,
+            IndexExpectation::Repair {
+                files: fixture.profile().files_per_scope(),
+                embeddings: fixture.profile().files_per_scope()
+                    * fixture.profile().sections_per_file(),
+            },
+        )?;
+        let output: IndexOutput = serde_json::from_value(index)
+            .map_err(|e| ScalePrepareError::Input(format!("base index schema: {e}")))?;
+        base.push((
+            scope.name.clone(),
+            output
+                .commit_hash
+                .ok_or_else(|| ScalePrepareError::Input("base index lacks commit".into()))?,
+            output
+                .tree_hash
+                .ok_or_else(|| ScalePrepareError::Input("base index lacks tree".into()))?,
+        ));
+        boundary.recheck(&root, corpus)?;
+    }
+    fixture.apply_history_overlay(lock)?;
+    fixture.recheck()?;
+    let mut final_receipts = Vec::with_capacity(fixture.manifest().scopes.len());
+    for scope in &fixture.manifest().scopes {
+        let boundary = ScopeBoundary::bind(&root, &scope.name, corpus)?;
+        let index = run_scope(
+            executable,
+            fixture,
+            &boundary.scope,
+            &device,
+            &OFFLINE_INDEX_ARGS,
+        )?;
+        let (_, base_head, _) = base
+            .iter()
+            .find(|(name, _, _)| name == &scope.name)
+            .ok_or_else(|| ScalePrepareError::Input("missing base scope receipt".into()))?;
+        validate_index_output(
+            &index,
+            IndexExpectation::Overlay {
+                files: scope.expected_files,
+                embeddings: fixture.profile().sections_per_file() + 1,
+                parent: base_head.clone(),
+            },
+        )?;
+        let output: IndexOutput = serde_json::from_value(index)
+            .map_err(|e| ScalePrepareError::Input(format!("overlay index schema: {e}")))?;
+        let (base_name, base_head, base_tree) = base
+            .iter()
+            .find(|(name, _, _)| name == &scope.name)
+            .ok_or_else(|| ScalePrepareError::Input("missing base scope receipt".into()))?;
+        if base_name != &scope.name
+            || output
+                .commit_hash
+                .as_deref()
+                .is_none_or(|head| !valid_hash(Some(head)))
+            || output
+                .tree_hash
+                .as_deref()
+                .is_none_or(|tree| !valid_hash(Some(tree)))
+        {
+            return Err(ScalePrepareError::Input(
+                "overlay index lacks canonical bindings".into(),
+            ));
+        }
+        final_receipts.push(PreparedScopeReceipt {
+            name: scope.name.clone(),
+            scope_id: String::new(),
+            base_head: Some(base_head.clone()),
+            final_head: output.commit_hash.unwrap(),
+            base_tree: Some(base_tree.clone()),
+            final_tree: output.tree_hash.unwrap(),
+            source_files: scope.files.len(),
+            current_chunks: 0,
+            physical_chunks: 0,
+            embedded_chunks: 0,
+        });
+        boundary.recheck(&root, corpus)?;
+    }
+    let evidence = crate::scale_attest::attest_ready(fixture)
+        .map_err(|e| ScalePrepareError::Input(format!("history overlay did not attest: {e}")))?;
+    for receipt in &mut final_receipts {
+        let scope = evidence
+            .scopes
+            .iter()
+            .find(|s| s.name == receipt.name)
+            .ok_or_else(|| ScalePrepareError::Input("attestor omitted history scope".into()))?;
+        receipt.scope_id = scope.scope_id.clone();
+        receipt.current_chunks = scope.current_chunks;
+        receipt.physical_chunks = scope.physical_chunks;
+        receipt.embedded_chunks = scope.embedded_chunks;
+        if receipt.final_head != scope.head {
+            return Err(ScalePrepareError::Input(
+                "final index/attestor HEAD differs".into(),
+            ));
+        }
+    }
+    let report = expected_history_report(
+        fixture,
+        executable,
+        final_receipts,
+        evidence.registry_rows,
+        &evidence,
+    )?;
+    publish_report(
+        fixture,
+        executable,
+        &root,
+        &device,
+        corpus,
+        report,
+        (initialized, fixture.manifest().scopes.len() * 2),
+    )
 }
 
 fn validate_init_output(value: &Value, scope: PathBuf) -> Result<(), ScalePrepareError> {
@@ -707,15 +896,11 @@ fn validate_index_output(
                 .into(),
         ));
     }
-    if output.embedding_tasks_executed != 0 {
-        return Err(ScalePrepareError::Input(
-            "offline scale index performed unsupported embedding or commit output".into(),
-        ));
-    }
     match expected {
-        IndexExpectation::Repair { files }
+        IndexExpectation::Repair { files, embeddings }
             if output.status == "indexed"
                 && output.normalized_files == files as u64
+                && output.embedding_tasks_executed == embeddings as u64
                 && valid_hash(output.commit_hash.as_deref())
                 && valid_hash(output.tree_hash.as_deref())
                 && strict_auto_commit(
@@ -727,16 +912,57 @@ fn validate_index_output(
         IndexExpectation::RegistryNoop { files }
             if output.status == "noop"
                 && output.normalized_files == files as u64
+                && output.embedding_tasks_executed == 0
                 && output.commit_hash.is_none()
                 && output.commit.is_none()
                 && valid_hash(output.tree_hash.as_deref()) => {}
+        IndexExpectation::Overlay {
+            files,
+            embeddings,
+            parent,
+        } if output.status == "indexed"
+            && output.normalized_files == files as u64
+            && output.embedding_tasks_executed == embeddings as u64
+            && valid_hash(output.commit_hash.as_deref())
+            && valid_hash(output.tree_hash.as_deref())
+            && strict_history_overlay_commit(
+                output.commit.as_ref(),
+                output.commit_hash.as_deref(),
+                output.tree_hash.as_deref(),
+                &parent,
+            )? => {}
         _ => {
-            return Err(ScalePrepareError::Input(
-                "index output violates the requested repair/noop semantics".into(),
-            ));
+            return Err(ScalePrepareError::Input(format!(
+                "index output violates the requested repair/noop semantics: {}",
+                serde_json::to_string(value).unwrap_or_else(|_| "<invalid-json>".into())
+            )));
         }
     }
     Ok(())
+}
+
+fn strict_history_overlay_commit(
+    commit: Option<&Value>,
+    commit_hash: Option<&str>,
+    tree_hash: Option<&str>,
+    parent: &str,
+) -> Result<bool, ScalePrepareError> {
+    let Some(value) = commit else {
+        return Ok(false);
+    };
+    let parsed: AutoCommitWire = serde_json::from_value(value.clone())
+        .map_err(|e| ScalePrepareError::Input(format!("history commit schema: {e}")))?;
+    Ok(parsed.commit_type == "auto"
+        && parsed.object_type == "commit"
+        && parsed.message == "kio index auto snapshot"
+        && scale_spec::is_canonical_utc_second(&parsed.created_at)
+        && parsed.parents.len() == 1
+        && parsed.parents[0] == parent
+        && parsed.stats.files_added == 1
+        && parsed.stats.files_modified == 1
+        && parsed.stats.files_deleted == 2
+        && parsed.tree == tree_hash.unwrap_or_default()
+        && canonical_value_hash(value)? == commit_hash.unwrap_or_default())
 }
 
 fn strict_auto_commit(
@@ -754,7 +980,7 @@ fn strict_auto_commit(
     Ok(parsed.commit_type == "auto"
         && parsed.object_type == "commit"
         && parsed.message == "kio index auto snapshot"
-        && is_canonical_utc_second(&parsed.created_at)
+        && scale_spec::is_canonical_utc_second(&parsed.created_at)
         && parsed.parents.iter().all(|parent| valid_hash(Some(parent)))
         && valid_hash(Some(&parsed.tool_lock_hash))
         && parsed.stats.files_added == expected_files as u64
@@ -770,19 +996,6 @@ fn canonical_value_hash(value: &Value) -> Result<String, ScalePrepareError> {
     })?;
     let digest = Sha256::digest(&canonical);
     Ok(format!("sha256:{}", kio_core::cas::lower_hex(&digest)))
-}
-
-fn is_canonical_utc_second(value: &str) -> bool {
-    value.len() == 20
-        && value.as_bytes().get(4) == Some(&b'-')
-        && value.as_bytes().get(7) == Some(&b'-')
-        && value.as_bytes().get(10) == Some(&b'T')
-        && value.as_bytes().get(13) == Some(&b':')
-        && value.as_bytes().get(16) == Some(&b':')
-        && value.as_bytes().get(19) == Some(&b'Z')
-        && value.bytes().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
-        })
 }
 
 fn valid_hash(value: Option<&str>) -> bool {
@@ -1022,6 +1235,7 @@ fn expected_report(
         preparer: PREPARER_ID.to_owned(),
         fixture_id: scale_spec::FIXTURE_ID.to_owned(),
         profile: fixture.profile(),
+        lane: fixture.lane(),
         manifest_hash: scale_spec::manifest_hash(fixture.manifest())?,
         corpus: fixture.root().to_string_lossy().into_owned(),
         binary: BinaryBinding {
@@ -1033,7 +1247,10 @@ fn expected_report(
             .map(|scope| PreparedScopeReceipt {
                 name: scope.name.clone(),
                 scope_id: scope.scope_id.clone(),
-                head: scope.head.clone(),
+                base_head: scope.base_head.clone(),
+                final_head: scope.head.clone(),
+                base_tree: scope.base_tree.clone(),
+                final_tree: scope.tree.clone(),
                 source_files: scope.source_files,
                 current_chunks: scope.current_chunks,
                 physical_chunks: scope.physical_chunks,
@@ -1042,6 +1259,42 @@ fn expected_report(
             .collect(),
         registry_rows,
         current_chunks: scopes.iter().map(|scope| scope.current_chunks).sum(),
+        historical_only_chunks: scopes
+            .iter()
+            .map(|scope| scope.historical_only_chunks)
+            .sum(),
+        deleted_chunks: scopes.iter().map(|scope| scope.deleted_chunks).sum(),
+        physical_chunks: scopes.iter().map(|scope| scope.physical_chunks).sum(),
+        embedded_chunks: scopes.iter().map(|scope| scope.embedded_chunks).sum(),
+    })
+}
+
+fn expected_history_report(
+    fixture: &crate::scale_fixture::ValidatedFixture,
+    executable: &DescriptorExecutable,
+    scopes: Vec<PreparedScopeReceipt>,
+    registry_rows: usize,
+    evidence: &crate::scale_attest::CorpusEvidence,
+) -> Result<PrepareReport, ScalePrepareError> {
+    Ok(PrepareReport {
+        schema_version: scale_spec::SCHEMA_VERSION,
+        preparer: PREPARER_ID.to_owned(),
+        fixture_id: scale_spec::FIXTURE_ID.to_owned(),
+        profile: fixture.profile(),
+        lane: fixture.lane(),
+        manifest_hash: scale_spec::manifest_hash(fixture.manifest())?,
+        corpus: fixture.root().to_string_lossy().into_owned(),
+        binary: BinaryBinding {
+            sha256: format!("sha256:{}", executable.immutable_binding().sha256),
+            bytes: executable.immutable_binding().bytes,
+        },
+        scopes,
+        registry_rows,
+        current_chunks: evidence.current_chunks,
+        historical_only_chunks: evidence.historical_only_chunks,
+        deleted_chunks: evidence.deleted_chunks,
+        physical_chunks: evidence.physical_chunks,
+        embedded_chunks: evidence.embedded_chunks,
     })
 }
 
@@ -1284,7 +1537,14 @@ mod tests {
     #[test]
     fn index_parser_rejects_network_and_missing_counts() {
         assert!(
-            validate_index_output(&indexed_output(), IndexExpectation::Repair { files: 1 }).is_ok()
+            validate_index_output(
+                &indexed_output(),
+                IndexExpectation::Repair {
+                    files: 1,
+                    embeddings: 0,
+                },
+            )
+            .is_ok()
         );
         assert!(
             validate_index_output(&noop_output(), IndexExpectation::RegistryNoop { files: 1 })
@@ -1293,11 +1553,14 @@ mod tests {
         assert!(
             validate_index_output(
                 &serde_json::json!({"status":"indexed","network_allowed":true}),
-                IndexExpectation::Repair { files: 1 }
+                IndexExpectation::Repair {
+                    files: 1,
+                    embeddings: 0,
+                }
             )
             .is_err()
         );
-        assert!(validate_index_output(&serde_json::json!({"status":"failed","network_allowed":false,"failed_files":0,"pending_files":0,"pending_online_tasks":0,"paused_tasks":0,"embedding_tasks_failed":0,"normalized_files":1,"commit_hash":"x"}), IndexExpectation::Repair { files: 1 }).is_err());
+        assert!(validate_index_output(&serde_json::json!({"status":"failed","network_allowed":false,"failed_files":0,"pending_files":0,"pending_online_tasks":0,"paused_tasks":0,"embedding_tasks_failed":0,"normalized_files":1,"commit_hash":"x"}), IndexExpectation::Repair { files: 1, embeddings: 0 }).is_err());
     }
 
     #[test]
@@ -1311,7 +1574,14 @@ mod tests {
             let mut output = indexed_output();
             output[key] = value;
             assert!(
-                validate_index_output(&output, IndexExpectation::Repair { files: 1 }).is_err(),
+                validate_index_output(
+                    &output,
+                    IndexExpectation::Repair {
+                        files: 1,
+                        embeddings: 0,
+                    },
+                )
+                .is_err(),
                 "{key}"
             );
         }

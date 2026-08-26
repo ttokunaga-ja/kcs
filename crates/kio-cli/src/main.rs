@@ -18709,10 +18709,7 @@ fn embedding_tool_lock_entry() -> Result<Option<Value>> {
     let execution_mode = embedding_adapter_profile(execution)
         .map_err(adapter_to_kio)?
         .execution_mode;
-    let (kind, mode) = match execution_mode {
-        ExecutionMode::OfflineApi => ("offline_api", "offline"),
-        _ => ("online_api", "online"),
-    };
+    let (kind, mode) = embedding_execution_labels(execution_mode);
     Ok(Some(json!({
         "tool_id": profile.tool_id,
         "profile_hash": profile.profile_hash,
@@ -18722,6 +18719,14 @@ fn embedding_tool_lock_entry() -> Result<Option<Value>> {
         "kind": kind,
         "mode": mode,
     })))
+}
+
+fn embedding_execution_labels(mode: ExecutionMode) -> (&'static str, &'static str) {
+    match mode {
+        ExecutionMode::OnlineApi => ("online_api", "online"),
+        ExecutionMode::OfflineApi => ("offline_api", "offline"),
+        ExecutionMode::DeterministicLibrary => ("deterministic_library", "deterministic"),
+    }
 }
 
 /// A retained-history chunk eligible for the effective current config.
@@ -27422,6 +27427,24 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use clap::Parser;
+
+    #[test]
+    fn embedding_tool_lock_labels_cover_every_execution_mode() {
+        use kio_adapter::types::ExecutionMode;
+
+        assert_eq!(
+            super::embedding_execution_labels(ExecutionMode::OnlineApi),
+            ("online_api", "online")
+        );
+        assert_eq!(
+            super::embedding_execution_labels(ExecutionMode::OfflineApi),
+            ("offline_api", "offline")
+        );
+        assert_eq!(
+            super::embedding_execution_labels(ExecutionMode::DeterministicLibrary),
+            ("deterministic_library", "deterministic")
+        );
+    }
 
     #[test]
     fn bound_child_stdout_requires_the_private_result_exit_marker() {

@@ -855,13 +855,13 @@ dependencies = [
 name = "kio-eval"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cap-primitives",
  "clap",
  "getrandom 0.4.3",
  "kio-core",
  "kio-index",
  "kio-pipeline",
- "kio-search",
  "libc",
  "rusqlite",
  "serde",

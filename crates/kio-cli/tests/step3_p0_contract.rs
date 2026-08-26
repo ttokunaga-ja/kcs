@@ -17,7 +17,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
-const TEST_LOCAL_EMBEDDING_ENV: &str = "KIO_TEST_LOCAL_EMBED";
+const TEST_DETERMINISTIC_EMBEDDING_ENV: &str = "KIO_EVAL_DETERMINISTIC_EMBED";
 const TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV: &str = "KIO_TEST_MISTRAL_OCR";
 
 const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
@@ -26,7 +26,7 @@ const KIO_CHILD_ENV_DENYLIST: &[&str] = &[
     "KIO_FIXED_NOW",
     "KIO_TEST_GEMINI_EMBED",
     "KIO_TEST_GEMINI_BATCH",
-    "KIO_TEST_LOCAL_EMBED",
+    "KIO_EVAL_DETERMINISTIC_EMBED",
     "KIO_TEST_MISTRAL_OCR",
     "KIO_TEST_MISTRAL_BATCH",
     "KIO_TEST_BATCH_INVENTORY",
@@ -8485,18 +8485,16 @@ fn r13_3_unwritable_log_path_does_not_fail_the_search() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1/2 — the `offline_api` embedding adapter (07 §3 D9, 07 §5.3, 07 §5.5).
+// Deterministic evaluator embedding adapter.
 //
-// The offline adapter runs a local model server, so CI can never exercise the
-// real one — there is no GPU runner and vLLM does not run on the macOS one
-// either. `KIO_TEST_LOCAL_EMBED` is what makes the PATH testable without the
-// model: what these tests pin is the offline posture (no consent, no charge,
-// no batch lane), which is where the design risk lives.
+// This release-capable, network-free adapter exercises the production adapter
+// wire without a model server. These tests pin its non-transmitting,
+// non-billable posture plus the shared vector/image behavior.
 // ---------------------------------------------------------------------------
 
-fn json_success_local_embed(dir: &TempDir, args: &[&str]) -> Value {
+fn json_success_deterministic_embed(dir: &TempDir, args: &[&str]) -> Value {
     let output = kio(dir, args)
-        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_DETERMINISTIC_EMBEDDING_ENV, "scale-v3")
         .arg("--json")
         .assert()
         .success()
@@ -8506,10 +8504,8 @@ fn json_success_local_embed(dir: &TempDir, args: &[&str]) -> Value {
     serde_json::from_slice(&output).unwrap()
 }
 
-/// A scope indexed entirely through the offline embedding adapter. Note there
-/// is no `--approve` of any network policy and no `approvals[]` row anywhere:
-/// that is the point.
-fn indexed_scope_local_embed() -> TempDir {
+/// A scope indexed entirely through the deterministic evaluator adapter.
+fn indexed_scope_deterministic_embed() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("auth.md"),
@@ -8522,22 +8518,22 @@ fn indexed_scope_local_embed() -> TempDir {
     )
     .unwrap();
     kio(&dir, &["init"]).assert().success();
-    json_success_local_embed(&dir, &["index", "--approve"]);
+    json_success_deterministic_embed(&dir, &["index", "--approve"]);
     dir
 }
 
-/// 07 §3 (D9): an `offline_api` adapter transmits nothing, so vector search
-/// works with no `approvals[]` row and no `allow_network` — the machinery that
-/// gates transmission has nothing here to gate.
+/// A deterministic-library adapter transmits nothing, so vector search works
+/// without an embedding approval or network grant.
 #[test]
-fn offline_embedding_serves_vector_search_without_any_approval() {
-    let dir = indexed_scope_local_embed();
-    let search = json_success_local_embed(&dir, &["search", "トークン", "--mode", "vector"]);
+fn deterministic_embedding_serves_vector_search_without_any_approval() {
+    let dir = indexed_scope_deterministic_embed();
+    let search =
+        json_success_deterministic_embed(&dir, &["search", "トークン", "--mode", "vector"]);
     assert_eq!(search["resolved_mode"], "vector", "{search}");
     assert_eq!(search["fallback"], false, "{search}");
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
-        "offline vector search must return hits: {search}"
+        "deterministic vector search must return hits: {search}"
     );
 
     // No embedding approval exists, because none was required. (markdownize is
@@ -8549,18 +8545,17 @@ fn offline_embedding_serves_vector_search_without_any_approval() {
     assert!(
         !approvals
             .iter()
-            .any(|row| row["tool_id"] == "qwen3_vl_embedding_local"),
-        "an offline embedding adapter must not publish an approvals[] row: {scope}"
+            .any(|row| row["tool_id"] == "kio_eval_deterministic_embedding"),
+        "a deterministic embedding adapter must not publish an approvals[] row: {scope}"
     );
 }
 
-/// `--offline` forbids new transmission for one run (07 §3). A local adapter
-/// has none to forbid, so the flag must not knock it down to text — otherwise
-/// a local-only user could never use vectors at all.
+/// `--offline` forbids new transmission for one run. A deterministic adapter
+/// has none to forbid, so the flag must not knock vector search down to text.
 #[test]
-fn offline_flag_does_not_degrade_the_offline_embedding_adapter() {
-    let dir = indexed_scope_local_embed();
-    let search = json_success_local_embed(
+fn offline_flag_does_not_degrade_the_deterministic_embedding_adapter() {
+    let dir = indexed_scope_deterministic_embed();
+    let search = json_success_deterministic_embed(
         &dir,
         &["search", "トークン", "--mode", "vector", "--offline"],
     );
@@ -8572,37 +8567,40 @@ fn offline_flag_does_not_degrade_the_offline_embedding_adapter() {
     );
 }
 
-/// A local model runs on hardware the user already owns: the adapter declares
-/// no billable kinds, so no reservation is taken and no charge is settled.
+/// The evaluator adapter declares no billable kinds, so no reservation is
+/// taken and no charge is settled.
 #[test]
-fn offline_embedding_never_touches_the_cost_ledger() {
-    let dir = indexed_scope_local_embed();
-    json_success_local_embed(&dir, &["search", "トークン", "--mode", "vector"]);
+fn deterministic_embedding_never_touches_the_cost_ledger() {
+    let dir = indexed_scope_deterministic_embed();
+    json_success_deterministic_embed(&dir, &["search", "トークン", "--mode", "vector"]);
     assert_eq!(
         reservation_row_count(&dir, "embedding"),
         0,
-        "an offline adapter must not reserve against the ledger"
+        "a deterministic adapter must not reserve against the ledger"
     );
     assert_eq!(reservation_or_charged_usd(&dir, "embedding"), 0.0);
 }
 
-/// 07 §6: the lock is provenance. `kind`/`mode` were literals reading
-/// `online_api`/`online`, which recorded an offline run as an online one.
+/// The working tool-lock records the active execution posture even though
+/// kind/mode are intentionally outside the canonical tool-lock identity.
 #[test]
-fn tool_lock_records_the_offline_execution_mode() {
-    let dir = indexed_scope_local_embed();
+fn tool_lock_records_the_deterministic_execution_mode() {
+    let dir = indexed_scope_deterministic_embed();
     let lock: Value =
         serde_json::from_slice(&fs::read(dir.path().join(".kio/tool-lock.json")).unwrap()).unwrap();
     let embedding = &lock["embedding"];
-    assert_eq!(embedding["kind"], "offline_api", "{lock}");
-    assert_eq!(embedding["mode"], "offline", "{lock}");
-    assert_eq!(embedding["tool_id"], "qwen3_vl_embedding_local", "{lock}");
+    assert_eq!(embedding["kind"], "deterministic_library", "{lock}");
+    assert_eq!(embedding["mode"], "deterministic", "{lock}");
+    assert_eq!(
+        embedding["tool_id"], "kio_eval_deterministic_embedding",
+        "{lock}"
+    );
     // 03 §7: a different vector space, and the compat gate has only the hash
     // to notice that with.
     assert_ne!(
         embedding["profile_hash"],
         Value::Null,
-        "the offline profile must be pinned: {lock}"
+        "the deterministic profile must be pinned: {lock}"
     );
 }
 
@@ -8618,9 +8616,9 @@ fn the_online_adapter_still_records_online_provenance() {
     assert_eq!(lock["embedding"]["tool_id"], "gemini_embedding_2", "{lock}");
 }
 
-/// A scope whose OCR path produced image objects, indexed through the offline
-/// embedding adapter (the only one that declares `image_object`).
-fn indexed_scope_local_embed_with_images() -> TempDir {
+/// A scope whose OCR path produced image objects, indexed through the
+/// deterministic evaluator adapter (which declares `image_object`).
+fn indexed_scope_deterministic_embed_with_images() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     // R9-2: image extraction only happens on the online OCR path, which
     // non-text-native files reach → PDF fixture.
@@ -8630,15 +8628,15 @@ fn indexed_scope_local_embed_with_images() -> TempDir {
     )
     .unwrap();
     kio(&dir, &["init"]).assert().success();
-    json_success_local_embed(&dir, &["index", "--approve"]);
+    json_success_deterministic_embed(&dir, &["index", "--approve"]);
     kio(&dir, &["batch", "resume"])
-        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_DETERMINISTIC_EMBEDDING_ENV, "scale-v3")
         .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
         .arg("--json")
         .assert()
         .success();
     // The chunk pass runs on the next index, once normalized bodies exist.
-    json_success_local_embed(&dir, &["index"]);
+    json_success_deterministic_embed(&dir, &["index"]);
     dir
 }
 
@@ -8656,7 +8654,7 @@ fn count(conn: &rusqlite::Connection, sql: &str) -> i64 {
 /// a chunk body references get embedded into `image_vec`.
 #[test]
 fn image_objects_referenced_by_chunks_are_embedded_into_image_vec() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     let conn = index_db(&dir);
     let images = count(&conn, "SELECT COUNT(*) FROM image_vec");
     assert!(
@@ -8687,7 +8685,7 @@ fn image_objects_referenced_by_chunks_are_embedded_into_image_vec() {
 /// writer (not a later search) to repopulate the replica image relation.
 #[test]
 fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     let (source_images, chunks, chunk_vectors) = {
         let conn = index_db(&dir);
         let source_images = count(&conn, "SELECT COUNT(*) FROM image_vec");
@@ -8714,7 +8712,7 @@ fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
             .unwrap();
     }
 
-    json_success_local_embed(&dir, &["batch", "resume"]);
+    json_success_deterministic_embed(&dir, &["batch", "resume"]);
     let source_after = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
     let replica =
         rusqlite::Connection::open(dir.path().join(".test-cache/kio/aggregator.sqlite")).unwrap();
@@ -8733,9 +8731,9 @@ fn image_embedding_enrichment_writes_through_the_empty_chunk_branch() {
 /// chunk path groups on. Re-indexing must not re-embed what is already stored.
 #[test]
 fn image_embedding_is_idempotent_across_reindex() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     let before = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
-    json_success_local_embed(&dir, &["index"]);
+    json_success_deterministic_embed(&dir, &["index"]);
     let after = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
     assert_eq!(
         before, after,
@@ -8778,12 +8776,12 @@ fn the_online_adapter_embeds_no_images_because_it_declares_no_capability() {
 /// reconstruct it — otherwise a rebuild silently costs the corpus image search.
 #[test]
 fn rebuild_db_restores_image_vectors_from_objects() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     let before = count(&index_db(&dir), "SELECT COUNT(*) FROM image_vec");
     assert!(before > 0);
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
     kio(&dir, &["repair", "rebuild-db"])
-        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_DETERMINISTIC_EMBEDDING_ENV, "scale-v3")
         .arg("--json")
         .assert()
         .success();
@@ -8808,8 +8806,9 @@ fn image_rows(search: &Value) -> Vec<&Value> {
 /// says what it is, `payload_uri` is what the Agent opens to get the bytes.
 #[test]
 fn an_embedded_image_is_returned_as_an_image_row_with_a_payload_uri() {
-    let dir = indexed_scope_local_embed_with_images();
-    let search = json_success_local_embed(&dir, &["search", "figure page one", "--limit", "20"]);
+    let dir = indexed_scope_deterministic_embed_with_images();
+    let search =
+        json_success_deterministic_embed(&dir, &["search", "figure page one", "--limit", "20"]);
     let images = image_rows(&search);
     assert!(
         !images.is_empty(),
@@ -8850,8 +8849,9 @@ fn an_embedded_image_is_returned_as_an_image_row_with_a_payload_uri() {
 /// lets an image be handed over while the citation stays verifiable.
 #[test]
 fn an_image_row_carries_the_referencing_chunks_evidence_pointer() {
-    let dir = indexed_scope_local_embed_with_images();
-    let search = json_success_local_embed(&dir, &["search", "figure page one", "--limit", "20"]);
+    let dir = indexed_scope_deterministic_embed_with_images();
+    let search =
+        json_success_deterministic_embed(&dir, &["search", "figure page one", "--limit", "20"]);
     let image = image_rows(&search).first().copied().cloned().unwrap();
     let pointer = &image["evidence_pointer"];
     for field in ["commit", "raw_hash", "chunk_hash", "path_at_commit"] {
@@ -8883,7 +8883,7 @@ fn an_image_row_carries_the_referencing_chunks_evidence_pointer() {
     // The claim the pointer makes is checkable, which is the entire reason it
     // is a chunk's and not the object URI.
     let uri = image["evidence_uri"].as_str().unwrap();
-    let verified = json_success_local_embed(&dir, &["evidence", "verify", uri]);
+    let verified = json_success_deterministic_embed(&dir, &["evidence", "verify", uri]);
     assert_eq!(verified["status"], "alive", "{verified}");
 
     // V6: where several chunks cite one image, the pointer takes the lowest
@@ -8933,14 +8933,14 @@ fn v6_the_pointer_is_the_lowest_chunk_hash_citing_the_image() {
     fs::write(dir.path().join("alpha.pdf"), fake_pdf(&["figure alpha"])).unwrap();
     fs::write(dir.path().join("beta.pdf"), fake_pdf(&["figure beta"])).unwrap();
     kio(&dir, &["init"]).assert().success();
-    json_success_local_embed(&dir, &["index", "--approve"]);
+    json_success_deterministic_embed(&dir, &["index", "--approve"]);
     kio(&dir, &["batch", "resume"])
-        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_DETERMINISTIC_EMBEDDING_ENV, "scale-v3")
         .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")
         .arg("--json")
         .assert()
         .success();
-    json_success_local_embed(&dir, &["index"]);
+    json_success_deterministic_embed(&dir, &["index"]);
 
     // The citing set, read from the index rather than restated from the rule.
     let conn = index_db(&dir);
@@ -8970,7 +8970,7 @@ fn v6_the_pointer_is_the_lowest_chunk_hash_citing_the_image() {
          got {citing:?} from {bodies:?}"
     );
 
-    let search = json_success_local_embed(
+    let search = json_success_deterministic_embed(
         &dir,
         &["search", "mock ocr figure", "--scope", ".", "--limit", "50"],
     );
@@ -8990,11 +8990,11 @@ fn v6_the_pointer_is_the_lowest_chunk_hash_citing_the_image() {
     drop(conn);
     fs::remove_file(dir.path().join(".kio/index/sqlite.db")).unwrap();
     kio(&dir, &["repair", "rebuild-db"])
-        .env(TEST_LOCAL_EMBEDDING_ENV, "mock")
+        .env(TEST_DETERMINISTIC_EMBEDDING_ENV, "scale-v3")
         .arg("--json")
         .assert()
         .success();
-    let after = json_success_local_embed(
+    let after = json_success_deterministic_embed(
         &dir,
         &["search", "mock ocr figure", "--scope", ".", "--limit", "50"],
     );
@@ -9046,8 +9046,8 @@ fn the_online_adapter_returns_no_image_rows_because_it_embeds_none() {
 /// added it for.
 #[test]
 fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
-    let dir = indexed_scope_local_embed_with_images();
-    let text = json_success_local_embed(
+    let dir = indexed_scope_deterministic_embed_with_images();
+    let text = json_success_deterministic_embed(
         &dir,
         &[
             "search",
@@ -9086,9 +9086,9 @@ fn a_text_mode_search_returns_no_image_rows_but_still_names_the_figures() {
 /// the citing chunk certainly has a text rank to be inherited.
 #[test]
 fn an_image_inherits_the_text_lane_standing_of_the_chunk_that_cites_it() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     let search = |mode: &str| {
-        json_success_local_embed(
+        json_success_deterministic_embed(
             &dir,
             &["search", "mock ocr page", "--mode", mode, "--limit", "20"],
         )
@@ -9117,10 +9117,10 @@ fn an_image_inherits_the_text_lane_standing_of_the_chunk_that_cites_it() {
 /// acceptable by flooding with figures.
 #[test]
 fn images_and_chunks_share_one_max_per_raw_hash_budget() {
-    let dir = indexed_scope_local_embed_with_images();
+    let dir = indexed_scope_deterministic_embed_with_images();
     // PC49/PC50: folder config is only effective under a single-scope search.
     write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 10\n");
-    let uncapped = json_success_local_embed(
+    let uncapped = json_success_deterministic_embed(
         &dir,
         &["search", "figure page one", "--scope", ".", "--limit", "20"],
     );
@@ -9130,7 +9130,7 @@ fn images_and_chunks_share_one_max_per_raw_hash_budget() {
     );
 
     write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 1\n");
-    let capped = json_success_local_embed(
+    let capped = json_success_deterministic_embed(
         &dir,
         &["search", "figure page one", "--scope", ".", "--limit", "20"],
     );

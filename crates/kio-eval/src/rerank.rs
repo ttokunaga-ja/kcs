@@ -1434,7 +1434,7 @@ mod tests {
                         "path_at_commit": "doc.pdf.md",
                         "byte_start": 0,
                         "byte_end": 4,
-                        "scope_id": "scope",
+                        "scope_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                         "scope_path": scope_path,
                     },
                 }))

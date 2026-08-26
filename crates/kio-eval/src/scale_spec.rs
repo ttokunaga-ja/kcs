@@ -10,11 +10,11 @@ use thiserror::Error;
 
 use kio_core::cas::{canonical_json_bytes, hash_bytes};
 
-pub const SCHEMA_VERSION: u64 = 2;
-pub const FIXTURE_ID: &str = "kio-scale-v2";
-pub const GENERATOR_ID: &str = "kio-eval scale generate/v2";
-pub const PREPARER_ID: &str = "kio-eval scale prepare/v2";
-pub const ATTESTOR_ID: &str = "kio-eval scale attest/v2";
+pub const SCHEMA_VERSION: u64 = 3;
+pub const FIXTURE_ID: &str = "kio-scale-v3";
+pub const GENERATOR_ID: &str = "kio-eval scale generate/v3";
+pub const PREPARER_ID: &str = "kio-eval scale prepare/v3";
+pub const ATTESTOR_ID: &str = "kio-eval scale attest/v3";
 pub const SEED: u64 = 20_260_713;
 pub const WORKLOAD: &str = "exact-reference-v1";
 pub const MANIFEST_NAME: &str = "scale-corpus-manifest.json";
@@ -35,11 +35,15 @@ pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_OWNER_BYTES: usize = 64 * 1024;
 
 /// SHA-256 of the exact JCS-plus-LF frozen manifest for [`ScaleProfile::Tiny`].
-pub const TINY_MANIFEST_HASH: &str =
-    "sha256:8bded49fbf1c93b9fd4a6f83f994cf574dba1283fc2b1c82e8767ea486c284fc";
+pub const TINY_CURRENT_TEXT_MANIFEST_HASH: &str =
+    "sha256:c616b93da1bfbecdfb50a5abd703bb1bc756fbc9f65e2d139df7170c008d0a24";
+pub const TINY_HISTORY_OVERLAY_MANIFEST_HASH: &str =
+    "sha256:1148f3f4717959f8227e99443d06551e909379db2be684771f61a841f407a695";
 /// SHA-256 of the exact JCS-plus-LF frozen manifest for [`ScaleProfile::Full`].
-pub const FULL_MANIFEST_HASH: &str =
-    "sha256:be610235b409698e6763b50c9d19967e01dadb9740dfff443495d58d6ec9f46e";
+pub const FULL_CURRENT_TEXT_MANIFEST_HASH: &str =
+    "sha256:c39b4575f92b857d628b8d426894e02beee73801cba80948984de167632ae69f";
+pub const FULL_HISTORY_OVERLAY_MANIFEST_HASH: &str =
+    "sha256:0f34f7fd93900df459a978bdcb78b6e30341994c72c2e719a3e4b380b9288360";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -48,11 +52,25 @@ pub enum ScaleProfile {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleLane {
+    CurrentText,
+    HistoryOverlay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceState {
+    Base,
+    Overlay,
+}
+
 impl ScaleProfile {
     #[must_use]
     pub const fn files_per_scope(self) -> usize {
         match self {
-            Self::Tiny => 1,
+            Self::Tiny => 3,
             Self::Full => 200,
         }
     }
@@ -92,10 +110,12 @@ impl ScaleProfile {
     }
 
     #[must_use]
-    pub const fn frozen_manifest_hash(self) -> &'static str {
-        match self {
-            Self::Tiny => TINY_MANIFEST_HASH,
-            Self::Full => FULL_MANIFEST_HASH,
+    pub const fn frozen_manifest_hash(self, lane: ScaleLane) -> &'static str {
+        match (self, lane) {
+            (Self::Tiny, ScaleLane::CurrentText) => TINY_CURRENT_TEXT_MANIFEST_HASH,
+            (Self::Tiny, ScaleLane::HistoryOverlay) => TINY_HISTORY_OVERLAY_MANIFEST_HASH,
+            (Self::Full, ScaleLane::CurrentText) => FULL_CURRENT_TEXT_MANIFEST_HASH,
+            (Self::Full, ScaleLane::HistoryOverlay) => FULL_HISTORY_OVERLAY_MANIFEST_HASH,
         }
     }
 }
@@ -253,6 +273,19 @@ pub struct ScaleShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ExpectedPopulation {
+    pub base_chunks: usize,
+    pub current_chunks: usize,
+    pub historical_only_chunks: usize,
+    pub deleted_chunks: usize,
+    pub physical_cas_chunks: usize,
+    pub edit_operations: usize,
+    pub rename_operations: usize,
+    pub delete_operations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScaleFile {
     pub path: String,
     pub raw_hash: String,
@@ -267,8 +300,32 @@ pub struct ScaleScope {
     pub persona: String,
     pub use_case: String,
     pub expected_files: usize,
+    pub expected_base_chunks: usize,
     pub expected_current_chunks: usize,
     pub files: Vec<ScaleFile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryOperationKind {
+    Edit,
+    Rename,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryOperation {
+    pub scope: String,
+    pub kind: HistoryOperationKind,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    pub before_raw_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_raw_hash: Option<String>,
+    pub before_chunks: usize,
+    pub after_chunks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,11 +346,15 @@ pub struct ScaleManifest {
     pub seed: u64,
     pub workload: String,
     pub profile: ScaleProfile,
+    pub lane: ScaleLane,
     pub chunking: ChunkingContract,
     pub shape: ScaleShape,
     pub scopes: Vec<ScaleScope>,
     pub queries: Vec<ScaleQuery>,
-    pub content_root_hash: String,
+    pub base_content_root_hash: String,
+    pub overlay_content_root_hash: String,
+    pub expected_population: ExpectedPopulation,
+    pub history_operations: Vec<HistoryOperation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +371,7 @@ pub struct OwnerMarker {
     pub fixture_id: String,
     pub generator: String,
     pub profile: ScaleProfile,
+    pub lane: ScaleLane,
     pub state: OwnerState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_hash: Option<String>,
@@ -335,9 +397,9 @@ pub enum ScaleSpecError {
     OwnerJson(String),
     #[error("scale owner marker must be canonical JCS JSON followed by one LF")]
     OwnerNonCanonical,
-    #[error("scale manifest does not match the frozen v2 contract")]
+    #[error("scale manifest does not match the frozen v3 contract")]
     FrozenMismatch,
-    #[error("scale owner marker does not match the frozen v2 contract")]
+    #[error("scale owner marker does not match the frozen v3 contract")]
     OwnerMismatch,
     #[error("invalid scale render input")]
     RenderInput,
@@ -345,6 +407,51 @@ pub enum ScaleSpecError {
 
 pub fn document_path(file_index: usize) -> String {
     format!("document-{file_index:04}.md")
+}
+
+/// Accept exactly a real Gregorian UTC instant rendered to whole seconds.
+///
+/// The scale attestor intentionally validates this independently of the
+/// production commit type. A digit-shaped but impossible date must not become
+/// trusted evidence merely because its canonical JSON hash is self-consistent.
+#[must_use]
+pub fn is_canonical_utc_second(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            !matches!(index, 4 | 7 | 10 | 13 | 16 | 19) && !byte.is_ascii_digit()
+        })
+    {
+        return false;
+    }
+    let number = |start: usize, end: usize| -> Option<u32> {
+        std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()
+    };
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        number(0, 4),
+        number(5, 7),
+        number(8, 10),
+        number(11, 13),
+        number(14, 16),
+        number(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year != 0 && (1..=days).contains(&day) && hour < 24 && minute < 60 && second < 60
 }
 pub fn section_heading(scope: usize, file: usize, section: usize) -> String {
     format!("Scale record S{scope:02} F{file:04} C{section:02}")
@@ -414,6 +521,24 @@ pub fn render_document(
     Ok(document)
 }
 
+/// Render the frozen post-edit source.  It preserves every heading and changes
+/// only the first section's text, so heading chunking remains one chunk per
+/// section while the edited content receives a distinct raw hash.
+pub fn render_history_edited_document(
+    scope_index: usize,
+    file_index: usize,
+    profile: ScaleProfile,
+) -> Result<String, ScaleSpecError> {
+    let source = render_document(scope_index, file_index, profile)?;
+    let needle = format!("{}\n\n", section_heading(scope_index, file_index, 0));
+    let replacement = format!(
+        "{}history overlay edit {}\n\n",
+        needle,
+        reference_token(scope_index, file_index, 0, usize::MAX)
+    );
+    Ok(source.replacen(&needle, &replacement, 1))
+}
+
 #[must_use]
 pub fn shape(profile: ScaleProfile) -> ScaleShape {
     ScaleShape {
@@ -444,7 +569,10 @@ fn content_root_hash(scopes: &[ScaleScope]) -> Result<String, ScaleSpecError> {
     Ok(hash_bytes(&bytes))
 }
 
-pub fn frozen_manifest(profile: ScaleProfile) -> Result<ScaleManifest, ScaleSpecError> {
+pub fn frozen_manifest(
+    profile: ScaleProfile,
+    lane: ScaleLane,
+) -> Result<ScaleManifest, ScaleSpecError> {
     let mut scopes = Vec::with_capacity(SCOPE_COUNT);
     let mut queries = Vec::with_capacity(SCOPE_COUNT);
     for (scope_index, scope) in SCOPES.iter().enumerate() {
@@ -463,6 +591,7 @@ pub fn frozen_manifest(profile: ScaleProfile) -> Result<ScaleManifest, ScaleSpec
             persona: scope.persona.to_owned(),
             use_case: scope.use_case.to_owned(),
             expected_files: profile.files_per_scope(),
+            expected_base_chunks: profile.files_per_scope() * profile.sections_per_file(),
             expected_current_chunks: profile.files_per_scope() * profile.sections_per_file(),
             files,
         });
@@ -473,7 +602,81 @@ pub fn frozen_manifest(profile: ScaleProfile) -> Result<ScaleManifest, ScaleSpec
             heading: section_heading(scope_index, 0, 0),
         });
     }
-    let content_root_hash = content_root_hash(&scopes)?;
+    let base_content_root_hash = content_root_hash(&scopes)?;
+    let mut overlay_scopes = scopes.clone();
+    let mut history_operations = Vec::new();
+    if lane == ScaleLane::HistoryOverlay {
+        for (scope_index, scope) in overlay_scopes.iter_mut().enumerate() {
+            let before = scope.files[0].clone();
+            let after = render_history_edited_document(scope_index, 0, profile)?;
+            scope.files[0].raw_hash = hash_bytes(after.as_bytes());
+            scope.files[0].bytes = after.len();
+            history_operations.push(HistoryOperation {
+                scope: scope.name.clone(),
+                kind: HistoryOperationKind::Edit,
+                source: document_path(0),
+                destination: None,
+                before_raw_hash: before.raw_hash,
+                after_raw_hash: Some(scope.files[0].raw_hash.clone()),
+                before_chunks: profile.sections_per_file(),
+                after_chunks: profile.sections_per_file(),
+            });
+            let before = scope.files[1].clone();
+            scope.files[1].path = "renamed-document-0001.md".into();
+            history_operations.push(HistoryOperation {
+                scope: scope.name.clone(),
+                kind: HistoryOperationKind::Rename,
+                source: document_path(1),
+                destination: Some(scope.files[1].path.clone()),
+                before_raw_hash: before.raw_hash.clone(),
+                after_raw_hash: Some(before.raw_hash),
+                before_chunks: profile.sections_per_file(),
+                after_chunks: profile.sections_per_file(),
+            });
+            let before = scope.files[2].clone();
+            scope.files.remove(2);
+            history_operations.push(HistoryOperation {
+                scope: scope.name.clone(),
+                kind: HistoryOperationKind::Delete,
+                source: document_path(2),
+                destination: None,
+                before_raw_hash: before.raw_hash,
+                after_raw_hash: None,
+                before_chunks: profile.sections_per_file(),
+                after_chunks: 0,
+            });
+            scope.expected_current_chunks =
+                (profile.files_per_scope() - 1) * profile.sections_per_file();
+            scope.expected_files = profile.files_per_scope() - 1;
+        }
+    }
+    let overlay_content_root_hash = content_root_hash(&overlay_scopes)?;
+    let sections = profile.sections_per_file();
+    let expected_population = match lane {
+        ScaleLane::CurrentText => ExpectedPopulation {
+            base_chunks: profile.expected_chunks(),
+            current_chunks: profile.expected_chunks(),
+            historical_only_chunks: 0,
+            deleted_chunks: 0,
+            physical_cas_chunks: profile.expected_chunks(),
+            edit_operations: 0,
+            rename_operations: 0,
+            delete_operations: 0,
+        },
+        ScaleLane::HistoryOverlay => ExpectedPopulation {
+            base_chunks: profile.expected_chunks(),
+            current_chunks: (profile.files_per_scope() - 1) * sections * SCOPE_COUNT,
+            // Chunk identity includes the whole-file raw hash. Editing one
+            // section therefore replaces every chunk identity from that file;
+            // the deleted file contributes the second historical-only set.
+            historical_only_chunks: 2 * sections * SCOPE_COUNT,
+            deleted_chunks: sections * SCOPE_COUNT,
+            physical_cas_chunks: (profile.files_per_scope() + 1) * sections * SCOPE_COUNT,
+            edit_operations: SCOPE_COUNT,
+            rename_operations: SCOPE_COUNT,
+            delete_operations: SCOPE_COUNT,
+        },
+    };
     Ok(ScaleManifest {
         schema_version: SCHEMA_VERSION,
         fixture_id: FIXTURE_ID.to_owned(),
@@ -481,15 +684,22 @@ pub fn frozen_manifest(profile: ScaleProfile) -> Result<ScaleManifest, ScaleSpec
         seed: SEED,
         workload: WORKLOAD.to_owned(),
         profile,
+        lane,
         chunking: ChunkingContract {
             strategy: CHUNKING_STRATEGY.to_owned(),
             max_chars: CHUNKING_MAX_CHARS,
             config_hash: CHUNKING_CONFIG_HASH.to_owned(),
         },
         shape: shape(profile),
-        scopes,
+        // The public scope inventory describes the lane's final searchable
+        // tree. The separately pinned base root and each operation's before
+        // identity remain the authority for preparing the parent snapshot.
+        scopes: overlay_scopes,
         queries,
-        content_root_hash,
+        base_content_root_hash,
+        overlay_content_root_hash,
+        expected_population,
+        history_operations,
     })
 }
 
@@ -516,11 +726,11 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<ScaleManifest, ScaleSpecError> {
     if serialize_manifest(&manifest)? != bytes {
         return Err(ScaleSpecError::NonCanonical);
     }
-    let frozen = frozen_manifest(manifest.profile)?;
+    let frozen = frozen_manifest(manifest.profile, manifest.lane)?;
     if manifest != frozen {
         return Err(ScaleSpecError::FrozenMismatch);
     }
-    if manifest_hash(&manifest)? != manifest.profile.frozen_manifest_hash() {
+    if manifest_hash(&manifest)? != manifest.profile.frozen_manifest_hash(manifest.lane) {
         return Err(ScaleSpecError::FrozenMismatch);
     }
     Ok(manifest)
@@ -533,7 +743,7 @@ pub fn validate_owner(owner: &OwnerMarker) -> Result<(), ScaleSpecError> {
     let valid_state = match owner.state {
         OwnerState::Building => owner.manifest_hash.is_none(),
         OwnerState::Ready => {
-            owner.manifest_hash.as_deref() == Some(owner.profile.frozen_manifest_hash())
+            owner.manifest_hash.as_deref() == Some(owner.profile.frozen_manifest_hash(owner.lane))
         }
     };
     if valid_identity && valid_state {
@@ -573,8 +783,8 @@ mod tests {
 
     #[test]
     fn frozen_shapes_and_rendering_are_bounded() {
-        assert_eq!(shape(ScaleProfile::Tiny).expected_files, 20);
-        assert_eq!(shape(ScaleProfile::Tiny).expected_current_chunks, 60);
+        assert_eq!(shape(ScaleProfile::Tiny).expected_files, 60);
+        assert_eq!(shape(ScaleProfile::Tiny).expected_current_chunks, 180);
         assert_eq!(shape(ScaleProfile::Full).expected_files, 4_000);
         assert_eq!(shape(ScaleProfile::Full).expected_current_chunks, 120_000);
         for (index, _) in SCOPES.iter().enumerate() {
@@ -588,20 +798,38 @@ mod tests {
 
     #[test]
     fn frozen_manifest_is_canonical_and_has_pinned_digest() {
-        for profile in [ScaleProfile::Tiny, ScaleProfile::Full] {
-            let manifest = frozen_manifest(profile).unwrap();
+        for (profile, lane) in [ScaleProfile::Tiny, ScaleProfile::Full]
+            .into_iter()
+            .flat_map(|profile| {
+                [ScaleLane::CurrentText, ScaleLane::HistoryOverlay].map(move |lane| (profile, lane))
+            })
+        {
+            let manifest = frozen_manifest(profile, lane).unwrap();
             let bytes = serialize_manifest(&manifest).unwrap();
-            assert_eq!(parse_manifest(&bytes).unwrap(), manifest);
             assert_eq!(
                 manifest_hash(&manifest).unwrap(),
-                profile.frozen_manifest_hash()
+                profile.frozen_manifest_hash(lane)
             );
+            assert_eq!(parse_manifest(&bytes).unwrap(), manifest);
         }
     }
 
     #[test]
+    fn history_manifest_separates_base_shape_from_final_inventory() {
+        let manifest = frozen_manifest(ScaleProfile::Tiny, ScaleLane::HistoryOverlay).unwrap();
+        assert_eq!(manifest.shape.expected_files, 60);
+        assert_eq!(manifest.expected_population.base_chunks, 180);
+        assert!(manifest.scopes.iter().all(|scope| {
+            scope.expected_files == 2
+                && scope.expected_base_chunks == 9
+                && scope.expected_current_chunks == 6
+                && scope.files.len() == 2
+        }));
+    }
+
+    #[test]
     fn manifest_rejects_noncanonical_and_self_consistent_mutation() {
-        let manifest = frozen_manifest(ScaleProfile::Tiny).unwrap();
+        let manifest = frozen_manifest(ScaleProfile::Tiny, ScaleLane::CurrentText).unwrap();
         let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         bytes.push(b'\n');
         assert_eq!(parse_manifest(&bytes), Err(ScaleSpecError::NonCanonical));
@@ -618,8 +846,9 @@ mod tests {
             fixture_id: FIXTURE_ID.into(),
             generator: GENERATOR_ID.into(),
             profile: ScaleProfile::Tiny,
+            lane: ScaleLane::CurrentText,
             state: OwnerState::Ready,
-            manifest_hash: Some(TINY_MANIFEST_HASH.into()),
+            manifest_hash: Some(TINY_CURRENT_TEXT_MANIFEST_HASH.into()),
         };
         assert!(validate_owner(&ready).is_ok());
         let bytes = serialize_owner(&ready).unwrap();
@@ -627,7 +856,7 @@ mod tests {
         let mut bad = ready;
         bad.manifest_hash = None;
         assert_eq!(validate_owner(&bad), Err(ScaleSpecError::OwnerMismatch));
-        let wrong_version = br#"{"fixture_id":"kio-scale-v2","generator":"kio-eval scale generate/v2","manifest_hash":"sha256:00","profile":"tiny","schema_version":1,"state":"ready"}
+        let wrong_version = br#"{"fixture_id":"kio-scale-v3","generator":"kio-eval scale generate/v3","manifest_hash":"sha256:00","profile":"tiny","schema_version":1,"state":"ready"}
 "#;
         assert!(parse_owner(wrong_version).is_err());
     }

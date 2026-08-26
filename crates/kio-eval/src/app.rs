@@ -44,7 +44,7 @@ use kio_eval::{
         evaluate_queries_with_validator, final_exit_code, run_bounded_command, write_report,
         write_results,
     },
-    scale_spec::ScaleProfile,
+    scale_spec::{ScaleLane, ScaleProfile},
     u7::{self, AdapterCommand, AdapterLimits, Modality},
 };
 use thiserror::Error;
@@ -514,12 +514,15 @@ enum ComparatorRuntimeCommands {
 
 #[derive(Debug, Subcommand)]
 enum ScaleCommands {
-    /// Materialize a Rust v2 deterministic scale fixture.
+    /// Materialize one Rust v3 deterministic scale lane.
     Generate {
         #[arg(long)]
         out: PathBuf,
         #[arg(long, value_enum)]
         profile: ScaleProfile,
+        /// Create a current-text baseline or a separately owned history lane.
+        #[arg(long, value_enum)]
+        lane: ScaleLane,
         /// Reset only a fully validated current Rust-owned fixture.
         #[arg(long)]
         reset_owned: bool,
@@ -531,7 +534,7 @@ enum ScaleCommands {
         #[arg(long)]
         bin: PathBuf,
     },
-    /// Independently attest a prepared Rust v2 scale fixture.
+    /// Independently attest a prepared Rust v3 scale fixture.
     Attest {
         #[arg(long)]
         corpus: PathBuf,
@@ -539,10 +542,12 @@ enum ScaleCommands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Measure deterministic search latency on an attested Rust v2 fixture.
+    /// Measure deterministic search latency on paired attested Rust v3 fixtures.
     Benchmark {
         #[arg(long)]
-        corpus: PathBuf,
+        current_corpus: PathBuf,
+        #[arg(long)]
+        history_corpus: PathBuf,
         #[arg(long)]
         bin: PathBuf,
         #[arg(long)]
@@ -1594,9 +1599,11 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                 ScaleCommands::Generate {
                     out,
                     profile,
+                    lane,
                     reset_owned,
                 } => {
-                    let outcome = kio_eval::scale_fixture::generate(out, *profile, *reset_owned)?;
+                    let outcome =
+                        kio_eval::scale_fixture::generate(out, *profile, *lane, *reset_owned)?;
                     println!("[ok] scale fixture {outcome:?}: {}", out.display());
                     Ok(ExitCode::Success)
                 }
@@ -1622,14 +1629,21 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     Ok(ExitCode::Success)
                 }
                 ScaleCommands::Benchmark {
-                    corpus,
+                    current_corpus,
+                    history_corpus,
                     bin,
                     warmups,
                     samples,
                     out,
                 } => {
-                    let summary =
-                        kio_eval::scale_benchmark::benchmark(corpus, bin, *warmups, *samples, out)?;
+                    let summary = kio_eval::scale_benchmark::benchmark(
+                        current_corpus,
+                        history_corpus,
+                        bin,
+                        *warmups,
+                        *samples,
+                        out,
+                    )?;
                     println!("[ok] scale benchmark: {}", summary.report.display());
                     Ok(if summary.acceptance_failed {
                         ExitCode::Failure
@@ -2922,6 +2936,8 @@ mod tests {
                 "/tmp/scale",
                 "--profile",
                 "tiny",
+                "--lane",
+                "current-text",
             ])
             .is_ok()
         );
@@ -2946,8 +2962,10 @@ mod tests {
                 "kio-eval",
                 "scale",
                 "benchmark",
-                "--corpus",
-                "/tmp/scale",
+                "--current-corpus",
+                "/tmp/current",
+                "--history-corpus",
+                "/tmp/history",
                 "--bin",
                 "/tmp/kio",
                 "--warmups",
@@ -2964,8 +2982,10 @@ mod tests {
                 "kio-eval",
                 "scale",
                 "benchmark",
-                "--corpus",
-                "/tmp/scale",
+                "--current-corpus",
+                "/tmp/current",
+                "--history-corpus",
+                "/tmp/history",
                 "--bin",
                 "/tmp/kio",
             ])

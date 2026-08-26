@@ -4,6 +4,7 @@ pub mod artifact;
 pub mod attestation;
 pub mod boundary;
 pub mod crossscope;
+pub mod d1;
 pub mod fixture_register;
 pub mod generator;
 pub mod manifest;

@@ -130,22 +130,33 @@ jobs:
       - run: >-
           cargo build --release --locked --all-features
           -p kio-cli -p kio-eval --bins
-      # This lane has no fixture/product network dependency. The Rust v2
-      # commands create an isolated device under the temporary corpus.
+      # This lane has no fixture/product network dependency. Rust v3 creates
+      # two isolated, create-only corpus destinations: current text and a
+      # derived history overlay.
       - run: >-
           target/release/kio-eval scale generate
-          --out /tmp/kio-scale-tiny --profile tiny
+          --out /tmp/kio-scale-tiny-current --profile tiny --lane current-text
       - run: >-
           target/release/kio-eval scale prepare
-          --corpus /tmp/kio-scale-tiny --bin target/release/kio
+          --corpus /tmp/kio-scale-tiny-current --bin target/release/kio
       - run: >-
           target/release/kio-eval scale attest
-          --corpus /tmp/kio-scale-tiny
+          --corpus /tmp/kio-scale-tiny-current
+      - run: >-
+          target/release/kio-eval scale generate
+          --out /tmp/kio-scale-tiny-history --profile tiny --lane history-overlay
+      - run: >-
+          target/release/kio-eval scale prepare
+          --corpus /tmp/kio-scale-tiny-history --bin target/release/kio
+      - run: >-
+          target/release/kio-eval scale attest
+          --corpus /tmp/kio-scale-tiny-history
       # This is a contract smoke only: tiny fixtures are deliberately not
       # performance-acceptance eligible.
       - run: >-
           target/release/kio-eval scale benchmark
-          --corpus /tmp/kio-scale-tiny --bin target/release/kio
+          --current-corpus /tmp/kio-scale-tiny-current
+          --history-corpus /tmp/kio-scale-tiny-history --bin target/release/kio
           --warmups 1 --samples 1 --out /tmp/kio-scale-tiny-rust-smoke.json
       - run: target/release/kio-eval generate-corpus --out /tmp/kio-eval-corpus
       # replay-history rejects hardlinked executables at its trust boundary.

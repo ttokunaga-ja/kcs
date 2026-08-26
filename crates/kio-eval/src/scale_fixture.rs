@@ -6,7 +6,8 @@
 use crate::{
     boundary::sync_retained_directory,
     scale_spec::{
-        self, MANIFEST_NAME, OWNER_MARKER_NAME, OwnerMarker, OwnerState, SCOPES, ScaleProfile,
+        self, MANIFEST_NAME, OWNER_MARKER_NAME, OwnerMarker, OwnerState, SCOPES, ScaleLane,
+        ScaleProfile, SourceState,
     },
 };
 use cap_primitives::{ambient_authority, fs as cap_fs};
@@ -20,7 +21,7 @@ use std::{
 };
 use thiserror::Error;
 
-const TEMP_PREFIX: &str = ".kio-scale-v2.tmp-";
+const TEMP_PREFIX: &str = ".kio-scale-v3.tmp-";
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -86,6 +87,8 @@ pub struct ValidatedFixture {
     parent_public: PathBuf,
     root_leaf: String,
     profile: ScaleProfile,
+    lane: ScaleLane,
+    source_state: SourceState,
     manifest: scale_spec::ScaleManifest,
     owner: OwnerMarker,
     immutable: ImmutableFixture,
@@ -98,6 +101,14 @@ impl ValidatedFixture {
     #[must_use]
     pub fn profile(&self) -> ScaleProfile {
         self.profile
+    }
+    #[must_use]
+    pub fn lane(&self) -> ScaleLane {
+        self.lane
+    }
+    #[must_use]
+    pub fn source_state(&self) -> SourceState {
+        self.source_state
     }
     #[must_use]
     pub fn manifest(&self) -> &scale_spec::ScaleManifest {
@@ -134,11 +145,12 @@ impl ValidatedFixture {
         ensure_dir(&self.parent_handle, &self.parent_identity, &self.root)?;
         ensure_dir(&self.root_handle, &self.root_identity, &self.root)?;
         named_identity(&self.parent_handle, &self.root_leaf, &self.root_identity)?;
-        let (o, m) = inspect(&self.root_handle, &self.root, self.profile, true)?;
-        if o != self.owner || m != self.manifest {
+        let (o, m, state) = inspect(&self.root_handle, &self.root, self.profile, self.lane, true)?;
+        if o != self.owner || m != self.manifest || state != self.source_state {
             return bad("fixture changed after binding");
         }
-        if observe_immutable(&self.root_handle, &self.root, self.profile)? != self.immutable {
+        if observe_immutable(&self.root_handle, &self.root, self.profile, state)? != self.immutable
+        {
             return bad("immutable fixture authority changed after binding");
         }
         Ok(())
@@ -149,6 +161,81 @@ impl ValidatedFixture {
         self.recheck()?;
         guard.recheck()?;
         Ok(guard)
+    }
+
+    /// Apply the manifest's frozen history plan without gaining pathname
+    /// authority beyond the bound fixture root and its declared scopes.
+    pub fn apply_history_overlay(&mut self, guard: &FixtureLock) -> Result<(), ScaleFixtureError> {
+        if self.lane != ScaleLane::HistoryOverlay || self.source_state != SourceState::Base {
+            return bad("history overlay requires a base-state history fixture");
+        }
+        guard.recheck()?;
+        if !same(&meta_file(&guard.root, &self.root)?, &self.root_identity) {
+            return bad("history overlay lock belongs to a different fixture");
+        }
+        self.recheck()?;
+        let (_, _, state) = inspect(&self.root_handle, &self.root, self.profile, self.lane, true)?;
+        if state != SourceState::Base {
+            return bad("history overlay source state changed before apply");
+        }
+        for (scope_index, scope) in SCOPES.iter().enumerate() {
+            let handle = open_dir(&self.root_handle, scope.name, &self.root)?;
+            let edit = scale_spec::render_history_edited_document(scope_index, 0, self.profile)?;
+            if read_regular(
+                &handle,
+                "document-0000.md",
+                scale_spec::MAX_SOURCE_BYTES,
+                &self.root,
+            )? != scale_spec::render_document(scope_index, 0, self.profile)?.as_bytes()
+            {
+                return bad("history edit source is missing or replaced");
+            }
+            replace_regular(&handle, "document-0000.md", edit.as_bytes(), &self.root)?;
+            if cap_fs::stat(
+                &handle,
+                Path::new("renamed-document-0001.md"),
+                cap_fs::FollowSymlinks::No,
+            )
+            .is_ok()
+            {
+                return bad("history rename destination already exists");
+            }
+            if read_regular(
+                &handle,
+                "document-0001.md",
+                scale_spec::MAX_SOURCE_BYTES,
+                &self.root,
+            )? != scale_spec::render_document(scope_index, 1, self.profile)?.as_bytes()
+            {
+                return bad("history rename source is missing or replaced");
+            }
+            rename_noreplace(
+                &handle,
+                "document-0001.md",
+                &handle,
+                "renamed-document-0001.md",
+            )?;
+            if read_regular(
+                &handle,
+                "document-0002.md",
+                scale_spec::MAX_SOURCE_BYTES,
+                &self.root,
+            )? != scale_spec::render_document(scope_index, 2, self.profile)?.as_bytes()
+            {
+                return bad("history delete source is missing or replaced");
+            }
+            remove_regular(&handle, "document-0002.md", &self.root)?;
+            sync_dir(&handle, &self.root)?;
+        }
+        sync_dir(&self.root_handle, &self.root)?;
+        guard.recheck()?;
+        let (_, _, state) = inspect(&self.root_handle, &self.root, self.profile, self.lane, true)?;
+        if state != SourceState::Overlay {
+            return bad("history overlay did not reach complete state");
+        }
+        self.source_state = state;
+        self.immutable = observe_immutable(&self.root_handle, &self.root, self.profile, state)?;
+        Ok(())
     }
 }
 #[derive(Debug)]
@@ -200,8 +287,9 @@ pub(crate) fn bind_ready_expected(
         _ => {}
     }
     let profile = owner.profile;
-    let (owner, manifest) = inspect(&h, root, profile, true)?;
-    let immutable = observe_immutable(&h, root, profile)?;
+    let lane = owner.lane;
+    let (owner, manifest, source_state) = inspect(&h, root, profile, lane, true)?;
+    let immutable = observe_immutable(&h, root, profile, source_state)?;
     let parent_handle = p.handle.try_clone()?;
     Ok(ValidatedFixture {
         root: root.to_path_buf(),
@@ -212,6 +300,8 @@ pub(crate) fn bind_ready_expected(
         parent_public: p.public,
         root_leaf: p.leaf,
         profile,
+        lane,
+        source_state,
         manifest,
         owner,
         immutable,
@@ -221,13 +311,14 @@ pub(crate) fn bind_ready_expected(
 pub fn generate(
     out: &Path,
     profile: ScaleProfile,
+    lane: ScaleLane,
     reset_owned: bool,
 ) -> Result<GenerateOutcome, ScaleFixtureError> {
     ensure_atomic_rename_supported()?;
     let parent = bind_parent(out)?;
     ensure_public_parent(&parent)?;
-    let temp = format!("{TEMP_PREFIX}{}", profile_name(profile));
-    recover_interrupted_reset(&parent, &temp, profile, out)?;
+    let temp = format!("{TEMP_PREFIX}{}-{}", profile_name(profile), lane_name(lane));
+    recover_interrupted_reset(&parent, &temp, profile, lane, out)?;
     match cap_fs::stat(
         &parent.handle,
         Path::new(&parent.leaf),
@@ -235,10 +326,10 @@ pub fn generate(
     ) {
         Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {
             let root = open_dir(&parent.handle, &parent.leaf, out)?;
-            match inspect(&root, out, profile, true) {
+            match inspect(&root, out, profile, lane, true) {
                 Ok(_) if !reset_owned => {
                     let guard = lock(&root, out)?;
-                    inspect(&root, out, profile, true)?;
+                    inspect(&root, out, profile, lane, true)?;
                     guard.recheck()?;
                     let identity = meta_file(&root, out)?;
                     named_identity(&parent.handle, &parent.leaf, &identity)?;
@@ -247,13 +338,13 @@ pub fn generate(
                 }
                 Ok(_) => {
                     let guard = lock(&root, out)?;
-                    inspect(&root, out, profile, false)?;
-                    let immutable = observe_immutable(&root, out, profile)?;
+                    let (_, _, state) = inspect(&root, out, profile, lane, false)?;
+                    let immutable = observe_immutable(&root, out, profile, state)?;
                     guard.recheck()?;
-                    let reset = reset_slot(profile);
-                    capture_and_remove(&parent, &root, reset, profile, &immutable, out)?;
+                    let reset = reset_slot(profile, lane);
+                    capture_and_remove(&parent, &root, &reset, profile, lane, &immutable, out)?;
                     drop(guard);
-                    materialize(&parent, &temp, profile, out, true)?;
+                    materialize(&parent, &temp, profile, lane, out, true)?;
                     return Ok(GenerateOutcome::Reset);
                 }
                 Err(e) => {
@@ -272,15 +363,15 @@ pub fn generate(
             let h = open_dir(&parent.handle, &temp, out)?;
             let temp_identity = meta_file(&h, out)?;
             let guard = lock(&h, out)?;
-            inspect(&h, out, profile, false).map_err(|e| {
+            inspect(&h, out, profile, lane, false).map_err(|e| {
                 ScaleFixtureError::Input(format!(
                     "current generator temporary fixture is not recoverable: {e}"
                 ))
             })?;
-            let immutable = observe_immutable(&h, out, profile)?;
+            let immutable = observe_immutable(&h, out, profile, SourceState::Base)?;
             ensure_public_parent(&parent)?;
             named_identity(&parent.handle, &temp, &temp_identity)?;
-            if observe_immutable(&h, out, profile)? != immutable {
+            if observe_immutable(&h, out, profile, SourceState::Base)? != immutable {
                 return bad("temporary fixture changed before recovery publication");
             }
             guard.recheck()?;
@@ -290,8 +381,8 @@ pub fn generate(
             if !same(&meta_file(&h, out)?, &temp_identity) {
                 return bad("recovered output identity differs from temporary fixture");
             }
-            inspect(&h, out, profile, false)?;
-            if observe_immutable(&h, out, profile)? != immutable {
+            inspect(&h, out, profile, lane, false)?;
+            if observe_immutable(&h, out, profile, SourceState::Base)? != immutable {
                 return bad("recovered output immutable authority differs from temporary fixture");
             }
             drop(guard);
@@ -299,7 +390,7 @@ pub fn generate(
         }
         Ok(_) => bad("temporary fixture is unsafe or not a directory"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            materialize(&parent, &temp, profile, out, false)?;
+            materialize(&parent, &temp, profile, lane, out, false)?;
             Ok(GenerateOutcome::Created)
         }
         Err(e) => Err(e.into()),
@@ -310,6 +401,7 @@ fn recover_interrupted_reset(
     parent: &BoundParent,
     build_slot: &str,
     profile: ScaleProfile,
+    lane: ScaleLane,
     label: &Path,
 ) -> Result<(), ScaleFixtureError> {
     let root = match open_dir(&parent.handle, &parent.leaf, label) {
@@ -321,31 +413,31 @@ fn recover_interrupted_reset(
     }
     // An empty public root is only recoverable when one of the two fixed,
     // current-schema slots independently proves a complete ready fixture.
-    for slot in [reset_slot(profile), build_slot] {
-        let candidate = match open_dir(&parent.handle, slot, label) {
+    for slot in [reset_slot(profile, lane), build_slot.to_owned()] {
+        let candidate = match open_dir(&parent.handle, &slot, label) {
             Ok(candidate) => candidate,
             Err(_) => continue,
         };
-        if inspect(&candidate, label, profile, false).is_ok() {
+        if inspect(&candidate, label, profile, lane, false).is_ok() {
             // A ready-looking slot can belong to a live reset.  The exact
             // persistent fixture lock is the writer barrier: recovery may
             // exchange it only after the owner has died and released it.
             let guard = lock(&candidate, label)?;
-            inspect(&candidate, label, profile, false)?;
-            let immutable = observe_immutable(&candidate, label, profile)?;
+            let (_, _, state) = inspect(&candidate, label, profile, lane, false)?;
+            let immutable = observe_immutable(&candidate, label, profile, state)?;
             guard.recheck()?;
             let root_identity = meta_file(&root, label)?;
             let candidate_identity = meta_file(&candidate, label)?;
             named_identity(&parent.handle, &parent.leaf, &root_identity)?;
-            named_identity(&parent.handle, slot, &candidate_identity)?;
-            rename_exchange(&parent.handle, &parent.leaf, slot)?;
+            named_identity(&parent.handle, &slot, &candidate_identity)?;
+            rename_exchange(&parent.handle, &parent.leaf, &slot)?;
             sync_parent(parent)?;
             let restored = open_dir(&parent.handle, &parent.leaf, label)?;
             if !same(&meta_file(&restored, label)?, &candidate_identity) {
                 return bad("reset recovery output identity differs from ready slot");
             }
-            inspect(&restored, label, profile, false)?;
-            if observe_immutable(&restored, label, profile)? != immutable {
+            inspect(&restored, label, profile, lane, false)?;
+            if observe_immutable(&restored, label, profile, state)? != immutable {
                 return bad("reset recovery output immutable authority differs from ready slot");
             }
             guard.recheck()?;
@@ -369,6 +461,7 @@ fn materialize(
     parent: &BoundParent,
     temp_name: &str,
     profile: ScaleProfile,
+    lane: ScaleLane,
     label: &Path,
     exchange_publish: bool,
 ) -> Result<(), ScaleFixtureError> {
@@ -389,6 +482,7 @@ fn materialize(
                 fixture_id: scale_spec::FIXTURE_ID.into(),
                 generator: scale_spec::GENERATOR_ID.into(),
                 profile,
+                lane,
                 state: OwnerState::Building,
                 manifest_hash: None,
             })?,
@@ -412,7 +506,7 @@ fn materialize(
             }
             sync_dir(&s, label)?;
         }
-        let manifest = scale_spec::frozen_manifest(profile)?;
+        let manifest = scale_spec::frozen_manifest(profile, lane)?;
         write_new(
             &temp,
             MANIFEST_NAME,
@@ -427,17 +521,18 @@ fn materialize(
                 fixture_id: scale_spec::FIXTURE_ID.into(),
                 generator: scale_spec::GENERATOR_ID.into(),
                 profile,
+                lane,
                 state: OwnerState::Ready,
                 manifest_hash: Some(scale_spec::manifest_hash(&manifest)?),
             })?,
             label,
         )?;
-        inspect(&temp, label, profile, false)?;
-        let immutable = observe_immutable(&temp, label, profile)?;
+        let (_, _, state) = inspect(&temp, label, profile, lane, false)?;
+        let immutable = observe_immutable(&temp, label, profile, state)?;
         sync_dir(&temp, label)?;
         ensure_public_parent(parent)?;
         named_identity(&parent.handle, temp_name, &temp_identity)?;
-        if observe_immutable(&temp, label, profile)? != immutable {
+        if observe_immutable(&temp, label, profile, state)? != immutable {
             return bad("temporary fixture changed before publication");
         }
         guard.recheck()?;
@@ -451,8 +546,8 @@ fn materialize(
         if !same(&meta_file(&h, label)?, &temp_identity) {
             return bad("published output identity differs from temporary fixture");
         }
-        inspect(&h, label, profile, false)?;
-        if observe_immutable(&h, label, profile)? != immutable {
+        inspect(&h, label, profile, lane, false)?;
+        if observe_immutable(&h, label, profile, state)? != immutable {
             return bad("published output immutable authority differs from temporary fixture");
         }
         if exchange_publish {
@@ -461,7 +556,6 @@ fn materialize(
                 return bad("build slot is not empty after publication exchange");
             }
         }
-        drop(guard);
         Ok(())
     })()
 }
@@ -470,8 +564,9 @@ fn inspect(
     root: &fs::File,
     label: &Path,
     profile: ScaleProfile,
+    lane: ScaleLane,
     allow_runtime: bool,
-) -> Result<(OwnerMarker, scale_spec::ScaleManifest), ScaleFixtureError> {
+) -> Result<(OwnerMarker, scale_spec::ScaleManifest, SourceState), ScaleFixtureError> {
     if !meta_file(root, label)?.is_dir() {
         return bad("fixture root is not a real directory");
     }
@@ -487,7 +582,12 @@ fn inspect(
         scale_spec::MAX_MANIFEST_BYTES,
         label,
     )?)?;
-    if owner.profile != profile || owner.state != OwnerState::Ready || manifest.profile != profile {
+    if owner.profile != profile
+        || owner.lane != lane
+        || owner.state != OwnerState::Ready
+        || manifest.profile != profile
+        || manifest.lane != lane
+    {
         return bad("fixture owner or manifest profile is not ready");
     }
     if read_regular(root, scale_spec::LOCK_NAME, 64, label)? != b"locked\n" {
@@ -498,6 +598,22 @@ fn inspect(
         MANIFEST_NAME.to_owned(),
         scale_spec::LOCK_NAME.to_owned(),
     ]);
+    let source_state = if lane == ScaleLane::HistoryOverlay {
+        let first = open_dir(root, SCOPES[0].name, label)?;
+        if cap_fs::stat(
+            &first,
+            Path::new("renamed-document-0001.md"),
+            cap_fs::FollowSymlinks::No,
+        )
+        .is_ok()
+        {
+            SourceState::Overlay
+        } else {
+            SourceState::Base
+        }
+    } else {
+        SourceState::Base
+    };
     let mut total = 0u64;
     for (si, spec) in SCOPES.iter().enumerate() {
         expected.insert(spec.name.into());
@@ -507,30 +623,47 @@ fn inspect(
             profile.files_per_scope() + usize::from(allow_runtime),
             label,
         )?;
-        let wanted: BTreeSet<String> = (0..profile.files_per_scope())
+        let base: BTreeSet<String> = (0..profile.files_per_scope())
             .map(scale_spec::document_path)
             .collect();
-        if got != wanted
-            && (!allow_runtime
-                || !wanted.is_subset(&got)
-                || !got.difference(&wanted).all(|name| name == ".kio"))
-        {
+        let mut overlay = base.clone();
+        overlay.remove(&scale_spec::document_path(1));
+        overlay.remove(&scale_spec::document_path(2));
+        overlay.insert("renamed-document-0001.md".into());
+        let stripped: BTreeSet<String> = got
+            .iter()
+            .filter(|name| name.as_str() != ".kio")
+            .cloned()
+            .collect();
+        let expected_sources = match source_state {
+            SourceState::Base => &base,
+            SourceState::Overlay => &overlay,
+        };
+        if stripped != *expected_sources || (!allow_runtime && got != *expected_sources) {
             return bad("scope contains unknown or missing entries");
         }
         for fi in 0..profile.files_per_scope() {
-            let actual = read_regular(
-                &scope,
-                &scale_spec::document_path(fi),
-                scale_spec::MAX_SOURCE_BYTES,
-                label,
-            )?;
+            if source_state == SourceState::Overlay && fi == 2 {
+                continue;
+            }
+            let name = if source_state == SourceState::Overlay && fi == 1 {
+                "renamed-document-0001.md".into()
+            } else {
+                scale_spec::document_path(fi)
+            };
+            let actual = read_regular(&scope, &name, scale_spec::MAX_SOURCE_BYTES, label)?;
             total = total.checked_add(actual.len() as u64).ok_or_else(|| {
                 ScaleFixtureError::Input("source byte accounting overflow".into())
             })?;
             if total > MAX_TOTAL_BYTES {
                 return bad("source aggregate exceeds bound");
             }
-            if actual != scale_spec::render_document(si, fi, profile)?.as_bytes() {
+            let expected = if source_state == SourceState::Overlay && fi == 0 {
+                scale_spec::render_history_edited_document(si, fi, profile)?
+            } else {
+                scale_spec::render_document(si, fi, profile)?
+            };
+            if actual != expected.as_bytes() {
                 return bad("source differs from frozen renderer");
             }
         }
@@ -559,7 +692,7 @@ fn inspect(
     if allow_runtime {
         validate_runtime_leaves(root, label)?;
     }
-    Ok((owner, manifest))
+    Ok((owner, manifest, source_state))
 }
 
 fn validate_runtime_leaves(root: &fs::File, label: &Path) -> Result<(), ScaleFixtureError> {
@@ -601,6 +734,7 @@ fn capture_and_remove(
     root: &fs::File,
     reset_name: &str,
     profile: ScaleProfile,
+    lane: ScaleLane,
     immutable: &ImmutableFixture,
     label: &Path,
 ) -> Result<(), ScaleFixtureError> {
@@ -614,10 +748,10 @@ fn capture_and_remove(
     sync_parent(parent)?;
     named_identity(&parent.handle, reset_name, &root_identity)?;
     named_identity(&parent.handle, &parent.leaf, &reset_identity)?;
-    if observe_immutable(root, label, profile)? != *immutable {
+    if observe_immutable(root, label, profile, SourceState::Base)? != *immutable {
         return bad("immutable fixture changed before reset capture");
     }
-    remove_captured(parent, root, reset_name, profile, label)
+    remove_captured(parent, root, reset_name, profile, lane, label)
 }
 
 fn remove_captured(
@@ -625,9 +759,10 @@ fn remove_captured(
     root: &fs::File,
     reset_name: &str,
     profile: ScaleProfile,
+    lane: ScaleLane,
     label: &Path,
 ) -> Result<(), ScaleFixtureError> {
-    inspect(root, label, profile, false)?;
+    inspect(root, label, profile, lane, false)?;
     for scope in SCOPES {
         let h = open_dir(root, scope.name, label)?;
         for i in 0..profile.files_per_scope() {
@@ -727,6 +862,7 @@ fn observe_immutable(
     root: &fs::File,
     label: &Path,
     profile: ScaleProfile,
+    state: SourceState,
 ) -> Result<ImmutableFixture, ScaleFixtureError> {
     let owner = observed_regular(root, OWNER_MARKER_NAME, scale_spec::MAX_OWNER_BYTES, label)?;
     let manifest = observed_regular(root, MANIFEST_NAME, scale_spec::MAX_MANIFEST_BYTES, label)?;
@@ -737,9 +873,17 @@ fn observe_immutable(
         let identity = file_identity(&meta_file(&handle, label)?);
         let mut sources = Vec::with_capacity(profile.files_per_scope());
         for index in 0..profile.files_per_scope() {
+            if state == SourceState::Overlay && index == 2 {
+                continue;
+            }
+            let name = if state == SourceState::Overlay && index == 1 {
+                "renamed-document-0001.md".to_owned()
+            } else {
+                scale_spec::document_path(index)
+            };
             sources.push(observed_regular(
                 &handle,
-                &scale_spec::document_path(index),
+                &name,
                 scale_spec::MAX_SOURCE_BYTES,
                 label,
             )?);
@@ -844,11 +988,11 @@ fn replace_regular(
     b: &[u8],
     label: &Path,
 ) -> Result<(), ScaleFixtureError> {
-    let old = read_regular(dir, name, scale_spec::MAX_OWNER_BYTES, label)?;
+    let old = read_regular(dir, name, scale_spec::MAX_SOURCE_BYTES, label)?;
     let tmp = temp_leaf(name)?;
     write_new(dir, &tmp, b, label)?;
     rename_exchange(dir, &tmp, name)?;
-    if read_regular(dir, &tmp, scale_spec::MAX_OWNER_BYTES, label)? != old {
+    if read_regular(dir, &tmp, scale_spec::MAX_SOURCE_BYTES, label)? != old {
         return bad("replacement target changed before exchange");
     }
     cap_fs::remove_file(dir, Path::new(&tmp))?;
@@ -1049,16 +1193,23 @@ fn temp_leaf(n: &str) -> Result<String, ScaleFixtureError> {
         bad("unsafe temporary name")
     }
 }
-fn reset_slot(profile: ScaleProfile) -> &'static str {
-    match profile {
-        ScaleProfile::Tiny => ".kio-scale-v2.reset-tiny",
-        ScaleProfile::Full => ".kio-scale-v2.reset-full",
-    }
+fn reset_slot(profile: ScaleProfile, lane: ScaleLane) -> String {
+    format!(
+        ".kio-scale-v3.reset-{}-{}",
+        profile_name(profile),
+        lane_name(lane)
+    )
 }
 const fn profile_name(p: ScaleProfile) -> &'static str {
     match p {
         ScaleProfile::Tiny => "tiny",
         ScaleProfile::Full => "full",
+    }
+}
+const fn lane_name(lane: ScaleLane) -> &'static str {
+    match lane {
+        ScaleLane::CurrentText => "current-text",
+        ScaleLane::HistoryOverlay => "history-overlay",
     }
 }
 #[cfg(target_os = "macos")]
@@ -1170,6 +1321,13 @@ fn rename_at(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    fn generate(
+        out: &Path,
+        profile: ScaleProfile,
+        reset_owned: bool,
+    ) -> Result<GenerateOutcome, ScaleFixtureError> {
+        super::generate(out, profile, ScaleLane::CurrentText, reset_owned)
+    }
     fn rt(t: &tempfile::TempDir) -> PathBuf {
         fs::canonicalize(t.path()).unwrap()
     }
@@ -1187,7 +1345,7 @@ mod tests {
             generate(&o, ScaleProfile::Tiny, false).unwrap(),
             GenerateOutcome::ReadyNoop
         );
-        let x = r.join(".kio-scale-v2.tmp-tiny");
+        let x = r.join(".kio-scale-v3.tmp-tiny-current-text");
         fs::rename(&o, &x).unwrap();
         assert_eq!(
             generate(&o, ScaleProfile::Tiny, false).unwrap(),
@@ -1200,6 +1358,95 @@ mod tests {
         assert_eq!(
             generate(&o, ScaleProfile::Tiny, true).unwrap(),
             GenerateOutcome::Reset
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn current_and_history_destinations_are_independent_and_overlay_is_exact() {
+        let temp = tempdir().unwrap();
+        let root = rt(&temp);
+        let current = root.join("current");
+        let history = root.join("history");
+        super::generate(&current, ScaleProfile::Tiny, ScaleLane::CurrentText, false).unwrap();
+        super::generate(
+            &history,
+            ScaleProfile::Tiny,
+            ScaleLane::HistoryOverlay,
+            false,
+        )
+        .unwrap();
+
+        let current_before =
+            fs::read(current.join(SCOPES[0].name).join("document-0000.md")).unwrap();
+        let mut bound = bind_ready(&history).unwrap();
+        assert_eq!(bound.lane(), ScaleLane::HistoryOverlay);
+        assert_eq!(bound.source_state(), SourceState::Base);
+        let guard = bound.lock().unwrap();
+        bound.apply_history_overlay(&guard).unwrap();
+        assert_eq!(bound.source_state(), SourceState::Overlay);
+        bound.recheck().unwrap();
+
+        for (scope_index, scope) in SCOPES.iter().enumerate() {
+            let scope = history.join(scope.name);
+            assert_eq!(
+                fs::read(scope.join("document-0000.md")).unwrap(),
+                scale_spec::render_history_edited_document(scope_index, 0, ScaleProfile::Tiny)
+                    .unwrap()
+                    .as_bytes()
+            );
+            assert!(scope.join("renamed-document-0001.md").is_file());
+            assert!(!scope.join("document-0001.md").exists());
+            assert!(!scope.join("document-0002.md").exists());
+        }
+        assert!(bound.apply_history_overlay(&guard).is_err());
+        assert_eq!(
+            fs::read(current.join(SCOPES[0].name).join("document-0000.md")).unwrap(),
+            current_before
+        );
+        assert!(
+            current
+                .join(SCOPES[0].name)
+                .join("document-0001.md")
+                .is_file()
+        );
+        assert!(
+            current
+                .join(SCOPES[0].name)
+                .join("document-0002.md")
+                .is_file()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn partial_overlay_and_cross_lane_adoption_fail_closed() {
+        let temp = tempdir().unwrap();
+        let root = rt(&temp);
+        let history = root.join("history");
+        super::generate(
+            &history,
+            ScaleProfile::Tiny,
+            ScaleLane::HistoryOverlay,
+            false,
+        )
+        .unwrap();
+        fs::rename(
+            history.join(SCOPES[1].name).join("document-0001.md"),
+            history
+                .join(SCOPES[1].name)
+                .join("renamed-document-0001.md"),
+        )
+        .unwrap();
+        assert!(bind_ready(&history).is_err());
+        assert!(
+            super::generate(&history, ScaleProfile::Tiny, ScaleLane::CurrentText, false).is_err()
+        );
+        assert!(
+            history
+                .join(SCOPES[1].name)
+                .join("renamed-document-0001.md")
+                .is_file()
         );
     }
 
@@ -1361,7 +1608,7 @@ mod tests {
         fs::write(out.join("foreign"), b"x").unwrap();
         assert!(generate(&out, ScaleProfile::Tiny, false).is_err());
         fs::remove_dir_all(&out).unwrap();
-        fs::create_dir(root.join(".kio-scale-v2.tmp-tiny")).unwrap();
+        fs::create_dir(root.join(".kio-scale-v3.tmp-tiny-current-text")).unwrap();
         assert!(generate(&out, ScaleProfile::Tiny, false).is_err());
     }
 
@@ -1372,9 +1619,9 @@ mod tests {
         let out = rt(&temp).join("scale");
         generate(&out, ScaleProfile::Tiny, false).unwrap();
         let parent = bind_parent(&out).unwrap();
-        let slot = reset_slot(ScaleProfile::Tiny);
-        ensure_empty_slot(&parent.handle, slot, &out).unwrap();
-        rename_exchange(&parent.handle, &parent.leaf, slot).unwrap();
+        let slot = reset_slot(ScaleProfile::Tiny, ScaleLane::CurrentText);
+        ensure_empty_slot(&parent.handle, &slot, &out).unwrap();
+        rename_exchange(&parent.handle, &parent.leaf, &slot).unwrap();
         assert_eq!(
             generate(&out, ScaleProfile::Tiny, false).unwrap(),
             GenerateOutcome::ReadyNoop
@@ -1407,10 +1654,10 @@ mod tests {
         let out = rt(&temp).join("scale");
         generate(&out, ScaleProfile::Tiny, false).unwrap();
         let parent = bind_parent(&out).unwrap();
-        let slot = reset_slot(ScaleProfile::Tiny);
-        ensure_empty_slot(&parent.handle, slot, &out).unwrap();
-        rename_exchange(&parent.handle, &parent.leaf, slot).unwrap();
-        let candidate = open_dir(&parent.handle, slot, &out).unwrap();
+        let slot = reset_slot(ScaleProfile::Tiny, ScaleLane::CurrentText);
+        ensure_empty_slot(&parent.handle, &slot, &out).unwrap();
+        rename_exchange(&parent.handle, &parent.leaf, &slot).unwrap();
+        let candidate = open_dir(&parent.handle, &slot, &out).unwrap();
         let guard = lock(&candidate, &out).unwrap();
         assert!(generate(&out, ScaleProfile::Tiny, false).is_err());
         drop(guard);
@@ -1432,6 +1679,10 @@ mod tests {
                 .contains("atomic no-replace publication unsupported")
         );
         assert!(!out.exists());
-        assert!(!rt(&temp).join(".kio-scale-v2.tmp-tiny").exists());
+        assert!(
+            !rt(&temp)
+                .join(".kio-scale-v3.tmp-tiny-current-text")
+                .exists()
+        );
     }
 }
