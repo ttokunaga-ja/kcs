@@ -5,6 +5,7 @@ mod ocr_discovery;
 mod online_task;
 mod promotion;
 mod purge;
+mod release_binding;
 mod restore;
 mod search_history;
 mod search_time;
@@ -732,6 +733,7 @@ struct SearchArgs {
 }
 
 fn main() {
+    release_binding::retain();
     // Register the sqlite-vec `vec0` module before any connection opens, so
     // `chunk_vec` is available process-wide (04 §4.3, K4).
     kio_index::vec::ensure_registered();

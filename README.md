@@ -46,6 +46,10 @@ kio search "あの PDF"
 kio open <pointer from the results>
 ```
 
+Draft release candidates are not public releases. Their archive verification,
+installation, uninstallation, platform support, and signing-status procedures
+are defined in [docs/10-operations.md §12](docs/10-operations.md#12-rc-draft-artifact-の検証と導入).
+
 ## About network use
 
 Kio is **local-first**, which means your originals, history, and index live on

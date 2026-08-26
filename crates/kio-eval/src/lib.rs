@@ -23,6 +23,7 @@ pub mod persona_schedule;
 pub(crate) mod process_boundary;
 pub mod python_exceptions;
 pub mod qhard;
+pub mod release;
 pub mod replay;
 pub mod replay_boundary;
 pub mod rerank;

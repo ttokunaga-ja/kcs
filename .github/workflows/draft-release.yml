@@ -1,0 +1,143 @@
+name: Draft release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character commit SHA to package
+        required: true
+        type: string
+
+# This workflow only reads the selected candidate and uploads ephemeral Actions
+# artifacts. It never creates tags, releases, deployments, or repository writes.
+permissions:
+  contents: read
+
+jobs:
+  draft-artifact:
+    name: ${{ matrix.label }} (${{ matrix.support }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+            support: supported
+          - os: macos-latest
+            label: macOS
+            support: supported
+          - os: windows-latest
+            label: Windows
+            support: experimental
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Validate the exact candidate input
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm checkout is the requested immutable commit
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain --untracked-files=no)"
+
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Build the Rust-owned release tooling
+        run: cargo +1.98.0 build -p kio-eval --bin kio-eval --locked
+
+      - name: Build two independent, byte-identical candidate archives
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          eval_bin=target/debug/kio-eval
+          if [[ "$RUNNER_OS" == "Windows" ]]; then eval_bin="${eval_bin}.exe"; fi
+          target="$("$eval_bin" release native-target)"
+          lock_sha256="$("$eval_bin" release lock-sha256 --repo "$GITHUB_WORKSPACE")"
+          printf '%s\n' "$target" > "$RUNNER_TEMP/kio-release-target"
+          printf '%s\n' "$lock_sha256" > "$RUNNER_TEMP/kio-release-lock-sha256"
+          tools_dir="$RUNNER_TEMP/kio-release-tools"
+          "$eval_bin" release prepare-tools --out "$tools_dir"
+          for lane in first second; do
+            build_dir="$RUNNER_TEMP/kio-release-build-$lane"
+            artifact_dir="$RUNNER_TEMP/kio-release-artifacts-$lane"
+            "$eval_bin" release build \
+              --repo "$GITHUB_WORKSPACE" \
+              --candidate-sha "$CANDIDATE_SHA" \
+              --target "$target" \
+              --target-dir "$build_dir"
+            binary="$build_dir/$target/release/kio"
+            if [[ "$RUNNER_OS" == "Windows" ]]; then binary="${binary}.exe"; fi
+            "$eval_bin" release package \
+              --repo "$GITHUB_WORKSPACE" \
+              --binary "$binary" \
+              --target "$target" \
+              --tools-dir "$tools_dir" \
+              --out "$artifact_dir"
+          done
+          "$eval_bin" release compare \
+            --left "$RUNNER_TEMP/kio-release-artifacts-first" \
+            --right "$RUNNER_TEMP/kio-release-artifacts-second"
+
+      - name: Verify and smoke only the extracted archive
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SUPPORT: ${{ matrix.support }}
+        run: |
+          set -euo pipefail
+          eval_bin=target/debug/kio-eval
+          if [[ "$RUNNER_OS" == "Windows" ]]; then eval_bin="${eval_bin}.exe"; fi
+          lock_sha256="$(<"$RUNNER_TEMP/kio-release-lock-sha256")"
+          artifact_dir="$RUNNER_TEMP/kio-release-artifacts-first"
+          set -- "$artifact_dir"/*.tar.gz
+          test "$#" = 1
+          archive="$1"
+          checksums="${archive%.tar.gz}.checksums.json"
+          test -f "$checksums"
+          archive_sha256="$("$eval_bin" release archive-sha256 --archive "$archive")"
+          printf 'archive_sha256=%s\n' "$archive_sha256"
+          verify_output="$("$eval_bin" release verify \
+            --archive "$archive" \
+            --checksums "$checksums" \
+            --expected-archive-sha256 "$archive_sha256" \
+            --source-repo "$GITHUB_WORKSPACE" \
+            --expected-commit "$CANDIDATE_SHA" \
+            --expected-lock-sha256 "$lock_sha256")"
+          printf '%s\n' "$verify_output"
+          grep -F "\"support\":\"$SUPPORT\"" <<< "$verify_output"
+          "$eval_bin" release smoke \
+            --archive "$archive" \
+            --checksums "$checksums" \
+            --expected-archive-sha256 "$archive_sha256" \
+            --source-repo "$GITHUB_WORKSPACE" \
+            --expected-commit "$CANDIDATE_SHA" \
+            --expected-lock-sha256 "$lock_sha256" \
+            --work-dir "$RUNNER_TEMP/kio-release-smoke" \
+            --receipt "$artifact_dir/smoke.json"
+
+      - name: Save draft artifacts only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: kio-${{ matrix.label }}-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/kio-release-artifacts-first
+          if-no-files-found: error
+          compression-level: 0

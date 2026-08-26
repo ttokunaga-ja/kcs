@@ -1034,3 +1034,114 @@ cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (c
 ## 11.8 推奨 Reading Path
 
 Reading Path の正本は [README.md §1](README.md)。docs/ 直下のファイル名の数字プレフィックスがそのまま読む順番であり、本書で別の順序を定義しない。
+
+---
+
+# 12. RC draft artifact の検証と導入
+
+本節は、tag や GitHub Release を作る前の release candidate artifact の運用正本である。
+RC version の正本は workspace package version であり、最初の候補は `0.1.0-rc.1` とする。
+platform support policy は [09-mvp-scope.md §1.2](09-mvp-scope.md) だけを正本とし、
+macOS / Linux は `supported`、Windows は `experimental` とする。
+
+draft workflow が生成する Actions artifact は、同じ target 用の次の files を一組として保持する。
+
+```text
+kio-0.1.0-rc.1-<target>.tar.gz
+kio-0.1.0-rc.1-<target>.checksums.json
+smoke.json
+```
+
+archive には展開後の `bin/kio` (`bin/kio.exe` on Windows)、`LICENSE.md`、
+`NOTICE.txt`、`TRADEMARKS.md`、本書を写した `OPERATIONS.md`、canonical provenance、
+CycloneDX SBOM、dependency / license inventory、dependency audit receipt、内部 checksum
+manifest を含める。外部 `checksums.json` は archive 自身の SHA-256 と内部の binary / SBOM /
+provenance / checksum digest を同時に束縛する。archive 自身の digest を archive 内へ自己参照で
+埋め込まず、外部 sidecar を一組として検証することで循環を作らない。
+
+`dependency-audit.json` は固定版 `cargo-deny` による offline の bans / licenses / sources 検査の
+receipt である。P3 draft は advisory database を使用せず、provenance と receipt の
+`advisory_database` は `null` とするため、脆弱性 advisory scan を実施したという主張はしない。
+将来 advisory 検査を追加する場合は、database revision を provenance へ固定する必要がある。
+
+Rust verifier は candidate SHA、lockfile digest に加え、受理した workflow run の log / receipt へ
+独立に固定した archive SHA-256 を期待値として受け取り、archive と sidecar の組を検査する。
+download した sidecar に書かれた digest を、そのまま `--expected-archive-sha256` の信頼根にしては
+ならない。entry の重複、absolute path、`..`、backslash separator、symlink、非 canonical tar header、
+非 canonical JSON、digest 差し替え、binary の build binding と provenance の不一致を一つでも検出した
+場合は展開前に拒否する。
+
+```text
+kio-eval release verify \
+  --archive <kio-...tar.gz> \
+  --checksums <kio-...checksums.json> \
+  --expected-archive-sha256 <accepted run receipt の SHA-256> \
+  --source-repo <clean exact-candidate checkout> \
+  --expected-commit <full candidate SHA> \
+  --expected-lock-sha256 <Cargo.lock SHA-256>
+```
+
+`kio-eval` は release engineering 用の dev-only tool であり、利用者向け archive には含めない。
+通常の development build は明示的に `unbound` であり、packager は受理しない。RC build は
+version、full commit SHA、Git tree、`Cargo.lock` / `rust-toolchain.toml` の SHA-256、Rust version、
+target triple、`all-features`、`release` profile を binary へ束縛し、packager と verifier の双方が
+一致を確認する。`--source-repo` を指定した verifier は commit、Git tree、workspace version、lockfile、
+toolchain file の binding を clean checkout から独立に再導出する。Git authority は tracked tree / index
+と exact commit であり、source tree / index に変更がある build・package・source verification は拒否する。
+
+## 12.1 macOS / Linux の install と uninstall
+
+verification 済み archive を新しい directory へ展開し、archive 内 binary だけを導入する。
+build tree の `target/release` を直接 install してはならない。
+
+```sh
+tar -xzf kio-0.1.0-rc.1-<target>.tar.gz
+./kio-0.1.0-rc.1-<target>/bin/kio --version
+install -d "$HOME/.local/bin"
+install -m 0755 ./kio-0.1.0-rc.1-<target>/bin/kio "$HOME/.local/bin/kio"
+```
+
+`$HOME/.local/bin` を `PATH` へ追加する操作は shell 設定の所有者が明示的に行う。system directory
+への install や管理者権限は要求しない。uninstall は導入した binary だけを削除する。
+
+```sh
+rm "$HOME/.local/bin/kio"
+```
+
+uninstall は利用者の scope 内にある `.kio`、device registry、cache を自動削除しない。これらは
+binary と別の user data であり、利用者の明示判断なしに消してはならない。
+
+## 12.2 Windows experimental の install と uninstall
+
+PowerShell で verification 済み archive を新しい directory へ展開し、user-local directory へ
+`kio.exe` を copy する。PATH の永続変更は自動化しない。
+
+```powershell
+tar -xzf kio-0.1.0-rc.1-x86_64-pc-windows-msvc.tar.gz
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Kio\bin" | Out-Null
+Copy-Item ".\kio-0.1.0-rc.1-x86_64-pc-windows-msvc\bin\kio.exe" "$env:LOCALAPPDATA\Kio\bin\kio.exe"
+& "$env:LOCALAPPDATA\Kio\bin\kio.exe" --version
+```
+
+Windows RC の導入後も、自動 child-scope mutation は要求しない。直接選択した scope で次の手動経路
+だけを用いる。
+
+```powershell
+kio init <scope-path>
+Set-Location <scope-path>
+kio index --approve --offline
+```
+
+uninstall は `Remove-Item "$env:LOCALAPPDATA\Kio\bin\kio.exe"` で binary だけを削除する。
+`.kio`、registry、cache は macOS / Linux と同様に残す。
+
+## 12.3 signing status
+
+P3 draft artifact は全 platform で publisher identity を証明する signature を持たない。macOS arm64
+artifact には実行可能性のため `rust-lld` が生成する **ad-hoc signature** があるが、certificate、
+Team ID、publisher identity はなく、**not notarized** である。これは linker output の一部であり、
+別の `codesign --sign` 処理は実行しない。Windows artifact は **Authenticode unsigned**、Linux
+artifact に detached signature はない。この違いを provenance の閉じた platform-specific signing
+fields に記録する。credential、Apple notarization、Windows certificate、Sigstore 等の signing 処理は、
+別の明示承認と鍵管理方針が確定するまで実行しない。checksum / provenance は、独立に保持した archive
+SHA-256 と組み合わせて改ざん検出と同一性確認を提供するが、publisher identity の代替ではない。

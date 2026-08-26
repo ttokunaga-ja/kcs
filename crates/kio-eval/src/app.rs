@@ -177,6 +177,101 @@ enum Commands {
         #[command(subcommand)]
         command: BenchmarkCommands,
     },
+    /// Deterministically build, package, and verify an unpublished RC candidate.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReleaseCommands {
+    /// Print the native Rust target triple for a candidate build.
+    NativeTarget,
+    /// Print the checked-out candidate's Cargo.lock SHA-256.
+    LockSha256 {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Print the SHA-256 identity of one bounded candidate archive.
+    ArchiveSha256 {
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Install the fixed release-audit tools into a new directory.
+    PrepareTools {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Build a bound release-candidate binary for the native target.
+    Build {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        candidate_sha: String,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        target_dir: PathBuf,
+    },
+    /// Package one already-bound candidate binary into a deterministic archive.
+    Package {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        binary: PathBuf,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        tools_dir: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Verify archive layout, canonical JSON, checksums, and embedded binding.
+    Verify {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        checksums: Option<PathBuf>,
+        /// Trusted digest retained outside the archive/sidecar pair.
+        #[arg(long)]
+        expected_archive_sha256: String,
+        /// Clean exact-candidate checkout used to rederive source bindings.
+        #[arg(long)]
+        source_repo: PathBuf,
+        #[arg(long)]
+        expected_commit: String,
+        #[arg(long)]
+        expected_lock_sha256: String,
+    },
+    /// Extract and smoke-test only the verified candidate archive.
+    Smoke {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        checksums: Option<PathBuf>,
+        /// Trusted digest retained outside the archive/sidecar pair.
+        #[arg(long)]
+        expected_archive_sha256: String,
+        /// Clean exact-candidate checkout used to rederive source bindings.
+        #[arg(long)]
+        source_repo: PathBuf,
+        #[arg(long)]
+        expected_commit: String,
+        #[arg(long)]
+        expected_lock_sha256: String,
+        #[arg(long)]
+        work_dir: PathBuf,
+        #[arg(long)]
+        receipt: Option<PathBuf>,
+    },
+    /// Require two independently produced candidate output directories to match byte-for-byte.
+    Compare {
+        #[arg(long)]
+        left: PathBuf,
+        #[arg(long)]
+        right: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -600,6 +695,8 @@ pub enum AppError {
     PersonaLease(#[from] kio_eval::persona_lease::PersonaLeaseError),
     #[error(transparent)]
     PersonaAttest(#[from] kio_eval::persona_attest::PersonaAttestError),
+    #[error(transparent)]
+    Release(#[from] kio_eval::release::ReleaseError),
 }
 
 fn generate_corpus(out: PathBuf, force: bool) -> Result<ExitCode, AppError> {
@@ -1854,6 +1951,132 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     } else {
                         ExitCode::Failure
                     })
+                }
+            },
+            Commands::Release { command } => match command {
+                ReleaseCommands::NativeTarget => {
+                    println!("{}", kio_eval::release::native_target()?);
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::LockSha256 { repo } => {
+                    println!("{}", kio_eval::release::candidate_lock_sha256(repo)?);
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::ArchiveSha256 { archive } => {
+                    println!("{}", kio_eval::release::candidate_archive_sha256(archive)?);
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::PrepareTools { out } => {
+                    kio_eval::release::prepare_tools(&kio_eval::release::PrepareToolsOptions {
+                        output_dir: out.clone(),
+                    })?;
+                    println!("[ok] pinned release tools: {}", out.display());
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::Build {
+                    repo,
+                    candidate_sha,
+                    target,
+                    target_dir,
+                } => {
+                    let summary = kio_eval::release::build_candidate(
+                        &kio_eval::release::BuildCandidateOptions {
+                            repo: repo.clone(),
+                            candidate_sha: candidate_sha.clone(),
+                            target: target.clone(),
+                            target_dir: target_dir.clone(),
+                        },
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&summary)
+                            .map_err(|error| AppError::Input(error.to_string()))?
+                    );
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::Package {
+                    repo,
+                    binary,
+                    target,
+                    tools_dir,
+                    out,
+                } => {
+                    let summary = kio_eval::release::package_candidate(
+                        &kio_eval::release::PackageCandidateOptions {
+                            repo: repo.clone(),
+                            binary: binary.clone(),
+                            target: target.clone(),
+                            output_dir: out.clone(),
+                            tools_dir: tools_dir.clone(),
+                        },
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&summary)
+                            .map_err(|error| AppError::Input(error.to_string()))?
+                    );
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::Verify {
+                    archive,
+                    checksums,
+                    expected_archive_sha256,
+                    source_repo,
+                    expected_commit,
+                    expected_lock_sha256,
+                } => {
+                    let summary = kio_eval::release::verify_candidate(
+                        &kio_eval::release::VerifyCandidateOptions {
+                            archive: archive.clone(),
+                            checksum: checksums.clone(),
+                            expected_archive_sha256: expected_archive_sha256.clone(),
+                            expected_repo: Some(source_repo.clone()),
+                            expected_commit: Some(expected_commit.clone()),
+                            expected_lock_sha256: Some(expected_lock_sha256.clone()),
+                        },
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&summary)
+                            .map_err(|error| AppError::Input(error.to_string()))?
+                    );
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::Smoke {
+                    archive,
+                    checksums,
+                    expected_archive_sha256,
+                    source_repo,
+                    expected_commit,
+                    expected_lock_sha256,
+                    work_dir,
+                    receipt,
+                } => {
+                    let summary = kio_eval::release::smoke_candidate(
+                        &kio_eval::release::SmokeCandidateOptions {
+                            verify: kio_eval::release::VerifyCandidateOptions {
+                                archive: archive.clone(),
+                                checksum: checksums.clone(),
+                                expected_archive_sha256: expected_archive_sha256.clone(),
+                                expected_repo: Some(source_repo.clone()),
+                                expected_commit: Some(expected_commit.clone()),
+                                expected_lock_sha256: Some(expected_lock_sha256.clone()),
+                            },
+                            work_dir: work_dir.clone(),
+                            receipt: receipt.clone(),
+                        },
+                    )?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&summary)
+                            .map_err(|error| AppError::Input(error.to_string()))?
+                    );
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::Compare { left, right } => {
+                    kio_eval::release::compare_candidate_dirs(left, right)?;
+                    println!("[ok] candidate outputs are byte-identical");
+                    Ok(ExitCode::Success)
                 }
             },
         };

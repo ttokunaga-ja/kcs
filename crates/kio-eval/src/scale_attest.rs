@@ -2446,7 +2446,7 @@ fn attest_scope_inner(
         .sum::<usize>();
     let approval = &identity.scan_approval;
     if identity.scope_id.is_empty()
-        || identity.kio_format_version != env!("CARGO_PKG_VERSION")
+        || identity.kio_format_version != kio_core::scope::KIO_FORMAT_VERSION
         || identity.scope_path != expected_scope_path
         || approval.scope_id != identity.scope_id
         || approval.root_path != expected_scope_path
