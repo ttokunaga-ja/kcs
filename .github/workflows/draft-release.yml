@@ -64,6 +64,22 @@ jobs:
       - name: Build the Rust-owned release tooling
         run: cargo +1.98.0 build -p kio-eval --bin kio-eval --locked
 
+      - name: Prefetch the exact locked candidate graph
+        run: |
+          set -euo pipefail
+          # cargo-sbom resolves the complete workspace graph, including
+          # non-host and dev dependencies. Hydrate it once, then prove the
+          # packaging tools can remain fail-closed and offline.
+          cargo +1.98.0 fetch \
+            --locked \
+            --manifest-path "$GITHUB_WORKSPACE/Cargo.toml"
+          CARGO_NET_OFFLINE=true cargo +1.98.0 metadata \
+            --locked \
+            --all-features \
+            --format-version 1 \
+            --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
+            >/dev/null
+
       - name: Build two independent, byte-identical candidate archives
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
