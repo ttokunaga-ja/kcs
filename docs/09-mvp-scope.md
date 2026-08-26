@@ -226,6 +226,36 @@ Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 �
                                        (研究メモ: 旧 research/markdown.md — git 履歴。単価改定時は本表を更新)
 ```
 
+### P2 scale evaluator contract
+
+P2 の性能 fixture は Rust v3 の二つの create-only lane である。`current-text` は base source
+だけを index し、`history-overlay` は同じ base を index 後に全20 scopeで edit・rename・deleteを
+各1件適用して final HEAD を index する。二つの destination を共有・上書き・adoptしてはならない。
+
+| profile / lane | current | historical-only | deleted | physical |
+| --- | ---: | ---: | ---: | ---: |
+| tiny / current-text | 180 | 0 | 0 | 180 |
+| tiny / history-overlay | 120 | 120 | 60 | 240 |
+| full / current-text | 120,000 | 0 | 0 | 120,000 |
+| full / history-overlay | 119,400 | 1,200 | 600 | 120,600 |
+
+`scale prepare` は正式な `init → offline index` だけを使い、history overlayにも同じ再index経路を
+使う。`scale attest` は生CAS、commit/tree、SQLite/FTS/vector、registryをread-onlyで再計算する。
+top-10 Pointer の再検証は evaluator-local strict wire と生CASで完結し、production の
+`EvidencePointer::validate` を呼ばない。これは評価証跡が被評価のproduction verifierへ権威を委譲しない
+ための境界である。
+
+5 benchmark lane は `current-text` (text)、`vector`、`hybrid`、`history` (all-history text)、
+`deleted` (include-deleted text) である。requested mode と resolved mode は一致し、fallbackは常に
+falseでなければならない。vector/hybridのtext fallbackは測定ではなく失敗とする。評価用の決定論embeddingは
+exact selectorでのみ有効な実Adapter wireで、network不可・非課金である。deleted laneは独立attest済みの
+正解Pointerをprivateな`--to`先へ復元し、raw hash一致とfixture working tree不変の両方をreportで証明する。
+
+D1 の baseline/enriched TTFV と preview/actual cost は tagged `measured` / `not-measured` /
+`blocked` 状態で表す。証拠のない値を0やpassへ変換しない。Full の5 warmup/100 samplesは手動の
+scale acceptanceであり、actual D1とdogfoodはP4の別ゲートである。push CIはTiny二laneの契約smokeだけを
+実行し、Fullや性能合格を主張しない。
+
 Q_hard の Rust 計測は `kio-eval benchmark qhard` を正本とする。これは外部 fixture の
 attestation (tree / XDG environment / registered scopes / frozen golden digest) を要求し、fixture
 未配置・未 attest を pass や historical result の再利用として扱わない。Q_hard 8 問だけの

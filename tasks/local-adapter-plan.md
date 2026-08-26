@@ -519,8 +519,8 @@ purge 済み画像の URI が chunk 本文に残る場合がある。`related_im
 >   `Box<dyn EmbeddingAdapter>`。**trait は既に正しい抽象だった** — `profile()` が
 >   `execution_mode` / `allow_network` / `billable_kinds` を、
 >   `preferred_request_kind()` が lane を持つので、offline の 3 分岐すべてが賄える
-> - offline seam は `KIO_TEST_LOCAL_EMBED`。CI は GPU を持たないので、
->   **実モデル無しで offline の意味論を検証する唯一の手段**
+> - P2 で offline の mock selector は削除した。CI は transport を差し替えた
+>   `RecordingClient` で、実モデルや mock vector identity を持ち込まずに offline の意味論を検証する
 >
 > 🔴 **consent gate も ledger も「2 箇所」だった** (Chunk A のゲートと同じ構図):
 >
@@ -612,9 +612,8 @@ D4 によりテキストのみでも同形式を使う。
 >   768 より先にどれだけ乗っていたか」に依存し、それは文の性質ではない
 > - **切り詰めは 2048 と等値比較しない。** 同族のより広いモデルを切り詰めるのも
 >   MRL である。禁じるべきは*広げる*ことなので、768 未満の応答だけを拒否する
-> - **宣言は `Real` を選ぶ。** `KIO_TEST_LOCAL_EMBED=mock` を経由しない限り
->   mock は選ばれない。宣言が黙って mock ベクトルを実コーパスへ書く経路は無い
-> - **mock と real は別 profile hash**。同一空間を名乗らせない (03 §7)
+> - **宣言は常に `Real` を選ぶ。** P2 で mock backend と selector を削除したため、
+>   宣言が mock ベクトルを実コーパスへ書く経路は存在しない
 > - `tool_profile_hash` = `sha256:f9f610bb…` が V4 の `v4-profile.json` と
 >   **一致することをテストで凍結した**。Python 移植と Rust 実装が独立に同じ値を
 >   出しており、どちらかがずれたら落ちる

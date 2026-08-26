@@ -106,7 +106,7 @@ FTS が MATCH した分がすべてになる。FTS の MATCH は本質的に疎�
 ## 検証 — 払う前に、機構だけ無料で確かめた
 
 「vector lane がプールを埋める」は推論だったので、**支払う前に**確かめた。
-`KIO_TEST_LOCAL_EMBED=mock` (catalog.rs の offline 埋め込み seam) で同じ 420 scope を
+当時の offline 埋め込み seam（P2 で削除済み）で同じ 420 scope を
 作り直し、同じ 24 問を数えた:
 
 | 構成 | 候補 >10 件の問 | 候補数 |

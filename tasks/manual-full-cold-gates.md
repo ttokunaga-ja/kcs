@@ -90,29 +90,62 @@ KIO_FULL_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kio-scale-full.XXXXXX")
 cargo +1.98.0 build --release --all-features --locked --offline \
   -p kio-cli -p kio-eval --bins
 target/release/kio-eval scale generate \
-  --out "$KIO_FULL_ROOT/corpus" --profile full
+  --out "$KIO_FULL_ROOT/current" --profile full --lane current-text
+target/release/kio-eval scale generate \
+  --out "$KIO_FULL_ROOT/history" --profile full --lane history-overlay
 target/release/kio-eval scale prepare \
-  --corpus "$KIO_FULL_ROOT/corpus" --bin target/release/kio
+  --corpus "$KIO_FULL_ROOT/current" --bin target/release/kio
+target/release/kio-eval scale prepare \
+  --corpus "$KIO_FULL_ROOT/history" --bin target/release/kio
 target/release/kio-eval scale attest \
-  --corpus "$KIO_FULL_ROOT/corpus" \
-  --out "$KIO_FULL_ROOT/attestation.json"
+  --corpus "$KIO_FULL_ROOT/current"
+target/release/kio-eval scale attest \
+  --corpus "$KIO_FULL_ROOT/history"
+jq -e '
+  .schema_version == 3 and .lane == "current_text" and
+  .edit_operations == 0 and .rename_operations == 0 and .delete_operations == 0 and
+  .current_chunks == 120000 and .historical_only_chunks == 0 and
+  .deleted_chunks == 0 and .physical_chunks == 120000
+' "$KIO_FULL_ROOT/current/scale-attestation.json"
+jq -e '
+  .schema_version == 3 and .lane == "history_overlay" and
+  .edit_operations == 20 and .rename_operations == 20 and .delete_operations == 20 and
+  .current_chunks == 119400 and .historical_only_chunks == 1200 and
+  .deleted_chunks == 600 and .physical_chunks == 120600
+' "$KIO_FULL_ROOT/history/scale-attestation.json"
 target/release/kio-eval scale benchmark \
-  --corpus "$KIO_FULL_ROOT/corpus" --bin target/release/kio \
+  --current-corpus "$KIO_FULL_ROOT/current" \
+  --history-corpus "$KIO_FULL_ROOT/history" --bin target/release/kio \
   --warmups 5 --samples 100 \
   --out "$KIO_FULL_ROOT/benchmark.json"
 jq -e '
-  .measurement_class == "full_100k_acceptance" and
-  .acceptance_eligible == true and
+  .measurement_class == "full_manual_p4_gate" and
+  .full_formal_manual_gate == true and
+  .acceptance_failed == false and
   .passed_p95_thresholds == true and
-  .current_chunks >= 100001 and
-  .warmups == 5 and .samples == 100
+  .warmups == 5 and .samples == 100 and
+  ([.lanes[].name] | sort) == ["current-text", "deleted", "history", "hybrid", "vector"] and
+  ([.lanes[].name] | unique | length) == 5 and
+  (all(.lanes[]; .requested_mode == .resolved_mode)) and
+  (all(.lanes[]; .pointer_attestations > 0)) and
+  ([.lanes[] | select(.name == "current-text") | .population] == [120000]) and
+  ([.lanes[] | select(.name == "vector") | .population] == [120000]) and
+  ([.lanes[] | select(.name == "hybrid") | .population] == [120000]) and
+  ([.lanes[] | select(.name == "history") | .population] == [1200]) and
+  ([.lanes[] | select(.name == "deleted") | .population] == [600]) and
+  ([.lanes[] | select(.name == "deleted") |
+    .restore_raw_verified and .restore_working_tree_unchanged] == [true])
 ' "$KIO_FULL_ROOT/benchmark.json"
 ```
 
-The Rust command publishes its create-only report even when an eligible run
-misses a threshold, then exits nonzero. M3-1 requires both measured p95 signals
-below 5 seconds; M3-2 and M3-3 each require both below 7 seconds. Tiny remains a
-contract smoke and cannot satisfy this gate. See [the evaluator contract](../eval/README.md).
+The two corpus paths are create-only and must remain distinct. The Rust command
+publishes its create-only report after its typed search-contract checks. At the
+formal Full sampling shape it retains the M3-1 current-text p95 < 5 seconds and
+M3-2/M3-3 history/deleted p95 < 7 seconds gates for both product and process-wall
+signals; vector/hybrid are recorded without inventing a new threshold. Tiny
+remains a contract smoke and cannot satisfy this gate. The report's D1 TTFV/cost
+fields remain typed `not-measured` for this scale-only run: P4 owns actual D1
+data, and dogfood is a separate manual gate. See [the evaluator contract](../eval/README.md).
 
 ## 4. U7 GPU/model gate
 

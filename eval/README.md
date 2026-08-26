@@ -29,10 +29,10 @@
 | `kio-eval benchmark qhard` | attest済み外部fixtureとsynthetic M3-1を同一実行で再測定する唯一のQ_hard判定経路 |
 | `golden-queries-fixture-b.jsonl` | baseline 比較専用の別凍結母集団（24問、hard1/2/3 各8、sha256:bdad3e02c4b70f721e882d7f24c8b5b442621be7c0c03593afde41b8ebca7d45） |
 | `kio-eval benchmark baseline` | attest済みfixture-BをSpotlight/rgaと比較する唯一のbaseline判定経路 |
-| `kio-eval scale generate` | Rust v2 の決定論的性能 fixture 正本。20 scope と tiny/full の形を固定し、owner marker を含めて materialize する |
-| `kio-eval scale prepare` | 各 leaf scope を `init → offline index` し、隔離 registry と Rust prepare report を公開する |
-| `kio-eval scale attest` | manifest・HEAD・現行 chunk config・SQLite/FTS・registry binding を独立に照合し、create-only attestation を公開する |
-| `kio-eval scale benchmark` | attestation 済み v2 fixture だけを測定し、manifest/prepare/attestation/binary と実測前後の状態を report に束縛する |
+| `kio-eval scale generate` | Rust v3 の決定論的性能 fixture 正本。current-text と history-overlay を別の create-only destination として生成する |
+| `kio-eval scale prepare` | 各 leaf scope を正式な `init → offline index` 経路へ通す。history lane は base index 後に全20 scopeの edit/rename/deleteを適用して再indexする |
+| `kio-eval scale attest` | manifest・commit/tree/chunk CAS・SQLite/FTS/vector・registryをread-onlyで再計算し、current/historical-only/deleted/physicalを分離する |
+| `kio-eval scale benchmark` | 2 laneのattestationを同時に束縛し、text/vector/hybrid/history/deletedをfallbackなしで測定する |
 
 ## 使い方
 
@@ -321,78 +321,103 @@ folder と利用者・用途の対応は manifest にも保存する。
 | `client-deliverables` | consultant | findings / recommendations |
 | `downloads-inbox` | knowledge worker | downloaded references / inbox |
 
-full は時間・ディスクを使う明示実行専用であり、通常 CI では生成・index しない。通常の安全確認には
-同じ 20 scope 構造の `tiny` (20 files / 60 chunks) を使う。
+full は時間・ディスクを使う明示実行専用であり、push CIでは生成・indexしない。通常の安全確認には
+同じ20 scope構造の `tiny`（各scope 3 files、current-text 180 chunks）を使う。2 laneは同じpathへ
+上書き・adoptせず、必ず別destinationへ生成する。
 
 ```bash
-# 軽量 smoke (20 scopes / 60 chunks)
+# 軽量 smoke (20 scopes / current-text 180 chunks)
 target/release/kio-eval scale generate \
-  --out /tmp/kio-scale-tiny --profile tiny
+  --out /tmp/kio-scale-tiny-current --profile tiny --lane current-text
+target/release/kio-eval scale generate \
+  --out /tmp/kio-scale-tiny-history --profile tiny --lane history-overlay
 target/release/kio-eval scale prepare \
-  --corpus /tmp/kio-scale-tiny --bin target/release/kio
-target/release/kio-eval scale attest --corpus /tmp/kio-scale-tiny
+  --corpus /tmp/kio-scale-tiny-current --bin target/release/kio
+target/release/kio-eval scale prepare \
+  --corpus /tmp/kio-scale-tiny-history --bin target/release/kio
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-tiny-current
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-tiny-history
 target/release/kio-eval scale benchmark \
-  --corpus /tmp/kio-scale-tiny --bin target/release/kio \
+  --current-corpus /tmp/kio-scale-tiny-current \
+  --history-corpus /tmp/kio-scale-tiny-history --bin target/release/kio \
   --warmups 1 --samples 1 --out /tmp/kio-scale-tiny.benchmark.json
 
-# 本番規模 (20 scopes / 4,000 files / 120,000 chunks): 手動性能計測時のみ
+# 本番規模 (20 scopes / base 4,000 files / 120,000 chunks): P4手動計測時のみ
 target/release/kio-eval scale generate \
-  --out /tmp/kio-scale-full --profile full
+  --out /tmp/kio-scale-full-current --profile full --lane current-text
+target/release/kio-eval scale generate \
+  --out /tmp/kio-scale-full-history --profile full --lane history-overlay
 target/release/kio-eval scale prepare \
-  --corpus /tmp/kio-scale-full --bin target/release/kio
+  --corpus /tmp/kio-scale-full-current --bin target/release/kio
+target/release/kio-eval scale prepare \
+  --corpus /tmp/kio-scale-full-history --bin target/release/kio
 
 # 任意時点で再検証 (read-only SQLite attestation)
-target/release/kio-eval scale attest --corpus /tmp/kio-scale-full
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-full-current
+target/release/kio-eval scale attest --corpus /tmp/kio-scale-full-history
 
-# Rust measurement lane: full だけが acceptance eligible。5 warmup + 100 samples
-# の M3-1 `search.latency_ms` p95 を判定に使う。--out は corpus 外の既存実体
-# directory にだけ原子的に書き出せる。
+# Rust measurement lane: Full の formal sampling shape は 5 warmup + 100 samples。
+# P2 は bounded smoke までとし、formal測定、実データのD1判定、dogfood合格はP4の別手動gateである。
+# --out は corpus 外の既存実体 directory にだけ原子的に書き出せる。
 target/release/kio-eval scale benchmark \
-  --corpus /tmp/kio-scale-full --bin target/release/kio \
+  --current-corpus /tmp/kio-scale-full-current \
+  --history-corpus /tmp/kio-scale-full-history --bin target/release/kio \
   --warmups 5 --samples 100 --out /tmp/kio-scale-full.latency.json
 ```
 
-`kio-eval scale prepare` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
-HEAD tree projection を公開するので、その直後に別の `kio snapshot create` を追加してはならない。
-device state は corpus 内の `.kio-eval-device` に隔離され、開発者の実 registry や API key を使わない。
+`kio-eval scale prepare` は各scopeを明示的な `kio index --offline --yes` で終える。`index` 自体がsnapshotと
+HEAD tree projectionを公開するため、その直後に別の`kio snapshot create`を追加しない。history laneはbase
+HEADを作った後、凍結planどおり各scopeへedit・rename・deleteを1件ずつ適用し、同じCLI index経路でfinal
+HEADを作る。SQLite/CASへ直接データを注入しない。device stateはcorpus内の`.kio-eval-device`に隔離される。
+prepare/search childだけがrelease buildでも有効なexact selector
+`KIO_EVAL_DETERMINISTIC_EMBED=scale-v3`を受け取り、実`EmbeddingAdapter` wireで768次元の決定論vectorを作る。
+このadapterはnetwork不可・非課金であり、開発者のregistry、API key、外部modelを使わない。
+current fixtureのvector/hybrid workloadでは、ASCII token featureに加え、各chunkで最初に現れる12桁hexの
+reference tokenだけをdomain-separated anchorとして扱う。query自体も同じopaque tokenであり、後続referenceを
+すべてanchor化して長いchunk内で信号を希釈しない。このalgorithmはembedding profileのimmutable model versionへ
+束縛され、attestorはadapterを呼ばずに同じvector bytesを独立再計算する。これはscale-v3 exact-reference workloadの
+決定論的な検索probeであり、一般的なsemantic embedding品質や将来のhistory-vector laneを主張しない。
 
-出力の `scale-corpus-manifest.json` は全 source bytes、expected chunk 数、
-query契約を版管理する `query_workload_id=exact-reference-v1`、
-`scale-attestation.json` は次を証明する。
+出力manifestはbase/overlay source hash、operation plan、expected populationを固定し、
+prepare reportはscopeごとのbase/final commit・treeを束縛する。`scale-attestation.json`は次を証明する。
 
-- manifest と 4,000 source files の完全一致、isolated registry の indexed 20 scopes 完全一致
-- 本番検索と同じ対象-tree config association、`chunk_publications`、HEAD
-  `(raw_hash, tool_profile_hash, gen)` predicate による current eligible chunk 数
-- 全 section 共通 sentinel の FTS `MATCH` と FTS5 docsize shadow の双方で同数を確認
-- full では current eligible chunks が 120,000、かつ 100,000 を超えること
+- lane/profile/manifestとsource bytesの完全一致、isolated registryのindexed 20 scopes完全一致
+- 生CASからbase→final commit/tree関係、凍結adapter setのtool-lock preimage、chunk canonical bytes/hash、
+  publication/index projectionを再計算
+- current、historical-only、deleted、physical CAS、embedding/vector rowを別々に数え、凍結母集団と完全一致
+- history laneの`edit_operations` / `rename_operations` / `delete_operations`が各20件であり、
+  current-text laneでは各0件、かつ両laneの母集団とdestinationが独立していること
+- full current-textは120,000 current chunks、full historyは119,400 current、1,200 historical-only、
+  600 deleted、120,600 physical chunksであること
 - 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける。
   これは高選択性queryのlatency probeであり、広いqueryのmulti-scope ranking性能は証明しない
 
-Rust の `kio-eval scale benchmark` は release binary・manifest・保存済みと実測前後の live attestation・platformをreportへ束縛し、
-各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
-明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
-主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、独立した上限guardはrunner計測のprocess wall timeで、
-両方の生標本とp50/p95/p99を保存する。full の acceptance は M3-1 の `< 5秒` と
-M3-2/M3-3 の `< 7秒` を全て判定する（tiny は pass fields を出さない）。M3-1の `< 5秒` 判定は
-**high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
-(`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
-編集・rename・deleteを含まないため、結果は **execution-path-only** であり、履歴データの品質・母集団の
-代表性を示す正式な履歴性能値ではない。ただし selected execution path に対する full Scale の合否契約には、
-両シナリオの `< 7秒` p95 を含める。
+Rustの`kio-eval scale benchmark`はrelease binary、両manifest、両prepare/attestation、実測前後のlive evidence、
+platformを1 reportへ束縛する。5 laneは`current-text`、`vector`、`hybrid`、`history`、`deleted`で、modeは
+すべて明示する。`requested_mode == resolved_mode`、`fallback == false`を必須とし、vector/hybridのtext fallbackは
+測定値ではなく失敗である。各top-10 Evidence Pointerはproduction issuer/verifierを使わないevaluator-local wireと
+生CASから再検証する。reportはlaneごとの母集団、Recall@10、生標本、product metricとprocess wallの
+p50/p95/p99、binary/fixture/attestation digest、独立検証したPointer件数を保持する。deleted laneは
+正解Pointerをprivateなcreate-only出力先へ実際に`restore --to`し、復元raw hashの一致とfixture working
+treeの不変をそれぞれ`restore_raw_verified` / `restore_working_tree_unchanged`として`true`に固定する。
+
+D1 schemaもRust reportに含めるが、このP2 scale runはD1 corpusのTTFV/costを測っていない。baseline/enriched
+TTFV、preview/actual costはそれぞれtyped `not-measured`として出力し、0またはpassへ変換しない。Fullの
+5 warmup/100 samplesはP4 manual gateであり、既存M3-1 current-text p95 < 5秒とM3-2/M3-3
+history/deleted p95 < 7秒をproduct/process-wallの両signalで判定する。vector/hybridには未合意の閾値を
+追加せず実測値を保持する。D1実データとdogfoodもP4の別gateであり、push CIのTiny smokeは正式性能合格にならない。
 
 ### このfixtureで証明しないもの
 
 - 全scopeが6,000 chunks、全ファイルが同じ生成Markdownであり、実フォルダの偏ったscope規模、
   日本語、表、ログ、コード、長短文書の混在は代表しない。
-- embeddingを必須化しないため、hybrid/vector p95は証明しない。
 - exact reference tokenを使うため、広い共通語queryで20 scopeの候補が競合するranking/latencyは証明しない。
-- M3-2/M3-3の正式な10万chunk性能には、同じ20 scopeへ編集・rename・deleteを重ね、
-  historical/deleted populationをattestする独立したhistory overlayが必要。
+- D1の実測、外部OCR、paid embedding、GPU、real dogfoodの品質・性能は証明しない。
 - Q_hardのSpotlight/rga比較、dogfood、D1 (PDF 1,000本/5GB相当、TTFV/AI時間/コスト) は
   性質の異なるゲートなので、このbalanced fixtureへ混ぜない。
 
-次の拡張順は (1) history overlay、(2) scope/chunk長を偏らせたskewed robustness fixture、
-(3) Q_hard/D1/dogfood の実データ系ゲートとする。balanced fixtureの再現性は維持する。
+次の拡張順は (1) scope/chunk長を偏らせたskewed robustness fixture、
+(2) Q_hard/D1/dogfood の実データ系ゲートとする。balanced fixtureの再現性は維持する。
 
 生成先は owner marker で保護する。非空の未所有 directory は変更せず、`--reset-owned` も未知の
 entry があれば削除前に停止する。ready corpus の再生成と再 prepare は no-op になる。
