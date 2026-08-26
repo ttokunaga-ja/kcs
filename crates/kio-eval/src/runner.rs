@@ -928,16 +928,25 @@ pub enum ClassifiedOutcome {
     },
 }
 
-fn parse_json(text: &str) -> Option<Value> {
+const MAX_JSON_ERROR_DETAIL_CHARS: usize = 256;
+
+fn parse_json(text: &str) -> Result<Value, String> {
     let text = text.trim();
-    (!text.is_empty())
-        .then(|| serde_json::from_str(text).ok())
-        .flatten()
+    if text.is_empty() {
+        Err("empty output".to_owned())
+    } else {
+        serde_json::from_str(text).map_err(|error| {
+            error
+                .to_string()
+                .chars()
+                .take(MAX_JSON_ERROR_DETAIL_CHARS)
+                .collect()
+        })
+    }
 }
 
-fn error_code(value: &Option<Value>) -> Option<String> {
-    value
-        .as_ref()?
+fn error_code(value: Option<&Value>) -> Option<String> {
+    value?
         .as_object()?
         .get("error_code")?
         .as_str()
@@ -979,36 +988,60 @@ fn parse_pointer(value: &Value) -> Result<EvidencePointerRecord, String> {
     })
 }
 
-fn parse_response(value: Value) -> Result<SearchResponse, String> {
+enum ResponseParseError {
+    Schema(String),
+    Pointer { index: usize, reason: String },
+}
+
+impl ResponseParseError {
+    fn detail(self, exit_code: i32) -> String {
+        match self {
+            Self::Schema(reason) => {
+                format!("exit {exit_code}: JSON response schema invalid: {reason}")
+            }
+            Self::Pointer { index, reason } => {
+                format!("exit {exit_code}: result[{index}] Evidence Pointer invalid: {reason}")
+            }
+        }
+    }
+}
+
+fn parse_response(value: Value) -> Result<SearchResponse, ResponseParseError> {
     let object = value
         .as_object()
-        .ok_or_else(|| "stdout JSON response is not an object".to_owned())?;
+        .ok_or_else(|| ResponseParseError::Schema("response is not an object".to_owned()))?;
     let results = object
         .get("results")
         .and_then(Value::as_array)
-        .ok_or_else(|| "stdout JSON response has no results array".to_owned())?;
+        .ok_or_else(|| ResponseParseError::Schema("response has no results array".to_owned()))?;
     results
         .iter()
         .enumerate()
         .map(|(index, result)| {
-            let object = result
-                .as_object()
-                .ok_or_else(|| format!("result[{index}] is not an object"))?;
-            let pointer = parse_pointer(
-                object
-                    .get("evidence_pointer")
-                    .ok_or_else(|| format!("result[{index}] has no evidence_pointer"))?,
-            )
-            .map_err(|error| format!("result[{index}] {error}"))?;
+            let object = result.as_object().ok_or_else(|| {
+                ResponseParseError::Schema(format!("result[{index}] is not an object"))
+            })?;
+            let pointer = parse_pointer(object.get("evidence_pointer").ok_or_else(|| {
+                ResponseParseError::Schema(format!("result[{index}] has no evidence_pointer"))
+            })?)
+            .map_err(|error| ResponseParseError::Pointer {
+                index,
+                reason: error,
+            })?;
             let current_paths = match object.get("current_paths") {
                 None | Some(Value::Null) => None,
                 Some(Value::Array(paths)) => Some(
                     paths
                         .iter()
                         .map(|path| nonempty_string(path, "current_paths"))
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(ResponseParseError::Schema)?,
                 ),
-                Some(_) => return Err(format!("result[{index}] invalid current_paths")),
+                Some(_) => {
+                    return Err(ResponseParseError::Schema(format!(
+                        "result[{index}] invalid current_paths"
+                    )));
+                }
             };
             Ok(SearchHit {
                 pointer,
@@ -1017,8 +1050,10 @@ fn parse_response(value: Value) -> Result<SearchResponse, String> {
                     .expect("pointer was checked above")
                     .clone(),
                 current_paths,
-                current_path: optional_string(object.get("current_path"), "current_path")?,
-                title: optional_string(object.get("title"), "title")?,
+                current_path: optional_string(object.get("current_path"), "current_path")
+                    .map_err(ResponseParseError::Schema)?,
+                title: optional_string(object.get("title"), "title")
+                    .map_err(ResponseParseError::Schema)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -1031,31 +1066,34 @@ fn parse_response(value: Value) -> Result<SearchResponse, String> {
 pub fn classify_outcome(outcome: &SearchOutcome) -> ClassifiedOutcome {
     let stdout = parse_json(&outcome.stdout);
     let stderr = parse_json(&outcome.stderr);
-    let code = error_code(&stdout).or_else(|| error_code(&stderr));
+    let code = error_code(stdout.as_ref().ok()).or_else(|| error_code(stderr.as_ref().ok()));
     if let Some(code) = code.as_deref().filter(|code| is_not_implemented(code)) {
         return ClassifiedOutcome::Unimplemented {
             error_code: code.to_owned(),
         };
     }
     if matches!(outcome.returncode, 0 | 3) {
-        return match stdout.and_then(|value| parse_response(value).ok()) {
-            Some(response) => ClassifiedOutcome::Scored {
-                response,
-                error_code: code,
-                detail: (outcome.returncode == 3).then(|| "partial(exit 3)".to_owned()),
-            },
-            None => ClassifiedOutcome::Failed {
-                error_code: code,
-                detail: match outcome.returncode {
-                    0 => "exit 0 だが stdout が JSON レスポンスでない".to_owned(),
-                    3 => "exit 3 だが stdout が JSON レスポンスでない".to_owned(),
-                    _ => unreachable!("only exit 0 and 3 are handled here"),
+        return match stdout {
+            Ok(value) => match parse_response(value) {
+                Ok(response) => ClassifiedOutcome::Scored {
+                    response,
+                    error_code: code,
+                    detail: (outcome.returncode == 3).then(|| "partial(exit 3)".to_owned()),
                 },
+                Err(error) => ClassifiedOutcome::Failed {
+                    error_code: code,
+                    detail: error.detail(outcome.returncode),
+                },
+            },
+            Err(reason) => ClassifiedOutcome::Failed {
+                error_code: code,
+                detail: format!("exit {}: stdout is not JSON: {reason}", outcome.returncode),
             },
         };
     }
     let detail = stderr
         .as_ref()
+        .ok()
         .and_then(Value::as_object)
         .and_then(|object| object.get("message"))
         .and_then(Value::as_str)
@@ -2589,7 +2627,7 @@ mod tests {
         assert!(matches!(
             zero,
             ClassifiedOutcome::Failed { ref detail, .. }
-                if detail == "exit 0 だが stdout が JSON レスポンスでない"
+                if detail == "exit 0: JSON response schema invalid: response has no results array"
         ));
         let partial = classify_outcome(&outcome(
             3,
@@ -2598,7 +2636,76 @@ mod tests {
         assert!(matches!(
             partial,
             ClassifiedOutcome::Failed { ref detail, .. }
-                if detail == "exit 3 だが stdout が JSON レスポンスでない"
+                if detail.starts_with("exit 3: result[0] Evidence Pointer invalid:")
+        ));
+    }
+
+    #[test]
+    fn classifies_plaintext_fallback_with_diagnostic_error_code_as_scored() {
+        let classified = classify_outcome(&outcome(
+            0,
+            serde_json::json!({
+                "results": [{
+                    "evidence_pointer": pointer(),
+                    "title": "Plain text note",
+                    "current_path": "note.txt"
+                }],
+                "fallback": true,
+                "error_code": "KIO-E-VECTOR-UNAVAILABLE-001"
+            }),
+        ));
+        assert!(matches!(
+            classified,
+            ClassifiedOutcome::Scored { error_code: Some(ref code), .. }
+                if code == "KIO-E-VECTOR-UNAVAILABLE-001"
+        ));
+    }
+
+    #[test]
+    fn distinguishes_non_json_schema_and_pointer_failures() {
+        let non_json = SearchOutcome {
+            returncode: 0,
+            stdout: "not json".into(),
+            stderr: String::new(),
+            duration_ms: 1.0,
+        };
+        assert!(matches!(
+            classify_outcome(&non_json),
+            ClassifiedOutcome::Failed { ref detail, .. }
+                if detail.starts_with("exit 0: stdout is not JSON:")
+                    && detail.contains("line 1 column")
+        ));
+
+        let truncated = SearchOutcome {
+            returncode: 0,
+            stdout: format!("{{\"{}\"", "field".repeat(100)),
+            stderr: String::new(),
+            duration_ms: 1.0,
+        };
+        assert!(matches!(
+            classify_outcome(&truncated),
+            ClassifiedOutcome::Failed { ref detail, .. }
+                if detail.starts_with("exit 0: stdout is not JSON:")
+                    && detail.contains("line 1 column")
+                    && detail.chars().count() <= MAX_JSON_ERROR_DETAIL_CHARS + 28
+        ));
+
+        let pointer_failure = classify_outcome(&outcome(
+            0,
+            serde_json::json!({"results":[{"evidence_pointer": {
+                "schema_version": 1,
+                "commit": format!("sha256:{}", "c".repeat(64)),
+                "raw_hash": format!("sha256:{}", "a".repeat(64)),
+                "tool_profile_hash": format!("sha256:{}", "b".repeat(64)),
+                "chunk_hash": format!("sha256:{}", "d".repeat(64)),
+                "scope_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "heading_path": []
+            }}]}),
+        ));
+        assert!(matches!(
+            pointer_failure,
+            ClassifiedOutcome::Failed { ref detail, .. }
+                if detail == "exit 0: result[0] Evidence Pointer invalid: invalid evidence_pointer: pointer heading_path is invalid"
         ));
     }
 

@@ -1,6 +1,6 @@
 //! Evidence Pointer contracts.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{Result, SearchError};
 
@@ -10,6 +10,15 @@ pub const SHA256_DIGEST_LENGTH: usize = 64;
 
 const FULL_HASH_REQUIREMENT: &str =
     "hash must be `sha256:` followed by 64 lowercase hexadecimal characters";
+
+fn deserialize_present_heading_path<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
+}
 
 /// A full SHA-256 identifier that has passed the Kio object-hash grammar.
 ///
@@ -133,6 +142,7 @@ struct UncheckedEvidencePointer {
     tool_profile_hash: String,
     chunk_hash: String,
     path_at_commit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_heading_path")]
     heading_path: Option<Vec<String>>,
     section_id: Option<String>,
     byte_start: Option<u64>,
@@ -174,6 +184,24 @@ impl EvidencePointer {
             ));
         }
 
+        if let Some(heading_path) = &self.heading_path {
+            if heading_path.is_empty() {
+                return Err(SearchError::Evidence(
+                    "heading_path must be omitted when no headings are present".to_owned(),
+                ));
+            }
+            if heading_path.len() > 64 {
+                return Err(SearchError::Evidence(
+                    "heading_path must contain at most 64 headings".to_owned(),
+                ));
+            }
+            if heading_path.iter().any(|heading| heading.is_empty()) {
+                return Err(SearchError::Evidence(
+                    "heading_path entries must be non-empty strings".to_owned(),
+                ));
+            }
+        }
+
         Ok(ValidatedEvidencePointer {
             pointer: self,
             commit: ValidatedHash::new(&self.commit, "commit")?,
@@ -206,6 +234,7 @@ pub struct EvidencePointerIssueRequest {
 }
 
 pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<EvidencePointer> {
+    let heading_path = request.heading_path.filter(|headings| !headings.is_empty());
     let pointer = EvidencePointer {
         schema_version: EVIDENCE_POINTER_SCHEMA_VERSION,
         commit: request.commit,
@@ -214,7 +243,7 @@ pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<Ev
         tool_profile_hash: request.tool_profile_hash,
         chunk_hash: request.chunk_hash,
         path_at_commit: request.path_at_commit,
-        heading_path: request.heading_path,
+        heading_path,
         section_id: request.section_id,
         byte_start: request.byte_start,
         byte_end: request.byte_end,
@@ -316,6 +345,24 @@ mod tests {
             byte_end: Some(1500),
             scope_id: "scope_01J8ZQABCDEFGHJKMNPQRS".to_owned(),
             scope_path: Some("/tmp/scope".to_owned()),
+        }
+    }
+
+    fn issue_request(heading_path: Option<Vec<String>>) -> EvidencePointerIssueRequest {
+        let pointer = pointer();
+        EvidencePointerIssueRequest {
+            scope_id: pointer.scope_id,
+            scope_path: pointer.scope_path,
+            commit: pointer.commit,
+            tree: pointer.tree,
+            raw_hash: pointer.raw_hash,
+            tool_profile_hash: pointer.tool_profile_hash,
+            chunk_hash: pointer.chunk_hash,
+            path_at_commit: pointer.path_at_commit,
+            heading_path,
+            section_id: pointer.section_id,
+            byte_start: pointer.byte_start,
+            byte_end: pointer.byte_end,
         }
     }
 
@@ -477,6 +524,65 @@ mod tests {
         assert!(decoded.tree.is_none());
         assert!(decoded.path_at_commit.is_none());
         assert!(decoded.scope_path.is_none());
+    }
+
+    #[test]
+    fn issuer_normalizes_empty_heading_path_to_omission() {
+        let issued = issue_evidence_pointer(issue_request(Some(Vec::new()))).unwrap();
+
+        assert!(issued.heading_path.is_none());
+        let encoded = serde_json::to_value(issued).unwrap();
+        assert!(encoded.get("heading_path").is_none());
+    }
+
+    #[test]
+    fn inline_json_rejects_explicit_empty_heading_path() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["heading_path"] = serde_json::json!([]);
+
+        let error = serde_json::from_value::<EvidencePointer>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("heading_path must be omitted"));
+    }
+
+    #[test]
+    fn inline_json_rejects_explicit_null_heading_path() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["heading_path"] = serde_json::Value::Null;
+
+        assert!(serde_json::from_value::<EvidencePointer>(value).is_err());
+    }
+
+    #[test]
+    fn inline_json_rejects_empty_heading_path_entry() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["heading_path"] = serde_json::json!([""]);
+
+        let error = serde_json::from_value::<EvidencePointer>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("heading_path entries must be non-empty"));
+    }
+
+    #[test]
+    fn inline_json_rejects_more_than_64_heading_path_entries() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["heading_path"] = serde_json::json!(vec!["heading"; 65]);
+
+        let error = serde_json::from_value::<EvidencePointer>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 64 headings"));
+    }
+
+    #[test]
+    fn inline_json_accepts_64_non_empty_heading_path_entries() {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["heading_path"] = serde_json::json!(vec!["heading"; 64]);
+
+        let decoded: EvidencePointer = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.heading_path.as_ref().map(Vec::len), Some(64));
     }
 
     #[test]

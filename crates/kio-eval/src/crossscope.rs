@@ -29,6 +29,7 @@ use crate::{
 const RECALL_TARGET: f64 = 0.8;
 const RANK_LIMIT: usize = 50;
 const MAX_CROSSSCOPE_REPORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FAILURE_SUMMARY_FIELD_CHARS: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct CrossscopeOptions {
@@ -94,6 +95,51 @@ struct Counts {
     n_failed: usize,
     worst_expected_rank_mean: Option<f64>,
     worst_expected_rank_max: Option<usize>,
+}
+
+fn failure_summary(artifact: &CrossscopeResults, report_path: &std::path::Path) -> String {
+    let (scenario, detail) = artifact
+        .queries
+        .iter()
+        .find(|row| row.status != "ok")
+        .map(|row| {
+            (
+                row.scenario.as_str(),
+                row.detail.as_deref().unwrap_or("no failure detail"),
+            )
+        })
+        .unwrap_or(("aggregate", "recall or latency gate failed"));
+    let bounded_field = |value: &str| {
+        let normalized = value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    '?'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        if normalized.chars().count() > MAX_FAILURE_SUMMARY_FIELD_CHARS {
+            let mut truncated = normalized
+                .chars()
+                .take(MAX_FAILURE_SUMMARY_FIELD_CHARS - 3)
+                .collect::<String>();
+            truncated.push_str("...");
+            truncated
+        } else {
+            normalized
+        }
+    };
+    let detail = bounded_field(detail);
+    let report = bounded_field(&report_path.display().to_string());
+    format!(
+        "crossscope failed: n_failed={}; scenario={}; detail={}; report={}",
+        artifact.counts.n_failed, scenario, detail, report
+    )
 }
 
 fn expected_scopes(query: &crate::manifest::GoldenQuery) -> Vec<String> {
@@ -289,7 +335,9 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
             .push(duration_ms);
         match classify_outcome(&outcome) {
             ClassifiedOutcome::Scored {
-                response, detail, ..
+                response,
+                error_code,
+                detail,
             } => {
                 let validation = if query.scenario == Scenario::M3_2 {
                     let attestor = attestor.as_mut().expect("M3-2 requires attestor");
@@ -316,7 +364,7 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
                         query: query.query.clone(),
                         status: "failed".into(),
                         recall_at_10: Some(0.0),
-                        error_code: None,
+                        error_code,
                         detail: Some(detail),
                         duration_ms: Some(duration_ms),
                         scopes: None,
@@ -344,7 +392,7 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
                     query: query.query.clone(),
                     status: "ok".into(),
                     recall_at_10: Some(recall),
-                    error_code: None,
+                    error_code,
                     detail,
                     duration_ms: Some(duration_ms),
                     scopes: Some(scopes),
@@ -433,6 +481,9 @@ pub fn run(options: CrossscopeOptions) -> Result<kio_core::ExitCode, CrossscopeE
     destination
         .publish(&bytes, MAX_CROSSSCOPE_REPORT_BYTES)
         .map_err(|error| CrossscopeError::Input(error.to_string()))?;
+    if !all_pass {
+        eprintln!("{}", failure_summary(&artifact, &options.out));
+    }
     Ok(if all_pass {
         kio_core::ExitCode::Success
     } else {
@@ -554,5 +605,81 @@ mod tests {
         );
         assert!(parsed.get("aggregator").is_none());
         assert_eq!(parsed["counts"]["n_queries"], 0);
+    }
+
+    #[test]
+    fn failure_summary_names_first_failure_and_report_path() {
+        let artifact = CrossscopeResults {
+            target_recall_at_10: RECALL_TARGET,
+            scenarios: BTreeMap::new(),
+            queries: vec![QueryRow {
+                scenario: "M3-2".into(),
+                query: "q".into(),
+                status: "failed".into(),
+                recall_at_10: Some(0.0),
+                error_code: None,
+                detail: Some(
+                    "result[3] Evidence Pointer invalid: pointer heading_path is invalid".into(),
+                ),
+                duration_ms: Some(1.0),
+                scopes: None,
+                worst_expected_rank: None,
+            }],
+            counts: Counts {
+                n_queries: 16,
+                n_failed: 1,
+                worst_expected_rank_mean: None,
+                worst_expected_rank_max: None,
+            },
+        };
+        assert_eq!(
+            failure_summary(&artifact, std::path::Path::new("/tmp/report.json")),
+            "crossscope failed: n_failed=1; scenario=M3-2; detail=result[3] Evidence Pointer invalid: pointer heading_path is invalid; report=/tmp/report.json"
+        );
+    }
+
+    #[test]
+    fn failure_summary_covers_aggregate_gate_and_flattens_detail() {
+        let artifact = CrossscopeResults {
+            target_recall_at_10: RECALL_TARGET,
+            scenarios: BTreeMap::new(),
+            queries: vec![QueryRow {
+                scenario: "M3-1".into(),
+                query: "q".into(),
+                status: "ok".into(),
+                recall_at_10: Some(0.5),
+                error_code: None,
+                detail: Some("ignored".into()),
+                duration_ms: Some(1.0),
+                scopes: None,
+                worst_expected_rank: None,
+            }],
+            counts: Counts {
+                n_queries: 1,
+                n_failed: 0,
+                worst_expected_rank_mean: None,
+                worst_expected_rank_max: None,
+            },
+        };
+        assert_eq!(
+            failure_summary(&artifact, std::path::Path::new("report.json")),
+            "crossscope failed: n_failed=0; scenario=aggregate; detail=recall or latency gate failed; report=report.json"
+        );
+
+        let mut failed = artifact;
+        failed.queries[0].status = "failed".into();
+        failed.queries[0].detail = Some(format!(
+            "first line\nsecond\tline\u{1b}{}",
+            "x".repeat(MAX_FAILURE_SUMMARY_FIELD_CHARS)
+        ));
+        let summary = failure_summary(&failed, std::path::Path::new("report.json"));
+        let detail = summary
+            .strip_prefix("crossscope failed: n_failed=0; scenario=M3-1; detail=")
+            .unwrap()
+            .strip_suffix("; report=report.json")
+            .unwrap();
+        assert!(detail.starts_with("first line second line?"));
+        assert!(detail.ends_with("..."));
+        assert_eq!(detail.chars().count(), MAX_FAILURE_SUMMARY_FIELD_CHARS);
     }
 }

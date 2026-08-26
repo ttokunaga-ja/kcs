@@ -70,6 +70,10 @@ Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `byte_start` / `byte_end` | normalized unit 本文内の UTF-8 byte span (unit-local・0-based half-open、[03-data-model.md §8.1](03-data-model.md)) |
 | `scope_path` | 生成時点の正本 `.kio` の絶対パス (解決の高速ヒント + 表示用。解決の root 信頼は `scope_id`) |
 
+`heading_path` がない chunk は、wire form で `heading_path` field 自体を**省略する**。field を
+present にする場合は、1〜64 個の非空文字列だけを順序どおり格納する。`"heading_path": []` と
+`"heading_path": null` は non-canonical であり、production parser と verifier は受理しない。
+
 表示用 field は、解決が成功した場合は**解決結果の canonical 値 (tree / chunk object 由来) を優先して
 表示し、pointer 入力値と相違するときは入力値を無視する** — 正しい必須 tuple に偽の表示 metadata
 (path / heading / span) を付けた pointer が、alive 判定のままそのまま人間向け引用に使われることを
