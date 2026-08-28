@@ -38,6 +38,8 @@ const MAX_UNPACKED: u64 = 640 * 1024 * 1024;
 const MAX_CANDIDATE_OUTPUTS: usize = 16;
 const MAX_JSON_DIFF_FIELDS: usize = 64;
 const MAX_DIAGNOSTIC_PATH_BYTES: usize = 512;
+const MAX_PE_SECTIONS: usize = 96;
+const MAX_PE_DEBUG_ENTRIES: usize = 32;
 
 #[derive(Debug, Error)]
 pub enum ReleaseError {
@@ -208,6 +210,69 @@ struct ArchiveEntryDiagnostic {
     matches: bool,
     left: Option<ContentDigest>,
     right: Option<ContentDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pe32_plus: Option<PeDifferenceDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct PeDifferenceDiagnostic {
+    left: PeDiagnostic,
+    right: PeDiagnostic,
+}
+
+#[derive(Serialize)]
+struct PeDiagnostic {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<Pe32PlusMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct Pe32PlusMetadata {
+    machine: u16,
+    coff_timestamp: u32,
+    checksum: u32,
+    reproducible: bool,
+    sections: Vec<PeSectionDiagnostic>,
+    debug_entries: Vec<PeDebugEntryDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct PeSectionDiagnostic {
+    name_hex: String,
+    rva: u32,
+    virtual_size: u32,
+    raw_size: u32,
+    raw_offset: u32,
+    raw_sha256: String,
+}
+
+#[derive(Serialize)]
+struct PeDebugEntryDiagnostic {
+    kind: u32,
+    timestamp: u32,
+    size: u32,
+    raw_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codeview_rsds: Option<CodeViewRsdsDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct CodeViewRsdsDiagnostic {
+    guid_hex: String,
+    age: u32,
+    pdb_path_bytes: usize,
+    pdb_path_sha256: String,
+    pdb_path_class: &'static str,
+}
+
+struct ParsedPeSection {
+    name: [u8; 8],
+    rva: u32,
+    virtual_size: u32,
+    raw_size: u32,
+    raw_offset: u32,
 }
 
 pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> {
@@ -939,14 +1004,323 @@ fn archive_entry_diagnostics(
         .map(|path| {
             let left_bytes = left.get(&path);
             let right_bytes = right.get(&path);
+            let pe32_plus =
+                (left_bytes != right_bytes && path.ends_with("/bin/kio.exe")).then(|| {
+                    PeDifferenceDiagnostic {
+                        left: pe_diagnostic(left_bytes.map(Vec::as_slice)),
+                        right: pe_diagnostic(right_bytes.map(Vec::as_slice)),
+                    }
+                });
             ArchiveEntryDiagnostic {
                 path: diagnostic_label(&path),
                 matches: left_bytes == right_bytes,
                 left: left_bytes.map(|bytes| content_digest(bytes)),
                 right: right_bytes.map(|bytes| content_digest(bytes)),
+                pe32_plus,
             }
         })
         .collect()
+}
+
+fn pe_diagnostic(bytes: Option<&[u8]>) -> PeDiagnostic {
+    match bytes {
+        Some(bytes) => match parse_pe32_plus(bytes) {
+            Ok(metadata) => PeDiagnostic {
+                metadata: Some(metadata),
+                reason: None,
+            },
+            Err(reason) => PeDiagnostic {
+                metadata: None,
+                reason: Some(reason),
+            },
+        },
+        None => PeDiagnostic {
+            metadata: None,
+            reason: Some("missing_payload"),
+        },
+    }
+}
+
+fn parse_pe32_plus(bytes: &[u8]) -> Result<Pe32PlusMetadata, &'static str> {
+    let dos = bytes.get(..64).ok_or("truncated_header")?;
+    if dos.get(..2) != Some(b"MZ") {
+        return Err("invalid_signature");
+    }
+    let pe_offset = usize::try_from(pe_u32(dos, 0x3c).ok_or("truncated_header")?)
+        .map_err(|_| "truncated_header")?;
+    let coff = bytes
+        .get(pe_offset..pe_offset.checked_add(24).ok_or("truncated_header")?)
+        .ok_or("truncated_header")?;
+    if coff.get(..4) != Some(b"PE\0\0") {
+        return Err("invalid_signature");
+    }
+    let machine = pe_u16(coff, 4).ok_or("truncated_header")?;
+    let section_count = usize::from(pe_u16(coff, 6).ok_or("truncated_header")?);
+    if section_count > MAX_PE_SECTIONS {
+        return Err("excessive_sections");
+    }
+    let coff_timestamp = pe_u32(coff, 8).ok_or("truncated_header")?;
+    let optional_size = usize::from(pe_u16(coff, 20).ok_or("truncated_header")?);
+    let optional_offset = pe_offset.checked_add(24).ok_or("truncated_header")?;
+    let optional = bytes
+        .get(
+            optional_offset
+                ..optional_offset
+                    .checked_add(optional_size)
+                    .ok_or("truncated_header")?,
+        )
+        .ok_or("truncated_header")?;
+    if pe_u16(optional, 0) != Some(0x20b) {
+        return Err("unsupported_optional_magic");
+    }
+    let checksum = pe_u32(optional, 64).ok_or("truncated_header")?;
+    let rva_count = usize::try_from(pe_u32(optional, 108).ok_or("truncated_header")?)
+        .map_err(|_| "truncated_header")?;
+    if rva_count <= 6 {
+        return Err("invalid_debug_directory");
+    }
+    let debug_directory = 112usize
+        .checked_add(6usize.checked_mul(8).ok_or("truncated_header")?)
+        .ok_or("truncated_header")?;
+    let debug_rva = pe_u32(optional, debug_directory).ok_or("truncated_header")?;
+    let debug_size = pe_u32(optional, debug_directory + 4).ok_or("truncated_header")?;
+    let section_offset = optional_offset
+        .checked_add(optional_size)
+        .ok_or("truncated_header")?;
+    let section_table_size = section_count.checked_mul(40).ok_or("invalid_section")?;
+    let table = bytes
+        .get(
+            section_offset
+                ..section_offset
+                    .checked_add(section_table_size)
+                    .ok_or("invalid_section")?,
+        )
+        .ok_or("invalid_section")?;
+    let mut parsed_sections = Vec::with_capacity(section_count);
+    let mut section_ranges = Vec::with_capacity(section_count);
+    for index in 0..section_count {
+        let record = table
+            .get(index.checked_mul(40).ok_or("invalid_section")?..)
+            .and_then(|tail| tail.get(..40))
+            .ok_or("invalid_section")?;
+        let virtual_size = pe_u32(record, 8).ok_or("invalid_section")?;
+        let rva = pe_u32(record, 12).ok_or("invalid_section")?;
+        let raw_size = pe_u32(record, 16).ok_or("invalid_section")?;
+        let raw_offset = pe_u32(record, 20).ok_or("invalid_section")?;
+        let raw_end = usize::try_from(raw_offset)
+            .ok()
+            .and_then(|start| {
+                usize::try_from(raw_size)
+                    .ok()
+                    .and_then(|size| start.checked_add(size))
+            })
+            .ok_or("invalid_section")?;
+        let raw_start = usize::try_from(raw_offset).map_err(|_| "invalid_section")?;
+        bytes.get(raw_start..raw_end).ok_or("invalid_section")?;
+        if raw_size != 0 {
+            section_ranges.push((
+                raw_offset,
+                raw_offset.checked_add(raw_size).ok_or("invalid_section")?,
+            ));
+        }
+        parsed_sections.push(ParsedPeSection {
+            name: record[..8].try_into().map_err(|_| "invalid_section")?,
+            rva,
+            virtual_size,
+            raw_size,
+            raw_offset,
+        });
+    }
+    if !non_overlapping_nonempty_ranges(&mut section_ranges) {
+        return Err("invalid_section");
+    }
+    let mut sections = Vec::with_capacity(section_count);
+    for section in &parsed_sections {
+        let raw_start = usize::try_from(section.raw_offset).map_err(|_| "invalid_section")?;
+        let raw_end = raw_start
+            .checked_add(usize::try_from(section.raw_size).map_err(|_| "invalid_section")?)
+            .ok_or("invalid_section")?;
+        let raw = bytes.get(raw_start..raw_end).ok_or("invalid_section")?;
+        sections.push(PeSectionDiagnostic {
+            name_hex: hex_bytes(&section.name),
+            rva: section.rva,
+            virtual_size: section.virtual_size,
+            raw_size: section.raw_size,
+            raw_offset: section.raw_offset,
+            raw_sha256: digest(raw),
+        });
+    }
+
+    let debug_entries = if debug_rva == 0 && debug_size == 0 {
+        Vec::new()
+    } else {
+        if debug_rva == 0 || debug_size == 0 || debug_size % 28 != 0 {
+            return Err("invalid_debug_directory");
+        }
+        let count = usize::try_from(debug_size / 28).map_err(|_| "invalid_debug_directory")?;
+        if count > MAX_PE_DEBUG_ENTRIES {
+            return Err("excessive_debug_entries");
+        }
+        let debug = pe_rva_slice(bytes, &parsed_sections, debug_rva, debug_size)
+            .ok_or("invalid_debug_directory")?;
+        let mut entries = Vec::with_capacity(count);
+        let mut debug_payload_ranges = Vec::with_capacity(count);
+        for index in 0..count {
+            let entry = debug
+                .get(index.checked_mul(28).ok_or("invalid_debug_directory")?..)
+                .and_then(|tail| tail.get(..28))
+                .ok_or("invalid_debug_directory")?;
+            let timestamp = pe_u32(entry, 4).ok_or("invalid_debug_directory")?;
+            let kind = pe_u32(entry, 12).ok_or("invalid_debug_directory")?;
+            let size = pe_u32(entry, 16).ok_or("invalid_debug_directory")?;
+            let payload_rva = pe_u32(entry, 20).ok_or("invalid_debug_directory")?;
+            let payload_offset = pe_u32(entry, 24).ok_or("invalid_debug_directory")?;
+            let (payload, payload_range) =
+                pe_debug_payload(bytes, &parsed_sections, payload_rva, payload_offset, size)?;
+            if size != 0 {
+                debug_payload_ranges.push(payload_range);
+                if !non_overlapping_nonempty_ranges(&mut debug_payload_ranges) {
+                    return Err("invalid_debug_payload");
+                }
+            }
+            let codeview_rsds = if kind == 2 && payload.get(..4) == Some(b"RSDS") {
+                Some(parse_codeview_rsds(payload)?)
+            } else {
+                None
+            };
+            entries.push(PeDebugEntryDiagnostic {
+                kind,
+                timestamp,
+                size,
+                raw_sha256: digest(payload),
+                codeview_rsds,
+            });
+        }
+        entries
+    };
+    Ok(Pe32PlusMetadata {
+        machine,
+        coff_timestamp,
+        checksum,
+        reproducible: debug_entries.iter().any(|entry| entry.kind == 16),
+        sections,
+        debug_entries,
+    })
+}
+
+fn pe_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset.checked_add(2)?)
+        .map(|value| u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn pe_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|value| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn pe_rva_slice<'a>(
+    bytes: &'a [u8],
+    sections: &[ParsedPeSection],
+    rva: u32,
+    size: u32,
+) -> Option<&'a [u8]> {
+    let (raw_start, raw_end) = pe_rva_raw_range(sections, rva, size)?;
+    bytes.get(raw_start..raw_end)
+}
+
+fn pe_rva_raw_range(sections: &[ParsedPeSection], rva: u32, size: u32) -> Option<(usize, usize)> {
+    let end = rva.checked_add(size)?;
+    let section = sections.iter().find(|section| {
+        let span = section.virtual_size.max(section.raw_size);
+        section
+            .rva
+            .checked_add(span)
+            .is_some_and(|section_end| rva >= section.rva && end <= section_end)
+    })?;
+    let relative = rva.checked_sub(section.rva)?;
+    let raw_start = section.raw_offset.checked_add(relative)?;
+    let raw_end = raw_start.checked_add(size)?;
+    if raw_end > section.raw_offset.checked_add(section.raw_size)? {
+        return None;
+    }
+    Some((
+        usize::try_from(raw_start).ok()?,
+        usize::try_from(raw_end).ok()?,
+    ))
+}
+
+fn pe_debug_payload<'a>(
+    bytes: &'a [u8],
+    sections: &[ParsedPeSection],
+    rva: u32,
+    offset: u32,
+    size: u32,
+) -> Result<(&'a [u8], (u32, u32)), &'static str> {
+    if size == 0 {
+        return if rva == 0 && offset == 0 {
+            Ok((&bytes[..0], (0, 0)))
+        } else {
+            Err("invalid_debug_payload")
+        };
+    }
+    let (mapped_start, mapped_end) =
+        pe_rva_raw_range(sections, rva, size).ok_or("invalid_debug_payload")?;
+    let expected_offset = u32::try_from(mapped_start).map_err(|_| "invalid_debug_payload")?;
+    if offset != expected_offset {
+        return Err("invalid_debug_payload");
+    }
+    let raw = bytes
+        .get(mapped_start..mapped_end)
+        .ok_or("invalid_debug_payload")?;
+    let raw_end = offset.checked_add(size).ok_or("invalid_debug_payload")?;
+    Ok((raw, (offset, raw_end)))
+}
+
+fn non_overlapping_nonempty_ranges(ranges: &mut [(u32, u32)]) -> bool {
+    ranges.sort_unstable();
+    ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0)
+}
+
+fn parse_codeview_rsds(bytes: &[u8]) -> Result<CodeViewRsdsDiagnostic, &'static str> {
+    let fixed = bytes.get(..24).ok_or("invalid_codeview")?;
+    let path_and_nul = bytes.get(24..).ok_or("invalid_codeview")?;
+    let nul = path_and_nul
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("invalid_codeview")?;
+    let path = &path_and_nul[..nul];
+    if path.is_empty() {
+        return Err("invalid_codeview");
+    }
+    Ok(CodeViewRsdsDiagnostic {
+        guid_hex: hex_bytes(&fixed[4..20]),
+        age: pe_u32(fixed, 20).ok_or("invalid_codeview")?,
+        pdb_path_bytes: path.len(),
+        pdb_path_sha256: digest(path),
+        pdb_path_class: if is_absolute_pdb_path(path) {
+            "absolute"
+        } else {
+            "relative"
+        },
+    })
+}
+
+fn is_absolute_pdb_path(path: &[u8]) -> bool {
+    path.starts_with(b"/")
+        || path.starts_with(b"\\\\")
+        || path.starts_with(b"//")
+        || matches!(path, [drive, b':', slash, ..] if drive.is_ascii_alphabetic() && matches!(slash, b'\\' | b'/'))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
 }
 
 fn diagnostic_label(value: &str) -> String {
@@ -2446,6 +2820,69 @@ mod tests {
         fs::write(dir.join(name), bytes).unwrap();
     }
 
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn synthetic_pe32_plus(timestamp: u32, guid: [u8; 16], pdb_path: &[u8]) -> Vec<u8> {
+        let pe_offset = 0x80;
+        let optional_offset = pe_offset + 24;
+        let section_offset = optional_offset + 0xf0;
+        let mut bytes = vec![0; 0x400];
+        bytes[..2].copy_from_slice(b"MZ");
+        put_u32(&mut bytes, 0x3c, pe_offset as u32);
+        bytes[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
+        put_u16(&mut bytes, pe_offset + 4, 0x8664);
+        put_u16(&mut bytes, pe_offset + 6, 1);
+        put_u32(&mut bytes, pe_offset + 8, timestamp);
+        put_u16(&mut bytes, pe_offset + 20, 0xf0);
+        put_u16(&mut bytes, optional_offset, 0x20b);
+        put_u32(&mut bytes, optional_offset + 64, 0x1234_5678);
+        put_u32(&mut bytes, optional_offset + 108, 16);
+        put_u32(&mut bytes, optional_offset + 160, 0x1000);
+        put_u32(&mut bytes, optional_offset + 164, 56);
+        bytes[section_offset..section_offset + 8].copy_from_slice(b".rdata\0\0");
+        put_u32(&mut bytes, section_offset + 8, 0x200);
+        put_u32(&mut bytes, section_offset + 12, 0x1000);
+        put_u32(&mut bytes, section_offset + 16, 0x200);
+        put_u32(&mut bytes, section_offset + 20, 0x200);
+
+        let debug = 0x200;
+        put_u32(&mut bytes, debug + 4, timestamp);
+        put_u32(&mut bytes, debug + 12, 2);
+        put_u32(&mut bytes, debug + 16, (24 + pdb_path.len() + 1) as u32);
+        put_u32(&mut bytes, debug + 20, 0x1100);
+        put_u32(&mut bytes, debug + 24, 0x300);
+        let repro = debug + 28;
+        put_u32(&mut bytes, repro + 4, timestamp);
+        put_u32(&mut bytes, repro + 12, 16);
+
+        bytes[0x300..0x304].copy_from_slice(b"RSDS");
+        bytes[0x304..0x314].copy_from_slice(&guid);
+        put_u32(&mut bytes, 0x314, 7);
+        let path_start = 0x318;
+        bytes[path_start..path_start + pdb_path.len()].copy_from_slice(pdb_path);
+        bytes[path_start + pdb_path.len()] = 0;
+        bytes
+    }
+
+    fn windows_archive_payload(binary: Vec<u8>) -> BTreeMap<String, (Vec<u8>, u32)> {
+        BTreeMap::from([
+            (
+                "kio-0.1.0-rc.1-x86_64-pc-windows-msvc/bin/kio.exe".into(),
+                (binary, 0o755),
+            ),
+            (
+                "kio-0.1.0-rc.1-x86_64-pc-windows-msvc/LICENSE.md".into(),
+                (b"license".to_vec(), 0o644),
+            ),
+        ])
+    }
+
     #[test]
     fn candidate_directory_comparison_accepts_exact_outputs() {
         let t = tempfile::tempdir().unwrap();
@@ -2539,6 +2976,123 @@ mod tests {
         assert_eq!(entry["matches"], false);
         assert_eq!(entry["left"]["size"], 4);
         assert_eq!(entry["right"]["size"], 5);
+    }
+
+    #[test]
+    fn candidate_directory_comparison_reports_safe_pe32_plus_differences() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let pdb = br"C:\\build\\secret\\kio.pdb";
+        let left_binary = synthetic_pe32_plus(1, [1; 16], pdb);
+        let right_binary = synthetic_pe32_plus(2, [2; 16], pdb);
+        write_archive(
+            &left.join("candidate.tar.gz"),
+            &windows_archive_payload(left_binary),
+        )
+        .unwrap();
+        write_archive(
+            &right.join("candidate.tar.gz"),
+            &windows_archive_payload(right_binary),
+        )
+        .unwrap();
+        let diagnostic = compare_error(&left, &right);
+        let entries = diagnostic["outputs"][0]["difference"]["archive_entries"]
+            .as_array()
+            .unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry["path"].as_str().unwrap().ends_with("/bin/kio.exe"))
+            .unwrap();
+        let pe = &entry["pe32_plus"];
+        assert_eq!(pe["left"]["metadata"]["machine"], 0x8664);
+        assert_eq!(pe["left"]["metadata"]["coff_timestamp"], 1);
+        assert_eq!(pe["right"]["metadata"]["coff_timestamp"], 2);
+        assert_eq!(pe["left"]["metadata"]["reproducible"], true);
+        assert_eq!(
+            pe["left"]["metadata"]["debug_entries"][0]["codeview_rsds"]["guid_hex"],
+            "01010101010101010101010101010101"
+        );
+        assert_eq!(
+            pe["right"]["metadata"]["debug_entries"][0]["codeview_rsds"]["guid_hex"],
+            "02020202020202020202020202020202"
+        );
+        assert_eq!(
+            pe["left"]["metadata"]["debug_entries"][0]["codeview_rsds"]["pdb_path_class"],
+            "absolute"
+        );
+        assert_eq!(
+            pe["left"]["metadata"]["sections"][0]["raw_sha256"],
+            digest(&synthetic_pe32_plus(1, [1; 16], pdb)[0x200..0x400])
+        );
+        let rendered = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!rendered.contains("C:\\\\build\\\\secret\\\\kio.pdb"));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn pe32_plus_diagnostics_are_bounded_and_fail_closed() {
+        assert_eq!(pe_diagnostic(Some(b"MZ")).reason, Some("truncated_header"));
+        let mut excessive_sections = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        put_u16(
+            &mut excessive_sections,
+            0x80 + 6,
+            (MAX_PE_SECTIONS + 1) as u16,
+        );
+        assert_eq!(
+            pe_diagnostic(Some(&excessive_sections)).reason,
+            Some("excessive_sections")
+        );
+        let mut excessive_debug = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        put_u32(
+            &mut excessive_debug,
+            0x80 + 24 + 112 + 6 * 8 + 4,
+            ((MAX_PE_DEBUG_ENTRIES + 1) * 28) as u32,
+        );
+        assert_eq!(
+            pe_diagnostic(Some(&excessive_debug)).reason,
+            Some("excessive_debug_entries")
+        );
+        let mut redirected_pointer = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        let payload_size = 24 + b"relative.pdb".len() + 1;
+        let duplicate = redirected_pointer[0x300..0x300 + payload_size].to_vec();
+        redirected_pointer[0x340..0x340 + payload_size].copy_from_slice(&duplicate);
+        put_u32(&mut redirected_pointer, 0x200 + 24, 0x340);
+        assert_eq!(
+            pe_diagnostic(Some(&redirected_pointer)).reason,
+            Some("invalid_debug_payload")
+        );
+        let mut overlapping_debug = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        put_u32(&mut overlapping_debug, 0x200 + 28 + 16, 1);
+        put_u32(&mut overlapping_debug, 0x200 + 28 + 20, 0x1100);
+        put_u32(&mut overlapping_debug, 0x200 + 28 + 24, 0x300);
+        assert_eq!(
+            pe_diagnostic(Some(&overlapping_debug)).reason,
+            Some("invalid_debug_payload")
+        );
+        let mut overlapping_sections = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        put_u16(&mut overlapping_sections, 0x80 + 6, 2);
+        let section_offset = 0x80 + 24 + 0xf0;
+        let section = overlapping_sections[section_offset..section_offset + 40].to_vec();
+        overlapping_sections[section_offset + 40..section_offset + 80].copy_from_slice(&section);
+        assert_eq!(
+            pe_diagnostic(Some(&overlapping_sections)).reason,
+            Some("invalid_section")
+        );
+        let mut malformed_codeview = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        malformed_codeview[0x318] = 0;
+        assert_eq!(
+            pe_diagnostic(Some(&malformed_codeview)).reason,
+            Some("invalid_codeview")
+        );
+        let first = pe_diagnostic(Some(&excessive_debug));
+        let second = pe_diagnostic(Some(&excessive_debug));
+        assert_eq!(
+            canonical_json(&first).unwrap(),
+            canonical_json(&second).unwrap()
+        );
     }
 
     #[test]
