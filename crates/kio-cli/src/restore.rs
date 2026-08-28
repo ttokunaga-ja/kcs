@@ -894,12 +894,15 @@ fn open_destination_dir(
         match cap_fs::open_dir_nofollow(&current, Path::new(&component)) {
             Ok(next) => current = next,
             Err(error) if create_missing && error.kind() == std::io::ErrorKind::NotFound => {
-                let mut options = cap_fs::DirOptions::new();
                 #[cfg(unix)]
-                {
+                let options = {
                     use cap_fs::DirBuilderExt;
+                    let mut options = cap_fs::DirOptions::new();
                     options.mode(0o700);
-                }
+                    options
+                };
+                #[cfg(not(unix))]
+                let options = cap_fs::DirOptions::new();
                 match cap_fs::create_dir(&current, Path::new(&component), &options) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}

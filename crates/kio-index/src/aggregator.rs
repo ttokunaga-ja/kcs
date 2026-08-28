@@ -904,11 +904,6 @@ impl BoundCache {
         use std::os::fd::AsRawFd;
         PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()))
     }
-
-    #[cfg(not(unix))]
-    fn sqlite_path(&self) -> PathBuf {
-        self.public_path.clone()
-    }
 }
 
 #[cfg(unix)]

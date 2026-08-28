@@ -73,12 +73,12 @@ impl SnapshotTestControl {
         Self {}
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, unix))]
     fn authority_capture_ready(&self) -> Option<&Path> {
         self.core.snapshot_authority_capture_ready.as_deref()
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(debug_assertions), unix))]
     fn authority_capture_ready(&self) -> Option<&Path> {
         None
     }

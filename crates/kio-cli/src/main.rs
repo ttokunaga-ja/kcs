@@ -127,12 +127,12 @@ use kio_pipeline::prepare::{
 use kio_pipeline::scan::{
     PlannedChildCommand, ScanCandidate, ScanPreview, ScanPreviewRequest, build_bound_scan_preview,
     build_scan_preview, build_scan_preview_with_inherited_rules, classify_secret,
-    configure_planned_child_index_command, current_bound_scan_policy_allows_file,
-    current_scan_policy_allows_file, discover_child_scopes, generated_parent_policy_for_child,
-    generated_parent_policy_payload_for_child, hash_verified_scan_input,
-    parse_generated_parent_policy_payload, read_bound_verified_scan_input,
-    read_verified_scan_input,
+    configure_planned_child_index_command, current_scan_policy_allows_file, discover_child_scopes,
+    generated_parent_policy_for_child, generated_parent_policy_payload_for_child,
+    hash_verified_scan_input, parse_generated_parent_policy_payload, read_verified_scan_input,
 };
+#[cfg(unix)]
+use kio_pipeline::scan::{current_bound_scan_policy_allows_file, read_bound_verified_scan_input};
 use kio_pipeline::task::{
     HoldReason, RetryErrorKind, hold_reason_for_reason, retry_policy,
     task_can_complete_from_materialized_output, task_can_enter_secret_hold,
@@ -2563,12 +2563,12 @@ fn run_index_for_repo(args: IndexArgs, repo: Repository, discover_children: bool
 /// it enters its retained `.kio` directory, so source reads must never fall
 /// back to it.
 fn build_repository_scan_preview(
-    repo: &Repository,
+    _repo: &Repository,
     request: ScanPreviewRequest,
 ) -> kio_pipeline::Result<ScanPreview> {
     #[cfg(unix)]
     {
-        match (repo.bound_root_handle(), repo.bound_kio_handle()) {
+        match (_repo.bound_root_handle(), _repo.bound_kio_handle()) {
             (Some(root), Some(kio)) => return build_bound_scan_preview(root, kio, request, &[]),
             (None, None) => {}
             _ => {
@@ -10148,12 +10148,15 @@ fn open_chunk_ledger_dir(kio_dir: &Path, create_missing: bool) -> Result<ChunkLe
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound
                 ) =>
         {
-            let mut options = cap_fs::DirOptions::new();
             #[cfg(unix)]
-            {
+            let options = {
                 use cap_fs::DirBuilderExt;
+                let mut options = cap_fs::DirOptions::new();
                 options.mode(0o700);
-            }
+                options
+            };
+            #[cfg(not(unix))]
+            let options = cap_fs::DirOptions::new();
             let created = match cap_fs::create_dir(&kio, Path::new("index"), &options) {
                 Ok(()) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
@@ -26926,6 +26929,7 @@ fn validate_user_tools_config() -> Result<()> {
 /// Whether a tools.toml carries any `auth = "plain:<...>"` value (P3). Walks the
 /// parsed TOML rather than substring-matching so a comment mentioning `plain:`
 /// does not trigger a false warning.
+#[cfg(unix)]
 fn tools_toml_contains_plain_auth(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -26936,6 +26940,7 @@ fn tools_toml_contains_plain_auth(bytes: &[u8]) -> bool {
     toml_value_has_plain_auth(&value)
 }
 
+#[cfg(unix)]
 fn toml_value_has_plain_auth(value: &toml::Value) -> bool {
     match value {
         toml::Value::String(text) => text.starts_with("plain:"),
