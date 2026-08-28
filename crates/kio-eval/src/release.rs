@@ -859,6 +859,9 @@ fn collect_json_field_differences(
                 .cloned()
                 .collect::<BTreeSet<_>>();
             for key in keys {
+                if fields.len() > MAX_JSON_DIFF_FIELDS {
+                    break;
+                }
                 let child = format!("{path}/{}", json_pointer_segment(&key));
                 match (left.get(&key), right.get(&key)) {
                     (Some(left), Some(right)) => {
@@ -870,6 +873,9 @@ fn collect_json_field_differences(
         }
         (Value::Array(left), Value::Array(right)) => {
             for index in 0..left.len().max(right.len()) {
+                if fields.len() > MAX_JSON_DIFF_FIELDS {
+                    break;
+                }
                 let child = format!("{path}/{index}");
                 match (left.get(index), right.get(index)) {
                     (Some(left), Some(right)) => {
@@ -2640,5 +2646,28 @@ mod tests {
             first["outputs"][0]["difference"]["json_fields"]["truncated"],
             true
         );
+    }
+
+    #[test]
+    fn json_diff_bounds_missing_object_keys_and_array_items() {
+        let missing_object = Value::Object(
+            (0..100)
+                .map(|index| (format!("key-{index:03}"), Value::from(index)))
+                .collect(),
+        );
+        let missing_array = Value::Array((0..100).map(Value::from).collect());
+        for (left, right) in [
+            (Value::Object(serde_json::Map::new()), missing_object),
+            (Value::Array(Vec::new()), missing_array),
+        ] {
+            let first = json_field_differences(&left, &right).unwrap();
+            let second = json_field_differences(&left, &right).unwrap();
+            assert_eq!(first.fields.len(), MAX_JSON_DIFF_FIELDS);
+            assert!(first.truncated);
+            assert_eq!(
+                canonical_json(&first).unwrap(),
+                canonical_json(&second).unwrap()
+            );
+        }
     }
 }
