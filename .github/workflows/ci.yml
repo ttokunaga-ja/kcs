@@ -23,8 +23,40 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check canonical workflow action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          test "${#workflow_files[@]}" -gt 0
+          uses_key_count="$({
+            grep -hEo "(^|[[:space:]{,])([\"']?uses[\"']?)[[:space:]]*:" \
+              "${workflow_files[@]}" || true
+          } | wc -l | tr -d '[:space:]')"
+          references="$(
+            sed -nE \
+              's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' \
+              "${workflow_files[@]}"
+          )"
+          reference_count="$(
+            printf '%s\n' "$references" | sed '/^$/d' | wc -l | tr -d '[:space:]'
+          )"
+          if [[ "$uses_key_count" != "$reference_count" ]]; then
+            echo "workflow uses entries must use the canonical block form" >&2
+            exit 1
+          fi
+          invalid=0
+          while IFS= read -r reference; do
+            [[ -n "$reference" ]] || continue
+            if [[ ! "$reference" =~ ^[^@[:space:]]+/[^@[:space:]]+@[0-9a-f]{40}$ ]]; then
+              printf 'mutable or malformed external action reference: %s\n' "$reference" >&2
+              invalid=1
+            fi
+          done <<< "$references"
+          test "$invalid" -eq 0
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
@@ -40,8 +72,8 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - run: cargo build -p kio-eval --bin kio-eval --locked
       - run: >-
           target/debug/kio-eval persona plan --profile tiny
@@ -123,8 +155,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       # Optional ranking features must take this same eval path; `--all-features`
       # prevents a default-off ranking lane from bypassing the only Recall gate.
       - run: >-
@@ -201,8 +233,8 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - run: cargo test --workspace --all-targets --locked
 
   windows-security-r23:
@@ -213,6 +245,6 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
       - run: cargo test --workspace --all-targets --locked
