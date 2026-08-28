@@ -35,6 +35,9 @@ const MAX_JSON: u64 = 16 * 1024 * 1024;
 const MAX_ENTRY: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 16;
 const MAX_UNPACKED: u64 = 640 * 1024 * 1024;
+const MAX_CANDIDATE_OUTPUTS: usize = 16;
+const MAX_JSON_DIFF_FIELDS: usize = 64;
+const MAX_DIAGNOSTIC_PATH_BYTES: usize = 512;
 
 #[derive(Debug, Error)]
 pub enum ReleaseError {
@@ -152,6 +155,59 @@ struct ChecksumSidecar {
     provenance_sha256: String,
     sbom_sha256: String,
     checksums_sha256: String,
+}
+
+#[derive(Serialize)]
+struct CompareDiagnostic {
+    schema: &'static str,
+    outputs: Vec<OutputDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct OutputDiagnostic {
+    name: String,
+    matches: bool,
+    left: Option<ContentDigest>,
+    right: Option<ContentDigest>,
+    difference: Option<OutputDifference>,
+}
+
+#[derive(Serialize)]
+struct ContentDigest {
+    size: usize,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct OutputDifference {
+    classification: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_fields: Option<JsonFieldDifferences>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_entries: Option<Vec<ArchiveEntryDiagnostic>>,
+}
+
+#[derive(Serialize)]
+struct JsonFieldDifferences {
+    truncated: bool,
+    fields: Vec<JsonFieldDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct JsonFieldDiagnostic {
+    path: String,
+    left_kind: Option<&'static str>,
+    right_kind: Option<&'static str>,
+    left_canonical_sha256: Option<String>,
+    right_canonical_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ArchiveEntryDiagnostic {
+    path: String,
+    matches: bool,
+    left: Option<ContentDigest>,
+    right: Option<ContentDigest>,
 }
 
 pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> {
@@ -665,17 +721,250 @@ pub fn smoke_candidate(options: &SmokeCandidateOptions) -> Result<SmokeSummary, 
 pub fn compare_candidate_dirs(left: &Path, right: &Path) -> Result<(), ReleaseError> {
     let left = canonical_dir_files(left)?;
     let right = canonical_dir_files(right)?;
-    if left.keys().collect::<Vec<_>>() != right.keys().collect::<Vec<_>>() {
-        return Err(ReleaseError::Verify("candidate output names differ".into()));
+    if left == right {
+        return Ok(());
     }
-    for (name, bytes) in left {
-        if right.get(&name) != Some(&bytes) {
-            return Err(ReleaseError::Verify(format!(
-                "candidate output differs: {name}"
-            )));
+    let diagnostic = compare_diagnostic(&left, &right)?;
+    Err(ReleaseError::Verify(
+        String::from_utf8(canonical_json(&diagnostic)?)
+            .map_err(|_| ReleaseError::Verify("comparison diagnostic is not UTF-8".into()))?,
+    ))
+}
+
+fn compare_diagnostic(
+    left: &BTreeMap<String, Vec<u8>>,
+    right: &BTreeMap<String, Vec<u8>>,
+) -> Result<CompareDiagnostic, ReleaseError> {
+    let names = left
+        .keys()
+        .chain(right.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut outputs = Vec::with_capacity(names.len());
+    for name in names {
+        let left_bytes = left.get(&name);
+        let right_bytes = right.get(&name);
+        let matches = left_bytes == right_bytes;
+        let difference = (!matches)
+            .then(|| {
+                output_difference(
+                    &name,
+                    left_bytes.map(Vec::as_slice),
+                    right_bytes.map(Vec::as_slice),
+                )
+            })
+            .transpose()?;
+        outputs.push(OutputDiagnostic {
+            name: diagnostic_label(&name),
+            matches,
+            left: left_bytes.map(|bytes| content_digest(bytes)),
+            right: right_bytes.map(|bytes| content_digest(bytes)),
+            difference,
+        });
+    }
+    Ok(CompareDiagnostic {
+        schema: "kio-rc-compare-diagnostic-v1",
+        outputs,
+    })
+}
+
+fn content_digest(bytes: &[u8]) -> ContentDigest {
+    ContentDigest {
+        size: bytes.len(),
+        sha256: digest(bytes),
+    }
+}
+
+fn output_difference(
+    name: &str,
+    left: Option<&[u8]>,
+    right: Option<&[u8]>,
+) -> Result<OutputDifference, ReleaseError> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(OutputDifference {
+            classification: "missing_output",
+            json_fields: None,
+            archive_entries: None,
+        });
+    };
+    if name.ends_with(".json") {
+        return Ok(
+            match (canonical_json_value(left), canonical_json_value(right)) {
+                (Ok(left), Ok(right)) => OutputDifference {
+                    classification: "canonical_json",
+                    json_fields: Some(json_field_differences(&left, &right)?),
+                    archive_entries: None,
+                },
+                _ => OutputDifference {
+                    classification: "malformed_or_noncanonical_json",
+                    json_fields: None,
+                    archive_entries: None,
+                },
+            },
+        );
+    }
+    if name.ends_with(".tar.gz") {
+        return Ok(match (read_archive(left), read_archive(right)) {
+            (Ok(left), Ok(right)) => OutputDifference {
+                classification: "canonical_archive",
+                json_fields: None,
+                archive_entries: Some(archive_entry_diagnostics(&left, &right)),
+            },
+            _ => OutputDifference {
+                classification: "malformed_or_noncanonical_archive",
+                json_fields: None,
+                archive_entries: None,
+            },
+        });
+    }
+    Ok(OutputDifference {
+        classification: "byte_payload",
+        json_fields: None,
+        archive_entries: None,
+    })
+}
+
+fn canonical_json_value(bytes: &[u8]) -> Result<Value, ReleaseError> {
+    canonical_parse(bytes)
+}
+
+fn json_field_differences(
+    left: &Value,
+    right: &Value,
+) -> Result<JsonFieldDifferences, ReleaseError> {
+    let mut fields = Vec::new();
+    collect_json_field_differences(left, right, "", &mut fields)?;
+    let truncated = fields.len() > MAX_JSON_DIFF_FIELDS;
+    fields.truncate(MAX_JSON_DIFF_FIELDS);
+    Ok(JsonFieldDifferences { truncated, fields })
+}
+
+fn collect_json_field_differences(
+    left: &Value,
+    right: &Value,
+    path: &str,
+    fields: &mut Vec<JsonFieldDiagnostic>,
+) -> Result<(), ReleaseError> {
+    if left == right {
+        return Ok(());
+    }
+    if fields.len() > MAX_JSON_DIFF_FIELDS {
+        return Ok(());
+    }
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            let keys = left
+                .keys()
+                .chain(right.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for key in keys {
+                let child = format!("{path}/{}", json_pointer_segment(&key));
+                match (left.get(&key), right.get(&key)) {
+                    (Some(left), Some(right)) => {
+                        collect_json_field_differences(left, right, &child, fields)?
+                    }
+                    (left, right) => fields.push(json_field_diagnostic(&child, left, right)?),
+                }
+            }
         }
+        (Value::Array(left), Value::Array(right)) => {
+            for index in 0..left.len().max(right.len()) {
+                let child = format!("{path}/{index}");
+                match (left.get(index), right.get(index)) {
+                    (Some(left), Some(right)) => {
+                        collect_json_field_differences(left, right, &child, fields)?
+                    }
+                    (left, right) => fields.push(json_field_diagnostic(&child, left, right)?),
+                }
+            }
+        }
+        _ => fields.push(json_field_diagnostic(path, Some(left), Some(right))?),
     }
     Ok(())
+}
+
+fn json_field_diagnostic(
+    path: &str,
+    left: Option<&Value>,
+    right: Option<&Value>,
+) -> Result<JsonFieldDiagnostic, ReleaseError> {
+    Ok(JsonFieldDiagnostic {
+        path: bounded_diagnostic_path(path),
+        left_kind: left.map(json_kind),
+        right_kind: right.map(json_kind),
+        left_canonical_sha256: left.map(canonical_value_digest).transpose()?,
+        right_canonical_sha256: right.map(canonical_value_digest).transpose()?,
+    })
+}
+
+fn bounded_diagnostic_path(path: &str) -> String {
+    if path.len() <= MAX_DIAGNOSTIC_PATH_BYTES {
+        path.into()
+    } else {
+        format!("sha256:{}", digest(path.as_bytes()))
+    }
+}
+
+fn canonical_value_digest(value: &Value) -> Result<String, ReleaseError> {
+    Ok(digest(&canonical_json(value)?))
+}
+
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn archive_entry_diagnostics(
+    left: &BTreeMap<String, Vec<u8>>,
+    right: &BTreeMap<String, Vec<u8>>,
+) -> Vec<ArchiveEntryDiagnostic> {
+    left.keys()
+        .chain(right.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|path| {
+            let left_bytes = left.get(&path);
+            let right_bytes = right.get(&path);
+            ArchiveEntryDiagnostic {
+                path: diagnostic_label(&path),
+                matches: left_bytes == right_bytes,
+                left: left_bytes.map(|bytes| content_digest(bytes)),
+                right: right_bytes.map(|bytes| content_digest(bytes)),
+            }
+        })
+        .collect()
+}
+
+fn diagnostic_label(value: &str) -> String {
+    if value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+        && !value.starts_with('/')
+        && !value
+            .split('/')
+            .any(|segment| segment == ".." || segment.is_empty())
+    {
+        value.into()
+    } else {
+        format!("sha256:{}", digest(value.as_bytes()))
+    }
+}
+
+fn json_pointer_segment(key: &str) -> String {
+    if key.len() > 96 || key.bytes().any(|byte| byte.is_ascii_control()) {
+        format!("sha256:{}", digest(key.as_bytes()))
+    } else {
+        key.replace('~', "~0").replace('/', "~1")
+    }
 }
 
 fn canonical_repo(input: &Path) -> Result<PathBuf, ReleaseError> {
@@ -1682,6 +1971,11 @@ fn canonical_dir_files(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, Release
     }
     let mut result = BTreeMap::new();
     for entry in fs::read_dir(path)? {
+        if result.len() == MAX_CANDIDATE_OUTPUTS {
+            return Err(ReleaseError::Verify(
+                "candidate output count exceeds comparison limit".into(),
+            ));
+        }
         let entry = entry?;
         if entry.file_type()?.is_symlink() || !entry.file_type()?.is_file() {
             return Err(ReleaseError::Invalid(
@@ -2132,5 +2426,219 @@ mod tests {
     fn rejects_traversal_and_duplicate_names() {
         assert!(valid_archive_name("../evil").is_err());
         assert!(valid_archive_name("root\\evil").is_err());
+    }
+
+    fn compare_error(left: &Path, right: &Path) -> Value {
+        let error = compare_candidate_dirs(left, right).unwrap_err();
+        let ReleaseError::Verify(detail) = error else {
+            panic!("comparison did not fail verification")
+        };
+        serde_json::from_str(&detail).unwrap()
+    }
+
+    fn write_output(dir: &Path, name: &str, bytes: &[u8]) {
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    #[test]
+    fn candidate_directory_comparison_accepts_exact_outputs() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        for dir in [&left, &right] {
+            write_output(dir, "candidate.tar.gz", b"archive");
+            write_output(dir, "candidate.checksums.json", br#"{"schema":"v1"}"#);
+        }
+        assert!(compare_candidate_dirs(&left, &right).is_ok());
+    }
+
+    #[test]
+    fn candidate_directory_comparison_is_fail_closed_and_summarizes_all_outputs() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let left_archive = b"archive";
+        let mut right_archive = left_archive.to_vec();
+        right_archive[3] ^= 1;
+        write_output(&left, "candidate.tar.gz", left_archive);
+        write_output(&right, "candidate.tar.gz", &right_archive);
+        write_output(&left, "candidate.checksums.json", br#"{"schema":"v1"}"#);
+        write_output(&right, "candidate.checksums.json", br#"{"schema":"v1"}"#);
+        let diagnostic = compare_error(&left, &right);
+        assert_eq!(diagnostic["schema"], "kio-rc-compare-diagnostic-v1");
+        let outputs = diagnostic["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["name"], "candidate.checksums.json");
+        assert_eq!(outputs[0]["matches"], true);
+        assert_eq!(outputs[1]["name"], "candidate.tar.gz");
+        assert_eq!(outputs[1]["matches"], false);
+        assert_eq!(
+            outputs[1]["difference"]["classification"],
+            "malformed_or_noncanonical_archive"
+        );
+        assert_eq!(outputs[1]["left"]["size"], left_archive.len());
+        assert_eq!(outputs[1]["right"]["size"], left_archive.len());
+        assert!(outputs[1]["left"]["sha256"].as_str().unwrap().len() == 64);
+    }
+
+    #[test]
+    fn candidate_directory_comparison_reports_canonical_json_without_values() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        write_output(
+            &left,
+            "candidate.checksums.json",
+            &canonical_json(&json!({"safe":"left-secret","unsafe key!":"same"})).unwrap(),
+        );
+        write_output(
+            &right,
+            "candidate.checksums.json",
+            &canonical_json(&json!({"safe":"right-secret","unsafe key!":"same"})).unwrap(),
+        );
+        let diagnostic = compare_error(&left, &right);
+        let field = &diagnostic["outputs"][0]["difference"]["json_fields"]["fields"][0];
+        assert_eq!(field["path"], "/safe");
+        assert_eq!(field["left_kind"], "string");
+        assert_eq!(field["right_kind"], "string");
+        assert!(field["left_canonical_sha256"].as_str().unwrap().len() == 64);
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!serialized.contains("left-secret"));
+        assert!(!serialized.contains("right-secret"));
+        assert!(!serialized.contains("unsafe key!"));
+    }
+
+    #[test]
+    fn candidate_directory_comparison_reports_archive_entries() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let mut left_payload = BTreeMap::new();
+        left_payload.insert("kio-x/LICENSE.md".into(), (b"left".to_vec(), 0o644));
+        let mut right_payload = left_payload.clone();
+        right_payload.insert("kio-x/LICENSE.md".into(), (b"right".to_vec(), 0o644));
+        write_archive(&left.join("candidate.tar.gz"), &left_payload).unwrap();
+        write_archive(&right.join("candidate.tar.gz"), &right_payload).unwrap();
+        let diagnostic = compare_error(&left, &right);
+        let entry = &diagnostic["outputs"][0]["difference"]["archive_entries"][0];
+        assert_eq!(entry["path"], "kio-x/LICENSE.md");
+        assert_eq!(entry["matches"], false);
+        assert_eq!(entry["left"]["size"], 4);
+        assert_eq!(entry["right"]["size"], 5);
+    }
+
+    #[test]
+    fn candidate_directory_comparison_uses_unambiguous_json_pointers() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let left_value = json!({
+            "a.b": {"[0]": 1},
+            "a": {"b": 2},
+            "slash/key": 3,
+            "tilde~key": 4,
+            "[x]": 5,
+        });
+        let right_value = json!({
+            "a.b": {"[0]": 11},
+            "a": {"b": 12},
+            "slash/key": 13,
+            "tilde~key": 14,
+            "[x]": 15,
+        });
+        write_output(
+            &left,
+            "candidate.checksums.json",
+            &canonical_json(&left_value).unwrap(),
+        );
+        write_output(
+            &right,
+            "candidate.checksums.json",
+            &canonical_json(&right_value).unwrap(),
+        );
+        let diagnostic = compare_error(&left, &right);
+        let paths = diagnostic["outputs"][0]["difference"]["json_fields"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["path"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths,
+            BTreeSet::from(["/[x]", "/a.b/[0]", "/a/b", "/slash~1key", "/tilde~0key"])
+        );
+
+        let root = json_field_differences(&json!(1), &json!(2)).unwrap();
+        assert_eq!(root.fields[0].path, "");
+        let array = json_field_differences(&json!([1]), &json!([2])).unwrap();
+        assert_eq!(array.fields[0].path, "/0");
+    }
+
+    #[test]
+    fn candidate_directory_comparison_reports_missing_output_and_caps_diagnostics() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        write_output(&left, "candidate.tar.gz", b"present");
+        write_output(&right, "candidate.checksums.json", br#"{"x":1}"#);
+        let diagnostic = compare_error(&left, &right);
+        let outputs = diagnostic["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["difference"]["classification"], "missing_output");
+        assert_eq!(outputs[1]["difference"]["classification"], "missing_output");
+
+        let overflowing = t.path().join("overflowing");
+        fs::create_dir(&overflowing).unwrap();
+        for index in 0..=MAX_CANDIDATE_OUTPUTS {
+            write_output(&overflowing, &format!("output-{index:02}"), b"x");
+        }
+        assert!(matches!(
+            compare_candidate_dirs(&overflowing, &right),
+            Err(ReleaseError::Verify(detail)) if detail == "candidate output count exceeds comparison limit"
+        ));
+    }
+
+    #[test]
+    fn candidate_directory_comparison_bounds_json_fields_deterministically() {
+        let t = tempfile::tempdir().unwrap();
+        let left = t.path().join("left");
+        let right = t.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        let left_value = Value::Array((0..100).map(Value::from).collect());
+        let right_value = Value::Array((100..200).map(Value::from).collect());
+        write_output(
+            &left,
+            "candidate.checksums.json",
+            &canonical_json(&left_value).unwrap(),
+        );
+        write_output(
+            &right,
+            "candidate.checksums.json",
+            &canonical_json(&right_value).unwrap(),
+        );
+        let first = compare_error(&left, &right);
+        let second = compare_error(&left, &right);
+        assert_eq!(first, second);
+        let fields = first["outputs"][0]["difference"]["json_fields"]["fields"]
+            .as_array()
+            .unwrap();
+        assert_eq!(fields.len(), MAX_JSON_DIFF_FIELDS);
+        assert_eq!(
+            first["outputs"][0]["difference"]["json_fields"]["truncated"],
+            true
+        );
     }
 }
