@@ -305,16 +305,18 @@ pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> 
         ("cargo-deny", CARGO_DENY_VERSION),
     ] {
         let mut cargo = Command::new("cargo");
-        cargo.current_dir(filesystem_root()?).args([
-            "+1.98.0",
-            "install",
-            "--locked",
-            "--version",
-            version,
-            "--root",
-        ]);
-        cargo.arg(&root).arg(crate_name);
-        isolate_cargo_configuration(&mut cargo, &cargo_home, false);
+        cargo
+            .current_dir(subprocess_path(&filesystem_root()?)?)
+            .args([
+                "+1.98.0",
+                "install",
+                "--locked",
+                "--version",
+                version,
+                "--root",
+            ]);
+        cargo.arg(subprocess_path(&root)?).arg(crate_name);
+        isolate_cargo_configuration(&mut cargo, &cargo_home, false)?;
         let status = cargo.status()?;
         if !status.success() {
             return Err(ReleaseError::Invalid(format!(
@@ -327,7 +329,9 @@ pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> 
         ("cargo-deny", CARGO_DENY_VERSION),
     ] {
         let path = root.join("bin").join(executable_name(exe));
-        let output = Command::new(&path).arg("--version").output()?;
+        let output = Command::new(subprocess_path(&path)?)
+            .arg("--version")
+            .output()?;
         if !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains(version) {
             return Err(ReleaseError::Invalid(format!(
                 "{exe} does not report pinned version {version}"
@@ -1530,7 +1534,7 @@ fn cargo_command(
     cargo_home: &Path,
 ) -> Result<Command, ReleaseError> {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(filesystem_root()?)
+    cmd.current_dir(subprocess_path(&filesystem_root()?)?)
         .arg("+1.98.0")
         // The filesystem-root cwd and isolated Cargo home exclude file-based
         // config discovery. The trusted Rust toolchain remains the host PATH
@@ -1556,7 +1560,7 @@ fn cargo_command(
         "--offline",
         "--manifest-path",
     ])
-    .arg(repo.join("Cargo.toml"))
+    .arg(subprocess_path(&repo.join("Cargo.toml"))?)
     .args([
         "--all-features",
         "-p",
@@ -1567,8 +1571,8 @@ fn cargo_command(
         &b.target,
         "--target-dir",
     ])
-    .arg(target_dir);
-    isolate_cargo_configuration(&mut cmd, cargo_home, true);
+    .arg(subprocess_path(target_dir)?);
+    isolate_cargo_configuration(&mut cmd, cargo_home, true)?;
     cmd.env_remove("RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
@@ -2190,16 +2194,18 @@ fn generate_sbom(
     cargo_home: &Path,
 ) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-sbom", CARGO_SBOM_VERSION)?;
-    let mut command = Command::new(tool);
-    command.current_dir(filesystem_root()?).args([
-        "--cargo-package",
-        "kio-cli",
-        "--output-format",
-        "cyclone_dx_json_1_6",
-        "--project-directory",
-    ]);
-    command.arg(repo);
-    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let mut command = Command::new(subprocess_path(&tool)?);
+    command
+        .current_dir(subprocess_path(&filesystem_root()?)?)
+        .args([
+            "--cargo-package",
+            "kio-cli",
+            "--output-format",
+            "cyclone_dx_json_1_6",
+            "--project-directory",
+        ]);
+    command.arg(subprocess_path(repo)?);
+    isolate_cargo_configuration(&mut command, cargo_home, true)?;
     let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
@@ -2219,31 +2225,29 @@ fn generate_inventory(
     cargo_home: &Path,
 ) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-deny", CARGO_DENY_VERSION)?;
-    let mut command = Command::new(tool);
-    command.current_dir(filesystem_root()?).args([
-        "--manifest-path",
-        repo.join("Cargo.toml")
-            .to_str()
-            .ok_or_else(|| ReleaseError::Invalid("manifest path not UTF-8".into()))?,
-        "--config",
-        repo.join("deny.toml")
-            .to_str()
-            .ok_or_else(|| ReleaseError::Invalid("deny config path not UTF-8".into()))?,
-        "--all-features",
-        "--locked",
-        "--offline",
-        "--exclude-dev",
-        "--exclude",
-        "kio-eval",
-        "--target",
-        target,
-        "list",
-        "--format",
-        "json",
-        "--layout",
-        "crate",
-    ]);
-    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let mut command = Command::new(subprocess_path(&tool)?);
+    command
+        .current_dir(subprocess_path(&filesystem_root()?)?)
+        .arg("--manifest-path")
+        .arg(subprocess_path(&repo.join("Cargo.toml"))?)
+        .arg("--config")
+        .arg(subprocess_path(&repo.join("deny.toml"))?)
+        .args([
+            "--all-features",
+            "--locked",
+            "--offline",
+            "--exclude-dev",
+            "--exclude",
+            "kio-eval",
+            "--target",
+            target,
+            "list",
+            "--format",
+            "json",
+            "--layout",
+            "crate",
+        ]);
+    isolate_cargo_configuration(&mut command, cargo_home, true)?;
     let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
@@ -2263,30 +2267,28 @@ fn generate_audit(
     cargo_home: &Path,
 ) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-deny", CARGO_DENY_VERSION)?;
-    let mut command = Command::new(tool);
-    command.current_dir(filesystem_root()?).args([
-        "--manifest-path",
-        repo.join("Cargo.toml")
-            .to_str()
-            .ok_or_else(|| ReleaseError::Invalid("manifest path not UTF-8".into()))?,
-        "--config",
-        repo.join("deny.toml")
-            .to_str()
-            .ok_or_else(|| ReleaseError::Invalid("deny config path not UTF-8".into()))?,
-        "--all-features",
-        "--locked",
-        "--offline",
-        "--exclude-dev",
-        "--exclude",
-        "kio-eval",
-        "--target",
-        target,
-        "check",
-        "bans",
-        "licenses",
-        "sources",
-    ]);
-    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let mut command = Command::new(subprocess_path(&tool)?);
+    command
+        .current_dir(subprocess_path(&filesystem_root()?)?)
+        .arg("--manifest-path")
+        .arg(subprocess_path(&repo.join("Cargo.toml"))?)
+        .arg("--config")
+        .arg(subprocess_path(&repo.join("deny.toml"))?)
+        .args([
+            "--all-features",
+            "--locked",
+            "--offline",
+            "--exclude-dev",
+            "--exclude",
+            "kio-eval",
+            "--target",
+            target,
+            "check",
+            "bans",
+            "licenses",
+            "sources",
+        ]);
+    isolate_cargo_configuration(&mut command, cargo_home, true)?;
     let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
@@ -2306,7 +2308,9 @@ fn generate_audit(
 fn pinned_tool(tools: &Path, name: &str, version: &str) -> Result<PathBuf, ReleaseError> {
     let path = tools.join("bin").join(executable_name(name));
     require_regular(&path, MAX_INPUT)?;
-    let output = Command::new(&path).arg("--version").output()?;
+    let output = Command::new(subprocess_path(&path)?)
+        .arg("--version")
+        .output()?;
     if !output.status.success() || !String::from_utf8_lossy(&output.stdout).contains(version) {
         return Err(ReleaseError::Invalid(format!(
             "{name} is not pinned version {version}"
@@ -2595,7 +2599,11 @@ fn filesystem_root() -> Result<PathBuf, ReleaseError> {
     Ok(root)
 }
 
-fn isolate_cargo_configuration(command: &mut Command, cargo_home: &Path, offline: bool) {
+fn isolate_cargo_configuration(
+    command: &mut Command,
+    cargo_home: &Path,
+    offline: bool,
+) -> Result<(), ReleaseError> {
     // Cargo environment variables are another configuration authority. Remove
     // the entire namespace, including any command-local value, then add back
     // only the isolated cache home and explicit network policy.
@@ -2615,10 +2623,61 @@ fn isolate_cargo_configuration(command: &mut Command, cargo_home: &Path, offline
         })
         .collect::<Vec<_>>();
     command.env_clear().envs(inherited);
+    let cargo_home = subprocess_path(cargo_home)?;
+    if !cargo_home.is_absolute() {
+        return Err(ReleaseError::Invalid(
+            "subprocess Cargo home must be an absolute path".into(),
+        ));
+    }
     command.env("CARGO_HOME", cargo_home);
     if offline {
         command.env("CARGO_NET_OFFLINE", "true");
     }
+    Ok(())
+}
+
+/// Convert canonical Windows paths into the ordinary Win32 form accepted by
+/// Cargo and release tools. Canonical paths remain authoritative for all
+/// filesystem checks and receipts; this conversion exists only at a process
+/// boundary. Device namespaces do not have an equivalent ordinary path and
+/// are rejected rather than passed through.
+fn subprocess_path(path: &Path) -> Result<PathBuf, ReleaseError> {
+    #[cfg(windows)]
+    {
+        let raw = path
+            .to_str()
+            .ok_or_else(|| ReleaseError::Invalid("subprocess path is not UTF-8".into()))?;
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            let mut components = unc.split('\\');
+            if components.next().filter(|part| !part.is_empty()).is_none()
+                || components.next().filter(|part| !part.is_empty()).is_none()
+            {
+                return Err(ReleaseError::Invalid(
+                    "subprocess path has an invalid verbatim UNC namespace".into(),
+                ));
+            }
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(drive) = raw.strip_prefix(r"\\?\") {
+            let bytes = drive.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+            {
+                return Ok(PathBuf::from(drive));
+            }
+            return Err(ReleaseError::Invalid(
+                "subprocess path uses an unsupported Windows device namespace".into(),
+            ));
+        }
+        if raw.starts_with(r"\\.\") || raw.starts_with(r"\??\") {
+            return Err(ReleaseError::Invalid(
+                "subprocess path uses an unsupported Windows device namespace".into(),
+            ));
+        }
+    }
+    Ok(path.to_path_buf())
 }
 
 fn copy_tree_regular(
@@ -2842,6 +2901,17 @@ mod tests {
             features: "all-features".into(),
             profile: "release".into(),
             repro_recipe: "linux-rustc-default-v1".into(),
+        }
+    }
+
+    fn test_absolute_path(name: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\kio-release-tests").join(name)
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/tmp/kio-release-tests").join(name)
         }
     }
     fn binary() -> Vec<u8> {
@@ -3076,12 +3146,13 @@ mod tests {
     #[test]
     fn isolated_cargo_process_rejects_configuration_environment() {
         let mut command = Command::new("cargo");
+        let cargo_home = test_absolute_path("isolated-cargo-home");
         command
             .env("CARGO_PROFILE_RELEASE_DEBUG", "true")
             .env("CARGO_TARGET_DIR", "/hostile-target")
             .env("RUSTFLAGS", "--hostile")
             .env("RUSTC_WRAPPER", "hostile-wrapper");
-        isolate_cargo_configuration(&mut command, Path::new("/isolated-cargo-home"), true);
+        isolate_cargo_configuration(&mut command, &cargo_home, true).unwrap();
         let environment = command
             .get_envs()
             .filter_map(|(key, value)| Some((key.to_str()?, value.and_then(OsStr::to_str))))
@@ -3096,15 +3167,74 @@ mod tests {
         }
         assert_eq!(
             environment.get("CARGO_HOME"),
-            Some(&Some("/isolated-cargo-home"))
+            Some(&Some(cargo_home.to_str().unwrap()))
         );
         assert_eq!(environment.get("CARGO_NET_OFFLINE"), Some(&Some("true")));
+        assert!(Path::new(environment["CARGO_HOME"].unwrap()).is_absolute());
+    }
+
+    #[test]
+    fn isolated_cargo_process_rejects_relative_cargo_home() {
+        let mut command = Command::new("cargo");
+        assert!(
+            isolate_cargo_configuration(&mut command, Path::new("relative-cargo-home"), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn subprocess_path_preserves_ordinary_paths() {
+        for path in [Path::new("candidate/home"), Path::new("/candidate/home")] {
+            assert_eq!(subprocess_path(path).unwrap(), path);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_subprocess_path_converts_verbatim_paths_and_rejects_devices() {
+        assert_eq!(
+            subprocess_path(Path::new(r"\\?\C:\candidate\home")).unwrap(),
+            Path::new(r"C:\candidate\home")
+        );
+        assert_eq!(
+            subprocess_path(Path::new(r"\\?\UNC\server\share\candidate")).unwrap(),
+            Path::new(r"\\server\share\candidate")
+        );
+        for path in [
+            Path::new(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\candidate"),
+            Path::new(r"\\.\PhysicalDrive0"),
+            Path::new(r"\??\C:\candidate"),
+            Path::new(r"\\?\UNC\server"),
+        ] {
+            assert!(subprocess_path(path).is_err(), "{}", path.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cargo_home_environment_does_not_expose_verbatim_prefix() {
+        let mut command = Command::new("cargo");
+        isolate_cargo_configuration(
+            &mut command,
+            Path::new(r"\\?\C:\candidate\isolated-cargo-home"),
+            true,
+        )
+        .unwrap();
+        let cargo_home = command
+            .get_envs()
+            .find_map(|(name, value)| {
+                (name == OsStr::new("CARGO_HOME")).then(|| value.map(PathBuf::from))
+            })
+            .flatten()
+            .unwrap();
+        assert_eq!(cargo_home, Path::new(r"C:\candidate\isolated-cargo-home"));
     }
 
     #[test]
     fn candidate_cargo_command_removes_ambient_compiler_overrides() {
         let repo = Path::new(".");
-        let target_dir = Path::new("/tmp/kio-release-command-test");
+        let target_dir = test_absolute_path("candidate-target");
+        let cargo_home = test_absolute_path("isolated-cargo-home");
         let assert_native_tool_environment_removed =
             |environment: &BTreeMap<&str, Option<&str>>, target: &str| {
                 for variable in [
@@ -3165,8 +3295,7 @@ mod tests {
                 }
             };
         let linux = binding();
-        let linux_command =
-            cargo_command(repo, &linux, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
+        let linux_command = cargo_command(repo, &linux, &target_dir, &cargo_home).unwrap();
         let linux_args = linux_command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -3220,8 +3349,7 @@ mod tests {
         {
             macos.target = "aarch64-apple-darwin".into();
             macos.repro_recipe = "macos-rust-lld-no-uuid-macos11-v1".into();
-            let macos_command =
-                cargo_command(repo, &macos, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
+            let macos_command = cargo_command(repo, &macos, &target_dir, &cargo_home).unwrap();
             let macos_env = macos_command
                 .get_envs()
                 .map(|(key, value)| {
@@ -3242,8 +3370,7 @@ mod tests {
         let mut windows = binding();
         windows.target = "x86_64-pc-windows-msvc".into();
         windows.repro_recipe = "windows-msvc-brepro-v1".into();
-        let windows_command =
-            cargo_command(repo, &windows, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
+        let windows_command = cargo_command(repo, &windows, &target_dir, &cargo_home).unwrap();
         let windows_args = windows_command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
