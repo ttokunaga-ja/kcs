@@ -1039,18 +1039,27 @@ Reading Path の正本は [README.md §1](README.md)。docs/ 直下のファイ�
 
 # 12. RC draft artifact の検証と導入
 
-本節は、tag や GitHub Release を作る前の release candidate artifact の運用正本である。
+本節は、`draft-release` workflow が生成する Actions artifact と、公開済み GitHub Release asset の
+双方の運用正本である。公開済み `v0.1.0-rc.1` archive 内の `OPERATIONS.md` は immutable な
+published artifact bytes であり、本修正では差し替えない。本節の更新は main と将来の candidate に
+適用する。
 RC version の正本は workspace package version であり、最初の候補は `0.1.0-rc.1` とする。
 platform support policy は [09-mvp-scope.md §1.2](09-mvp-scope.md) だけを正本とし、
 macOS / Linux は `supported`、Windows は `experimental` とする。
 
-draft workflow が生成する Actions artifact は、同じ target 用の次の files を一組として保持する。
+`draft-release` workflow が生成する per-target Actions artifact は、同じ target 用の次の files を
+一組として保持する。
 
 ```text
 kio-0.1.0-rc.1-<target>.tar.gz
 kio-0.1.0-rc.1-<target>.checksums.json
 smoke.json
 ```
+
+`smoke.json` は workflow run 内部の smoke evidence であり、GitHub Release asset として公開しない。
+公開済み [`v0.1.0-rc.1` GitHub pre-release](https://github.com/ttokunaga-ja/kio/releases/tag/v0.1.0-rc.1)
+の公開 asset は、`aarch64-apple-darwin` / `x86_64-unknown-linux-gnu` /
+`x86_64-pc-windows-msvc` の 3 target それぞれの archive + checksums sidecar、合計 6 files のみである。
 
 archive には展開後の `bin/kio` (`bin/kio.exe` on Windows)、`LICENSE.md`、
 `NOTICE.txt`、`TRADEMARKS.md`、本書を写した `OPERATIONS.md`、canonical provenance、

@@ -11,8 +11,9 @@ heavy lifting (OCR, embedding) uses frontier models, on explicit opt-in.
 Secondary framing: *evidence-grounded local knowledge archive*.
 
 **Status: pre-release.** The MVP pipeline is implemented and passes its contract
-suite, but there are no published binaries yet and the CLI surface can still
-change. It is a CLI; there is no GUI.
+suite. [`v0.1.0-rc.1`](https://github.com/ttokunaga-ja/kio/releases/tag/v0.1.0-rc.1)
+is published as a GitHub pre-release; the CLI surface can still change. It is a
+CLI; there is no GUI.
 
 ---
 
@@ -46,9 +47,10 @@ kio search "あの PDF"
 kio open <pointer from the results>
 ```
 
-Draft release candidates are not public releases. Their archive verification,
-installation, uninstallation, platform support, and signing-status procedures
-are defined in [docs/10-operations.md §12](docs/10-operations.md#12-rc-draft-artifact-の検証と導入).
+The [`v0.1.0-rc.1` GitHub pre-release](https://github.com/ttokunaga-ja/kio/releases/tag/v0.1.0-rc.1)
+is public. Its archive verification, installation, uninstallation, platform
+support, and signing-status procedures are defined in
+[docs/10-operations.md §12](docs/10-operations.md#12-rc-draft-artifact-の検証と導入).
 
 ## About network use
 
@@ -130,8 +132,9 @@ Kio は、手元にある PDF・Office 文書・画像・コード・メモを�
 あなたのマシンにあり、OCR や Embedding といった重い計算には frontier AI を使います
 (明示的な opt-in 後)。
 
-**状態: プレリリース。** MVP パイプラインは実装済みで契約テストを通過していますが、
-配布バイナリはまだなく、CLI の仕様も変わりえます。GUI はありません。
+**状態: プレリリース。** MVP パイプラインは実装済みで契約テストを通過しています。
+[`v0.1.0-rc.1`](https://github.com/ttokunaga-ja/kio/releases/tag/v0.1.0-rc.1) は
+GitHub pre-release として公開済みですが、CLI の仕様は変わりえます。GUI はありません。
 
 ## 中核 3 点
 
