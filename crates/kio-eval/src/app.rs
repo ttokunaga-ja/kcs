@@ -202,6 +202,17 @@ enum ReleaseCommands {
     PrepareTools {
         #[arg(long)]
         out: PathBuf,
+        #[arg(long)]
+        cargo_home: PathBuf,
+    },
+    /// Create an isolated, lock-bound Cargo cache home for candidate builds.
+    PrepareCargoHome {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        source_cargo_home: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Build a bound release-candidate binary for the native target.
     Build {
@@ -213,6 +224,8 @@ enum ReleaseCommands {
         target: String,
         #[arg(long)]
         target_dir: PathBuf,
+        #[arg(long)]
+        cargo_home: PathBuf,
     },
     /// Package one already-bound candidate binary into a deterministic archive.
     Package {
@@ -224,6 +237,8 @@ enum ReleaseCommands {
         target: String,
         #[arg(long)]
         tools_dir: PathBuf,
+        #[arg(long)]
+        cargo_home: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -1966,11 +1981,27 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     println!("{}", kio_eval::release::candidate_archive_sha256(archive)?);
                     Ok(ExitCode::Success)
                 }
-                ReleaseCommands::PrepareTools { out } => {
+                ReleaseCommands::PrepareTools { out, cargo_home } => {
                     kio_eval::release::prepare_tools(&kio_eval::release::PrepareToolsOptions {
                         output_dir: out.clone(),
+                        cargo_home: cargo_home.clone(),
                     })?;
                     println!("[ok] pinned release tools: {}", out.display());
+                    Ok(ExitCode::Success)
+                }
+                ReleaseCommands::PrepareCargoHome {
+                    repo,
+                    source_cargo_home,
+                    out,
+                } => {
+                    kio_eval::release::prepare_cargo_home(
+                        &kio_eval::release::PrepareCargoHomeOptions {
+                            repo: repo.clone(),
+                            source_cargo_home: source_cargo_home.clone(),
+                            output_dir: out.clone(),
+                        },
+                    )?;
+                    println!("[ok] isolated Cargo home: {}", out.display());
                     Ok(ExitCode::Success)
                 }
                 ReleaseCommands::Build {
@@ -1978,6 +2009,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     candidate_sha,
                     target,
                     target_dir,
+                    cargo_home,
                 } => {
                     let summary = kio_eval::release::build_candidate(
                         &kio_eval::release::BuildCandidateOptions {
@@ -1985,6 +2017,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                             candidate_sha: candidate_sha.clone(),
                             target: target.clone(),
                             target_dir: target_dir.clone(),
+                            cargo_home: cargo_home.clone(),
                         },
                     )?;
                     println!(
@@ -1999,6 +2032,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                     binary,
                     target,
                     tools_dir,
+                    cargo_home,
                     out,
                 } => {
                     let summary = kio_eval::release::package_candidate(
@@ -2008,6 +2042,7 @@ pub fn run(args: Args) -> Result<ExitCode, AppError> {
                             target: target.clone(),
                             output_dir: out.clone(),
                             tools_dir: tools_dir.clone(),
+                            cargo_home: cargo_home.clone(),
                         },
                     )?;
                     println!(

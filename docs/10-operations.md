@@ -1093,10 +1093,9 @@ binary binding と provenance は schema v2 で、target によって次の clos
 古い binding/provenance schema や target と一致しない recipe は受理しない。
 
 ```text
-x86_64-unknown-linux-gnu / aarch64-unknown-linux-gnu = linux-rustc-default-v1
-<arch>-apple-darwin = macos-rust-lld-no-uuid-macos11-v1
+x86_64-unknown-linux-gnu = linux-rustc-default-v1
+aarch64-apple-darwin = macos-rust-lld-no-uuid-macos11-v1
 x86_64-pc-windows-msvc = windows-msvc-brepro-v1
-x86_64-pc-windows-gnu = windows-gnu-rustc-default-v1
 ```
 
 MSVC candidate build は `CARGO_ENCODED_RUSTFLAGS` を ASCII Unit Separator (`0x1f`) で区切り、
@@ -1105,7 +1104,10 @@ ambient Rust flags、compiler wrapper、target linker override、および locke
 compiler・archiver・flags・dependency build override を継承せず、Cargo command-line config で `rustc`、
 wrapper 無効、Windows の `link.exe` を固定する。bare tool 名は workflow が提供する trusted
 Rust/C/MSVC toolchain の `PATH` から解決し、Windows SDK/MSVC探索用の `LIB` / `INCLUDE` と
-registry/cache 用の `CARGO_HOME` は維持する。一方、MSVCの `CL` / `_CL_` / `LINK` / `_LINK_` による
+registry/git cache は lock-bound な create-only Cargo home へ regular-file copy するが、ambient
+`CARGO_HOME` の config/credentials は受理しない。candidate Cargo は filesystem root から absolute
+manifest path で起動するため repository/ancestor `.cargo/config*` も探索せず、ambient `CARGO_*`
+configuration environment も継承しない。一方、MSVCの `CL` / `_CL_` / `LINK` / `_LINK_` による
 追加option注入は拒否する。Windows MSVC
 artifact の packager と verifier は PE32+ を厳格に
 parse し、`IMAGE_DEBUG_TYPE_REPRO` (kind 16) を必須にする。欠落・破損・非 PE32+ は warning や skip

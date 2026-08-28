@@ -40,6 +40,9 @@ const MAX_JSON_DIFF_FIELDS: usize = 64;
 const MAX_DIAGNOSTIC_PATH_BYTES: usize = 512;
 const MAX_PE_SECTIONS: usize = 96;
 const MAX_PE_DEBUG_ENTRIES: usize = 32;
+const MAX_CARGO_CACHE_FILES: usize = 100_000;
+const MAX_CARGO_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_CARGO_CACHE_FILE: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ReleaseError {
@@ -58,6 +61,14 @@ pub enum ReleaseError {
 #[derive(Debug, Clone)]
 pub struct PrepareToolsOptions {
     pub output_dir: PathBuf,
+    pub cargo_home: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrepareCargoHomeOptions {
+    pub repo: PathBuf,
+    pub source_cargo_home: PathBuf,
+    pub output_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +77,7 @@ pub struct BuildCandidateOptions {
     pub candidate_sha: String,
     pub target: String,
     pub target_dir: PathBuf,
+    pub cargo_home: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +89,7 @@ pub struct PackageCandidateOptions {
     /// Root produced by [`prepare_tools`].  Tool binaries are never resolved
     /// from PATH, which prevents an ambient cargo subcommand substitution.
     pub tools_dir: PathBuf,
+    pub cargo_home: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +171,13 @@ struct ChecksumSidecar {
     provenance_sha256: String,
     sbom_sha256: String,
     checksums_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CargoHomeReceipt {
+    schema: String,
+    cargo_lock_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -277,24 +297,25 @@ struct ParsedPeSection {
 }
 
 pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> {
+    let cargo_home = validate_prepared_cargo_home_for_tools(&options.cargo_home)?;
     create_empty_dir(&options.output_dir)?;
     let root = options.output_dir.canonicalize()?;
     for (crate_name, version) in [
         ("cargo-sbom", CARGO_SBOM_VERSION),
         ("cargo-deny", CARGO_DENY_VERSION),
     ] {
-        let status = Command::new("cargo")
-            .args([
-                "+1.98.0",
-                "install",
-                "--locked",
-                "--version",
-                version,
-                "--root",
-            ])
-            .arg(&root)
-            .arg(crate_name)
-            .status()?;
+        let mut cargo = Command::new("cargo");
+        cargo.current_dir(filesystem_root()?).args([
+            "+1.98.0",
+            "install",
+            "--locked",
+            "--version",
+            version,
+            "--root",
+        ]);
+        cargo.arg(&root).arg(crate_name);
+        isolate_cargo_configuration(&mut cargo, &cargo_home, false);
+        let status = cargo.status()?;
         if !status.success() {
             return Err(ReleaseError::Invalid(format!(
                 "installing {crate_name} {version} failed: {status}"
@@ -316,9 +337,84 @@ pub fn prepare_tools(options: &PrepareToolsOptions) -> Result<(), ReleaseError> 
     Ok(())
 }
 
+/// Create the only Cargo configuration authority accepted by candidate builds.
+/// Registry and git object caches are copied as data, never as configuration.
+pub fn prepare_cargo_home(options: &PrepareCargoHomeOptions) -> Result<(), ReleaseError> {
+    let repo = canonical_repo(&options.repo)?;
+    reject_dirty(&repo)?;
+    require_output_outside_repo(&repo, &options.output_dir)?;
+    let source_meta = fs::symlink_metadata(&options.source_cargo_home)?;
+    if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
+        return Err(ReleaseError::Invalid(
+            "Cargo home source must be a real directory".into(),
+        ));
+    }
+    let source = options.source_cargo_home.canonicalize()?;
+    if source.starts_with(&repo) {
+        return Err(ReleaseError::Invalid(
+            "Cargo home source/output must be disjoint and outside repository".into(),
+        ));
+    }
+    create_empty_dir(&options.output_dir)?;
+    let output = options.output_dir.canonicalize()?;
+    if output.starts_with(&source) || source.starts_with(&output) {
+        return Err(ReleaseError::Invalid(
+            "Cargo home source/output must be disjoint and outside repository".into(),
+        ));
+    }
+    let lock: toml::Value = toml::from_str(&fs::read_to_string(repo.join("Cargo.lock"))?)
+        .map_err(|error| ReleaseError::Invalid(format!("Cargo.lock: {error}")))?;
+    let sources = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|package| package.get("source").and_then(toml::Value::as_str));
+    let mut copy_registry = false;
+    let mut copy_git = false;
+    for source in sources {
+        if !(source.starts_with("registry+")
+            || source.starts_with("sparse+")
+            || source.starts_with("git+"))
+        {
+            return Err(ReleaseError::Invalid(
+                "Cargo.lock contains unsupported source scheme".into(),
+            ));
+        }
+        copy_registry |= source.starts_with("registry+") || source.starts_with("sparse+");
+        copy_git |= source.starts_with("git+");
+    }
+    let mut copied = (0usize, 0u64);
+    for (name, required) in [("registry", copy_registry), ("git", copy_git)] {
+        if !required {
+            continue;
+        }
+        let input = source.join(name);
+        if !input.exists() {
+            return Err(ReleaseError::Invalid(format!(
+                "required Cargo cache tree is missing: {name}"
+            )));
+        }
+        copy_tree_regular(&input, &output.join(name), &mut copied)?;
+    }
+    let lock = digest(&bounded_bytes(&repo.join("Cargo.lock"), MAX_JSON)?);
+    let receipt = CargoHomeReceipt {
+        schema: "kio-rc-cargo-home-v1".into(),
+        cargo_lock_sha256: lock,
+    };
+    create_new_bytes(
+        &output.join("kio-rc-cargo-home.json"),
+        &canonical_json(&receipt)?,
+    )?;
+    validate_prepared_cargo_home(&repo, &output)?;
+    Ok(())
+}
+
 /// Return the native Rust target used for an RC candidate build.
 pub fn native_target() -> Result<String, ReleaseError> {
-    rust_host()
+    let target = rust_host()?;
+    support_for_target(&target)?;
+    Ok(target)
 }
 
 /// Hash the locked dependency graph from a clean canonical checkout.
@@ -347,7 +443,8 @@ pub fn build_candidate(options: &BuildCandidateOptions) -> Result<BuildSummary, 
     }
     require_output_outside_repo(&repo, &options.target_dir)?;
     create_empty_dir(&options.target_dir)?;
-    let mut cargo = cargo_command(&repo, &binding, &options.target_dir)?;
+    let cargo_home = validate_prepared_cargo_home(&repo, &options.cargo_home)?;
+    let mut cargo = cargo_command(&repo, &binding, &options.target_dir, &cargo_home)?;
     let status = cargo.status()?;
     if !status.success() {
         return Err(ReleaseError::Invalid(format!(
@@ -370,6 +467,7 @@ pub fn package_candidate(
     options: &PackageCandidateOptions,
 ) -> Result<PackageSummary, ReleaseError> {
     let repo = canonical_repo(&options.repo)?;
+    let cargo_home = validate_prepared_cargo_home(&repo, &options.cargo_home)?;
     let binding = repo_binding(&repo, &git(&repo, &["rev-parse", "HEAD"])?, &options.target)?;
     require_regular(&options.binary, MAX_INPUT)?;
     require_binding(&binding, &read_binding(&options.binary)?)?;
@@ -378,10 +476,21 @@ pub fn package_candidate(
     create_empty_dir(&options.output_dir)?;
 
     let generated = TempDir::new()?;
-    let sbom_path = generate_sbom(&repo, &options.tools_dir, generated.path())?;
-    let inventory_path =
-        generate_inventory(&repo, &options.tools_dir, generated.path(), &binding.target)?;
-    let audit_path = generate_audit(&repo, &options.tools_dir, generated.path(), &binding.target)?;
+    let sbom_path = generate_sbom(&repo, &options.tools_dir, generated.path(), &cargo_home)?;
+    let inventory_path = generate_inventory(
+        &repo,
+        &options.tools_dir,
+        generated.path(),
+        &binding.target,
+        &cargo_home,
+    )?;
+    let audit_path = generate_audit(
+        &repo,
+        &options.tools_dir,
+        generated.path(),
+        &binding.target,
+        &cargo_home,
+    )?;
     let sbom = canonical_sbom(&sbom_path, Some(&repo))?;
     let inventory = canonical_inventory(&inventory_path, &repo)?;
     let audit = canonical_json_file(&audit_path)?;
@@ -1414,13 +1523,18 @@ fn workspace_version(repo: &Path) -> Result<String, ReleaseError> {
         .map(str::to_owned)
         .ok_or_else(|| ReleaseError::Invalid("workspace.package.version missing".into()))
 }
-fn cargo_command(repo: &Path, b: &Binding, target_dir: &Path) -> Result<Command, ReleaseError> {
+fn cargo_command(
+    repo: &Path,
+    b: &Binding,
+    target_dir: &Path,
+    cargo_home: &Path,
+) -> Result<Command, ReleaseError> {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(repo)
+    cmd.current_dir(filesystem_root()?)
         .arg("+1.98.0")
-        // Command-line config overrides repository and ambient Cargo config.
-        // The trusted Rust toolchain remains the host PATH tool selected by
-        // rust-toolchain.toml; wrappers are deliberately disabled below.
+        // The filesystem-root cwd and isolated Cargo home exclude file-based
+        // config discovery. The trusted Rust toolchain remains the host PATH
+        // tool selected by rust-toolchain.toml; wrappers are disabled below.
         .args([
             "--config",
             "build.rustc=\"rustc\"",
@@ -1439,6 +1553,11 @@ fn cargo_command(repo: &Path, b: &Binding, target_dir: &Path) -> Result<Command,
         "build",
         "--release",
         "--locked",
+        "--offline",
+        "--manifest-path",
+    ])
+    .arg(repo.join("Cargo.toml"))
+    .args([
         "--all-features",
         "-p",
         "kio-cli",
@@ -1449,6 +1568,7 @@ fn cargo_command(repo: &Path, b: &Binding, target_dir: &Path) -> Result<Command,
         "--target-dir",
     ])
     .arg(target_dir);
+    isolate_cargo_configuration(&mut cmd, cargo_home, true);
     cmd.env_remove("RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
@@ -1510,7 +1630,7 @@ fn cargo_command(repo: &Path, b: &Binding, target_dir: &Path) -> Result<Command,
         cmd.env_remove(variable);
     }
     cmd.env("CARGO_ENCODED_RUSTFLAGS", candidate_rustflags(&b.target)?);
-    if b.target.ends_with("-apple-darwin") {
+    if b.target == "aarch64-apple-darwin" {
         // Match Rust's supported macOS floor for every C/assembly dependency;
         // otherwise the host SDK can silently stamp objects with the host OS.
         cmd.env_remove("SDKROOT")
@@ -1534,8 +1654,13 @@ fn candidate_rustflags(target: &str) -> Result<String, ReleaseError> {
     if target == "x86_64-pc-windows-msvc" {
         return Ok("-C\u{1f}link-arg=/Brepro".into());
     }
-    if !target.ends_with("-apple-darwin") {
+    if target == "x86_64-unknown-linux-gnu" {
         return Ok(String::new());
+    }
+    if target != "aarch64-apple-darwin" {
+        return Err(ReleaseError::Invalid(format!(
+            "unsupported RC target {target}"
+        )));
     }
     let linker = pinned_rust_lld(target)?;
     let linker = linker
@@ -1635,29 +1760,27 @@ fn binary_name() -> &'static str {
     if cfg!(windows) { "kio.exe" } else { "kio" }
 }
 fn binary_name_for_target(target: &str) -> &'static str {
-    if target.ends_with("-pc-windows-msvc") || target.ends_with("-pc-windows-gnu") {
+    if target == "x86_64-pc-windows-msvc" {
         "kio.exe"
     } else {
         "kio"
     }
 }
 fn support_for_target(target: &str) -> Result<&'static str, ReleaseError> {
-    if target.ends_with("-pc-windows-msvc") || target.ends_with("-pc-windows-gnu") {
-        Ok("experimental")
-    } else if target.ends_with("-apple-darwin") || target.ends_with("-unknown-linux-gnu") {
-        Ok("supported")
-    } else {
-        Err(ReleaseError::Invalid(format!(
+    match target {
+        "x86_64-unknown-linux-gnu" | "aarch64-apple-darwin" => Ok("supported"),
+        "x86_64-pc-windows-msvc" => Ok("experimental"),
+        _ => Err(ReleaseError::Invalid(format!(
             "unsupported RC target {target}"
-        )))
+        ))),
     }
 }
 fn signing_status(target: &str) -> Result<Value, ReleaseError> {
     support_for_target(target)?;
     let (macos_adhoc_signature, apple_notarization, windows_authenticode) =
-        if target.ends_with("-apple-darwin") {
+        if target == "aarch64-apple-darwin" {
             ("linker-generated", "not-notarized", "not-applicable")
-        } else if target.ends_with("-pc-windows-msvc") || target.ends_with("-pc-windows-gnu") {
+        } else if target == "x86_64-pc-windows-msvc" {
             ("not-applicable", "not-applicable", "unsigned")
         } else {
             ("not-applicable", "not-applicable", "not-applicable")
@@ -1697,18 +1820,13 @@ fn validate_binding(b: &Binding) -> Result<(), ReleaseError> {
     Ok(())
 }
 fn repro_recipe_for_target(target: &str) -> Result<&'static str, ReleaseError> {
-    if target.ends_with("-unknown-linux-gnu") {
-        Ok("linux-rustc-default-v1")
-    } else if target.ends_with("-apple-darwin") {
-        Ok("macos-rust-lld-no-uuid-macos11-v1")
-    } else if target == "x86_64-pc-windows-msvc" {
-        Ok("windows-msvc-brepro-v1")
-    } else if target.ends_with("-pc-windows-gnu") {
-        Ok("windows-gnu-rustc-default-v1")
-    } else {
-        Err(ReleaseError::Invalid(format!(
+    match target {
+        "x86_64-unknown-linux-gnu" => Ok("linux-rustc-default-v1"),
+        "aarch64-apple-darwin" => Ok("macos-rust-lld-no-uuid-macos11-v1"),
+        "x86_64-pc-windows-msvc" => Ok("windows-msvc-brepro-v1"),
+        _ => Err(ReleaseError::Invalid(format!(
             "unsupported RC target {target}"
-        )))
+        ))),
     }
 }
 fn require_binary_reproducibility(binding: &Binding, bytes: &[u8]) -> Result<(), ReleaseError> {
@@ -2065,20 +2183,24 @@ fn canonical_parse<T: for<'a> Deserialize<'a> + Serialize>(
     }
     Ok(value)
 }
-fn generate_sbom(repo: &Path, tools: &Path, out: &Path) -> Result<PathBuf, ReleaseError> {
+fn generate_sbom(
+    repo: &Path,
+    tools: &Path,
+    out: &Path,
+    cargo_home: &Path,
+) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-sbom", CARGO_SBOM_VERSION)?;
-    let output = Command::new(tool)
-        .current_dir(repo)
-        .env("CARGO_NET_OFFLINE", "true")
-        .args([
-            "--cargo-package",
-            "kio-cli",
-            "--output-format",
-            "cyclone_dx_json_1_6",
-            "--project-directory",
-        ])
-        .arg(repo)
-        .output()?;
+    let mut command = Command::new(tool);
+    command.current_dir(filesystem_root()?).args([
+        "--cargo-package",
+        "kio-cli",
+        "--output-format",
+        "cyclone_dx_json_1_6",
+        "--project-directory",
+    ]);
+    command.arg(repo);
+    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
             "cargo-sbom failed: {}",
@@ -2094,31 +2216,35 @@ fn generate_inventory(
     tools: &Path,
     out: &Path,
     target: &str,
+    cargo_home: &Path,
 ) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-deny", CARGO_DENY_VERSION)?;
-    let output = Command::new(tool)
-        .current_dir(repo)
-        .env("CARGO_NET_OFFLINE", "true")
-        .args([
-            "--manifest-path",
-            "Cargo.toml",
-            "--config",
-            "deny.toml",
-            "--all-features",
-            "--locked",
-            "--offline",
-            "--exclude-dev",
-            "--exclude",
-            "kio-eval",
-            "--target",
-            target,
-            "list",
-            "--format",
-            "json",
-            "--layout",
-            "crate",
-        ])
-        .output()?;
+    let mut command = Command::new(tool);
+    command.current_dir(filesystem_root()?).args([
+        "--manifest-path",
+        repo.join("Cargo.toml")
+            .to_str()
+            .ok_or_else(|| ReleaseError::Invalid("manifest path not UTF-8".into()))?,
+        "--config",
+        repo.join("deny.toml")
+            .to_str()
+            .ok_or_else(|| ReleaseError::Invalid("deny config path not UTF-8".into()))?,
+        "--all-features",
+        "--locked",
+        "--offline",
+        "--exclude-dev",
+        "--exclude",
+        "kio-eval",
+        "--target",
+        target,
+        "list",
+        "--format",
+        "json",
+        "--layout",
+        "crate",
+    ]);
+    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
             "cargo-deny dependency inventory failed: {}",
@@ -2134,30 +2260,34 @@ fn generate_audit(
     tools: &Path,
     out: &Path,
     target: &str,
+    cargo_home: &Path,
 ) -> Result<PathBuf, ReleaseError> {
     let tool = pinned_tool(tools, "cargo-deny", CARGO_DENY_VERSION)?;
-    let output = Command::new(tool)
-        .current_dir(repo)
-        .env("CARGO_NET_OFFLINE", "true")
-        .args([
-            "--manifest-path",
-            "Cargo.toml",
-            "--config",
-            "deny.toml",
-            "--all-features",
-            "--locked",
-            "--offline",
-            "--exclude-dev",
-            "--exclude",
-            "kio-eval",
-            "--target",
-            target,
-            "check",
-            "bans",
-            "licenses",
-            "sources",
-        ])
-        .output()?;
+    let mut command = Command::new(tool);
+    command.current_dir(filesystem_root()?).args([
+        "--manifest-path",
+        repo.join("Cargo.toml")
+            .to_str()
+            .ok_or_else(|| ReleaseError::Invalid("manifest path not UTF-8".into()))?,
+        "--config",
+        repo.join("deny.toml")
+            .to_str()
+            .ok_or_else(|| ReleaseError::Invalid("deny config path not UTF-8".into()))?,
+        "--all-features",
+        "--locked",
+        "--offline",
+        "--exclude-dev",
+        "--exclude",
+        "kio-eval",
+        "--target",
+        target,
+        "check",
+        "bans",
+        "licenses",
+        "sources",
+    ]);
+    isolate_cargo_configuration(&mut command, cargo_home, true);
+    let output = command.output()?;
     if !output.status.success() {
         return Err(ReleaseError::Invalid(format!(
             "cargo-deny audit failed: {}",
@@ -2452,6 +2582,139 @@ fn require_output_outside_repo(repo: &Path, output: &Path) -> Result<(), Release
     }
     Ok(())
 }
+fn filesystem_root() -> Result<PathBuf, ReleaseError> {
+    let cwd = env::current_dir()?;
+    let root = cwd
+        .ancestors()
+        .last()
+        .ok_or_else(|| ReleaseError::Invalid("filesystem root missing".into()))?
+        .to_path_buf();
+    for name in ["config", "config.toml"] {
+        reject_cargo_authority_entry(&root.join(".cargo").join(name))?;
+    }
+    Ok(root)
+}
+
+fn isolate_cargo_configuration(command: &mut Command, cargo_home: &Path, offline: bool) {
+    // Cargo environment variables are another configuration authority. Remove
+    // the entire namespace, including any command-local value, then add back
+    // only the isolated cache home and explicit network policy.
+    let inherited = env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy().to_ascii_uppercase();
+            !name.starts_with("CARGO_")
+                && !matches!(
+                    name.as_str(),
+                    "RUSTFLAGS"
+                        | "RUSTC"
+                        | "RUSTC_WRAPPER"
+                        | "RUSTC_WORKSPACE_WRAPPER"
+                        | "RUSTC_LINKER"
+                        | "RUSTC_BOOTSTRAP"
+                )
+        })
+        .collect::<Vec<_>>();
+    command.env_clear().envs(inherited);
+    command.env("CARGO_HOME", cargo_home);
+    if offline {
+        command.env("CARGO_NET_OFFLINE", "true");
+    }
+}
+
+fn copy_tree_regular(
+    source: &Path,
+    destination: &Path,
+    copied: &mut (usize, u64),
+) -> Result<(), ReleaseError> {
+    let md = fs::symlink_metadata(source)?;
+    if md.file_type().is_symlink() || !md.is_dir() {
+        return Err(ReleaseError::Invalid(format!(
+            "Cargo cache source {} is not a real directory",
+            source.display()
+        )));
+    }
+    fs::create_dir(destination)?;
+    let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let kind = fs::symlink_metadata(&from)?.file_type();
+        if kind.is_dir() {
+            copy_tree_regular(&from, &to, copied)?;
+        } else if kind.is_file() && !kind.is_symlink() {
+            let size = fs::metadata(&from)?.len();
+            copied.0 += 1;
+            copied.1 = copied
+                .1
+                .checked_add(size)
+                .ok_or_else(|| ReleaseError::Invalid("Cargo cache size overflow".into()))?;
+            if copied.0 > MAX_CARGO_CACHE_FILES
+                || copied.1 > MAX_CARGO_CACHE_BYTES
+                || size > MAX_CARGO_CACHE_FILE
+            {
+                return Err(ReleaseError::Invalid(
+                    "Cargo cache copy exceeds bounded limits".into(),
+                ));
+            }
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(ReleaseError::Invalid(format!(
+                "Cargo cache contains symlink or special entry: {}",
+                from.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_prepared_cargo_home_for_tools(home: &Path) -> Result<PathBuf, ReleaseError> {
+    let metadata = fs::symlink_metadata(home)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ReleaseError::Invalid(
+            "prepared Cargo home must be a real directory".into(),
+        ));
+    }
+    let home = home.canonicalize()?;
+    for name in ["config", "config.toml", "credentials", "credentials.toml"] {
+        reject_cargo_authority_entry(&home.join(name))?;
+    }
+    let receipt: CargoHomeReceipt = canonical_parse(&bounded_bytes(
+        &home.join("kio-rc-cargo-home.json"),
+        MAX_JSON,
+    )?)?;
+    if receipt.schema != "kio-rc-cargo-home-v1" || !valid_digest(&receipt.cargo_lock_sha256) {
+        return Err(ReleaseError::Invalid(
+            "prepared Cargo home receipt is non-canonical".into(),
+        ));
+    }
+    Ok(home)
+}
+fn reject_cargo_authority_entry(path: &Path) -> Result<(), ReleaseError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(ReleaseError::Invalid(
+            "prepared Cargo authority contains configuration or credentials".into(),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ReleaseError::Io(error)),
+    }
+}
+
+fn validate_prepared_cargo_home(repo: &Path, home: &Path) -> Result<PathBuf, ReleaseError> {
+    require_output_outside_repo(repo, home)?;
+    let home = validate_prepared_cargo_home_for_tools(home)?;
+    let expected = digest(&bounded_bytes(&repo.join("Cargo.lock"), MAX_JSON)?);
+    let receipt: CargoHomeReceipt = canonical_parse(&bounded_bytes(
+        &home.join("kio-rc-cargo-home.json"),
+        MAX_JSON,
+    )?)?;
+    if receipt.cargo_lock_sha256 != expected {
+        return Err(ReleaseError::Invalid(
+            "prepared Cargo home receipt does not bind Cargo.lock".into(),
+        ));
+    }
+    Ok(home)
+}
 fn create_new_bytes(path: &Path, bytes: &[u8]) -> Result<(), ReleaseError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -2716,6 +2979,14 @@ mod tests {
             candidate_rustflags("x86_64-pc-windows-msvc").unwrap(),
             "-C\u{1f}link-arg=/Brepro"
         );
+        for unsupported in [
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "x86_64-pc-windows-gnu",
+            "riscv64gc-unknown-linux-gnu",
+        ] {
+            assert!(candidate_rustflags(unsupported).is_err());
+        }
         #[cfg(target_os = "macos")]
         {
             let target = native_target().unwrap();
@@ -2724,6 +2995,110 @@ mod tests {
                 "rust-lld\u{1f}-C\u{1f}linker-flavor=ld64.lld\u{1f}-C\u{1f}link-arg=-no_uuid"
             ));
         }
+    }
+
+    #[test]
+    fn isolated_cargo_home_ignores_hostile_repo_ancestor_and_home_configuration() {
+        let fixture = TempDir::new().unwrap();
+        let base = fixture.path();
+        let repo = base.join("candidate");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::create_dir_all(repo.join(".cargo")).unwrap();
+        fs::create_dir_all(base.join(".cargo")).unwrap();
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname=\"kio-cli\"\nversion=\"0.0.0\"\nedition=\"2024\"\n[[bin]]\nname=\"kio\"\npath=\"src/main.rs\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"kio-cli\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(repo.join("build.rs"), "fn main(){println!(\"cargo:rustc-env=KIO_TEST_DEBUG={}\",std::env::var(\"DEBUG\").unwrap());}\n").unwrap();
+        fs::write(
+            repo.join("src/main.rs"),
+            "fn main(){print!(\"{}\",env!(\"KIO_TEST_DEBUG\"));}\n",
+        )
+        .unwrap();
+        let target = native_target().unwrap();
+        let hostile = format!(
+            "[profile.release]\ndebug=true\n[target.{target}]\nlinker=\"definitely-not-a-linker\"\n"
+        );
+        fs::write(repo.join(".cargo/config.toml"), &hostile).unwrap();
+        fs::write(base.join(".cargo/config.toml"), &hostile).unwrap();
+        let source_home = base.join("source-home");
+        fs::create_dir_all(&source_home).unwrap();
+        fs::write(source_home.join("config.toml"), &hostile).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=kio-test",
+                "-c",
+                "user.email=kio@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cargo_home = base.join("isolated-home");
+        prepare_cargo_home(&PrepareCargoHomeOptions {
+            repo: repo.clone(),
+            source_cargo_home: source_home,
+            output_dir: cargo_home.clone(),
+        })
+        .unwrap();
+        assert!(!cargo_home.join("config.toml").exists());
+        let mut b = binding();
+        b.target = target.clone();
+        b.repro_recipe = repro_recipe_for_target(&target).unwrap().into();
+        let target_dir = base.join("target");
+        let status = cargo_command(&repo, &b, &target_dir, &cargo_home)
+            .unwrap()
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let binary = target_dir.join(&target).join("release").join(binary_name());
+        assert_eq!(Command::new(binary).output().unwrap().stdout, b"false");
+    }
+
+    #[test]
+    fn isolated_cargo_process_rejects_configuration_environment() {
+        let mut command = Command::new("cargo");
+        command
+            .env("CARGO_PROFILE_RELEASE_DEBUG", "true")
+            .env("CARGO_TARGET_DIR", "/hostile-target")
+            .env("RUSTFLAGS", "--hostile")
+            .env("RUSTC_WRAPPER", "hostile-wrapper");
+        isolate_cargo_configuration(&mut command, Path::new("/isolated-cargo-home"), true);
+        let environment = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value.and_then(OsStr::to_str))))
+            .collect::<BTreeMap<_, _>>();
+        for rejected in [
+            "CARGO_PROFILE_RELEASE_DEBUG",
+            "CARGO_TARGET_DIR",
+            "RUSTFLAGS",
+            "RUSTC_WRAPPER",
+        ] {
+            assert!(!environment.contains_key(rejected), "{rejected}");
+        }
+        assert_eq!(
+            environment.get("CARGO_HOME"),
+            Some(&Some("/isolated-cargo-home"))
+        );
+        assert_eq!(environment.get("CARGO_NET_OFFLINE"), Some(&Some("true")));
     }
 
     #[test]
@@ -2750,7 +3125,13 @@ mod tests {
                         format!("HOST_{variable}"),
                         format!("TARGET_{variable}"),
                     ] {
-                        assert_eq!(environment.get(name.as_str()), Some(&None), "{name}");
+                        assert!(
+                            environment
+                                .get(name.as_str())
+                                .and_then(|value| *value)
+                                .is_none(),
+                            "{name}"
+                        );
                     }
                 }
                 for name in [
@@ -2777,11 +3158,15 @@ mod tests {
                     "COMPILER_PATH",
                     "GCC_EXEC_PREFIX",
                 ] {
-                    assert_eq!(environment.get(name), Some(&None), "{name}");
+                    assert!(
+                        environment.get(name).and_then(|value| *value).is_none(),
+                        "{name}"
+                    );
                 }
             };
         let linux = binding();
-        let linux_command = cargo_command(repo, &linux, target_dir).unwrap();
+        let linux_command =
+            cargo_command(repo, &linux, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
         let linux_args = linux_command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -2824,35 +3209,41 @@ mod tests {
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
         ] {
-            assert_eq!(linux_env.get(key), Some(&None));
+            assert!(linux_env.get(key).and_then(|value| *value).is_none());
         }
         assert_eq!(linux_env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&Some("")));
         assert_native_tool_environment_removed(&linux_env, &linux.target);
 
+        #[cfg(target_os = "macos")]
         let mut macos = binding();
-        macos.target = "aarch64-apple-darwin".into();
-        macos.repro_recipe = "macos-rust-lld-no-uuid-macos11-v1".into();
-        let macos_command = cargo_command(repo, &macos, target_dir).unwrap();
-        let macos_env = macos_command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_str().unwrap(),
-                    value.map(|value| value.to_str().unwrap()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_native_tool_environment_removed(&macos_env, &macos.target);
-        assert_eq!(macos_env.get("SDKROOT"), Some(&None));
-        assert_eq!(
-            macos_env.get("MACOSX_DEPLOYMENT_TARGET"),
-            Some(&Some("11.0"))
-        );
+        #[cfg(target_os = "macos")]
+        {
+            macos.target = "aarch64-apple-darwin".into();
+            macos.repro_recipe = "macos-rust-lld-no-uuid-macos11-v1".into();
+            let macos_command =
+                cargo_command(repo, &macos, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
+            let macos_env = macos_command
+                .get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_str().unwrap(),
+                        value.map(|value| value.to_str().unwrap()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_native_tool_environment_removed(&macos_env, &macos.target);
+            assert!(macos_env.get("SDKROOT").and_then(|value| *value).is_none());
+            assert_eq!(
+                macos_env.get("MACOSX_DEPLOYMENT_TARGET"),
+                Some(&Some("11.0"))
+            );
+        }
 
         let mut windows = binding();
         windows.target = "x86_64-pc-windows-msvc".into();
         windows.repro_recipe = "windows-msvc-brepro-v1".into();
-        let windows_command = cargo_command(repo, &windows, target_dir).unwrap();
+        let windows_command =
+            cargo_command(repo, &windows, target_dir, Path::new("/tmp/kio-cargo-home")).unwrap();
         let windows_args = windows_command
             .get_args()
             .map(|arg| arg.to_str().unwrap())
@@ -2878,12 +3269,14 @@ mod tests {
             windows_env.get("CARGO_ENCODED_RUSTFLAGS"),
             Some(&Some("-C\u{1f}link-arg=/Brepro"))
         );
-        assert_eq!(
-            windows_env.get("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"),
-            Some(&None)
+        assert!(
+            windows_env
+                .get("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER")
+                .and_then(|value| *value)
+                .is_none()
         );
         for key in ["CL", "_CL_", "LINK", "_LINK_"] {
-            assert_eq!(windows_env.get(key), Some(&None));
+            assert!(windows_env.get(key).and_then(|value| *value).is_none());
         }
         assert!(!windows_env.contains_key("LIB"));
         assert!(!windows_env.contains_key("INCLUDE"));
@@ -3022,18 +3415,21 @@ mod tests {
             "macos-rust-lld-no-uuid-macos11-v1"
         );
         assert_eq!(
-            repro_recipe_for_target("x86_64-apple-darwin").unwrap(),
-            "macos-rust-lld-no-uuid-macos11-v1"
-        );
-        assert_eq!(
-            repro_recipe_for_target("aarch64-unknown-linux-gnu").unwrap(),
-            "linux-rustc-default-v1"
-        );
-        assert_eq!(
             repro_recipe_for_target("x86_64-pc-windows-msvc").unwrap(),
             "windows-msvc-brepro-v1"
         );
         assert!(repro_recipe_for_target("unsupported").is_err());
+        assert!(repro_recipe_for_target("x86_64-apple-darwin").is_err());
+        assert!(repro_recipe_for_target("aarch64-unknown-linux-gnu").is_err());
+        assert!(repro_recipe_for_target("x86_64-pc-windows-gnu").is_err());
+        for unsupported in [
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-pc-windows-gnu",
+            "riscv64gc-unknown-linux-gnu",
+        ] {
+            assert!(support_for_target(unsupported).is_err());
+        }
         let mut mismatched = binding();
         mismatched.repro_recipe = "windows-msvc-brepro-v1".into();
         assert!(validate_binding(&mismatched).is_err());

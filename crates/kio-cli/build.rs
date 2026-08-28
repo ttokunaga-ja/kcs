@@ -143,16 +143,11 @@ fn candidate_binding(package_version: &str, actual_target: &str, actual_profile:
 }
 
 fn repro_recipe_for_target(target: &str) -> &'static str {
-    if target.ends_with("-unknown-linux-gnu") {
-        "linux-rustc-default-v1"
-    } else if target.ends_with("-apple-darwin") {
-        "macos-rust-lld-no-uuid-macos11-v1"
-    } else if target == "x86_64-pc-windows-msvc" {
-        "windows-msvc-brepro-v1"
-    } else if target.ends_with("-pc-windows-gnu") {
-        "windows-gnu-rustc-default-v1"
-    } else {
-        fail(format!("unsupported RC target {target}"))
+    match target {
+        "x86_64-unknown-linux-gnu" => "linux-rustc-default-v1",
+        "aarch64-apple-darwin" => "macos-rust-lld-no-uuid-macos11-v1",
+        "x86_64-pc-windows-msvc" => "windows-msvc-brepro-v1",
+        _ => fail(format!("unsupported RC target {target}")),
     }
 }
 
