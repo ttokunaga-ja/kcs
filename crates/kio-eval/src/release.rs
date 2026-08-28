@@ -27,8 +27,8 @@ use thiserror::Error;
 pub const RC_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CARGO_SBOM_VERSION: &str = "0.10.0";
 pub const CARGO_DENY_VERSION: &str = "0.20.2";
-const MARKER_START: &[u8] = b"KIO_RC_BINDING_V1\n";
-const MARKER_END: &[u8] = b"\nKIO_RC_BINDING_END_V1";
+const MARKER_START: &[u8] = b"KIO_RC_BINDING_V2\n";
+const MARKER_END: &[u8] = b"\nKIO_RC_BINDING_END_V2";
 const MAX_INPUT: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE: u64 = 768 * 1024 * 1024;
 const MAX_JSON: u64 = 16 * 1024 * 1024;
@@ -145,6 +145,7 @@ pub struct Binding {
     pub target: String,
     pub features: String,
     pub profile: String,
+    pub repro_recipe: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +362,7 @@ pub fn build_candidate(options: &BuildCandidateOptions) -> Result<BuildSummary, 
     require_regular(&binary, MAX_INPUT)?;
     let embedded = read_binding(&binary)?;
     require_binding(&binding, &embedded)?;
+    require_binary_reproducibility(&binding, &bounded_bytes(&binary, MAX_INPUT)?)?;
     Ok(BuildSummary { binary, binding })
 }
 
@@ -371,6 +373,7 @@ pub fn package_candidate(
     let binding = repo_binding(&repo, &git(&repo, &["rev-parse", "HEAD"])?, &options.target)?;
     require_regular(&options.binary, MAX_INPUT)?;
     require_binding(&binding, &read_binding(&options.binary)?)?;
+    require_binary_reproducibility(&binding, &bounded_bytes(&options.binary, MAX_INPUT)?)?;
     require_output_outside_repo(&repo, &options.output_dir)?;
     create_empty_dir(&options.output_dir)?;
 
@@ -388,7 +391,7 @@ pub fn package_candidate(
     let root = format!("kio-{}-{}", binding.version, binding.target);
 
     let provenance = canonical_json(&json!({
-        "schema": "kio-rc-provenance-v1",
+        "schema": "kio-rc-provenance-v2",
         "binding": binding,
         "support": support,
         "signing": signing_status(&binding.target)?,
@@ -543,7 +546,7 @@ pub fn verify_candidate(options: &VerifyCandidateOptions) -> Result<VerifySummar
     if support != support_for_target(&binding.target)? {
         return Err(ReleaseError::Verify("support policy mismatch".into()));
     }
-    if provenance.get("schema").and_then(Value::as_str) != Some("kio-rc-provenance-v1") {
+    if provenance.get("schema").and_then(Value::as_str) != Some("kio-rc-provenance-v2") {
         return Err(ReleaseError::Verify("wrong provenance schema".into()));
     }
     if provenance.as_object().map(serde_json::Map::len) != Some(6) {
@@ -604,6 +607,7 @@ pub fn verify_candidate(options: &VerifyCandidateOptions) -> Result<VerifySummar
         ))
         .ok_or_else(|| ReleaseError::Verify("missing binary".into()))?;
     require_binding(&binding, &read_binding_bytes(bin)?)?;
+    require_binary_reproducibility(&binding, bin)?;
     let checksums: Value = canonical_parse(
         files
             .get(&format!("{root}/release/checksums.json"))
@@ -1384,6 +1388,7 @@ fn repo_binding(repo: &Path, candidate: &str, target: &str) -> Result<Binding, R
         target: target.to_owned(),
         features: "all-features".into(),
         profile: "release".into(),
+        repro_recipe: repro_recipe_for_target(target)?.into(),
     };
     validate_binding(&binding)?;
     Ok(binding)
@@ -1412,44 +1417,125 @@ fn workspace_version(repo: &Path) -> Result<String, ReleaseError> {
 fn cargo_command(repo: &Path, b: &Binding, target_dir: &Path) -> Result<Command, ReleaseError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(repo)
+        .arg("+1.98.0")
+        // Command-line config overrides repository and ambient Cargo config.
+        // The trusted Rust toolchain remains the host PATH tool selected by
+        // rust-toolchain.toml; wrappers are deliberately disabled below.
         .args([
-            "+1.98.0",
-            "build",
-            "--release",
-            "--locked",
-            "--all-features",
-            "-p",
-            "kio-cli",
-            "--bin",
-            "kio",
-            "--target",
-            &b.target,
-            "--target-dir",
-        ])
-        .arg(target_dir);
+            "--config",
+            "build.rustc=\"rustc\"",
+            "--config",
+            "build.rustc-wrapper=\"\"",
+            "--config",
+            "build.rustc-workspace-wrapper=\"\"",
+        ]);
+    if b.target == "x86_64-pc-windows-msvc" {
+        cmd.args([
+            "--config",
+            "target.x86_64-pc-windows-msvc.linker=\"link.exe\"",
+        ]);
+    }
+    cmd.args([
+        "build",
+        "--release",
+        "--locked",
+        "--all-features",
+        "-p",
+        "kio-cli",
+        "--bin",
+        "kio",
+        "--target",
+        &b.target,
+        "--target-dir",
+    ])
+    .arg(target_dir);
     cmd.env_remove("RUSTFLAGS")
         .env_remove("CARGO_BUILD_RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC")
+        .env_remove("CARGO_BUILD_RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
         .env_remove(format!(
             "CARGO_TARGET_{}_RUSTFLAGS",
             b.target.to_ascii_uppercase().replace('-', "_")
+        ))
+        .env_remove(format!(
+            "CARGO_TARGET_{}_LINKER",
+            b.target.to_ascii_uppercase().replace('-', "_")
         ));
-    if let Some(flags) = candidate_rustflags(&b.target)? {
-        cmd.env("CARGO_ENCODED_RUSTFLAGS", flags);
+    for variable in [
+        "CC",
+        "CFLAGS",
+        "AR",
+        "ARFLAGS",
+        "RANLIB",
+        "RANLIBFLAGS",
+        "CXX",
+        "CXXFLAGS",
+        "CXXSTDLIB",
+    ] {
+        cmd.env_remove(variable);
+        cmd.env_remove(format!("{variable}_{}", b.target));
+        cmd.env_remove(format!("{variable}_{}", b.target.replace(['-', '.'], "_")));
+        cmd.env_remove(format!("HOST_{variable}"));
+        cmd.env_remove(format!("TARGET_{variable}"));
     }
+    for variable in [
+        "CRATE_CC_NO_DEFAULTS",
+        "CC_KNOWN_WRAPPER_CUSTOM",
+        "CC_SHELL_ESCAPED_FLAGS",
+        "CC_FORCE_DISABLE",
+        "CC_ENABLE_DEBUG_OUTPUT",
+        "CROSS_COMPILE",
+        "RUSTC_LINKER",
+        "RING_PREGENERATE_ASM",
+        "PERL_EXECUTABLE",
+        "LIBSQLITE3_SYS_USE_PKG_CONFIG",
+        "SQLITE_MAX_VARIABLE_NUMBER",
+        "SQLITE_MAX_EXPR_DEPTH",
+        "SQLITE_MAX_COLUMN",
+        "LIBSQLITE3_FLAGS",
+        "LIBSQLITE3_SYS_BUNDLING",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "COMPILER_PATH",
+        "GCC_EXEC_PREFIX",
+    ] {
+        cmd.env_remove(variable);
+    }
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", candidate_rustflags(&b.target)?);
     if b.target.ends_with("-apple-darwin") {
         // Match Rust's supported macOS floor for every C/assembly dependency;
         // otherwise the host SDK can silently stamp objects with the host OS.
-        cmd.env("MACOSX_DEPLOYMENT_TARGET", "11.0");
+        cmd.env_remove("SDKROOT")
+            .env_remove("MACOSX_DEPLOYMENT_TARGET")
+            .env("MACOSX_DEPLOYMENT_TARGET", "11.0");
+    }
+    if b.target == "x86_64-pc-windows-msvc" {
+        // LIB and INCLUDE are part of the trusted runner's initialized
+        // MSVC/Windows SDK environment. CL/LINK inject command-line options
+        // and must not participate in the closed candidate recipe.
+        for variable in ["CL", "_CL_", "LINK", "_LINK_"] {
+            cmd.env_remove(variable);
+        }
     }
     for (key, value) in binding_env(b) {
         cmd.env(key, value);
     }
     Ok(cmd)
 }
-fn candidate_rustflags(target: &str) -> Result<Option<String>, ReleaseError> {
+fn candidate_rustflags(target: &str) -> Result<String, ReleaseError> {
+    if target == "x86_64-pc-windows-msvc" {
+        return Ok("-C\u{1f}link-arg=/Brepro".into());
+    }
     if !target.ends_with("-apple-darwin") {
-        return Ok(None);
+        return Ok(String::new());
     }
     let linker = pinned_rust_lld(target)?;
     let linker = linker
@@ -1460,7 +1546,7 @@ fn candidate_rustflags(target: &str) -> Result<Option<String>, ReleaseError> {
             "rust-lld path contains an unsafe flag separator".into(),
         ));
     }
-    Ok(Some(encoded_macos_linker_flags(linker)))
+    Ok(encoded_macos_linker_flags(linker))
 }
 fn encoded_macos_linker_flags(linker: &str) -> String {
     // LLD 22 computes LC_UUID before filling its linker-generated ad-hoc
@@ -1492,7 +1578,7 @@ fn pinned_rust_lld(target: &str) -> Result<PathBuf, ReleaseError> {
     require_regular(&linker, MAX_INPUT)?;
     Ok(linker)
 }
-fn binding_env(b: &Binding) -> [(&'static str, String); 10] {
+fn binding_env(b: &Binding) -> [(&'static str, String); 11] {
     [
         ("KIO_RC_BUILD", "1".into()),
         ("KIO_RC_VERSION", b.version.clone()),
@@ -1504,6 +1590,7 @@ fn binding_env(b: &Binding) -> [(&'static str, String); 10] {
         ("KIO_RC_TARGET", b.target.clone()),
         ("KIO_RC_FEATURES", b.features.clone()),
         ("KIO_RC_PROFILE", b.profile.clone()),
+        ("KIO_RC_REPRO_RECIPE", b.repro_recipe.clone()),
     ]
 }
 fn git(repo: &Path, args: &[&str]) -> Result<String, ReleaseError> {
@@ -1601,9 +1688,46 @@ fn validate_binding(b: &Binding) -> Result<(), ReleaseError> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
         || support_for_target(&b.target).is_err()
         || b.rust_version.is_empty()
+        || b.repro_recipe != repro_recipe_for_target(&b.target)?
     {
         return Err(ReleaseError::Unbound(
             "binding fields are incomplete or non-canonical".into(),
+        ));
+    }
+    Ok(())
+}
+fn repro_recipe_for_target(target: &str) -> Result<&'static str, ReleaseError> {
+    if target.ends_with("-unknown-linux-gnu") {
+        Ok("linux-rustc-default-v1")
+    } else if target.ends_with("-apple-darwin") {
+        Ok("macos-rust-lld-no-uuid-macos11-v1")
+    } else if target == "x86_64-pc-windows-msvc" {
+        Ok("windows-msvc-brepro-v1")
+    } else if target.ends_with("-pc-windows-gnu") {
+        Ok("windows-gnu-rustc-default-v1")
+    } else {
+        Err(ReleaseError::Invalid(format!(
+            "unsupported RC target {target}"
+        )))
+    }
+}
+fn require_binary_reproducibility(binding: &Binding, bytes: &[u8]) -> Result<(), ReleaseError> {
+    if binding.repro_recipe != "windows-msvc-brepro-v1" {
+        return Ok(());
+    }
+    let metadata = parse_pe32_plus(bytes).map_err(|_| {
+        ReleaseError::Verify(
+            "Windows MSVC binary is not a valid PE32+ reproducible artifact".into(),
+        )
+    })?;
+    if metadata.machine != 0x8664 {
+        return Err(ReleaseError::Verify(
+            "Windows MSVC binary is not an AMD64 PE32+ artifact".into(),
+        ));
+    }
+    if !metadata.reproducible {
+        return Err(ReleaseError::Verify(
+            "Windows MSVC binary lacks IMAGE_DEBUG_TYPE_REPRO".into(),
         ));
     }
     Ok(())
@@ -1657,13 +1781,14 @@ fn read_binding_bytes(bytes: &[u8]) -> Result<Binding, ReleaseError> {
         "target",
         "features",
         "profile",
+        "repro_recipe",
     ]);
     if values.keys().copied().collect::<BTreeSet<_>>() != expected {
         return Err(ReleaseError::Unbound(
             "binding has missing or unknown keys".into(),
         ));
     }
-    if values.get("schema") != Some(&"1") || values.get("bound") != Some(&"1") {
+    if values.get("schema") != Some(&"2") || values.get("bound") != Some(&"1") {
         return Err(ReleaseError::Unbound(
             "binding is development or unknown schema".into(),
         ));
@@ -1678,6 +1803,7 @@ fn read_binding_bytes(bytes: &[u8]) -> Result<Binding, ReleaseError> {
         target: values["target"].to_owned(),
         features: values["features"].to_owned(),
         profile: values["profile"].to_owned(),
+        repro_recipe: values["repro_recipe"].to_owned(),
     };
     validate_binding(&b)?;
     Ok(b)
@@ -1775,6 +1901,7 @@ fn verify_source_binding(repo: &Path, binding: &Binding) -> Result<(), ReleaseEr
         target: binding.target.clone(),
         features: "all-features".into(),
         profile: "release".into(),
+        repro_recipe: repro_recipe_for_target(&binding.target)?.into(),
     };
     require_binding(&expected, binding).map_err(|_| {
         ReleaseError::Verify(
@@ -2451,12 +2578,13 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".into(),
             features: "all-features".into(),
             profile: "release".into(),
+            repro_recipe: "linux-rustc-default-v1".into(),
         }
     }
     fn binary() -> Vec<u8> {
         let mut v = MARKER_START.to_vec();
         let b = binding();
-        v.extend(format!("schema=1\nbound=1\nversion={}\ncommit={}\ngit_tree={}\ncargo_lock_sha256={}\nrust_toolchain_sha256={}\nrustc_version={}\ntarget={}\nfeatures={}\nprofile={}", b.version, b.commit, b.tree, b.cargo_lock_sha256, b.toolchain_sha256, b.rust_version, b.target, b.features, b.profile).into_bytes());
+        v.extend(format!("schema=2\nbound=1\nversion={}\ncommit={}\ngit_tree={}\ncargo_lock_sha256={}\nrust_toolchain_sha256={}\nrustc_version={}\ntarget={}\nfeatures={}\nprofile={}\nrepro_recipe={}", b.version, b.commit, b.tree, b.cargo_lock_sha256, b.toolchain_sha256, b.rust_version, b.target, b.features, b.profile, b.repro_recipe).into_bytes());
         v.extend(MARKER_END);
         v
     }
@@ -2521,7 +2649,7 @@ mod tests {
         let sbom = digest(&p[&format!("{root}/release/sbom.cdx.json")].0);
         let inventory = digest(&p[&format!("{root}/release/dependencies.json")].0);
         let audit = digest(&p[&format!("{root}/release/dependency-audit.json")].0);
-        p.insert(provenance, (canonical_json(&json!({"schema":"kio-rc-provenance-v1","binding":binding(),"support":"supported","tools":{"cargo_sbom":CARGO_SBOM_VERSION,"cargo_deny":CARGO_DENY_VERSION,"advisory_database":Value::Null},"signing":signing_status("x86_64-unknown-linux-gnu").unwrap(),"digests":{"binary_sha256":binary,"sbom_sha256":sbom,"dependency_inventory_sha256":inventory,"dependency_audit_sha256":audit}})).unwrap(),0o644));
+        p.insert(provenance, (canonical_json(&json!({"schema":"kio-rc-provenance-v2","binding":binding(),"support":"supported","tools":{"cargo_sbom":CARGO_SBOM_VERSION,"cargo_deny":CARGO_DENY_VERSION,"advisory_database":Value::Null},"signing":signing_status("x86_64-unknown-linux-gnu").unwrap(),"digests":{"binary_sha256":binary,"sbom_sha256":sbom,"dependency_inventory_sha256":inventory,"dependency_audit_sha256":audit}})).unwrap(),0o644));
         let checks = internal_checksums(&p).unwrap();
         p.insert(format!("{root}/release/checksums.json"), (checks, 0o644));
         p
@@ -2578,29 +2706,188 @@ mod tests {
         assert_eq!(executable_name("cargo-sbom"), expected);
     }
     #[test]
-    fn candidate_build_uses_only_the_pinned_macos_linker() {
+    fn candidate_build_uses_closed_target_specific_reproducibility_flags() {
         assert_eq!(
             encoded_macos_linker_flags("/toolchain/rust-lld"),
             "-C\u{1f}linker=/toolchain/rust-lld\u{1f}-C\u{1f}linker-flavor=ld64.lld\u{1f}-C\u{1f}link-arg=-no_uuid"
         );
-        assert!(
-            candidate_rustflags("x86_64-unknown-linux-gnu")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            candidate_rustflags("x86_64-pc-windows-msvc")
-                .unwrap()
-                .is_none()
+        assert_eq!(candidate_rustflags("x86_64-unknown-linux-gnu").unwrap(), "");
+        assert_eq!(
+            candidate_rustflags("x86_64-pc-windows-msvc").unwrap(),
+            "-C\u{1f}link-arg=/Brepro"
         );
         #[cfg(target_os = "macos")]
         {
             let target = native_target().unwrap();
-            let flags = candidate_rustflags(&target).unwrap().unwrap();
+            let flags = candidate_rustflags(&target).unwrap();
             assert!(flags.ends_with(
                 "rust-lld\u{1f}-C\u{1f}linker-flavor=ld64.lld\u{1f}-C\u{1f}link-arg=-no_uuid"
             ));
         }
+    }
+
+    #[test]
+    fn candidate_cargo_command_removes_ambient_compiler_overrides() {
+        let repo = Path::new(".");
+        let target_dir = Path::new("/tmp/kio-release-command-test");
+        let assert_native_tool_environment_removed =
+            |environment: &BTreeMap<&str, Option<&str>>, target: &str| {
+                for variable in [
+                    "CC",
+                    "CFLAGS",
+                    "AR",
+                    "ARFLAGS",
+                    "RANLIB",
+                    "RANLIBFLAGS",
+                    "CXX",
+                    "CXXFLAGS",
+                    "CXXSTDLIB",
+                ] {
+                    for name in [
+                        variable.to_owned(),
+                        format!("{variable}_{target}"),
+                        format!("{variable}_{}", target.replace(['-', '.'], "_")),
+                        format!("HOST_{variable}"),
+                        format!("TARGET_{variable}"),
+                    ] {
+                        assert_eq!(environment.get(name.as_str()), Some(&None), "{name}");
+                    }
+                }
+                for name in [
+                    "CRATE_CC_NO_DEFAULTS",
+                    "CC_KNOWN_WRAPPER_CUSTOM",
+                    "CC_SHELL_ESCAPED_FLAGS",
+                    "CC_FORCE_DISABLE",
+                    "CC_ENABLE_DEBUG_OUTPUT",
+                    "CROSS_COMPILE",
+                    "RUSTC_LINKER",
+                    "RING_PREGENERATE_ASM",
+                    "PERL_EXECUTABLE",
+                    "LIBSQLITE3_SYS_USE_PKG_CONFIG",
+                    "SQLITE_MAX_VARIABLE_NUMBER",
+                    "SQLITE_MAX_EXPR_DEPTH",
+                    "SQLITE_MAX_COLUMN",
+                    "LIBSQLITE3_FLAGS",
+                    "LIBSQLITE3_SYS_BUNDLING",
+                    "CPATH",
+                    "C_INCLUDE_PATH",
+                    "CPLUS_INCLUDE_PATH",
+                    "OBJC_INCLUDE_PATH",
+                    "LIBRARY_PATH",
+                    "COMPILER_PATH",
+                    "GCC_EXEC_PREFIX",
+                ] {
+                    assert_eq!(environment.get(name), Some(&None), "{name}");
+                }
+            };
+        let linux = binding();
+        let linux_command = cargo_command(repo, &linux, target_dir).unwrap();
+        let linux_args = linux_command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &linux_args[..7],
+            [
+                "+1.98.0",
+                "--config",
+                "build.rustc=\"rustc\"",
+                "--config",
+                "build.rustc-wrapper=\"\"",
+                "--config",
+                "build.rustc-workspace-wrapper=\"\"",
+            ]
+        );
+        assert!(
+            !linux_args
+                .iter()
+                .any(|arg| arg.contains(".linker=\"link.exe\""))
+        );
+        let linux_env = linux_command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_str().unwrap(),
+                    value.map(|value| value.to_str().unwrap()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for key in [
+            "RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "RUSTC",
+            "CARGO_BUILD_RUSTC",
+            "RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+        ] {
+            assert_eq!(linux_env.get(key), Some(&None));
+        }
+        assert_eq!(linux_env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&Some("")));
+        assert_native_tool_environment_removed(&linux_env, &linux.target);
+
+        let mut macos = binding();
+        macos.target = "aarch64-apple-darwin".into();
+        macos.repro_recipe = "macos-rust-lld-no-uuid-macos11-v1".into();
+        let macos_command = cargo_command(repo, &macos, target_dir).unwrap();
+        let macos_env = macos_command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_str().unwrap(),
+                    value.map(|value| value.to_str().unwrap()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_native_tool_environment_removed(&macos_env, &macos.target);
+        assert_eq!(macos_env.get("SDKROOT"), Some(&None));
+        assert_eq!(
+            macos_env.get("MACOSX_DEPLOYMENT_TARGET"),
+            Some(&Some("11.0"))
+        );
+
+        let mut windows = binding();
+        windows.target = "x86_64-pc-windows-msvc".into();
+        windows.repro_recipe = "windows-msvc-brepro-v1".into();
+        let windows_command = cargo_command(repo, &windows, target_dir).unwrap();
+        let windows_args = windows_command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            windows_args[7..10],
+            [
+                "--config",
+                "target.x86_64-pc-windows-msvc.linker=\"link.exe\"",
+                "build",
+            ]
+        );
+        let windows_env = windows_command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_str().unwrap(),
+                    value.map(|value| value.to_str().unwrap()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            windows_env.get("CARGO_ENCODED_RUSTFLAGS"),
+            Some(&Some("-C\u{1f}link-arg=/Brepro"))
+        );
+        assert_eq!(
+            windows_env.get("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"),
+            Some(&None)
+        );
+        for key in ["CL", "_CL_", "LINK", "_LINK_"] {
+            assert_eq!(windows_env.get(key), Some(&None));
+        }
+        assert!(!windows_env.contains_key("LIB"));
+        assert!(!windows_env.contains_key("INCLUDE"));
+        assert_native_tool_environment_removed(&windows_env, &windows.target);
     }
     #[test]
     fn verifier_accepts_bound_archive_and_rejects_tamper_or_substitution() {
@@ -2649,6 +2936,30 @@ mod tests {
         fs::write(&tampered, bytes).unwrap();
         assert!(verify_candidate(&verify_options(tampered, None)).is_err());
     }
+
+    #[test]
+    fn verifier_rejects_v1_provenance_even_when_other_digests_are_rebound() {
+        let root = root();
+        let provenance_path = format!("{root}/release/provenance.json");
+        let checksums_path = format!("{root}/release/checksums.json");
+        let mut changed = payload();
+        let mut provenance: Value = serde_json::from_slice(&changed[&provenance_path].0).unwrap();
+        provenance["schema"] = Value::String("kio-rc-provenance-v1".into());
+        changed.insert(
+            provenance_path,
+            (canonical_json(&provenance).unwrap(), 0o644),
+        );
+        changed.remove(&checksums_path);
+        changed.insert(
+            checksums_path,
+            (internal_checksums(&changed).unwrap(), 0o644),
+        );
+        let (_t, archive, checksum) = archive_pair_from_payload(changed);
+        assert!(matches!(
+            verify_candidate(&verify_options(archive, Some(checksum))),
+            Err(ReleaseError::Verify(detail)) if detail == "wrong provenance schema"
+        ));
+    }
     #[test]
     fn retained_archive_digest_rejects_coordinated_evidence_substitution() {
         let (_trusted_dir, trusted_archive, _trusted_checksum) = archive_pair();
@@ -2690,12 +3001,61 @@ mod tests {
         let mut development = MARKER_START.to_vec();
         development.extend_from_slice(
             format!(
-                "schema=1\nbound=0\nversion={RC_VERSION}\ntarget=x86_64-unknown-linux-gnu\nprofile=debug"
+                "schema=2\nbound=0\nversion={RC_VERSION}\ntarget=x86_64-unknown-linux-gnu\nprofile=debug"
             )
             .as_bytes(),
         );
         development.extend_from_slice(MARKER_END);
         assert!(read_binding_bytes(&development).is_err());
+        let v1 = b"KIO_RC_BINDING_V1\nschema=1\nbound=1\nKIO_RC_BINDING_END_V1";
+        assert!(read_binding_bytes(v1).is_err());
+    }
+
+    #[test]
+    fn binding_recipe_is_closed_and_target_specific() {
+        assert_eq!(
+            repro_recipe_for_target("x86_64-unknown-linux-gnu").unwrap(),
+            "linux-rustc-default-v1"
+        );
+        assert_eq!(
+            repro_recipe_for_target("aarch64-apple-darwin").unwrap(),
+            "macos-rust-lld-no-uuid-macos11-v1"
+        );
+        assert_eq!(
+            repro_recipe_for_target("x86_64-apple-darwin").unwrap(),
+            "macos-rust-lld-no-uuid-macos11-v1"
+        );
+        assert_eq!(
+            repro_recipe_for_target("aarch64-unknown-linux-gnu").unwrap(),
+            "linux-rustc-default-v1"
+        );
+        assert_eq!(
+            repro_recipe_for_target("x86_64-pc-windows-msvc").unwrap(),
+            "windows-msvc-brepro-v1"
+        );
+        assert!(repro_recipe_for_target("unsupported").is_err());
+        let mut mismatched = binding();
+        mismatched.repro_recipe = "windows-msvc-brepro-v1".into();
+        assert!(validate_binding(&mismatched).is_err());
+    }
+
+    #[test]
+    fn windows_msvc_recipe_requires_pe_repro_debug_entry() {
+        let mut windows = binding();
+        windows.target = "x86_64-pc-windows-msvc".into();
+        windows.repro_recipe = "windows-msvc-brepro-v1".into();
+        let valid = synthetic_pe32_plus(1, [1; 16], b"relative.pdb");
+        assert!(require_binary_reproducibility(&windows, &valid).is_ok());
+        let mut missing_repro = valid.clone();
+        put_u32(&mut missing_repro, 0x200 + 28 + 12, 0);
+        assert!(require_binary_reproducibility(&windows, &missing_repro).is_err());
+        let mut wrong_machine = valid.clone();
+        put_u16(&mut wrong_machine, 0x80 + 4, 0x014c);
+        assert!(matches!(
+            require_binary_reproducibility(&windows, &wrong_machine),
+            Err(ReleaseError::Verify(detail)) if detail == "Windows MSVC binary is not an AMD64 PE32+ artifact"
+        ));
+        assert!(require_binary_reproducibility(&windows, b"not a PE").is_err());
     }
     #[test]
     fn rejects_noncanonical_json() {

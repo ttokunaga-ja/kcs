@@ -1089,6 +1089,29 @@ target triple、`all-features`、`release` profile を binary へ束縛し、pac
 toolchain file の binding を clean checkout から独立に再導出する。Git authority は tracked tree / index
 と exact commit であり、source tree / index に変更がある build・package・source verification は拒否する。
 
+binary binding と provenance は schema v2 で、target によって次の closed な `repro_recipe` を必須にする。
+古い binding/provenance schema や target と一致しない recipe は受理しない。
+
+```text
+x86_64-unknown-linux-gnu / aarch64-unknown-linux-gnu = linux-rustc-default-v1
+<arch>-apple-darwin = macos-rust-lld-no-uuid-macos11-v1
+x86_64-pc-windows-msvc = windows-msvc-brepro-v1
+x86_64-pc-windows-gnu = windows-gnu-rustc-default-v1
+```
+
+MSVC candidate build は `CARGO_ENCODED_RUSTFLAGS` を ASCII Unit Separator (`0x1f`) で区切り、
+正確に `-C`、`link-arg=/Brepro` を渡す。これは rustc の stable な encoded rustflags 形式であり、
+ambient Rust flags、compiler wrapper、target linker override、および locked graph の native C/asm
+compiler・archiver・flags・dependency build override を継承せず、Cargo command-line config で `rustc`、
+wrapper 無効、Windows の `link.exe` を固定する。bare tool 名は workflow が提供する trusted
+Rust/C/MSVC toolchain の `PATH` から解決し、Windows SDK/MSVC探索用の `LIB` / `INCLUDE` と
+registry/cache 用の `CARGO_HOME` は維持する。一方、MSVCの `CL` / `_CL_` / `LINK` / `_LINK_` による
+追加option注入は拒否する。Windows MSVC
+artifact の packager と verifier は PE32+ を厳格に
+parse し、`IMAGE_DEBUG_TYPE_REPRO` (kind 16) を必須にする。欠落・破損・非 PE32+ は warning や skip
+ではなく fail-closed である。Linux は既定 rustc recipe、macOS は既存の pinned `rust-lld`、
+`linker-flavor=ld64.lld`、`-no_uuid` と `MACOSX_DEPLOYMENT_TARGET=11.0` を維持する。
+
 ## 12.1 macOS / Linux の install と uninstall
 
 verification 済み archive を新しい directory へ展開し、archive 内 binary だけを導入する。

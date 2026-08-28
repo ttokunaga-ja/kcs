@@ -11,6 +11,7 @@ const RC_ENVIRONMENT: &[&str] = &[
     "KIO_RC_TARGET",
     "KIO_RC_FEATURES",
     "KIO_RC_PROFILE",
+    "KIO_RC_REPRO_RECIPE",
 ];
 
 fn main() {
@@ -37,7 +38,7 @@ fn main() {
 
 fn write_binding_source(binding: &str) {
     let out_dir = PathBuf::from(required_cargo_value("OUT_DIR"));
-    let retained = format!("KIO_RC_BINDING_V1\n{binding}\nKIO_RC_BINDING_END_V1");
+    let retained = format!("KIO_RC_BINDING_V2\n{binding}\nKIO_RC_BINDING_END_V2");
     let source = format!("static RELEASE_BINDING: &str = {retained:?};\n");
     fs::write(out_dir.join("release_binding_generated.rs"), source)
         .unwrap_or_else(|error| fail(format!("could not write release binding source: {error}")));
@@ -48,7 +49,7 @@ fn development_binding(version: &str, target: &str, profile: &str) -> String {
     require_safe("TARGET", target);
     require_safe("PROFILE", profile);
     fixed_binding(&[
-        ("schema", "1"),
+        ("schema", "2"),
         ("bound", "0"),
         ("version", version),
         ("target", target),
@@ -77,6 +78,7 @@ fn candidate_binding(package_version: &str, actual_target: &str, actual_profile:
     let target = required_rc_value("KIO_RC_TARGET");
     let features = required_rc_value("KIO_RC_FEATURES");
     let profile = required_rc_value("KIO_RC_PROFILE");
+    let repro_recipe = required_rc_value("KIO_RC_REPRO_RECIPE");
 
     for (name, value) in [
         ("KIO_RC_COMMIT_SHA", commit.as_str()),
@@ -118,9 +120,14 @@ fn candidate_binding(package_version: &str, actual_target: &str, actual_profile:
             "KIO_RC_FEATURES must be exactly `all-features`, got {features:?}"
         ));
     }
+    if repro_recipe != repro_recipe_for_target(&target) {
+        fail(format!(
+            "KIO_RC_REPRO_RECIPE does not match target {target}, got {repro_recipe:?}"
+        ));
+    }
 
     fixed_binding(&[
-        ("schema", "1"),
+        ("schema", "2"),
         ("bound", "1"),
         ("version", &version),
         ("commit", &commit),
@@ -131,7 +138,22 @@ fn candidate_binding(package_version: &str, actual_target: &str, actual_profile:
         ("target", &target),
         ("features", &features),
         ("profile", &profile),
+        ("repro_recipe", &repro_recipe),
     ])
+}
+
+fn repro_recipe_for_target(target: &str) -> &'static str {
+    if target.ends_with("-unknown-linux-gnu") {
+        "linux-rustc-default-v1"
+    } else if target.ends_with("-apple-darwin") {
+        "macos-rust-lld-no-uuid-macos11-v1"
+    } else if target == "x86_64-pc-windows-msvc" {
+        "windows-msvc-brepro-v1"
+    } else if target.ends_with("-pc-windows-gnu") {
+        "windows-gnu-rustc-default-v1"
+    } else {
+        fail(format!("unsupported RC target {target}"))
+    }
 }
 
 fn fixed_binding(entries: &[(&str, &str)]) -> String {
