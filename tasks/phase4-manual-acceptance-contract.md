@@ -191,8 +191,37 @@ Within `m1-m2`, run `kio init --json`, install the exact config below, write and
 manifest a first exact `document.md`, and run
 `kio index --offline --approve --json`. Replace only `document.md` with a second
 manifested byte sequence that has a different raw hash, then run the same index
-command again so the old and current commits have different trees. Record actual
-UTC times for both invocations. No time or hour boundary is required: all-zero
+command again so the old and current commits have different trees. Public
+`--approve` is itself a writer even with `--offline`: it publishes the isolated
+approval state, adds `adapter.policy.allow_network = true` to the scope config,
+and refreshes the isolated `$XDG_CACHE_HOME/kio/aggregator.sqlite`. Treat `init`,
+the first index, and the second index as three different closed mutation classes;
+a directory-prefix allowance is forbidden. The first index permits only the
+fixed `.kio` leaves `.lock`, `HEAD`, `approvals.jsonl`, `config.toml`,
+`index/{chunks.jsonl,sqlite.db}`, `manifest.json`, `purge/epoch`,
+`quarantine.jsonl`, `refs/heads/main`, `scope.json`, `tasks.jsonl`, and
+`tool-lock.json`; hash-sharded descendants of
+`objects/{chunks,commits,manifests,normalized,normalized_unit_objects,normalized_units,prepared,raw,toollocks,trees}`;
+and exactly the observed private-XDG leaves
+`xdg-cache/kio/aggregator.sqlite` and
+`xdg-data/kio/{consents.jsonl,consents.lock,cost-ledger.sqlite,cost-ledger.sqlite.write-seq,logs/events.jsonl,logs/scrub.lock,scope-registry.sqlite}`.
+The second index permits updates only to the applicable existing metadata,
+index/ledger/purge/tool-lock/device-observability/registry/cache leaves in that
+set and new hash-sharded CAS descendants caused by the changed document.
+`approvals.jsonl`, `consents.jsonl`, `consents.lock`, and the already-approved
+config bytes must have identical before/after digests on the second index.
+Unlisted regular files, retained SQLite temporary siblings, and `-wal`, `-shm`,
+or `-journal` sidecars fail closed. Record the complete observed path set and
+change class for each invocation. Before/after manifests can reject a retained
+unexpected file but cannot prove that a transient sibling was never created and
+deleted within the invocation; state this observation limit rather than replacing
+it with a prefix allowance. `--offline`, the empty secret environment, and
+`network_allowed = false` remain mandatory. Do not restore the config between the
+two indexes, because only the document may be changed in that interval.
+Immediately after the second index, restore and re-manifest the exact config block
+below, then make no further config or document change before either dry-run.
+Record actual UTC times for both index invocations. No time or hour boundary is
+required: all-zero
 horizons make the retained-auto set empty; the older non-tip tree is therefore a
 real candidate while tips remain excluded. Run the identical
 `kio gc --dry-run --json` command twice.
@@ -233,7 +262,8 @@ unchanged. Preserve this fixture unchanged until M2.
 
 Create a separate `m8` scope with the same public-only `init`, exact
 `manual_only`/all-zero config, two different document versions, and two offline
-index invocations used by M1. Record its old commit/tree as a real retention-GC
+index invocations plus the same post-second-index exact-config restoration used
+by M1. Record its old commit/tree as a real retention-GC
 candidate, but do not copy or reuse M1 evidence or state. Run
 `kio gc --dry-run --prune-unreachable --json` twice and record both exact JSON
 outputs; they must be byte-identical. Each pass must have exactly the top-level
@@ -340,8 +370,9 @@ absent and the active marker must be absent after completion.
 ### M4 and M5: one-shot auto/idle boundary in `m4-m5`
 
 In a separate `m4-m5` scope, run `kio init --json`, install the exact M1
-`manual_only` config, index an exact manifested old document, change only that
-document to an exact manifested current version, and index again so their trees
+`manual_only` config, index an exact manifested old document with
+`kio index --offline --approve --json`, change only that document to an exact
+manifested current version, and run the same index command again so their trees
 differ. Then install exactly these scope-local config bytes with a final LF, and
 record the bytes and digests of both configs:
 

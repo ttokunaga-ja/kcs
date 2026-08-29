@@ -18,6 +18,7 @@ readonly EXPECTED_CANDIDATE_COMMIT='b95efd86d1ee738378edb7171509ae7ca81e8661'
 readonly EXPECTED_CANDIDATE_TREE='a4183c874799ab55d2471b726f9b5dc4dd3eb8d8'
 readonly EXPECTED_LOCK_SHA256='74059079ef8e69ce3e35c31214c0587616bd4eb6c3199553d5339389fc9ece21'
 readonly EXPECTED_MANUAL_CONFIG_SHA256='455e7192e094bc14fdf58beb8b358d49bc2095ec57f03a5fb6ac46d8afcc7650'
+readonly EXPECTED_APPROVED_MANUAL_CONFIG_SHA256='290ec55a425915256171b554b30e86018cf1ebdd277db0af42cf0aca78f6c3e5'
 readonly MANUAL_CONFIG=$'[gc]\nmode = "manual_only"\n\n[gc.auto_retention]\nkeep_last_hours = 0\nkeep_hourly_days = 0\nkeep_daily_weeks = 0\nkeep_weekly_months = 0\n'
 
 usage() {
@@ -264,9 +265,9 @@ manifest "$FIXTURE" "$INITIAL_MANIFEST_TMP" || {
 print -r -- "$(sha256 "$FIXTURE/manifest.before.json")  manifest.before.json" > "$FIXTURE/digest.before.sha256"
 
 record_command() {
-  # record_command STAGE LABEL SCOPE PRIVATE none|kio_writer argv...
+  # record_command STAGE LABEL SCOPE PRIVATE none|kio_init|kio_index_first|kio_index_second argv...
   local stage="$1" label="$2" scope="$3" private="$4" mutation_policy="$5"; shift 5
-  local dir before after observation diff stdout stderr start end exit_code scope_prefix device_prefix mutation_valid=true
+  local dir before after observation diff stdout stderr start end exit_code scope_root scope_prefix device_prefix cache_prefix mutation_valid=true
   dir="$STAGES/$stage/$label"
   before="$dir/fixture-manifest.before.json"
   after="$dir/fixture-manifest.after.json"
@@ -316,29 +317,155 @@ record_command() {
     --arg scope "$(sha256 "$after.scope.json")" --arg private "$(sha256 "$after.private.json")" \
     '{fixture_manifest_sha256:$fixture,scope_manifest_sha256:$scope,private_manifest_sha256:$private}' > "$after"
   manifest_diff "$before.fixture.json" "$after.fixture.json" "$diff" || return 70
-  scope_prefix="${scope#"$FIXTURE"/}/.kio"
+  scope_root="${scope#"$FIXTURE"/}"
+  scope_prefix="$scope_root/.kio"
   device_prefix="${private#"$FIXTURE"/}/xdg-data/kio"
+  cache_prefix="${private#"$FIXTURE"/}/xdg-cache/kio"
   case "$mutation_policy" in
     none)
       jq -e '.entries | length == 0' "$diff" >/dev/null || mutation_valid=false
       ;;
-    kio_writer)
-      jq -e --arg scope_prefix "$scope_prefix" --arg device_prefix "$device_prefix" '
+    kio_init)
+      jq -e --arg s "$scope_prefix" --arg d "$device_prefix" '
+        ([.entries[].path] | sort) == ([
+          $s,
+          ($s + "/HEAD"),
+          ($s + "/config.toml"),
+          ($s + "/logs"),
+          ($s + "/manifest.json"),
+          ($s + "/objects"),
+          ($s + "/objects/commits"),
+          ($s + "/objects/raw"),
+          ($s + "/objects/trees"),
+          ($s + "/purge"),
+          ($s + "/purge/epoch"),
+          ($s + "/refs"),
+          ($s + "/refs/heads"),
+          ($s + "/refs/heads/main"),
+          ($s + "/refs/tags-v1"),
+          ($s + "/scope.json"),
+          ($s + "/tool-lock.json"),
+          $d,
+          ($d + "/scope-registry.sqlite")
+        ] | sort) and
+        (.entries | all(.before == null and .after != null and
+          (if .after.kind == "regular" then .after.nlink == 1 else .after.kind == "directory" end)))' "$diff" >/dev/null || mutation_valid=false
+      jq -e '
+        ([.entries[].path] | sort) == ([
+          "home","tmp","xdg-cache","xdg-config","xdg-data","xdg-data/kio",
+          "xdg-data/kio/scope-registry.sqlite"
+        ] | sort) and
+        ([.entries[] | select(.kind == "regular") | .path] == ["xdg-data/kio/scope-registry.sqlite"])' "$after.private.json" >/dev/null || mutation_valid=false
+      ;;
+    kio_index_first|kio_index_second)
+      jq -e --arg s "$scope_prefix" --arg d "$device_prefix" --arg c "$cache_prefix" --arg policy "$mutation_policy" '
+        def static_first:
+          . == ($s + "/.lock") or . == ($s + "/HEAD") or
+          . == ($s + "/approvals.jsonl") or . == ($s + "/config.toml") or
+          . == ($s + "/index") or . == ($s + "/index/chunks.jsonl") or
+          . == ($s + "/index/sqlite.db") or . == ($s + "/manifest.json") or
+          . == ($s + "/purge/epoch") or . == ($s + "/quarantine.jsonl") or
+          . == ($s + "/refs/heads/main") or . == ($s + "/scope.json") or
+          . == ($s + "/tasks.jsonl") or . == ($s + "/tool-lock.json") or
+          . == $c or . == ($c + "/aggregator.sqlite") or
+          . == ($d + "/consents.jsonl") or . == ($d + "/consents.lock") or
+          . == ($d + "/cost-ledger.sqlite") or . == ($d + "/cost-ledger.sqlite.write-seq") or
+          . == ($d + "/logs") or . == ($d + "/logs/events.jsonl") or
+          . == ($d + "/logs/scrub.lock") or . == ($d + "/scope-registry.sqlite");
+        def static_second:
+          . == ($s + "/.lock") or . == ($s + "/HEAD") or
+          . == ($s + "/index/chunks.jsonl") or . == ($s + "/index/sqlite.db") or
+          . == ($s + "/manifest.json") or . == ($s + "/purge/epoch") or
+          . == ($s + "/quarantine.jsonl") or . == ($s + "/refs/heads/main") or
+          . == ($s + "/scope.json") or . == ($s + "/tasks.jsonl") or
+          . == ($s + "/tool-lock.json") or . == ($c + "/aggregator.sqlite") or
+          . == ($d + "/cost-ledger.sqlite") or . == ($d + "/cost-ledger.sqlite.write-seq") or
+          . == ($d + "/logs/events.jsonl") or . == ($d + "/logs/scrub.lock") or
+          . == ($d + "/scope-registry.sqlite");
+        def cas_path:
+          . as $path |
+          ($path | startswith($s + "/objects/")) and
+          (($path | ltrimstr($s + "/")) as $logical |
+            ($logical | test("^objects/(chunks|commits|manifests|normalized|normalized_unit_objects|normalized_units|prepared|raw|toollocks|trees)$")) or
+            ($logical | test("^objects/(chunks|commits|manifests|normalized|normalized_unit_objects|normalized_units|prepared|raw|toollocks|trees)/[0-9a-f]{2}$")) or
+            ($logical | test("^objects/(chunks|commits|manifests|normalized|normalized_unit_objects|normalized_units|prepared|raw|toollocks|trees)/[0-9a-f]{2}/[0-9a-f]{2}$")) or
+            ((try (($logical | capture("^objects/(chunks|commits|manifests|normalized_unit_objects|prepared|raw|toollocks|trees)/(?<a>[0-9a-f]{2})/(?<b>[0-9a-f]{2})/(?<hash>[0-9a-f]{64})$")) as $m |
+              ($m.hash | startswith($m.a + $m.b))) catch false) // false) or
+            ((try (($logical | capture("^objects/normalized/(?<a>[0-9a-f]{2})/(?<b>[0-9a-f]{2})/(?<hash>[0-9a-f]{64})\\.[0-9a-f]{64}\\.g[0-9]+\\.md$")) as $m |
+              ($m.hash | startswith($m.a + $m.b))) catch false) // false) or
+            ((try (($logical | capture("^objects/normalized_units/(?<a>[0-9a-f]{2})/(?<b>[0-9a-f]{2})/(?<hash>[0-9a-f]{64})\\.[0-9a-f]{64}\\.g[0-9]+$")) as $m |
+              ($m.hash | startswith($m.a + $m.b))) catch false) // false) or
+            ((try (($logical | capture("^objects/normalized_units/(?<a>[0-9a-f]{2})/(?<b>[0-9a-f]{2})/(?<hash>[0-9a-f]{64})\\.[0-9a-f]{64}\\.g[0-9]+/(manifest\\.json|[0-9a-f]{16}\\.json)$")) as $m |
+              ($m.hash | startswith($m.a + $m.b))) catch false) // false));
+        def valid_change:
+          .after != null and
+          (if (.path | cas_path) then
+             .before == null and
+             (if .after.kind == "regular" then .after.nlink == 1 else .after.kind == "directory" end)
+           elif .after.kind == "regular" then
+             .after.nlink == 1 and
+             (if $policy == "kio_index_second" then
+                .before.kind == "regular" and .before.nlink == 1
+              else
+                .before == null or (.before.kind == "regular" and .before.nlink == 1)
+              end)
+           else
+             .before == null and .after.kind == "directory"
+           end);
         (.entries | length > 0) and
         (.entries | all(
-          (.path == $scope_prefix or (.path | startswith($scope_prefix + "/"))) or
-          (.path == $device_prefix or (.path | startswith($device_prefix + "/")))
-        ))' "$diff" >/dev/null || mutation_valid=false
+          ((if $policy == "kio_index_first" then (.path | static_first) else (.path | static_second) end) or
+           (.path | cas_path)) and valid_change
+        )) and
+        ([.entries[] | select(.path | cas_path) | select(.after.kind == "regular")] | length > 0) and
+        (if $policy == "kio_index_first" then
+           ([
+             ($s + "/.lock"),($s + "/HEAD"),($s + "/approvals.jsonl"),($s + "/config.toml"),
+             ($s + "/index"),($s + "/index/chunks.jsonl"),($s + "/index/sqlite.db"),
+             ($s + "/manifest.json"),($s + "/quarantine.jsonl"),($s + "/refs/heads/main"),
+             ($s + "/scope.json"),($s + "/tasks.jsonl"),($s + "/tool-lock.json"),
+             $c,($c + "/aggregator.sqlite"),($d + "/consents.jsonl"),($d + "/consents.lock"),
+             ($d + "/cost-ledger.sqlite"),($d + "/cost-ledger.sqlite.write-seq"),($d + "/logs"),
+             ($d + "/logs/events.jsonl"),($d + "/logs/scrub.lock"),($d + "/scope-registry.sqlite")
+           ] - [.entries[].path] | length) == 0
+         else
+           ([
+             ($s + "/HEAD"),($s + "/index/chunks.jsonl"),($s + "/index/sqlite.db"),
+             ($s + "/manifest.json"),($s + "/refs/heads/main"),($s + "/scope.json"),
+             ($c + "/aggregator.sqlite"),($d + "/logs/events.jsonl"),($d + "/scope-registry.sqlite")
+           ] - [.entries[].path] | length) == 0
+         end)' "$diff" >/dev/null || mutation_valid=false
+      jq -e '
+        ([.entries[].path] | sort) == ([
+          "home","tmp","xdg-cache","xdg-cache/kio","xdg-cache/kio/aggregator.sqlite",
+          "xdg-config","xdg-data","xdg-data/kio","xdg-data/kio/consents.jsonl",
+          "xdg-data/kio/consents.lock","xdg-data/kio/cost-ledger.sqlite",
+          "xdg-data/kio/cost-ledger.sqlite.write-seq","xdg-data/kio/logs",
+          "xdg-data/kio/logs/events.jsonl","xdg-data/kio/logs/scrub.lock",
+          "xdg-data/kio/scope-registry.sqlite"
+        ] | sort) and
+        (.entries | all(if .kind == "regular" then .nlink == 1 else .kind == "directory" end))' "$after.private.json" >/dev/null || mutation_valid=false
+      if [[ "$mutation_policy" == kio_index_second ]]; then
+        jq -e --slurpfile after "$after.scope.json" '
+          def entry($manifest; $path): [$manifest.entries[] | select(.path == $path)][0];
+          entry(.; ".kio/config.toml") == entry($after[0]; ".kio/config.toml") and
+          entry(.; ".kio/approvals.jsonl") == entry($after[0]; ".kio/approvals.jsonl")' "$before.scope.json" >/dev/null || mutation_valid=false
+        jq -e --slurpfile after "$after.private.json" '
+          def entry($manifest; $path): [$manifest.entries[] | select(.path == $path)][0];
+          entry(.; "xdg-data/kio/consents.jsonl") == entry($after[0]; "xdg-data/kio/consents.jsonl") and
+          entry(.; "xdg-data/kio/consents.lock") == entry($after[0]; "xdg-data/kio/consents.lock")' "$before.private.json" >/dev/null || mutation_valid=false
+      fi
       ;;
     *) mutation_valid=false ;;
   esac
+  jq -r '.entries[].path' "$diff" | jq -Rsc 'split("\n") | map(select(length > 0))' > "$dir/observed-path-set.json"
   jq -n --arg label "$label" --arg mutation_policy "$mutation_policy" \
-    --arg scope_prefix "$scope_prefix" --arg device_prefix "$device_prefix" \
-    --arg contract_reason "$(if [[ "$mutation_policy" == kio_writer ]]; then print -r -- 'public Kio writer may change only its scope .kio and isolated device-data kio roots'; else print -r -- 'read-only command permits no fixture or private-root change'; fi)" \
+    --arg scope_prefix "$scope_prefix" --arg device_prefix "$device_prefix" --arg cache_prefix "$cache_prefix" \
+    --arg contract_reason "$(if [[ "$mutation_policy" == none ]]; then print -r -- 'read-only command permits no fixture or private-root change'; else print -r -- 'invocation-specific closed logical leaves and hash-shaped CAS descendants only; retained SQLite sidecars and unlisted regular files fail closed'; fi)" \
     --arg before "$(sha256 "$before")" --arg after "$(sha256 "$after")" \
-    --slurpfile diff "$diff" \
+    --slurpfile diff "$diff" --slurpfile observed_path_set "$dir/observed-path-set.json" \
     --argjson mutation_policy_valid "$mutation_valid" \
-    '{schema:"kio.phase4.observation-log-manifest.v1",source:$label,mutation_policy:$mutation_policy,mutation_policy_valid:$mutation_policy_valid,contract_reason:$contract_reason,allowed_path_prefixes:(if $mutation_policy == "none" then [] else [$scope_prefix,$device_prefix] end),before_digest:$before,after_digest:$after,entries:[$diff[0].entries[] | . + {contract_reason:$contract_reason}]}' > "$observation"
+    '{schema:"kio.phase4.observation-log-manifest.v1",source:$label,mutation_policy:$mutation_policy,mutation_policy_valid:$mutation_policy_valid,contract_reason:$contract_reason,observed_path_set:$observed_path_set[0],transient_observation_limit:"before/after manifests reject retained unlisted files but cannot prove absence of create-delete transient siblings",before_digest:$before,after_digest:$after,entries:[$diff[0].entries[] | . + {contract_reason:$contract_reason}]}' > "$observation"
   print -r -- "$(sha256 "$stdout")  stdout.bin" > "$dir/stdout.sha256"
   print -r -- "$(sha256 "$stderr")  stderr.bin" > "$dir/stderr.sha256"
   jq -n --arg start "$start" --arg end "$end" --argjson exit_code "$exit_code" --argjson mutation_policy_valid "$mutation_valid" \
@@ -415,6 +542,17 @@ stage_primary_invocation() {
 json_commit() { jq -er '.. | objects | .commit_hash? // empty | strings | select(test("^sha256:[0-9a-f]{64}$"))' "$1" | head -1; }
 json_tree() { jq -er '.. | objects | .tree_hash? // empty | strings | select(test("^sha256:[0-9a-f]{64}$"))' "$1" | head -1; }
 
+validate_offline_approve_index() {
+  jq -e '
+    .status == "indexed" and .approval_method == "approve" and
+    .network_allowed == false and .network_opt_in == true and
+    .failed_files == 0 and .pending_files == 0 and .pending_online_tasks == 0 and
+    .paused_tasks == 0 and .embedding_tasks_executed == 0 and .embedding_tasks_failed == 0 and
+    (.commit_hash | test("^sha256:[0-9a-f]{64}$")) and
+    (.tree_hash | test("^sha256:[0-9a-f]{64}$")) and
+    .gc.status == "disabled" and .gc.mode == "manual_only" and .gc.reason == "manual_only" and .gc.trigger == "index"' "$1" >/dev/null
+}
+
 stage_start() {
   local stage="$1" predecessor="$2" mutation="$3"
   ACTIVE_STAGE="$stage"
@@ -463,21 +601,28 @@ run_m1() {
   local old=$'## Retention fixture\nold byte sequence\n' current=$'## Retention fixture\ncurrent byte sequence\n'
   local old_commit old_tree current_commit current_tree plan1="$STAGES/$stage/gc-1/stdout.bin" plan2="$STAGES/$stage/gc-2/stdout.bin"
   stage_start "$stage" '' 'fixture writes through index; dry-run thereafter'
-  record_command "$stage" init "$scope" "$private" kio_writer "$PRODUCT_BINARY" init --json || fatal_stage "$stage" 'init_failed_or_unlisted_mutation'
+  record_command "$stage" init "$scope" "$private" kio_init "$PRODUCT_BINARY" init --json || fatal_stage "$stage" 'init_failed_or_unlisted_mutation'
   record_harness_text "$stage" config "$scope/.kio/config.toml" replace 'install exact manual-only all-zero retention config' "$MANUAL_CONFIG" || fatal_stage "$stage" 'config_replace_failed_or_unlisted_mutation'
   [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'config_exact_bytes_mismatch'
   print -r -- "$(sha256 "$scope/.kio/config.toml")  .kio/config.toml" > "$STAGES/$stage/config.sha256"
   record_harness_text "$stage" document-old "$doc" create 'old fixture document bytes' "$old" || fatal_stage "$stage" 'old_document_collision_or_unlisted_mutation'
   print -r -- "$(sha256 "$doc")  document.md" > "$STAGES/$stage/document.old.sha256"
-  record_command "$stage" index-old "$scope" "$private" kio_writer "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'old_index_failed_or_unlisted_mutation'
+  record_command "$stage" index-old "$scope" "$private" kio_index_first "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'old_index_failed_or_unlisted_mutation'
+  validate_offline_approve_index "$STAGES/$stage/index-old/stdout.bin" || fatal_stage "$stage" 'old_index_offline_approve_predicate_failed'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'old_index_approval_config_transition_mismatch'
   old_commit="$(json_commit "$STAGES/$stage/index-old/stdout.bin")" || fatal_stage "$stage" 'old_index_commit_missing'
   old_tree="$(json_tree "$STAGES/$stage/index-old/stdout.bin")" || fatal_stage "$stage" 'old_index_tree_missing'
   record_harness_text "$stage" document-current "$doc" replace 'current fixture document bytes with a distinct tree' "$current" || fatal_stage "$stage" 'current_document_replace_failed_or_unlisted_mutation'
   print -r -- "$(sha256 "$doc")  document.md" > "$STAGES/$stage/document.current.sha256"
-  record_command "$stage" index-current "$scope" "$private" kio_writer "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'current_index_failed_or_unlisted_mutation'
+  record_command "$stage" index-current "$scope" "$private" kio_index_second "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'current_index_failed_or_unlisted_mutation'
+  validate_offline_approve_index "$STAGES/$stage/index-current/stdout.bin" || fatal_stage "$stage" 'current_index_offline_approve_predicate_failed'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'current_index_approval_config_transition_mismatch'
   current_commit="$(json_commit "$STAGES/$stage/index-current/stdout.bin")" || fatal_stage "$stage" 'current_index_commit_missing'
   current_tree="$(json_tree "$STAGES/$stage/index-current/stdout.bin")" || fatal_stage "$stage" 'current_index_tree_missing'
   [[ "$old_commit" != "$current_commit" && "$old_tree" != "$current_tree" ]] || fatal_stage "$stage" 'index_transition_not_distinct'
+  record_harness_text "$stage" config-final "$scope/.kio/config.toml" replace 'restore exact manual-only all-zero retention config after the second required approve index' "$MANUAL_CONFIG" || fatal_stage "$stage" 'final_config_restore_failed_or_unlisted_mutation'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'final_config_exact_bytes_mismatch'
+  print -r -- "$(sha256 "$scope/.kio/config.toml")  .kio/config.toml" > "$STAGES/$stage/config.final.sha256"
   record_command "$stage" gc-1 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'dry_run_1_failed_or_mutated'
   record_command "$stage" gc-2 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'dry_run_2_failed_or_mutated'
   jq -e --arg oc "$old_commit" --arg ot "$old_tree" --arg cc "$current_commit" --arg scope "$scope" '
@@ -506,16 +651,17 @@ run_m1() {
   print -r -- "$(sha256 "$STAGES/$stage/frozen-fixture-manifest.json")  frozen-fixture-manifest.json" > "$STAGES/$stage/frozen-fixture.sha256"
   jq -n --arg old_commit "$old_commit" --arg old_tree "$old_tree" --arg current_commit "$current_commit" --arg current_tree "$current_tree" \
     --arg binary_sha256 "$EXPECTED_BINARY_SHA256" \
+    --arg approved_config_sha256 "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" \
     --arg config_sha256 "$(sha256 "$scope/.kio/config.toml")" \
     --arg old_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.old.sha256")" \
     --arg current_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.current.sha256")" \
     --arg plan_1_sha256 "$(sha256 "$plan1")" --arg plan_2_sha256 "$(sha256 "$plan2")" \
     --arg frozen_fixture_sha256 "$(sha256 "$STAGES/$stage/frozen-fixture-manifest.json")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{real_candidate:true,tip_excluded:true,tree_only:true,internal_stability:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_consent_and_config_state_unchanged:true,final_manual_config_restored:true,real_candidate:true,tip_excluded:true,tree_only:true,internal_stability:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
   stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current gc-1 gc-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" gc-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
-  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/gc-2/fixture-manifest.after.json" 'public init and two index transitions; two final dry-runs read-only' init harness-config harness-document-old index-old harness-document-current index-current gc-1 gc-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
+  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/gc-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; two final dry-runs read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final gc-1 gc-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
   jq -n --arg stage "$stage" --arg before "$(sha256 "$STAGES/$stage/init/fixture-manifest.before.json")" --arg after "$(sha256 "$STAGES/$stage/gc-2/fixture-manifest.after.json")" \
     --slurpfile assertions "$STAGES/$stage/assertions.json" --slurpfile commands "$STAGES/$stage/command-manifest.json" \
     --slurpfile observations "$STAGES/$stage/observation-log-manifest.json" \
@@ -533,21 +679,28 @@ run_m8() {
   local retention_plan="$STAGES/$stage/retention-plan/stdout.bin"
   local inventory1="$STAGES/$stage/inventory-1/stdout.bin" inventory2="$STAGES/$stage/inventory-2/stdout.bin"
   stage_start "$stage" M1 'fixture writes through index; diagnostic dry-run thereafter'
-  record_command "$stage" init "$scope" "$private" kio_writer "$PRODUCT_BINARY" init --json || fatal_stage "$stage" 'init_failed_or_unlisted_mutation'
+  record_command "$stage" init "$scope" "$private" kio_init "$PRODUCT_BINARY" init --json || fatal_stage "$stage" 'init_failed_or_unlisted_mutation'
   record_harness_text "$stage" config "$scope/.kio/config.toml" replace 'install exact manual-only all-zero retention config' "$MANUAL_CONFIG" || fatal_stage "$stage" 'config_replace_failed_or_unlisted_mutation'
   [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'config_exact_bytes_mismatch'
   print -r -- "$(sha256 "$scope/.kio/config.toml")  .kio/config.toml" > "$STAGES/$stage/config.sha256"
   record_harness_text "$stage" document-old "$doc" create 'old fixture document bytes' "$old" || fatal_stage "$stage" 'old_document_collision_or_unlisted_mutation'
   print -r -- "$(sha256 "$doc")  document.md" > "$STAGES/$stage/document.old.sha256"
-  record_command "$stage" index-old "$scope" "$private" kio_writer "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'old_index_failed_or_unlisted_mutation'
+  record_command "$stage" index-old "$scope" "$private" kio_index_first "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'old_index_failed_or_unlisted_mutation'
+  validate_offline_approve_index "$STAGES/$stage/index-old/stdout.bin" || fatal_stage "$stage" 'old_index_offline_approve_predicate_failed'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'old_index_approval_config_transition_mismatch'
   old_commit="$(json_commit "$STAGES/$stage/index-old/stdout.bin")" || fatal_stage "$stage" 'old_index_commit_missing'
   old_tree="$(json_tree "$STAGES/$stage/index-old/stdout.bin")" || fatal_stage "$stage" 'old_index_tree_missing'
   record_harness_text "$stage" document-current "$doc" replace 'current fixture document bytes with a distinct tree' "$current" || fatal_stage "$stage" 'current_document_replace_failed_or_unlisted_mutation'
   print -r -- "$(sha256 "$doc")  document.md" > "$STAGES/$stage/document.current.sha256"
-  record_command "$stage" index-current "$scope" "$private" kio_writer "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'current_index_failed_or_unlisted_mutation'
+  record_command "$stage" index-current "$scope" "$private" kio_index_second "$PRODUCT_BINARY" index --offline --approve --json || fatal_stage "$stage" 'current_index_failed_or_unlisted_mutation'
+  validate_offline_approve_index "$STAGES/$stage/index-current/stdout.bin" || fatal_stage "$stage" 'current_index_offline_approve_predicate_failed'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'current_index_approval_config_transition_mismatch'
   current_commit="$(json_commit "$STAGES/$stage/index-current/stdout.bin")" || fatal_stage "$stage" 'current_index_commit_missing'
   current_tree="$(json_tree "$STAGES/$stage/index-current/stdout.bin")" || fatal_stage "$stage" 'current_index_tree_missing'
   [[ "$old_commit" != "$current_commit" && "$old_tree" != "$current_tree" ]] || fatal_stage "$stage" 'index_transition_not_distinct'
+  record_harness_text "$stage" config-final "$scope/.kio/config.toml" replace 'restore exact manual-only all-zero retention config after the second required approve index' "$MANUAL_CONFIG" || fatal_stage "$stage" 'final_config_restore_failed_or_unlisted_mutation'
+  [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'final_config_exact_bytes_mismatch'
+  print -r -- "$(sha256 "$scope/.kio/config.toml")  .kio/config.toml" > "$STAGES/$stage/config.final.sha256"
   record_command "$stage" retention-plan "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'retention_plan_failed_or_mutated'
   jq -e --arg oc "$old_commit" --arg ot "$old_tree" --arg cc "$current_commit" --arg scope "$scope" '
     (keys == ["as_of","baseline_receipts_digest","candidate_count","candidate_tree_count","candidates","estimated_bytes","exclusions","limits","object_kinds_planned","plan_digest","policy","scope_path","stability_check_stats","stable_truth_digest","stats","status","truth_digest"]) and
@@ -599,14 +752,15 @@ run_m8() {
   jq -n --arg old_commit "$old_commit" --arg old_tree "$old_tree" \
     --arg current_commit "$current_commit" --arg current_tree "$current_tree" \
     --arg retention_plan_sha256 "$(sha256 "$retention_plan")" --arg output_sha256 "$(sha256 "$inventory1")" \
-    --arg binary_sha256 "$EXPECTED_BINARY_SHA256" --arg config_sha256 "$(sha256 "$scope/.kio/config.toml")" \
+    --arg binary_sha256 "$EXPECTED_BINARY_SHA256" --arg approved_config_sha256 "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" \
+    --arg config_sha256 "$(sha256 "$scope/.kio/config.toml")" \
     --arg old_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.old.sha256")" \
     --arg current_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.current.sha256")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plan:{sha256:$retention_plan_sha256,real_candidate:true,no_write:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{exact_schema:true,exact_summary:true,independent_pass_stats_match:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_no_write:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plan:{sha256:$retention_plan_sha256,real_candidate:true,no_write:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_consent_and_config_state_unchanged:true,final_manual_config_restored:true,exact_schema:true,exact_summary:true,independent_pass_stats_match:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_no_write:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
   stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" inventory-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
-  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/inventory-2/fixture-manifest.after.json" 'public init and two index transitions; retention plan and two inventories read-only' init harness-config harness-document-old index-old harness-document-current index-current retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
+  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/inventory-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; retention plan and two inventories read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
   jq -n --arg stage "$stage" --arg before "$(sha256 "$STAGES/$stage/init/fixture-manifest.before.json")" --arg after "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.after.json")" \
     --slurpfile assertions "$STAGES/$stage/assertions.json" --slurpfile commands "$STAGES/$stage/command-manifest.json" \
     --slurpfile observations "$STAGES/$stage/observation-log-manifest.json" \
