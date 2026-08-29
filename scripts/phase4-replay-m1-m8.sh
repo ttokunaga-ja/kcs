@@ -663,9 +663,9 @@ run_m1() {
     .estimated_bytes == .candidates[0].size_bytes and
     ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
     ([.exclusions[]? | select(.reason == "ref_tip" and .count >= 1)] | length == 1)' "$plan1" >/dev/null || fatal_stage "$stage" 'dry_run_1_predicate_failed'
-  jq -e --argfile first "$plan1" '
+  jq -e --slurpfile first "$plan1" '
     (.as_of | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
-    (del(.as_of) == ($first | del(.as_of))) and
+    (del(.as_of) == ($first[0] | del(.as_of))) and
     ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$")))' "$plan2" >/dev/null || fatal_stage "$stage" 'dry_run_stability_failed'
   [[ "$(sha256 "$STAGES/$stage/gc-1/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/gc-1/fixture-manifest.after.json")" && "$(sha256 "$STAGES/$stage/gc-2/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/gc-2/fixture-manifest.after.json")" ]] || fatal_stage "$stage" 'dry_run_mutated_protected_manifest'
   [[ "$(sha256 "$STAGES/$stage/gc-1/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/gc-2/fixture-manifest.before.json")" ]] || fatal_stage "$stage" 'dry_run_cross_invocation_state_changed'
@@ -744,9 +744,9 @@ run_m8() {
     .estimated_bytes == .candidates[0].size_bytes and
     ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
     ([.exclusions[]? | select(.reason == "ref_tip" and .count >= 1)] | length == 1)' "$retention_plan1" >/dev/null || fatal_stage "$stage" 'retention_plan_1_predicate_failed'
-  jq -e --argfile first "$retention_plan1" '
+  jq -e --slurpfile first "$retention_plan1" '
     (.as_of | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
-    (del(.as_of) == ($first | del(.as_of))) and
+    (del(.as_of) == ($first[0] | del(.as_of))) and
     ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$")))' "$retention_plan2" >/dev/null || fatal_stage "$stage" 'retention_plan_stability_failed'
   [[ "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.after.json")" && "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.after.json")" ]] || fatal_stage "$stage" 'retention_plan_mutated_protected_manifest'
   [[ "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.before.json")" ]] || fatal_stage "$stage" 'retention_plan_cross_invocation_state_changed'
