@@ -262,8 +262,13 @@ records actual wall time and need not be byte-identical. All other semantic plan
 fields must match between the invocations. The
 `truth_digest`, `stable_truth_digest`, `baseline_receipts_digest`, and
 `plan_digest` must each be well formed and stable across both invocations; they
-are not required to equal one another. Protected manifests must remain
-unchanged. Preserve this fixture unchanged until M2.
+are not required to equal one another. `stats` and `stability_check_stats` must
+each have the exact counter shape and non-negative integer values, but they are
+diagnostics and are not required to equal each other: the first pass performs
+retention reachability while the independent stable-truth reread does not repeat
+that traversal. Each diagnostics object must instead be stable across the two
+identical dry-run invocations. Protected manifests must remain unchanged.
+Preserve this fixture unchanged until M2.
 
 ### M8: independent `m8` inventory coverage boundary
 
@@ -271,7 +276,12 @@ Create a separate `m8` scope with the same public-only `init`, exact
 `manual_only`/all-zero config, two different document versions, and two offline
 index invocations plus the same post-second-index exact-config restoration used
 by M1. Record its old commit/tree as a real retention-GC
-candidate, but do not copy or reuse M1 evidence or state. Run
+candidate, but do not copy or reuse M1 evidence or state. First run the identical
+preliminary `kio gc --dry-run --json` command twice. Apply the M1 retention-plan
+rules: each diagnostics object has the exact non-negative integer counter shape,
+the two diagnostics objects within one output need not equal one another, and
+each object must be stable across the two invocations after removing `as_of`.
+Both preliminary invocations are read-only. Then run
 `kio gc --dry-run --prune-unreachable --json` twice and record both exact JSON
 outputs; they must be byte-identical. Each pass must have exactly the top-level
 keys `schema_version`, `operation`, `status`, `read_only`, `diagnostic_only`,
@@ -280,6 +290,12 @@ keys `schema_version`, `operation`, `status`, `read_only`, `diagnostic_only`,
 `schema_version = 1`, `operation = "unreachable_object_inventory"`,
 `status = "dry_run"`, `read_only = true`, `diagnostic_only = true`,
 `mutation_authority = false`, and independent inventory/stability pass stats.
+Unlike the preliminary retention planner diagnostics, the two unreachable-
+inventory pass stats must be exactly equal: the implementation compares two
+independent full scans, including objects, shallow boundaries, stats, and
+observations, and rejects any mismatch. This equality is only a read-only
+stability gate; it grants no mutation authority and does not weaken
+`diagnostic_only = true` or `mutation_authority = false`.
 The exact `summary` keys are `object_count`, `physical_bytes`,
 `candidate_count`, `candidate_bytes`, `protected_count`, `protected_bytes`,
 `inventory_only_count`, and `inventory_only_bytes`.

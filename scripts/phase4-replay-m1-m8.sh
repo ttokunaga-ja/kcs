@@ -652,7 +652,10 @@ run_m1() {
     (keys == ["as_of","baseline_receipts_digest","candidate_count","candidate_tree_count","candidates","estimated_bytes","exclusions","limits","object_kinds_planned","plan_digest","policy","scope_path","stability_check_stats","stable_truth_digest","stats","status","truth_digest"]) and
     .status == "dry_run" and (.as_of | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and .scope_path == $scope and .candidate_count == 1 and .candidate_tree_count == 1 and .object_kinds_planned == ["tree"] and
     (.limits | keys == ["max_commits","max_depth","max_dir_entries","max_graph_steps","max_name_bytes","max_receipts","max_refs","max_tree_entries","max_verified_bytes"]) and
-    (.stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and .stats == .stability_check_stats and
+    (.stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and
+    (.stability_check_stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and
+    # These are diagnostic counters from different traversals, not an authority comparison.
+    ([.stats[],.stability_check_stats[]] | all(type == "number" and . >= 0 and floor == .)) and
     (.policy | keys == ["keep_daily_weeks","keep_hourly_days","keep_last_hours","keep_repaired_per_branch","keep_weekly_months"]) and
     .policy.keep_last_hours == 0 and .policy.keep_hourly_days == 0 and .policy.keep_daily_weeks == 0 and .policy.keep_weekly_months == 0 and .policy.keep_repaired_per_branch == 5 and
     (.exclusions | all(keys == ["count","reason"] and (.count | type == "number" and . >= 0) and (.reason | type == "string"))) and
@@ -681,7 +684,7 @@ run_m1() {
     --arg plan_1_sha256 "$(sha256 "$plan1")" --arg plan_2_sha256 "$(sha256 "$plan2")" \
     --arg frozen_fixture_sha256 "$(sha256 "$STAGES/$stage/frozen-fixture-manifest.json")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,real_candidate:true,tip_excluded:true,tree_only:true,internal_stability:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,real_candidate:true,tip_excluded:true,tree_only:true,retention_pass_diagnostic_shapes_valid:true,retention_diagnostics_repeat_stable:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
   stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current gc-1 gc-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" gc-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
   stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/gc-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; two final dry-runs read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final gc-1 gc-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
@@ -699,7 +702,7 @@ run_m8() {
   doc="$scope/document.md"
   local old=$'## Unreachable inventory fixture\nold byte sequence\n' current=$'## Unreachable inventory fixture\ncurrent byte sequence\n'
   local old_commit old_tree current_commit current_tree
-  local retention_plan="$STAGES/$stage/retention-plan/stdout.bin"
+  local retention_plan1="$STAGES/$stage/retention-plan-1/stdout.bin" retention_plan2="$STAGES/$stage/retention-plan-2/stdout.bin"
   local inventory1="$STAGES/$stage/inventory-1/stdout.bin" inventory2="$STAGES/$stage/inventory-2/stdout.bin"
   stage_start "$stage" M1 'fixture writes through index; diagnostic dry-run thereafter'
   record_command "$stage" init "$scope" "$private" kio_init "$PRODUCT_BINARY" init --json || fatal_stage "$stage" 'init_failed_or_unlisted_mutation'
@@ -724,20 +727,29 @@ run_m8() {
   record_harness_text "$stage" config-final "$scope/.kio/config.toml" replace 'restore exact manual-only all-zero retention config after the second required approve index' "$MANUAL_CONFIG" || fatal_stage "$stage" 'final_config_restore_failed_or_unlisted_mutation'
   [[ "$(sha256 "$scope/.kio/config.toml")" == "$EXPECTED_MANUAL_CONFIG_SHA256" ]] || fatal_stage "$stage" 'final_config_exact_bytes_mismatch'
   print -r -- "$(sha256 "$scope/.kio/config.toml")  .kio/config.toml" > "$STAGES/$stage/config.final.sha256"
-  record_command "$stage" retention-plan "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'retention_plan_failed_or_mutated'
+  record_command "$stage" retention-plan-1 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'retention_plan_1_failed_or_mutated'
+  record_command "$stage" retention-plan-2 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --json || fatal_stage "$stage" 'retention_plan_2_failed_or_mutated'
   jq -e --arg oc "$old_commit" --arg ot "$old_tree" --arg cc "$current_commit" --arg scope "$scope" '
     (keys == ["as_of","baseline_receipts_digest","candidate_count","candidate_tree_count","candidates","estimated_bytes","exclusions","limits","object_kinds_planned","plan_digest","policy","scope_path","stability_check_stats","stable_truth_digest","stats","status","truth_digest"]) and
     .status == "dry_run" and (.as_of | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and .scope_path == $scope and .candidate_count == 1 and .candidate_tree_count == 1 and .object_kinds_planned == ["tree"] and
     (.limits | keys == ["max_commits","max_depth","max_dir_entries","max_graph_steps","max_name_bytes","max_receipts","max_refs","max_tree_entries","max_verified_bytes"]) and
-    (.stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and .stats == .stability_check_stats and
+    (.stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and
+    (.stability_check_stats | keys == ["commits","dir_entries","graph_steps","receipts","refs","tree_entries","trees_verified","verified_bytes"]) and
+    # These are diagnostic counters from different traversals, not an authority comparison.
+    ([.stats[],.stability_check_stats[]] | all(type == "number" and . >= 0 and floor == .)) and
     (.policy | keys == ["keep_daily_weeks","keep_hourly_days","keep_last_hours","keep_repaired_per_branch","keep_weekly_months"]) and
     .policy.keep_last_hours == 0 and .policy.keep_hourly_days == 0 and .policy.keep_daily_weeks == 0 and .policy.keep_weekly_months == 0 and .policy.keep_repaired_per_branch == 5 and
     (.exclusions | all(keys == ["count","reason"] and (.count | type == "number" and . >= 0) and (.reason | type == "string"))) and
     (.candidates | length == 1) and (.candidates[0] | keys == ["commit_hash","commit_type","created_at","policy","size_bytes","tree_hash"] and .commit_hash == $oc and .commit_hash != $cc and .tree_hash == $ot and .commit_type == "auto" and .policy == "auto_retention" and (.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$")) and (.size_bytes | type == "number" and . > 0)) and
     .estimated_bytes == .candidates[0].size_bytes and
     ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
-    ([.exclusions[]? | select(.reason == "ref_tip" and .count >= 1)] | length == 1)' "$retention_plan" >/dev/null || fatal_stage "$stage" 'retention_plan_predicate_failed'
-  [[ "$(sha256 "$STAGES/$stage/retention-plan/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/retention-plan/fixture-manifest.after.json")" ]] || fatal_stage "$stage" 'retention_plan_mutated_protected_manifest'
+    ([.exclusions[]? | select(.reason == "ref_tip" and .count >= 1)] | length == 1)' "$retention_plan1" >/dev/null || fatal_stage "$stage" 'retention_plan_1_predicate_failed'
+  jq -e --argfile first "$retention_plan1" '
+    (.as_of | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+    (del(.as_of) == ($first | del(.as_of))) and
+    ([.truth_digest,.stable_truth_digest,.baseline_receipts_digest,.plan_digest] | all(type == "string" and test("^sha256:[0-9a-f]{64}$")))' "$retention_plan2" >/dev/null || fatal_stage "$stage" 'retention_plan_stability_failed'
+  [[ "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.after.json")" && "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.after.json")" ]] || fatal_stage "$stage" 'retention_plan_mutated_protected_manifest'
+  [[ "$(sha256 "$STAGES/$stage/retention-plan-1/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.before.json")" ]] || fatal_stage "$stage" 'retention_plan_cross_invocation_state_changed'
   record_command "$stage" inventory-1 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --prune-unreachable --json || fatal_stage "$stage" 'inventory_1_failed_or_mutated'
   record_command "$stage" inventory-2 "$scope" "$private" none "$PRODUCT_BINARY" gc --dry-run --prune-unreachable --json || fatal_stage "$stage" 'inventory_2_failed_or_mutated'
   jq -e --arg old_tree "$old_tree" '
@@ -764,26 +776,30 @@ run_m8() {
       (.reason | type == "string" and length > 0))) and
     (.objects == (.objects | sort_by(.kind, .hash))) and ([.objects[] | [.kind,.hash]] | unique | length == length) and
     (.limits | keys == ["max_depth","max_directory_entries","max_history_steps","max_manifest_units","max_name_bytes","max_objects","max_physical_bytes","max_receipts","max_refs","max_verified_bytes"] and all(type == "number" and . > 0)) and
-    (.stats | keys == ["inventory_pass","stability_pass"] and .inventory_pass == .stability_pass and
-      (.inventory_pass | keys == ["directory_entries","history_steps","manifest_units","objects","physical_bytes","receipts","refs","verified_bytes"])) and
+    # Equal full-scan counters are a read-only stability gate, never mutation authority.
+    (.stats | keys == ["inventory_pass","stability_pass"] and
+      (.inventory_pass | keys == ["directory_entries","history_steps","manifest_units","objects","physical_bytes","receipts","refs","verified_bytes"]) and
+      (.stability_pass | keys == ["directory_entries","history_steps","manifest_units","objects","physical_bytes","receipts","refs","verified_bytes"]) and
+      ([.inventory_pass[],.stability_pass[]] | all(type == "number" and . >= 0 and floor == .)) and
+      .inventory_pass == .stability_pass) and
     (.shallow_boundaries | type == "array" and all(keys == ["commit_hash","tree_hash"] and
       (.commit_hash | test("^sha256:[0-9a-f]{64}$")) and (.tree_hash | test("^sha256:[0-9a-f]{64}$")))) and
     ([.objects[] | select(.hash == $old_tree and .kind == "tree" and .classification == "protected" and .reason == "retention_gc_owned")] | length == 1)' "$inventory1" >/dev/null || fatal_stage "$stage" 'inventory_1_predicate_failed'
   cmp -s "$inventory1" "$inventory2" || fatal_stage "$stage" 'inventory_output_not_byte_identical'
   [[ "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.after.json")" && "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.before.json")" == "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.after.json")" ]] || fatal_stage "$stage" 'inventory_mutated_protected_manifest'
-  [[ "$(sha256 "$STAGES/$stage/retention-plan/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.before.json")" && "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.before.json")" ]] || fatal_stage "$stage" 'inventory_cross_invocation_state_changed'
+  [[ "$(sha256 "$STAGES/$stage/retention-plan-2/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.before.json")" && "$(sha256 "$STAGES/$stage/inventory-1/fixture-manifest.after.json")" == "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.before.json")" ]] || fatal_stage "$stage" 'inventory_cross_invocation_state_changed'
   jq -n --arg old_commit "$old_commit" --arg old_tree "$old_tree" \
     --arg current_commit "$current_commit" --arg current_tree "$current_tree" \
-    --arg retention_plan_sha256 "$(sha256 "$retention_plan")" --arg output_sha256 "$(sha256 "$inventory1")" \
+    --arg retention_plan_1_sha256 "$(sha256 "$retention_plan1")" --arg retention_plan_2_sha256 "$(sha256 "$retention_plan2")" --arg output_sha256 "$(sha256 "$inventory1")" \
     --arg binary_sha256 "$EXPECTED_BINARY_SHA256" --arg approved_config_sha256 "$EXPECTED_APPROVED_MANUAL_CONFIG_SHA256" \
     --arg config_sha256 "$(sha256 "$scope/.kio/config.toml")" \
     --arg old_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.old.sha256")" \
     --arg current_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.current.sha256")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plan:{sha256:$retention_plan_sha256,real_candidate:true,no_write:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,exact_schema:true,exact_summary:true,independent_pass_stats_match:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_no_write:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
-  stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'command_manifest_failed'
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plans:{first_sha256:$retention_plan_1_sha256,second_sha256:$retention_plan_2_sha256,real_candidate:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,exact_schema:true,exact_summary:true,diagnostic_only_true:true,mutation_authority_false:true,retention_pass_diagnostic_shapes_valid:true,retention_diagnostics_repeat_stable:true,inventory_pass_stats_equal_read_only_stability_gate:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_1_no_write:true,retention_plan_2_no_write:true,retention_plan_cross_invocation_state_unchanged:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
+  stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current retention-plan-1 retention-plan-2 inventory-1 inventory-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" inventory-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
-  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/inventory-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; retention plan and two inventories read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
+  stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/inventory-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; two retention plans and two inventories read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final retention-plan-1 retention-plan-2 inventory-1 inventory-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
   jq -n --arg stage "$stage" --arg before "$(sha256 "$STAGES/$stage/init/fixture-manifest.before.json")" --arg after "$(sha256 "$STAGES/$stage/inventory-2/fixture-manifest.after.json")" \
     --slurpfile assertions "$STAGES/$stage/assertions.json" --slurpfile commands "$STAGES/$stage/command-manifest.json" \
     --slurpfile observations "$STAGES/$stage/observation-log-manifest.json" \
