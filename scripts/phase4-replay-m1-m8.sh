@@ -241,16 +241,50 @@ validate_released_consent_lock() {
   [[ "$payload" == "$canonical" && "${#payload}" == "$(file_bytes "$lock_file")" ]]
 }
 
+validate_jsonl_objects() {
+  # Exactly one terminal LF is allowed. Every preceding record must be a
+  # nonempty JSON object; leading, interior, whitespace-only, or extra trailing
+  # blank records are rejected rather than filtered out.
+  jq -eRs '
+    (contains("\r") | not) and endswith("\n") and
+    (split("\n") as $lines |
+      ($lines | length >= 2) and $lines[-1] == "" and
+      ($lines[:-1] | length > 0 and
+        all(.[]; length > 0 and (try (fromjson | type == "object") catch false))))' "$1" >/dev/null
+}
+
 validate_batch_input() {
   # Exact regular JSONL input: two identical pointer objects, no hidden blank
   # record, and a receipt that binds its current bytes before/after each batch.
   local input="$1" pointer="$2" receipt="$3"
   [[ -f "$input" && ! -L "$input" && "$(stat -f '%l' "$input")" == 1 && "$(stat -f '%Lp' "$input")" == 644 && \
     "$(file_bytes "$input")" -gt 0 && "$(od -An -tu1 -N1 -j $(($(file_bytes "$input") - 1)) "$input" | tr -d ' ')" == 10 ]] || return 1
-  awk 'NF == 0 {exit 1}' "$input" || return 1
+  validate_jsonl_objects "$input" || return 1
   jq -s -e --arg pointer "$pointer" '(length == 2 and .[0] == ($pointer | fromjson) and .[1] == ($pointer | fromjson))' "$input" >/dev/null || return 1
   jq -e --arg path "$input" --arg sha "$(sha256 "$input")" --argjson bytes "$(file_bytes "$input")" \
     '.schema == "kio.phase4.batch-input.v1" and .path == $path and .sha256 == $sha and .bytes == $bytes and .mode == "644" and .nlink == 1 and .lines == 2 and .duplicate_rows == true and .final_lf == true' "$receipt" >/dev/null
+}
+
+validate_cursor_key() {
+  # The 32 opaque bytes are first-use key material, not a line-oriented
+  # cursor-issuance receipt. Bind the observed random digest, never a fixed one.
+  local key_file="$1" observation="$2" search_output="$3" last_byte
+  [[ -f "$key_file" && ! -L "$key_file" && "$(stat -f '%Lp' "$key_file")" == 600 && \
+    "$(stat -f '%l' "$key_file")" == 1 && "$(file_bytes "$key_file")" == 32 ]] || return 1
+  last_byte="$(od -An -tu1 -N1 -j 31 "$key_file" | tr -d ' ')"
+  [[ "$last_byte" != 10 ]] || return 1
+  jq -e --arg path "${key_file#"$FIXTURE"/}" --arg sha "$(sha256 "$key_file")" --slurpfile search "$search_output" '
+    ($search | length == 1) and
+    ($search[0] | has("paging") and (.paging | type == "object" and has("next_cursor") and
+      (.next_cursor == null or (.next_cursor | type == "string" and length > 0)))) and
+    (keys == ["after","before","cursor_issuance_state","key_helper_independent_of_cursor_issuance","no_terminal_lf","paging_next_cursor","path","reason","schema","sha256"]) and
+    .schema == "kio.phase4.cursor-key-observation.v1" and .path == $path and
+    .reason == "first_search_cursor_signing_key_helper" and
+    .key_helper_independent_of_cursor_issuance == true and .no_terminal_lf == true and
+    .paging_next_cursor == $search[0].paging.next_cursor and
+    .cursor_issuance_state == (if $search[0].paging.next_cursor == null then "not_issued" else "issued" end) and
+    .before == null and .sha256 == $sha and
+    .after == {path:$path,kind:"regular",mode:"600",bytes:32,nlink:1,sha256:$sha}' "$observation" >/dev/null
 }
 
 record_harness_text() {
@@ -311,7 +345,7 @@ fi
 record_command() {
   # record_command STAGE LABEL SCOPE PRIVATE policy argv...
   local stage="$1" label="$2" scope="$3" private="$4" mutation_policy="$5"; shift 5
-  local dir before after observation diff stdout stderr start end exit_code scope_root scope_prefix device_prefix cache_prefix mutation_valid=true
+  local dir before after observation diff stdout stderr start end exit_code scope_root scope_prefix device_prefix cache_prefix before_entry after_entry before_bytes after_bytes prefix_sha mutation_valid=true
   dir="$STAGES/$stage/$label"
   before="$dir/fixture-manifest.before.json"
   after="$dir/fixture-manifest.after.json"
@@ -372,10 +406,11 @@ record_command() {
     expected_append_only_logs)
       # Text search is read-only for Kio state, but deliberately appends
       # device metrics and scope access observability records.  No cache or
-      # vector-query mutation is authorized here.
-      jq -e --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" '
-        (.entries | length == 4) and
-        ([.entries[].path] | sort) == ([$scope_log, $scope_lock, $device_log, $device_lock] | sort) and
+      # vector-query mutation is authorized here. The independent cursor-key
+      # helper is first-search setup, not evidence of next_cursor issuance.
+      jq -e --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" --arg cursor_key "$device_prefix/cursor-key" '
+        (.entries | length == 5) and
+        ([.entries[].path] | sort) == ([$scope_log, $scope_lock, $device_log, $device_lock, $cursor_key] | sort) and
         ([.entries[] | select(.path == $scope_log or .path == $device_log) | select(
           .after.kind == "regular" and .after.mode == "644" and .after.nlink == 1 and .after.bytes > 0 and
           (if .before == null then true else .before.kind == "regular" and .before.mode == "644" and .before.nlink == 1 and .after.bytes > .before.bytes end)
@@ -383,9 +418,15 @@ record_command() {
       jq -e --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_lock "$device_prefix/logs/scrub.lock" '
         ([.entries[] | select(.path == $scope_lock and .before == null and .after.kind == "regular" and .after.mode == "644" and .after.nlink == 1 and .after.bytes == 97)] | length) == 1 and
         ([.entries[] | select(.path == $device_lock and .before.kind == "regular" and .before.mode == "644" and .before.nlink == 1 and .before.bytes == 97 and .after.kind == "regular" and .after.mode == "644" and .after.nlink == 1 and .after.bytes == 97 and .before.sha256 != .after.sha256)] | length) == 1' "$diff" >/dev/null || mutation_valid=false
+      jq -e --arg cursor_key "$device_prefix/cursor-key" '
+        ([.entries[] | select(.path == $cursor_key and .before == null and .after.kind == "regular" and .after.mode == "600" and .after.nlink == 1 and .after.bytes == 32)] | length) == 1' "$diff" >/dev/null || mutation_valid=false
+      [[ "$(od -An -tu1 -N1 -j 31 "$private/xdg-data/kio/cursor-key" | tr -d ' ')" != 10 ]] || mutation_valid=false
+      jq -n --arg path "${device_prefix}/cursor-key" --arg reason "first_search_cursor_signing_key_helper" --slurpfile diff "$diff" --slurpfile search "$stdout" '
+        ($diff[0].entries | map(select(.path == $path))[0]) as $entry |
+        {schema:"kio.phase4.cursor-key-observation.v1",path:$path,reason:$reason,key_helper_independent_of_cursor_issuance:true,paging_next_cursor:$search[0].paging.next_cursor,cursor_issuance_state:(if $search[0].paging.next_cursor == null then "not_issued" else "issued" end),no_terminal_lf:true,before:$entry.before,after:$entry.after,sha256:$entry.after.sha256}' > "$dir/cursor-key-observation.json"
+      validate_cursor_key "$private/xdg-data/kio/cursor-key" "$dir/cursor-key-observation.json" "$stdout" || mutation_valid=false
       jq -n --argjson entries '[]' > "$dir/search-log-append-observation.json"
       for log_file in "$scope/.kio/logs/access.jsonl" "$private/xdg-data/kio/logs/metrics.jsonl"; do
-        local before_entry after_entry before_bytes after_bytes prefix_sha
         before_entry="$(jq -c --arg path "${log_file#"$FIXTURE"/}" '.entries[] | select(.path == $path) | .before' "$diff")"
         after_entry="$(jq -c --arg path "${log_file#"$FIXTURE"/}" '.entries[] | select(.path == $path) | .after' "$diff")"
         [[ -n "$after_entry" && "$after_entry" != null ]] || continue
@@ -410,16 +451,26 @@ record_command() {
       done
       [[ "$(od -An -tu1 -N1 -j $(($(file_bytes "$scope/.kio/logs/access.jsonl") - 1)) "$scope/.kio/logs/access.jsonl" | tr -d ' ')" == 10 ]] || mutation_valid=false
       [[ "$(od -An -tu1 -N1 -j $(($(file_bytes "$private/xdg-data/kio/logs/metrics.jsonl") - 1)) "$private/xdg-data/kio/logs/metrics.jsonl" | tr -d ' ')" == 10 ]] || mutation_valid=false
-      awk 'NF == 0 {exit 1}' "$scope/.kio/logs/access.jsonl" && jq -sR -e 'split("\n") | map(select(length > 0) | fromjson) | length > 0 and all(type == "object" and (keys == ["code","component","context","level","message","ts"]) and .code == "KIO-I-SEARCH-ACCESS-001" and .component == "kio-cli" and .level == "info" and .message == "search access" and .context.query == "[redacted]" and .context.mode == "text" and (.context.result_count | type == "number" and . >= 1))' "$scope/.kio/logs/access.jsonl" >/dev/null || mutation_valid=false
-      awk 'NF == 0 {exit 1}' "$private/xdg-data/kio/logs/metrics.jsonl" && jq -sR -e 'split("\n") | map(select(length > 0) | fromjson) | length > 0 and all(type == "object" and (keys == ["code","component","context","level","message","metric","ts","value"]) and .code == "KIO-M-SEARCH-001" and .component == "search" and .level == "info" and .message == "search completed" and .metric == "search.latency_ms" and .context.mode == "text" and (.context.scope_count | type == "number" and . >= 1) and (.context.result_count | type == "number" and . >= 1) and (.value | type == "number" and . >= 0))' "$private/xdg-data/kio/logs/metrics.jsonl" >/dev/null || mutation_valid=false
+      validate_jsonl_objects "$scope/.kio/logs/access.jsonl" || mutation_valid=false
+      jq -s -e 'length > 0 and all(.[]; (keys == ["code","component","context","level","message","ts"]) and .code == "KIO-I-SEARCH-ACCESS-001" and .component == "kio-cli" and .level == "info" and .message == "search access" and .context.query == "[redacted]" and .context.mode == "text" and (.context.result_count | type == "number" and . >= 1))' "$scope/.kio/logs/access.jsonl" >/dev/null || mutation_valid=false
+      validate_jsonl_objects "$private/xdg-data/kio/logs/metrics.jsonl" || mutation_valid=false
+      jq -s -e 'length > 0 and all(.[]; (keys == ["code","component","context","level","message","metric","ts","value"]) and .code == "KIO-M-SEARCH-001" and .component == "search" and .level == "info" and .message == "search completed" and .metric == "search.latency_ms" and .context.mode == "text" and (.context.scope_count | type == "number" and . >= 1) and (.context.result_count | type == "number" and . >= 1) and (.value | type == "number" and . >= 0))' "$private/xdg-data/kio/logs/metrics.jsonl" >/dev/null || mutation_valid=false
+      jq --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" --arg cursor_key "$device_prefix/cursor-key" '
+        .entries |= map(select(.path != $scope_log and .path != $scope_lock and .path != $device_log and .path != $device_lock))' \
+        "$before.fixture.json" > "$dir/log-protected-fixture-manifest.before.json"
       jq --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" '
         .entries |= map(select(.path != $scope_log and .path != $scope_lock and .path != $device_log and .path != $device_lock))' \
+        "$after.fixture.json" > "$dir/log-protected-fixture-manifest.after.json"
+      manifest_diff "$dir/log-protected-fixture-manifest.before.json" "$dir/log-protected-fixture-manifest.after.json" "$dir/cursor-key-only-manifest-diff.json" || mutation_valid=false
+      jq -e --arg cursor_key "$device_prefix/cursor-key" '.entries | length == 1 and .[0].path == $cursor_key and .[0].before == null' "$dir/cursor-key-only-manifest-diff.json" >/dev/null || mutation_valid=false
+      jq --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" --arg cursor_key "$device_prefix/cursor-key" '
+        .entries |= map(select(.path != $scope_log and .path != $scope_lock and .path != $device_log and .path != $device_lock and .path != $cursor_key))' \
         "$before.fixture.json" > "$dir/protected-fixture-manifest.before.json"
-      jq --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" '
-        .entries |= map(select(.path != $scope_log and .path != $scope_lock and .path != $device_log and .path != $device_lock))' \
+      jq --arg scope_log "$scope_prefix/logs/access.jsonl" --arg scope_lock "$scope_prefix/logs/access.scrub.lock" --arg device_log "$device_prefix/logs/metrics.jsonl" --arg device_lock "$device_prefix/logs/scrub.lock" --arg cursor_key "$device_prefix/cursor-key" '
+        .entries |= map(select(.path != $scope_log and .path != $scope_lock and .path != $device_log and .path != $device_lock and .path != $cursor_key))' \
         "$after.fixture.json" > "$dir/protected-fixture-manifest.after.json"
       jq -n --arg before "$(sha256 "$dir/protected-fixture-manifest.before.json")" --arg after "$(sha256 "$dir/protected-fixture-manifest.after.json")" \
-        '{schema:"kio.phase4.search-protected-digest.v1",excluded_paths:[".kio/logs/access.jsonl",".kio/logs/access.scrub.lock","private-m6-m7/xdg-data/kio/logs/metrics.jsonl","private-m6-m7/xdg-data/kio/logs/scrub.lock"],before_sha256:$before,after_sha256:$after,unchanged:($before == $after)}' > "$dir/protected-digest.json"
+        '{schema:"kio.phase4.search-protected-digest.v1",excluded_paths:[".kio/logs/access.jsonl",".kio/logs/access.scrub.lock","private-m6-m7/xdg-data/kio/logs/metrics.jsonl","private-m6-m7/xdg-data/kio/logs/scrub.lock","private-m6-m7/xdg-data/kio/cursor-key"],before_sha256:$before,after_sha256:$after,unchanged:($before == $after),cursor_key_helper_not_cursor_issuance:true}' > "$dir/protected-digest.json"
       jq -e '.unchanged == true' "$dir/protected-digest.json" >/dev/null || mutation_valid=false
       ;;
     kio_init)
@@ -548,7 +599,7 @@ record_command() {
           "xdg-data/kio/cost-ledger.sqlite.write-seq","xdg-data/kio/logs",
           "xdg-data/kio/logs/events.jsonl","xdg-data/kio/logs/scrub.lock",
           "xdg-data/kio/scope-registry.sqlite"
-        ] + (if $policy == "kio_index_second_after_search" then ["xdg-data/kio/logs/metrics.jsonl"] else [] end) | sort) and
+        ] + (if $policy == "kio_index_second_after_search" then ["xdg-data/kio/logs/metrics.jsonl","xdg-data/kio/cursor-key"] else [] end) | sort) and
         (.entries | all(if .kind == "regular" then .nlink == 1 else .kind == "directory" end))' "$after.private.json" >/dev/null || mutation_valid=false
       validate_released_consent_lock "$private/xdg-data/kio/consents.lock" || mutation_valid=false
       if [[ "$mutation_policy" == kio_index_second || "$mutation_policy" == kio_index_second_after_search ]]; then
@@ -566,7 +617,7 @@ record_command() {
   jq -r '.entries[].path' "$diff" | jq -Rsc 'split("\n") | map(select(length > 0))' > "$dir/observed-path-set.json"
   jq -n --arg label "$label" --arg mutation_policy "$mutation_policy" \
     --arg scope_prefix "$scope_prefix" --arg device_prefix "$device_prefix" --arg cache_prefix "$cache_prefix" \
-    --arg contract_reason "$(case "$mutation_policy" in none) print -r -- 'read-only command permits no fixture or private-root change' ;; expected_append_only_logs) print -r -- 'text search permits only append_search_logs metrics/access records; all Kio state and query caches remain protected' ;; *) print -r -- 'invocation-specific closed logical leaves and hash-shaped CAS descendants only; retained SQLite sidecars and unlisted regular files fail closed' ;; esac)" \
+    --arg contract_reason "$(case "$mutation_policy" in none) print -r -- 'read-only command permits no fixture or private-root change' ;; expected_append_only_logs) print -r -- 'first text search permits only append_search_logs metrics/access records, their scrub locks, and independent first-use cursor-key helper creation; all other state remains protected' ;; *) print -r -- 'invocation-specific closed logical leaves and hash-shaped CAS descendants only; retained SQLite sidecars and unlisted regular files fail closed' ;; esac)" \
     --arg before "$(sha256 "$before")" --arg after "$(sha256 "$after")" \
     --slurpfile diff "$diff" --slurpfile observed_path_set "$dir/observed-path-set.json" \
     --argjson mutation_policy_valid "$mutation_valid" \
@@ -735,6 +786,8 @@ run_m6_m7() {
   record_command M6 search "$scope" "$private" expected_append_only_logs "$PRODUCT_BINARY" search 3600 --mode text --json || fatal_stage M6 'search_failed_or_unexpected_mutation'
   jq -e --arg commit "$index_commit" '
     (.results | type == "array" and length > 0) and (.results[0].evidence_pointer | type == "object") and
+    (.paging | type == "object" and (keys == ["limit","next_cursor"]) and .limit == 20 and
+      (.next_cursor == null or (.next_cursor | type == "string" and length > 0))) and
     (.results[0].evidence_pointer | .schema_version == 1 and .commit == $commit and
       [.raw_hash,.tool_profile_hash,.chunk_hash] | all(type == "string" and test("^sha256:[0-9a-f]{64}$")) and
       (.scope_id | type == "string" and length > 0) and .path_at_commit == "evidence.md") and
@@ -772,7 +825,8 @@ run_m6_m7() {
     fi
   done
   for label in search verify-single verify-batch verify-single-strict verify-batch-strict; do [[ ! -s "$STAGES/M6/$label/stderr.bin" ]] || fatal_stage M6 'happy_path_stderr_not_empty'; done
-  jq -n --argjson pointer "$pointer" --arg commit "$index_commit" --arg raw "$raw_hash" --arg document_sha256 "$(sha256 "$doc")" --arg binary_sha256 "$(sha256 "$PRODUCT_BINARY")" --arg batch_sha "$(sha256 "$pointer_file")" --argjson batch_bytes "$(file_bytes "$pointer_file")" '{fixed_binding_binary_sha256:$binary_sha256,pointer:$pointer,commit:$commit,raw_hash:$raw,document_sha256:$document_sha256,batch_input_sha256:$batch_sha,batch_input_bytes:$batch_bytes,predicates:{search_append_only_observability:true,standalone_alive:true,batch_exact_schema:true,batch_duplicate_order_preserved:true,batch_nested_result_byte_parity:true,strict_alive:true,empty_happy_path_stderr:true,batch_input_unchanged:true}}' > "$STAGES/M6/assertions.json"
+  validate_cursor_key "$private/xdg-data/kio/cursor-key" "$STAGES/M6/search/cursor-key-observation.json" "$STAGES/M6/search/stdout.bin" || fatal_stage M6 'cursor_key_changed_after_search'
+  jq -n --argjson pointer "$pointer" --arg commit "$index_commit" --arg raw "$raw_hash" --arg document_sha256 "$(sha256 "$doc")" --arg binary_sha256 "$(sha256 "$PRODUCT_BINARY")" --arg batch_sha "$(sha256 "$pointer_file")" --argjson batch_bytes "$(file_bytes "$pointer_file")" --slurpfile cursor "$STAGES/M6/search/cursor-key-observation.json" '{fixed_binding_binary_sha256:$binary_sha256,pointer:$pointer,commit:$commit,raw_hash:$raw,document_sha256:$document_sha256,batch_input_sha256:$batch_sha,batch_input_bytes:$batch_bytes,cursor_key:$cursor[0],predicates:{search_append_only_observability:true,cursor_key_first_search_helper_not_cursor_issuance:true,standalone_alive:true,batch_exact_schema:true,batch_duplicate_order_preserved:true,batch_nested_result_byte_parity:true,strict_alive:true,empty_happy_path_stderr:true,batch_input_unchanged:true}}' > "$STAGES/M6/assertions.json"
   stage_command_manifest M6 "$STAGES/M6/command-manifest.json" init index search verify-single verify-batch verify-single-strict verify-batch-strict || fatal_stage M6 'command_manifest_failed'
   stage_primary_invocation M6 verify-batch-strict || fatal_stage M6 'primary_invocation_failed'
   stage_manifest_summary M6 "$STAGES/M6/evidence/fixture-manifest.before.json" "$STAGES/M6/verify-batch-strict/fixture-manifest.after.json" 'exact evidence fixture, public init/index/text search and read-only evidence verification' evidence init index search verify-single verify-batch verify-single-strict verify-batch-strict || fatal_stage M6 'manifest_summary_failed'
@@ -793,7 +847,8 @@ run_m6_m7() {
     entry(.; "m6-m7/.kio/logs/access.jsonl") == entry($after[0]; "m6-m7/.kio/logs/access.jsonl") and
     entry(.; "m6-m7/.kio/logs/access.scrub.lock") == entry($after[0]; "m6-m7/.kio/logs/access.scrub.lock") and
     entry(.; "private-m6-m7/xdg-data/kio/logs/metrics.jsonl") == entry($after[0]; "private-m6-m7/xdg-data/kio/logs/metrics.jsonl") and
-    entry(.; "private-m6-m7/xdg-data/kio/logs/scrub.lock") == entry($after[0]; "private-m6-m7/xdg-data/kio/logs/scrub.lock")' "$STAGES/M7/index-later/fixture-manifest.before.json" >/dev/null || fatal_stage M7 'search_protocol_leaves_changed_by_index'
+    entry(.; "private-m6-m7/xdg-data/kio/logs/scrub.lock") == entry($after[0]; "private-m6-m7/xdg-data/kio/logs/scrub.lock") and
+    entry(.; "private-m6-m7/xdg-data/kio/cursor-key") == entry($after[0]; "private-m6-m7/xdg-data/kio/cursor-key")' "$STAGES/M7/index-later/fixture-manifest.before.json" >/dev/null || fatal_stage M7 'search_protocol_leaves_changed_by_index'
   jq -e --arg old "$index_commit" '.commit.parents == [$old]' "$STAGES/M7/index-later/stdout.bin" >/dev/null || fatal_stage M7 'later_index_parent_chain_invalid'
   record_command M7 log "$scope" "$private" none "$PRODUCT_BINARY" log --json || fatal_stage M7 'log_failed_or_mutated'
   target="$(jq -er '.commits | select(type == "array" and length > 0) | .[0].commit_hash | select(test("^sha256:[0-9a-f]{64}$"))' "$STAGES/M7/log/stdout.bin")" || fatal_stage M7 'log_target_missing'
@@ -811,7 +866,8 @@ run_m6_m7() {
   validate_alive "$STAGES/M7/verify-new-strict/stdout.bin" "$target" "$raw_hash" || fatal_stage M7 'new_pointer_verify_predicate_failed'
   for label in log retarget-1 retarget-2 verify-new-strict; do [[ ! -s "$STAGES/M7/$label/stderr.bin" ]] || fatal_stage M7 'happy_path_stderr_not_empty'; done
   [[ "$(sha256 "$doc")" == "${raw_hash#sha256:}" && "$(jq -c '.new_pointer.raw_hash' "$STAGES/M7/retarget-1/stdout.bin")" == "\"$raw_hash\"" ]] || fatal_stage M7 'post_retarget_source_binding_changed'
-  jq -n --arg target "$target" --arg raw "$raw_hash" --arg document_sha256 "$(sha256 "$doc")" --arg binary_sha256 "$(sha256 "$PRODUCT_BINARY")" --arg pointer "$pointer" '{fixed_binding_binary_sha256:$binary_sha256,target_commit:$target,raw_hash:$raw,document_sha256:$document_sha256,original_pointer:($pointer|fromjson),predicates:{later_exact_commit:true,retarget_stdout_byte_identical:true,retarget_json_byte_identical:true,new_pointer_strict_alive:true,fixture_private_unchanged_per_retarget:true,empty_happy_path_stderr:true,source_binding_stable:true}}' > "$STAGES/M7/assertions.json"
+  validate_cursor_key "$private/xdg-data/kio/cursor-key" "$STAGES/M6/search/cursor-key-observation.json" "$STAGES/M6/search/stdout.bin" || fatal_stage M7 'cursor_key_changed_after_search'
+  jq -n --arg target "$target" --arg raw "$raw_hash" --arg document_sha256 "$(sha256 "$doc")" --arg binary_sha256 "$(sha256 "$PRODUCT_BINARY")" --arg pointer "$pointer" --slurpfile m6 "$STAGES/M6/assertions.json" '{fixed_binding_binary_sha256:$binary_sha256,target_commit:$target,raw_hash:$raw,document_sha256:$document_sha256,original_pointer:($pointer|fromjson),cursor_key:$m6[0].cursor_key,predicates:{later_exact_commit:true,retarget_stdout_byte_identical:true,retarget_json_byte_identical:true,new_pointer_strict_alive:true,fixture_private_unchanged_per_retarget:true,cursor_key_unchanged_after_search:true,empty_happy_path_stderr:true,source_binding_stable:true}}' > "$STAGES/M7/assertions.json"
   stage_command_manifest M7 "$STAGES/M7/command-manifest.json" index-later log retarget-1 retarget-2 verify-new-strict || fatal_stage M7 'command_manifest_failed'
   stage_primary_invocation M7 verify-new-strict || fatal_stage M7 'primary_invocation_failed'
   stage_manifest_summary M7 "$STAGES/M7/unrelated/fixture-manifest.before.json" "$STAGES/M7/verify-new-strict/fixture-manifest.after.json" 'one unrelated fixture document and later index; all retarget operations read-only' unrelated index-later log retarget-1 retarget-2 verify-new-strict || fatal_stage M7 'manifest_summary_failed'

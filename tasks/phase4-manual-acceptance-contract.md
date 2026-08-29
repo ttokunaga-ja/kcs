@@ -326,6 +326,26 @@ pairs: `kio evidence verify <pointer> --json` with
 `kio evidence verify <pointer> --strict --json` with
 `kio evidence verify --batch <pointers.jsonl> --strict --json`.
 
+The text search appends the existing metrics/access JSONL records with their
+existing append-only prefix proof, and creates or updates exactly the two scrub
+lock leaves for those logs. Thus its permitted log/lock mutation set is
+`$XDG_DATA_HOME/kio/logs/metrics.jsonl`, `$XDG_DATA_HOME/kio/logs/scrub.lock`,
+`.kio/logs/access.jsonl`, and `.kio/logs/access.scrub.lock`. Independently of
+pagination or the presence of `next_cursor`, search calls `cursor_signing_key()`.
+In the fresh private XDG state, first use must create_new the separate fixed
+`$XDG_DATA_HOME/kio/cursor-key` path. Record that it was absent before search and
+is afterward a regular `nlink = 1`, mode `0600`, exactly-32-byte file with no LF,
+plus its SHA-256 and filesystem metadata. Record the explicitly present nullable
+`paging.next_cursor` value and its derived issued/not-issued state in the same
+receipt without making key creation conditional on that value. Its digest need not be deterministic,
+but no additional private file is permitted in this first-search mutation set.
+
+For every subsequent M6 standalone, batch, and strict verification, and for M7
+index, log, retarget, and re-verification, this cursor-key's bytes, SHA-256, and
+metadata must remain unchanged. This first-use key is a public CLI contract, not a
+product defect; it is distinct from the four documented log/lock leaves and is
+not excused by a generic private-XDG digest allowance.
+
 The batch is a regular, single-link (`nlink = 1`) JSONL file whose exact bytes are
 the same alive pointer on two LF-terminated lines. Record those bytes, final LF,
 byte count, and SHA-256. Every invocation must exit 0. Each batch response must
