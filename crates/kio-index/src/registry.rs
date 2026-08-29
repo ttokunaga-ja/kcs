@@ -6,10 +6,16 @@
 //! §3.1). Losing it must be recoverable by re-running `kio init` / `kio index`
 //! in each scope.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
+};
 
+use cap_primitives::fs as cap_fs;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
 use crate::Result;
 
@@ -28,7 +34,186 @@ pub struct RegistryEntry {
 
 pub struct RegistryDb {
     conn: Connection,
+    // Declared after `conn`, so the database closes before its private snapshot
+    // directory is removed.
+    _snapshot: Option<RegistrySnapshot>,
 }
+
+/// The size limits are deliberately registry-specific.  Snapshot reads and
+/// copies are streaming, so these bounds limit I/O rather than allocating a
+/// whole SQLite leaf in memory.
+const MAX_REGISTRY_LEAF_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REGISTRY_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const REGISTRY_SNAPSHOT_RETRY_WINDOW: Duration = Duration::from_secs(5);
+const MAX_REGISTRY_SNAPSHOT_ATTEMPTS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySnapshotError {
+    /// The registry main leaf and both sidecars are absent: a normal cache miss.
+    Missing,
+    /// An unsafe file shape, link, replacement, or integrity failure was found.
+    UnsafeIntegrity(String),
+    /// A concurrent change, busy source, or transient read prevented a stable
+    /// owned snapshot before the bounded retry deadline.
+    UnstableBusy(String),
+}
+
+impl std::fmt::Display for RegistrySnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("scope registry is absent"),
+            Self::UnsafeIntegrity(message) | Self::UnstableBusy(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RegistrySnapshotError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LeafObservation {
+    Absent,
+    Present(FileObservation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileObservation {
+    identity: FileIdentity,
+    bytes: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryManifest {
+    main: LeafObservation,
+    wal: LeafObservation,
+    shm: LeafObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrivateSnapshotManifest {
+    main: FileObservation,
+    wal: Option<FileObservation>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity;
+
+const PRIVATE_REGISTRY_MAIN: &str = "snapshot.sqlite";
+
+enum PrivateSnapshotStorage {
+    #[cfg(unix)]
+    Temp(tempfile::TempDir),
+    #[cfg(windows)]
+    Windows(crate::registry_windows_security::RegistrySnapshotPrivateDir),
+}
+
+impl PrivateSnapshotStorage {
+    fn create() -> std::result::Result<Self, SnapshotAttemptError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut builder = tempfile::Builder::new();
+            builder.prefix("kio-registry-snapshot-");
+            builder.permissions(fs::Permissions::from_mode(0o700));
+            builder.tempdir().map(Self::Temp).map_err(|error| {
+                SnapshotAttemptError::Unstable(format!(
+                    "create registry snapshot directory: {error}"
+                ))
+            })
+        }
+        #[cfg(windows)]
+        {
+            crate::registry_windows_security::RegistrySnapshotPrivateDir::create()
+                .map(Self::Windows)
+                .map_err(|error| {
+                    SnapshotAttemptError::Unstable(format!(
+                        "create owner-private registry snapshot directory: {error}"
+                    ))
+                })
+        }
+        #[cfg(not(any(unix, windows)))]
+        compile_error!("RegistrySnapshot requires a platform-private directory implementation");
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            #[cfg(unix)]
+            Self::Temp(temp) => temp.path(),
+            #[cfg(windows)]
+            Self::Windows(temp) => temp.path(),
+        }
+    }
+
+    fn create_file(&self, basename: &str) -> std::result::Result<fs::File, SnapshotAttemptError> {
+        match self {
+            #[cfg(unix)]
+            Self::Temp(temp) => {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true).mode(0o600);
+                options.open(temp.path().join(basename)).map_err(|error| {
+                    SnapshotAttemptError::Unstable(format!(
+                        "create registry snapshot {}: {error}",
+                        temp.path().join(basename).display()
+                    ))
+                })
+            }
+            #[cfg(windows)]
+            Self::Windows(temp) => temp.create_file(basename).map_err(|error| {
+                SnapshotAttemptError::Unstable(format!(
+                    "create owner-private registry snapshot {basename}: {error}"
+                ))
+            }),
+        }
+    }
+
+    #[cfg(windows)]
+    fn as_windows(
+        &self,
+    ) -> std::result::Result<
+        &crate::registry_windows_security::RegistrySnapshotPrivateDir,
+        SnapshotAttemptError,
+    > {
+        match self {
+            Self::Windows(storage) => Ok(storage),
+        }
+    }
+}
+
+struct RegistrySnapshot {
+    // This is the descriptor-relative capability used to validate the copied
+    // leaves immediately before SQLite is allowed to open the private path.
+    // Keep it alive for the lifetime of the connection/snapshot.
+    _private_dir: fs::File,
+    _storage: PrivateSnapshotStorage,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotTestPhase {
+    AfterInitialManifest,
+    BeforeSnapshotSqliteOpen,
+    AfterSnapshotQueryBeforeRecheck,
+}
+
+#[cfg(test)]
+type SnapshotTestHook =
+    std::sync::Arc<dyn Fn(SnapshotTestPhase, usize, Option<&Path>) + Send + Sync>;
 
 /// `$XDG_DATA_HOME/kio/scope-registry.sqlite`, falling back to
 /// `$HOME/.local/share/kio/scope-registry.sqlite` (03-data-model.md §4).
@@ -47,39 +232,962 @@ pub fn default_registry_path() -> Result<PathBuf> {
     Ok(data_home.join("kio/scope-registry.sqlite"))
 }
 
+fn index_error_from_snapshot(error: RegistrySnapshotError) -> crate::IndexError {
+    match error {
+        RegistrySnapshotError::Missing => crate::IndexError::RegistryMissing,
+        RegistrySnapshotError::UnsafeIntegrity(message) => {
+            crate::IndexError::RegistryUnsafeIntegrity(message)
+        }
+        RegistrySnapshotError::UnstableBusy(message) => {
+            crate::IndexError::RegistryUnstableBusy(message)
+        }
+    }
+}
+
+fn snapshot_query_error(error: crate::IndexError) -> RegistrySnapshotError {
+    match error {
+        crate::IndexError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            RegistrySnapshotError::UnstableBusy(format!("query registry snapshot: {code}"))
+        }
+        crate::IndexError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseCorrupt
+                    | rusqlite::ErrorCode::NotADatabase
+                    | rusqlite::ErrorCode::SchemaChanged
+                    // The fixed lookup SQL is product-owned; SQLITE_ERROR here
+                    // (for example a missing required scopes column) proves a
+                    // malformed stable snapshot schema rather than transient I/O.
+                    | rusqlite::ErrorCode::Unknown
+            ) =>
+        {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "stable registry snapshot query failed: {code}"
+            ))
+        }
+        error @ crate::IndexError::Sqlite(
+            rusqlite::Error::InvalidColumnName(_)
+            | rusqlite::Error::InvalidColumnType(_, _, _)
+            | rusqlite::Error::FromSqlConversionFailure(_, _, _)
+            | rusqlite::Error::SqlInputError { .. },
+        ) => RegistrySnapshotError::UnsafeIntegrity(format!(
+            "stable registry snapshot returned malformed row/schema: {error}"
+        )),
+        error => RegistrySnapshotError::UnstableBusy(format!(
+            "stable registry snapshot query failed: {error}"
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum SnapshotAttemptError {
+    Missing,
+    Unsafe(String),
+    Unstable(String),
+}
+
+fn registry_parent_and_leaf(
+    path: &Path,
+) -> std::result::Result<(fs::File, String, PathBuf), RegistrySnapshotError> {
+    let path = normalized_absolute_registry_path(path)?;
+    let filesystem_root = registry_filesystem_root(&path)?;
+    let leaf = path
+        .file_name()
+        .and_then(|leaf| leaf.to_str())
+        .ok_or_else(|| {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "scope registry path has no valid UTF-8 file name: {}",
+                path.display()
+            ))
+        })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("/"));
+    let mut handle =
+        cap_fs::open_ambient_dir(&filesystem_root, cap_primitives::ambient_authority()).map_err(
+            |error| RegistrySnapshotError::UnstableBusy(format!("open filesystem root: {error}")),
+        )?;
+    let mut bound_component_path = filesystem_root.clone();
+    #[cfg(test)]
+    let mut index = 0usize;
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let before = match cap_fs::stat(&handle, Path::new(name), cap_fs::FollowSymlinks::No) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RegistrySnapshotError::Missing);
+            }
+            Err(error) => {
+                return Err(RegistrySnapshotError::UnstableBusy(format!(
+                    "inspect registry parent component {}: {error}",
+                    name.to_string_lossy()
+                )));
+            }
+        };
+        validate_directory(&before, &name.to_string_lossy())?;
+        #[cfg(test)]
+        run_parent_component_hook(index);
+        let child = cap_fs::open_dir_nofollow(&handle, Path::new(name)).map_err(|error| {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "open registry parent component {}: {error}",
+                name.to_string_lossy()
+            ))
+        })?;
+        bound_component_path.push(name);
+        let opened = cap_fs::Metadata::from_file(&child).map_err(|error| {
+            RegistrySnapshotError::UnstableBusy(format!(
+                "inspect opened registry parent component {}: {error}",
+                name.to_string_lossy()
+            ))
+        })?;
+        validate_directory(&opened, &name.to_string_lossy())?;
+        let current = cap_fs::stat(&handle, Path::new(name), cap_fs::FollowSymlinks::No).map_err(
+            |error| {
+                RegistrySnapshotError::UnsafeIntegrity(format!(
+                    "reinspect registry parent component {} after opening: {error}",
+                    name.to_string_lossy()
+                ))
+            },
+        )?;
+        validate_directory(&current, &name.to_string_lossy())?;
+        if leaf_identity(&before) != leaf_identity(&opened)
+            || leaf_identity(&before) != leaf_identity(&current)
+            || leaf_identity(&opened) != leaf_identity(&current)
+        {
+            return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                "registry parent component changed while opening: {}",
+                name.to_string_lossy()
+            )));
+        }
+        #[cfg(windows)]
+        verify_windows_directory_binding(&bound_component_path, &child, &name.to_string_lossy())?;
+        handle = child;
+        #[cfg(test)]
+        {
+            index += 1;
+        }
+    }
+    Ok((handle, leaf.to_owned(), parent.to_owned()))
+}
+
+#[cfg(windows)]
+fn verify_windows_directory_binding(
+    path: &Path,
+    opened: &fs::File,
+    label: &str,
+) -> std::result::Result<(), RegistrySnapshotError> {
+    let path_identity = kio_core::cas::windows_real_directory_identity(path).map_err(|error| {
+        RegistrySnapshotError::UnstableBusy(format!(
+            "inspect Windows registry parent component {label}: {error}"
+        ))
+    })?;
+    let handle_identity = kio_core::cas::windows_directory_handle_identity(opened);
+    if path_identity.is_none() || path_identity != handle_identity {
+        return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+            "Windows registry parent component is a reparse point or changed while opening: {label}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_windows_regular_binding(
+    path: &Path,
+    opened: &fs::File,
+    label: &str,
+) -> std::result::Result<(), SnapshotAttemptError> {
+    let path_identity =
+        kio_core::cas::windows_real_regular_file_identity(path).map_err(|error| {
+            SnapshotAttemptError::Unstable(format!("inspect Windows registry {label}: {error}"))
+        })?;
+    let handle_identity = kio_core::cas::windows_regular_file_handle_identity(opened);
+    if path_identity.is_none() || path_identity != handle_identity {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "Windows registry {label} is a reparse point or changed while opening"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn normalized_absolute_registry_path(
+    path: &Path,
+) -> std::result::Result<PathBuf, RegistrySnapshotError> {
+    if !path.is_absolute() {
+        return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+            "scope registry path must be absolute: {}",
+            path.display()
+        )));
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                #[cfg(target_os = "macos")]
+                if normalized == Path::new("/") && name == "var" {
+                    normalized.push("private");
+                    normalized.push("var");
+                } else {
+                    normalized.push(name);
+                }
+                #[cfg(not(target_os = "macos"))]
+                normalized.push(name);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                    "scope registry path is not normalized: {}",
+                    path.display()
+                )));
+            }
+            Component::Prefix(_) => {
+                return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                    "scope registry path prefix is unsupported: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(windows)]
+fn normalized_absolute_registry_path(
+    path: &Path,
+) -> std::result::Result<PathBuf, RegistrySnapshotError> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+            "scope registry path must use an absolute drive or UNC path: {}",
+            path.display()
+        )));
+    };
+    if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        || !matches!(components.next(), Some(Component::RootDir))
+    {
+        return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+            "scope registry path must use a normalized absolute drive or UNC path: {}",
+            path.display()
+        )));
+    }
+    let mut normalized = PathBuf::from(prefix.as_os_str());
+    normalized.push("\\");
+    for component in components {
+        match component {
+            Component::Normal(name) => normalized.push(name),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                    "scope registry path is not normalized: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn registry_filesystem_root(path: &Path) -> std::result::Result<PathBuf, RegistrySnapshotError> {
+    #[cfg(windows)]
+    {
+        let mut components = path.components();
+        use std::path::Prefix;
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                "scope registry path must have an absolute Windows volume/share root: {}",
+                path.display()
+            )));
+        };
+        if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+            || !matches!(components.next(), Some(Component::RootDir))
+        {
+            return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+                "scope registry path must be absolute on Windows: {}",
+                path.display()
+            )));
+        }
+        let mut root = PathBuf::from(prefix.as_os_str());
+        root.push("\\");
+        Ok(root)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(PathBuf::from("/"))
+    }
+}
+
+fn validate_directory(
+    metadata: &cap_fs::Metadata,
+    label: &str,
+) -> std::result::Result<(), RegistrySnapshotError> {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
+            "registry parent component must be a real directory: {label}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+type ParentComponentHook = std::sync::Arc<dyn Fn(usize)>;
+
+#[cfg(test)]
+thread_local! {
+    static PARENT_COMPONENT_HOOK: std::cell::RefCell<Option<ParentComponentHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_parent_component_hook(index: usize) {
+    PARENT_COMPONENT_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(index);
+        }
+    });
+}
+
+fn leaf_identity(metadata: &cap_fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs::_WindowsByHandle;
+        FileIdentity {
+            volume_serial_number: metadata.volume_serial_number(),
+            file_index: metadata.file_index(),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        FileIdentity
+    }
+}
+
+fn validate_regular(
+    metadata: &cap_fs::Metadata,
+    label: &str,
+) -> std::result::Result<(), SnapshotAttemptError> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "scope registry {label} must be a regular non-symlink file"
+        )));
+    }
+    if metadata.len() > MAX_REGISTRY_LEAF_BYTES {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "scope registry {label} exceeds {} byte limit",
+            MAX_REGISTRY_LEAF_BYTES
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use cap_fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(SnapshotAttemptError::Unsafe(format!(
+                "scope registry {label} must have exactly one hard link"
+            )));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs::_WindowsByHandle;
+        if metadata.number_of_links() != Some(1) {
+            return Err(SnapshotAttemptError::Unsafe(format!(
+                "scope registry {label} must have exactly one hard link"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn observe_leaf(
+    parent: &fs::File,
+    parent_path: &Path,
+    name: &str,
+    copy_to: Option<(&PrivateSnapshotStorage, &str)>,
+) -> std::result::Result<LeafObservation, SnapshotAttemptError> {
+    #[cfg(not(windows))]
+    let _ = parent_path;
+    let before = match cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LeafObservation::Absent);
+        }
+        Err(error) => {
+            return Err(SnapshotAttemptError::Unstable(format!(
+                "stat scope registry {name}: {error}"
+            )));
+        }
+    };
+    validate_regular(&before, name)?;
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut input = cap_fs::open(parent, Path::new(name), &options).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("open scope registry {name}: {error}"))
+    })?;
+    let opened = cap_fs::Metadata::from_file(&input).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("inspect opened registry {name}: {error}"))
+    })?;
+    validate_regular(&opened, name)?;
+    #[cfg(windows)]
+    verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
+    if leaf_identity(&before) != leaf_identity(&opened) || before.len() != opened.len() {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "scope registry {name} changed while opening"
+        )));
+    }
+
+    let mut output = match copy_to {
+        Some((storage, basename)) => Some(storage.create_file(basename)?),
+        None => None,
+    };
+    let mut hash = Sha256::new();
+    let mut total = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buf).map_err(|error| {
+            SnapshotAttemptError::Unstable(format!("read scope registry {name}: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            SnapshotAttemptError::Unsafe(format!("scope registry {name} size overflow"))
+        })?;
+        if total > MAX_REGISTRY_LEAF_BYTES {
+            return Err(SnapshotAttemptError::Unsafe(format!(
+                "scope registry {name} exceeded byte limit while reading"
+            )));
+        }
+        hash.update(&buf[..read]);
+        if let Some(output) = output.as_mut() {
+            output.write_all(&buf[..read]).map_err(|error| {
+                SnapshotAttemptError::Unstable(format!("write registry snapshot {name}: {error}"))
+            })?;
+        }
+    }
+    if let Some(output) = output.as_mut() {
+        output.flush().map_err(|error| {
+            SnapshotAttemptError::Unstable(format!("flush registry snapshot {name}: {error}"))
+        })?;
+    }
+    let after =
+        cap_fs::stat(parent, Path::new(name), cap_fs::FollowSymlinks::No).map_err(|error| {
+            SnapshotAttemptError::Unstable(format!("restat scope registry {name}: {error}"))
+        })?;
+    validate_regular(&after, name)?;
+    #[cfg(windows)]
+    verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
+    if leaf_identity(&opened) != leaf_identity(&after)
+        || opened.len() != after.len()
+        || total != opened.len()
+    {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "scope registry {name} changed while reading"
+        )));
+    }
+    Ok(LeafObservation::Present(FileObservation {
+        identity: leaf_identity(&opened),
+        bytes: total,
+        sha256: hash.finalize().into(),
+    }))
+}
+
+fn observe_manifest(
+    parent: &fs::File,
+    parent_path: &Path,
+    main: &str,
+    storage: Option<&PrivateSnapshotStorage>,
+    missing_is_cache_miss: bool,
+) -> std::result::Result<RegistryManifest, SnapshotAttemptError> {
+    let wal = format!("{main}-wal");
+    let shm = format!("{main}-shm");
+    let main_observation = observe_leaf(
+        parent,
+        parent_path,
+        main,
+        storage.map(|storage| (storage, PRIVATE_REGISTRY_MAIN)),
+    )?;
+    let wal_observation = observe_leaf(
+        parent,
+        parent_path,
+        &wal,
+        storage.map(|storage| (storage, "snapshot.sqlite-wal")),
+    )?;
+    let shm_observation = observe_leaf(parent, parent_path, &shm, None)?;
+    let manifest = RegistryManifest {
+        main: main_observation,
+        wal: wal_observation,
+        shm: shm_observation,
+    };
+    let total = [&manifest.main, &manifest.wal, &manifest.shm]
+        .iter()
+        .filter_map(|leaf| match leaf {
+            LeafObservation::Present(observation) => Some(observation.bytes),
+            LeafObservation::Absent => None,
+        })
+        .try_fold(0u64, |total, bytes| total.checked_add(bytes))
+        .ok_or_else(|| {
+            SnapshotAttemptError::Unsafe("scope registry aggregate size overflow".to_owned())
+        })?;
+    if total > MAX_REGISTRY_TOTAL_BYTES {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "scope registry exceeds {} byte aggregate limit",
+            MAX_REGISTRY_TOTAL_BYTES
+        )));
+    }
+    if missing_is_cache_miss {
+        match (&manifest.main, &manifest.wal, &manifest.shm) {
+            (LeafObservation::Absent, LeafObservation::Absent, LeafObservation::Absent) => {
+                return Err(SnapshotAttemptError::Missing);
+            }
+            (LeafObservation::Absent, _, _) => {
+                return Err(SnapshotAttemptError::Unsafe(
+                    "scope registry sidecar exists without main database".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Final observation intentionally records every presence shape.  A source
+    // main disappearing after a valid initial capture is concurrent drift
+    // (retryable), not a cache miss or an integrity fallback.
+    Ok(manifest)
+}
+
+fn sqlite_snapshot_error(
+    error: rusqlite::Error,
+    operation: &str,
+    fixed_schema_probe: bool,
+) -> SnapshotAttemptError {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            SnapshotAttemptError::Unstable(format!("{operation}: {code}"))
+        }
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseCorrupt
+                    | rusqlite::ErrorCode::NotADatabase
+                    | rusqlite::ErrorCode::SchemaChanged
+            ) || (fixed_schema_probe && code.code == rusqlite::ErrorCode::Unknown) =>
+        {
+            SnapshotAttemptError::Unsafe(format!("{operation}: {code}"))
+        }
+        // Private snapshot setup/open/query errors such as CANTOPEN and IOERR
+        // do not prove source or owned-copy corruption.  Retry inside the
+        // bounded snapshot window and fail as UnstableBusy if they persist.
+        error => SnapshotAttemptError::Unstable(format!("{operation}: {error}")),
+    }
+}
+
+fn classify_snapshot_sqlite_failure(
+    parent: &fs::File,
+    parent_path: &Path,
+    main: &str,
+    initial: &RegistryManifest,
+    error: SnapshotAttemptError,
+) -> SnapshotAttemptError {
+    // A copied main/WAL pair can be temporarily incoherent while a writer is
+    // rotating/checkpointing.  Re-observe all source leaves before calling a
+    // stable copy malformed; source drift is retryable rather than corruption.
+    match observe_manifest(parent, parent_path, main, None, false) {
+        Ok(current) if &current != initial => SnapshotAttemptError::Unstable(
+            "scope registry changed while preparing SQLite snapshot".to_owned(),
+        ),
+        Ok(_) => error,
+        Err(SnapshotAttemptError::Unsafe(message)) => SnapshotAttemptError::Unsafe(message),
+        Err(SnapshotAttemptError::Missing) | Err(SnapshotAttemptError::Unstable(_)) => {
+            SnapshotAttemptError::Unstable(
+                "scope registry could not be rechecked after snapshot SQLite failure".to_owned(),
+            )
+        }
+    }
+}
+
+/// Verify the private copy through the already-held directory capability
+/// before SQLite sees its path.  The source manifest is intentionally used
+/// only for bytes/digest expectations: a copied file has a different identity
+/// from its source.  This rejects pre-created sidecars, replacement leaves,
+/// links, and every name SQLite could otherwise interpret before the first
+/// private SQLite open.
+fn verify_private_snapshot_leaf(
+    private_dir: &fs::File,
+    name: &str,
+    expected: &FileObservation,
+) -> std::result::Result<FileObservation, SnapshotAttemptError> {
+    let before = cap_fs::stat(private_dir, Path::new(name), cap_fs::FollowSymlinks::No).map_err(
+        |error| {
+            SnapshotAttemptError::Unsafe(format!(
+                "private registry snapshot {name} is missing or unsafe: {error}"
+            ))
+        },
+    )?;
+    validate_regular(&before, name)?;
+    if before.len() != expected.bytes {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "private registry snapshot {name} has unexpected size"
+        )));
+    }
+    let mut options = cap_fs::OpenOptions::new();
+    options
+        .read(true)
+        ._cap_fs_ext_follow(cap_fs::FollowSymlinks::No);
+    let mut file = cap_fs::open(private_dir, Path::new(name), &options).map_err(|error| {
+        SnapshotAttemptError::Unsafe(format!("open private registry snapshot {name}: {error}"))
+    })?;
+    let opened = cap_fs::Metadata::from_file(&file).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("inspect private registry snapshot {name}: {error}"))
+    })?;
+    validate_regular(&opened, name)?;
+    if leaf_identity(&before) != leaf_identity(&opened) || before.len() != opened.len() {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "private registry snapshot {name} changed while opening"
+        )));
+    }
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf).map_err(|error| {
+            SnapshotAttemptError::Unstable(format!(
+                "read private registry snapshot {name}: {error}"
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes.checked_add(read as u64).ok_or_else(|| {
+            SnapshotAttemptError::Unsafe(format!("private registry snapshot {name} size overflow"))
+        })?;
+        if bytes > MAX_REGISTRY_LEAF_BYTES {
+            return Err(SnapshotAttemptError::Unsafe(format!(
+                "private registry snapshot {name} exceeds byte limit"
+            )));
+        }
+        hash.update(&buf[..read]);
+    }
+    let after = cap_fs::stat(private_dir, Path::new(name), cap_fs::FollowSymlinks::No).map_err(
+        |error| {
+            SnapshotAttemptError::Unsafe(format!(
+                "reinspect private registry snapshot {name}: {error}"
+            ))
+        },
+    )?;
+    validate_regular(&after, name)?;
+    let actual_sha256: [u8; 32] = hash.finalize().into();
+    if leaf_identity(&opened) != leaf_identity(&after)
+        || opened.len() != after.len()
+        || bytes != expected.bytes
+        || actual_sha256 != expected.sha256
+    {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "private registry snapshot {name} changed or differs from its source copy"
+        )));
+    }
+    Ok(FileObservation {
+        identity: leaf_identity(&opened),
+        bytes,
+        sha256: actual_sha256,
+    })
+}
+
+fn verify_private_snapshot_before_sqlite(
+    private_dir: &fs::File,
+    initial: &RegistryManifest,
+) -> std::result::Result<PrivateSnapshotManifest, SnapshotAttemptError> {
+    let main = PRIVATE_REGISTRY_MAIN;
+    let wal = format!("{PRIVATE_REGISTRY_MAIN}-wal");
+    let shm = format!("{PRIVATE_REGISTRY_MAIN}-shm");
+    let mut allowed = std::collections::BTreeSet::new();
+    let LeafObservation::Present(main_expected) = &initial.main else {
+        return Err(SnapshotAttemptError::Unsafe(
+            "private registry snapshot has no main source observation".to_owned(),
+        ));
+    };
+    allowed.insert(main.to_owned());
+    let private_main = verify_private_snapshot_leaf(private_dir, main, main_expected)?;
+    let private_wal = if let LeafObservation::Present(wal_expected) = &initial.wal {
+        allowed.insert(wal.clone());
+        Some(verify_private_snapshot_leaf(
+            private_dir,
+            &wal,
+            wal_expected,
+        )?)
+    } else {
+        None
+    };
+    if !matches!(
+        cap_fs::stat(private_dir, Path::new(&shm), cap_fs::FollowSymlinks::No),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Err(SnapshotAttemptError::Unsafe(format!(
+            "private registry snapshot has unexpected pre-open sidecar {shm}"
+        )));
+    }
+    let entries = cap_fs::read_base_dir(private_dir).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("enumerate private registry snapshot: {error}"))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            SnapshotAttemptError::Unstable(format!(
+                "enumerate private registry snapshot entry: {error}"
+            ))
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(SnapshotAttemptError::Unsafe(
+                "private registry snapshot has a non-UTF-8 leaf".to_owned(),
+            ));
+        };
+        if !allowed.contains(&name) {
+            return Err(SnapshotAttemptError::Unsafe(format!(
+                "private registry snapshot has unexpected pre-open leaf {name}"
+            )));
+        }
+    }
+    Ok(PrivateSnapshotManifest {
+        main: private_main,
+        wal: private_wal,
+    })
+}
+
+fn snapshot_attempt(
+    parent: &fs::File,
+    parent_path: &Path,
+    main: &str,
+    #[cfg(test)] hook: Option<&SnapshotTestHook>,
+    #[cfg(not(test))] _hook: Option<&()>,
+    #[cfg(test)] attempt: usize,
+    #[cfg(not(test))] _attempt: usize,
+) -> std::result::Result<(Connection, RegistrySnapshot), SnapshotAttemptError> {
+    let storage = PrivateSnapshotStorage::create()?;
+    let initial = observe_manifest(parent, parent_path, main, Some(&storage), true)?;
+    let private_dir = {
+        #[cfg(windows)]
+        {
+            storage.as_windows()?.capability().map_err(|error| {
+                SnapshotAttemptError::Unstable(format!(
+                    "clone owner-private registry snapshot capability: {error}"
+                ))
+            })?
+        }
+        #[cfg(not(windows))]
+        cap_fs::open_ambient_dir(storage.path(), cap_primitives::ambient_authority()).map_err(
+            |error| {
+                SnapshotAttemptError::Unstable(format!(
+                    "open private registry snapshot directory capability: {error}"
+                ))
+            },
+        )?
+    };
+    let private_initial = verify_private_snapshot_before_sqlite(&private_dir, &initial)?;
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(SnapshotTestPhase::AfterInitialManifest, attempt, None);
+        hook(
+            SnapshotTestPhase::BeforeSnapshotSqliteOpen,
+            attempt,
+            Some(storage.path()),
+        );
+    }
+    let private_current = verify_private_snapshot_before_sqlite(&private_dir, &initial)?;
+    if private_initial != private_current {
+        return Err(SnapshotAttemptError::Unsafe(
+            "private registry snapshot changed before SQLite open".to_owned(),
+        ));
+    }
+    let snapshot_path = storage.path().join(PRIVATE_REGISTRY_MAIN);
+    let conn = match Connection::open_with_flags(
+        &snapshot_path,
+        // The snapshot directory is private and owned.  Do not pass NOFOLLOW
+        // here: SQLite's Unix VFS applies it to the private SHM sidecar too,
+        // preventing the read-only handle from initializing that private file.
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Err(classify_snapshot_sqlite_failure(
+                parent,
+                parent_path,
+                main,
+                &initial,
+                sqlite_snapshot_error(error, "open registry snapshot", false),
+            ));
+        }
+    };
+    if let Err(error) = conn.busy_timeout(Duration::from_millis(5000)) {
+        return Err(classify_snapshot_sqlite_failure(
+            parent,
+            parent_path,
+            main,
+            &initial,
+            sqlite_snapshot_error(error, "configure registry snapshot", false),
+        ));
+    }
+    if let Err(error) = conn.pragma_update(None, "query_only", "ON") {
+        return Err(classify_snapshot_sqlite_failure(
+            parent,
+            parent_path,
+            main,
+            &initial,
+            sqlite_snapshot_error(error, "make registry snapshot query-only", false),
+        ));
+    }
+    // Execute a real query before the final source recheck.  This exercises
+    // committed WAL visibility without ever passing the source path to SQLite.
+    if let Err(error) = conn
+        .query_row("SELECT 1 FROM scopes LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()
+    {
+        return Err(classify_snapshot_sqlite_failure(
+            parent,
+            parent_path,
+            main,
+            &initial,
+            sqlite_snapshot_error(error, "query registry snapshot", true),
+        ));
+    }
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(
+            SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck,
+            attempt,
+            None,
+        );
+    }
+    let final_manifest = observe_manifest(parent, parent_path, main, None, false)?;
+    if initial != final_manifest {
+        return Err(SnapshotAttemptError::Unstable(
+            "scope registry main/WAL/SHM changed while snapshotting".to_owned(),
+        ));
+    }
+    Ok((
+        conn,
+        RegistrySnapshot {
+            _private_dir: private_dir,
+            _storage: storage,
+        },
+    ))
+}
+
 impl RegistryDb {
     /// Open the registry as a strictly read-only cache. Evidence operations use
     /// this path so an absent registry never creates directories, a database,
     /// WAL sidecars, or schema state.
-    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let leaf = path.file_name().ok_or_else(|| {
-            crate::IndexError::Schema(format!(
-                "scope registry path has no file name: {}",
-                path.display()
-            ))
-        })?;
-        // SQLite's NOFOLLOW flag rejects a symlink in *any* pathname
-        // component on macOS. Resolve the existing parent first so ordinary
-        // OS-owned aliases such as /var -> /private/var remain usable, while
-        // still passing the untrusted final registry leaf to NOFOLLOW.
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let parent = parent.canonicalize().map_err(|error| {
-            crate::IndexError::Schema(format!(
-                "resolve scope registry parent {}: {error}",
-                parent.display()
-            ))
-        })?;
-        let path = parent.join(leaf);
-        let conn = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        conn.busy_timeout(Duration::from_millis(5000))?;
-        Ok(Self { conn })
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+    ) -> std::result::Result<Self, RegistrySnapshotError> {
+        Self::open_read_only_with_budget(path.as_ref(), REGISTRY_SNAPSHOT_RETRY_WINDOW)
+    }
+
+    /// Return a private, owned snapshot rather than opening the mutable source
+    /// registry.  SQLite is therefore free to create a private SHM file while
+    /// the source main/WAL/SHM leaves remain untouched.  This is deliberately
+    /// stable-or-fail, not a claim of a cross-file atomic filesystem snapshot.
+    fn open_read_only_with_budget(
+        path: &Path,
+        retry_window: Duration,
+    ) -> std::result::Result<Self, RegistrySnapshotError> {
+        let (parent, leaf, parent_path) = registry_parent_and_leaf(path)?;
+        let started = Instant::now();
+        let mut saw_instability = None;
+        for attempt in 0..MAX_REGISTRY_SNAPSHOT_ATTEMPTS {
+            match snapshot_attempt(&parent, &parent_path, &leaf, None, attempt) {
+                Ok((conn, snapshot)) => {
+                    return Ok(Self {
+                        conn,
+                        _snapshot: Some(snapshot),
+                    });
+                }
+                Err(SnapshotAttemptError::Unsafe(message)) => {
+                    return Err(RegistrySnapshotError::UnsafeIntegrity(message));
+                }
+                Err(SnapshotAttemptError::Missing) => {
+                    return match saw_instability {
+                        Some(message) => Err(RegistrySnapshotError::UnstableBusy(message)),
+                        None => Err(RegistrySnapshotError::Missing),
+                    };
+                }
+                Err(SnapshotAttemptError::Unstable(message)) => {
+                    saw_instability = Some(message.clone());
+                    if started.elapsed() >= retry_window
+                        || attempt + 1 == MAX_REGISTRY_SNAPSHOT_ATTEMPTS
+                    {
+                        return Err(RegistrySnapshotError::UnstableBusy(message));
+                    }
+                }
+            }
+            // Keep retrying within the same five-second busy boundary used by
+            // registry SQLite handles.  A short yield avoids a hot spin while
+            // preserving a bounded failure mode.
+            std::thread::yield_now();
+        }
+        Err(RegistrySnapshotError::UnstableBusy(
+            saw_instability
+                .unwrap_or_else(|| "scope registry snapshot retry budget exhausted".to_owned()),
+        ))
+    }
+
+    #[cfg(test)]
+    fn open_read_only_for_test(
+        path: &Path,
+        attempts: usize,
+        hook: SnapshotTestHook,
+    ) -> std::result::Result<Self, RegistrySnapshotError> {
+        let (parent, leaf, parent_path) = registry_parent_and_leaf(path)?;
+        let mut saw_instability = None;
+        for attempt in 0..attempts {
+            match snapshot_attempt(&parent, &parent_path, &leaf, Some(&hook), attempt) {
+                Ok((conn, snapshot)) => {
+                    return Ok(Self {
+                        conn,
+                        _snapshot: Some(snapshot),
+                    });
+                }
+                Err(SnapshotAttemptError::Unsafe(message)) => {
+                    return Err(RegistrySnapshotError::UnsafeIntegrity(message));
+                }
+                Err(SnapshotAttemptError::Missing) => {
+                    return match saw_instability {
+                        Some(message) => Err(RegistrySnapshotError::UnstableBusy(message)),
+                        None => Err(RegistrySnapshotError::Missing),
+                    };
+                }
+                Err(SnapshotAttemptError::Unstable(message)) if attempt + 1 == attempts => {
+                    return Err(RegistrySnapshotError::UnstableBusy(message));
+                }
+                Err(SnapshotAttemptError::Unstable(message)) => saw_instability = Some(message),
+            }
+        }
+        Err(RegistrySnapshotError::UnstableBusy(
+            "scope registry test retry budget exhausted".to_owned(),
+        ))
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -118,7 +1226,10 @@ impl RegistryDb {
                 PRIMARY KEY (scope_id, kio_path)
             );",
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _snapshot: None,
+        })
     }
 
     pub fn open_default() -> Result<Self> {
@@ -126,7 +1237,7 @@ impl RegistryDb {
     }
 
     pub fn open_default_read_only() -> Result<Self> {
-        Self::open_read_only(default_registry_path()?)
+        Self::open_read_only(default_registry_path()?).map_err(index_error_from_snapshot)
     }
 
     /// R15-3: retire every registration for `kio_path` whose `scope_id` differs
@@ -193,6 +1304,16 @@ impl RegistryDb {
              ORDER BY last_seen_at DESC, kio_path",
             params![scope_id],
         )
+    }
+
+    /// Evidence callers use this typed variant so an owned snapshot query
+    /// failure cannot be mistaken for a missing cache and bypass duplicate
+    /// resolution safeguards.
+    pub fn lookup_scope_id_snapshot(
+        &self,
+        scope_id: &str,
+    ) -> std::result::Result<Vec<RegistryEntry>, RegistrySnapshotError> {
+        self.lookup_scope_id(scope_id).map_err(snapshot_query_error)
     }
 
     pub fn get(&self, scope_id: &str, kio_path: &str) -> Result<Option<RegistryEntry>> {
@@ -265,6 +1386,35 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegistryEntry> {
 mod tests {
     use super::*;
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct RegistrySnapshot {
+        bytes: Vec<u8>,
+        is_file: bool,
+        len: u64,
+        readonly: bool,
+        #[cfg(unix)]
+        mode: u32,
+        #[cfg(unix)]
+        nlink: u64,
+    }
+
+    fn snapshot_registry(path: &Path) -> RegistrySnapshot {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        RegistrySnapshot {
+            bytes: std::fs::read(path).unwrap(),
+            is_file: metadata.file_type().is_file(),
+            len: metadata.len(),
+            readonly: metadata.permissions().readonly(),
+            #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            nlink: metadata.nlink(),
+        }
+    }
+
     fn entry(scope_id: &str, root: &str, participates: bool, indexed: bool) -> RegistryEntry {
         RegistryEntry {
             scope_id: scope_id.to_owned(),
@@ -314,6 +1464,598 @@ mod tests {
         db.upsert(&entry("scope_a", "/tmp/a", true, true)).unwrap();
         let db = RegistryDb::open_read_only(dir.path().join("scope-registry.sqlite")).unwrap();
         assert_eq!(db.lookup_scope_id("scope_a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn read_only_lookup_does_not_create_wal_sidecars_or_mutate_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let wal_path = dir.path().join("scope-registry.sqlite-wal");
+        let shm_path = dir.path().join("scope-registry.sqlite-shm");
+        let expected = entry("scope_a", "/tmp/a", true, true);
+
+        // Create a WAL-mode registry with a committed lookup row, then close the
+        // writer. Closing the only writer checkpoints it, leaving no sidecars for
+        // the read-only evidence path to inherit.
+        let writer = RegistryDb::open(&path).unwrap();
+        writer.upsert(&expected).unwrap();
+        let journal_mode: String = writer
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+        drop(writer);
+        assert!(
+            !wal_path.exists(),
+            "test precondition: writer close must leave no -wal sidecar"
+        );
+        assert!(
+            !shm_path.exists(),
+            "test precondition: writer close must leave no -shm sidecar"
+        );
+        let before = snapshot_registry(&path);
+        assert_eq!(before.bytes.get(18), Some(&2), "WAL read version missing");
+        assert_eq!(before.bytes.get(19), Some(&2), "WAL write version missing");
+
+        let reader = RegistryDb::open_read_only(&path).unwrap();
+        assert_eq!(reader.lookup_scope_id("scope_a").unwrap(), vec![expected]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let temp = reader._snapshot.as_ref().unwrap()._storage.path();
+            assert_eq!(fs::metadata(temp).unwrap().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::metadata(temp.join(PRIVATE_REGISTRY_MAIN))
+                    .unwrap()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            // Any SQLite sidecars here are private implementation state; the
+            // source sidecars remain absent below.
+        }
+        drop(reader);
+
+        assert_eq!(snapshot_registry(&path), before, "main registry changed");
+        let wal_exists = wal_path.exists();
+        let shm_exists = shm_path.exists();
+        assert!(
+            !wal_exists && !shm_exists,
+            "read-only lookup created WAL sidecars: -wal={wal_exists}, -shm={shm_exists}"
+        );
+    }
+
+    #[test]
+    fn read_only_snapshot_sees_committed_uncheckpointed_wal_without_touching_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let wal = dir.path().join("scope-registry.sqlite-wal");
+        let shm = dir.path().join("scope-registry.sqlite-shm");
+        let expected = entry("scope_wal", "/tmp/wal", true, true);
+
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 0i64)
+            .unwrap();
+        // Keep a reader transaction alive so the committed WAL frame remains
+        // available for the snapshot instead of relying on close/checkpoint.
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM scopes;")
+            .unwrap();
+        writer.upsert(&expected).unwrap();
+        assert!(wal.is_file(), "fixture requires a source WAL");
+        assert!(shm.is_file(), "fixture requires a source SHM");
+        let fresh = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count: i64 = fresh
+            .query_row(
+                "SELECT count(*) FROM scopes WHERE scope_id = ?1",
+                params!["scope_wal"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "fixture committed row must be normally visible");
+        let before_main = snapshot_registry(&path);
+        let before_wal = snapshot_registry(&wal);
+        let before_shm = snapshot_registry(&shm);
+
+        let snapshot = RegistryDb::open_read_only(&path).unwrap();
+        assert_eq!(
+            snapshot.lookup_scope_id("scope_wal").unwrap(),
+            vec![expected]
+        );
+        drop(snapshot);
+
+        assert_eq!(snapshot_registry(&path), before_main);
+        assert_eq!(snapshot_registry(&wal), before_wal);
+        assert_eq!(snapshot_registry(&shm), before_shm);
+        drop(fresh);
+        drop(reader);
+        drop(writer);
+    }
+
+    #[test]
+    fn read_only_missing_registry_is_typed_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("scope-registry.sqlite");
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::Missing)
+        ));
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_registry_path_normalization_only_rewrites_var_alias() {
+        assert_eq!(
+            normalized_absolute_registry_path(Path::new("/var/folders/kio/scope-registry.sqlite"))
+                .unwrap(),
+            PathBuf::from("/private/var/folders/kio/scope-registry.sqlite")
+        );
+        assert_eq!(
+            normalized_absolute_registry_path(Path::new("/tmp/kio/scope-registry.sqlite")).unwrap(),
+            PathBuf::from("/tmp/kio/scope-registry.sqlite")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_snapshot_rejects_immediate_parent_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        symlink(&target, &link).unwrap();
+        let path = link.join("scope-registry.sqlite");
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_snapshot_rejects_nested_ancestor_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        symlink(&target, &link).unwrap();
+        let child = link.join("child");
+        fs::create_dir(target.join("child")).unwrap();
+        let path = child.join("scope-registry.sqlite");
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[test]
+    fn parent_component_regular_directory_replacement_between_stat_and_open_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let path = nested.join("scope-registry.sqlite");
+        let moved = dir.path().join("moved");
+        let final_index = normalized_absolute_registry_path(&path)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .components()
+            .filter(|component| matches!(component, Component::Normal(_)))
+            .count()
+            - 1;
+        PARENT_COMPONENT_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(std::sync::Arc::new(move |index| {
+                if index == final_index {
+                    fs::rename(&nested, &moved).unwrap();
+                    fs::create_dir(&nested).unwrap();
+                }
+            }));
+        });
+        let result = RegistryDb::open_read_only(&path);
+        PARENT_COMPONENT_HOOK.with(|slot| *slot.borrow_mut() = None);
+        match result {
+            Err(RegistrySnapshotError::UnsafeIntegrity(_)) => {}
+            Err(error) => panic!("expected unsafe replacement failure, got {error}"),
+            Ok(_) => panic!("expected replacement failure"),
+        }
+    }
+
+    #[test]
+    fn snapshot_final_all_absent_is_unstable_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let main = path.clone();
+        let wal = dir.path().join("scope-registry.sqlite-wal");
+        let shm = dir.path().join("scope-registry.sqlite-shm");
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                let _ = fs::remove_file(&main);
+                let _ = fs::remove_file(&wal);
+                let _ = fs::remove_file(&shm);
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_absent_to_present_sidecar_is_unstable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let shm = dir.path().join("scope-registry.sqlite-shm");
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                fs::write(&shm, b"changed").unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_snapshot_preopen_sidecar_symlink_is_unsafe() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let target = dir.path().join("outside-shm-target");
+        fs::write(&target, b"outside").unwrap();
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, private| {
+            if phase == SnapshotTestPhase::BeforeSnapshotSqliteOpen {
+                let private = private.expect("pre-open hook carries private snapshot path");
+                symlink(&target, private.join("snapshot.sqlite-shm")).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[test]
+    fn private_snapshot_preopen_main_replacement_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, private| {
+            if phase == SnapshotTestPhase::BeforeSnapshotSqliteOpen {
+                let private = private.expect("pre-open hook carries private snapshot path");
+                let main = private.join(PRIVATE_REGISTRY_MAIN);
+                let replacement = private.join("replacement.sqlite");
+                fs::copy(&main, &replacement).unwrap();
+                #[cfg(windows)]
+                fs::remove_file(&main).unwrap();
+                fs::rename(&replacement, &main).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_identity_replacement_is_unstable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let replacement = dir.path().join("replacement.sqlite");
+        let source = path.clone();
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                fs::copy(&source, &replacement).unwrap();
+                #[cfg(windows)]
+                fs::remove_file(&source).unwrap();
+                fs::rename(&replacement, &source).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_churn_exhausts_deterministic_test_retry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let shm = dir.path().join("scope-registry.sqlite-shm");
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                fs::write(&shm, format!("churn-{attempt}")).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 2, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_instability_followed_by_disappearance_is_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        drop(writer);
+        let main = path.clone();
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck && attempt == 0 {
+                fs::remove_file(&main).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 2, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_wal_disappearance_is_unstable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let wal = dir.path().join("scope-registry.sqlite-wal");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 0i64)
+            .unwrap();
+        writer
+            .upsert(&entry("scope_a", "/tmp/a", true, true))
+            .unwrap();
+        assert!(wal.exists());
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                fs::remove_file(&wal).unwrap();
+            }
+        });
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::UnstableBusy(_))
+        ));
+        drop(writer);
+    }
+
+    #[test]
+    fn stable_malformed_registry_schema_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE scopes (scope_id TEXT);")
+            .unwrap();
+        drop(conn);
+        let snapshot = RegistryDb::open_read_only(&path).unwrap();
+        match snapshot.lookup_scope_id_snapshot("scope") {
+            Err(RegistrySnapshotError::UnsafeIntegrity(_)) => {}
+            Err(error) => panic!("expected malformed schema unsafe error, got {error}"),
+            Ok(_) => panic!("malformed schema lookup unexpectedly succeeded"),
+        }
+    }
+
+    #[test]
+    fn stable_empty_sqlite_registry_without_scopes_table_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        drop(Connection::open(&path).unwrap());
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[test]
+    fn busy_snapshot_query_error_is_retryable() {
+        let error = crate::IndexError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ));
+        assert!(matches!(
+            snapshot_query_error(error),
+            RegistrySnapshotError::UnstableBusy(_)
+        ));
+    }
+
+    #[test]
+    fn snapshot_query_cannot_open_and_io_errors_are_retryable() {
+        for code in [rusqlite::ffi::SQLITE_CANTOPEN, rusqlite::ffi::SQLITE_IOERR] {
+            let error = crate::IndexError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(matches!(
+                snapshot_query_error(error),
+                RegistrySnapshotError::UnstableBusy(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn snapshot_query_proven_corruption_and_schema_errors_are_unsafe() {
+        for code in [
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+            rusqlite::ffi::SQLITE_SCHEMA,
+        ] {
+            let error = crate::IndexError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert!(matches!(
+                snapshot_query_error(error),
+                RegistrySnapshotError::UnsafeIntegrity(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn private_snapshot_cannot_open_and_io_errors_are_retryable() {
+        for code in [rusqlite::ffi::SQLITE_CANTOPEN, rusqlite::ffi::SQLITE_IOERR] {
+            let error = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            assert!(matches!(
+                sqlite_snapshot_error(error, "open registry snapshot", false),
+                SnapshotAttemptError::Unstable(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn proven_snapshot_corruption_and_schema_errors_are_unsafe() {
+        for code in [
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+            rusqlite::ffi::SQLITE_SCHEMA,
+        ] {
+            let error = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            assert!(matches!(
+                sqlite_snapshot_error(error, "query registry snapshot", true),
+                SnapshotAttemptError::Unsafe(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn sqlite_error_is_unsafe_only_for_fixed_schema_probe() {
+        let open_error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            None,
+        );
+        assert!(matches!(
+            sqlite_snapshot_error(open_error, "open registry snapshot", false),
+            SnapshotAttemptError::Unstable(_)
+        ));
+        let probe_error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            None,
+        );
+        assert!(matches!(
+            sqlite_snapshot_error(probe_error, "query registry snapshot", true),
+            SnapshotAttemptError::Unsafe(_)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_registry_path_policy_accepts_only_absolute_disk_or_unc_roots() {
+        for accepted in [
+            r"C:\kio\scope-registry.sqlite",
+            r"\\server\share\kio\scope-registry.sqlite",
+        ] {
+            assert!(
+                normalized_absolute_registry_path(Path::new(accepted)).is_ok(),
+                "{accepted}"
+            );
+        }
+        for rejected in [
+            r"kio\scope-registry.sqlite",
+            r"C:kio\scope-registry.sqlite",
+            r"C:\kio\..\scope-registry.sqlite",
+            r"\\?\C:\kio\scope-registry.sqlite",
+            r"\\?\UNC\server\share\kio\scope-registry.sqlite",
+            r"\\.\PhysicalDrive0",
+        ] {
+            assert!(
+                normalized_absolute_registry_path(Path::new(rejected)).is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_oversized_leaf_before_sqlite_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_REGISTRY_LEAF_BYTES + 1).unwrap();
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_snapshot_rejects_hardlinked_wal_leaf() {
+        use std::fs::hard_link;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let wal = dir.path().join("scope-registry.sqlite-wal");
+        let victim = dir.path().join("wal-victim");
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 0i64)
+            .unwrap();
+        writer
+            .upsert(&entry("scope_wal", "/tmp/wal", true, true))
+            .unwrap();
+        assert!(wal.is_file());
+        hard_link(&wal, &victim).unwrap();
+        let error = match RegistryDb::open_read_only(&path) {
+            Ok(_) => panic!("hardlinked WAL must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, RegistrySnapshotError::UnsafeIntegrity(_)));
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_snapshot_rejects_symlinked_main_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.sqlite");
+        fs::write(&target, b"not a registry").unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        symlink(&target, &path).unwrap();
+        assert!(matches!(
+            RegistryDb::open_read_only(&path),
+            Err(RegistrySnapshotError::UnsafeIntegrity(_))
+        ));
     }
 
     #[test]

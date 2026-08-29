@@ -276,6 +276,16 @@ CREATE TABLE scopes (
 
 - WAL モード + busy_timeout 5000ms で複数プロセスの書き込みを直列化する
   ([05-runtime.md](05-runtime.md) 同時実行規約)
+- EvidenceReadOnly の registry 解決は source registry を SQLite で直接開かない。main / `-wal` /
+  `-shm` を NOFOLLOW・regular・identity・size・SHA で前後観測し、private TempDir へ main と
+  存在する WAL だけを copy して query_only reader を開く。3 leaf の presence を含む比較が崩れた
+  場合は stable-or-fail（formal atomic snapshot の主張ではない）で停止する。main / `-wal` / `-shm` の
+  **全 3 leaf が absent** の場合だけが no-create cache miss であり、main absent + sidecar present は
+  unsafe integrity。unsafe leaf・pre/open/post identity mismatch、または source 再観測が一致した
+  owned copy の SQLite integrity failure は `KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001` / exit 4、presence/hash
+  drift・busy・retry exhaustion・temp I/O・integrity を確定できない private snapshot read-open-query
+  failure は `KIO-E-REGISTRY-SNAPSHOT-001` / exit 3。これらを hint / CWD fallback や scope status に
+  落とさない。
 - upsert は `(scope_id, kio_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する。`root_path` /
   `kio_path` は canonical 形で保存する (規則の正本 = [05-runtime.md §1.8](05-runtime.md): 絶対化 →
   lexical 解決 → 末尾 separator 除去 → realpath、比較は byte 単位)

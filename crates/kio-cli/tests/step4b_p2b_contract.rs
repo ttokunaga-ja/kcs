@@ -2241,3 +2241,201 @@ fn pb42_open_view_side_binds_to_pointer_tool_profile_hash_not_first_raw_hash_mat
     let verify_output = success(&dir, &["evidence", "verify", &pointer_json]);
     assert_eq!(verify_output["status"], "alive", "{verify_output}");
 }
+
+/// Evidence's registry is only a cache miss when the registry is genuinely
+/// absent.  A valid pointer hint remains usable, and the read-only resolver
+/// must not recreate the device cache merely to perform that lookup.
+#[test]
+fn registry_snapshot_missing_is_a_no_create_cache_miss_with_valid_hint() {
+    let (dir, pointer, _) = fixture();
+    let registry_dir = registry_path(&dir).parent().unwrap().to_path_buf();
+    fs::remove_dir_all(&registry_dir).unwrap();
+    assert!(!registry_dir.exists());
+
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+    let output = kio(&dir, &["evidence", "verify", &pointer_text])
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(output["status"], "alive", "{output}");
+    assert!(
+        !registry_dir.exists(),
+        "EvidenceReadOnly recreated a missing registry cache"
+    );
+}
+
+/// A valid scope_path must not bypass an unsafe registry leaf.  This is a
+/// command-level integrity failure, so neither single nor batch verify emits
+/// a result envelope on stdout.
+#[cfg(unix)]
+#[test]
+fn registry_snapshot_unsafe_leaf_fails_closed_without_hint_fallback_or_stdout() {
+    let (dir, pointer, _) = fixture();
+    let registry = registry_path(&dir);
+    let victim = dir.path().join("registry-snapshot-victim");
+    let victim_bytes = b"do not follow this registry link";
+    fs::write(&victim, victim_bytes).unwrap();
+    fs::remove_file(&registry).unwrap();
+    std::os::unix::fs::symlink(&victim, &registry).unwrap();
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+
+    let single = kio(&dir, &["evidence", "verify", &pointer_text])
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(single.status.code(), Some(4), "{single:?}");
+    assert!(single.stdout.is_empty(), "{single:?}");
+    let single_error: Value = serde_json::from_slice(&single.stderr).unwrap();
+    assert_eq!(
+        single_error["error_code"], "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001",
+        "{single_error}"
+    );
+
+    let batch_path = batch_file(
+        &dir,
+        "unsafe-registry.jsonl",
+        format!("{pointer_text}\n").as_bytes(),
+    );
+    let batch = batch_output(&dir, &batch_path, false);
+    assert_eq!(batch.status.code(), Some(4), "{batch:?}");
+    assert!(batch.stdout.is_empty(), "{batch:?}");
+    let batch_error: Value = serde_json::from_slice(&batch.stderr).unwrap();
+    assert_eq!(
+        batch_error["error_code"], "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001",
+        "{batch_error}"
+    );
+    assert_eq!(fs::read(&victim).unwrap(), victim_bytes);
+}
+
+/// A snapshot may open and satisfy its pre-query yet still fail the typed
+/// candidate query.  That malformed schema is unsafe integrity, never a
+/// cache miss that a valid pointer hint can bypass.
+#[test]
+fn registry_snapshot_malformed_lookup_fails_closed_for_single_and_batch() {
+    let (dir, pointer, _) = fixture();
+    let registry = registry_path(&dir);
+    fs::remove_file(&registry).unwrap();
+    let malformed = rusqlite::Connection::open(&registry).unwrap();
+    malformed
+        .execute_batch("CREATE TABLE scopes(scope_id TEXT)")
+        .unwrap();
+    drop(malformed);
+    let registry_before = fs::read(&registry).unwrap();
+    let scope_before = fs::read(kio_dir(&dir).join("scope.json")).unwrap();
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+
+    let single = kio(&dir, &["evidence", "verify", &pointer_text])
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(single.status.code(), Some(4), "{single:?}");
+    assert!(single.stdout.is_empty(), "{single:?}");
+    let single_error: Value = serde_json::from_slice(&single.stderr).unwrap();
+    assert_eq!(
+        single_error["error_code"],
+        "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001"
+    );
+    assert_eq!(single_error["context"]["reason"], "unsafe_integrity");
+
+    let batch_path = batch_file(
+        &dir,
+        "malformed-registry.jsonl",
+        format!("{pointer_text}\n").as_bytes(),
+    );
+    let batch = batch_output(&dir, &batch_path, false);
+    assert_eq!(batch.status.code(), Some(4), "{batch:?}");
+    assert!(batch.stdout.is_empty(), "{batch:?}");
+    let batch_error: Value = serde_json::from_slice(&batch.stderr).unwrap();
+    assert_eq!(
+        batch_error["error_code"],
+        "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001"
+    );
+    assert_eq!(batch_error["context"]["reason"], "unsafe_integrity");
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    assert_eq!(
+        fs::read(kio_dir(&dir).join("scope.json")).unwrap(),
+        scope_before
+    );
+}
+
+#[cfg(unix)]
+fn geteuid_is_root() -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: libc's geteuid has no preconditions and returns the effective
+    // uid of this test process.
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(unix)]
+struct PermissionRestore {
+    path: std::path::PathBuf,
+    original: std::fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionRestore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
+/// A source leaf that cannot be opened is retryable, and a valid hint cannot
+/// turn it into an alive result.  Root bypasses mode bits, so that environment
+/// cannot exercise this Unix permission boundary.
+#[cfg(unix)]
+#[test]
+fn registry_snapshot_unreadable_leaf_is_retryable_without_hint_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if geteuid_is_root() {
+        return;
+    }
+    let (dir, pointer, _) = fixture();
+    let registry = registry_path(&dir);
+    let registry_before = fs::read(&registry).unwrap();
+    let scope_before = fs::read(kio_dir(&dir).join("scope.json")).unwrap();
+    let original = fs::metadata(&registry).unwrap().permissions();
+    let _restore = PermissionRestore {
+        path: registry.clone(),
+        original,
+    };
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o000)).unwrap();
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+
+    let single = kio(&dir, &["evidence", "verify", &pointer_text])
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(single.status.code(), Some(3), "{single:?}");
+    assert!(single.stdout.is_empty(), "{single:?}");
+    let single_error: Value = serde_json::from_slice(&single.stderr).unwrap();
+    assert_eq!(single_error["error_code"], "KIO-E-REGISTRY-SNAPSHOT-001");
+    assert_eq!(single_error["context"]["reason"], "unstable_or_busy");
+
+    let batch_path = batch_file(
+        &dir,
+        "unreadable-registry.jsonl",
+        format!("{pointer_text}\n").as_bytes(),
+    );
+    let batch = batch_output(&dir, &batch_path, false);
+    assert_eq!(batch.status.code(), Some(3), "{batch:?}");
+    assert!(batch.stdout.is_empty(), "{batch:?}");
+    let batch_error: Value = serde_json::from_slice(&batch.stderr).unwrap();
+    assert_eq!(batch_error["error_code"], "KIO-E-REGISTRY-SNAPSHOT-001");
+    assert_eq!(batch_error["context"]["reason"], "unstable_or_busy");
+
+    // Read through the original open descriptor is not possible after mode
+    // removal; restore before asserting source bytes are unchanged.
+    drop(_restore);
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    assert_eq!(
+        fs::read(kio_dir(&dir).join("scope.json")).unwrap(),
+        scope_before
+    );
+}

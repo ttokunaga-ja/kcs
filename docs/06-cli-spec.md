@@ -561,6 +561,16 @@ kio open / view / restore      dead pointer (tombstoned / not_found) は 4。sco
 kio evidence retarget          canonical heading_path exact match が 0 件なら KIO-E-EVIDENCE-RETARGET-NOT-FOUND-001 / 4、複数なら KIO-E-EVIDENCE-RETARGET-AMBIG-001 / 4。invalid pointer / --at は 2、shallow/drift は既存 retryable 分類、CAS 矛盾は 4。
 ```
 
+Evidence の registry snapshot は command-level preflight である。source registry の symlink /
+hardlink / non-regular leaf、pre/open/post の identity 不一致、または source 再観測が一致した
+owned copy の SQLite integrity failure は `KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001` / exit 4 とする。
+source leaf の presence/hash drift、busy、bounded retry 内に安定しない snapshot、temp I/O、または
+copy/open/query 中に integrity を確定できない failure は `KIO-E-REGISTRY-SNAPSHOT-001` / exit 3 とし、
+いずれも stdout を空にして single verify / batch verify / retarget へ同じまま伝播する。これらは
+scope status や `batch_changed` に変換しない。registry main / `-wal` / `-shm` の **全 3 leaf が absent**
+の場合だけは cache miss であり、既存の validated hint / CWD 候補規則を継続できる。main absent で
+sidecar が存在する形は unsafe integrity である。
+
 スクリプト連携 (`kio index && kio search`) はこれらを参照する。コマンド固有の補足は各 sub-command の docstring で明記。
 
 ---

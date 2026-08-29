@@ -945,7 +945,19 @@ impl EvidenceScopeBinding {
             } => {
                 let current =
                     resolve_evidence_scope_target(&self.scope_id, self.scope_path.as_deref())
-                        .map_err(|_| batch_changed_error())?;
+                        .map_err(|error| {
+                            // A second resolver invocation is the existing
+                            // post-bind authority re-observation.  Only a known
+                            // target/index drift becomes BATCH-CHANGED; an unsafe
+                            // or unstable registry snapshot remains the original
+                            // command-level error and never turns into a nested
+                            // verification result.
+                            if is_registry_snapshot_error(&error) {
+                                error
+                            } else {
+                                batch_changed_error()
+                            }
+                        })?;
                 if current.repo_root != target.repo_root || current.kio_dir != target.kio_dir {
                     return Err(batch_changed_error());
                 }
@@ -1005,8 +1017,16 @@ fn unavailable_evidence_result(
                 ExitCode::PartialFailure,
             ))
         }
+        Err(error) if is_registry_snapshot_error(&error) => Err(error),
         _ => Err(batch_changed_error()),
     }
+}
+
+fn is_registry_snapshot_error(error: &KioError) -> bool {
+    matches!(
+        error.error_code(),
+        "KIO-E-REGISTRY-SNAPSHOT-001" | "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001"
+    )
 }
 
 fn bind_evidence_scope(pointer: &EvidencePointer, strict: bool) -> Result<EvidenceScopeBinding> {
@@ -4359,6 +4379,7 @@ mod tests {
     #[test]
     fn batch_cache_hit_still_rechecks_scope_authority() {
         let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("isolated-data/kio/scope-registry.sqlite");
         let pointer = EvidencePointer {
             schema_version: 1,
             commit: hash('a'),
@@ -4374,26 +4395,30 @@ mod tests {
             scope_id: "batch-cache-final-recheck-unreachable".to_owned(),
             scope_path: Some(dir.path().join("missing-scope").display().to_string()),
         };
-        let mut bindings = bind_batch_scopes(std::slice::from_ref(&pointer), false).unwrap();
-        let original = match &bindings[0].state {
-            EvidenceScopeState::Unavailable(result) => result.clone(),
-            EvidenceScopeState::Ready { .. } => panic!("fixture scope must be unreachable"),
-        };
-        let key = evidence_pointer_cache_key(&pointer).unwrap();
-        let mut cache = BTreeMap::from([(key, original)]);
+        with_evidence_registry_path_for_test(registry_path.clone(), || {
+            let mut bindings = bind_batch_scopes(std::slice::from_ref(&pointer), false).unwrap();
+            let original = match &bindings[0].state {
+                EvidenceScopeState::Unavailable(result) => result.clone(),
+                EvidenceScopeState::Ready { .. } => panic!("fixture scope must be unreachable"),
+            };
+            let key = evidence_pointer_cache_key(&pointer).unwrap();
+            let mut cache = BTreeMap::from([(key, original)]);
 
-        let EvidenceScopeState::Unavailable(expected) = &mut bindings[0].state else {
-            unreachable!("fixture scope must remain unreachable");
-        };
-        expected
-            .result
-            .details
-            .as_object_mut()
-            .unwrap()
-            .insert("changed_after_cache_fill".to_owned(), json!(true));
+            let EvidenceScopeState::Unavailable(expected) = &mut bindings[0].state else {
+                unreachable!("fixture scope must remain unreachable");
+            };
+            expected
+                .result
+                .details
+                .as_object_mut()
+                .unwrap()
+                .insert("changed_after_cache_fill".to_owned(), json!(true));
 
-        let error = verify_batch_row(&pointer, false, &bindings, &mut cache).unwrap_err();
-        assert_eq!(error.error_code(), "KIO-E-EVIDENCE-BATCH-CHANGED-001");
+            let error = verify_batch_row(&pointer, false, &bindings, &mut cache).unwrap_err();
+            assert_eq!(error.error_code(), "KIO-E-EVIDENCE-BATCH-CHANGED-001");
+        });
+        assert!(!registry_path.exists());
+        assert!(!registry_path.parent().unwrap().exists());
     }
 
     fn commit(kind: CommitType, created_at: &str) -> CommitObject {

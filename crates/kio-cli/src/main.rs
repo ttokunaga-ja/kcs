@@ -90,7 +90,9 @@ use kio_index::fts::{
     FtsTokenizer, SqliteFtsIndex, open_existing_source_index_connection,
     read_bound_gc_index_metadata,
 };
-use kio_index::registry::{RegistryDb, RegistryEntry};
+use kio_index::registry::{
+    RegistryDb, RegistryEntry, RegistrySnapshotError, default_registry_path,
+};
 use kio_index::{
     ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
 };
@@ -13760,10 +13762,208 @@ pub(crate) fn resolve_evidence_scope_target(
     scope_id: &str,
     scope_path_hint: Option<&str>,
 ) -> Result<ScopeTarget> {
-    resolve_scope_target_with_mode(
+    resolve_evidence_scope_target_with_snapshot(scope_id, scope_path_hint)
+}
+
+/// Evidence resolution takes exactly one owned registry snapshot per resolution.
+/// The snapshot supplies both the live-candidate union and the final
+/// incompatible-format peek; unsafe or unstable registry state is a command
+/// failure, never a reason to bypass the registry using a hint or CWD.
+fn resolve_evidence_scope_target_with_snapshot(
+    scope_id: &str,
+    scope_path_hint: Option<&str>,
+) -> Result<ScopeTarget> {
+    let registry_path = evidence_registry_path().map_err(|error| {
+        registry_snapshot_transient_error(
+            Path::new("<unresolved>"),
+            "path_resolution",
+            error.to_string(),
+        )
+    })?;
+    let registry = match RegistryDb::open_read_only(&registry_path) {
+        Ok(registry) => Some(registry),
+        Err(RegistrySnapshotError::Missing) => None,
+        Err(error) => return Err(registry_snapshot_open_error(&registry_path, error)),
+    };
+    // Keep the owned `RegistryDb` alive through candidate selection and the
+    // format peek.  `entries` is consequently one coherent, private snapshot
+    // generation rather than a second live-registry open.
+    let entries = registry
+        .as_ref()
+        .map(|registry| {
+            registry
+                .lookup_scope_id_snapshot(scope_id)
+                .map_err(|error| registry_snapshot_lookup_error(&registry_path, error))
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    // A valid scope_path is a candidate, not an authority: fold it into the
+    // same deduplicated pool as the rows read from this snapshot.
+    let hinted = scope_path_hint
+        .and_then(|hint| {
+            open_scope_from_hint_with_mode(hint, ScopeResolutionMode::EvidenceReadOnly)
+        })
+        .filter(|target| target.scope_id == scope_id);
+    if let Some(target) = resolve_scope_id_from_registry_entries(
         scope_id,
-        scope_path_hint,
+        hinted,
         ScopeResolutionMode::EvidenceReadOnly,
+        &entries,
+    )? {
+        return Ok(target);
+    }
+
+    // A cache miss alone retains the documented hint/CWD recovery path.  The
+    // branches above deliberately returned before this point for every unsafe,
+    // unstable, busy, copy/open/query, or TOCTOU snapshot outcome.
+    if let Some(target) = current_scope_target_with_mode(ScopeResolutionMode::EvidenceReadOnly)
+        .ok()
+        .filter(|target| target.scope_id == scope_id)
+    {
+        return Ok(target);
+    }
+
+    // QB6: re-use the entries from the owned snapshot, rather than re-opening
+    // the mutable registry for the incompatible-format diagnosis.
+    let mut candidate_roots: Vec<PathBuf> = Vec::new();
+    if let Some(hint) = scope_path_hint {
+        candidate_roots.push(PathBuf::from(hint));
+    }
+    candidate_roots.extend(entries.iter().map(|entry| PathBuf::from(&entry.root_path)));
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_roots.push(cwd);
+    }
+    for root in candidate_roots {
+        if let Some(version) = peek_incompatible_format_version(&root, scope_id) {
+            return Err(KioError::incompatible_format(version));
+        }
+    }
+    Err(scope_unreachable_error(scope_id))
+}
+
+#[cfg(test)]
+thread_local! {
+    static EVIDENCE_REGISTRY_PATH_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn evidence_registry_path() -> kio_index::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = EVIDENCE_REGISTRY_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(path);
+    }
+    default_registry_path()
+}
+
+#[cfg(test)]
+fn with_evidence_registry_path_for_test<T>(path: PathBuf, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EVIDENCE_REGISTRY_PATH_OVERRIDE.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = EVIDENCE_REGISTRY_PATH_OVERRIDE.with(|slot| slot.replace(Some(path)));
+    let _restore = Restore(previous);
+    run()
+}
+
+fn resolve_scope_id_from_registry_entries(
+    scope_id: &str,
+    extra_live: Option<ScopeTarget>,
+    mode: ScopeResolutionMode,
+    entries: &[RegistryEntry],
+) -> Result<Option<ScopeTarget>> {
+    let mut live = Vec::<ScopeTarget>::new();
+    live.extend(extra_live);
+    for entry in entries {
+        if let Some(target) = open_scope_from_hint_with_mode(&entry.root_path, mode)
+            && target.scope_id == scope_id
+        {
+            live.push(target);
+        }
+    }
+    if live.is_empty() {
+        return Ok(None);
+    }
+    let mut unique_dirs = live
+        .iter()
+        .map(|target| target.kio_dir.clone())
+        .collect::<Vec<_>>();
+    unique_dirs.sort();
+    unique_dirs.dedup();
+    if unique_dirs.len() > 1 {
+        return Err(registry_duplicate_error(scope_id, &unique_dirs));
+    }
+    Ok(live.into_iter().next())
+}
+
+fn registry_snapshot_unsafe_error(registry_path: &Path, detail: String) -> KioError {
+    KioError::new(
+        "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001",
+        "scope registry could not be read without violating integrity safeguards",
+        json!({
+            "registry_path": registry_path,
+            "reason": "unsafe_integrity",
+            "detail": detail,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn registry_snapshot_open_error(registry_path: &Path, error: RegistrySnapshotError) -> KioError {
+    match error {
+        RegistrySnapshotError::Missing => registry_snapshot_unsafe_error(
+            registry_path,
+            "registry snapshot open reported Missing after a present leaf was required".to_owned(),
+        ),
+        RegistrySnapshotError::UnsafeIntegrity(detail) => {
+            registry_snapshot_unsafe_error(registry_path, detail)
+        }
+        RegistrySnapshotError::UnstableBusy(detail) => {
+            registry_snapshot_transient_error(registry_path, "unstable_or_busy", detail)
+        }
+    }
+}
+
+fn registry_snapshot_lookup_error(registry_path: &Path, error: RegistrySnapshotError) -> KioError {
+    match error {
+        // `RegistryDb` owns a successfully opened snapshot here.  A later
+        // Missing therefore cannot be a cache miss and must never enable hint
+        // or CWD fallback.
+        RegistrySnapshotError::Missing => registry_snapshot_unsafe_error(
+            registry_path,
+            "owned registry snapshot disappeared before lookup".to_owned(),
+        ),
+        RegistrySnapshotError::UnsafeIntegrity(detail) => {
+            registry_snapshot_unsafe_error(registry_path, detail)
+        }
+        RegistrySnapshotError::UnstableBusy(detail) => {
+            registry_snapshot_transient_error(registry_path, "unstable_or_busy", detail)
+        }
+    }
+}
+
+fn registry_snapshot_transient_error(
+    registry_path: &Path,
+    reason: &str,
+    detail: String,
+) -> KioError {
+    KioError::new(
+        "KIO-E-REGISTRY-SNAPSHOT-001",
+        "scope registry could not be read from a stable snapshot; retry the command",
+        json!({
+            "registry_path": registry_path,
+            "reason": reason,
+            "detail": detail,
+        }),
+        ExitCode::PartialFailure,
     )
 }
 
@@ -30479,5 +30679,50 @@ mod tests {
         forged.text_hash = hash_bytes(forged.text.as_bytes());
 
         assert!(authenticate_chunk_row(&forged, &authorities).is_err());
+    }
+
+    #[test]
+    fn registry_snapshot_error_mapping_preserves_typed_exit_and_closed_reason() {
+        let path = std::path::Path::new("/private/test/scope-registry.sqlite");
+        let unsafe_error = super::registry_snapshot_unsafe_error(path, "linked main".to_owned());
+        assert_eq!(
+            unsafe_error.error_code(),
+            "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001"
+        );
+        assert_eq!(
+            unsafe_error.exit_code(),
+            kio_core::ExitCode::PermanentFailure
+        );
+        assert_eq!(unsafe_error.context()["reason"], "unsafe_integrity");
+        assert_eq!(
+            unsafe_error.context()["registry_path"],
+            path.display().to_string()
+        );
+
+        let transient_error = super::registry_snapshot_transient_error(
+            path,
+            "unstable_or_busy",
+            "retry budget exhausted".to_owned(),
+        );
+        assert_eq!(transient_error.error_code(), "KIO-E-REGISTRY-SNAPSHOT-001");
+        assert_eq!(
+            transient_error.exit_code(),
+            kio_core::ExitCode::PartialFailure
+        );
+        assert_eq!(transient_error.context()["reason"], "unstable_or_busy");
+
+        let impossible_missing = super::registry_snapshot_lookup_error(
+            path,
+            kio_index::registry::RegistrySnapshotError::Missing,
+        );
+        assert_eq!(
+            impossible_missing.error_code(),
+            "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001"
+        );
+        assert_eq!(
+            impossible_missing.exit_code(),
+            kio_core::ExitCode::PermanentFailure
+        );
+        assert_eq!(impossible_missing.context()["reason"], "unsafe_integrity");
     }
 }

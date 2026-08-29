@@ -162,6 +162,17 @@ bulk 系 (`kio evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     (1a/1b の「表現差で変えない」の対象は既知候補集合に対する判定 — scope_path が registry 未登録の
     clone を新たに教える場合に候補が増えて error 側へ倒れるのは fail-closed の意図どおりの**情報差**で
     あり、表現差ではない)
+    EvidenceReadOnly は **1 resolver invocation 内で** registry main / `-wal` / `-shm` の 3 leaf を
+    開始・終了で同一性まで観測した private owned snapshot を 1 回だけ開き、その snapshot の live 行を
+    1a/1b の候補 union と後続の format peek へ再利用する。source leaf を SQLite に渡さず、private copy へは
+    main と存在する WAL だけを渡す（SHM は copy しない）。これは formal な cross-file atomic
+    snapshot を主張せず stable-or-fail の線形化点である。main / `-wal` / `-shm` の **全 3 leaf が absent**
+    の Missing registry のみ cache miss として hint / CWD 規則を継続する。main absent + sidecar present は
+    unsafe integrity とする。unsafe leaf / pre-open-post identity mismatch、または source 再観測が
+    一致した owned copy の SQLite integrity failure は `KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001` (exit 4)、
+    presence/hash drift / busy / retry exhaustion / temp I/O / integrity を確定できない private snapshot
+    read-open-query failure は `KIO-E-REGISTRY-SNAPSHOT-001` (exit 3) で fail-closed し、
+    hint / CWD fallback、nested scope status、batch_changed へ変換しない。
 2.  commit を refs / objects/commits/ から取得
 2a. commit が shallow (tree 破棄済み) の場合の適用手順は次に限る: **手順 5 (tombstone /
     raw 存在) → pointer の chunk_hash → chunk object → gen で normalized unit instance を

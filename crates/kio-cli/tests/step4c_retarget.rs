@@ -704,6 +704,114 @@ fn retarget_live_registry_duplicate_is_shared_retryable_failure() {
     );
 }
 
+/// Snapshot integrity failures are command-level for retarget too: a valid
+/// pointer hint cannot bypass an unsafe registry leaf, and no new pointer is
+/// emitted.
+#[cfg(unix)]
+#[test]
+fn retarget_unsafe_registry_snapshot_has_the_shared_command_error() {
+    let (dir, pointer, target) = fixture_with_later_commit();
+    let registry = registry_path(&dir);
+    let victim = dir.path().join("retarget-registry-snapshot-victim");
+    fs::write(&victim, b"registry victim").unwrap();
+    fs::remove_file(&registry).unwrap();
+    std::os::unix::fs::symlink(&victim, &registry).unwrap();
+
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+    let error = failure(
+        &dir,
+        &["evidence", "retarget", &pointer_text, "--at", &target],
+        4,
+        "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001",
+    );
+    assert_eq!(error["context"]["reason"], "unsafe_integrity");
+    assert_eq!(fs::read(&victim).unwrap(), b"registry victim");
+}
+
+#[test]
+fn retarget_malformed_registry_snapshot_is_unsafe_without_hint_fallback() {
+    let (dir, pointer, target) = fixture_with_later_commit();
+    let registry = registry_path(&dir);
+    fs::remove_file(&registry).unwrap();
+    let malformed = rusqlite::Connection::open(&registry).unwrap();
+    malformed
+        .execute_batch("CREATE TABLE scopes(scope_id TEXT)")
+        .unwrap();
+    drop(malformed);
+    let registry_before = fs::read(&registry).unwrap();
+    let scope_before = fs::read(dir.path().join(".kio/scope.json")).unwrap();
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+    let error = failure(
+        &dir,
+        &["evidence", "retarget", &pointer_text, "--at", &target],
+        4,
+        "KIO-E-REGISTRY-SNAPSHOT-UNSAFE-001",
+    );
+    assert_eq!(error["context"]["reason"], "unsafe_integrity");
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    assert_eq!(
+        fs::read(dir.path().join(".kio/scope.json")).unwrap(),
+        scope_before
+    );
+}
+
+#[cfg(unix)]
+fn geteuid_is_root() -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: libc's geteuid has no preconditions and returns this process's
+    // effective uid.
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(unix)]
+struct PermissionRestore {
+    path: PathBuf,
+    original: std::fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionRestore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn retarget_unreadable_registry_snapshot_is_retryable_without_hint_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if geteuid_is_root() {
+        return;
+    }
+    let (dir, pointer, target) = fixture_with_later_commit();
+    let registry = registry_path(&dir);
+    let registry_before = fs::read(&registry).unwrap();
+    let scope_before = fs::read(dir.path().join(".kio/scope.json")).unwrap();
+    let original = fs::metadata(&registry).unwrap().permissions();
+    let restore = PermissionRestore {
+        path: registry.clone(),
+        original,
+    };
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o000)).unwrap();
+    let pointer_text = serde_json::to_string(&pointer).unwrap();
+    let error = failure(
+        &dir,
+        &["evidence", "retarget", &pointer_text, "--at", &target],
+        3,
+        "KIO-E-REGISTRY-SNAPSHOT-001",
+    );
+    assert_eq!(error["context"]["reason"], "unstable_or_busy");
+    drop(restore);
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    assert_eq!(
+        fs::read(dir.path().join(".kio/scope.json")).unwrap(),
+        scope_before
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn retarget_rejects_linked_or_nonregular_old_chunk_without_touching_victim() {
