@@ -208,8 +208,15 @@ and exactly the observed private-XDG leaves
 The second index permits updates only to the applicable existing metadata,
 index/ledger/purge/tool-lock/device-observability/registry/cache leaves in that
 set and new hash-sharded CAS descendants caused by the changed document.
-`approvals.jsonl`, `consents.jsonl`, `consents.lock`, and the already-approved
-config bytes must have identical before/after digests on the second index.
+`approvals.jsonl`, `consents.jsonl`, and the already-approved config bytes must
+have identical before/after digests on the second index. `consents.lock` must be
+replaced only as that exact existing lock leaf; it may not be created, removed, or
+retyped. Record its observed 97-byte before/after states and require mode `0644`,
+`nlink = 1`, different before/after SHA-256 values, no terminal LF, and compact
+canonical JSON with exactly `pid`, `token`, and `created_at`: the release sentinel
+PID is `4294967295`, the token is 32 lowercase hexadecimal characters, and
+`created_at` is a UTC second timestamp. No additional lock or temporary leaf may
+remain.
 Unlisted regular files, retained SQLite temporary siblings, and `-wal`, `-shm`,
 or `-journal` sidecars fail closed. Record the complete observed path set and
 change class for each invocation. Before/after manifests can reject a retained

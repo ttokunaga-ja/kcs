@@ -211,6 +211,21 @@ replace_fixture_text() {
   /bin/mv -f "$temporary" "$target_file"
 }
 
+validate_released_consent_lock() {
+  local lock_file="$1" payload canonical
+  [[ -f "$lock_file" && ! -L "$lock_file" && "$(stat -f '%Lp' "$lock_file")" == 644 && \
+    "$(stat -f '%l' "$lock_file")" == 1 && "$(file_bytes "$lock_file")" == 97 ]] || return 1
+  jq -e '
+    (keys == ["created_at","pid","token"]) and
+    .pid == 4294967295 and
+    (.token | type == "string" and test("^[0-9a-f]{32}$")) and
+    (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))' \
+    "$lock_file" >/dev/null || return 1
+  payload="$(<"$lock_file")"
+  canonical="$(jq -c '{pid,token,created_at}' "$lock_file")" || return 1
+  [[ "$payload" == "$canonical" && "${#payload}" == "$(file_bytes "$lock_file")" ]]
+}
+
 record_harness_text() {
   # record_harness_text STAGE LABEL PATH create|replace CONTRACT_REASON TEXT
   local stage="$1" label="$2" target_file="$3" operation="$4" reason="$5" text="$6"
@@ -379,6 +394,7 @@ record_command() {
           . == ($s + "/quarantine.jsonl") or . == ($s + "/refs/heads/main") or
           . == ($s + "/scope.json") or . == ($s + "/tasks.jsonl") or
           . == ($s + "/tool-lock.json") or . == ($c + "/aggregator.sqlite") or
+          . == ($d + "/consents.lock") or
           . == ($d + "/cost-ledger.sqlite") or . == ($d + "/cost-ledger.sqlite.write-seq") or
           . == ($d + "/logs/events.jsonl") or . == ($d + "/logs/scrub.lock") or
           . == ($d + "/scope-registry.sqlite");
@@ -432,9 +448,16 @@ record_command() {
            ([
              ($s + "/HEAD"),($s + "/index/chunks.jsonl"),($s + "/index/sqlite.db"),
              ($s + "/manifest.json"),($s + "/refs/heads/main"),($s + "/scope.json"),
-             ($c + "/aggregator.sqlite"),($d + "/logs/events.jsonl"),($d + "/scope-registry.sqlite")
+             ($c + "/aggregator.sqlite"),($d + "/consents.lock"),
+             ($d + "/logs/events.jsonl"),($d + "/scope-registry.sqlite")
            ] - [.entries[].path] | length) == 0
-         end)' "$diff" >/dev/null || mutation_valid=false
+         end) and
+        (if $policy == "kio_index_second" then
+           ([.entries[] | select(.path == ($d + "/consents.lock") and
+             .before.kind == "regular" and .before.mode == "644" and .before.nlink == 1 and .before.bytes == 97 and
+             .after.kind == "regular" and .after.mode == "644" and .after.nlink == 1 and .after.bytes == 97 and
+             .before.sha256 != .after.sha256)] | length) == 1
+         else true end)' "$diff" >/dev/null || mutation_valid=false
       jq -e '
         ([.entries[].path] | sort) == ([
           "home","tmp","xdg-cache","xdg-cache/kio","xdg-cache/kio/aggregator.sqlite",
@@ -445,6 +468,7 @@ record_command() {
           "xdg-data/kio/scope-registry.sqlite"
         ] | sort) and
         (.entries | all(if .kind == "regular" then .nlink == 1 else .kind == "directory" end))' "$after.private.json" >/dev/null || mutation_valid=false
+      validate_released_consent_lock "$private/xdg-data/kio/consents.lock" || mutation_valid=false
       if [[ "$mutation_policy" == kio_index_second ]]; then
         jq -e --slurpfile after "$after.scope.json" '
           def entry($manifest; $path): [$manifest.entries[] | select(.path == $path)][0];
@@ -452,8 +476,7 @@ record_command() {
           entry(.; ".kio/approvals.jsonl") == entry($after[0]; ".kio/approvals.jsonl")' "$before.scope.json" >/dev/null || mutation_valid=false
         jq -e --slurpfile after "$after.private.json" '
           def entry($manifest; $path): [$manifest.entries[] | select(.path == $path)][0];
-          entry(.; "xdg-data/kio/consents.jsonl") == entry($after[0]; "xdg-data/kio/consents.jsonl") and
-          entry(.; "xdg-data/kio/consents.lock") == entry($after[0]; "xdg-data/kio/consents.lock")' "$before.private.json" >/dev/null || mutation_valid=false
+          entry(.; "xdg-data/kio/consents.jsonl") == entry($after[0]; "xdg-data/kio/consents.jsonl")' "$before.private.json" >/dev/null || mutation_valid=false
       fi
       ;;
     *) mutation_valid=false ;;
@@ -658,7 +681,7 @@ run_m1() {
     --arg plan_1_sha256 "$(sha256 "$plan1")" --arg plan_2_sha256 "$(sha256 "$plan2")" \
     --arg frozen_fixture_sha256 "$(sha256 "$STAGES/$stage/frozen-fixture-manifest.json")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_consent_and_config_state_unchanged:true,final_manual_config_restored:true,real_candidate:true,tip_excluded:true,tree_only:true,internal_stability:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},plans:{first_sha256:$plan_1_sha256,second_sha256:$plan_2_sha256},predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,real_candidate:true,tip_excluded:true,tree_only:true,internal_stability:true,semantic_repeat_stability:true,dry_run_1_no_write:true,dry_run_2_no_write:true,dry_run_cross_invocation_state_unchanged:true},frozen_fixture_sha256:$frozen_fixture_sha256}' > "$STAGES/$stage/assertions.json"
   stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current gc-1 gc-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" gc-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
   stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/gc-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; two final dry-runs read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final gc-1 gc-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
@@ -757,7 +780,7 @@ run_m8() {
     --arg old_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.old.sha256")" \
     --arg current_document_sha256 "$(awk '{print $1}' "$STAGES/$stage/document.current.sha256")" \
     --slurpfile run "$EVIDENCE_ROOT/run.json" \
-    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plan:{sha256:$retention_plan_sha256,real_candidate:true,no_write:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_consent_and_config_state_unchanged:true,final_manual_config_restored:true,exact_schema:true,exact_summary:true,independent_pass_stats_match:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_no_write:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
+    '{fixed_binding:$run[0].expected_binding,downloaded_binary_sha256:$binary_sha256,approved_config_sha256:$approved_config_sha256,config_sha256:$config_sha256,documents:{old_sha256:$old_document_sha256,current_sha256:$current_document_sha256},old:{commit:$old_commit,tree:$old_tree},current:{commit:$current_commit,tree:$current_tree},retention_plan:{sha256:$retention_plan_sha256,real_candidate:true,no_write:true},candidate_count:0,old_tree_classification:"protected",old_tree_reason:"retention_gc_owned",predicates:{index_mutation_path_sets_closed:true,offline_index_network_allowed_false:true,approval_config_transition_exact:true,second_approval_log_consent_record_and_config_unchanged:true,second_consent_lock_update_closed:true,final_manual_config_restored:true,exact_schema:true,exact_summary:true,independent_pass_stats_match:true,objects_sorted_unique:true,outputs_byte_identical:true,retention_plan_no_write:true,inventory_1_no_write:true,inventory_2_no_write:true,inventory_cross_invocation_state_unchanged:true,public_cli_real_unreachable_candidate_exercised:false},output_sha256:$output_sha256}' > "$STAGES/$stage/assertions.json"
   stage_command_manifest "$stage" "$STAGES/$stage/command-manifest.json" init index-old index-current retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'command_manifest_failed'
   stage_primary_invocation "$stage" inventory-2 || fatal_stage "$stage" 'primary_invocation_receipt_failed'
   stage_manifest_summary "$stage" "$STAGES/$stage/init/fixture-manifest.before.json" "$STAGES/$stage/inventory-2/fixture-manifest.after.json" 'public init and two approve-index transitions, then exact config restoration; retention plan and two inventories read-only' init harness-config harness-document-old index-old harness-document-current index-current harness-config-final retention-plan inventory-1 inventory-2 || fatal_stage "$stage" 'stage_manifest_summary_failed'
