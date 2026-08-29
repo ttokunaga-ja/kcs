@@ -771,8 +771,18 @@ continuation_gate_m6_m7() {
 }
 
 validate_alive() {
-  local output="$1" commit="$2" raw="$3"
-  jq -e --arg commit "$commit" --arg raw "$raw" '(keys == ["details","status"]) and .status == "alive" and .details.commit == $commit and .details.raw_hash == $raw' "$output" >/dev/null
+  local output="$1" pointer="$2"
+  jq -e --argjson pointer "$pointer" '
+    . == {status:"alive",details:{
+      scope_id:$pointer.scope_id,
+      scope_path:$pointer.scope_path,
+      commit:$pointer.commit,
+      raw_hash:$pointer.raw_hash,
+      tool_profile_hash:$pointer.tool_profile_hash,
+      chunk_hash:$pointer.chunk_hash,
+      commit_shallow:false,
+      manifest_missing:false
+    }}' "$output" >/dev/null
 }
 
 run_m6_m7() {
@@ -785,7 +795,7 @@ run_m6_m7() {
   validate_offline_approve_index "$STAGES/M6/index/stdout.bin" || fatal_stage M6 'index_predicate_failed'
   index_commit="$(json_commit "$STAGES/M6/index/stdout.bin")" || fatal_stage M6 'index_commit_missing'
   record_command M6 search "$scope" "$private" expected_append_only_logs "$PRODUCT_BINARY" search 3600 --mode text --json || fatal_stage M6 'search_failed_or_unexpected_mutation'
-  jq -e --arg commit "$index_commit" '
+  jq -e --arg commit "$index_commit" --arg scope_path "$scope/.kio" '
     .paging as $paging | .results[0].evidence_pointer as $pointer |
     (.results | type == "array" and length > 0) and ($pointer | type == "object") and
     ($paging | type == "object") and ($paging | keys == ["limit","next_cursor"]) and
@@ -794,7 +804,8 @@ run_m6_m7() {
     $pointer.schema_version == 1 and $pointer.commit == $commit and
     ([$pointer.raw_hash,$pointer.tool_profile_hash,$pointer.chunk_hash] |
       all(.[]; type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
-    ($pointer.scope_id | type == "string" and length > 0) and $pointer.path_at_commit == "evidence.md" and
+    ($pointer.scope_id | type == "string" and length > 0) and $pointer.scope_path == $scope_path and
+    $pointer.path_at_commit == "evidence.md" and
     (.results[0].evidence_uri == ("kio://" + $pointer.scope_id + "/" + $pointer.commit + "/" + $pointer.raw_hash + "/" + $pointer.tool_profile_hash + "/" + $pointer.chunk_hash))' "$STAGES/M6/search/stdout.bin" >/dev/null || fatal_stage M6 'search_pointer_predicate_failed'
   pointer="$(jq -c '.results[0].evidence_pointer' "$STAGES/M6/search/stdout.bin")"
   raw_hash="$(jq -r '.raw_hash' <<<"$pointer")"
@@ -805,17 +816,35 @@ run_m6_m7() {
   jq -n --arg path "$pointer_file" --arg sha "$(sha256 "$pointer_file")" --argjson bytes "$(file_bytes "$pointer_file")" '{schema:"kio.phase4.batch-input.v1",path:$path,sha256:$sha,bytes:$bytes,mode:"644",nlink:1,lines:2,duplicate_rows:true,final_lf:true}' > "$STAGES/M6/input/receipt.json"
   validate_batch_input "$pointer_file" "$pointer" "$STAGES/M6/input/receipt.json" || fatal_stage M6 'batch_input_shape_invalid'
   record_command M6 verify-single "$scope" "$private" none "$PRODUCT_BINARY" evidence verify "$pointer" --json || fatal_stage M6 'single_verify_failed'
-  validate_alive "$STAGES/M6/verify-single/stdout.bin" "$index_commit" "$raw_hash" || fatal_stage M6 'single_verify_predicate_failed'
+  validate_alive "$STAGES/M6/verify-single/stdout.bin" "$pointer" || fatal_stage M6 'single_verify_predicate_failed'
   validate_batch_input "$pointer_file" "$pointer" "$STAGES/M6/input/receipt.json" || fatal_stage M6 'batch_input_changed'
   record_command M6 verify-batch "$scope" "$private" none "$PRODUCT_BINARY" evidence verify --batch "$pointer_file" --json || fatal_stage M6 'batch_verify_failed'
   validate_batch_input "$pointer_file" "$pointer" "$STAGES/M6/input/receipt.json" || fatal_stage M6 'batch_input_changed'
   record_command M6 verify-single-strict "$scope" "$private" none "$PRODUCT_BINARY" evidence verify "$pointer" --strict --json || fatal_stage M6 'strict_single_verify_failed'
-  validate_alive "$STAGES/M6/verify-single-strict/stdout.bin" "$index_commit" "$raw_hash" || fatal_stage M6 'strict_single_verify_predicate_failed'
+  validate_alive "$STAGES/M6/verify-single-strict/stdout.bin" "$pointer" || fatal_stage M6 'strict_single_verify_predicate_failed'
   validate_batch_input "$pointer_file" "$pointer" "$STAGES/M6/input/receipt.json" || fatal_stage M6 'batch_input_changed'
   record_command M6 verify-batch-strict "$scope" "$private" none "$PRODUCT_BINARY" evidence verify --batch "$pointer_file" --strict --json || fatal_stage M6 'strict_batch_verify_failed'
   validate_batch_input "$pointer_file" "$pointer" "$STAGES/M6/input/receipt.json" || fatal_stage M6 'batch_input_changed'
   for output in "$STAGES/M6/verify-batch/stdout.bin" "$STAGES/M6/verify-batch-strict/stdout.bin"; do
-    jq -e --arg input "sha256:$(sha256 "$pointer_file")" '(keys == ["input_sha256","results","schema","schema_version","strict","summary","verified_count"]) and .schema == "kio.evidence.batch-verify" and .schema_version == 1 and .input_sha256 == $input and .verified_count == 2 and .summary == {total:2,status_counts:{alive:2,tombstoned:0,not_found:0,scope_unreachable:0,unverifiable:0,registry_duplicate:0}} and (.results | length == 2 and .[0].line == 1 and .[1].line == 2 and all(.[]; keys == ["line","result"]))' "$output" >/dev/null || fatal_stage M6 'batch_schema_predicate_failed'
+    jq -e --arg input "sha256:$(sha256 "$pointer_file")" --argjson pointer "$pointer" '
+      .results as $results |
+      (keys == ["input_sha256","results","schema","schema_version","strict","summary","verified_count"]) and
+      .schema == "kio.evidence.batch-verify" and .schema_version == 1 and
+      .input_sha256 == $input and .verified_count == 2 and
+      .summary == {total:2,status_counts:{alive:2,tombstoned:0,not_found:0,scope_unreachable:0,unverifiable:0,registry_duplicate:0}} and
+      ($results | length == 2) and $results[0].line == 1 and $results[1].line == 2 and
+      all($results[];
+        (keys == ["line","result"]) and
+        .result == {status:"alive",details:{
+          scope_id:$pointer.scope_id,
+          scope_path:$pointer.scope_path,
+          commit:$pointer.commit,
+          raw_hash:$pointer.raw_hash,
+          tool_profile_hash:$pointer.tool_profile_hash,
+          chunk_hash:$pointer.chunk_hash,
+          commit_shallow:false,
+          manifest_missing:false
+        }})' "$output" >/dev/null || fatal_stage M6 'batch_schema_predicate_failed'
   done
   if ! jq -e '.strict == false' "$STAGES/M6/verify-batch/stdout.bin" >/dev/null || ! jq -e '.strict == true' "$STAGES/M6/verify-batch-strict/stdout.bin" >/dev/null; then
     fatal_stage M6 'batch_strict_flag_mismatch'
@@ -867,7 +896,7 @@ run_m6_m7() {
   jq -e --arg target "$target" --arg pointer "$pointer" '(keys == ["match_method","new_pointer","retargeted_from","schema","schema_version","status","target_commit"]) and .schema == "kio.evidence.retarget" and .schema_version == 1 and .status == "retargeted" and .target_commit == $target and .target_commit != .retargeted_from.commit and .retargeted_from == ($pointer | fromjson) and .match_method == "heading_path_exact" and .new_pointer.commit == $target and .new_pointer.raw_hash == ($pointer | fromjson | .raw_hash)' "$STAGES/M7/retarget-1/stdout.bin" >/dev/null || fatal_stage M7 'retarget_predicate_failed'
   new_pointer="$(jq -c '.new_pointer' "$STAGES/M7/retarget-1/stdout.bin")"
   record_command M7 verify-new-strict "$scope" "$private" none "$PRODUCT_BINARY" evidence verify "$new_pointer" --strict --json || fatal_stage M7 'new_pointer_verify_failed'
-  validate_alive "$STAGES/M7/verify-new-strict/stdout.bin" "$target" "$raw_hash" || fatal_stage M7 'new_pointer_verify_predicate_failed'
+  validate_alive "$STAGES/M7/verify-new-strict/stdout.bin" "$new_pointer" || fatal_stage M7 'new_pointer_verify_predicate_failed'
   for label in log retarget-1 retarget-2 verify-new-strict; do [[ ! -s "$STAGES/M7/$label/stderr.bin" ]] || fatal_stage M7 'happy_path_stderr_not_empty'; done
   [[ "$(sha256 "$doc")" == "${raw_hash#sha256:}" && "$(jq -c '.new_pointer.raw_hash' "$STAGES/M7/retarget-1/stdout.bin")" == "\"$raw_hash\"" ]] || fatal_stage M7 'post_retarget_source_binding_changed'
   validate_cursor_key "$private/xdg-data/kio/cursor-key" "$STAGES/M6/search/cursor-key-observation.json" "$STAGES/M6/search/stdout.bin" || fatal_stage M7 'cursor_key_changed_after_search'
