@@ -712,7 +712,7 @@ continuation_gate_m6_m7() {
   manifest "$m1_scope" "$m1_scope_manifest" && manifest "$m1_private" "$m1_private_manifest" && manifest "$scope" "$scope_manifest" && manifest "$private" "$private_manifest" || return 1
   jq -e --arg scope "$(sha256 "$m1_scope_manifest")" --arg private "$(sha256 "$m1_private_manifest")" '.scope_manifest_sha256 == $scope and .private_manifest_sha256 == $private' "$STAGES/M1/frozen-fixture-manifest.json" >/dev/null || return 1
   jq -e '.entries | length == 0' "$scope_manifest" >/dev/null || return 1
-  jq -e '([.entries[].path] | sort) == ["home","tmp","xdg-cache","xdg-config","xdg-data"] and all(.entries[].kind == "directory")' "$private_manifest" >/dev/null || return 1
+  jq -e '([.entries[].path] | sort) == ["home","tmp","xdg-cache","xdg-config","xdg-data"] and all(.entries[]; .kind == "directory")' "$private_manifest" >/dev/null || return 1
   jq -n --arg binary_sha "$(sha256 "$PRODUCT_BINARY")" --arg m1_scope "$(sha256 "$m1_scope_manifest")" --arg m1_private "$(sha256 "$m1_private_manifest")" --arg scope "$(sha256 "$scope_manifest")" --arg private "$(sha256 "$private_manifest")" \
     '{schema:"kio.phase4.m6-m7-continuation-gate.v1",status:"passed",fixed_binding_binary_sha256:$binary_sha,m1_frozen_scope_manifest_sha256:$m1_scope,m1_frozen_private_manifest_sha256:$m1_private,m6_m7_unused_scope_manifest_sha256:$scope,m6_m7_unused_private_manifest_sha256:$private,unused_scope:true,unused_private:true}' > "$EVIDENCE_ROOT/continuation-gate-m6-m7.json"
   print -r -- "$(sha256 "$EVIDENCE_ROOT/continuation-gate-m6-m7.json")  continuation-gate-m6-m7.json" > "$EVIDENCE_ROOT/continuation-gate-m6-m7.sha256"
