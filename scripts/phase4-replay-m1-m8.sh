@@ -103,8 +103,8 @@ PRODUCT_BINARY_PHYSICAL="$(cd "$(dirname "$PRODUCT_BINARY")" 2>/dev/null && pwd 
   exit 65
 }
 
-for path in "$FIXTURE" "$STAGES/M1" "$STAGES/M8"; do
-  [[ ! -e "$path" ]] || { print -u2 -- "evidence collision: $path"; exit 65; }
+for collision_target in "$FIXTURE" "$STAGES/M1" "$STAGES/M8"; do
+  [[ ! -e "$collision_target" ]] || { print -u2 -- "evidence collision: $collision_target"; exit 65; }
 done
 mkdir -p "$FIXTURE" "$STAGES/M1" "$STAGES/M8"
 
@@ -198,37 +198,37 @@ manifest_diff() {
 }
 
 write_text_once() {
-  local path="$1" text="$2"
-  [[ ! -e "$path" ]] || return 1
-  print -rn -- "$text" > "$path"
+  local target_file="$1" text="$2"
+  [[ ! -e "$target_file" ]] || return 1
+  print -rn -- "$text" > "$target_file"
 }
 
 replace_fixture_text() {
-  local path="$1" text="$2" temporary="${1}.phase4-replacement"
-  [[ -f "$path" && ! -L "$path" && "$(stat -f '%l' "$path")" == 1 && ! -e "$temporary" ]] || return 1
+  local target_file="$1" text="$2" temporary="${1}.phase4-replacement"
+  [[ -f "$target_file" && ! -L "$target_file" && "$(stat -f '%l' "$target_file")" == 1 && ! -e "$temporary" ]] || return 1
   print -rn -- "$text" > "$temporary" || return 1
-  /bin/mv -f "$temporary" "$path"
+  /bin/mv -f "$temporary" "$target_file"
 }
 
 record_harness_text() {
   # record_harness_text STAGE LABEL PATH create|replace CONTRACT_REASON TEXT
-  local stage="$1" label="$2" path="$3" operation="$4" reason="$5" text="$6"
+  local stage="$1" label="$2" target_file="$3" operation="$4" reason="$5" text="$6"
   local dir="$STAGES/$stage/harness-$label" before="$STAGES/$stage/harness-$label/fixture-manifest.before.json"
   local after="$STAGES/$stage/harness-$label/fixture-manifest.after.json" diff="$STAGES/$stage/harness-$label/manifest-diff.json"
-  local relative="${path#"$FIXTURE"/}"
-  [[ "$path" == "$FIXTURE"/* && "$relative" != "$path" && ! -e "$dir" ]] || return 1
+  local relative="${target_file#"$FIXTURE"/}"
+  [[ "$target_file" == "$FIXTURE"/* && "$relative" != "$target_file" && ! -e "$dir" ]] || return 1
   mkdir -p "$dir"
   manifest "$FIXTURE" "$before" || return 70
   case "$operation" in
-    create) write_text_once "$path" "$text" || return 1 ;;
-    replace) replace_fixture_text "$path" "$text" || return 1 ;;
+    create) write_text_once "$target_file" "$text" || return 1 ;;
+    replace) replace_fixture_text "$target_file" "$text" || return 1 ;;
     *) return 1 ;;
   esac
   manifest "$FIXTURE" "$after" || return 70
   manifest_diff "$before" "$after" "$diff" || return 70
   jq -e --arg path "$relative" '.entries | length == 1 and .[0].path == $path' "$diff" >/dev/null || return 71
   jq -n --arg label "$label" --arg operation "$operation" --arg reason "$reason" \
-    --arg path "$relative" --arg content_sha256 "$(sha256 "$path")" \
+    --arg path "$relative" --arg content_sha256 "$(sha256 "$target_file")" \
     --arg before_sha256 "$(sha256 "$before")" --arg after_sha256 "$(sha256 "$after")" \
     --slurpfile diff "$diff" \
     '{schema:"kio.phase4.harness-transition.v1",label:$label,operation:$operation,contract_reason:$reason,path:$path,content_sha256:$content_sha256,before_manifest_sha256:$before_sha256,after_manifest_sha256:$after_sha256,entries:[$diff[0].entries[] | . + {contract_reason:$reason}]}' > "$dir/receipt.json"
@@ -423,21 +423,21 @@ stage_start() {
 }
 
 complete_stage() {
-  local stage="$1" status="$2" reason="$3" assertion_file="$4"
+  local stage="$1" terminal_state="$2" reason="$3" assertion_file="$4"
   local dir="$STAGES/$stage" manifest_tmp="$EVIDENCE_ROOT/.${stage}-evidence-manifest.json"
   local completion_tmp="$EVIDENCE_ROOT/.${stage}-completion.json" result_terminal required
   for required in stage.json command.txt command-manifest.json stdout.bin stdout.sha256 stderr.bin stderr.sha256 fixture-manifest.before.json fixture-manifest.after.json digest.before.sha256 digest.after.sha256 observation-log-manifest.json result.json assertions.json; do
     [[ -f "$dir/$required" && ! -L "$dir/$required" ]] || return 1
   done
   result_terminal="$(jq -er '.terminal_status' "$dir/result.json")" || return 1
-  [[ "$result_terminal" == "$status" ]] || return 1
-  if [[ "$status" == passed ]]; then
+  [[ "$result_terminal" == "$terminal_state" ]] || return 1
+  if [[ "$terminal_state" == passed ]]; then
     jq -e '[.. | booleans] | all' "$assertion_file" >/dev/null || return 1
   fi
   [[ ! -e "$manifest_tmp" && ! -e "$completion_tmp" && ! -e "$dir/evidence-manifest.json" && ! -e "$dir/completion.json" ]] || return 1
   manifest "$dir" "$manifest_tmp" || return 1
   /bin/mv "$manifest_tmp" "$dir/evidence-manifest.json"
-  jq -n --arg stage "$stage" --arg status "$status" --arg result_terminal "$result_terminal" \
+  jq -n --arg stage "$stage" --arg status "$terminal_state" --arg result_terminal "$result_terminal" \
     --arg reason "$reason" --arg at "$(utc_now)" \
     --arg stage_sha256 "$(sha256 "$dir/stage.json")" --arg result_sha256 "$(sha256 "$dir/result.json")" \
     --arg assertions_sha256 "$(sha256 "$assertion_file")" \
