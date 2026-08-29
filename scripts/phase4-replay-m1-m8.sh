@@ -274,15 +274,16 @@ validate_cursor_key() {
   last_byte="$(od -An -tu1 -N1 -j 31 "$key_file" | tr -d ' ')"
   [[ "$last_byte" != 10 ]] || return 1
   jq -e --arg path "${key_file#"$FIXTURE"/}" --arg sha "$(sha256 "$key_file")" --slurpfile search "$search_output" '
+    $search[0] as $response | $response.paging as $paging |
     ($search | length == 1) and
-    ($search[0] | has("paging") and (.paging | type == "object" and has("next_cursor") and
-      (.next_cursor == null or (.next_cursor | type == "string" and length > 0)))) and
+    ($response | has("paging")) and ($paging | type == "object") and ($paging | has("next_cursor")) and
+    ($paging.next_cursor == null or ($paging.next_cursor | type == "string" and length > 0)) and
     (keys == ["after","before","cursor_issuance_state","key_helper_independent_of_cursor_issuance","no_terminal_lf","paging_next_cursor","path","reason","schema","sha256"]) and
     .schema == "kio.phase4.cursor-key-observation.v1" and .path == $path and
     .reason == "first_search_cursor_signing_key_helper" and
     .key_helper_independent_of_cursor_issuance == true and .no_terminal_lf == true and
-    .paging_next_cursor == $search[0].paging.next_cursor and
-    .cursor_issuance_state == (if $search[0].paging.next_cursor == null then "not_issued" else "issued" end) and
+    .paging_next_cursor == $paging.next_cursor and
+    .cursor_issuance_state == (if $paging.next_cursor == null then "not_issued" else "issued" end) and
     .before == null and .sha256 == $sha and
     .after == {path:$path,kind:"regular",mode:"600",bytes:32,nlink:1,sha256:$sha}' "$observation" >/dev/null
 }
@@ -785,13 +786,16 @@ run_m6_m7() {
   index_commit="$(json_commit "$STAGES/M6/index/stdout.bin")" || fatal_stage M6 'index_commit_missing'
   record_command M6 search "$scope" "$private" expected_append_only_logs "$PRODUCT_BINARY" search 3600 --mode text --json || fatal_stage M6 'search_failed_or_unexpected_mutation'
   jq -e --arg commit "$index_commit" '
-    (.results | type == "array" and length > 0) and (.results[0].evidence_pointer | type == "object") and
-    (.paging | type == "object" and (keys == ["limit","next_cursor"]) and .limit == 20 and
-      (.next_cursor == null or (.next_cursor | type == "string" and length > 0))) and
-    (.results[0].evidence_pointer | .schema_version == 1 and .commit == $commit and
-      [.raw_hash,.tool_profile_hash,.chunk_hash] | all(type == "string" and test("^sha256:[0-9a-f]{64}$")) and
-      (.scope_id | type == "string" and length > 0) and .path_at_commit == "evidence.md") and
-    (.results[0].evidence_uri == ("kio://" + .results[0].evidence_pointer.scope_id + "/" + .results[0].evidence_pointer.commit + "/" + .results[0].evidence_pointer.raw_hash + "/" + .results[0].evidence_pointer.tool_profile_hash + "/" + .results[0].evidence_pointer.chunk_hash))' "$STAGES/M6/search/stdout.bin" >/dev/null || fatal_stage M6 'search_pointer_predicate_failed'
+    .paging as $paging | .results[0].evidence_pointer as $pointer |
+    (.results | type == "array" and length > 0) and ($pointer | type == "object") and
+    ($paging | type == "object") and ($paging | keys == ["limit","next_cursor"]) and
+    $paging.limit == 20 and
+    ($paging.next_cursor == null or ($paging.next_cursor | type == "string" and length > 0)) and
+    $pointer.schema_version == 1 and $pointer.commit == $commit and
+    ([$pointer.raw_hash,$pointer.tool_profile_hash,$pointer.chunk_hash] |
+      all(.[]; type == "string" and test("^sha256:[0-9a-f]{64}$"))) and
+    ($pointer.scope_id | type == "string" and length > 0) and $pointer.path_at_commit == "evidence.md" and
+    (.results[0].evidence_uri == ("kio://" + $pointer.scope_id + "/" + $pointer.commit + "/" + $pointer.raw_hash + "/" + $pointer.tool_profile_hash + "/" + $pointer.chunk_hash))' "$STAGES/M6/search/stdout.bin" >/dev/null || fatal_stage M6 'search_pointer_predicate_failed'
   pointer="$(jq -c '.results[0].evidence_pointer' "$STAGES/M6/search/stdout.bin")"
   raw_hash="$(jq -r '.raw_hash' <<<"$pointer")"
   [[ "$raw_hash" == "sha256:$(sha256 "$doc")" ]] || fatal_stage M6 'pointer_raw_hash_mismatch'
