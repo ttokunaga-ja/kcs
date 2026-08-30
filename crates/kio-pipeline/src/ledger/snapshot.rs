@@ -1859,6 +1859,7 @@ mod tests {
         assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 1.0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn all_absent_whole_parent_substitution_is_unsafe_not_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1886,6 +1887,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn present_snapshot_whole_parent_substitution_is_unsafe() {
         let dir = tempfile::tempdir().unwrap();
@@ -1912,6 +1914,107 @@ mod tests {
             Err(error) => panic!("expected unsafe parent substitution, got {error}"),
             Ok(_) => panic!("detached private snapshot must not be accepted"),
         }
+    }
+
+    // Windows retains the canonical parent without delete sharing for the full
+    // snapshot attempt. The Unix parent-replacement race is therefore
+    // structurally impossible there: prove the sharing boundary while checking
+    // the original stable binding retains its true missing semantics.
+    #[cfg(windows)]
+    #[test]
+    fn all_absent_bound_parent_blocks_substitution_and_returns_true_missing() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("cost-ledger.sqlite");
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let hook_moved_parent = moved_parent.clone();
+        let rename_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&rename_checked);
+        let hook: SnapshotHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && matches!(phase, SnapshotPhase::AfterFinalManifestBeforeParentRecheck)
+            {
+                let error = fs::rename(&replacement_parent, &hook_moved_parent)
+                    .expect_err("the retained no-delete-share parent must block substitution");
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION as i32),
+                    "the canonical parent must remain bound for the full snapshot attempt"
+                );
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        assert!(matches!(
+            LedgerReadSnapshot::open_for_test(&path, 1, hook),
+            Err(LedgerSnapshotError::Missing)
+        ));
+        assert!(
+            rename_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the no-delete-share boundary"
+        );
+        assert!(
+            canonical_parent.is_dir(),
+            "the original parent must remain live"
+        );
+        assert!(
+            !moved_parent.exists(),
+            "a denied replacement must not create a detached parent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn present_bound_parent_blocks_substitution_and_keeps_original_snapshot() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("cost-ledger.sqlite");
+        let original = LedgerDb::open(&path).unwrap();
+        original
+            .connection()
+            .execute(
+                "INSERT INTO cost_ledger (scope_id,adapter_kind,input_hash,tool_profile_hash,submission_seq,batch_job_id,usd,estimated,outcome,month,recorded_at)
+                 VALUES ('scope-original','markdownize','input-original','profile-original',1,'job-original',2.5,0,'succeeded','2026-08',0)",
+                [],
+            )
+            .unwrap();
+        drop(original);
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let hook_moved_parent = moved_parent.clone();
+        let rename_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&rename_checked);
+        let hook: SnapshotHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && matches!(phase, SnapshotPhase::AfterFinalManifestBeforeParentRecheck)
+            {
+                let error = fs::rename(&replacement_parent, &hook_moved_parent)
+                    .expect_err("the retained no-delete-share parent must block substitution");
+                assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let snapshot = LedgerReadSnapshot::open_for_test(&path, 1, hook)
+            .expect("the original stable parent and snapshot must remain usable");
+        assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 2.5);
+        assert!(
+            rename_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the no-delete-share boundary"
+        );
+        assert!(
+            canonical_parent.is_dir(),
+            "the original parent must remain live"
+        );
+        assert!(
+            !moved_parent.exists(),
+            "substitution must not have occurred"
+        );
     }
 
     #[cfg(unix)]
@@ -1992,19 +2095,28 @@ mod tests {
 
     #[test]
     fn oversized_source_leaf_is_unsafe_before_reading() {
-        let (dir, path, _db) = ledger();
+        let (dir, path, db) = ledger();
+        drop(db);
         let oversized = dir.path().join("oversized-wal");
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&oversized)
             .unwrap();
         file.set_len(MAX_LEAF_BYTES + 1).unwrap();
-        fs::rename(oversized, format!("{}-wal", path.display())).unwrap();
-        assert!(matches!(
-            LedgerReadSnapshot::open(&path),
-            Err(LedgerSnapshotError::UnsafeIntegrity(_))
-        ));
+        drop(file);
+        if wal.exists() {
+            fs::remove_file(&wal).unwrap();
+        }
+        fs::rename(oversized, &wal).unwrap();
+        match LedgerReadSnapshot::open(&path) {
+            Err(LedgerSnapshotError::UnsafeIntegrity(message)) => {
+                assert!(message.contains("ledger cost-ledger.sqlite-wal exceeds bound"));
+            }
+            Err(error) => panic!("expected size-bound integrity failure, got {error}"),
+            Ok(_) => panic!("oversized WAL must not produce a snapshot"),
+        }
     }
 
     #[test]
@@ -2070,6 +2182,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn source_identity_replacement_after_probe_is_unsafe() {
         let (dir, path, _db) = ledger();
@@ -2085,6 +2198,58 @@ mod tests {
             LedgerReadSnapshot::open_for_test(&path, 1, hook),
             Err(LedgerSnapshotError::UnsafeIntegrity(_))
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_writer_blocks_source_replacement_and_preserves_original_snapshot() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let (dir, path, writer) = ledger();
+        writer
+            .connection()
+            .execute(
+                "INSERT INTO cost_ledger (scope_id,adapter_kind,input_hash,tool_profile_hash,submission_seq,batch_job_id,usd,estimated,outcome,month,recorded_at)
+                 VALUES ('scope-original','markdownize','input-original','profile-original',1,'job-original',4.0,0,'succeeded','2026-08',0)",
+                [],
+            )
+            .unwrap();
+        let original_source = source_bytes(&path);
+        let original_identity = kio_core::cas::windows_real_regular_file_identity(&path)
+            .unwrap()
+            .expect("the source must be a real regular file");
+        let moved = dir.path().join("moved.sqlite");
+        let source = path.clone();
+        let hook_moved = moved.clone();
+        let replacement_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&replacement_checked);
+        let hook: SnapshotHook = std::sync::Arc::new(move |phase, _, _| {
+            if matches!(phase, SnapshotPhase::AfterProbeBeforeRecheck) {
+                let error = fs::rename(&source, &hook_moved)
+                    .expect_err("the live writer handle must block replacement on Windows");
+                assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let snapshot = LedgerReadSnapshot::open_for_test(&path, 1, hook)
+            .expect("the unchanged original snapshot must remain usable");
+        assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 4.0);
+        assert!(
+            replacement_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the live-source sharing boundary"
+        );
+        assert_eq!(source_bytes(&path), original_source);
+        assert_eq!(
+            kio_core::cas::windows_real_regular_file_identity(&path).unwrap(),
+            Some(original_identity)
+        );
+        assert!(path.exists(), "the original source must remain live");
+        assert!(
+            !moved.exists(),
+            "the denied replacement must not create a moved source"
+        );
+        drop(writer);
     }
 
     #[test]
