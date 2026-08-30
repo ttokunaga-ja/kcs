@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 cap-primitives.workspace = true
+getrandom.workspace = true
 kio-adapter = { path = "../kio-adapter" }
 kio-core.workspace = true
 rusqlite.workspace = true
@@ -19,6 +20,7 @@ serde_json.workspace = true
 serde_jcs.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tempfile = "3"
 toml.workspace = true
 unicode-normalization.workspace = true
 
@@ -29,4 +31,3 @@ libc = "0.2"
 windows-sys.workspace = true
 
 [dev-dependencies]
-tempfile = "3"

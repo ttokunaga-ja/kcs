@@ -47,6 +47,16 @@ pub enum PipelineError {
     /// before it reaches this variant — this is the residual (busy/io/etc.).
     #[error("cost ledger sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A stable, owned cost-ledger snapshot could not be obtained for a
+    /// read-only budget observation. Kept lossless and path-bound so callers
+    /// preserve Missing versus unsafe-integrity versus retryable-busy
+    /// semantics without consulting ambient path configuration again.
+    #[error("cost ledger snapshot error at {path}: {source}")]
+    LedgerSnapshot {
+        path: String,
+        #[source]
+        source: ledger::LedgerSnapshotError,
+    },
 }
 
 impl PipelineError {
@@ -74,6 +84,14 @@ impl PipelineError {
     #[must_use]
     pub fn path(path: impl Into<String>) -> Self {
         Self::Path { path: path.into() }
+    }
+
+    #[must_use]
+    pub fn ledger_snapshot(path: impl Into<String>, source: ledger::LedgerSnapshotError) -> Self {
+        Self::LedgerSnapshot {
+            path: path.into(),
+            source,
+        }
     }
 }
 

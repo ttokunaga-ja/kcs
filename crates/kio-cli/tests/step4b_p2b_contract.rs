@@ -6,7 +6,8 @@
 //! does not fabricate coverage for those.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use base64::Engine;
@@ -17,6 +18,7 @@ use kio_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kio_core::scope::Repository;
 use kio_index::registry::{RegistryDb, RegistryEntry};
 use kio_pipeline::markdownize::NormalizedUnitObject;
+use rusqlite::params;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -35,6 +37,43 @@ fn kio(dir: &TempDir, args: &[&str]) -> Command {
         .env_remove("MISTRAL_API_KEY")
         .args(args);
     command
+}
+
+/// A fully private public-CLI process for diagnostics that must also bind
+/// HOME, rather than relying on the broader contract harness's XDG-only
+/// convenience setup.
+fn private_kio_process(dir: &TempDir, args: &[&str]) -> std::process::Command {
+    let temp_dir = dir.path().join(".test-tmp");
+    fs::create_dir_all(&temp_dir).unwrap();
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("kio"));
+    command
+        .env_clear()
+        .current_dir(dir.path())
+        .env("HOME", dir.path().join(".test-home"))
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
+        .env("TMPDIR", temp_dir)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("TZ", "UTC")
+        .args(args);
+    command
+}
+
+fn private_success(dir: &TempDir, args: &[&str]) -> Value {
+    let output = private_kio_process(dir, args)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn success(dir: &TempDir, args: &[&str]) -> Value {
@@ -120,6 +159,624 @@ fn assert_single_batch_parity(
 
 fn registry_path(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join(".test-data/kio/scope-registry.sqlite")
+}
+
+/// A complete `Present` observation of one device-local cost-ledger leaf.
+/// The companion's identity matters: `LedgerDb::open` may atomically replace
+/// the same bytes, which a bytes-only assertion would miss.
+#[derive(Debug, PartialEq, Eq)]
+struct PresentLedgerLeaf {
+    bytes: Vec<u8>,
+    sha256: String,
+    size: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    nlink: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+/// A raw source-leaf observation used only after this test deliberately makes
+/// a leaf unsafe. Unlike normal observations it records, rather than rejects,
+/// a hard-link count greater than one.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct UnsafeLedgerLeafObservation {
+    bytes: Vec<u8>,
+    sha256: String,
+    size: u64,
+    mode: u32,
+    nlink: u64,
+    dev: u64,
+    ino: u64,
+}
+
+/// The source ledger's SQLite main/WAL/SHM triad and the adjacent write-seq
+/// companion.  `Absent` is evidence too: a text or cursor read must not turn
+/// it into a sidecar merely by observing budget status.
+#[derive(Debug, PartialEq, Eq)]
+enum LedgerLeafObservation {
+    Absent,
+    Present(PresentLedgerLeaf),
+}
+
+fn observe_ledger_leaf(path: &Path) -> LedgerLeafObservation {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LedgerLeafObservation::Absent;
+        }
+        Err(error) => panic!("cannot observe ledger leaf {}: {error}", path.display()),
+    };
+    assert!(metadata.file_type().is_file(), "{}", path.display());
+    #[cfg(unix)]
+    assert_eq!(
+        {
+            use std::os::unix::fs::MetadataExt;
+            metadata.nlink()
+        },
+        1,
+        "ledger leaf must not be hard-linked: {}",
+        path.display()
+    );
+    let bytes = fs::read(path).unwrap();
+    LedgerLeafObservation::Present(PresentLedgerLeaf {
+        sha256: hash_bytes(&bytes),
+        size: metadata.len(),
+        bytes,
+        #[cfg(unix)]
+        mode: {
+            use std::os::unix::fs::MetadataExt;
+            metadata.mode() & 0o7777
+        },
+        #[cfg(unix)]
+        nlink: {
+            use std::os::unix::fs::MetadataExt;
+            metadata.nlink()
+        },
+        #[cfg(unix)]
+        dev: {
+            use std::os::unix::fs::MetadataExt;
+            metadata.dev()
+        },
+        #[cfg(unix)]
+        ino: {
+            use std::os::unix::fs::MetadataExt;
+            metadata.ino()
+        },
+    })
+}
+
+#[cfg(unix)]
+fn observe_unsafe_ledger_leaf(path: &Path) -> UnsafeLedgerLeafObservation {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path).unwrap();
+    assert!(metadata.file_type().is_file(), "{}", path.display());
+    let bytes = fs::read(path).unwrap();
+    UnsafeLedgerLeafObservation {
+        sha256: hash_bytes(&bytes),
+        size: metadata.len(),
+        mode: metadata.mode() & 0o7777,
+        nlink: metadata.nlink(),
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        bytes,
+    }
+}
+
+fn ledger_leaf_paths(dir: &TempDir) -> [PathBuf; 4] {
+    let main = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    [
+        main.clone(),
+        PathBuf::from(format!("{}.write-seq", main.display())),
+        PathBuf::from(format!("{}-wal", main.display())),
+        PathBuf::from(format!("{}-shm", main.display())),
+    ]
+}
+
+fn observe_ledger_leaves(dir: &TempDir) -> [LedgerLeafObservation; 4] {
+    ledger_leaf_paths(dir).map(|path| observe_ledger_leaf(&path))
+}
+
+fn assert_ledger_leaves_unchanged(
+    dir: &TempDir,
+    before: &[LedgerLeafObservation; 4],
+    context: &str,
+) {
+    assert_eq!(
+        observe_ledger_leaves(dir),
+        *before,
+        "{context}: main/write-seq/WAL/SHM must remain exact Present|Absent observations"
+    );
+}
+
+fn assert_no_budget_paused_task(dir: &TempDir) {
+    let tasks = fs::read_to_string(dir.path().join(".kio/tasks.jsonl")).unwrap();
+    for line in tasks.lines().filter(|line| !line.is_empty()) {
+        let task: Value = serde_json::from_str(line).unwrap();
+        assert_ne!(
+            task["status"], "paused",
+            "fixture must not pre-pause task: {task}"
+        );
+    }
+}
+
+/// Seed a genuine current-month settled charge before the observation.  The
+/// search itself never owns this write: it proves that `budget_paused` must
+/// inspect ledger truth, rather than infer exhaustion merely from a zero cap.
+fn seed_current_scope_ledger_charge(dir: &TempDir, usd: f64) {
+    let repo = Repository::open(dir.path()).unwrap();
+    let scope_id = repo.scope_identity().unwrap().scope_id;
+    let ledger_path = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    let ledger = kio_pipeline::ledger::LedgerDb::open(&ledger_path).unwrap();
+    ledger
+        .connection()
+        .execute(
+            "INSERT INTO cost_ledger (
+                scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq,
+                batch_job_id, usd, estimated, outcome, month, recorded_at
+             ) VALUES (?1, 'embedding', 'budget-search-seed-input',
+                'budget-search-seed-profile', 1, 'budget-search-seed-job', ?2, 0,
+                'succeeded', strftime('%Y-%m', 'now'), unixepoch('now') * 1000)",
+            params![scope_id, usd],
+        )
+        .unwrap();
+}
+
+/// An unterminated batch intent/job is budget truth too:
+/// `ledger_month_total` includes `state IN (0, 1)` reservations even before a
+/// terminal `cost_ledger` row exists.
+fn seed_current_scope_ledger_reservation(dir: &TempDir, state: i64, usd: f64) {
+    let repo = Repository::open(dir.path()).unwrap();
+    let scope_id = repo.scope_identity().unwrap().scope_id;
+    let input_hash = format!("budget-search-reservation-input-state-{state}");
+    let ledger_path = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    let ledger = kio_pipeline::ledger::LedgerDb::open(&ledger_path).unwrap();
+    ledger
+        .connection()
+        .execute(
+            "INSERT INTO batch_requests (
+                scope_id, adapter_kind, input_hash, tool_profile_hash, state,
+                request_kind, estimated_usd, created_at
+             ) VALUES (?1, 'embedding', ?2,
+                'budget-search-reservation-profile', ?3, 'batch', ?4,
+                unixepoch('now') * 1000)",
+            params![scope_id, input_hash, state, usd],
+        )
+        .unwrap();
+}
+
+fn write_budget_caps(dir: &TempDir, device_cap: f64, folder_cap: Option<f64>) {
+    let device_dir = dir.path().join(".test-config/kio");
+    fs::create_dir_all(&device_dir).unwrap();
+    fs::write(
+        device_dir.join("config.toml"),
+        format!("[budget]\nmonthly_usd_cap = {device_cap}\n"),
+    )
+    .unwrap();
+    if let Some(folder_cap) = folder_cap {
+        fs::write(
+            dir.path().join(".kio/config.toml"),
+            format!("[budget]\nmonthly_usd_cap = {folder_cap}\n"),
+        )
+        .unwrap();
+    }
+}
+
+fn assert_text_budget_pause_preserves_ledger(dir: &TempDir, query: &str, cap_kind: &str) {
+    let before = observe_ledger_leaves(dir);
+    for (label, args) in [
+        ("explicit text", vec!["search", query, "--mode", "text"]),
+        ("auto resolved to text", vec!["search", query]),
+    ] {
+        let response = private_success(dir, &args);
+        assert_eq!(
+            response["requested_mode"],
+            if label == "explicit text" {
+                "text"
+            } else {
+                "auto"
+            },
+            "{response}"
+        );
+        assert_eq!(response["resolved_mode"], "text", "{response}");
+        assert_eq!(
+            response["index_status"]["budget_paused"], true,
+            "{label} must preserve exhausted {cap_kind} budget truth: {response}"
+        );
+        assert_no_budget_paused_task(dir);
+        assert_ledger_leaves_unchanged(dir, &before, label);
+    }
+}
+
+fn wait_for_search_response_barrier(ready: &Path, child: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !ready.exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                use std::io::Read;
+                pipe.read_to_end(&mut stderr).unwrap();
+            }
+            panic!(
+                "search exited before response barrier: {status}; stderr={}",
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready.exists(),
+        "search did not reach response barrier: {}",
+        ready.display()
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_search_child_process_tree(child: &std::process::Child) {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pid=", "-o", "ppid=", "-p", &child.id().to_string()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let fields: Vec<u32> = String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(|field| field.parse().unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        vec![child.id(), std::process::id()],
+        "ps={fields:?}"
+    );
+}
+
+/// Explicit text search is not a vector/hybrid page-one operation.  It must
+/// not open the device cost ledger (whose companion write-sequence leaf is
+/// atomically rewritten even when its bytes are unchanged).
+#[test]
+fn pb_text_search_preserves_cost_ledger_and_write_sequence_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("ledger-text-search.md"),
+        "# Ledger text search\n\ntextledgerneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+
+    let before = observe_ledger_leaves(&dir);
+    assert!(
+        matches!(before[0], LedgerLeafObservation::Present(_)),
+        "index must have initialized the device ledger"
+    );
+
+    let ready = dir.path().join("text-search-response.ready");
+    let release = ready.with_extension("release");
+    let mut child = private_kio_process(&dir, &["search", "textledgerneedle", "--mode", "text"])
+        .env("KIO_TEST_SEARCH_RESPONSE_BARRIER_READY", &ready)
+        .arg("--json")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_search_response_barrier(&ready, &mut child);
+    #[cfg(target_os = "macos")]
+    assert_search_child_process_tree(&child);
+    fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["requested_mode"], "text", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "{response}"
+    );
+
+    assert_ledger_leaves_unchanged(&dir, &before, "explicit text search");
+
+    let fallback = private_success(&dir, &["search", "textledgerneedle"]);
+    assert_eq!(fallback["requested_mode"], "auto", "{fallback}");
+    assert_eq!(fallback["resolved_mode"], "text", "{fallback}");
+    assert!(
+        !fallback["results"].as_array().unwrap().is_empty(),
+        "{fallback}"
+    );
+    assert_ledger_leaves_unchanged(&dir, &before, "auto/default search resolved to text");
+}
+
+/// A valid text query must not downgrade an unsafe device-ledger leaf to a
+/// no-ledger/zero-spend observation or a scope-level partial response. The
+/// fixture owns both aliases; no user cache is ever modified.
+#[cfg(unix)]
+#[test]
+fn pb_text_search_unsafe_ledger_hardlink_fails_closed_without_search_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("unsafe-ledger-search.md"),
+        "# Unsafe ledger\n\nunsafeledgerneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+
+    let leaves = ledger_leaf_paths(&dir);
+    let main = &leaves[0];
+    let before_other_leaves = [
+        observe_ledger_leaf(&leaves[1]),
+        observe_ledger_leaf(&leaves[2]),
+        observe_ledger_leaf(&leaves[3]),
+    ];
+    let alias = dir.path().join("unsafe-ledger-alias.sqlite");
+    fs::hard_link(main, &alias).unwrap();
+    let before_main = observe_unsafe_ledger_leaf(main);
+    assert_eq!(before_main.nlink, 2, "fixture must create a main hardlink");
+
+    let output = private_kio_process(&dir, &["search", "unsafeledgerneedle", "--mode", "text"])
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        error["error_code"], "KIO-E-LEDGER-SNAPSHOT-UNSAFE-001",
+        "{error}"
+    );
+    assert_eq!(error["context"]["reason"], "unsafe_integrity", "{error}");
+    assert!(error.get("index_status").is_none(), "{error}");
+    assert!(error.get("excluded_scopes").is_none(), "{error}");
+
+    assert_eq!(
+        observe_unsafe_ledger_leaf(main),
+        before_main,
+        "failed text search must not change the unsafe source main leaf"
+    );
+    assert_eq!(observe_ledger_leaf(&leaves[1]), before_other_leaves[0]);
+    assert_eq!(observe_ledger_leaf(&leaves[2]), before_other_leaves[1]);
+    assert_eq!(observe_ledger_leaf(&leaves[3]), before_other_leaves[2]);
+}
+
+/// Budget status is supplementary to a text search result. A syntactically
+/// valid but policy-invalid cap must not turn an otherwise usable text search
+/// into a command failure (and must not reopen the source ledger merely while
+/// discovering that policy error).
+#[test]
+fn pb_text_search_budget_policy_error_remains_best_effort_and_non_mutating() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("invalid-budget-policy.md"),
+        "# Invalid budget policy\n\ninvalidbudgetpolicyneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    // Valid TOML and global config-schema shape, but `read_budget_policy`
+    // rejects a folder-layer `per_adapter` policy (that constraint is
+    // device-only). There is deliberately no `[search]` key here, so normal
+    // text mode selection remains usable.
+    fs::write(
+        dir.path().join(".kio/config.toml"),
+        "[budget.per_adapter]\nembedding = 1\n",
+    )
+    .unwrap();
+    let before = observe_ledger_leaves(&dir);
+
+    let response = private_success(
+        &dir,
+        &["search", "invalidbudgetpolicyneedle", "--mode", "text"],
+    );
+    assert_eq!(response["requested_mode"], "text", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "best-effort budget observation must not hide text results: {response}"
+    );
+    assert_ledger_leaves_unchanged(&dir, &before, "invalid budget policy text search");
+}
+
+/// An entirely absent source main/WAL/SHM triad is the normal zero-spend
+/// observation. Text search must not recreate the ledger, its write-sequence
+/// companion, or a SQLite sidecar merely to render `index_status`.
+#[test]
+fn pb_text_search_missing_ledger_is_zero_spend_and_no_create() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("missing-ledger-search.md"),
+        "# Missing ledger\n\nmissingledgerneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    for path in ledger_leaf_paths(&dir) {
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    let absent = observe_ledger_leaves(&dir);
+    assert!(
+        absent
+            .iter()
+            .all(|leaf| matches!(leaf, LedgerLeafObservation::Absent)),
+        "fixture must start with no source ledger main/write-seq/WAL/SHM"
+    );
+
+    let response = private_success(&dir, &["search", "missingledgerneedle", "--mode", "text"]);
+    assert_eq!(response["requested_mode"], "text", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert_eq!(
+        response["index_status"]["budget_paused"], false,
+        "{response}"
+    );
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "missing ledger must not hide ordinary text results: {response}"
+    );
+    assert_ledger_leaves_unchanged(&dir, &absent, "missing ledger text search");
+}
+
+/// A no-ledger result needs the same stable-or-fail observation as a present
+/// snapshot. If another process creates an already-exhausted ledger between
+/// the first and confirming all-absent triad reads, search must retry and use
+/// that real total rather than publish a false `budget_paused=false`.
+#[cfg(unix)]
+#[test]
+fn pb_text_search_retries_absent_to_present_ledger_before_budget_status() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("appearing-ledger-search.md"),
+        "# Appearing ledger\n\nappearingledgerneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    write_budget_caps(&dir, 1.0, None);
+    assert_no_budget_paused_task(&dir);
+    for path in ledger_leaf_paths(&dir) {
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    assert!(
+        observe_ledger_leaves(&dir)
+            .iter()
+            .all(|leaf| matches!(leaf, LedgerLeafObservation::Absent))
+    );
+
+    let barrier_dir = dir.path().join(".ledger-absent-barrier");
+    fs::create_dir(&barrier_dir).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&barrier_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let ready = barrier_dir.join("ledger-absent-confirm.ready");
+    let release = ready.with_extension("release");
+    let mut child =
+        private_kio_process(&dir, &["search", "appearingledgerneedle", "--mode", "text"])
+            .env("KIO_TEST_LEDGER_SNAPSHOT_ABSENT_BARRIER_READY", &ready)
+            .arg("--json")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+    wait_for_search_response_barrier(&ready, &mut child);
+    #[cfg(target_os = "macos")]
+    assert_search_child_process_tree(&child);
+
+    seed_current_scope_ledger_charge(&dir, 1.0);
+    let after_creator = observe_ledger_leaves(&dir);
+    fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["requested_mode"], "text", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert_eq!(
+        response["index_status"]["budget_paused"], true,
+        "the appearing exhausted ledger must never be reported as zero spend: {response}"
+    );
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "{response}"
+    );
+    assert_no_budget_paused_task(&dir);
+    assert_ledger_leaves_unchanged(
+        &dir,
+        &after_creator,
+        "absent-to-present retry must not mutate the creator's ledger",
+    );
+}
+
+/// Exhaustion is ledger-derived state, not a property of the cap alone. Both
+/// text entry paths must report an exhausted device cap without reopening the
+/// source SQLite database or creating WAL/SHM sidecars.
+#[test]
+fn pb_text_and_auto_preserve_device_cap_exhaustion_without_ledger_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("device-budget.md"),
+        "# Device budget\n\ndevicebudgetneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    assert_no_budget_paused_task(&dir);
+    write_budget_caps(&dir, 1.0, None);
+    seed_current_scope_ledger_charge(&dir, 1.0);
+    assert_text_budget_pause_preserves_ledger(&dir, "devicebudgetneedle", "device");
+}
+
+/// The folder cap has an independent current-scope total. It must remain
+/// visible to text/auto status while the source device ledger stays untouched.
+#[test]
+fn pb_text_and_auto_preserve_folder_cap_exhaustion_without_ledger_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("folder-budget.md"),
+        "# Folder budget\n\nfolderbudgetneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    assert_no_budget_paused_task(&dir);
+    write_budget_caps(&dir, 10.0, Some(1.0));
+    seed_current_scope_ledger_charge(&dir, 1.0);
+    assert_text_budget_pause_preserves_ledger(&dir, "folderbudgetneedle", "folder");
+}
+
+/// Reservation-only exhaustion must not be mistaken for zero spend. The
+/// device total depends on both active states: neither the `state=0` intent
+/// nor the `state=1` job-created reservation alone reaches the cap.
+#[test]
+fn pb_text_and_auto_preserve_device_reservation_exhaustion_without_ledger_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("device-reservation.md"),
+        "# Device reservation\n\ndevicereservationneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    assert_no_budget_paused_task(&dir);
+    write_budget_caps(&dir, 1.0, None);
+    seed_current_scope_ledger_reservation(&dir, 0, 0.4);
+    seed_current_scope_ledger_reservation(&dir, 1, 0.6);
+    assert_text_budget_pause_preserves_ledger(&dir, "devicereservationneedle", "device");
+}
+
+/// The folder total likewise depends on both active states, so an
+/// implementation that omits either `state=0` or `state=1` reports the wrong
+/// non-paused status. No settled charge is present here.
+#[test]
+fn pb_text_and_auto_preserve_folder_reservation_exhaustion_without_ledger_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("folder-reservation.md"),
+        "# Folder reservation\n\nfolderreservationneedle\n",
+    )
+    .unwrap();
+    private_success(&dir, &["init"]);
+    private_success(&dir, &["index", "--offline", "--approve"]);
+    assert_no_budget_paused_task(&dir);
+    write_budget_caps(&dir, 10.0, Some(1.0));
+    seed_current_scope_ledger_reservation(&dir, 0, 0.4);
+    seed_current_scope_ledger_reservation(&dir, 1, 0.6);
+    assert_text_budget_pause_preserves_ledger(&dir, "folderreservationneedle", "folder");
 }
 
 /// init + index + search, returning (dir, evidence_pointer, evidence_uri).

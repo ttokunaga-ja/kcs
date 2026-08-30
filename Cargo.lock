@@ -932,6 +932,7 @@ name = "kio-pipeline"
 version = "0.1.0-rc.1"
 dependencies = [
  "cap-primitives",
+ "getrandom 0.4.3",
  "kio-adapter",
  "kio-core",
  "libc",

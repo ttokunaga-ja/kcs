@@ -31,28 +31,141 @@
 //! projection tests below together with the existing deleted-history suite.
 
 use std::fs;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use kio_core::cas::{ObjectKind, ObjectStore};
 use kio_core::gc::ShallowReceipt;
+use kio_core::scope::Repository;
+use rusqlite::params;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 const TEST_ADOPTED_EMBEDDING_ENV: &str = "KIO_TEST_GEMINI_EMBED";
+
+#[derive(Debug, Eq, PartialEq)]
+struct PresentLedgerLeafState {
+    bytes: Vec<u8>,
+    sha256: String,
+    len: u64,
+    readonly: bool,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    nlink: u64,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum LedgerLeafState {
+    Absent,
+    Present(PresentLedgerLeafState),
+}
+
+fn ledger_leaf_state(path: &std::path::Path) -> LedgerLeafState {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LedgerLeafState::Absent;
+        }
+        Err(error) => panic!("cannot inspect ledger leaf {}: {error}", path.display()),
+    };
+    assert!(metadata.file_type().is_file(), "{}", path.display());
+    #[cfg(unix)]
+    assert_eq!(
+        metadata.nlink(),
+        1,
+        "ledger leaf must not be hard-linked: {}",
+        path.display()
+    );
+    let bytes = fs::read(path).unwrap();
+    LedgerLeafState::Present(PresentLedgerLeafState {
+        sha256: kio_core::cas::lower_hex(&Sha256::digest(&bytes)),
+        len: metadata.len(),
+        readonly: metadata.permissions().readonly(),
+        modified: metadata.modified().unwrap(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+        #[cfg(unix)]
+        nlink: metadata.nlink(),
+        #[cfg(unix)]
+        mode: metadata.mode() & 0o7777,
+        bytes,
+    })
+}
+
+fn ledger_leaf_states(dir: &TempDir) -> [LedgerLeafState; 4] {
+    let main = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    [
+        ledger_leaf_state(&main),
+        ledger_leaf_state(&std::path::PathBuf::from(format!(
+            "{}.write-seq",
+            main.display()
+        ))),
+        ledger_leaf_state(&std::path::PathBuf::from(format!("{}-wal", main.display()))),
+        ledger_leaf_state(&std::path::PathBuf::from(format!("{}-shm", main.display()))),
+    ]
+}
+
+fn seed_current_scope_charge(dir: &TempDir, usd: f64) {
+    let repo = Repository::open(dir.path()).unwrap();
+    let scope_id = repo.scope_identity().unwrap().scope_id;
+    let ledger =
+        kio_pipeline::ledger::LedgerDb::open(dir.path().join(".test-data/kio/cost-ledger.sqlite"))
+            .unwrap();
+    ledger
+        .connection()
+        .execute(
+            "INSERT INTO cost_ledger (
+            scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq,
+            batch_job_id, usd, estimated, outcome, month, recorded_at
+         ) VALUES (?1, 'embedding', 'cursor-budget-seed-input',
+            'cursor-budget-seed-profile', 1, 'cursor-budget-seed-job', ?2, 0,
+            'succeeded', strftime('%Y-%m', 'now'), unixepoch('now') * 1000)",
+            params![scope_id, usd],
+        )
+        .unwrap();
+}
+
+fn assert_no_budget_paused_task(dir: &TempDir) {
+    let tasks = fs::read_to_string(dir.path().join(".kio/tasks.jsonl")).unwrap();
+    for line in tasks.lines().filter(|line| !line.is_empty()) {
+        let task: Value = serde_json::from_str(line).unwrap();
+        assert_ne!(
+            task["status"], "paused",
+            "fixture must not pre-pause task: {task}"
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Harness (mirrors crates/kio-cli/tests/step4b_p2b_contract.rs / step3_p0_contract.rs).
 // ---------------------------------------------------------------------------
 
 fn kio(dir: &TempDir, args: &[&str]) -> Command {
+    let temp_dir = dir.path().join(".test-tmp");
+    fs::create_dir_all(&temp_dir).unwrap();
     let mut command = Command::cargo_bin("kio").unwrap();
     command
         .current_dir(dir.path())
+        .env("HOME", dir.path().join(".test-home"))
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
         .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
+        .env("TMPDIR", temp_dir)
         .env_remove("GEMINI_API_KEY")
         .env_remove("MISTRAL_API_KEY")
         .env_remove("KIO_FIXED_NOW")
@@ -61,6 +174,89 @@ fn kio(dir: &TempDir, args: &[&str]) -> Command {
         .env_remove("KIO_TEST_SCOPE_SEARCH_DELAY_MS")
         .args(args);
     command
+}
+
+/// The cursor ledger test uses a fully private, direct child process so the
+/// bound HOME/XDG roots and the process attribution are observable without a
+/// process-global environment mutation.
+fn private_kio_process(dir: &TempDir, args: &[&str]) -> std::process::Command {
+    let temp_dir = dir.path().join(".test-tmp");
+    fs::create_dir_all(&temp_dir).unwrap();
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("kio"));
+    command
+        .env_clear()
+        .current_dir(dir.path())
+        .env("HOME", dir.path().join(".test-home"))
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
+        .env("TMPDIR", temp_dir)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("TZ", "UTC")
+        .args(args);
+    command
+}
+
+fn wait_for_search_response_barrier(ready: &Path, child: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !ready.exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("search exited before response barrier: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready.exists(),
+        "search did not reach response barrier: {}",
+        ready.display()
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_search_child_process_tree(child: &std::process::Child) {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pid=", "-o", "ppid=", "-p", &child.id().to_string()])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let fields: Vec<u32> = String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(|field| field.parse().unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        vec![child.id(), std::process::id()],
+        "ps={fields:?}"
+    );
+}
+
+fn run_bound_vector_search(dir: &TempDir, args: &[&str], trace: &Path, label: &str) -> Value {
+    let ready = dir.path().join(format!("{label}.ready"));
+    let release = ready.with_extension("release");
+    let mut child = private_kio_process(dir, args)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env("KIO_TEST_QUERY_EMBED_TRACE", trace)
+        .env("KIO_TEST_SEARCH_RESPONSE_BARRIER_READY", &ready)
+        .arg("--json")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_search_response_barrier(&ready, &mut child);
+    #[cfg(target_os = "macos")]
+    assert_search_child_process_tree(&child);
+    fs::write(&release, b"release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn success(dir: &TempDir, args: &[&str]) -> Value {
@@ -234,6 +430,163 @@ fn pc5_online_and_offline_are_mutually_exclusive() {
     );
     assert_eq!(code, 2);
     assert_eq!(err["error_code"], "KIO-E-CONFIG-USAGE-001");
+}
+
+/// PC6: auto's cheap precheck can see a usable, approved online embedding
+/// adapter, but a real `kio adapter revoke --all` that wins the final
+/// pre-attempt gate must resolve the same request to text *before* opening or
+/// sweeping the source ledger. The ready barrier is reachable only after
+/// auto's vector-capable precheck; it changes no state itself. The revoke is a
+/// separate public CLI invocation in the fixture's private HOME/XDG roots.
+#[test]
+fn pc6_auto_final_revoke_before_attempt_falls_back_to_text_without_ledger_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("final-consent-recheck.md"),
+        "# Final consent recheck\n\nfinalconsentneedle searchable text\n",
+    )
+    .unwrap();
+    kio(&dir, &["init"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    kio(&dir, &["index", "--approve"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    assert_no_budget_paused_task(&dir);
+
+    let before = ledger_leaf_states(&dir);
+    let ready = dir.path().join("final-consent.ready");
+    let release = ready.with_extension("release");
+    let trace = dir.path().join("final-consent-query-embed.trace");
+    let mut child = private_kio_process(&dir, &["search", "finalconsentneedle"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env("KIO_TEST_SEARCH_FINAL_CONSENT_BARRIER_READY", &ready)
+        .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
+        .arg("--json")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_search_response_barrier(&ready, &mut child);
+    #[cfg(target_os = "macos")]
+    assert_search_child_process_tree(&child);
+
+    let revoke = private_kio_process(&dir, &["adapter", "revoke", "--all"])
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        revoke.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&revoke.stdout),
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    let revoked: Value = serde_json::from_slice(&revoke.stdout).unwrap();
+    assert_eq!(revoked["status"], "revoked", "{revoked}");
+    fs::write(&release, b"release").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["requested_mode"], "auto", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert_eq!(
+        response["fallback_reason"], "embedding_not_authorized",
+        "{response}"
+    );
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "{response}"
+    );
+    assert_no_budget_paused_task(&dir);
+    assert_eq!(
+        ledger_leaf_states(&dir),
+        before,
+        "a final consent revoke before any attempt must preserve source ledger main/write-seq/WAL/SHM"
+    );
+    assert!(
+        !trace.exists(),
+        "the final pre-attempt rejection must not send a query embedding"
+    );
+}
+
+/// Once final consent has passed, an online query embedding uses the existing
+/// durable claim/reservation/settlement protocol. A provider failure may make
+/// auto return text results, but that post-attempt fallback remains inside the
+/// documented fresh vector/hybrid page-one ledger-write exception: it must not
+/// be "fixed" by moving the claim after the send or dropping unknown billing.
+#[test]
+fn pc6_auto_post_attempt_failure_retains_authorized_ledger_accounting() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("post-attempt-fallback.md"),
+        "# Post-attempt fallback\n\npostattemptneedle searchable text\n",
+    )
+    .unwrap();
+    kio(&dir, &["init"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    kio(&dir, &["index", "--approve"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    assert_no_budget_paused_task(&dir);
+
+    let write_seq = dir
+        .path()
+        .join(".test-data/kio/cost-ledger.sqlite.write-seq");
+    if write_seq.exists() {
+        fs::remove_file(&write_seq).unwrap();
+    }
+    let before = ledger_leaf_states(&dir);
+    assert!(matches!(before[1], LedgerLeafState::Absent));
+    let trace = dir.path().join("post-attempt-query-embed.trace");
+    let output = private_kio_process(&dir, &["search", "postattemptneedle"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "auth_error")
+        .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["requested_mode"], "auto", "{response}");
+    assert_eq!(response["resolved_mode"], "text", "{response}");
+    assert_eq!(
+        response["fallback_reason"], "query_embedding_unavailable",
+        "{response}"
+    );
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "{response}"
+    );
+    assert_no_budget_paused_task(&dir);
+    let after = ledger_leaf_states(&dir);
+    assert!(
+        matches!(after[1], LedgerLeafState::Present(_)),
+        "an authorized post-attempt failure must retain the durable ledger open/settlement boundary"
+    );
+    assert_ne!(
+        after, before,
+        "post-attempt fallback must not erase or disguise authorized ledger accounting"
+    );
+    assert_eq!(
+        fs::read_to_string(trace).unwrap().lines().count(),
+        1,
+        "the failure must occur after exactly one attempted query send"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -735,9 +1088,28 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
         .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .assert()
         .success();
+    assert_no_budget_paused_task(&dir);
+
+    // A fresh vector/hybrid page 1 is the one search path allowed to open
+    // the device ledger: it may charge / settle the query embedding and
+    // `LedgerDb::open` refreshes this advisory companion atomically. Remove
+    // it first so the page-1 assertion is a positive discriminator, rather
+    // than merely observing an artifact left by indexing.
+    let ledger_main = dir.path().join(".test-data/kio/cost-ledger.sqlite");
+    let ledger_write_seq = dir
+        .path()
+        .join(".test-data/kio/cost-ledger.sqlite.write-seq");
+    assert!(ledger_main.is_file(), "index must create the test ledger");
+    if ledger_write_seq.exists() {
+        fs::remove_file(&ledger_write_seq).unwrap();
+    }
+    assert!(
+        !ledger_write_seq.exists(),
+        "page-1 discriminator starts with no write-seq companion"
+    );
 
     let trace = dir.path().join("query-embed.trace");
-    let page1_output = kio(
+    let page1 = run_bound_vector_search(
         &dir,
         &[
             "search",
@@ -747,17 +1119,12 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
             "--limit",
             "1",
         ],
-    )
-    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
-    .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
-    .arg("--json")
-    .assert()
-    .success()
-    .get_output()
-    .stdout
-    .clone();
-    let page1: Value = serde_json::from_slice(&page1_output).unwrap();
+        &trace,
+        "cursor-page1",
+    );
+    assert_eq!(page1["requested_mode"], "hybrid", "{page1}");
     assert_eq!(page1["resolved_mode"], "hybrid", "{page1}");
+    assert_no_budget_paused_task(&dir);
     let cursor = page1["paging"]["next_cursor"]
         .as_str()
         .expect("3-document fixture must page at limit=1")
@@ -767,6 +1134,29 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
         .unwrap()
         .to_owned();
 
+    assert!(
+        ledger_write_seq.is_file(),
+        "fresh hybrid page 1 must retain its permitted ledger-open side effect"
+    );
+
+    // Make the cap exhausted only after this fresh vector/hybrid page 1. That
+    // keeps page 1's permitted metered path genuinely available, then proves
+    // the cursor replay reads the resulting ledger truth without reopening the
+    // source database. The settled row is test setup, not a paused task.
+    let config_dir = dir.path().join(".test-config/kio");
+    fs::create_dir_all(&config_dir).unwrap();
+    let device_config = config_dir.join("config.toml");
+    let existing_device_config = fs::read_to_string(&device_config).unwrap_or_default();
+    fs::write(
+        &device_config,
+        format!("{existing_device_config}\n[budget]\nmonthly_usd_cap = 1\n"),
+    )
+    .unwrap();
+    seed_current_scope_charge(&dir, 1.0);
+    let ledger_after_page1 = ledger_leaf_states(&dir);
+    assert!(matches!(ledger_after_page1[0], LedgerLeafState::Present(_)));
+    assert!(matches!(ledger_after_page1[1], LedgerLeafState::Present(_)));
+
     let after_page1 = fs::read_to_string(&trace).unwrap();
     assert_eq!(
         after_page1.lines().count(),
@@ -774,7 +1164,7 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
         "page 1 must send the query embedding exactly once: {after_page1:?}"
     );
 
-    let page2_output = kio(
+    let page2 = run_bound_vector_search(
         &dir,
         &[
             "search",
@@ -786,17 +1176,23 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
             "--cursor",
             &cursor,
         ],
-    )
-    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
-    .env("KIO_TEST_QUERY_EMBED_TRACE", &trace)
-    .arg("--json")
-    .assert()
-    .success()
-    .get_output()
-    .stdout
-    .clone();
-    let page2: Value = serde_json::from_slice(&page2_output).unwrap();
+        &trace,
+        "cursor-page2",
+    );
+    assert_eq!(page2["requested_mode"], "hybrid", "{page2}");
     assert_eq!(page2["resolved_mode"], "hybrid", "{page2}");
+    assert_eq!(page2["index_status"]["budget_paused"], true, "{page2}");
+    assert_no_budget_paused_task(&dir);
+
+    // A cursor replay reuses page 1's cached vector. It must neither make a
+    // second metered query request nor reopen the ledger merely for
+    // `index_status`: that would atomically replace the write-seq companion
+    // even when its bytes are unchanged.
+    assert_eq!(
+        ledger_leaf_states(&dir),
+        ledger_after_page1,
+        "cursor replay must preserve source ledger main/write-seq/WAL/SHM Present|Absent state"
+    );
 
     // The trace file gained NO new lines: replay never re-embedded.
     let after_page2 = fs::read_to_string(&trace).unwrap();
@@ -812,6 +1208,61 @@ fn r23_01_cursor_replay_never_re_embeds_the_query() {
     assert_ne!(
         page1_chunk, page2_chunk,
         "page 2 must advance past page 1's hit: page1={page1} page2={page2}"
+    );
+}
+
+/// Fresh vector page 1 shares hybrid's permitted metered boundary.  This is
+/// deliberately a positive discriminator: text/cursor tests must not make
+/// the ledger path unreachable for an actual fresh vector request.
+#[test]
+fn r23_01_fresh_vector_page_one_retains_allowed_ledger_open_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("vector-page-one.md"),
+        "# Vector page one\n\nvectorpageoneneedle\n",
+    )
+    .unwrap();
+    kio(&dir, &["init"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    kio(&dir, &["index", "--approve"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    assert_no_budget_paused_task(&dir);
+
+    let write_seq = dir
+        .path()
+        .join(".test-data/kio/cost-ledger.sqlite.write-seq");
+    if write_seq.exists() {
+        fs::remove_file(&write_seq).unwrap();
+    }
+    let trace = dir.path().join("vector-page-one.trace");
+    let response = run_bound_vector_search(
+        &dir,
+        &[
+            "search",
+            "vectorpageoneneedle",
+            "--mode",
+            "vector",
+            "--limit",
+            "1",
+        ],
+        &trace,
+        "vector-page1",
+    );
+    assert_eq!(response["requested_mode"], "vector", "{response}");
+    assert_eq!(response["resolved_mode"], "vector", "{response}");
+    assert!(
+        matches!(ledger_leaf_states(&dir)[1], LedgerLeafState::Present(_)),
+        "fresh vector page 1 remains allowed to open the ledger and recreate write-seq"
+    );
+    assert_no_budget_paused_task(&dir);
+    assert_eq!(
+        fs::read_to_string(trace).unwrap().lines().count(),
+        1,
+        "fresh vector page 1 performs exactly one embedding request"
     );
 }
 

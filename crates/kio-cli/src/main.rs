@@ -113,7 +113,8 @@ use kio_pipeline::ledger::ops::{
 };
 use kio_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kio_pipeline::ledger::{
-    BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
+    BatchRequestRow, BatchState, LedgerDb, LedgerReadSnapshot, LedgerSnapshotError, Outcome,
+    RequestKind, TaskKey as LedgerTaskKey,
 };
 use kio_pipeline::markdownize::{
     IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
@@ -5889,7 +5890,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // query-embedding row. R23-01 (05 §1.5 L234): a cursor replay (page 2+)
     // no longer computes a query embedding at all — see the `else` arm below.
     let mut vector_unavailable_reason = "query_embedding_unavailable";
-    let mut post_attempt_unauthorized = false;
+    let mut final_consent_unauthorized = false;
     let query_embedding = if uses_vectors {
         if decoded_cursor.is_none() {
             match compute_query_embedding_page1(
@@ -5913,12 +5914,12 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
                     vector_unavailable_reason = "embedding_contract_violation";
                     None
                 }
-                // PC6: the claim-Tx re-read found the send no longer
+                // PC6: the final pre-attempt re-read found the send no longer
                 // authorized (a revoke completed between the precheck above
                 // and the re-read) — this is the same user-intent category as
                 // the precheck's own Unauthorized, not a technical failure.
                 Some(QueryEmbeddingOutcome::NotAuthorized) => {
-                    post_attempt_unauthorized = true;
+                    final_consent_unauthorized = true;
                     None
                 }
                 None => None,
@@ -5947,7 +5948,7 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // A live adapter failure (auth/rate) after the send still degrades vector→text
     // so `--vector` errors and auto/hybrid falls back, exactly as before O2.
     let vector = if uses_vectors && query_embedding.is_none() {
-        if post_attempt_unauthorized {
+        if final_consent_unauthorized {
             VectorAvailability::Unauthorized
         } else {
             VectorAvailability::Unavailable {
@@ -7034,7 +7035,16 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
             entry
         })
         .collect::<Vec<_>>();
-    let index_status = compute_index_status(&searched);
+    // Search status must retain the documented exhausted-cap observation, but
+    // SQLite must never see the mutable source ledger merely to compute it.
+    // Capture one owned main+WAL snapshot for the whole invocation and reuse
+    // that frozen connection for the device total and every scope total.  A
+    // fresh vector/hybrid page 1 may already have used the ordinary writable
+    // ledger for the metered query embedding; this status read does not reopen
+    // that source and cursor/text paths remain source-ledger read-only.
+    let ledger_path = ledger_db_path();
+    let budget_ledger = open_search_budget_snapshot(&ledger_path)?;
+    let index_status = compute_index_status(&searched, budget_ledger.as_ref(), &ledger_path)?;
     // PC45/PC46: a scope that skipped shallow ancestors mid-walk is not fully
     // complete even though it was not excluded — same partial-failure
     // treatment (exit 3) as an excluded_scopes entry (05 §1.6 "黙って欠落
@@ -8068,7 +8078,11 @@ fn diversify_merged<'a>(
 /// across scopes (count-weighted average). Enrichment tasks are Markdownize +
 /// Embedding; "done" is `Done`/`Partial`. `budget_paused` is a budget-paused task or
 /// an exhausted monthly budget (R22-7 — a secrets hold pauses work but not for budget).
-fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
+fn compute_index_status(
+    searched: &[SearchedScopeInfo],
+    budget_ledger: Option<&LedgerReadSnapshot>,
+    ledger_path: &Path,
+) -> Result<Value> {
     let mut total = 0u64;
     let mut done = 0u64;
     let mut pending = 0u64;
@@ -8077,6 +8091,16 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     let mut unsupported_input_errors = Vec::new();
     let mut task_errors = Vec::new();
     let mut office_conversion_unavailable_inputs = Vec::new();
+    let month = utc_month(&now_utc_seconds());
+    let device_spent = match budget_ledger {
+        Some(snapshot) => snapshot.month_total(None, None, &month).map_err(|error| {
+            pipeline_to_kio(kio_pipeline::PipelineError::ledger_snapshot(
+                ledger_path.display().to_string(),
+                error,
+            ))
+        })?,
+        None => 0.0,
+    };
 
     for scope in searched {
         // R23-20 (03 §4 L296): `scope.scope_path` is now the canonical `.kio`
@@ -8209,16 +8233,31 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                         "message": error.message(),
                     })),
                 }
-                if let Ok(budget) = budget_status_json(&repo) {
-                    let device = budget
-                        .get("device_remaining_usd")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(f64::INFINITY);
-                    let folder = budget
-                        .get("folder_remaining_usd")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(f64::INFINITY);
-                    if device <= 0.0 || folder <= 0.0 {
+                // Preserve the established best-effort treatment of unrelated
+                // per-scope budget-config/identity failures: they must not
+                // discard otherwise valid multi-scope search results. Snapshot
+                // query failures remain command-fatal inside the successful
+                // policy+identity branch and are never converted to zero.
+                if let Ok(caps) =
+                    read_budget_policy(user_config_toml_path(), repo.kio_dir().join("config.toml"))
+                    && let Ok(identity) = repo.scope_identity()
+                {
+                    let folder_spent = match budget_ledger {
+                        Some(snapshot) => snapshot
+                            .month_total(Some(&identity.scope_id), None, &month)
+                            .map_err(|error| {
+                                pipeline_to_kio(kio_pipeline::PipelineError::ledger_snapshot(
+                                    ledger_path.display().to_string(),
+                                    error,
+                                ))
+                            })?,
+                        None => 0.0,
+                    };
+                    let device_exhausted = caps.device_monthly_usd_cap - device_spent <= 0.0;
+                    let folder_exhausted = caps
+                        .folder_monthly_usd_cap
+                        .is_some_and(|cap| cap - folder_spent <= 0.0);
+                    if device_exhausted || folder_exhausted {
                         budget_paused = true;
                     }
                 }
@@ -8242,7 +8281,7 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     };
     let unsupported_inputs_complete = unsupported_input_errors.is_empty();
     let tasks_complete = task_errors.is_empty();
-    json!({
+    Ok(json!({
         "enriched_ratio": enriched_ratio,
         "pending_enrichment_tasks": pending,
         "budget_paused": budget_paused,
@@ -8261,7 +8300,7 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
             "count": office_conversion_unavailable_inputs.len(),
             "files": office_conversion_unavailable_inputs,
         },
-    })
+    }))
 }
 
 fn current_unsupported_inputs(repo: &Repository) -> Result<Vec<UnsupportedInputDisposition>> {
@@ -14719,6 +14758,30 @@ fn maybe_wait_at_test_search_response_barrier() {
     }
 }
 
+/// Test-only synchronization point immediately before search's final consent
+/// re-read. It does not alter consent or a search outcome: the integration
+/// test performs an ordinary public `kio adapter revoke` while the child waits
+/// here, proving that a revoke which wins the final pre-attempt gate cannot
+/// open or mutate the source ledger.
+fn maybe_wait_at_test_search_final_consent_barrier() {
+    #[cfg(debug_assertions)]
+    let ready_path =
+        std::env::var_os("KIO_TEST_SEARCH_FINAL_CONSENT_BARRIER_READY").map(PathBuf::from);
+    #[cfg(not(debug_assertions))]
+    let ready_path: Option<PathBuf> = None;
+    let Some(ready_path) = ready_path else {
+        return;
+    };
+    if fs::write(&ready_path, b"ready").is_err() {
+        return;
+    }
+    let release_path = ready_path.with_extension("release");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !release_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// QB5/QB6/QB7 §Z1 / 裁定1 (step4b-contract-tests-p3b.md, 10-operations.md §3
 /// L300-311): the shared (1)+(3) read-path preflight pair — §I checkpoint 1
 /// (purge journal / epoch, LC53) immediately followed by index (sqlite.db)
@@ -15910,6 +15973,58 @@ fn job_is_accounted_for(
 /// ledger, sole store for every reservation/charge this CLI records.
 fn ledger_db_path() -> PathBuf {
     data_home().join("kio/cost-ledger.sqlite")
+}
+
+/// Capture the device ledger once for a search response's budget-status
+/// observation.  A completely absent main/WAL/SHM triad is the one normal
+/// no-ledger state and means zero spent; every unsafe or unstable state is a
+/// command-level failure and must not be reported as `budget_paused=false`.
+fn open_search_budget_snapshot(path: &Path) -> Result<Option<LedgerReadSnapshot>> {
+    match LedgerReadSnapshot::open(path) {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(LedgerSnapshotError::Missing) => Ok(None),
+        Err(error) => Err(pipeline_to_kio(
+            kio_pipeline::PipelineError::ledger_snapshot(path.display().to_string(), error),
+        )),
+    }
+}
+
+fn ledger_snapshot_to_kio(path: &str, error: LedgerSnapshotError) -> KioError {
+    match error {
+        // A successfully-owned snapshot cannot become Missing while querying.
+        // Treat that impossible transition as integrity failure rather than
+        // silently switching to the no-ledger/zero-total outcome.
+        LedgerSnapshotError::Missing => KioError::new(
+            "KIO-E-LEDGER-SNAPSHOT-UNSAFE-001",
+            "cost ledger snapshot disappeared after it was captured",
+            json!({
+                "ledger_path": path,
+                "reason": "unsafe_integrity",
+                "detail": "owned ledger snapshot reported Missing after capture",
+            }),
+            ExitCode::PermanentFailure,
+        ),
+        LedgerSnapshotError::UnsafeIntegrity(detail) => KioError::new(
+            "KIO-E-LEDGER-SNAPSHOT-UNSAFE-001",
+            "cost ledger could not be read without violating integrity safeguards",
+            json!({
+                "ledger_path": path,
+                "reason": "unsafe_integrity",
+                "detail": detail,
+            }),
+            ExitCode::PermanentFailure,
+        ),
+        LedgerSnapshotError::UnstableBusy(detail) => KioError::new(
+            "KIO-E-LEDGER-SNAPSHOT-001",
+            "cost ledger could not be read from a stable snapshot; retry the command",
+            json!({
+                "ledger_path": path,
+                "reason": "unstable_or_busy",
+                "detail": detail,
+            }),
+            ExitCode::PartialFailure,
+        ),
+    }
 }
 
 /// Open the device-global `cost-ledger.sqlite`. Every ledger-touching command (`kio status`,
@@ -18641,9 +18756,10 @@ enum QueryEmbeddingOutcome {
     /// failed its acceptance check (e.g. a dimension mismatch) — a distinct
     /// technical failure from a plain adapter error.
     ContractViolation,
-    /// PC6 (05 §1.1 L50-53 / 07 §3 L144-146): the claim-Tx re-read found the
-    /// send consent gate no longer satisfied (a revoke completed between the
-    /// caller's precheck and this re-read) — refuse the send. Maps to
+    /// PC6 (05 §1.1 L50-53 / 07 §3 L144-146): the final pre-attempt re-read
+    /// found the send consent gate no longer satisfied (a revoke completed
+    /// between the caller's precheck and this re-read) — refuse the send.
+    /// Maps to
     /// `VectorAvailability::Unauthorized`, not `Unavailable`, at the caller.
     NotAuthorized,
 }
@@ -18675,16 +18791,16 @@ enum QueryEmbeddingOutcome {
 /// the device-row protocol to "page 1" specifically; 04 §5.4 §H's own text is
 /// page-1-scoped: "vector|hybrid 検索 page 1 の query embedding 呼出").
 ///
-/// `exec_scopes`/`tool_id`/`online` are PC6's claim-Tx re-read inputs: the
+/// `exec_scopes`/`tool_id`/`online` are PC6's final pre-attempt re-read inputs: the
 /// caller already ran the same [`embedding_opt_in_for_scopes`] OR-across-
 /// scopes check once as a cheap precheck (before this function is even
-/// called), but 05 §1.1 requires the *final* verification to happen
-/// immediately ahead of spending the claim, narrowing the window in which a
-/// concurrent `kio adapter revoke` could otherwise let a since-revoked send
-/// through undetected (a revoke completing strictly before this re-read is
-/// honored; one completing after is allowed to be in-flight, matching the
-/// spec's own "検証後に revoke が完了した場合の当該送信は in-flight として
-/// 許容").
+/// called), but 05 §1.1 requires the *final* verification before opening the
+/// writable ledger or beginning a sweep/claim. This narrows the window in
+/// which a concurrent `kio adapter revoke` could otherwise let a
+/// since-revoked send through undetected while keeping a revoke that wins this
+/// re-read fully non-mutating. A revoke completing after the re-read is
+/// allowed to be in-flight, matching the spec's own "検証後に revoke が完了した
+/// 場合の当該送信は in-flight として許容".
 fn compute_query_embedding_page1(
     query: &str,
     exec_scopes: &[ExecScope],
@@ -18707,6 +18823,18 @@ fn compute_query_embedding_page1(
         return local_query_embedding(execution, query);
     }
     let profile = declared_embedding_profile(execution);
+
+    // PC6: the final authorization check is deliberately before *any* source
+    // ledger action. A revoked auto/hybrid candidate therefore resolves to its
+    // normal text fallback without opening the ledger, refreshing write-seq,
+    // sweeping stale rows, or creating a claim. Once the check succeeds, later
+    // claim/reservation/send/settlement outcomes remain the normal fresh-page-1
+    // metered path.
+    maybe_wait_at_test_search_final_consent_barrier();
+    if !embedding_opt_in_for_scopes(exec_scopes, tool_id, &profile.profile_hash, online)? {
+        return Ok(Some(QueryEmbeddingOutcome::NotAuthorized));
+    }
+
     let ledger = open_ledger_db()?;
     let conn = ledger.connection();
     let key = LedgerTaskKey::new(
@@ -18727,12 +18855,6 @@ fn compute_query_embedding_page1(
         Ok(())
     })
     .map_err(pipeline_to_kio)?;
-
-    // PC6: the final consent re-read, immediately ahead of the claim Tx that
-    // is about to spend the device row (05 §1.1 L50-53 / 07 §3 L144-146).
-    if !embedding_opt_in_for_scopes(exec_scopes, tool_id, &profile.profile_hash, online)? {
-        return Ok(Some(QueryEmbeddingOutcome::NotAuthorized));
-    }
 
     // §M note-2: the "effective timeout" is max(participating scopes' resolved
     // `timeout_seconds`) — currently a no-op maximum, since
@@ -27433,6 +27555,9 @@ fn pipeline_to_kio(error: kio_pipeline::PipelineError) -> KioError {
         ),
         kio_pipeline::PipelineError::Locked { path } => KioError::locked(path),
         kio_pipeline::PipelineError::Io { path, message } => KioError::io(message, path),
+        kio_pipeline::PipelineError::LedgerSnapshot { path, source } => {
+            ledger_snapshot_to_kio(&path, source)
+        }
         // R23-13 (06 §7 L343-344 "KIO-E-STORE-CONSTRAINT-001 ... permanent・
         // 非再試行で command を即時中止・exit 4"): a ledger CHECK constraint
         // reached at runtime is an implementation-bug signal (pre-write
@@ -28438,7 +28563,12 @@ mod tests {
             },
         ];
 
-        let status = compute_index_status(&searched);
+        let status = compute_index_status(
+            &searched,
+            None,
+            std::path::Path::new("/private/test/cost-ledger.sqlite"),
+        )
+        .unwrap();
         assert_eq!(status["tasks_complete"], false);
         assert_eq!(status["unsupported_inputs_complete"], false);
         assert_eq!(status["task_errors"].as_array().unwrap().len(), 2);
@@ -30724,5 +30854,53 @@ mod tests {
             kio_core::ExitCode::PermanentFailure
         );
         assert_eq!(impossible_missing.context()["reason"], "unsafe_integrity");
+    }
+
+    #[test]
+    fn ledger_snapshot_error_mapping_preserves_typed_exit_and_closed_reason() {
+        let path = "/private/test/cost-ledger.sqlite";
+        let unsafe_error = super::pipeline_to_kio(kio_pipeline::PipelineError::ledger_snapshot(
+            path,
+            kio_pipeline::ledger::LedgerSnapshotError::UnsafeIntegrity(
+                "linked ledger main".to_owned(),
+            ),
+        ));
+        assert_eq!(
+            unsafe_error.error_code(),
+            "KIO-E-LEDGER-SNAPSHOT-UNSAFE-001"
+        );
+        assert_eq!(
+            unsafe_error.exit_code(),
+            kio_core::ExitCode::PermanentFailure
+        );
+        assert_eq!(unsafe_error.context()["reason"], "unsafe_integrity");
+        assert_eq!(unsafe_error.context()["ledger_path"], path);
+
+        let transient_error = super::pipeline_to_kio(kio_pipeline::PipelineError::ledger_snapshot(
+            path,
+            kio_pipeline::ledger::LedgerSnapshotError::UnstableBusy(
+                "retry budget exhausted".to_owned(),
+            ),
+        ));
+        assert_eq!(transient_error.error_code(), "KIO-E-LEDGER-SNAPSHOT-001");
+        assert_eq!(
+            transient_error.exit_code(),
+            kio_core::ExitCode::PartialFailure
+        );
+        assert_eq!(transient_error.context()["reason"], "unstable_or_busy");
+
+        let impossible_missing =
+            super::pipeline_to_kio(kio_pipeline::PipelineError::ledger_snapshot(
+                path,
+                kio_pipeline::ledger::LedgerSnapshotError::Missing,
+            ));
+        assert_eq!(
+            impossible_missing.error_code(),
+            "KIO-E-LEDGER-SNAPSHOT-UNSAFE-001"
+        );
+        assert_eq!(
+            impossible_missing.exit_code(),
+            kio_core::ExitCode::PermanentFailure
+        );
     }
 }

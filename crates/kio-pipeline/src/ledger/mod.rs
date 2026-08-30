@@ -12,7 +12,11 @@
 pub mod model;
 pub mod ops;
 pub mod schema;
+pub mod snapshot;
+#[cfg(windows)]
+pub(crate) mod snapshot_windows_security;
 pub mod time;
 
 pub use model::{BatchRequestRow, BatchState, CostLedgerRow, Outcome, RequestKind, TaskKey};
 pub use schema::{LedgerDb, default_ledger_path};
+pub use snapshot::{LedgerReadSnapshot, LedgerSnapshotError};

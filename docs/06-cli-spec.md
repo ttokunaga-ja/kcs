@@ -325,6 +325,8 @@ kio search "..." --json                 # 機械可読
 
 レスポンス schema は [05-runtime.md §1.7](05-runtime.md)。`json` モードでは Evidence Pointer フル構造 + `next_cursor` を返す。
 
+`index_status.budget_paused` は task の budget pause と、cost ledger から観測した device / folder 月次 cap 枯渇の OR である。この観測は searched scope ごとに source ledger を reopen せず、1 invocation の同じ owned read-only snapshot から device total を1回、folder total を scope ごとに読む。explicit text、cursor replay、および offline / profile incompatibility / final consent rejection による**pre-attempt** auto→text は source ledger の main / `.write-seq` / SQLite sidecar を作成・変更しない。final consent check を通過した fresh vector / hybrid page 1 は query embedding 記帳の既存例外に従い、claim / reservation / send 後に最終結果が text fallback になった場合も同じである ([05-runtime.md §6](05-runtime.md))。snapshot が unsafe / unstable な場合は `budget_paused=false` に縮退せず、下記の command-level error で stdout を空のまま停止する。
+
 ---
 
 # 4. Output Format
@@ -570,6 +572,15 @@ copy/open/query 中に integrity を確定できない failure は `KIO-E-REGIST
 scope status や `batch_changed` に変換しない。registry main / `-wal` / `-shm` の **全 3 leaf が absent**
 の場合だけは cache miss であり、既存の validated hint / CWD 候補規則を継続できる。main absent で
 sidecar が存在する形は unsafe integrity である。
+
+Search の cost-ledger snapshot も command-level preflight である。source ledger のmain / `-wal` /
+`-shm` の全3 leaf absent の場合だけは no-create / zero-total として cap 判定を継続する。
+source symlink / hardlink / non-regular / oversize leaf、pre/open/post identity 不一致、main absent +
+sidecar present、または source 再観測が一致した owned copy の SQLite integrity failure は
+`KIO-E-LEDGER-SNAPSHOT-UNSAFE-001` / exit 4 とする。source leaf の presence/hash drift、busy、
+bounded retry exhaustion、temp I/O、または copy/open/query 中に integrity を確定できない
+failure は `KIO-E-LEDGER-SNAPSHOT-001` / exit 3 とする。どちらも stdout を空にし、
+scope fallback / excluded scope / `budget_paused=false` / 他 domain の error code へ変換しない。
 
 スクリプト連携 (`kio index && kio search`) はこれらを参照する。コマンド固有の補足は各 sub-command の docstring で明記。
 

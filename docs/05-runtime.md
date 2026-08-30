@@ -66,9 +66,10 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 実効 `allow_network` が true であること** (未設定・設定 key の喪失は gate 不成立 —
 [07-adapter-spec.md §3](07-adapter-spec.md) と同一規範。`--online` が開くのは未設定の既定閉鎖のみ —
 明示 revoke (`allow_network = false`・行の revoked) は上書きしない)。**この可否は
-相 1 claim Tx 内 (`BEGIN IMMEDIATE` 保持下) で approvals[] / boolean を再読して最終検証する** (読み取り開始時の値を
-使い回さない — 検証後に revoke が完了した場合の当該送信は in-flight として許容 (送信済みの取り消し
-非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
+source cost ledger を開く・stale sweep / claim を開始する**前**に approvals[] / boolean を再読して最終検証する**
+(読み取り開始時の値を使い回さない。ここで revoke が先行した auto / hybrid は ledger を開かず text fallback になる。
+検証後に revoke が完了した場合の当該送信は in-flight として許容し、以後の claim / reservation / send / settlement は
+fresh page 1 の通常の記帳経路に従う — 送信済みの取り消し非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
 (かつ `--online` 一時 opt-in なし) の場合、auto / `--mode hybrid` は text fallback
 (`fallback_reason="embedding_not_authorized"`)、`--mode vector` 明示は KIO-E-SEARCH-VEC-UNAUTHORIZED-001
 で error。**ユーザー意思由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
@@ -1734,7 +1735,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 規約:
 
-- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容する。検索は `.kio/index/sqlite.db` の WAL snapshot を読まず、公開済み `aggregator.sqlite` の projection だけを読む。例外的に `kio search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
+- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kio/.lock` を取得しない。`kio index` と `kio search` の同時実行は許容する。検索は `.kio/index/sqlite.db` の WAL snapshot を読まず、公開済み `aggregator.sqlite` の projection だけを読む。`index_status.budget_paused` の月次 cap 観測は、1 search invocation につき device-global cost-ledger の owned read-only snapshot を1個だけ作る。source main / `-wal` / `-shm` を NOFOLLOW・regular・single-link・identity・size・SHA で前後観測し、owner-private temp へ main と存在する WAL だけを複写して `READ_ONLY` + `query_only` で読む (SHM は複写しない)。全3 leaf absent のみ no-ledger / spent=0 とし、partial leaf・unsafe link / replacement・stable-copy integrity failure は `KIO-E-LEDGER-SNAPSHOT-UNSAFE-001` / exit 4、presence/hash drift・busy・retry exhaustion・temp/copy/open/query の不確定性は `KIO-E-LEDGER-SNAPSHOT-001` / exit 3 で stdout を返さず fail-closed する。これは開始と終了の一致を要求する stable-or-fail 観測であり、cross-file formal atomic snapshot の主張ではない。例外的に `kio search` は final consent check を通過した vector|hybrid の fresh page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行う。claim 開始後の adapter failure で最終結果が text fallback になってもこの例外は維持される。一方、offline / profile incompatibility / final consent rejection による pre-attempt auto→text はこの書込を行わない。これも `.kio/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
 - `.kio/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KIO-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。Unixでは acquire/reclaim/release 全体を crash-release される directory `flock` でも直列化し、release はcheck-then-unlinkでなくdead canonical sentinelとのatomic exchangeを使う。このため非保持時にもdead sentinel leafが残り得るが、次writerが同じgate下で回収し、単なる`.lock`存在だけをlive判定に使わない。
 - refs (refs/heads/main, refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kio repair verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
