@@ -58,6 +58,7 @@ enum SnapshotPhase {
     AfterInitialManifest,
     BeforePrivateSqliteOpen,
     AfterProbeBeforeRecheck,
+    AfterFinalManifestBeforeParentRecheck,
 }
 #[cfg(test)]
 type SnapshotHook = std::sync::Arc<dyn Fn(SnapshotPhase, usize, &Path) + Send + Sync>;
@@ -464,6 +465,45 @@ fn stable_parent_binding(path: &Path) -> Result<Option<(fs::File, String, PathBu
         },
         Err(error) => Err(parent_binding_error(error)),
     }
+}
+
+/// Rebind the canonical parent immediately before accepting a snapshot result.
+/// The retained descriptor remains the read authority during capture, but it
+/// must still name the directory currently reachable through the canonical
+/// nofollow path. A different directory is substitution; a temporarily absent
+/// path is ordinary churn and remains retryable.
+fn fresh_parent_binding(
+    held_parent: &fs::File,
+    parent_path: &Path,
+    main: &str,
+) -> Result<fs::File, AttemptError> {
+    let canonical_path = parent_path.join(main);
+    let (fresh_parent, fresh_main, fresh_parent_path) = match bound_parent(&canonical_path) {
+        Ok(binding) => binding,
+        Err(LedgerSnapshotError::Missing) => {
+            return Err(AttemptError::Unstable(
+                "ledger canonical parent disappeared while snapshotting".into(),
+            ));
+        }
+        Err(error) => return Err(parent_binding_error(error)),
+    };
+    if fresh_main != main || fresh_parent_path != parent_path {
+        return Err(AttemptError::Unsafe(
+            "ledger canonical parent rebound to an unexpected path".into(),
+        ));
+    }
+    let held_metadata = cap_fs::Metadata::from_file(held_parent).map_err(|error| {
+        AttemptError::Unstable(format!("inspect retained ledger parent: {error}"))
+    })?;
+    let fresh_metadata = cap_fs::Metadata::from_file(&fresh_parent).map_err(|error| {
+        AttemptError::Unstable(format!("inspect freshly bound ledger parent: {error}"))
+    })?;
+    if identity(&held_metadata) != identity(&fresh_metadata) {
+        return Err(AttemptError::Unsafe(
+            "ledger canonical parent identity changed while snapshotting".into(),
+        ));
+    }
+    Ok(fresh_parent)
 }
 
 fn parent_binding_error(error: LedgerSnapshotError) -> AttemptError {
@@ -1125,8 +1165,18 @@ fn attempt_snapshot(
     }
     if manifest_is_all_absent(&observed) {
         maybe_wait_at_test_ledger_absent_recheck()?;
-        let confirmed = manifest_recheck(parent, parent_path, main)?;
+        let fresh_parent = fresh_parent_binding(parent, parent_path, main)?;
+        let confirmed = manifest_recheck(&fresh_parent, parent_path, main)?;
         if manifest_is_all_absent(&confirmed) {
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook(
+                    SnapshotPhase::AfterFinalManifestBeforeParentRecheck,
+                    attempt,
+                    parent_path,
+                );
+            }
+            fresh_parent_binding(parent, parent_path, main)?;
             return Err(AttemptError::Missing);
         }
         return Err(AttemptError::Unstable(
@@ -1201,7 +1251,8 @@ fn attempt_snapshot(
             storage.path(),
         );
     }
-    let final_manifest = manifest_recheck(parent, parent_path, main)?;
+    let fresh_parent = fresh_parent_binding(parent, parent_path, main)?;
+    let final_manifest = manifest_recheck(&fresh_parent, parent_path, main)?;
     if initial != final_manifest {
         return Err(if manifest_identity_replaced(&initial, &final_manifest) {
             AttemptError::Unsafe("ledger source identity changed while snapshotting".into())
@@ -1209,6 +1260,15 @@ fn attempt_snapshot(
             AttemptError::Unstable("ledger main/WAL/SHM changed while snapshotting".into())
         });
     }
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(
+            SnapshotPhase::AfterFinalManifestBeforeParentRecheck,
+            attempt,
+            parent_path,
+        );
+    }
+    fresh_parent_binding(parent, parent_path, main)?;
     Ok(LedgerReadSnapshot {
         conn,
         _storage: storage,
@@ -1437,6 +1497,61 @@ mod tests {
         });
         let snapshot = LedgerReadSnapshot::open_for_test(&path, 2, hook).unwrap();
         assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn all_absent_whole_parent_substitution_is_unsafe_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("cost-ledger.sqlite");
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let replacement_path = path.clone();
+        let hook: SnapshotHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && matches!(phase, SnapshotPhase::AfterFinalManifestBeforeParentRecheck)
+            {
+                fs::rename(&replacement_parent, &moved_parent).unwrap();
+                fs::create_dir(&replacement_parent).unwrap();
+                drop(LedgerDb::open(&replacement_path).unwrap());
+            }
+        });
+
+        match LedgerReadSnapshot::open_for_test(&path, 1, hook) {
+            Err(LedgerSnapshotError::UnsafeIntegrity(message)) => {
+                assert!(message.contains("canonical parent identity changed"));
+            }
+            Err(error) => panic!("expected unsafe parent substitution, got {error}"),
+            Ok(_) => panic!("detached all-absent parent must not produce a snapshot"),
+        }
+    }
+
+    #[test]
+    fn present_snapshot_whole_parent_substitution_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("cost-ledger.sqlite");
+        drop(LedgerDb::open(&path).unwrap());
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let replacement_path = path.clone();
+        let hook: SnapshotHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && matches!(phase, SnapshotPhase::AfterFinalManifestBeforeParentRecheck)
+            {
+                fs::rename(&replacement_parent, &moved_parent).unwrap();
+                fs::create_dir(&replacement_parent).unwrap();
+                drop(LedgerDb::open(&replacement_path).unwrap());
+            }
+        });
+
+        match LedgerReadSnapshot::open_for_test(&path, 1, hook) {
+            Err(LedgerSnapshotError::UnsafeIntegrity(message)) => {
+                assert!(message.contains("canonical parent identity changed"));
+            }
+            Err(error) => panic!("expected unsafe parent substitution, got {error}"),
+            Ok(_) => panic!("detached private snapshot must not be accepted"),
+        }
     }
 
     #[cfg(unix)]

@@ -209,6 +209,7 @@ enum SnapshotTestPhase {
     AfterInitialManifest,
     BeforeSnapshotSqliteOpen,
     AfterSnapshotQueryBeforeRecheck,
+    AfterFinalManifestBeforeParentRecheck,
 }
 
 #[cfg(test)]
@@ -376,6 +377,70 @@ fn registry_parent_and_leaf(
         }
     }
     Ok((handle, leaf.to_owned(), parent.to_owned()))
+}
+
+fn registry_parent_binding_error(error: RegistrySnapshotError) -> SnapshotAttemptError {
+    match error {
+        RegistrySnapshotError::Missing => SnapshotAttemptError::Missing,
+        RegistrySnapshotError::UnsafeIntegrity(message) => SnapshotAttemptError::Unsafe(message),
+        RegistrySnapshotError::UnstableBusy(message) => SnapshotAttemptError::Unstable(message),
+    }
+}
+
+/// A missing canonical parent is a cache miss only after two complete nofollow
+/// walks agree. Each snapshot retry obtains a new binding rather than retaining
+/// a directory that may have been detached from the canonical path.
+fn stable_registry_parent_binding(
+    path: &Path,
+) -> std::result::Result<Option<(fs::File, String, PathBuf)>, SnapshotAttemptError> {
+    match registry_parent_and_leaf(path) {
+        Ok(binding) => Ok(Some(binding)),
+        Err(RegistrySnapshotError::Missing) => match registry_parent_and_leaf(path) {
+            Err(RegistrySnapshotError::Missing) => Ok(None),
+            Ok(_) => Err(SnapshotAttemptError::Unstable(
+                "scope registry parent appeared while confirming its absence".to_owned(),
+            )),
+            Err(error) => Err(registry_parent_binding_error(error)),
+        },
+        Err(error) => Err(registry_parent_binding_error(error)),
+    }
+}
+
+/// Freshly bind the canonical parent at the acceptance boundary and require it
+/// to be the same directory as the descriptor used to capture the snapshot.
+fn fresh_registry_parent_binding(
+    held_parent: &fs::File,
+    parent_path: &Path,
+    main: &str,
+) -> std::result::Result<fs::File, SnapshotAttemptError> {
+    let canonical_path = parent_path.join(main);
+    let (fresh_parent, fresh_main, fresh_parent_path) =
+        match registry_parent_and_leaf(&canonical_path) {
+            Ok(binding) => binding,
+            Err(RegistrySnapshotError::Missing) => {
+                return Err(SnapshotAttemptError::Unstable(
+                    "scope registry canonical parent disappeared while snapshotting".to_owned(),
+                ));
+            }
+            Err(error) => return Err(registry_parent_binding_error(error)),
+        };
+    if fresh_main != main || fresh_parent_path != parent_path {
+        return Err(SnapshotAttemptError::Unsafe(
+            "scope registry canonical parent rebound to an unexpected path".to_owned(),
+        ));
+    }
+    let held_metadata = cap_fs::Metadata::from_file(held_parent).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("inspect retained registry parent: {error}"))
+    })?;
+    let fresh_metadata = cap_fs::Metadata::from_file(&fresh_parent).map_err(|error| {
+        SnapshotAttemptError::Unstable(format!("inspect freshly bound registry parent: {error}"))
+    })?;
+    if leaf_identity(&held_metadata) != leaf_identity(&fresh_metadata) {
+        return Err(SnapshotAttemptError::Unsafe(
+            "scope registry canonical parent identity changed while snapshotting".to_owned(),
+        ));
+    }
+    Ok(fresh_parent)
 }
 
 #[cfg(windows)]
@@ -985,7 +1050,35 @@ fn snapshot_attempt(
     #[cfg(not(test))] _attempt: usize,
 ) -> std::result::Result<(Connection, RegistrySnapshot), SnapshotAttemptError> {
     let storage = PrivateSnapshotStorage::create()?;
-    let initial = observe_manifest(parent, parent_path, main, Some(&storage), true)?;
+    let initial = match observe_manifest(parent, parent_path, main, Some(&storage), true) {
+        Ok(initial) => initial,
+        Err(SnapshotAttemptError::Missing) => {
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                hook(SnapshotTestPhase::AfterInitialManifest, attempt, None);
+            }
+            let fresh_parent = fresh_registry_parent_binding(parent, parent_path, main)?;
+            return match observe_manifest(&fresh_parent, parent_path, main, None, true) {
+                Err(SnapshotAttemptError::Missing) => {
+                    #[cfg(test)]
+                    if let Some(hook) = hook {
+                        hook(
+                            SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck,
+                            attempt,
+                            None,
+                        );
+                    }
+                    fresh_registry_parent_binding(parent, parent_path, main)?;
+                    Err(SnapshotAttemptError::Missing)
+                }
+                Ok(_) => Err(SnapshotAttemptError::Unstable(
+                    "scope registry appeared while confirming an all-absent snapshot".to_owned(),
+                )),
+                Err(error) => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let private_dir = {
         #[cfg(windows)]
         {
@@ -1081,12 +1174,22 @@ fn snapshot_attempt(
             None,
         );
     }
-    let final_manifest = observe_manifest(parent, parent_path, main, None, false)?;
+    let fresh_parent = fresh_registry_parent_binding(parent, parent_path, main)?;
+    let final_manifest = observe_manifest(&fresh_parent, parent_path, main, None, false)?;
     if initial != final_manifest {
         return Err(SnapshotAttemptError::Unstable(
             "scope registry main/WAL/SHM changed while snapshotting".to_owned(),
         ));
     }
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(
+            SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck,
+            attempt,
+            None,
+        );
+    }
+    fresh_registry_parent_binding(parent, parent_path, main)?;
     Ok((
         conn,
         RegistrySnapshot {
@@ -1114,11 +1217,17 @@ impl RegistryDb {
         path: &Path,
         retry_window: Duration,
     ) -> std::result::Result<Self, RegistrySnapshotError> {
-        let (parent, leaf, parent_path) = registry_parent_and_leaf(path)?;
         let started = Instant::now();
         let mut saw_instability = None;
         for attempt in 0..MAX_REGISTRY_SNAPSHOT_ATTEMPTS {
-            match snapshot_attempt(&parent, &parent_path, &leaf, None, attempt) {
+            let result = match stable_registry_parent_binding(path) {
+                Ok(Some((parent, leaf, parent_path))) => {
+                    snapshot_attempt(&parent, &parent_path, &leaf, None, attempt)
+                }
+                Ok(None) => Err(SnapshotAttemptError::Missing),
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok((conn, snapshot)) => {
                     return Ok(Self {
                         conn,
@@ -1160,10 +1269,16 @@ impl RegistryDb {
         attempts: usize,
         hook: SnapshotTestHook,
     ) -> std::result::Result<Self, RegistrySnapshotError> {
-        let (parent, leaf, parent_path) = registry_parent_and_leaf(path)?;
         let mut saw_instability = None;
         for attempt in 0..attempts {
-            match snapshot_attempt(&parent, &parent_path, &leaf, Some(&hook), attempt) {
+            let result = match stable_registry_parent_binding(path) {
+                Ok(Some((parent, leaf, parent_path))) => {
+                    snapshot_attempt(&parent, &parent_path, &leaf, Some(&hook), attempt)
+                }
+                Ok(None) => Err(SnapshotAttemptError::Missing),
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok((conn, snapshot)) => {
                     return Ok(Self {
                         conn,
@@ -1665,6 +1780,69 @@ mod tests {
             Err(RegistrySnapshotError::UnsafeIntegrity(_)) => {}
             Err(error) => panic!("expected unsafe replacement failure, got {error}"),
             Ok(_) => panic!("expected replacement failure"),
+        }
+    }
+
+    #[test]
+    fn all_absent_whole_parent_substitution_is_unsafe_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("scope-registry.sqlite");
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let replacement_path = path.clone();
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && phase == SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck {
+                fs::rename(&replacement_parent, &moved_parent).unwrap();
+                fs::create_dir(&replacement_parent).unwrap();
+                let replacement = RegistryDb::open(&replacement_path).unwrap();
+                replacement
+                    .upsert(&entry("replacement", "/tmp/replacement", true, true))
+                    .unwrap();
+            }
+        });
+
+        match RegistryDb::open_read_only_for_test(&path, 1, hook) {
+            Err(RegistrySnapshotError::UnsafeIntegrity(message)) => {
+                assert!(message.contains("canonical parent identity changed"));
+            }
+            Err(error) => panic!("expected unsafe parent substitution, got {error}"),
+            Ok(_) => panic!("detached all-absent parent must not produce a snapshot"),
+        }
+    }
+
+    #[test]
+    fn present_snapshot_whole_parent_substitution_is_unsafe() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("scope-registry.sqlite");
+        let original = RegistryDb::open(&path).unwrap();
+        original
+            .upsert(&entry("original", "/tmp/original", true, true))
+            .unwrap();
+        drop(original);
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let replacement_path = path.clone();
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && phase == SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck {
+                fs::rename(&replacement_parent, &moved_parent).unwrap();
+                fs::create_dir(&replacement_parent).unwrap();
+                let replacement = RegistryDb::open(&replacement_path).unwrap();
+                replacement
+                    .upsert(&entry("replacement", "/tmp/replacement", true, true))
+                    .unwrap();
+            }
+        });
+
+        match RegistryDb::open_read_only_for_test(&path, 1, hook) {
+            Err(RegistrySnapshotError::UnsafeIntegrity(message)) => {
+                assert!(message.contains("canonical parent identity changed"));
+            }
+            Err(error) => panic!("expected unsafe parent substitution, got {error}"),
+            Ok(_) => panic!("detached private snapshot must not be accepted"),
         }
     }
 
