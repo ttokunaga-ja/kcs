@@ -547,14 +547,22 @@ fn bound_inherited_parent_from_root(
     let mut dir = root;
 
     let mut components = parent_path.components();
-    debug_assert_eq!(components.next(), Some(Component::RootDir));
+    // Consume the inherited `/dev/fd/N` prefix in ordinary code.  These calls
+    // advance the iterator, so placing them only in `debug_assert!` would make
+    // release builds re-walk the prefix from RootDir and reject it as a suffix
+    // traversal component.
+    let root_component = components.next();
+    let dev_component = components.next();
+    let fd_component = components.next();
+    let descriptor_component = components.next();
+    debug_assert_eq!(root_component, Some(Component::RootDir));
     debug_assert!(
-        matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"dev")
+        matches!(dev_component, Some(Component::Normal(name)) if name.as_bytes() == b"dev")
     );
     debug_assert!(
-        matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"fd")
+        matches!(fd_component, Some(Component::Normal(name)) if name.as_bytes() == b"fd")
     );
-    debug_assert!(components.next().is_some());
+    debug_assert!(descriptor_component.is_some());
     for component in components {
         let Component::Normal(name) = component else {
             return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
