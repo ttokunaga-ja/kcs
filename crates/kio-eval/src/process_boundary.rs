@@ -600,6 +600,57 @@ mod tests {
         assert_eq!(fs::read(home.join("x")).unwrap(), b"ok");
     }
     #[test]
+    fn descriptor_environment_child_opens_ledger_through_inherited_xdg_fd() {
+        const CHILD_MARKER: &str = "KIO_EVAL_DESCRIPTOR_LEDGER_CHILD";
+        if matches!(std::env::var(CHILD_MARKER).as_deref(), Ok("1")) {
+            use std::os::unix::ffi::OsStrExt;
+
+            let xdg_data = std::env::var_os("XDG_DATA_HOME")
+                .expect("child must receive descriptor-backed XDG_DATA_HOME");
+            let raw = xdg_data.as_bytes();
+            let descriptor = raw
+                .strip_prefix(b"/dev/fd/")
+                .expect("child XDG_DATA_HOME must use the exact /dev/fd/N spelling");
+            assert!(
+                !descriptor.is_empty()
+                    && descriptor.iter().all(u8::is_ascii_digit)
+                    && !(descriptor.len() > 1 && descriptor[0] == b'0'),
+                "child XDG_DATA_HOME descriptor must be canonical"
+            );
+            let ledger = PathBuf::from(xdg_data).join("kio/cost-ledger.sqlite");
+            let snapshot = kio_pipeline::ledger::LedgerReadSnapshot::open(&ledger)
+                .expect("child must bind the inherited XDG descriptor");
+            assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 2.0);
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let ledger_dir = data.join("kio");
+        fs::create_dir(&ledger_dir).unwrap();
+        let ledger = ledger_dir.join("cost-ledger.sqlite");
+        let db = kio_pipeline::ledger::LedgerDb::open(&ledger).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO cost_ledger (scope_id,adapter_kind,input_hash,tool_profile_hash,submission_seq,batch_job_id,usd,estimated,outcome,month,recorded_at) VALUES ('descriptor-child','embedding','input','profile',1,'job',2.0,0,'succeeded','2026-08',0)",
+                [],
+            )
+            .unwrap();
+        drop(db);
+        let data_handle = fs::File::open(&data).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .arg("--exact")
+            .arg("process_boundary::tests::descriptor_environment_child_opens_ledger_through_inherited_xdg_fd")
+            .arg("--nocapture");
+        configure_descriptor_environment(&mut child, &[("XDG_DATA_HOME", &data_handle)]).unwrap();
+        // This marker is deliberately set after `configure_descriptor_environment`,
+        // which clears the inherited environment by design.
+        child.env(CHILD_MARKER, "1");
+        assert!(child.status().unwrap().success());
+    }
+    #[test]
     fn executable_rechecks_and_memfd_is_sealed() {
         let temp = tempfile::tempdir().unwrap();
         let p = temp.path().join("x");

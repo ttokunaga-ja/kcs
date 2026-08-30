@@ -325,6 +325,11 @@ fn normalized_absolute(path: &Path) -> Result<PathBuf, LedgerSnapshotError> {
             path.display()
         )));
     }
+    // `/dev/fd/N` is a Linux-only descriptor authority spelling.  Preserve no
+    // ambient aliases here: `Path::components` normalizes repeated separators
+    // and dot components, which must never turn an alias into an authority.
+    #[cfg(target_os = "linux")]
+    validate_inherited_ledger_spelling(path)?;
     #[cfg(not(windows))]
     {
         let mut out = PathBuf::from("/");
@@ -387,7 +392,221 @@ fn normalized_absolute(path: &Path) -> Result<PathBuf, LedgerSnapshotError> {
     }
 }
 
+/// Reject aliases to the one inherited-descriptor spelling before path
+/// normalization can erase them.  Other absolute paths retain the ordinary
+/// lexical/no-follow resolver below.
+#[cfg(target_os = "linux")]
+fn validate_inherited_ledger_spelling(path: &Path) -> Result<(), LedgerSnapshotError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut components = path.components();
+    let names_descriptor_root = components.next() == Some(Component::RootDir)
+        && matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"dev")
+        && matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"fd");
+    if !names_descriptor_root {
+        return Ok(());
+    }
+
+    let raw = path.as_os_str().as_bytes();
+    if raw != b"/dev/fd" && !raw.starts_with(b"/dev/fd/") {
+        return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inherited ledger path is not canonical: {}",
+            path.display()
+        )));
+    }
+    let suffix = raw.strip_prefix(b"/dev/fd/").ok_or_else(|| {
+        LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inherited ledger descriptor is missing: {}",
+            path.display()
+        ))
+    })?;
+    if suffix.is_empty()
+        || suffix.starts_with(b"/")
+        || suffix.windows(2).any(|window| window == b"//")
+    {
+        return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inherited ledger path is not canonical: {}",
+            path.display()
+        )));
+    }
+    let mut suffix_components = suffix.split(|byte| *byte == b'/');
+    let descriptor = suffix_components
+        .next()
+        .expect("non-empty inherited descriptor suffix has a first component");
+    if descriptor.is_empty()
+        || !descriptor.iter().all(u8::is_ascii_digit)
+        || (descriptor.len() > 1 && descriptor[0] == b'0')
+        || std::str::from_utf8(descriptor)
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|fd| *fd >= 0)
+            .is_none()
+        || suffix_components.clone().next().is_none()
+        || suffix_components
+            .any(|component| component.is_empty() || component == b"." || component == b"..")
+    {
+        return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inherited ledger path is not canonical: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Return the descriptor in the sole supported `/dev/fd/N` spelling.
+#[cfg(target_os = "linux")]
+fn inherited_ledger_descriptor(path: &Path) -> Result<Option<i32>, LedgerSnapshotError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = path.as_os_str().as_bytes();
+    if !raw.starts_with(b"/dev/fd/") {
+        return Ok(None);
+    }
+    // `normalized_absolute` has already rejected aliases and malformed
+    // descriptor words.  Keep this parser self-contained so future callers
+    // cannot accidentally route an ambient `/dev/fd` path here.
+    validate_inherited_ledger_spelling(path)?;
+    let descriptor = raw[b"/dev/fd/".len()..]
+        .split(|byte| *byte == b'/')
+        .next()
+        .expect("validated inherited descriptor has a first component");
+    let fd = std::str::from_utf8(descriptor)
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| *fd >= 0)
+        .ok_or_else(|| {
+            LedgerSnapshotError::UnsafeIntegrity(format!(
+                "inherited ledger descriptor is invalid: {}",
+                path.display()
+            ))
+        })?;
+    Ok(Some(fd))
+}
+
+/// Bind an inherited directory descriptor and traverse only its suffix with
+/// no-follow operations.  This is not ambient `/dev/fd` support: the raw
+/// spelling was validated before normalization and the descriptor itself is
+/// duplicated, validated, and retained as the sole root authority.
+#[cfg(target_os = "linux")]
+fn bound_inherited_parent(
+    path: &Path,
+) -> Result<Option<(fs::File, String, PathBuf)>, LedgerSnapshotError> {
+    let Some(root) = duplicate_inherited_ledger_root(path)? else {
+        return Ok(None);
+    };
+    bound_inherited_parent_from_root(path, root).map(Some)
+}
+
+/// Duplicate the raw inherited descriptor before using it as a capability.
+#[cfg(target_os = "linux")]
+fn duplicate_inherited_ledger_root(path: &Path) -> Result<Option<fs::File>, LedgerSnapshotError> {
+    use std::os::fd::FromRawFd;
+
+    let Some(fd) = inherited_ledger_descriptor(path)? else {
+        return Ok(None);
+    };
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+            "duplicate inherited ledger descriptor {fd}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor.
+    let root = unsafe { fs::File::from_raw_fd(duplicate) };
+    let metadata = root.metadata().map_err(|error| {
+        LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inspect inherited ledger descriptor {fd}: {error}"
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+            "inherited ledger descriptor must name a directory: {fd}"
+        )));
+    }
+    Ok(Some(root))
+}
+
+/// Traverse a validated ledger suffix from an already-held inherited root.
+#[cfg(target_os = "linux")]
+fn bound_inherited_parent_from_root(
+    path: &Path,
+    root: fs::File,
+) -> Result<(fs::File, String, PathBuf), LedgerSnapshotError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let leaf = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| LedgerSnapshotError::UnsafeIntegrity("ledger file name is invalid".into()))?
+        .to_owned();
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| LedgerSnapshotError::UnsafeIntegrity("ledger has no parent".into()))?
+        .to_owned();
+    let mut dir = root;
+
+    let mut components = parent_path.components();
+    debug_assert_eq!(components.next(), Some(Component::RootDir));
+    debug_assert!(
+        matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"dev")
+    );
+    debug_assert!(
+        matches!(components.next(), Some(Component::Normal(name)) if name.as_bytes() == b"fd")
+    );
+    debug_assert!(components.next().is_some());
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(LedgerSnapshotError::UnsafeIntegrity(format!(
+                "inherited ledger path contains traversal: {}",
+                path.display()
+            )));
+        };
+        let label = name.to_string_lossy();
+        let before =
+            cap_fs::stat(&dir, Path::new(name), cap_fs::FollowSymlinks::No).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    #[cfg(test)]
+                    run_missing_parent_hook();
+                    LedgerSnapshotError::Missing
+                } else {
+                    LedgerSnapshotError::UnstableBusy(format!(
+                        "stat inherited ledger parent: {error}"
+                    ))
+                }
+            })?;
+        validate_dir(&before, &label)?;
+        let child = cap_fs::open_dir_nofollow(&dir, Path::new(name)).map_err(|error| {
+            LedgerSnapshotError::UnsafeIntegrity(format!(
+                "open inherited ledger parent nofollow: {error}"
+            ))
+        })?;
+        let opened = cap_fs::Metadata::from_file(&child).map_err(|error| {
+            LedgerSnapshotError::UnstableBusy(format!("inspect inherited ledger parent: {error}"))
+        })?;
+        let after =
+            cap_fs::stat(&dir, Path::new(name), cap_fs::FollowSymlinks::No).map_err(|error| {
+                LedgerSnapshotError::UnsafeIntegrity(format!(
+                    "re-stat inherited ledger parent: {error}"
+                ))
+            })?;
+        validate_dir(&opened, &label)?;
+        validate_dir(&after, &label)?;
+        if !same_identity(&before, &opened) || !same_identity(&before, &after) {
+            return Err(LedgerSnapshotError::UnsafeIntegrity(
+                "inherited ledger parent changed while opening".into(),
+            ));
+        }
+        dir = child;
+    }
+    Ok((dir, leaf, parent_path))
+}
+
 fn bound_parent(path: &Path) -> Result<(fs::File, String, PathBuf), LedgerSnapshotError> {
+    #[cfg(target_os = "linux")]
+    if let Some(binding) = bound_inherited_parent(path)? {
+        return Ok(binding);
+    }
     let leaf = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -454,6 +673,13 @@ fn bound_parent(path: &Path) -> Result<(fs::File, String, PathBuf), LedgerSnapsh
 /// the equivalent all-absent race for the parent itself: a creator that wins
 /// between observations makes the operation retry and bind the new parent.
 fn stable_parent_binding(path: &Path) -> Result<Option<(fs::File, String, PathBuf)>, AttemptError> {
+    #[cfg(target_os = "linux")]
+    if inherited_ledger_descriptor(path)
+        .map_err(parent_binding_error)?
+        .is_some()
+    {
+        return stable_inherited_parent_binding(path);
+    }
     match bound_parent(path) {
         Ok(binding) => Ok(Some(binding)),
         Err(LedgerSnapshotError::Missing) => match bound_parent(path) {
@@ -465,6 +691,100 @@ fn stable_parent_binding(path: &Path) -> Result<Option<(fs::File, String, PathBu
         },
         Err(error) => Err(parent_binding_error(error)),
     }
+}
+
+/// Confirm an inherited-path absence against one retained descriptor root,
+/// then prove that the canonical descriptor number still names that root just
+/// before accepting `Missing`.  Re-reading `/dev/fd/N` for both absence walks
+/// would let a same-process fd-table substitution join observations from two
+/// unrelated authority roots.
+#[cfg(target_os = "linux")]
+fn stable_inherited_parent_binding(
+    path: &Path,
+) -> Result<Option<(fs::File, String, PathBuf)>, AttemptError> {
+    let root = match duplicate_inherited_ledger_root(path) {
+        Ok(Some(root)) => root,
+        Ok(None) => {
+            return Err(AttemptError::Unsafe(
+                "inherited ledger root disappeared".into(),
+            ));
+        }
+        Err(error) => return Err(parent_binding_error(error)),
+    };
+    let first = root
+        .try_clone()
+        .map_err(|error| AttemptError::Unstable(format!("clone inherited ledger root: {error}")))?;
+    match bound_inherited_parent_from_root(path, first) {
+        Ok(binding) => Ok(Some(binding)),
+        Err(LedgerSnapshotError::Missing) => {
+            let second = root.try_clone().map_err(|error| {
+                AttemptError::Unstable(format!("re-clone inherited ledger root: {error}"))
+            })?;
+            match bound_inherited_parent_from_root(path, second) {
+                Ok(_) => Err(AttemptError::Unstable(
+                    "ledger parent appeared while confirming its absence".into(),
+                )),
+                Err(LedgerSnapshotError::Missing) => {
+                    let fresh_root = match duplicate_inherited_ledger_root(path) {
+                        Ok(Some(root)) => root,
+                        Ok(None) => {
+                            return Err(AttemptError::Unstable(
+                                "inherited ledger root disappeared while confirming absence".into(),
+                            ));
+                        }
+                        Err(error) => return Err(parent_binding_error(error)),
+                    };
+                    require_same_inherited_root(&root, &fresh_root, "while confirming absence")?;
+                    match bound_inherited_parent_from_root(path, fresh_root) {
+                        Err(LedgerSnapshotError::Missing) => {
+                            let post_walk_root = match duplicate_inherited_ledger_root(path) {
+                                Ok(Some(root)) => root,
+                                Ok(None) => {
+                                    return Err(AttemptError::Unstable(
+                                        "inherited ledger root disappeared after final absence walk"
+                                            .into(),
+                                    ));
+                                }
+                                Err(error) => return Err(parent_binding_error(error)),
+                            };
+                            require_same_inherited_root(
+                                &root,
+                                &post_walk_root,
+                                "after final absence walk",
+                            )?;
+                            Ok(None)
+                        }
+                        Ok(_) => Err(AttemptError::Unstable(
+                            "ledger parent appeared while accepting inherited absence".into(),
+                        )),
+                        Err(error) => Err(parent_binding_error(error)),
+                    }
+                }
+                Err(error) => Err(parent_binding_error(error)),
+            }
+        }
+        Err(error) => Err(parent_binding_error(error)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn require_same_inherited_root(
+    held: &fs::File,
+    fresh: &fs::File,
+    phase: &str,
+) -> Result<(), AttemptError> {
+    let held_metadata = cap_fs::Metadata::from_file(held).map_err(|error| {
+        AttemptError::Unstable(format!("inspect retained inherited ledger root: {error}"))
+    })?;
+    let fresh_metadata = cap_fs::Metadata::from_file(fresh).map_err(|error| {
+        AttemptError::Unstable(format!("inspect fresh inherited ledger root: {error}"))
+    })?;
+    if !same_identity(&held_metadata, &fresh_metadata) {
+        return Err(AttemptError::Unsafe(format!(
+            "inherited ledger root identity changed {phase}"
+        )));
+    }
+    Ok(())
 }
 
 /// Rebind the canonical parent immediately before accepting a snapshot result.
@@ -1303,6 +1623,23 @@ mod tests {
         (dir, path, db)
     }
 
+    #[cfg(target_os = "linux")]
+    fn high_test_descriptor_minimum() -> i32 {
+        let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: getrlimit returned success and initialized the structure.
+        let limit = unsafe { limit.assume_init() }.rlim_cur;
+        let upper = limit.min(i32::MAX as libc::rlim_t) as i32;
+        assert!(
+            upper > 32,
+            "RLIMIT_NOFILE is too small for descriptor tests"
+        );
+        upper - 16
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum SourceLeaf {
         Absent,
@@ -1758,6 +2095,199 @@ mod tests {
             LedgerReadSnapshot::open_for_test(&path, 2, hook),
             Err(LedgerSnapshotError::UnstableBusy(_))
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_directory_descriptor_is_a_capability_relative_ledger_parent() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let retained_root = fs::File::open(directory.path()).unwrap();
+        let actual = directory.path().join("kio/cost-ledger.sqlite");
+        fs::create_dir(directory.path().join("kio")).unwrap();
+        let db = LedgerDb::open(&actual).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO cost_ledger (scope_id,adapter_kind,input_hash,tool_profile_hash,submission_seq,batch_job_id,usd,estimated,outcome,month,recorded_at) VALUES ('descriptor','embedding','input','profile',1,'job',2.0,0,'succeeded','2026-08',0)",
+                [],
+            )
+            .unwrap();
+        let inherited = PathBuf::from(format!(
+            "/dev/fd/{}/kio/cost-ledger.sqlite",
+            retained_root.as_raw_fd()
+        ));
+
+        let snapshot = LedgerReadSnapshot::open(&inherited).unwrap();
+        assert_eq!(snapshot.month_total(None, None, "2026-08").unwrap(), 2.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_ledger_descriptor_rejects_aliases_closed_and_non_directory_fds() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let retained_root = fs::File::open(directory.path()).unwrap();
+        let fd = retained_root.as_raw_fd();
+        let aliases = [
+            format!("/dev/fd/{fd}"),
+            "/dev/fd/not-a-number/kio/cost-ledger.sqlite".to_owned(),
+            "/dev/fd/-1/kio/cost-ledger.sqlite".to_owned(),
+            "/dev/fd/2147483648/kio/cost-ledger.sqlite".to_owned(),
+            "/dev/fd/999999999999999999999999/kio/cost-ledger.sqlite".to_owned(),
+            format!("/dev/fd/0{fd}/kio/cost-ledger.sqlite"),
+            format!("/dev/fd//{fd}/kio/cost-ledger.sqlite"),
+            format!("/dev/fd/{fd}//kio/cost-ledger.sqlite"),
+            format!("/dev/fd/{fd}/./kio/cost-ledger.sqlite"),
+            format!("/dev/fd/{fd}/kio/../other/cost-ledger.sqlite"),
+            format!("/dev/fd/{fd}/kio/cost-ledger.sqlite/"),
+            format!("/dev//fd/{fd}/kio/cost-ledger.sqlite"),
+        ];
+        for alias in aliases {
+            assert!(matches!(
+                LedgerReadSnapshot::open(Path::new(&alias)),
+                Err(LedgerSnapshotError::UnsafeIntegrity(_))
+            ));
+        }
+
+        let file_path = directory.path().join("not-a-directory");
+        fs::write(&file_path, b"regular").unwrap();
+        let retained_file = fs::File::open(&file_path).unwrap();
+        let non_directory = PathBuf::from(format!(
+            "/dev/fd/{}/kio/cost-ledger.sqlite",
+            retained_file.as_raw_fd()
+        ));
+        assert!(matches!(
+            LedgerReadSnapshot::open(&non_directory),
+            Err(LedgerSnapshotError::UnsafeIntegrity(message)) if message.contains("must name a directory")
+        ));
+        drop(retained_file);
+
+        let held = fs::File::open(directory.path()).unwrap();
+        let closed_fd = unsafe {
+            libc::fcntl(
+                held.as_raw_fd(),
+                libc::F_DUPFD_CLOEXEC,
+                high_test_descriptor_minimum(),
+            )
+        };
+        assert!(
+            closed_fd >= high_test_descriptor_minimum(),
+            "allocate a high deterministic descriptor"
+        );
+        assert_eq!(unsafe { libc::close(closed_fd) }, 0);
+        let closed_path = PathBuf::from(format!("/dev/fd/{closed_fd}/cost-ledger.sqlite"));
+        assert!(matches!(
+            LedgerReadSnapshot::open(&closed_path),
+            Err(LedgerSnapshotError::UnsafeIntegrity(message)) if message.contains("duplicate inherited ledger descriptor")
+        ));
+
+        let proc_alias = PathBuf::from(format!("/proc/self/fd/{fd}/kio/cost-ledger.sqlite"));
+        assert!(matches!(
+            LedgerReadSnapshot::open(&proc_alias),
+            Err(LedgerSnapshotError::UnsafeIntegrity(_))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_missing_cannot_join_absence_across_fd_root_substitution() {
+        use std::os::fd::AsRawFd;
+
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let held_a = fs::File::open(root_a.path()).unwrap();
+        let held_b = fs::File::open(root_b.path()).unwrap();
+        let descriptor = unsafe {
+            libc::fcntl(
+                held_a.as_raw_fd(),
+                libc::F_DUPFD_CLOEXEC,
+                high_test_descriptor_minimum(),
+            )
+        };
+        assert!(descriptor >= high_test_descriptor_minimum());
+        let path = PathBuf::from(format!("/dev/fd/{descriptor}/kio/cost-ledger.sqlite"));
+        let swapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swapped_once = swapped.clone();
+        MISSING_PARENT_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(std::sync::Arc::new(move || {
+                if !swapped_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    assert_eq!(
+                        unsafe { libc::dup2(held_b.as_raw_fd(), descriptor) },
+                        descriptor
+                    );
+                }
+            }));
+        });
+        let result = LedgerReadSnapshot::open(&path);
+        MISSING_PARENT_HOOK.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(unsafe { libc::close(descriptor) }, 0);
+        assert!(swapped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            matches!(result, Err(LedgerSnapshotError::UnsafeIntegrity(message)) if message.contains("root identity changed"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_missing_rechecks_fd_root_after_final_absence_walk() {
+        use std::os::fd::AsRawFd;
+
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let held_a = fs::File::open(root_a.path()).unwrap();
+        let held_b = fs::File::open(root_b.path()).unwrap();
+        let descriptor = unsafe {
+            libc::fcntl(
+                held_a.as_raw_fd(),
+                libc::F_DUPFD_CLOEXEC,
+                high_test_descriptor_minimum(),
+            )
+        };
+        assert!(descriptor >= high_test_descriptor_minimum());
+        let path = PathBuf::from(format!("/dev/fd/{descriptor}/kio/cost-ledger.sqlite"));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_in_hook = calls.clone();
+        MISSING_PARENT_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(std::sync::Arc::new(move || {
+                if calls_in_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                    assert_eq!(
+                        unsafe { libc::dup2(held_b.as_raw_fd(), descriptor) },
+                        descriptor
+                    );
+                }
+            }));
+        });
+        let result = LedgerReadSnapshot::open(&path);
+        MISSING_PARENT_HOOK.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(unsafe { libc::close(descriptor) }, 0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(
+            matches!(result, Err(LedgerSnapshotError::UnsafeIntegrity(message)) if message.contains("after final absence walk"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_ledger_descriptor_rejects_symlink_suffix_without_accepting_victim() {
+        use std::{os::fd::AsRawFd, os::unix::fs::symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let retained_root = fs::File::open(directory.path()).unwrap();
+        let child = directory.path().join("kio");
+        symlink(victim.path(), &child).unwrap();
+        let inherited = PathBuf::from(format!(
+            "/dev/fd/{}/kio/cost-ledger.sqlite",
+            retained_root.as_raw_fd()
+        ));
+
+        assert!(matches!(
+            LedgerReadSnapshot::open(&inherited),
+            Err(LedgerSnapshotError::UnsafeIntegrity(_))
+        ));
+        assert!(!victim.path().join("cost-ledger.sqlite").exists());
     }
 
     #[test]
