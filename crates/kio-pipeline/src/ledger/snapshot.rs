@@ -147,8 +147,8 @@ struct Identity {
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Identity {
-    volume_serial_number: u32,
-    file_index: u64,
+    volume_serial_number: Option<u32>,
+    file_index: Option<u64>,
 }
 #[cfg(not(any(unix, windows)))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,7 +435,7 @@ fn bound_parent(path: &Path) -> Result<(fs::File, String, PathBuf), LedgerSnapsh
             })?;
         validate_dir(&opened, &name.to_string_lossy())?;
         validate_dir(&after, &name.to_string_lossy())?;
-        if identity(&before) != identity(&opened) || identity(&before) != identity(&after) {
+        if !same_identity(&before, &opened) || !same_identity(&before, &after) {
             return Err(LedgerSnapshotError::UnsafeIntegrity(
                 "ledger parent changed while opening".into(),
             ));
@@ -498,7 +498,7 @@ fn fresh_parent_binding(
     let fresh_metadata = cap_fs::Metadata::from_file(&fresh_parent).map_err(|error| {
         AttemptError::Unstable(format!("inspect freshly bound ledger parent: {error}"))
     })?;
-    if identity(&held_metadata) != identity(&fresh_metadata) {
+    if !same_identity(&held_metadata, &fresh_metadata) {
         return Err(AttemptError::Unsafe(
             "ledger canonical parent identity changed while snapshotting".into(),
         ));
@@ -606,6 +606,22 @@ fn identity(m: &cap_fs::Metadata) -> Identity {
         Identity
     }
 }
+
+/// Compare platform file identities without treating an unavailable Windows
+/// identity field as a stable value. A missing volume serial or file index
+/// cannot establish that two handles name the same object, so it fails closed.
+fn same_identity(left: &cap_fs::Metadata, right: &cap_fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        let left = identity(left);
+        let right = identity(right);
+        left.volume_serial_number.is_some() && left.file_index.is_some() && left == right
+    }
+    #[cfg(not(windows))]
+    {
+        identity(left) == identity(right)
+    }
+}
 fn validate_file(m: &cap_fs::Metadata, label: &str) -> Result<(), AttemptError> {
     if !m.is_file() || m.file_type().is_symlink() {
         return Err(AttemptError::Unsafe(format!(
@@ -663,7 +679,7 @@ fn observe(
     validate_file(&opened, name)?;
     #[cfg(windows)]
     verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
-    if identity(&before) != identity(&opened) || before.len() != opened.len() {
+    if !same_identity(&before, &opened) || before.len() != opened.len() {
         return Err(AttemptError::Unsafe(format!(
             "ledger {name} changed while opening"
         )));
@@ -703,8 +719,7 @@ fn observe(
     validate_file(&after, name)?;
     #[cfg(windows)]
     verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
-    if identity(&opened) != identity(&after) || opened.len() != after.len() || total != opened.len()
-    {
+    if !same_identity(&opened, &after) || opened.len() != after.len() || total != opened.len() {
         return Err(AttemptError::Unsafe(format!(
             "ledger {name} changed while reading"
         )));
@@ -943,7 +958,7 @@ fn verify_private_leaf(
         AttemptError::Unstable(format!("inspect private ledger snapshot {name}: {e}"))
     })?;
     validate_file(&opened, name)?;
-    if identity(&before) != identity(&opened) || before.len() != opened.len() {
+    if !same_identity(&before, &opened) || before.len() != opened.len() {
         return Err(AttemptError::Unsafe(format!(
             "private ledger snapshot {name} changed while opening"
         )));
@@ -974,7 +989,7 @@ fn verify_private_leaf(
         }
     })?;
     validate_file(&after, name)?;
-    if identity(&opened) != identity(&after)
+    if !same_identity(&opened, &after)
         || bytes != expected.bytes
         || hash.finalize().as_slice() != expected.sha256
     {

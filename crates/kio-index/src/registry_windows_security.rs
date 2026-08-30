@@ -153,7 +153,7 @@ impl RegistrySnapshotPrivateDir {
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                0,
+                ptr::null_mut(),
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -187,7 +187,7 @@ impl RegistrySnapshotPrivateDir {
                 ptr::null(),
                 3, // OPEN_EXISTING
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                0,
+                ptr::null_mut(),
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -221,7 +221,7 @@ struct CurrentUserSid {
 
 impl CurrentUserSid {
     fn current() -> io::Result<Self> {
-        let mut token = 0;
+        let mut token = ptr::null_mut();
         // SAFETY: current process pseudo-handle is valid; token is initialized
         // only on successful return.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
@@ -281,7 +281,9 @@ impl CurrentUserSid {
     }
 
     fn as_psid(&self) -> PSID {
-        self.bytes.as_ptr().cast()
+        // Windows exposes `PSID` as a mutable opaque pointer even for APIs
+        // that only read it. The allocation remains owned and immutable here.
+        self.bytes.as_ptr().cast_mut().cast()
     }
 
     fn len(&self) -> usize {
@@ -493,7 +495,7 @@ fn open_private_leaf_for_delete(
             ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_OPEN_REPARSE_POINT,
-            0,
+            ptr::null_mut(),
         )
     };
     if raw == INVALID_HANDLE_VALUE {
@@ -678,7 +680,11 @@ fn verify_descriptor(
     }
     // SAFETY: the ACE's variable SID starts at SidStart and has already been
     // bounded by the ACE size check above.
-    let ace_sid = unsafe { (&(*allowed).SidStart as *const u32).cast::<c_void>() };
+    let ace_sid = unsafe {
+        (&(*allowed).SidStart as *const u32)
+            .cast_mut()
+            .cast::<c_void>()
+    };
     if unsafe { EqualSid(ace_sid, owner.as_psid()) } == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

@@ -135,7 +135,7 @@ impl LedgerSnapshotPrivateDir {
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                0,
+                ptr::null_mut(),
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -195,7 +195,7 @@ impl LedgerSnapshotPrivateDir {
                 ptr::null(),
                 OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                0,
+                ptr::null_mut(),
             )
         };
         if raw == INVALID_HANDLE_VALUE {
@@ -225,7 +225,7 @@ struct CurrentUserSid {
 }
 impl CurrentUserSid {
     fn current() -> io::Result<Self> {
-        let mut token = 0;
+        let mut token = ptr::null_mut();
         // SAFETY: current process pseudo-handle is valid.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(context(last_error(), "open current process token"));
@@ -277,7 +277,9 @@ impl CurrentUserSid {
         Ok(Self { bytes })
     }
     fn as_psid(&self) -> PSID {
-        self.bytes.as_ptr().cast()
+        // Windows exposes `PSID` as a mutable opaque pointer even for APIs
+        // that only read it. The allocation remains owned and immutable here.
+        self.bytes.as_ptr().cast_mut().cast()
     }
     fn len(&self) -> usize {
         unsafe { GetLengthSid(self.as_psid()) as usize }
@@ -464,7 +466,7 @@ fn open_private_leaf_for_delete(
             ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_OPEN_REPARSE_POINT,
-            0,
+            ptr::null_mut(),
         )
     };
     if raw == INVALID_HANDLE_VALUE {
@@ -506,7 +508,7 @@ fn open_private_leaf_for_verify(
             ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_OPEN_REPARSE_POINT,
-            0,
+            ptr::null_mut(),
         )
     };
     if raw == INVALID_HANDLE_VALUE {
@@ -662,7 +664,11 @@ fn verify_descriptor(
         ));
     }
     // SAFETY: SID begins at SidStart and is bounded by the checked ACE size.
-    let ace_sid = unsafe { (&(*allowed).SidStart as *const u32).cast::<c_void>() };
+    let ace_sid = unsafe {
+        (&(*allowed).SidStart as *const u32)
+            .cast_mut()
+            .cast::<c_void>()
+    };
     if unsafe { EqualSid(ace_sid, owner.as_psid()) } == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

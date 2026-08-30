@@ -359,9 +359,27 @@ fn registry_parent_and_leaf(
             },
         )?;
         validate_directory(&current, &name.to_string_lossy())?;
-        if leaf_identity(&before) != leaf_identity(&opened)
-            || leaf_identity(&before) != leaf_identity(&current)
-            || leaf_identity(&opened) != leaf_identity(&current)
+        let before_identity = leaf_identity(&before).ok_or_else(|| {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "registry parent component has no usable identity: {}",
+                name.to_string_lossy()
+            ))
+        })?;
+        let opened_identity = leaf_identity(&opened).ok_or_else(|| {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "opened registry parent component has no usable identity: {}",
+                name.to_string_lossy()
+            ))
+        })?;
+        let current_identity = leaf_identity(&current).ok_or_else(|| {
+            RegistrySnapshotError::UnsafeIntegrity(format!(
+                "reinspected registry parent component has no usable identity: {}",
+                name.to_string_lossy()
+            ))
+        })?;
+        if before_identity != opened_identity
+            || before_identity != current_identity
+            || opened_identity != current_identity
         {
             return Err(RegistrySnapshotError::UnsafeIntegrity(format!(
                 "registry parent component changed while opening: {}",
@@ -435,7 +453,17 @@ fn fresh_registry_parent_binding(
     let fresh_metadata = cap_fs::Metadata::from_file(&fresh_parent).map_err(|error| {
         SnapshotAttemptError::Unstable(format!("inspect freshly bound registry parent: {error}"))
     })?;
-    if leaf_identity(&held_metadata) != leaf_identity(&fresh_metadata) {
+    let held_identity = leaf_identity(&held_metadata).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(
+            "retained registry parent has no usable identity while snapshotting".to_owned(),
+        )
+    })?;
+    let fresh_identity = leaf_identity(&fresh_metadata).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(
+            "freshly bound registry parent has no usable identity while snapshotting".to_owned(),
+        )
+    })?;
+    if held_identity != fresh_identity {
         return Err(SnapshotAttemptError::Unsafe(
             "scope registry canonical parent identity changed while snapshotting".to_owned(),
         ));
@@ -623,26 +651,26 @@ fn run_parent_component_hook(index: usize) {
     });
 }
 
-fn leaf_identity(metadata: &cap_fs::Metadata) -> FileIdentity {
+fn leaf_identity(metadata: &cap_fs::Metadata) -> Option<FileIdentity> {
     #[cfg(unix)]
     {
         use cap_fs::MetadataExt;
-        FileIdentity {
+        Some(FileIdentity {
             dev: metadata.dev(),
             ino: metadata.ino(),
-        }
+        })
     }
     #[cfg(windows)]
     {
         use cap_fs::_WindowsByHandle;
-        FileIdentity {
-            volume_serial_number: metadata.volume_serial_number(),
-            file_index: metadata.file_index(),
-        }
+        Some(FileIdentity {
+            volume_serial_number: metadata.volume_serial_number()?,
+            file_index: metadata.file_index()?,
+        })
     }
     #[cfg(not(any(unix, windows)))]
     {
-        FileIdentity
+        Some(FileIdentity)
     }
 }
 
@@ -715,7 +743,15 @@ fn observe_leaf(
     validate_regular(&opened, name)?;
     #[cfg(windows)]
     verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
-    if leaf_identity(&before) != leaf_identity(&opened) || before.len() != opened.len() {
+    let before_identity = leaf_identity(&before).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!("scope registry {name} has no usable identity"))
+    })?;
+    let opened_identity = leaf_identity(&opened).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!(
+            "opened scope registry {name} has no usable identity"
+        ))
+    })?;
+    if before_identity != opened_identity || before.len() != opened.len() {
         return Err(SnapshotAttemptError::Unsafe(format!(
             "scope registry {name} changed while opening"
         )));
@@ -762,16 +798,18 @@ fn observe_leaf(
     validate_regular(&after, name)?;
     #[cfg(windows)]
     verify_windows_regular_binding(&parent_path.join(name), &input, name)?;
-    if leaf_identity(&opened) != leaf_identity(&after)
-        || opened.len() != after.len()
-        || total != opened.len()
-    {
+    let after_identity = leaf_identity(&after).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!(
+            "reinspected scope registry {name} has no usable identity"
+        ))
+    })?;
+    if opened_identity != after_identity || opened.len() != after.len() || total != opened.len() {
         return Err(SnapshotAttemptError::Unsafe(format!(
             "scope registry {name} changed while reading"
         )));
     }
     Ok(LeafObservation::Present(FileObservation {
-        identity: leaf_identity(&opened),
+        identity: opened_identity,
         bytes: total,
         sha256: hash.finalize().into(),
     }))
@@ -929,7 +967,17 @@ fn verify_private_snapshot_leaf(
         SnapshotAttemptError::Unstable(format!("inspect private registry snapshot {name}: {error}"))
     })?;
     validate_regular(&opened, name)?;
-    if leaf_identity(&before) != leaf_identity(&opened) || before.len() != opened.len() {
+    let before_identity = leaf_identity(&before).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!(
+            "private registry snapshot {name} has no usable identity"
+        ))
+    })?;
+    let opened_identity = leaf_identity(&opened).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!(
+            "opened private registry snapshot {name} has no usable identity"
+        ))
+    })?;
+    if before_identity != opened_identity || before.len() != opened.len() {
         return Err(SnapshotAttemptError::Unsafe(format!(
             "private registry snapshot {name} changed while opening"
         )));
@@ -965,7 +1013,12 @@ fn verify_private_snapshot_leaf(
     )?;
     validate_regular(&after, name)?;
     let actual_sha256: [u8; 32] = hash.finalize().into();
-    if leaf_identity(&opened) != leaf_identity(&after)
+    let after_identity = leaf_identity(&after).ok_or_else(|| {
+        SnapshotAttemptError::Unsafe(format!(
+            "reinspected private registry snapshot {name} has no usable identity"
+        ))
+    })?;
+    if opened_identity != after_identity
         || opened.len() != after.len()
         || bytes != expected.bytes
         || actual_sha256 != expected.sha256
@@ -975,7 +1028,7 @@ fn verify_private_snapshot_leaf(
         )));
     }
     Ok(FileObservation {
-        identity: leaf_identity(&opened),
+        identity: opened_identity,
         bytes,
         sha256: actual_sha256,
     })
