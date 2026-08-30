@@ -3756,11 +3756,11 @@ mod tests {
     fn windows_archive_payload(binary: Vec<u8>) -> BTreeMap<String, (Vec<u8>, u32)> {
         BTreeMap::from([
             (
-                "kio-0.1.0-rc.1-x86_64-pc-windows-msvc/bin/kio.exe".into(),
+                format!("kio-{RC_VERSION}-x86_64-pc-windows-msvc/bin/kio.exe"),
                 (binary, 0o755),
             ),
             (
-                "kio-0.1.0-rc.1-x86_64-pc-windows-msvc/LICENSE.md".into(),
+                format!("kio-{RC_VERSION}-x86_64-pc-windows-msvc/LICENSE.md"),
                 (b"license".to_vec(), 0o644),
             ),
         ])
