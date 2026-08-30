@@ -1836,6 +1836,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn all_absent_whole_parent_substitution_is_unsafe_not_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1865,6 +1866,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn present_snapshot_whole_parent_substitution_is_unsafe() {
         let dir = tempfile::tempdir().unwrap();
@@ -2064,6 +2066,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn snapshot_wal_disappearance_is_unstable() {
         let dir = tempfile::tempdir().unwrap();
@@ -2087,6 +2090,144 @@ mod tests {
             RegistryDb::open_read_only_for_test(&path, 1, hook),
             Err(RegistrySnapshotError::UnstableBusy(_))
         ));
+        drop(writer);
+    }
+
+    // Windows retains the canonical parent without delete sharing for the entire
+    // snapshot attempt.  The Unix replacement race above is therefore
+    // structurally impossible: prove that the OS blocks it and that the stable
+    // original binding has the expected cache-miss semantics instead.
+    #[cfg(windows)]
+    #[test]
+    fn all_absent_bound_parent_blocks_substitution_and_returns_true_missing() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("scope-registry.sqlite");
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let hook_moved_parent = moved_parent.clone();
+        let rename_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&rename_checked);
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && phase == SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck {
+                let error = fs::rename(&replacement_parent, &hook_moved_parent)
+                    .expect_err("the retained no-delete-share parent must block substitution");
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION as i32),
+                    "the canonical parent must remain bound for the full snapshot attempt"
+                );
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        assert!(matches!(
+            RegistryDb::open_read_only_for_test(&path, 1, hook),
+            Err(RegistrySnapshotError::Missing)
+        ));
+        assert!(
+            rename_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the no-delete-share boundary"
+        );
+        assert!(
+            canonical_parent.is_dir(),
+            "the original parent must remain live"
+        );
+        assert!(
+            !moved_parent.exists(),
+            "a denied replacement must not create a detached parent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn present_bound_parent_blocks_substitution_and_keeps_original_snapshot() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_parent = dir.path().join("canonical");
+        fs::create_dir(&canonical_parent).unwrap();
+        let path = canonical_parent.join("scope-registry.sqlite");
+        let original = RegistryDb::open(&path).unwrap();
+        original
+            .upsert(&entry("original", "/tmp/original", true, true))
+            .unwrap();
+        drop(original);
+        let moved_parent = dir.path().join("detached");
+        let replacement_parent = canonical_parent.clone();
+        let hook_moved_parent = moved_parent.clone();
+        let rename_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&rename_checked);
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, attempt, _| {
+            if attempt == 0 && phase == SnapshotTestPhase::AfterFinalManifestBeforeParentRecheck {
+                let error = fs::rename(&replacement_parent, &hook_moved_parent)
+                    .expect_err("the retained no-delete-share parent must block substitution");
+                assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let snapshot = RegistryDb::open_read_only_for_test(&path, 1, hook)
+            .expect("the original stable parent and snapshot must remain usable");
+        assert_eq!(
+            snapshot.lookup_scope_id("original").unwrap(),
+            vec![entry("original", "/tmp/original", true, true)]
+        );
+        assert!(
+            rename_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the no-delete-share boundary"
+        );
+        assert!(
+            canonical_parent.is_dir(),
+            "the original parent must remain live"
+        );
+        assert!(
+            !moved_parent.exists(),
+            "substitution must not have occurred"
+        );
+    }
+
+    // A live Windows SQLite writer owns its WAL without delete sharing.  The
+    // Unix disappearance race is thus impossible while the writer is alive;
+    // prove the sharing boundary and that the untouched WAL-backed snapshot is
+    // accepted from its original source rather than a fabricated transition.
+    #[cfg(windows)]
+    #[test]
+    fn live_wal_blocks_deletion_and_preserves_original_snapshot() {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scope-registry.sqlite");
+        let wal = dir.path().join("scope-registry.sqlite-wal");
+        let expected = entry("scope_a", "/tmp/a", true, true);
+        let writer = RegistryDb::open(&path).unwrap();
+        writer
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 0i64)
+            .unwrap();
+        writer.upsert(&expected).unwrap();
+        assert!(wal.exists());
+        let delete_checked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_checked = std::sync::Arc::clone(&delete_checked);
+        let hook: SnapshotTestHook = std::sync::Arc::new(move |phase, _, _| {
+            if phase == SnapshotTestPhase::AfterSnapshotQueryBeforeRecheck {
+                let error = fs::remove_file(&wal)
+                    .expect_err("the live writer must block WAL deletion on Windows");
+                assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+                hook_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let snapshot = RegistryDb::open_read_only_for_test(&path, 1, hook)
+            .expect("an unchanged, WAL-backed snapshot must remain valid");
+        assert_eq!(snapshot.lookup_scope_id("scope_a").unwrap(), vec![expected]);
+        assert!(
+            delete_checked.load(std::sync::atomic::Ordering::SeqCst),
+            "the test hook must prove the live-WAL sharing boundary"
+        );
         drop(writer);
     }
 
